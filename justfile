@@ -17,6 +17,6 @@ check-slow:
 bench:
     cargo bench --workspace
 
-# Needs a nightly toolchain: `rustup toolchain install nightly`.
+# Needs a nightly toolchain: `rustup toolchain install nightly`. Targets: codec_roundtrip, tree_decode, frame_decode, journal_recovery.
 fuzz target="codec_roundtrip":
     cd fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time=60

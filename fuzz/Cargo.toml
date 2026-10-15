@@ -43,5 +43,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "journal_recovery"
+path = "fuzz_targets/journal_recovery.rs"
+test = false
+doc = false
+bench = false
+
 # Own workspace: nightly-only, excluded from the root `just check`.
 [workspace]
