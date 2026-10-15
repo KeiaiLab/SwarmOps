@@ -7,7 +7,9 @@
 //! `SWARMOPS_TEST_FS_CALLS=<file>` has it write how many calls it made, so that a dry run tells
 //! a crash sweep where it ends. [`CrashAtFs::from_env`] reads both; the stores open on what it
 //! gives by default ([`crate::FsObjectStore::open_default`], and `swarmops-repo`'s
-//! `LocalRepo::open` and `create`, which share one for both stores).
+//! `LocalRepo::open` and `create`, which share one for both stores). A third, test-only too,
+//! `SWARMOPS_TEST_NOW=<unix seconds>`, has `swarmops-ops` sign changesets at that time: a commit
+//! then writes the same objects in every run, so call k is the same call in every run.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};

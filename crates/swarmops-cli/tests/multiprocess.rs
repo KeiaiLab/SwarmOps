@@ -26,11 +26,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use support::{Racers, Run, Store, agent, run};
 use swarmops_core::{EntryKind, ObjectKind, RepoPath, Signature, hash_object};
+use swarmops_ops::NOW_ENV;
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, FsOps, Layout, LinkOutcome, RealFs};
 
@@ -280,6 +282,47 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
 // ---------------------------------------------------------------------------------------------
 // Crashes.
 // ---------------------------------------------------------------------------------------------
+
+/// The time the crash tests sign at: November 2023, in Unix seconds.
+const NOW: u64 = 1_700_000_000;
+
+/// `SWARMOPS_TEST_NOW=<unix seconds>`: a commit signs its changeset at that time, not the
+/// clock's, so that the same commit made twice is the same changeset, whenever it runs; unset,
+/// the time is the clock's.
+#[test]
+fn swarmops_test_now_fixes_the_signature_time() {
+    let template = Store::init();
+    let now = NOW.to_string();
+    let ids: Vec<String> = (0..2)
+        .map(|run| {
+            let store = Store::copy_of(&template);
+            let changes = store.changes("same", "same.txt", "the same change\n");
+            let args = ["commit", "-m", "same", "--changes", &changes];
+            let result = store.run_as(&agent(0), &args, &[(NOW_ENV, &now)]).ok();
+            let id = result["changeset"].as_str().unwrap().to_owned();
+            let shown = store.show(&id);
+            assert_eq!(shown["created_at"], NOW * 1000, "run {run}");
+            for signature in ["author", "committer"] {
+                assert_eq!(shown["signatures"][signature]["secs"], NOW, "run {run}");
+            }
+            store.assert_clean(&format!("run {run}"));
+            id
+        })
+        .collect();
+    assert_eq!(ids[0], ids[1], "one commit, at one time: one changeset");
+
+    let store = Store::copy_of(&template);
+    let before = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let id = store.commit(&agent(0), "clock.txt", "the clock\n", None);
+    let secs = store.show(&id)["signatures"]["committer"]["secs"]
+        .as_u64()
+        .unwrap();
+    assert!(secs >= before, "unset, the clock's time: {secs} < {before}");
+    store.assert_clean("signed at the clock's time");
+}
 
 /// Runs `run(k)` for every k of `ks`, [`AT_ONCE`] at a time, each on a thread of its own; the
 /// outcomes, in the order of `ks`.

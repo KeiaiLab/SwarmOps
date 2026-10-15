@@ -34,6 +34,8 @@ const VARS: &[&str] = &[
     "SWARMOPS_RUN_ID",
     "SWARMOPS_FORMAT",
     "SWARMOPS_TEST_CRASH_AT",
+    "SWARMOPS_TEST_FS_CALLS",
+    "SWARMOPS_TEST_NOW",
 ];
 
 /// The agent most mutations act as.
