@@ -1,6 +1,6 @@
 //! 32 writer processes on one native metadata store: how write transactions queue on
-//! `meta/lock`, which [`swarmops_store::MetaLock`] takes by polling `try_lock` every 10 ms
-//! rather than in a queue (docs/perf.md "M1 (store level)").
+//! `meta/lock`, which [`swarmops_store::MetaLock`] waits for in the kernel's flock queue
+//! (docs/perf.md "M1 store level").
 //!
 //! Ignored, since it runs minutes of fsync'd transactions: `just check-slow` runs it, and
 //! `cargo nextest run --release -p swarmops-store --run-ignored all --test contention
@@ -13,11 +13,12 @@
 //! [`PER_CHILD`] write transactions back to back, each inserting the next changeset of a chain
 //! of its own and committing it, with the default 10 s lock timeout (a `Busy` is counted, and
 //! the transaction tried again). [`PAUSE`] puts a pause between two transactions of a child,
-//! as an agent leaves at least a process start between two commits. With the polling lock the
-//! test fails either way, which docs/perf.md records: back to back, the writer that releases
-//! the lock takes it again before the pollers wake, so the others starve and meet `Busy`; 2 ms
-//! apart, the lock goes to whichever poller wakes first, and some still wait out the timeout.
-//! For every transaction a child times
+//! as an agent leaves at least a process start between two commits. With the lock Task 7a
+//! measured, which polled `try_lock` every 10 ms, the test failed either way, as docs/perf.md
+//! records: back to back, the writer that released the lock took it again before the pollers
+//! woke, so the others starved and met `Busy`; 2 ms apart, the lock went to whichever poller
+//! woke first, and some still waited out the timeout. The kernel's queue wakes the waiters the
+//! moment the lock is released. For every transaction a child times
 //!
 //! - the transaction: from calling [`MetaStore::write`] until `commit` returns;
 //! - the lock wait: until [`MetaStore::write`] returns, which is the wait for `meta/lock`
