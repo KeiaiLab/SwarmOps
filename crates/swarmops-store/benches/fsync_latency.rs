@@ -1,8 +1,10 @@
 //! M0 durability experiment: what one durable object write costs on this host.
 //!
-//! Each iteration writes a fresh 4 KiB file under `SWARMOPS_BENCH_DIR`
-//! (default `~/.local/state/swarmops-bench`) and then does the variant's
-//! durability step. The directory is removed at the end.
+//! Each variant runs in its own fresh temporary directory under
+//! `SWARMOPS_BENCH_DIR` (default `~/.local/state/swarmops-bench`), so the base
+//! directory is never deleted and a later variant never fsyncs a directory
+//! bloated by an earlier one. Criterion reports per-sample means; for true
+//! per-write percentiles see `tests/fsync_percentiles.rs`.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
@@ -10,10 +12,11 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use tempfile::TempDir;
 
 const PAYLOAD: [u8; 4096] = [0xA5; 4096];
 
-fn bench_dir() -> PathBuf {
+fn base_dir() -> PathBuf {
     let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
         || {
             let home = std::env::var_os("HOME").expect("HOME is set");
@@ -21,8 +24,12 @@ fn bench_dir() -> PathBuf {
         },
         PathBuf::from,
     );
-    fs::create_dir_all(&dir).expect("create bench dir");
+    fs::create_dir_all(&dir).expect("create bench base dir");
     dir
+}
+
+fn fresh_dir(base: &Path) -> TempDir {
+    tempfile::tempdir_in(base).expect("create variant dir")
 }
 
 struct Counter {
@@ -48,15 +55,16 @@ fn write_payload(path: &Path) -> File {
 }
 
 fn fsync_latency(c: &mut Criterion) {
-    let dir = bench_dir();
+    let base = base_dir();
     let mut group = c.benchmark_group("fsync");
     group
         .sample_size(60)
         .measurement_time(Duration::from_secs(6))
         .warm_up_time(Duration::from_secs(1));
 
+    let dir = fresh_dir(&base);
     let mut counter = Counter {
-        dir: dir.clone(),
+        dir: dir.path().to_path_buf(),
         n: 0,
     };
     group.bench_function("no_fsync", |b| {
@@ -65,10 +73,12 @@ fn fsync_latency(c: &mut Criterion) {
             drop(write_payload(&path));
         });
     });
+    drop(dir);
 
+    let dir = fresh_dir(&base);
     let mut counter = Counter {
-        dir: dir.clone(),
-        n: 1_000_000,
+        dir: dir.path().to_path_buf(),
+        n: 0,
     };
     group.bench_function("sync_data", |b| {
         b.iter(|| {
@@ -77,10 +87,12 @@ fn fsync_latency(c: &mut Criterion) {
             f.sync_data().expect("sync_data");
         });
     });
+    drop(dir);
 
+    let dir = fresh_dir(&base);
     let mut counter = Counter {
-        dir: dir.clone(),
-        n: 2_000_000,
+        dir: dir.path().to_path_buf(),
+        n: 0,
     };
     group.bench_function("sync_all", |b| {
         b.iter(|| {
@@ -89,12 +101,14 @@ fn fsync_latency(c: &mut Criterion) {
             f.sync_all().expect("sync_all");
         });
     });
+    drop(dir);
 
+    let dir = fresh_dir(&base);
     let mut counter = Counter {
-        dir: dir.clone(),
-        n: 3_000_000,
+        dir: dir.path().to_path_buf(),
+        n: 0,
     };
-    let dir_handle = File::open(&dir).expect("open dir");
+    let dir_handle = File::open(dir.path()).expect("open dir");
     group.bench_function("sync_all_rename_dir_fsync", |b| {
         b.iter(|| {
             let tmp = counter.next_path();
@@ -105,9 +119,9 @@ fn fsync_latency(c: &mut Criterion) {
             dir_handle.sync_all().expect("dir fsync");
         });
     });
-    group.finish();
     drop(dir_handle);
-    fs::remove_dir_all(&dir).expect("remove bench dir");
+    drop(dir);
+    group.finish();
 }
 
 criterion_group!(benches, fsync_latency);

@@ -12,7 +12,7 @@ check:
 
 # Slow suite: more proptest cases plus ignored (multi-process, crash, perf-ratio) tests.
 check-slow:
-    PROPTEST_CASES=2000 cargo nextest run --workspace --run-ignored all
+    PROPTEST_CASES=2000 cargo nextest run --workspace --all-features --run-ignored all -E 'not test(regenerate_golden)'
 
 bench:
     cargo bench --workspace

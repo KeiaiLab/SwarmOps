@@ -15,12 +15,18 @@ fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/golden")
 }
 
-fn read_golden(name: &str) -> (Vec<u8>, ObjectId) {
+/// Golden file: line 1 payload hex, line 2 id hex, line 3 (changesets only) delta_hash hex.
+fn read_golden(name: &str) -> (Vec<u8>, ObjectId, Option<[u8; 32]>) {
     let text = fs::read_to_string(golden_dir().join(format!("{name}.hex"))).unwrap();
     let mut lines = text.lines();
     let bytes = hex::decode(lines.next().unwrap().trim()).unwrap();
     let id = ObjectId::from_hex(lines.next().unwrap().trim()).unwrap();
-    (bytes, id)
+    let delta_hash = lines.next().map(|l| {
+        let mut out = [0u8; 32];
+        hex::decode_to_slice(l.trim(), &mut out).unwrap();
+        out
+    });
+    (bytes, id, delta_hash)
 }
 
 fn blob_id(content: &[u8]) -> BlobId {
@@ -188,7 +194,7 @@ fn tree_golden_vectors() {
         ("empty_tree", Tree::empty_root()),
         ("one_file_tree", one_file_tree()),
     ] {
-        let (bytes, id) = read_golden(name);
+        let (bytes, id, _) = read_golden(name);
         assert_eq!(tree.encode(), bytes, "{name}: encoding drifted");
         assert_eq!(Tree::decode(&bytes).unwrap(), tree, "{name}: decode");
         assert_eq!(tree.id().as_object_id(), id, "{name}: id drifted");
@@ -201,19 +207,46 @@ fn changeset_golden_vectors() {
         ("minimal_changeset", minimal_changeset()),
         ("full_changeset", full_changeset()),
     ] {
-        let (bytes, id) = read_golden(name);
+        let (bytes, id, pinned_delta_hash) = read_golden(name);
         assert_eq!(cs.encode().unwrap(), bytes, "{name}: encoding drifted");
         assert_eq!(Changeset::decode(&bytes).unwrap(), cs, "{name}: decode");
         assert_eq!(cs.id().unwrap().as_object_id(), id, "{name}: id drifted");
         assert_eq!(
             cs.delta_hash().unwrap(),
-            Changeset::decode(&bytes).unwrap().delta_hash().unwrap()
+            pinned_delta_hash.expect("golden line 3 pins delta_hash"),
+            "{name}: delta_hash boundary drifted"
         );
     }
     assert_ne!(
         minimal_changeset().delta_hash().unwrap(),
         full_changeset().delta_hash().unwrap()
     );
+}
+
+/// `delta_hash` covers exactly the delta section (`varint m` + entries): the same
+/// delta on a different base, with a different message or metadata, hashes the same;
+/// a different delta hashes differently. The literal pins the section boundary
+/// independently of the golden file.
+#[test]
+fn delta_hash_depends_only_on_delta_section() {
+    let base = full_changeset();
+    let expected = base.delta_hash().unwrap();
+    assert_eq!(
+        hex::encode(expected),
+        "24cc96bb154ea7252fecce3a87c4fe6e799d784ad213ad5a79e9ba7ae05fccaf"
+    );
+    let mut other_base = base.clone();
+    other_base.parents = vec![];
+    other_base.root = Tree::empty_root().id();
+    other_base.message = b"different".to_vec();
+    other_base.metadata = vec![];
+    other_base.extra_headers = vec![];
+    other_base.author = sig(b"x", b"y", 1, 0, false);
+    assert_eq!(other_base.delta_hash().unwrap(), expected);
+    let mut other_delta = base.clone();
+    other_delta.delta.pop();
+    assert_ne!(other_delta.delta_hash().unwrap(), expected);
+    assert_ne!(minimal_changeset().delta_hash().unwrap(), expected);
 }
 
 #[test]
@@ -398,35 +431,39 @@ proptest! {
     }
 }
 
-/// Regenerates the golden files from the fixed inputs above. Run once, commit the
-/// output; the regular golden tests then pin it.
+/// Regenerates the golden files from the fixed inputs above. Writes nothing unless
+/// `SWARMOPS_REGEN_GOLDEN=1` is set, so `--run-ignored all` can never rewrite the pin.
+/// Run on purpose, review the diff, commit; the regular golden tests then pin it.
 #[test]
-#[ignore = "writes tests/golden; run on purpose"]
+#[ignore = "writes tests/golden when SWARMOPS_REGEN_GOLDEN=1; run on purpose"]
 fn regenerate_golden() {
-    let items: Vec<(&str, Vec<u8>, ObjectId)> = vec![
-        (
-            "empty_tree",
-            Tree::empty_root().encode(),
-            Tree::empty_root().id().as_object_id(),
-        ),
-        (
-            "one_file_tree",
-            one_file_tree().encode(),
-            one_file_tree().id().as_object_id(),
-        ),
-        (
-            "minimal_changeset",
-            minimal_changeset().encode().unwrap(),
-            minimal_changeset().id().unwrap().as_object_id(),
-        ),
-        (
-            "full_changeset",
-            full_changeset().encode().unwrap(),
-            full_changeset().id().unwrap().as_object_id(),
-        ),
+    if std::env::var_os("SWARMOPS_REGEN_GOLDEN").is_none() {
+        eprintln!("regenerate_golden: SWARMOPS_REGEN_GOLDEN not set; nothing written");
+        return;
+    }
+    let trees: Vec<(&str, Tree)> = vec![
+        ("empty_tree", Tree::empty_root()),
+        ("one_file_tree", one_file_tree()),
     ];
-    for (name, bytes, id) in items {
-        let text = format!("{}\n{}\n", hex::encode(&bytes), id.to_hex());
+    for (name, tree) in trees {
+        let text = format!(
+            "{}\n{}\n",
+            hex::encode(tree.encode()),
+            tree.id().as_object_id().to_hex()
+        );
+        fs::write(golden_dir().join(format!("{name}.hex")), text).unwrap();
+    }
+    let changesets: Vec<(&str, Changeset)> = vec![
+        ("minimal_changeset", minimal_changeset()),
+        ("full_changeset", full_changeset()),
+    ];
+    for (name, cs) in changesets {
+        let text = format!(
+            "{}\n{}\n{}\n",
+            hex::encode(cs.encode().unwrap()),
+            cs.id().unwrap().as_object_id().to_hex(),
+            hex::encode(cs.delta_hash().unwrap())
+        );
         fs::write(golden_dir().join(format!("{name}.hex")), text).unwrap();
     }
 }
