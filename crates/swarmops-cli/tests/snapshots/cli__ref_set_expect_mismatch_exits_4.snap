@@ -101,7 +101,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_CAS_MISMATCH",
-        "message": "ref main moved to [c1]: commit your change on top of it (--parent [c1]), then retry with --expect [c1]",
+        "message": "ref main moved to [c1]: commit your change on top of it (--parent [c1]), then retry with --expect [c1]; re-apply your edits to the content at [c1] rather than re-sending your old files",
         "retryable": true,
         "exit": 4,
         "details": {
@@ -177,7 +177,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_CAS_MISMATCH",
-        "message": "ref main exists already: it points at [c2]",
+        "message": "ref main exists already and points at [c2]: commit your change on top of it (--parent [c2]), then retry with --expect [c2]; re-apply your edits to the content at [c2] rather than re-sending your old files",
         "retryable": true,
         "exit": 4,
         "details": {

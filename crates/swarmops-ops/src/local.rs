@@ -109,9 +109,12 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///
 /// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
 /// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does
-/// not exist), whose message gives the retry (commit on `actual`, then expect it) and whose hint
-/// only reads, `swarmops show <actual>` or `swarmops ref list`, so that an agent that runs it
-/// cannot undo the move that won; `E_TOO_LARGE`
+/// not exist), whose message says what to do next — to a `ref_set` that finds the ref moved, or
+/// created by another, to commit its change again on top of `actual` (`--parent <actual>`),
+/// re-applying its edits to the content there rather than re-sending its old files, then retry
+/// with `--expect <actual>`; to a `ref_delete`, to re-check before deleting; to a move of a ref
+/// that is gone, that it is gone — and whose hint only reads, `swarmops show <actual>` or
+/// `swarmops ref list`, so that an agent that runs it cannot undo the move that won; `E_TOO_LARGE`
 /// `{index, path, size, limit}` for a put over 512 MiB; and `E_INVALID_ARG` for limits, cursors
 /// and requests that break their own rules.
 pub struct LocalOps {
@@ -361,7 +364,9 @@ impl StoreOps for LocalOps {
         } = req;
         at_least_one("limit", limit)?;
         let cs = self.resolve(&rev)?;
-        // One trailing `/` is taken (`ls main:src/`); an error names the path as given.
+        // One trailing `/` is taken (`ls main:src/`). A path malformed even without it is
+        // E_INVALID_ARG naming it as given; past that, an error (no directory there) names the
+        // path without the `/`.
         let given = path
             .as_deref()
             .map(|path| (path, path.strip_suffix('/').unwrap_or(path)));
@@ -497,13 +502,13 @@ impl StoreOps for LocalOps {
             CasResult::Mismatch { actual } if actual == Some(new) => true,
             CasResult::Mismatch { actual } => {
                 let message = match (expected, actual) {
-                    (Some(_), Some(actual)) => format!(
-                        "ref {name} moved to {actual}: commit your change on top of it \
-                         (--parent {actual}), then retry with --expect {actual}"
-                    ),
-                    (None, Some(actual)) => {
-                        format!("ref {name} exists already: it points at {actual}")
+                    (Some(_), Some(actual)) => {
+                        retry_on(&format!("ref {name} moved to {actual}"), actual)
                     }
+                    (None, Some(actual)) => retry_on(
+                        &format!("ref {name} exists already and points at {actual}"),
+                        actual,
+                    ),
                     (Some(expected), None) => {
                         format!("ref {name} does not exist, so it does not point at {expected}")
                     }
@@ -579,6 +584,18 @@ fn path_not_found(rev: &Rev, path: &str) -> OpError {
     )
     .with_details(rev_and_path(rev, path))
     .with_hint(hint(format!("swarmops ls {listing}")))
+}
+
+/// The message of a `ref_set` that lost to another move, which left the ref at `actual`
+/// (`what` says how): commit the change again on top of `actual`, its edits re-applied to the
+/// content there (M1 has no merge, so whole files sent again would revert the other's edits),
+/// then expect `actual`.
+fn retry_on(what: &str, actual: ChangesetId) -> String {
+    format!(
+        "{what}: commit your change on top of it (--parent {actual}), then retry with --expect \
+         {actual}; re-apply your edits to the content at {actual} rather than re-sending your \
+         old files"
+    )
 }
 
 /// A ref move refused because ref `name` names `actual` (`None`: it does not exist), not what
