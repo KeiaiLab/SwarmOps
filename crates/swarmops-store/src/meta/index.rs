@@ -32,8 +32,11 @@
 
 use std::fs::File;
 use std::io;
+use std::num::NonZero;
 use std::os::unix::fs::FileExt;
+use std::panic;
 use std::sync::Arc;
+use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
@@ -89,6 +92,9 @@ pub struct Index {
     /// The bytes of `parents.log` those records' parents take.
     parents_len: u64,
     views: Views,
+    /// How many threads [`Index::sync`] syncs the five files from: see
+    /// [`Index::set_parallelism`].
+    sync_threads: usize,
 }
 
 impl Index {
@@ -149,6 +155,7 @@ impl Index {
             len: 0,
             parents_len: 0,
             views,
+            sync_threads: 1,
         };
         let whole = index.whole()?;
         (index.len, index.parents_len) = (whole.records, whole.parents_len);
@@ -230,14 +237,53 @@ impl Index {
         Ok(rec)
     }
 
-    /// Flushes the five files to stable storage, one `sync_data` each, in the order
-    /// [`Index::append`] writes them. The writer calls it before it moves `journal.ckpt` past
-    /// the records, which it does in batches, not per transaction (see [`crate::meta`]).
+    /// Makes [`Index::sync`] (also the sync a compaction starts with) flush the five files
+    /// from up to `threads` threads at once (0: one per available core), at most one per file.
+    /// A handle opens with 1: one file after another, in write order. [`crate::MetaStore`]
+    /// gives the index of every write transaction its own parallelism, 5 unless set.
+    pub fn set_parallelism(&mut self, threads: usize) {
+        self.sync_threads = match threads {
+            0 => thread::available_parallelism().map_or(1, NonZero::get),
+            threads => threads,
+        };
+    }
+
+    /// Flushes the five files to stable storage, one `sync_data` each. The writer calls it
+    /// before it moves `journal.ckpt` past the records, which it does in batches, not per
+    /// transaction (see [`crate::meta`]).
+    ///
+    /// With parallelism 1 ([`Index::set_parallelism`]) the syncs go one after another, in the
+    /// order [`Index::append`] writes the files, and the first error stops them. With more,
+    /// up to that many threads make them at once, each taking its share of the files in write
+    /// order and stopping at its first error (one file each at 5); once every thread is done,
+    /// the error of the first file in write order that failed comes back. ext4 commits
+    /// concurrent fsyncs together: five at once cost about two (docs/perf.md).
     pub fn sync(&self) -> Result<(), StoreError> {
-        for path in self.write_order() {
-            self.fs.sync_data(path.as_std_path())?;
+        let files = self.write_order();
+        let fs = &*self.fs;
+        let sync_all = |share: &[&Utf8PathBuf]| -> io::Result<()> {
+            share
+                .iter()
+                .try_for_each(|path| fs.sync_data(path.as_std_path()))
+        };
+        let threads = self.sync_threads.min(files.len());
+        if threads <= 1 {
+            return Ok(sync_all(&files)?);
         }
-        Ok(())
+        let results: Vec<io::Result<()>> = thread::scope(|scope| {
+            let syncs: Vec<_> = files
+                .chunks(files.len().div_ceil(threads))
+                .map(|share| scope.spawn(move || sync_all(share)))
+                .collect();
+            syncs
+                .into_iter()
+                .map(|sync| {
+                    sync.join()
+                        .unwrap_or_else(|panic| panic::resume_unwind(panic))
+                })
+                .collect()
+        });
+        Ok(results.into_iter().collect::<io::Result<()>>()?)
     }
 
     /// Record `rec`: four `read_at`s of the columns, and one of `parents.log` if it has

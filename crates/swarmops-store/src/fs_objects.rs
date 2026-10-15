@@ -8,13 +8,17 @@
 //! `sync_all`s a temp file in `objects/tmp/`, and links it into `objects/<2hex>/`
 //! without replacing anything. [`ObjectStore::flush`] then fsyncs each touched fan-out
 //! directory once, plus `objects/` itself when a put created a fan-out directory, which
-//! is what makes the new names survive power loss.
+//! is what makes the new names survive power loss. It makes those fsyncs at once, on
+//! `put_batch`'s pool: while any process has metadata pending, ext4 turns each directory
+//! fsync into a journal commit of its own, and concurrent fsyncs share commits
+//! (docs/perf.md).
 
 use std::collections::BTreeSet;
 use std::io;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use camino::{Utf8Path, Utf8PathBuf};
+use rayon::ThreadPool;
 use rayon::prelude::*;
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 
@@ -68,9 +72,9 @@ pub struct FsObjectStore {
     /// flush returns while an earlier one is still fsyncing directories the caller's
     /// objects rely on. Lock order: `flush_lock`, then `touched`; `put` takes only `touched`.
     flush_lock: Mutex<()>,
-    /// `put_batch`'s pool once [`FsObjectStore::set_parallelism`] is called; until then,
-    /// rayon's global pool.
-    pool: Option<rayon::ThreadPool>,
+    /// The pool of `put_batch` and of `flush`'s fsyncs once
+    /// [`FsObjectStore::set_parallelism`] is called; until then, rayon's global pool.
+    pool: Option<ThreadPool>,
 }
 
 impl FsObjectStore {
@@ -96,9 +100,12 @@ impl FsObjectStore {
         Self::open(layout, fs)
     }
 
-    /// Runs [`ObjectStore::put_batch`] on a pool of its own with `threads` threads (0: one
-    /// per available core). Until this is called, `put_batch` uses rayon's global pool,
-    /// which by default also has one thread per available core.
+    /// Runs [`ObjectStore::put_batch`], and the directory fsyncs of [`ObjectStore::flush`], on
+    /// a pool of its own with `threads` threads (0: one per available core). With 1 both go
+    /// one at a time, `flush` on the calling thread and in path order, so that a test counting
+    /// [`FsOps`] calls (a crash sweep's [`CrashAtFs`]) meets the same call at the same count in
+    /// every run. Until this is called, both use rayon's global pool, which by default also
+    /// has one thread per available core.
     ///
     /// # Panics
     ///
@@ -107,8 +114,28 @@ impl FsObjectStore {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
-            .expect("spawn the put_batch thread pool");
+            .expect("spawn the object store's thread pool");
         self.pool = Some(pool);
+    }
+
+    /// One `fsync_dir` of each of `dirs`, every one made whatever the others return; the
+    /// results in `dirs`' order. One after another on this thread when the pool has one
+    /// thread (or there is one dir); otherwise on the pool, as many at once as it has threads.
+    fn fsync_dirs(&self, dirs: &[Utf8PathBuf]) -> Vec<io::Result<()>> {
+        let fsync = |dir: &Utf8PathBuf| self.fs.fsync_dir(dir.as_std_path());
+        let threads = self
+            .pool
+            .as_ref()
+            .map_or_else(rayon::current_num_threads, ThreadPool::current_num_threads);
+        if threads <= 1 || dirs.len() <= 1 {
+            return dirs.iter().map(fsync).collect();
+        }
+        // `flush` holds `flush_lock` meanwhile, and nothing on the pool takes it.
+        let fsync_all = || dirs.par_iter().map(fsync).collect();
+        match &self.pool {
+            Some(pool) => pool.install(fsync_all),
+            None => fsync_all(),
+        }
     }
 
     fn touched(&self) -> MutexGuard<'_, BTreeSet<Utf8PathBuf>> {
@@ -227,23 +254,28 @@ impl ObjectStore for FsObjectStore {
         Ok(ids)
     }
 
+    /// Fsyncs every touched directory (see [`FsObjectStore::set_parallelism`] for how many at
+    /// once), all of them even when some fail. The ones that fail stay touched, so that a
+    /// later flush retries them, and the error of the first of those in path order comes back.
     fn flush(&self) -> Result<(), StoreError> {
         // `()` carries no state that a panicking holder could have left inconsistent.
         let _flushing = self
             .flush_lock
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let mut pending = std::mem::take(&mut *self.touched()).into_iter();
-        while let Some(dir) = pending.next() {
-            if let Err(err) = self.fs.fsync_dir(dir.as_std_path()) {
-                // Keep the directories not yet synced, so that a later flush retries them.
-                let mut touched = self.touched();
-                touched.insert(dir);
-                touched.extend(pending);
-                return Err(err.into());
+        let pending: Vec<Utf8PathBuf> = std::mem::take(&mut *self.touched()).into_iter().collect();
+        let results = self.fsync_dirs(&pending);
+        let mut first_error = None;
+        for (dir, result) in pending.into_iter().zip(results) {
+            if let Err(err) = result {
+                self.touched().insert(dir);
+                first_error.get_or_insert(err);
             }
         }
-        Ok(())
+        match first_error {
+            Some(err) => Err(err.into()),
+            None => Ok(()),
+        }
     }
 }
 

@@ -4,6 +4,9 @@
 //! Every test owns a fresh store root (`tempfile::tempdir()`), so tests are
 //! independent and may run in any order or in parallel.
 
+mod rendezvous;
+
+use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::os::unix::process::ExitStatusExt;
@@ -23,6 +26,8 @@ use swarmops_store::{
     CRASH_AT_ENV, FsObjectStore, FsOps, Layout, LinkOutcome, ObjectStore, RealFs, StoreError,
 };
 use tempfile::TempDir;
+
+use crate::rendezvous::Rendezvous;
 
 /// `"SOB1" | kind u8 | enc u8 | u16 rsvd | u64le ulen` (storage spec §2).
 const HEADER_LEN: usize = 16;
@@ -75,12 +80,16 @@ fn object_files(layout: &Layout) -> Vec<PathBuf> {
         .collect()
 }
 
-/// What the store asked of a [`CountingFs`].
+/// What the store asked of a [`CountingFs`], and how it answers.
 #[derive(Default)]
 struct Calls {
     write_durable_temp: AtomicUsize,
     link_noclobber: AtomicUsize,
     fsynced_dirs: Mutex<Vec<PathBuf>>,
+    /// Directories whose fsync fails, with an injected error that names the directory.
+    failing_dirs: Mutex<Vec<PathBuf>>,
+    /// Counts the directory fsyncs in flight (those that do not fail).
+    dir_fsyncs: Rendezvous,
 }
 
 impl Calls {
@@ -123,7 +132,20 @@ impl FsOps for CountingFs {
             .lock()
             .unwrap()
             .push(p.to_path_buf());
-        RealFs.fsync_dir(p)
+        if self
+            .calls
+            .failing_dirs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|dir| dir == p)
+        {
+            return Err(io::Error::other(format!(
+                "injected: fsync_dir {}",
+                p.display()
+            )));
+        }
+        self.calls.dir_fsyncs.around(|| RealFs.fsync_dir(p))
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -567,6 +589,100 @@ fn flush_fsyncs_objects_dir_for_a_new_fanout_dir() {
         calls.fsynced()[2..],
         [fanout],
         "an existing fan-out dir needs only its own fsync"
+    );
+}
+
+/// `count` blob payloads whose objects land in `count` different fan-out dirs.
+fn blobs_in_distinct_fanout_dirs(layout: &Layout, count: usize) -> Vec<Vec<u8>> {
+    let mut dirs = BTreeSet::new();
+    (0..)
+        .map(|i: u32| format!("spread {i}").into_bytes())
+        .filter(|blob| dirs.insert(fanout_dir(layout, blob)))
+        .take(count)
+        .collect()
+}
+
+/// Puts `blobs` into `store` of `layout`. Every fan-out dir they land in exists beforehand
+/// except the first blob's, which the put creates, so that `objects/` joins the touched set.
+/// Returns the directories a flush must fsync, in path order: `objects/` first.
+fn put_creating_one_fanout_dir(
+    store: &FsObjectStore,
+    layout: &Layout,
+    blobs: &[Vec<u8>],
+) -> Vec<PathBuf> {
+    for blob in &blobs[1..] {
+        fs::create_dir_all(fanout_dir(layout, blob)).unwrap();
+    }
+    let items = blobs.iter().map(|blob| (ObjectKind::Blob, blob.clone()));
+    store.put_batch(items.collect()).unwrap();
+    let mut dirs: Vec<PathBuf> = blobs.iter().map(|blob| fanout_dir(layout, blob)).collect();
+    dirs.push(layout.objects_dir().into_std_path_buf());
+    dirs.sort();
+    dirs
+}
+
+#[test]
+fn flush_at_parallelism_1_fsyncs_the_dirs_one_after_another_in_path_order() {
+    let (_root, layout) = new_root();
+    let (mut store, calls) = counting_store(&layout);
+    store.set_parallelism(1);
+    let blobs = blobs_in_distinct_fanout_dirs(&layout, 4);
+    let dirs = put_creating_one_fanout_dir(&store, &layout, &blobs);
+    assert_eq!(dirs[0], layout.objects_dir().as_std_path());
+    store.flush().unwrap();
+    assert_eq!(
+        calls.fsynced(),
+        dirs,
+        "objects/, then each fan-out dir, in path order"
+    );
+    assert_eq!(calls.dir_fsyncs.most(), 1, "one at a time");
+}
+
+#[test]
+fn flush_at_parallelism_8_fsyncs_the_same_dirs_at_once_and_any_failure_fails_it() {
+    let (_root, layout) = new_root();
+    let (mut store, calls) = counting_store(&layout);
+    store.set_parallelism(8);
+    let blobs = blobs_in_distinct_fanout_dirs(&layout, 17);
+    let dirs = put_creating_one_fanout_dir(&store, &layout, &blobs);
+    // Two dirs fail: the first fan-out dir (which one at a time would come right after
+    // objects/) and a later one. Each of the others waits until eight are in flight, which
+    // only fsyncs made at once can be.
+    let failing = [dirs[1].clone(), dirs[9].clone()];
+    calls.failing_dirs.lock().unwrap().extend(failing.clone());
+    calls.dir_fsyncs.arm(8);
+    match store.flush() {
+        Err(StoreError::Io(e)) => assert_eq!(
+            e.to_string(),
+            format!("injected: fsync_dir {}", failing[0].display()),
+            "the first failure in path order is the one reported"
+        ),
+        other => panic!("expected the injected error, got {other:?}"),
+    }
+    assert_eq!(
+        calls.dir_fsyncs.most(),
+        8,
+        "eight fsyncs were in flight together"
+    );
+    let mut fsynced = calls.fsynced();
+    fsynced.sort();
+    assert_eq!(
+        fsynced, dirs,
+        "every dir's fsync was made, the failing ones too"
+    );
+
+    // The failed dirs stay touched, and only they: the next flush retries them.
+    calls.dir_fsyncs.arm(0);
+    calls.failing_dirs.lock().unwrap().clear();
+    store.flush().unwrap();
+    let mut retried = calls.fsynced().split_off(dirs.len());
+    retried.sort();
+    assert_eq!(retried, failing);
+    store.flush().unwrap();
+    assert_eq!(
+        calls.fsynced().len(),
+        dirs.len() + 2,
+        "nothing left to flush"
     );
 }
 
