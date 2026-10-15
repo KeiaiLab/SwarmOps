@@ -50,9 +50,10 @@ const SIGABRT: i32 = 6;
 const CREATE_CRASH_ROOT: &str = "SWARMOPS_TEST_META_CREATE_CRASH_ROOT";
 
 /// The FsOps calls of `MetaStore::create`, in order: the journal, `journal.ckpt` and the index
-/// staged in `meta.tmp/meta/`, then `refs/` and the lock file, the staged directory synced,
-/// and the rename to `meta/` (which syncs the store root).
-const CREATE_CALLS: [&str; 19] = [
+/// (its columns, `parents.log` and its four view files) staged in `meta.tmp/meta/`, then
+/// `refs/` and the lock file, the staged directory synced, and the rename to `meta/` (which
+/// syncs the store root).
+const CREATE_CALLS: [&str; 24] = [
     "create_dir_all meta",
     "append_durable journal.log",
     "append_durable journal.off",
@@ -66,7 +67,12 @@ const CREATE_CALLS: [&str; 19] = [
     "append dh.col",
     "append par.col",
     "append parents.log",
+    "append ids.key",
+    "append ids.rec",
+    "append dh.key",
+    "append dh.rec",
     "fsync_dir idx",
+    "fsync_dir sorted",
     "fsync_dir meta",
     "create_dir_all refs",
     "append lock",
@@ -968,10 +974,10 @@ fn write_finishes_an_interrupted_compaction() {
     let all: Vec<ChangesetMeta> = (0..1100).map(|n| cs(n, &[])).collect();
     assert!(insert(&store, &all).checkpointed, "the write compacts");
     // A crash in a first compaction after it renamed the id view into place and before the
-    // delta-hash view: dh.key and dh.rec are not there yet.
+    // delta-hash view: dh.key and dh.rec are still the empty files the store was created with.
     let sorted = Layout::new(&root).meta_path("sorted");
-    fs::remove_file(sorted.join("dh.key")).unwrap();
-    fs::remove_file(sorted.join("dh.rec")).unwrap();
+    fs::write(sorted.join("dh.key"), []).unwrap();
+    fs::write(sorted.join("dh.rec"), []).unwrap();
     let torn = index(&root);
     assert_eq!((torn.ids_view().len(), torn.dh_view().len()), (1100, 0));
     let found = store.read().unwrap().by_delta_hash(&delta(7)).unwrap();
@@ -1238,6 +1244,10 @@ fn assert_fresh_meta(root: &Utf8Path) {
         ("idx/dh.col", 0),
         ("idx/par.col", 0),
         ("parents.log", 0),
+        ("sorted/ids.key", 0),
+        ("sorted/ids.rec", 0),
+        ("sorted/dh.key", 0),
+        ("sorted/dh.rec", 0),
     ];
     for (file, len) in files {
         assert_eq!(file_len(meta.join(file)), len, "{file}");
@@ -1246,11 +1256,11 @@ fn assert_fresh_meta(root: &Utf8Path) {
         fs::read(meta.join("journal.ckpt")).unwrap(),
         0_u64.to_le_bytes()
     );
-    for dir in ["refs", "sorted"] {
+    for (dir, holds) in [("refs", 0), ("sorted", 4)] {
         assert_eq!(
             fs::read_dir(meta.join(dir)).unwrap().count(),
-            0,
-            "{dir} is empty"
+            holds,
+            "{dir} holds {holds} files"
         );
     }
     assert!(!root.join("meta.tmp").exists(), "the staging is gone");

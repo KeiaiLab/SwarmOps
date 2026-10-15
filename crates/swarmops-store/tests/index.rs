@@ -56,11 +56,20 @@ const VIEWS: [(&str, u64); 4] = [
     ("sorted/dh.rec", 8),
 ];
 
-/// A fresh, empty store root and its layout; the directory lives as long as the `TempDir`.
-fn new_root() -> (TempDir, Layout) {
+/// A fresh store root and its layout, with no index files yet; the directory lives as long as
+/// the `TempDir`.
+fn bare_root() -> (TempDir, Layout) {
     let dir = tempfile::tempdir().expect("create store root");
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("temp dir is UTF-8");
     (dir, Layout::new(root))
+}
+
+/// A fresh store root and its layout, with an empty index laid out as `MetaStore::create`
+/// lays it out.
+fn new_root() -> (TempDir, Layout) {
+    let (dir, layout) = bare_root();
+    Index::create(&layout, real_fs()).expect("create the index files");
+    (dir, layout)
 }
 
 fn real_fs() -> Arc<dyn FsOps> {
@@ -812,11 +821,11 @@ fn append_writes_the_fixed_column_layout() {
 }
 
 #[test]
-fn open_creates_the_index_files_and_then_reads_sizes_only() {
-    let (_root, layout) = new_root();
-    fs::create_dir(layout.meta_dir()).unwrap(); // as Journal::create leaves it
+fn create_lays_out_the_index_and_open_reads_sizes_only() {
+    let (_root, layout) = bare_root();
+    fs::create_dir(layout.meta_dir()).unwrap(); // as the journal leaves meta/
     let (fs, calls) = recording_fs();
-    let index = Index::open(&layout, Arc::clone(&fs)).unwrap();
+    let index = Index::create(&layout, Arc::clone(&fs)).unwrap();
     assert_eq!(
         (index.len(), index.sorted_count(), index.tail_len()),
         (0, 0, 0)
@@ -831,18 +840,64 @@ fn open_creates_the_index_files_and_then_reads_sizes_only() {
             "append dh.col",
             "append par.col",
             "append parents.log",
+            "append ids.key",
+            "append ids.rec",
+            "append dh.key",
+            "append dh.rec",
             "fsync_dir idx",
+            "fsync_dir sorted",
             "fsync_dir meta",
         ]
     );
-    for (rel, _) in COLUMNS {
+    for (rel, _) in COLUMNS.iter().chain(&VIEWS) {
         assert_eq!(file_len(layout.meta_path(rel)), 0, "{rel}");
     }
-    assert!(layout.meta_path("sorted").is_dir());
 
     let again = Index::open(&layout, fs).unwrap();
     assert_eq!(again.len(), 0);
     assert_eq!(calls(), Vec::<String>::new(), "no FsOps call");
+}
+
+#[test]
+fn open_does_not_create_files() {
+    // Lock-free readers open the index, so opening creates nothing, even where every index
+    // file is missing: a store gets its index files from `MetaStore::create` alone.
+    let (_root, layout) = bare_root();
+    fs::create_dir(layout.meta_dir()).unwrap(); // as the journal leaves meta/
+    let (fs, calls) = recording_fs();
+    assert_index_corrupt(
+        Index::open(&layout, Arc::clone(&fs)).map(|index| index.len()),
+        "no index files",
+    );
+    assert_eq!(calls(), Vec::<String>::new(), "no FsOps call");
+    assert_eq!(
+        fs::read_dir(layout.meta_dir()).unwrap().count(),
+        0,
+        "nothing was created in meta/"
+    );
+}
+
+#[test]
+fn a_missing_column_beside_a_non_empty_one_is_index_corrupt() {
+    // A complete store has every index file, and nothing removes one, so a missing column,
+    // parents.log or view file is damage, beside full columns or empty ones; opening creates
+    // nothing in its place.
+    for records in [8, 0] {
+        for rel in COLUMNS.iter().chain(&VIEWS).map(|(rel, _)| *rel) {
+            let what = format!("{rel} missing beside {records} records");
+            let (_root, layout) = new_root();
+            let mut index = open(&layout);
+            let metas: Vec<ChangesetMeta> = (0..records).map(spread_meta).collect();
+            append_all(&mut index, &metas);
+            if records > 0 {
+                index.compact().unwrap();
+            }
+            drop(index);
+            fs::remove_file(layout.meta_path(rel)).unwrap();
+            assert_index_corrupt(open_len(&layout), &what);
+            assert!(!layout.meta_path(rel).exists(), "{what}: open created it");
+        }
+    }
 }
 
 #[test]

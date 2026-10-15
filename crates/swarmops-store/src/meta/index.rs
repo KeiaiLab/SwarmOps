@@ -10,9 +10,11 @@
 //! meta/sorted/       the sorted views by id and by delta hash ([`SortedView`])
 //! ```
 //!
-//! A record's number, its rec, is its position in the columns and its `seq`. The files only
-//! grow, by [`Index::append`], which writes `parents.log`, `par.col`, `gen.col`, `dh.col`
-//! and `ids.col`, in that order, with plain appends; [`Index::sync`] then makes them durable,
+//! [`Index::create`] lays the files out, empty, when the store is created, and nothing else
+//! creates or removes one, so a missing file is [`StoreError::IndexCorrupt`]. A record's
+//! number, its rec, is its position in the columns and its `seq`. The files only grow, by
+//! [`Index::append`], which writes `parents.log`, `par.col`, `gen.col`, `dh.col` and
+//! `ids.col`, in that order, with plain appends; [`Index::sync`] then makes them durable,
 //! once for many appends. Lookups binary-search a sorted view's key column, then scan the
 //! records past the view, the unsorted tail, read from `ids.col` (or `dh.col`) with one
 //! `read_at`; [`Index::compact`] merges the tail into the views.
@@ -37,7 +39,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
 
 use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
-use super::sorted::{self, Rebuild, SortedView, ViewName, Views};
+use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views, index_file_error};
 use crate::error::StoreError;
 use crate::fs_ops::FsOps;
 use crate::layout::Layout;
@@ -94,17 +96,41 @@ impl Index {
     /// writer decides; [`Index::compact`] itself always compacts.
     pub const COMPACT_THRESHOLD: u64 = 1024;
 
+    /// Creates the files of an empty index in `layout` where they are missing, changes going
+    /// through `fs`: `meta/idx/` with the four columns, `meta/parents.log`, and
+    /// `meta/sorted/` with the four view files; makes their directory entries durable; and
+    /// opens the index. Existing files are kept as they are. [`crate::MetaStore::create`]
+    /// calls it in its staging directory: a store gets its index files there, and nowhere
+    /// else.
+    pub fn create(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Index, StoreError> {
+        let idx = layout.meta_path("idx");
+        let sorted = layout.meta_path("sorted");
+        fs.create_dir_all(idx.as_std_path())?;
+        fs.create_dir_all(sorted.as_std_path())?;
+        let columns = [IDS, GENS, DHS, PARS, PARENTS].map(|rel| layout.meta_path(rel));
+        for path in columns
+            .iter()
+            .chain(&VIEW_FILES.map(|name| sorted.join(name)))
+        {
+            // An empty append creates a missing file and never truncates an existing one.
+            fs.append(path.as_std_path(), &[])?;
+        }
+        fs.fsync_dir(idx.as_std_path())?;
+        fs.fsync_dir(sorted.as_std_path())?;
+        fs.fsync_dir(layout.meta_dir().as_std_path())?;
+        Self::open(layout, fs)
+    }
+
     /// Opens the index of `layout`, changes going through `fs`.
     ///
-    /// Creates `meta/idx/`, `meta/sorted/` and empty column files where they are missing,
-    /// and makes their directory entries durable. Otherwise it only reads, without a lock:
-    /// the files' lengths, the last record's `par.col` entry, and the sorted views' lengths.
-    /// It repairs nothing, since a writer may be appending or compacting meanwhile: records
-    /// that some files lack are not counted, and a view that a compaction is renaming (or
-    /// crashed renaming) counts as covering what it covers, or nothing. A writer repairs
-    /// with [`Index::repair_tail`].
+    /// Creates nothing, since lock-free readers open it: a store has every index file from
+    /// [`Index::create`], so a missing one is [`StoreError::IndexCorrupt`]. Otherwise it only
+    /// reads, without a lock: the files' lengths, the last record's `par.col` entry, and the
+    /// sorted views' lengths. It repairs nothing, since a writer may be appending or
+    /// compacting meanwhile: records that some files lack are not counted, and a view that a
+    /// compaction is renaming (or crashed renaming) counts as covering what it covers, or
+    /// nothing. A writer repairs with [`Index::repair_tail`].
     pub fn open(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Index, StoreError> {
-        create_missing(layout, &*fs)?;
         let sorted_dir = layout.meta_path("sorted");
         // The views before the columns: a compaction covers records that were whole when it
         // ran, and whole records stay, so the columns read afterwards hold all that the
@@ -112,11 +138,11 @@ impl Index {
         let views = Views::open(&sorted_dir)?;
         let parents_path = layout.meta_path(PARENTS);
         let mut index = Index {
-            ids: Column::open(layout.meta_path(IDS))?,
-            gens: Column::open(layout.meta_path(GENS))?,
-            dhs: Column::open(layout.meta_path(DHS))?,
-            pars: Column::open(layout.meta_path(PARS))?,
-            parents: File::open(&parents_path)?,
+            ids: Column::open(layout.meta_path(IDS)).map_err(index_file_error)?,
+            gens: Column::open(layout.meta_path(GENS)).map_err(index_file_error)?,
+            dhs: Column::open(layout.meta_path(DHS)).map_err(index_file_error)?,
+            pars: Column::open(layout.meta_path(PARS)).map_err(index_file_error)?,
+            parents: File::open(&parents_path).map_err(index_file_error)?,
             parents_path,
             fs,
             sorted_dir,
@@ -560,30 +586,6 @@ fn sorted_tail(
         .collect();
     tail.sort_unstable();
     Ok(tail)
-}
-
-/// Creates `meta/idx/`, `meta/sorted/` and the column files that are missing, the files
-/// empty, and makes their directory entries durable; does nothing if none is missing.
-fn create_missing(layout: &Layout, fs: &dyn FsOps) -> Result<(), StoreError> {
-    let sorted = layout.meta_path("sorted");
-    let missing: Vec<Utf8PathBuf> = [IDS, GENS, DHS, PARS, PARENTS]
-        .into_iter()
-        .map(|rel| layout.meta_path(rel))
-        .filter(|path| !path.is_file())
-        .collect();
-    if missing.is_empty() && sorted.is_dir() {
-        return Ok(());
-    }
-    let idx = layout.meta_path("idx");
-    fs.create_dir_all(idx.as_std_path())?;
-    fs.create_dir_all(sorted.as_std_path())?;
-    for path in &missing {
-        // An empty append creates a missing file and never truncates an existing one.
-        fs.append(path.as_std_path(), &[])?;
-    }
-    fs.fsync_dir(idx.as_std_path())?;
-    fs.fsync_dir(layout.meta_dir().as_std_path())?;
-    Ok(())
 }
 
 /// A hex prefix of an id: its digits as bytes (an odd last digit in the high half of its

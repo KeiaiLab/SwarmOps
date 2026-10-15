@@ -61,18 +61,19 @@ impl<const K: usize> SortedView<K> {
         }
     }
 
-    /// The view held by a key file and a rec file, each with its entry count (`None` for a
-    /// missing file). If the counts differ the files are not one view (a compaction is
-    /// renaming them, or crashed doing so), and the view is empty.
-    fn pair(keys: Option<(File, u64)>, recs: Option<(File, u64)>) -> Self {
-        match (keys, recs) {
-            (Some((keys, len)), Some((recs, rec_count))) if len == rec_count && len > 0 => Self {
+    /// The view held by a key file and a rec file, each with its entry count. If the counts
+    /// differ the files are not one view (a compaction is renaming them, or crashed doing
+    /// so), and the view is empty.
+    fn pair((keys, len): (File, u64), (recs, rec_count): (File, u64)) -> Self {
+        if len == rec_count && len > 0 {
+            Self {
                 files: Some((keys, recs)),
                 len,
                 probes: AtomicU64::new(0),
                 rec_reads: AtomicU64::new(0),
-            },
-            _ => Self::empty(),
+            }
+        } else {
+            Self::empty()
         }
     }
 
@@ -208,18 +209,19 @@ impl<const K: usize> SortedView<K> {
 pub(crate) struct Views {
     pub(crate) ids: SortedView<32>,
     pub(crate) dh: SortedView<32>,
-    /// The entry counts of `ids.key`, `ids.rec`, `dh.key` and `dh.rec` (0 for a missing
-    /// file), in the order a compaction renames them.
+    /// The entry counts of `ids.key`, `ids.rec`, `dh.key` and `dh.rec`, in the order a
+    /// compaction renames them.
     counts: [u64; 4],
 }
 
 impl Views {
-    /// Opens the views in `dir`, `meta/sorted/`; missing files are empty views. A view
-    /// whose key and rec files hold different counts is mid-rename (or a crash stopped
-    /// one there) and is opened empty, so its records count as tail.
+    /// Opens the views in `dir`, `meta/sorted/`. A view whose key and rec files hold
+    /// different counts is mid-rename (or a crash stopped one there) and is opened empty, so
+    /// its records count as tail.
     ///
     /// Counts that grow along the rename order are [`StoreError::IndexCorrupt`], and so is
-    /// a file that ends in a partial entry.
+    /// a file that ends in a partial entry, or one that is missing: the store's creation
+    /// made all four ([`crate::Index::create`]), and a compaction only renames over them.
     pub(crate) fn open(dir: &Utf8Path) -> Result<Views, StoreError> {
         // The reverse of the rename order: once a file is seen new, every file opened after
         // it was renamed before it and is seen new too, so the counts seen never grow along
@@ -228,13 +230,7 @@ impl Views {
         let dh_key = open_entries(&dir.join(DH_KEY), 32)?;
         let ids_rec = open_entries(&dir.join(IDS_REC), REC_LEN)?;
         let ids_key = open_entries(&dir.join(IDS_KEY), 32)?;
-        let count = |opened: &Option<(File, u64)>| opened.as_ref().map_or(0, |(_, n)| *n);
-        let counts = [
-            count(&ids_key),
-            count(&ids_rec),
-            count(&dh_key),
-            count(&dh_rec),
-        ];
+        let counts = [ids_key.1, ids_rec.1, dh_key.1, dh_rec.1];
         if counts.windows(2).any(|pair| pair[0] < pair[1]) {
             return Err(StoreError::IndexCorrupt {
                 what: "the sorted views are out of the order compaction renames them in",
@@ -276,6 +272,9 @@ const IDS_KEY: &str = "ids.key";
 const IDS_REC: &str = "ids.rec";
 const DH_KEY: &str = "dh.key";
 const DH_REC: &str = "dh.rec";
+
+/// The four view files in `meta/sorted/`, in the order a compaction renames them.
+pub(crate) const VIEW_FILES: [&str; 4] = [IDS_KEY, IDS_REC, DH_KEY, DH_REC];
 
 /// Which of the two views.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -497,14 +496,10 @@ impl<const K: usize> Writer<'_, K> {
     }
 }
 
-/// Opens `path` read-only with its length in entries of `width` bytes; `None` if it does not
-/// exist, [`StoreError::IndexCorrupt`] if it ends in a partial entry.
-fn open_entries(path: &Utf8Path, width: usize) -> Result<Option<(File, u64)>, StoreError> {
-    let file = match File::open(path) {
-        Ok(file) => file,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
+/// Opens `path` read-only with its length in entries of `width` bytes;
+/// [`StoreError::IndexCorrupt`] if it is missing or ends in a partial entry.
+fn open_entries(path: &Utf8Path, width: usize) -> Result<(File, u64), StoreError> {
+    let file = File::open(path).map_err(index_file_error)?;
     let len = file.metadata()?.len();
     let width = to_u64(width);
     if !len.is_multiple_of(width) {
@@ -512,7 +507,19 @@ fn open_entries(path: &Utf8Path, width: usize) -> Result<Option<(File, u64)>, St
             what: "a sorted view file ends in a partial entry",
         });
     }
-    Ok(Some((file, len / width)))
+    Ok((file, len / width))
+}
+
+/// What a failure to open an index file is: [`StoreError::IndexCorrupt`] if the file is not
+/// there, since a complete store has every index file; the I/O error otherwise.
+pub(crate) fn index_file_error(e: io::Error) -> StoreError {
+    if e.kind() == io::ErrorKind::NotFound {
+        StoreError::IndexCorrupt {
+            what: "an index file is missing",
+        }
+    } else {
+        e.into()
+    }
 }
 
 /// How many entries from index `start` a read of at most `max` takes, in a view of `len`.

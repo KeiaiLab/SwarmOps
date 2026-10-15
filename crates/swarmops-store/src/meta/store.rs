@@ -165,8 +165,9 @@ impl MetaStore {
     }
 
     /// Creates `meta/` under `dir`, every change going through `fs`: an empty journal
-    /// (`journal.log`, `journal.off`) with `journal.ckpt` at 0, an empty index (`idx/`,
-    /// `parents.log`, `sorted/`), `refs/` and the lock file, all durable.
+    /// (`journal.log`, `journal.off`) with `journal.ckpt` at 0, an empty index (`idx/` with
+    /// its four columns, `parents.log`, `sorted/` with its four view files: the only place a
+    /// store's index files are made), `refs/` and the lock file, all durable.
     /// [`StoreError::Format`] if `meta/` exists already.
     ///
     /// Crash-atomic: everything is staged in `meta.tmp/meta/`, the `meta/` of a store root of
@@ -187,7 +188,7 @@ impl MetaStore {
         }
         let staged = Layout::new(staging.as_path());
         Journal::create(&staged, Arc::clone(&fs))?.set_ckpt(0)?;
-        Index::open(&staged, Arc::clone(&fs))?;
+        Index::create(&staged, Arc::clone(&fs))?;
         let staged_meta = staged.meta_dir();
         fs.create_dir_all(staged.meta_path("refs").as_std_path())?;
         fs.append(staged.meta_lock().as_std_path(), &[])?;
