@@ -1044,8 +1044,8 @@ fn repair_tail_cuts_a_partially_appended_record() {
 
 /// `truncate_to` cuts whole records off the end, `ids.col` first, as a writer whose sync
 /// failed does (see `MetaWrite`), never below what the sorted views cover; appends then carry
-/// on where it cut. A handle opened before the cut reads the records it still counts until a
-/// lookup reaches past the cut, which is an I/O error rather than wrong data.
+/// on where it cut. A handle opened before the cut fails, with an I/O error rather than wrong
+/// data, on every lookup that reads past the cut, as `truncate_to`'s documentation lists.
 #[test]
 fn truncate_to_cuts_whole_records_back_to_a_count() {
     let metas = [
@@ -1085,10 +1085,25 @@ fn truncate_to_cuts_whole_records_back_to_a_count() {
         assert_eq!(fresh.find(meta.id).unwrap(), Some(rec));
     }
     assert_eq!(fresh.find(id_of(5)).unwrap(), None);
+    // The stale handle answers what it reads below the cut: records, and ids the view holds. A
+    // lookup that reads past the cut fails: a record cut, and any scan of the tail, which runs
+    // to the end the handle counts, whether the id it looks for is cut or not.
     assert_eq!(stale.get(1).unwrap(), at_seq(&metas[1], 1));
-    match stale.get(5) {
-        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof),
-        other => panic!("a stale handle past the cut: expected an I/O error, got {other:?}"),
+    assert_eq!(stale.find(id_of(1)).unwrap(), Some(0), "the view holds it");
+    let past_the_cut = [
+        ("get of a record cut", stale.get(5).map(drop)),
+        ("find of a record kept", stale.find(id_of(4)).map(drop)),
+        ("find_prefix", stale.find_prefix("01").map(drop)),
+        (
+            "find_delta_hash",
+            stale.find_delta_hash(&[0xd1; 32]).map(drop),
+        ),
+    ];
+    for (what, got) in past_the_cut {
+        match got {
+            Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{what}"),
+            other => panic!("{what} on a stale handle: expected an I/O error, got {other:?}"),
+        }
     }
 
     // Never below the 3 records the views cover; parents.log ends there already.

@@ -12,16 +12,19 @@
 //! as one frame ([`Journal::append_frame`]: the commit point), materializes the frame (an
 //! [`Index::append`] per changeset, without a sync; a ref file replaced per moved ref), and
 //! unlocks. Every 32 frames past the checkpoint, when it compacts (the sync first), and on
-//! [`MetaStore::flush`], it also syncs the index and moves the checkpoint to the end of the
-//! journal: the batched durability of the projections.
+//! [`MetaStore::flush`] if any frame lies past the checkpoint, it also syncs the index and
+//! moves the checkpoint to the end of the journal: the batched durability of the projections.
 //!
 //! An error from [`MetaWrite::commit`] says whether the transaction committed. Once its frame
 //! is appended, every error is [`StoreError::PostCommit`]: the frame is durable, a step after
 //! it failed, and the next [`MetaStore::write`] repairs that. A failed index sync returns
 //! before the checkpoint moves, so the checkpoint never passes records that are not durable;
-//! and it first cuts the index back to the records the checkpoint has passed
-//! ([`Index::truncate_to`]), since a later sync may succeed without the pages a failed
-//! writeback dropped: the next write's replay appends them again, to be synced afresh.
+//! and it first cuts the index back to the records the checkpoint has passed, or to those the
+//! sorted views cover if more ([`Index::truncate_to`]), since a later sync may succeed without
+//! the pages a failed writeback dropped: the next write's replay appends them again, to be
+//! synced afresh. A snapshot taken before the cut can then fail with an I/O error on lookups
+//! that read cut records or scan the index's tail (as [`Index::truncate_to`] lists); a new one
+//! reads right.
 //! An error from the append itself may come after the frame's bytes reached the journal, so
 //! that transaction may or may not have committed: the next [`MetaStore::write`] settles it
 //! (it lists or cuts what the journal holds, then replays). A caller that retries after either
@@ -99,7 +102,8 @@ pub struct CommitInfo {
     /// How many ref moves it recorded.
     pub moved_refs: u64,
     /// Whether the commit also synced the index and moved `journal.ckpt` to the end of the
-    /// journal: at 32 frames past the checkpoint, after a compaction, or for a flush.
+    /// journal: at 32 frames past the checkpoint, after a compaction, or for a flush with a
+    /// frame past the checkpoint.
     pub checkpointed: bool,
 }
 
@@ -641,7 +645,8 @@ impl MetaWrite<'_> {
     /// sync, and may drop the pages it failed to write: a later sync can then succeed without
     /// those records ever reaching the disk. Cut, they are appended again by the next write's
     /// replay, from the journal, and synced afresh. If the cut fails too, the error says so
-    /// beside the sync's: the next writer keeps the records it finds whole.
+    /// beside the sync's; the records stay, and the next writer keeps them, since it finds them
+    /// whole: the hazard stays open until the next sync that succeeds, which may pass them.
     fn sync_index(&mut self) -> Result<(), StoreError> {
         let Err(failed) = self.index.sync() else {
             return Ok(());

@@ -17,9 +17,10 @@
 //! `ids.col`, in that order, with plain appends; [`Index::sync`] then makes them durable,
 //! once for many appends. They shrink only at the end, when a writer cuts what a crash left
 //! of a record ([`Index::repair_tail`]) or, after a failed sync, the records past the
-//! checkpoint ([`Index::truncate_to`]). Lookups binary-search a sorted view's key column,
-//! then scan the records past the view, the unsorted tail, read from `ids.col` (or `dh.col`)
-//! with one `read_at`; [`Index::compact`] merges the tail into the views.
+//! checkpoint, never below what the sorted views cover ([`Index::truncate_to`]). Lookups
+//! binary-search a sorted view's key column, then scan the records past the view, the unsorted
+//! tail, read from `ids.col` (or `dh.col`) with one `read_at`; [`Index::compact`] merges the
+//! tail into the views.
 //!
 //! # Crashes and concurrency
 //!
@@ -31,8 +32,8 @@
 //! leaves the sorted views out of step; each view still covers the records it covers, or is
 //! read as empty, so lookups stay right, and [`Index::repair_tail`] runs the compaction
 //! again. The one cut of whole records, after a failed sync, can take records from under a
-//! reader's handle: a lookup that reads one is then an I/O error, never wrong data, until
-//! the reader opens the index again.
+//! handle opened before it, a reader's snapshot's included: [`Index::truncate_to`] says which
+//! lookups then fail.
 
 use std::fs::File;
 use std::io;
@@ -389,8 +390,15 @@ impl Index {
     /// The files are cut in the reverse of the write order, `ids.col` first, each cut synced
     /// ([`FsOps::truncate`]), so that a crash in the middle leaves a torn tail for
     /// [`Index::repair_tail`] to cut the rest of; this handle counts only the records kept
-    /// from before the first cut. Another handle that counted records cut (a reader's) gets
-    /// an I/O error from a lookup that reads one, until the index is opened again.
+    /// from before the first cut.
+    ///
+    /// Another handle that counted records cut, opened before the cut (a reader's snapshot,
+    /// verify), then fails with an I/O error (`UnexpectedEof`), never with wrong data: on
+    /// [`Index::get`] of a record cut, on every [`Index::find`] that its sorted view misses (the
+    /// scan of the tail reads past the new end), and on every [`Index::find_prefix`] and
+    /// [`Index::find_delta_hash`]. A [`crate::MetaStore::read`] whose handle opened before the
+    /// cut fails the same way while it builds its snapshot. A handle opened after the cut, and
+    /// so a new snapshot, reads the index as cut, the journal's frames over it.
     pub fn truncate_to(&mut self, records: u64) -> Result<u64, StoreError> {
         let keep = records.max(self.views.covered());
         if keep >= self.len {
