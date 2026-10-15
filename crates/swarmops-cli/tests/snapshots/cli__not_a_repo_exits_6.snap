@@ -119,5 +119,30 @@ expression: s.transcript()
         "auth": "trust"
       }
     }
+  },
+  {
+    "args": "--repo '' info",
+    "env": {
+      "SWARMOPS_REPO": "[tmp]/missing"
+    },
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "repo_info",
+      "api": 1,
+      "error": {
+        "code": "E_NOT_A_REPO",
+        "message": "no store named: --repo is empty",
+        "retryable": false,
+        "exit": 6,
+        "details": {},
+        "hint": "pass --repo <store> or set SWARMOPS_REPO; swarmops init <dir> creates a store"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
   }
 ]
