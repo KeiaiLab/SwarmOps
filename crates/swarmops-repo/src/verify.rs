@@ -698,7 +698,7 @@ fn read_frames(journal: &Journal) -> Result<(Vec<Frame>, Option<u64>), RepoError
     let mut frames: Vec<Frame> = Vec::new();
     let mut batch = FRAME_BATCH;
     loop {
-        match journal.frames_from_strict(to_u64(frames.len()), batch) {
+        match journal.frames_from(to_u64(frames.len()), batch) {
             Ok(read) if read.is_empty() => break,
             Ok(read) => frames.extend(read),
             Err(StoreError::JournalCorrupt { offset }) if batch == 1 => {

@@ -837,12 +837,37 @@ fn create_makes_the_documented_fs_calls() {
         ]
         .map(str::to_owned),
     );
-    // Then the metadata store's create, staged in meta.tmp/ and renamed into place.
+    // Then the metadata store's create, staged in meta.tmp/ and renamed into place: the
+    // journal and its checkpoint, the index (four columns, parents.log, the four sorted view
+    // files), refs/ and the lock file, each directory synced.
     let (start, end) = meta_create_span(&calls);
     assert_eq!(calls[..start], want[..]);
-    for call in &calls[start..end] {
-        assert!(call.contains(" meta.tmp"), "{call}");
-    }
+    let staged = [
+        "create_dir_all meta.tmp/meta",
+        "append_durable meta.tmp/meta/journal.log",
+        "append_durable meta.tmp/meta/journal.off",
+        "fsync_dir meta.tmp/meta",
+        "fsync_dir meta.tmp",
+        "atomic_replace meta.tmp/meta/journal.ckpt",
+        "create_dir_all meta.tmp/meta/idx",
+        "create_dir_all meta.tmp/meta/sorted",
+        "append meta.tmp/meta/idx/ids.col",
+        "append meta.tmp/meta/idx/gen.col",
+        "append meta.tmp/meta/idx/dh.col",
+        "append meta.tmp/meta/idx/par.col",
+        "append meta.tmp/meta/parents.log",
+        "append meta.tmp/meta/sorted/ids.key",
+        "append meta.tmp/meta/sorted/ids.rec",
+        "append meta.tmp/meta/sorted/dh.key",
+        "append meta.tmp/meta/sorted/dh.rec",
+        "fsync_dir meta.tmp/meta/idx",
+        "fsync_dir meta.tmp/meta/sorted",
+        "fsync_dir meta.tmp/meta",
+        "create_dir_all meta.tmp/meta/refs",
+        "append meta.tmp/meta/lock",
+        "fsync_dir meta.tmp/meta",
+    ];
+    assert_eq!(calls[start..end], staged);
     // Then the identity, and FORMAT last of all: linked into place, never half written.
     assert_eq!(
         calls[end..],

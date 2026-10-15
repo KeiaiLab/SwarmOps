@@ -162,15 +162,54 @@ fn assert_corrupt_at<T: Debug>(got: Result<T, StoreError>, offset: u64, what: &s
     }
 }
 
-/// [`RealFs`] that records each call as `"<method> <file name>"`.
+/// [`RealFs`] that records each call as `"<method> <file name>"`, and may run a hook once,
+/// right before or right after the call it names: a writer racing the caller.
 struct RecordingFs {
     calls: Arc<Mutex<Vec<String>>>,
+    hook: Mutex<Option<Hook>>,
 }
+
+/// A call as [`RecordingFs`] records it, when the hook runs, and what it does. `After` hooks
+/// run for `file_len` only, the call with which readers measure the journal.
+type Hook = (String, When, Box<dyn FnOnce() + Send>);
+
+/// When a [`Hook`] runs, around the call it names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum When {
+    Before,
+    After,
+}
+
+/// A read of the journal from a reader's handle.
+type Read = fn(&Journal) -> Result<Vec<Frame>, StoreError>;
 
 impl RecordingFs {
     fn record(&self, method: &str, path: &Path) {
+        let call = Self::call(method, path);
+        self.calls.lock().unwrap().push(call.clone());
+        self.run_hook(&call, When::Before);
+    }
+
+    fn call(method: &str, path: &Path) -> String {
         let name = path.file_name().unwrap().to_string_lossy();
-        self.calls.lock().unwrap().push(format!("{method} {name}"));
+        format!("{method} {name}")
+    }
+
+    fn run_hook(&self, call: &str, when: When) {
+        let hook = {
+            let mut hook = self.hook.lock().unwrap();
+            if hook
+                .as_ref()
+                .is_some_and(|(at, at_when, _)| at == call && *at_when == when)
+            {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        if let Some((_, _, run)) = hook {
+            run();
+        }
     }
 }
 
@@ -217,7 +256,9 @@ impl FsOps for RecordingFs {
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
         self.record("file_len", path);
-        RealFs.file_len(path)
+        let len = RealFs.file_len(path);
+        self.run_hook(&Self::call("file_len", path), When::After);
+        len
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
@@ -249,9 +290,15 @@ impl FsOps for RecordingFs {
 /// Another handle on the journal whose FsOps calls are recorded, and a function that
 /// returns the calls made since it last ran.
 fn recording_journal(layout: &Layout) -> (Journal, impl Fn() -> Vec<String>) {
+    racing_journal(layout, None)
+}
+
+/// [`recording_journal`], running `hook` once right before the call it names goes ahead.
+fn racing_journal(layout: &Layout, hook: Option<Hook>) -> (Journal, impl Fn() -> Vec<String>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let fs = RecordingFs {
         calls: Arc::clone(&calls),
+        hook: Mutex::new(hook),
     };
     let journal = Journal::open(layout, Arc::new(fs)).unwrap();
     (journal, move || std::mem::take(&mut *calls.lock().unwrap()))
@@ -565,39 +612,6 @@ fn frames_from_is_inclusive_and_starts_at_frame_zero() {
 }
 
 #[test]
-fn frames_from_strict_reports_a_last_listed_frame_cut_short() {
-    // journal.off lists the last frame, but journal.log ends inside it (at 104) or right
-    // before it (at 84). frames_from passes over it, as the torn tail a writer repairs;
-    // frames_from_strict, for checking the journal, reports it at its start.
-    for log_end in [104, 84] {
-        let (_root, layout) = new_root();
-        let journal = new_journal(&layout);
-        let first = journal.append_frame(&[root_changeset()]).unwrap();
-        let second = journal
-            .append_frame(&[child_changeset(), main_created()])
-            .unwrap();
-        let whole = [first.clone(), second];
-        assert_eq!(reopen(&layout).frames_from_strict(0, 10).unwrap(), whole);
-        assert_eq!(
-            reopen(&layout).frames_from_strict(1, 1).unwrap(),
-            whole[1..]
-        );
-
-        set_len(layout.journal_log(), log_end);
-        let reader = reopen(&layout);
-        assert_eq!(reader.frames_from(0, 10).unwrap(), whole[..1]);
-        let what = format!("log ends at {log_end}");
-        assert_corrupt_at(reader.frames_from_strict(0, 10), 84, &what);
-        assert_corrupt_at(reader.frames_from_strict(1, 10), 84, &what);
-        assert_eq!(
-            reader.frames_from_strict(0, 1).unwrap(),
-            [first],
-            "{what}: the frames before it read"
-        );
-    }
-}
-
-#[test]
 fn a_first_frame_that_does_not_start_at_zero_is_journal_corrupt() {
     // journal.off lists the frame at 19 as frame 0: the bytes before it are no frame.
     let (_root, layout) = new_root();
@@ -673,6 +687,65 @@ fn torn_tail_is_ignored_by_readers_and_truncated_by_writer() {
 }
 
 #[test]
+fn zero_filled_tail_is_torn_and_cut() {
+    // A filesystem may expose zero-filled blocks at the end of a file after a crash. No frame
+    // starts with `len == 0`, so unlisted bytes that are zero all the way to the end of
+    // journal.log hold no committed frame: a torn tail, whatever its length. (Up to 7 bytes
+    // they are a header cut short as well; from 8 on, a header announcing an empty payload.)
+    for zeros in [1, 7, 8, 9, 100] {
+        let what = format!("{zeros} zero bytes after the last listed frame");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+        append_bytes(layout.journal_log(), &vec![0; zeros]);
+
+        let reader = reopen(&layout);
+        assert_eq!(
+            reader.tail_frames_from(0).unwrap(),
+            slice::from_ref(&first),
+            "{what}"
+        );
+        assert_eq!(
+            reader.tail_frames_from(84).unwrap(),
+            Vec::<Frame>::new(),
+            "{what}"
+        );
+        assert_eq!(journal.truncate_torn_tail().unwrap(), Some(84), "{what}");
+        assert_eq!(file_len(layout.journal_log()), 84, "{what}: cut");
+        assert_eq!(offsets_on_disk(&layout), [0], "{what}");
+        assert_eq!(
+            journal.truncate_torn_tail().unwrap(),
+            None,
+            "{what}: a second call"
+        );
+        assert_eq!(
+            reopen(&layout).tail_frames_from(0).unwrap(),
+            [first],
+            "{what}"
+        );
+    }
+
+    // A non-zero byte anywhere keeps the rules for frames: zeros, then a 1, make a whole
+    // header announcing an empty payload (from 7 zeros on), which no writer produces.
+    for zeros in [7, 8, 100] {
+        let what = format!("{zeros} zero bytes, then a 1");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[root_changeset()]).unwrap();
+        let mut tail = vec![0; zeros];
+        tail.push(1);
+        append_bytes(layout.journal_log(), &tail);
+        assert_corrupt_at(reopen(&layout).tail_frames_from(0), 84, &what);
+        assert_corrupt_at(journal.truncate_torn_tail(), 84, &what);
+        assert_eq!(
+            file_len(layout.journal_log()),
+            84 + u64::try_from(tail.len()).unwrap(),
+            "{what}: nothing was cut"
+        );
+    }
+}
+
+#[test]
 fn crc_mismatch_is_journal_corrupt_not_panic() {
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
@@ -703,8 +776,14 @@ fn crc_mismatch_is_journal_corrupt_not_panic() {
 
 #[test]
 fn frames_no_writer_produces_are_journal_corrupt_not_torn() {
+    // An empty payload has CRC 0, so its frame is 8 zero bytes: at the very end of
+    // journal.log it reads as a zero-filled tail (`zero_filled_tail_is_torn_and_cut`), and
+    // a byte that is not zero after it keeps it a frame here.
     let cases = [
-        ("an empty payload", frame_bytes(&[])),
+        (
+            "an empty payload, then a byte",
+            [frame_bytes(&[]), vec![0xee]].concat(),
+        ),
         ("zero records", frame_bytes(&[0, 0])),
         ("an unknown record kind", frame_bytes(&[1, 0, 3])),
         (
@@ -780,39 +859,411 @@ fn truncate_torn_tail_lists_a_whole_frame_that_lost_its_entry() {
 }
 
 #[test]
-fn truncate_torn_tail_drops_the_entry_of_a_frame_cut_short() {
-    // journal.off lists the last frame, but journal.log ends inside it (at 104) or right
-    // before it (at 84).
-    for (log_end, cut) in [(104, Some(84)), (84, None)] {
+fn a_listed_frame_cut_short_is_journal_corrupt() {
+    // A listed frame's bytes were synced before its entry was appended, so journal.log
+    // ending inside one is a filesystem losing a committed frame, never a torn write.
+    // Recovery cuts nothing and reports it; readers, which measure journal.off before
+    // journal.log, report it too.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    set_len(layout.journal_log(), 104); // 20 bytes into frame 1
+    assert_corrupt_at(journal.truncate_torn_tail(), 84, "truncate_torn_tail");
+    assert_corrupt_at(journal.truncate_torn_tail(), 84, "a second call");
+    assert_corrupt_at(journal.append_frame(&[compacted(2)]), 84, "append_frame");
+    assert_eq!(
+        file_len(layout.journal_log()),
+        104,
+        "nothing was cut or appended"
+    );
+    assert_eq!(offsets_on_disk(&layout), [0, 84], "no entry was dropped");
+    let reader = reopen(&layout);
+    assert_corrupt_at(reader.tail_frames_from(0), 84, "tail_frames_from(0)");
+    assert_corrupt_at(reader.tail_frames_from(84), 84, "tail_frames_from(84)");
+    assert_corrupt_at(reader.frames_from(0, 10), 84, "frames_from");
+    assert_corrupt_at(reader.frames_after(0, 10), 84, "frames_after");
+    assert_eq!(
+        reader.frames_from(0, 1).unwrap(),
+        slice::from_ref(&first),
+        "frame 0 still reads"
+    );
+
+    // Damage before the frame changes nothing: frame 0 failing its CRC, journal.log ending 2
+    // bytes into frame 1 (found by `fuzz/fuzz_targets/journal_recovery.rs`).
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[compacted(1)]).unwrap(); // bytes 0..19
+    journal.append_frame(&[compacted(2)]).unwrap(); // bytes 19..38
+    set_len(layout.journal_log(), 21);
+    flip_byte(layout.journal_log(), 17); // a payload byte of frame 0
+    assert_corrupt_at(journal.truncate_torn_tail(), 19, "frame 1 is cut short");
+    assert_eq!(file_len(layout.journal_log()), 21, "nothing was cut");
+    assert_eq!(offsets_on_disk(&layout), [0, 19], "no entry was dropped");
+
+    // Nor do garbage entries: entry 1 (43) points into frame 0 (bytes 0..84), at its
+    // generation, which reads as a header announcing 1 byte, so a frame ending at 52, where
+    // entry 2 points, at bytes that read as a frame cut short. Cutting at 52 would destroy
+    // frame 0.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap();
+    append_bytes(layout.journal_off(), &43_u64.to_le_bytes());
+    append_bytes(layout.journal_off(), &52_u64.to_le_bytes());
+    assert_corrupt_at(journal.truncate_torn_tail(), 52, "entry 2 is cut short");
+    assert_eq!(file_len(layout.journal_log()), 84, "nothing was cut");
+    assert_eq!(
+        offsets_on_disk(&layout),
+        [0, 43, 52],
+        "no entry was dropped"
+    );
+}
+
+#[test]
+fn a_log_ending_at_the_last_listed_frames_start_is_journal_corrupt() {
+    // journal.off lists frame 1, but journal.log ends where it starts: the committed frame
+    // is missing as a whole, for recovery and for readers alike.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    set_len(layout.journal_log(), 84);
+    assert_corrupt_at(journal.truncate_torn_tail(), 84, "truncate_torn_tail");
+    assert_eq!(file_len(layout.journal_log()), 84, "nothing was cut");
+    assert_eq!(offsets_on_disk(&layout), [0, 84], "no entry was dropped");
+    let reader = reopen(&layout);
+    assert_eq!(reader.frame_count().unwrap(), 2);
+    assert_corrupt_at(reader.tail_frames_from(0), 84, "tail_frames_from(0)");
+    assert_corrupt_at(
+        reader.tail_frames_from(84),
+        84,
+        "tail_frames_from(84), the end",
+    );
+    assert_corrupt_at(reader.frames_from(0, 10), 84, "frames_from");
+    assert_corrupt_at(reader.frames_after(0, 10), 84, "frames_after");
+    assert_eq!(reader.frames_from(0, 1).unwrap(), [first]);
+
+    // The only listed frame missing: an empty journal.log under journal.off = [0].
+    set_len(layout.journal_off(), 8);
+    set_len(layout.journal_log(), 0);
+    assert_corrupt_at(journal.truncate_torn_tail(), 0, "frame 0 is missing");
+    assert_eq!(offsets_on_disk(&layout), [0], "no entry was dropped");
+    assert_corrupt_at(
+        reopen(&layout).tail_frames_from(0),
+        0,
+        "tail_frames_from(0)",
+    );
+}
+
+#[test]
+fn readers_measure_off_before_log() {
+    // A frame listed in a snapshot of journal.off was synced before its entry was written,
+    // so it is whole in any journal.log measured after: readers measure journal.off first,
+    // and never again once journal.log is measured.
+    let order = ["file_len journal.off", "file_len journal.log"];
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    let (reader, calls) = recording_journal(&layout);
+    reader.tail_frames_from(0).unwrap();
+    assert_eq!(calls(), order, "tail_frames_from(0)");
+    reader.tail_frames_from(257).unwrap();
+    assert_eq!(calls(), order, "tail_frames_from at the end");
+    reader.frames_from(0, 10).unwrap();
+    assert_eq!(calls(), order, "frames_from");
+    reader.frames_after(0, 10).unwrap();
+    assert_eq!(calls(), order, "frames_after");
+
+    // A writer that appends a whole frame and its entry between the two measurements: to the
+    // reader that frame is whole and not listed yet.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    let racing_at = |call: &str| -> Hook {
+        let (log, off) = (layout.journal_log(), layout.journal_off());
+        let frame = frame_bytes(&[&[1, 0][..], &encoded(&compacted(2))].concat());
+        let append = move || {
+            append_bytes(&log, &frame);
+            append_bytes(&off, &84_u64.to_le_bytes());
+        };
+        (call.to_owned(), When::Before, Box::new(append))
+    };
+    let racing = || racing_at("file_len journal.log");
+    let raced = Frame {
+        seq: 1,
+        offset: 84,
+        records: vec![compacted(2)],
+    };
+    let (reader, calls) = racing_journal(&layout, Some(racing()));
+    assert_eq!(
+        reader.tail_frames_from(0).unwrap(),
+        [first.clone(), raced.clone()],
+        "tail_frames_from includes the frame, unlisted when it measured journal.off"
+    );
+    assert_eq!(calls(), order);
+
+    set_len(layout.journal_log(), 84);
+    set_len(layout.journal_off(), 8);
+    let (reader, calls) = racing_journal(&layout, Some(racing()));
+    assert_eq!(
+        reader.frames_from(0, 10).unwrap(),
+        slice::from_ref(&first),
+        "frames_from returns the frames listed when it measured journal.off"
+    );
+    assert_eq!(calls(), order);
+    assert_eq!(
+        reader.frames_from(0, 10).unwrap(),
+        [first.clone(), raced.clone()]
+    );
+
+    // A writer that appends just before journal.off is measured: the reader sees the frame
+    // listed and whole. One that measured journal.log first would find it listed and missing.
+    set_len(layout.journal_log(), 84);
+    set_len(layout.journal_off(), 8);
+    let (reader, _) = racing_journal(&layout, Some(racing_at("file_len journal.off")));
+    assert_eq!(reader.tail_frames_from(0).unwrap(), [first, raced]);
+}
+
+#[test]
+fn journal_off_cut_after_a_reader_measured_it_is_journal_corrupt() {
+    // A reader measures journal.off, then reads the entries it holds. If journal.off is
+    // shorter by then (a writer's recovery dropped entries that snapshot held, which are never
+    // genuine ones), the snapshot is not one: JournalCorrupt, never fewer frames read
+    // silently.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    let cut_to_one_entry = || -> Hook {
+        let off = layout.journal_off();
+        let cut = move || set_len(&off, 8);
+        (
+            "file_len journal.off".to_owned(),
+            When::After,
+            Box::new(cut),
+        )
+    };
+    let reads: [(&str, Read, u64); 3] = [
+        (
+            "tail_frames_from(0)",
+            |reader| reader.tail_frames_from(0),
+            0,
+        ),
+        ("frames_from(0, 10)", |reader| reader.frames_from(0, 10), 0),
+        (
+            "frames_after(0, 10)",
+            |reader| reader.frames_after(0, 10),
+            0,
+        ),
+    ];
+    for (what, read, offset) in reads {
+        set_len(layout.journal_off(), 8);
+        append_bytes(layout.journal_off(), &84_u64.to_le_bytes());
+        let (reader, _) = racing_journal(&layout, Some(cut_to_one_entry()));
+        assert_corrupt_at(read(&reader), offset, what);
+    }
+}
+
+#[test]
+fn a_zeroed_entry_is_journal_corrupt_for_readers_too() {
+    // A zero-filled block at the end of journal.off reads as entries pointing at 0, which no
+    // frame but the first starts at. Readers report it (frame 2's entry must point where frame
+    // 1 ends, 257, whether frame 2 is there or not); the writer's recovery drops it.
+    for unlisted in [false, true] {
+        let what = if unlisted {
+            "with frame 2 in journal.log"
+        } else {
+            "with frame 2 missing"
+        };
         let (_root, layout) = new_root();
         let journal = new_journal(&layout);
-        let first = journal.append_frame(&[root_changeset()]).unwrap();
+        journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
         journal
             .append_frame(&[child_changeset(), main_created()])
-            .unwrap();
-        set_len(layout.journal_log(), log_end);
-
+            .unwrap(); // bytes 84..257
+        if unlisted {
+            journal.append_frame(&[compacted(2)]).unwrap(); // bytes 257..276
+            set_len(layout.journal_off(), 16);
+        }
+        append_bytes(layout.journal_off(), &[0; 8]);
         let reader = reopen(&layout);
-        assert_eq!(
-            reader.frames_after(0, 10).unwrap(),
-            Vec::<Frame>::new(),
-            "the cut frame is skipped"
-        );
-        assert_eq!(reader.tail_frames_from(0).unwrap(), [first]);
-
-        assert_eq!(
-            journal.truncate_torn_tail().unwrap(),
-            cut,
-            "log ends at {log_end}"
-        );
-        assert_eq!(file_len(layout.journal_log()), 84);
+        assert_corrupt_at(reader.tail_frames_from(0), 0, what);
+        assert_corrupt_at(reader.tail_frames_from(84), 0, what);
+        assert_corrupt_at(reader.frames_from(0, 10), 0, what);
+        assert_corrupt_at(reader.frames_after(0, 10), 0, what);
+        assert_eq!(journal.truncate_torn_tail().unwrap(), None, "{what}");
+        let listed: &[u64] = if unlisted { &[0, 84, 257] } else { &[0, 84] };
         assert_eq!(
             offsets_on_disk(&layout),
-            [0],
-            "the dangling entry is dropped"
+            listed,
+            "{what}: dropped, then listed"
         );
-        let again = journal.append_frame(&[compacted(2)]).unwrap();
-        assert_eq!((again.seq, again.offset), (1, 84));
+        assert_eq!(
+            reader.frames_from(0, 10).unwrap().len(),
+            listed.len(),
+            "{what}"
+        );
+    }
+
+    // Read from where frame 0 ends, 19: every entry is below it, so no listed frame starts
+    // at or after it, and the read must start where the last listed frame ends. That frame
+    // must also start where the one listed before it ends, which a zeroed entry does not.
+    for entries in [&[0, 0][..], &[0, 19, 0, 0], &[0, 0, 0, 0]] {
+        let what = format!("journal.off {entries:?}, read from 19");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[compacted(1)]).unwrap(); // bytes 0..19
+        journal.append_frame(&[compacted(2)]).unwrap(); // bytes 19..38
+        let off: Vec<u8> = entries.iter().flat_map(|e: &u64| e.to_le_bytes()).collect();
+        fs::write(layout.journal_off(), off).unwrap();
+        assert_corrupt_at(reopen(&layout).tail_frames_from(19), 0, &what);
+    }
+}
+
+#[test]
+fn trailing_zeroed_entries_are_dropped_like_a_partial_entry() {
+    // A zero-filled block at the end of journal.off holds entries pointing at 0. Past frame 0
+    // no entry can be genuine, so recovery drops them as it drops a partial entry, and the
+    // frame left last is then checked as the last listed frame is.
+    let tails: [(&str, &[u8]); 3] = [
+        ("a zeroed entry", &[0; 8]),
+        ("two zeroed entries", &[0; 16]),
+        ("two zeroed entries and part of a third", &[0; 19]),
+    ];
+    for (what, tail) in tails {
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+        journal
+            .append_frame(&[child_changeset(), main_created()])
+            .unwrap(); // bytes 84..257
+        append_bytes(layout.journal_off(), tail);
+        assert_eq!(journal.truncate_torn_tail().unwrap(), None, "{what}");
+        assert_eq!(offsets_on_disk(&layout), [0, 84], "{what}: dropped");
+        assert_eq!(
+            file_len(layout.journal_log()),
+            257,
+            "{what}: journal.log kept"
+        );
+        assert_eq!(journal.truncate_torn_tail().unwrap(), None, "{what}: again");
+        assert_eq!(
+            reopen(&layout).tail_frames_from(0).unwrap().len(),
+            2,
+            "{what}"
+        );
+    }
+
+    // Entries [0, 0, 0] over frame 0 alone: entry 0 is frame 0's, the others are dropped.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    append_bytes(layout.journal_off(), &[0; 16]);
+    assert_eq!(journal.truncate_torn_tail().unwrap(), None);
+    assert_eq!(offsets_on_disk(&layout), [0]);
+
+    // The frame left last fails its CRC: damage, so nothing is dropped.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    flip_byte(layout.journal_log(), 200); // a payload byte of frame 1
+    append_bytes(layout.journal_off(), &[0; 8]);
+    assert_corrupt_at(
+        journal.truncate_torn_tail(),
+        84,
+        "frame 1 left last fails its CRC",
+    );
+    assert_eq!(offsets_on_disk(&layout), [0, 84, 0], "nothing was dropped");
+
+    // Zeros in journal.log stay a torn tail only up to its end: followed by data they are
+    // still JournalCorrupt, and nothing is cut.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    append_bytes(
+        layout.journal_log(),
+        &[[0; 16].as_slice(), b"data"].concat(),
+    );
+    assert_corrupt_at(journal.truncate_torn_tail(), 84, "zeros, then data");
+    assert_eq!(file_len(layout.journal_log()), 104, "nothing was cut");
+}
+
+#[test]
+fn recovery_checks_every_listed_frame_before_it_writes() {
+    // Recovery reads only the last listed frames to find the tail, but before it cuts
+    // journal.log or lists a frame it walks journal.off whole: every listed frame must start
+    // where the one before it ends (frame 0 at 0) and read whole. Garbage entries could
+    // otherwise make it cut a committed frame, or list a frame under a wrong seq.
+
+    // Crafted entries [0, 84, 116] over one 148-byte frame, whose parents hold a header at 84
+    // announcing a frame that ends at 116, and at 116 a whole 19-byte frame, then a header cut
+    // short at 135: the tail check alone would cut frame 0 there.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let mut fake_header = [0_u8; 32];
+    fake_header[0] = 24;
+    let mut embedded = [0_u8; 32];
+    embedded[..19].copy_from_slice(&frame_bytes(
+        &[&[1, 0][..], &encoded(&compacted(5))].concat(),
+    ));
+    embedded[19..23].copy_from_slice(&[0xff, 0xff, 0xff, 0x7f]);
+    journal
+        .append_frame(&[Record::Changeset {
+            id: id(0x11),
+            generation: 1,
+            delta_hash: [0xdd; 32],
+            parents: vec![
+                ChangesetId(ObjectId(fake_header)),
+                ChangesetId(ObjectId(embedded)),
+            ],
+        }])
+        .unwrap(); // bytes 0..148, its parents at 84..148
+    append_bytes(layout.journal_off(), &84_u64.to_le_bytes());
+    append_bytes(layout.journal_off(), &116_u64.to_le_bytes());
+    assert_corrupt_at(
+        journal.truncate_torn_tail(),
+        84,
+        "frame 0 ends at 148, not 84",
+    );
+    assert_eq!(file_len(layout.journal_log()), 148, "nothing was cut");
+    assert_eq!(offsets_on_disk(&layout), [0, 84, 116], "nothing was listed");
+
+    // Stale entries [0, 19, 0, 19]: frames 0 and 1 listed twice. With a torn tail to cut, or a
+    // whole unlisted frame to list, entry 2 is found not to start where frame 1 ends (38).
+    let unlisted = frame_bytes(&[&[1, 0][..], &encoded(&compacted(3))].concat());
+    for (what, tail) in [
+        ("a torn tail", b"garbage".to_vec()),
+        ("a whole frame", unlisted),
+    ] {
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[compacted(1)]).unwrap(); // bytes 0..19
+        journal.append_frame(&[compacted(2)]).unwrap(); // bytes 19..38
+        append_bytes(layout.journal_off(), &0_u64.to_le_bytes());
+        append_bytes(layout.journal_off(), &19_u64.to_le_bytes());
+        append_bytes(layout.journal_log(), &tail);
+        assert_corrupt_at(journal.truncate_torn_tail(), 0, what);
+        assert_eq!(
+            file_len(layout.journal_log()),
+            38 + u64::try_from(tail.len()).unwrap(),
+            "{what}: nothing was cut"
+        );
+        assert_eq!(
+            offsets_on_disk(&layout),
+            [0, 19, 0, 19],
+            "{what}: nothing was listed"
+        );
     }
 }
 
@@ -834,9 +1285,10 @@ fn an_offset_entry_off_a_frame_boundary_is_journal_corrupt() {
 #[test]
 fn offset_entries_out_of_order_are_journal_corrupt_not_a_panic() {
     // A third entry that does not start where frame 1 ends (257): one inside frame 0 (50),
-    // a zeroed one pointing back at frame 0 (0), and frame 1's entry again (84). The last
-    // two point at whole frames, so only their place in journal.off gives them away.
-    for bad in [50_u64, 0, 84] {
+    // and frame 1's entry again (84), which points at a whole frame, so only its place in
+    // journal.off gives it away. (A zeroed one is what a zero-filled block leaves, which
+    // recovery drops: `trailing_zeroed_entries_are_dropped_like_a_partial_entry`.)
+    for bad in [50_u64, 84] {
         let what = format!("third entry {bad}");
         let (_root, layout) = new_root();
         let journal = new_journal(&layout);

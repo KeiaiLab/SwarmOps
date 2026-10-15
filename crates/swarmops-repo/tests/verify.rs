@@ -682,8 +682,8 @@ fn verify_reports_a_listed_frame_cut_short() {
     assert_eq!(frames.len(), 2);
 
     // journal.off lists the last frame, so it was whole and durable before that: journal.log
-    // ending inside it (or right at its start) is damage, though readers pass over it as the
-    // torn tail a writer repairs.
+    // ending inside it (or right at its start) is damage, which the journal's readers and its
+    // recovery report too.
     let log = layout.journal_log();
     let end = fs::metadata(&log).unwrap().len();
     for cut in [end - 1, frames[1].offset + 3, frames[1].offset] {
