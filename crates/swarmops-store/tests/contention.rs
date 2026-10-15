@@ -1,5 +1,5 @@
 //! 32 writer processes on one native metadata store: how write transactions queue on
-//! `meta/lock` (docs/perf.md, "M1 store level").
+//! `meta/lock` (docs/perf.md, "M1 store level" and "M1 store fixes (7c)").
 //!
 //! Ignored, since it runs minutes of fsync'd transactions: `just check-slow` runs it, and
 //! `cargo nextest run --release -p swarmops-store --run-ignored all --test contention
@@ -543,7 +543,7 @@ fn print_uncontended_transaction(store: &MetaStore) {
 }
 
 #[test]
-#[ignore = "measurement, ~5 min: 32 processes x 1,000 fsync'd write transactions; prints the table docs/perf.md cites"]
+#[ignore = "measurement, 5-15 min (fsync-bound): 32 processes x 1,000 fsync'd write transactions; prints the table docs/perf.md cites"]
 fn thirty_two_processes_thousand_transactions_each() {
     if let Some((work, number)) = child_env() {
         child(&work, number);

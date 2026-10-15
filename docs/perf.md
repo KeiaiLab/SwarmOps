@@ -155,18 +155,93 @@ A blocking `flock` wakes a waiter the moment the lock is released. That removes 
 
 ### Decisions
 
-- **(a) `--durability fast`: not justified by this data; parallel directory fsyncs in `flush` come first.** The rule: reconsider the flag if 32-way `put_batch` throughput is below 4× the 1-way.
+- **(a) `--durability fast`: not justified by this data; parallel directory fsyncs in `flush` come first.** Applied in Task 7c, which parallelizes the directory fsyncs and adds no flag ("M1 store fixes (7c)" below). The rule: reconsider the flag if 32-way `put_batch` throughput is below 4× the 1-way.
   - The trigger is met only with another writer on the filesystem, which is the normal state of a swarm host: `put_batch` + `flush` on 32 threads against 1 then reaches 2.5× (405 against 161 objects/s; 2.56× and 2.45× in runs 3 and 4), below 4×. While nothing else writes it reaches 14.5× (3,666 against 253 objects/s; 13.8× and 14.6×).
   - The shortfall is not what a fast mode would skip. The per-object fsyncs scale 14.8× (14.9× and 13.2×); `flush`'s serial directory fsyncs take 571 of the 632 ms. A fast mode that skipped the object fsyncs would leave those in place.
   - Issuing the directory fsyncs in parallel keeps full durability, and took 162 of them from 575 ms to 45 ms in the side check. That comes first, and this data does not justify a `--durability fast` flag, which exists only with a measurement here that does.
-- **(b) Parallel `Index::sync()`: recommended.** The rule: only if five parallel fsyncs are at least 2× faster than serial.
+- **(b) Parallel `Index::sync()`: recommended.** Applied in Task 7c (below). The rule: only if five parallel fsyncs are at least 2× faster than serial.
   - Measured: 7.5 ms against 18.8 ms, 2.5× (2.48× and 2.97× in the two runs).
   - It saves about 11 ms at every batched sync (every 32nd transaction, and before each compaction), all of it time under the lock.
-- **(c) A blocking lock instead of polling: recommended.** The rule: if the fairness spread exceeds 2× or the p99 lock wait exceeds 1 s. The p99 lock wait carries the decision: it exceeds 1 s in every run, while the spread exceeds 2× only in back-to-back runs 1 and 2.
+- **(c) A blocking lock instead of polling: recommended.** Applied in Task 7c (below). The rule: if the fairness spread exceeds 2× or the p99 lock wait exceeds 1 s. The p99 lock wait carries the decision: it exceeds 1 s in every run, while the spread exceeds 2× only in back-to-back runs 1 and 2.
   - Back to back: p99 lock wait 8.2 s and 9.4 s, spread 2.18× and 2.01×, and 386 and 427 `Busy`, so both criteria are exceeded. The third back-to-back run (p99 9.3 s, spread 1.74×) and the two `just check-slow` runs (p99 8.5 s and 8.1 s, spreads 1.47× and 1.55×) exceed the p99 criterion alone.
   - 2 ms apart: p99 2.3 s and 1.9 s, with spread 1.19× and 1.09×. The p99 criterion is still exceeded, and `Busy` still occurs.
   - At 2 ms apart the spread understates the problem: over a whole run the lottery evens out, so every child finishes close to the others while single waits run to seconds. The wait tail is the indicator.
   - The side experiment says the change works: with the blocking `File::lock`, `Busy` disappears, and the p99 wait drops from 7–9 s to 0.8–1.1 s back to back and to 0.3–0.8 s 2 ms apart. The 10 s timeout can stay, with a thread that blocks in `File::lock` while the caller waits for it with a timeout; these runs never came near it. A strictly fair order for a writer that loops (a bulk import) needs a FIFO handoff on top of it.
+
+### M1 store fixes (7c)
+
+Task 7c applied the three decisions above, all at full durability:
+
+- (c) `MetaLock` waits in the kernel's flock queue. An acquire tries the lock once without blocking; if another handle holds it, a helper thread blocks in `File::lock` (`flock(LOCK_EX)`) on the acquire's own open file, and the caller waits for it up to the 10 s timeout. A helper that gets the lock after its caller gave up lets it go at once.
+- (b) `Index::sync` makes its five `sync_data`s from five threads at once (`MetaStore::set_parallelism`, 5 unless set).
+- (a), the first step: `FsObjectStore::flush` makes its directory fsyncs at once, on the object store's pool (`FsObjectStore::set_parallelism`, else rayon's global pool). The flag stays out.
+
+At parallelism 1 both kinds of sync run one after another in their old order. `LocalRepo` sets that under `SWARMOPS_TEST_CRASH_AT`, so crash sweeps keep meeting the same call at the same count.
+
+The disk was 1.6–3.7× slower than M0's. Another process on the host was writing about 110 MB/s near the end of the lock-change run (seen at its 13th minute, gone 9 minutes later), and other worktrees' tests and benches ran during some runs (named with each). Beside the load, every run gives a raw `fdatasync` of a 120-byte append (the median of 40) at its start and end: 13–15 ms while that writer ran, 6.6–7.9 ms after it stopped, against M0's 4.1 ms. So absolute times here do not compare with the 7a section; waits counted in transactions, `Busy` and the spread do.
+
+#### 32 writer processes, back to back
+
+`crates/swarmops-store/tests/contention.rs` as above (32 × 1,000, `--release`), run once with the lock change alone and twice with all three changes. The 7a polling runs are the back-to-back runs 1 and 2 above. "In transactions" divides each wait by the run's mean transaction time (wall / 32,000), the time the lock takes to pass once.
+
+| | 7a polling, run 1 | 7a polling, run 2 | 7c, lock change alone | 7c, run 1 | 7c, run 2 |
+|---|---|---|---|---|---|
+| load at start (range) | 8.5 (8.5–11.0) | 17.2 (13.8–27.6) | 33.3 (15.9–36.0) | 32.6 (10.5–33.4) | 10.5 (10.5–16.4) |
+| raw `fdatasync` p50, start / end | not taken | not taken | 14.8 ms (mid-run) | 15.3 / 6.7 ms | 6.6 / 7.9 ms |
+| wall, transactions/s | 264.8 s, 120.9/s | 291.3 s, 109.9/s | 794.9 s, 40.3/s | 590.9 s, 54.2/s | 444.4 s, 72.0/s |
+| transaction p50 / p99 / max | 7.48 ms / 8.21 s / 72.8 s | 7.64 ms / 9.39 s / 61.3 s | 832 ms / 3.97 s / 9.02 s | 693 ms / 2.47 s / 5.26 s | 24.1 ms / 1.74 s / 2.61 s |
+| lock wait p50 / p99 / max | 0.08 ms / 8.19 s / 72.8 s | 0.09 ms / 9.38 s / 61.2 s | 817 ms / 3.91 s / 8.92 s | 678 ms / 2.43 s / 5.22 s | 0.11 ms / 1.71 s / 2.57 s |
+| lock wait in transactions | 0.01 / 990 / 8,800 | 0.01 / 1,030 / 6,720 | 33 / 157 / 359 | 37 / 131 / 283 | 0.01 / 123 / 185 |
+| `Busy` | 386 | 427 | 0 | 0 | 0 |
+| child total time min / max (spread) | 121.6 / 264.8 s (2.18×) | 144.6 / 291.3 s (2.01×) | 747.4 / 794.9 s (1.06×) | 535.8 / 590.9 s (1.10×) | 382.1 / 444.4 s (1.16×) |
+| uncontended transaction p50 / p99 | not printed | not printed | 13.20 / 46.04 ms | 13.15 / 39.05 ms | 15.33 / 41.43 ms |
+| test | fails (`Busy`) | fails (`Busy`) | passes | passes | passes |
+
+Tests of other worktrees ran during some of these runs, on the same disk: Task 6's crash sweeps in 9 of the 39 load samples of run 1, and Task 7b's `fsync_latency` bench in 10 of the 29 samples of run 2. Task 7b's 32-process CLI contention test was running 8 minutes before the lock-change run started and had ended 11 minutes into it; that run did not log other processes, and neither did the 7a runs.
+
+`Busy` is gone, in every run. Whether the writer that has just committed takes the lock straight back depends on the host. At load 32–33 the woken waiters won: the lock rotated, and the median wait was one round of the 31 other writers (33–37 transactions). At load 10–16 (run 2) the committing writer usually asked again and got the lock before a woken waiter ran (median 0.11 ms), as the blocking `flock` did in the 7a side experiment. Either way every child finished within 16 % of the others (spread 1.06–1.16×, from 2.0–2.2× with polling). Counted in transactions, the p99 wait is 6–8× shorter, and the longest 19–48× shorter.
+
+The tail is bounded, not gone. At each release the kernel wakes every waiter and the first to run takes the lock, so a waiter can lose many releases in a row. A uniform random winner among 31 waiters predicts p99 140 and, over 32,000 waits, a longest wait of about 316 transactions; the rotating runs show 131–157 and 283–359. So the longest wait is a few hundred transactions: 2.6 s at run 2's 14 ms per transaction (it would be about 2.5 s at 7a's 8–9 ms), but 5.2–8.9 s at 18–25 ms. That stays inside the 10 s timeout, but on a slow disk not by much. An order fair to the transaction (at most 31) needs a FIFO handoff on top of `flock`.
+
+Throughput follows the disk: an uncontended transaction took 13.2–15.3 ms at the end of these runs (7.4 ms in 7a), and the lock passed every 14–25 ms. The lock's own hand-off (a helper thread woken in the kernel, then a channel to its caller) does not show at that scale. In one process, 32 threads × 16 turns of 2 ms (`tests/lock.rs`) wait at most 0.12–0.13 s with the kernel queue, against 1.22–1.25 s with the polling lock.
+
+#### `Index::sync`
+
+`crates/swarmops-store/benches/fsync_fanout.rs`, once, with two new variants that time `Index::sync` itself: an index of its own gets the 32 records of a checkpoint's frames appended before every iteration (untimed), then syncs at parallelism 1 or 5. It started at load 13.1 (12.4–13.7 during the run), raw `fdatasync` 8.0 ms at its start and 7.1 ms at its end; nothing else was benchmarking.
+
+| variant | 7a, runs 1 / 2 | 7c |
+|---|---|---|
+| serial, 5 × `sync_data` | 18.8 / 22.4 ms | 38.5 ms |
+| parallel, 5 threads | 7.6 / 7.5 ms | 15.5 ms |
+| one file | 3.8 / 4.0 ms | 6.9 ms |
+| `Index::sync`, parallelism 1 | not measured | 24.1 ms |
+| `Index::sync`, parallelism 5 (the default) | not measured | 9.2 ms |
+
+One `sync_data` took 6.9 ms here against 3.8–4.0 ms in 7a, so the disk ran 1.8× slower; in those units the raw variants repeat 7a (serial 5.6 single syncs, 7a 4.9–5.6; parallel 2.2, 7a 1.9–2.0), 2.5× apart (2.48×; 7a 2.48× and 2.97×). `Index::sync` itself, after a checkpoint's 32 records, takes 24.1 ms one file after another and 9.2 ms at the default parallelism: 2.6× faster, and 14.9 ms less time under the lock at every batched sync (0.47 ms a transaction on average). It costs less than the raw serial variant because 32 records add about 1 KiB to a 32-byte column, not 64 KiB.
+
+#### `flush`
+
+`crates/swarmops-store/benches/put_batch.rs`, once, unchanged: `flush` now makes its directory fsyncs on the store's pool, so the 8- and 32-thread variants fsync 8 and 32 at a time and the 1-thread variants as before. It started at load 13.1 (13.3–24.9 during the run), raw `fdatasync` 7.2 ms at its start and 7.9 ms at its end; nothing else was benchmarking.
+
+| variant | 7a, runs 3 / 4 | 7c |
+|---|---|---|
+| `put_batch` + `flush`, 1 thread | 1,011 ms / 1,017 ms | 1,857 ms |
+| 8 threads | 235 ms / 234 ms | 481 ms |
+| 32 threads | 73.1 ms / 69.8 ms | 72.3 ms |
+| the same with the busy writer, 1 thread | 1,615 ms / 1,591 ms | 1,572 ms |
+| 8 threads | 810 ms / 790 ms | 304 ms |
+| 32 threads | 632 ms / 648 ms | 98.9 ms |
+| `put_batch` alone, 1 thread | 999 ms / 990 ms | 984 ms |
+| 8 threads | 230 ms / 228 ms | 228 ms |
+| 32 threads | 67.0 ms / 74.9 ms | 66.3 ms |
+| `flush` alone, on the 32-thread store (7a: one directory after another) | 4.2 ms / 4.1 ms | 5.3 ms |
+| the same with the busy writer | 571 ms / 580 ms | 65.2 ms |
+
+Each row is one median, and the host changed between rows: the two 8-thread rows disagree the wrong way round (481 ms, and 304 ms with the busy writer). The object fsyncs cost what they did in 7a: `put_batch` alone takes 984 / 228 / 66.3 ms on 1 / 8 / 32 threads (7a: 999 / 230 / 67.0 ms). But every directory fsync was a journal commit of its own today even without the bench's busy writer, so one thread's serial `flush` took about 870 ms (1,857 − 984 ms).
+
+From 32 threads at once, `flush` takes 6 ms of the 72.3 ms that `put_batch` + `flush` take, and alone, with the busy writer, 65 ms against 571–580 ms one after another in 7a: 8.8–8.9× faster (the 7a side check had 575 against 45 ms).
+
+Against decision (a)'s rule, `put_batch` + `flush` on 32 threads now reaches 25.7× the 1-thread throughput (3,542 against 138 objects/s; 7a 13.8× and 14.6×), and 15.9× with the busy writer (2,588 against 163 objects/s; 7a 2.56× and 2.45×). That is above 4× in both, so nothing here calls for a `--durability fast` flag. A 32-thread commit's 256 new files take 72 ms, inside the "≤ 5 ms + 0.3 ms per changed file" target (82 ms), and 99 ms with the busy writer on this slower disk.
 
 ### Appendix: the side-experiment programs
 

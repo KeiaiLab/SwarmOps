@@ -1,15 +1,20 @@
-//! M1 experiment: would `Index::sync` gain from syncing its five files in parallel?
+//! M1 experiment: does `Index::sync` gain from syncing its five files in parallel?
 //!
 //! `Index::sync` (every 32 transactions, and before a compaction) makes the five index files
-//! durable with one `sync_data` each, one after another. Here five files in a fresh temporary
-//! directory under `SWARMOPS_BENCH_DIR` (default `~/.local/state/swarmops-bench`, on the
-//! native filesystem) each get 64 KiB of new data appended before every iteration (untimed),
-//! as the index's appends grow its files, and the iteration makes them durable:
+//! durable with one `sync_data` each: one after another at parallelism 1, from five threads at
+//! once at the store's default ([`Index::set_parallelism`]). Here five files in a fresh
+//! temporary directory under `SWARMOPS_BENCH_DIR` (default `~/.local/state/swarmops-bench`, on
+//! the native filesystem) each get 64 KiB of new data appended before every iteration
+//! (untimed), as the index's appends grow its files, and the iteration makes them durable:
 //!
-//! - `serial`: `sync_data` of each file in turn, each opened for it, as `Index::sync` does;
+//! - `serial`: `sync_data` of each file in turn, each opened for it, as `Index::sync` does at
+//!   parallelism 1;
 //! - `parallel`: the same from five threads at once (`std::thread::scope`; starting the
 //!   threads is timed too);
-//! - `one_file`: the `sync_data` of one such file alone, for scale.
+//! - `one_file`: the `sync_data` of one such file alone, for scale;
+//! - `index_sync/<threads>`: `Index::sync` itself at parallelism 1 and 5, on an index of its
+//!   own that gets the 32 records of a checkpoint's frames appended before every iteration
+//!   (untimed).
 //!
 //! Each variant runs in a directory of its own; docs/perf.md cites criterion's median.
 
@@ -18,16 +23,23 @@ mod common;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use camino::Utf8PathBuf;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use swarmops_core::{ChangesetId, ObjectKind, hash_object};
+use swarmops_store::{ChangesetMeta, Index, Layout, RealFs};
 use tempfile::TempDir;
 
 use crate::common::{base_dir, mix};
 
 /// New bytes appended to every file before each iteration, in 8-byte words (64 KiB).
 const WORDS: u64 = 8 * 1024;
+
+/// The records appended to the index before each `index_sync` iteration: one checkpoint's.
+const RECORDS: u64 = 32;
 
 /// Files in a fresh directory, each kept open for appending.
 struct Files {
@@ -137,7 +149,44 @@ fn fsync_fanout(c: &mut Criterion) {
         b.iter_custom(|iters| run(&mut files, iters, |paths| sync_data(&paths[0])));
     });
     drop(files);
+
+    for threads in [1, 5] {
+        let dir = tempfile::tempdir_in(&base).expect("create variant dir");
+        let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("UTF-8 dir");
+        let mut index = Index::create(&Layout::new(root), Arc::new(RealFs)).expect("create index");
+        index.set_parallelism(threads);
+        let mut next = 0;
+        group.bench_function(BenchmarkId::new("index_sync", threads), |b| {
+            b.iter_custom(|iters| {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    for n in next..next + RECORDS {
+                        index.append(&changeset(n)).expect("append");
+                    }
+                    next += RECORDS;
+                    let started = Instant::now();
+                    index.sync().expect("sync");
+                    total += started.elapsed();
+                }
+                total
+            });
+        });
+        drop(index);
+        drop(dir);
+    }
     group.finish();
+}
+
+/// Changeset `n` of a chain: the child of changeset `n - 1`.
+fn changeset(n: u64) -> ChangesetMeta {
+    let id = |n: u64| ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes()));
+    ChangesetMeta {
+        id: id(n),
+        seq: 0,
+        generation: n + 1,
+        delta_hash: hash_object(ObjectKind::Blob, &n.to_le_bytes()).0,
+        parents: n.checked_sub(1).map(id).into_iter().collect(),
+    }
 }
 
 criterion_group!(benches, fsync_fanout);

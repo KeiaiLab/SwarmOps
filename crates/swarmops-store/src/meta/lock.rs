@@ -10,7 +10,10 @@
 //! timeout, for the helper to hand the locked file back. The kernel wakes the blocked waiters
 //! the moment the holder unlocks, so the lock passes on at once instead of at a waiter's next
 //! poll. It is not strictly FIFO: the woken waiters race for the lock, and a writer that asks
-//! again right after it unlocked races with them.
+//! again right after it unlocked races with them. With 32 writers that loop, the median wait
+//! is one rotation (31 transactions), or next to nothing when the writer that has just
+//! committed asks again first; the longest is a few hundred transactions (docs/perf.md, "M1
+//! store fixes (7c)").
 //!
 //! A caller that times out returns [`StoreError::Busy`] and drops its end of the channel,
 //! which abandons its helper: the helper stays in the kernel's queue (a blocked `flock` cannot
