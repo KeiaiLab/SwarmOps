@@ -76,4 +76,17 @@ pub enum StoreError {
         /// The record that disagrees.
         seq: u64,
     },
+    /// A write transaction committed: its frame is durable at `frame_seq`. But a step after its
+    /// commit point failed: materializing the frame (index records, ref files), a compaction,
+    /// the index sync or the checkpoint. The next [`crate::MetaStore::write`] repairs what is
+    /// missing. Retrying the same transaction is safe: an insert finds the changeset
+    /// ([`crate::InsertOutcome::AlreadyPresent`]), and a ref move finds the ref at the caller's
+    /// own target ([`crate::CasResult::Mismatch`], with that target as `actual`).
+    #[error("the transaction committed at frame {frame_seq}, but a step after it failed: {source}")]
+    PostCommit {
+        /// The seq of the transaction's frame.
+        frame_seq: u64,
+        /// The step's error.
+        source: Box<StoreError>,
+    },
 }

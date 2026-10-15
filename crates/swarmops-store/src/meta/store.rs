@@ -15,11 +15,19 @@
 //! [`MetaStore::flush`], it also syncs the index and moves the checkpoint to the end of the
 //! journal: the batched durability of the projections.
 //!
-//! An error from [`MetaWrite::commit`] may come after the frame was appended, so the
-//! transaction may or may not have committed: the next [`MetaStore::write`] settles it (it
-//! lists or cuts what the journal holds, then replays). A caller that retries must look again
-//! first: an insert is idempotent ([`InsertOutcome::AlreadyPresent`]), and a ref move compares
-//! against the ref as it is then.
+//! An error from [`MetaWrite::commit`] says whether the transaction committed. Once its frame
+//! is appended, every error is [`StoreError::PostCommit`]: the frame is durable, a step after
+//! it failed, and the next [`MetaStore::write`] repairs that. A failed index sync returns
+//! before the checkpoint moves, so the checkpoint never passes records that are not durable.
+//! An error from the append itself may come after the frame's bytes reached the journal, so
+//! that transaction may or may not have committed: the next [`MetaStore::write`] settles it
+//! (it lists or cuts what the journal holds, then replays). A caller that retries after either
+//! must look again first: an insert is idempotent ([`InsertOutcome::AlreadyPresent`]), and a
+//! ref move compares against the ref as it is then.
+//!
+//! A compaction appends a `Compacted` record, in a frame of its own, as an advisory marker: a
+//! compaction that [`Index::repair_tail`] finishes after a crash appends none, so nothing may
+//! expect one per rebuild of the sorted views.
 //!
 //! # A snapshot
 //!
@@ -38,10 +46,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use camino::Utf8Path;
 use swarmops_core::ChangesetId;
 
-use super::frame::{Frame, Record};
+use super::frame::{Frame, MAX_RECORDS, Record};
 use super::index::{ChangesetMeta, Index};
 use super::journal::Journal;
 use super::lock::MetaLock;
+use super::parents::MAX_PARENTS;
 use super::refs::{self, RefState};
 use super::replay::{self, Overlay};
 use crate::error::StoreError;
@@ -59,11 +68,11 @@ const CHECKPOINT_EVERY: u64 = 32;
 /// How many frames [`MetaRead::reflog`] reads with one call as it walks back.
 const REFLOG_BATCH: u64 = 256;
 
-/// The most parents a changeset may have: their count is one byte of its journal record.
-const MAX_PARENTS: usize = 255;
-
 /// The most bytes a ref move's actor may take: its length is one byte of the record.
 const MAX_ACTOR_LEN: usize = 255;
+
+/// The directory of the store root in which [`MetaStore::create`] stages a new `meta/`.
+const STAGING: &str = "meta.tmp";
 
 /// One store's metadata (`meta/`): a handle that many threads may share, and many processes
 /// may hold at once.
@@ -78,7 +87,9 @@ pub struct MetaStore {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CommitInfo {
     /// The seq of the frame that holds the transaction's records. A transaction with nothing
-    /// queued appends no frame; its `frame_seq` is the seq the next frame will take.
+    /// queued appends no frame of its own: `frame_seq` is then the seq the next frame takes,
+    /// which names the `Compacted` frame its housekeeping appends if it compacts (for a flush,
+    /// or a tail that replay took past the threshold).
     pub frame_seq: u64,
     /// How many changesets it inserted.
     pub inserted: u64,
@@ -154,22 +165,39 @@ impl MetaStore {
     }
 
     /// Creates `meta/` under `dir`, every change going through `fs`: an empty journal
-    /// (`journal.log`, `journal.off`) with `journal.ckpt` at 0, `refs/`, the lock file, and
-    /// an empty index (`idx/`, `parents.log`, `sorted/`), their directory entries made
-    /// durable. [`StoreError::Format`] if `meta/` exists already.
+    /// (`journal.log`, `journal.off`) with `journal.ckpt` at 0, an empty index (`idx/`,
+    /// `parents.log`, `sorted/`), `refs/` and the lock file, all durable.
+    /// [`StoreError::Format`] if `meta/` exists already.
+    ///
+    /// Crash-atomic: everything is staged in `meta.tmp/meta/`, the `meta/` of a store root of
+    /// its own (so the journal and the index lay out their files there as they would in
+    /// `meta/`), made durable, and renamed to `meta/` last, which syncs the store root. A crash
+    /// before the rename leaves no `meta/`: [`MetaStore::open`] refuses the store with
+    /// [`StoreError::Format`], and the next create removes what is left of `meta.tmp/` and
+    /// starts over. Two creates of one store at once are not supported.
     pub fn create_with_fs(dir: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
-        let layout = Layout::new(dir);
-        let meta = layout.meta_dir();
+        let meta = Layout::new(dir).meta_dir();
         if std::fs::exists(&meta)? {
             return Err(StoreError::Format(format!("{meta} exists already")));
         }
-        let journal = Journal::create(&layout, Arc::clone(&fs))?;
-        journal.set_ckpt(0)?;
-        fs.create_dir_all(layout.meta_path("refs").as_std_path())?;
-        fs.append(layout.meta_lock().as_std_path(), &[])?;
-        fs.fsync_dir(meta.as_std_path())?;
-        Index::open(&layout, Arc::clone(&fs))?;
-        Ok(Self::from_parts(layout, fs, journal))
+        let staging = dir.join(STAGING);
+        if std::fs::exists(&staging)? {
+            // What a create that crashed left behind: no part of a store yet.
+            std::fs::remove_dir_all(&staging)?;
+        }
+        let staged = Layout::new(staging.as_path());
+        Journal::create(&staged, Arc::clone(&fs))?.set_ckpt(0)?;
+        Index::open(&staged, Arc::clone(&fs))?;
+        let staged_meta = staged.meta_dir();
+        fs.create_dir_all(staged.meta_path("refs").as_std_path())?;
+        fs.append(staged.meta_lock().as_std_path(), &[])?;
+        // The journal and the index made their own entries durable; this makes the last two
+        // durable before the rename publishes them.
+        fs.fsync_dir(staged_meta.as_std_path())?;
+        fs.rename_durable(staged_meta.as_std_path(), meta.as_std_path())?;
+        // Best effort: the staging directory is empty now, and harmless if it stays.
+        let _ = std::fs::remove_dir(&staging);
+        Self::open_with_fs(dir, fs)
     }
 
     /// Opens the metadata store of the store rooted at `dir` on the real filesystem: see
@@ -431,8 +459,9 @@ impl MetaWrite<'_> {
     ///
     /// Every parent must be in the store or queued before it: otherwise
     /// [`StoreError::MissingParent`]. A parent listed twice is
-    /// [`StoreError::DuplicateParent`], and more than 255 parents an `InvalidInput` error.
-    /// Nothing is queued then.
+    /// [`StoreError::DuplicateParent`]; more than 255 parents, or a transaction that holds
+    /// 65,535 records already (all one frame holds), an `InvalidInput` error. Nothing is queued
+    /// then.
     pub fn insert_changeset(&mut self, meta: ChangesetMeta) -> Result<InsertOutcome, StoreError> {
         if meta.parents.len() > MAX_PARENTS {
             return Err(invalid_input(format!(
@@ -455,6 +484,7 @@ impl MetaWrite<'_> {
                 .ok_or(StoreError::MissingParent(parent))?;
             generation = generation.max(parent_generation.saturating_add(1));
         }
+        self.check_room()?;
         let seq = self.index.len() + to_u64(self.queued.len());
         self.queued.insert(meta.id, generation);
         self.records.push(Record::Changeset {
@@ -472,7 +502,8 @@ impl MetaWrite<'_> {
     ///
     /// A name that is not `main` or `release/<x>` is [`StoreError::RefName`]; a `new` that is
     /// neither in the store nor queued, [`StoreError::UnknownRefTarget`]; an actor longer than
-    /// 255 bytes, an `InvalidInput` error.
+    /// 255 bytes, or a move that would not fit in the transaction's frame (65,535 records), an
+    /// `InvalidInput` error.
     pub fn cas_ref(
         &mut self,
         name: &str,
@@ -501,6 +532,7 @@ impl MetaWrite<'_> {
         if current != expected {
             return Ok(CasResult::Mismatch { actual: current });
         }
+        self.check_room()?;
         self.records.push(Record::RefMove {
             name: name.to_owned(),
             old: current,
@@ -513,7 +545,13 @@ impl MetaWrite<'_> {
     }
 
     /// Commits what is queued as one journal frame, materializes it, and unlocks: see the
-    /// module documentation. A transaction with nothing queued appends nothing.
+    /// module documentation. A transaction with nothing queued appends no frame of its own,
+    /// though its housekeeping may still compact (appending a `Compacted` frame) or
+    /// checkpoint.
+    ///
+    /// Once the frame is appended, every error is [`StoreError::PostCommit`]: the transaction
+    /// committed. An error from the append itself leaves that open; with nothing queued,
+    /// errors are the housekeeping's own.
     pub fn commit(self) -> Result<CommitInfo, StoreError> {
         self.finish(false)
     }
@@ -522,35 +560,62 @@ impl MetaWrite<'_> {
     /// checkpoint.
     fn finish(mut self, flush: bool) -> Result<CommitInfo, StoreError> {
         let store = self.store;
-        let journal = &store.journal;
-        let mut info = CommitInfo {
-            frame_seq: 0,
-            inserted: 0,
-            moved_refs: 0,
+        if self.records.is_empty() {
+            let info = CommitInfo {
+                frame_seq: store.journal.frame_count()?,
+                inserted: 0,
+                moved_refs: 0,
+                checkpointed: false,
+            };
+            return self.settle(info, flush);
+        }
+        let frame = store.journal.append_frame(&self.records)?; // the commit point
+        self.uncheckpointed += 1;
+        let info = CommitInfo {
+            frame_seq: frame.seq,
+            inserted: to_u64(self.queued.len()),
+            moved_refs: to_u64(self.records.len() - self.queued.len()),
             checkpointed: false,
         };
-        if self.records.is_empty() {
-            info.frame_seq = journal.frame_count()?;
-        } else {
-            let frame = journal.append_frame(&self.records)?; // the commit point
-            info.frame_seq = frame.seq;
-            info.inserted = to_u64(self.queued.len());
-            info.moved_refs = to_u64(self.records.len() - self.queued.len());
-            self.uncheckpointed += 1;
-            replay::materialize(&mut self.index, &store.layout, &*store.fs, &frame)?;
-        }
+        replay::materialize(&mut self.index, &store.layout, &*store.fs, &frame)
+            .and_then(|()| self.settle(info, flush))
+            .map_err(|source| StoreError::PostCommit {
+                frame_seq: frame.seq,
+                source: Box::new(source),
+            })
+    }
+
+    /// The batched durability of the projections, once the frames are materialized: with the
+    /// tail past [`Index::COMPACT_THRESHOLD`], a compaction (which syncs the index before it
+    /// writes the sorted views) and its `Compacted` frame; else, at 32 frames past the
+    /// checkpoint or for a flush with any, an index sync. Then the checkpoint moves to the end
+    /// of the journal; a failed sync or compaction returns first, so it never moves past what
+    /// is not durable.
+    fn settle(&mut self, mut info: CommitInfo, flush: bool) -> Result<CommitInfo, StoreError> {
+        let journal = &self.store.journal;
         if self.index.tail_len() > Index::COMPACT_THRESHOLD {
-            // The compaction syncs the index files before it writes the sorted views.
             let sorted_count = self.index.compact()?;
             journal.append_frame(&[Record::Compacted { sorted_count }])?;
-            journal.set_ckpt(journal.len())?;
-            info.checkpointed = true;
         } else if self.uncheckpointed >= CHECKPOINT_EVERY || (flush && self.uncheckpointed > 0) {
             self.index.sync()?;
-            journal.set_ckpt(journal.len())?;
-            info.checkpointed = true;
+        } else {
+            return Ok(info);
         }
+        journal.set_ckpt(journal.len())?;
+        info.checkpointed = true;
         Ok(info)
+    }
+
+    /// Refuses, with an `InvalidInput` error, a record past what the transaction's one frame
+    /// holds.
+    fn check_room(&self) -> Result<(), StoreError> {
+        if self.records.len() < MAX_RECORDS {
+            Ok(())
+        } else {
+            Err(invalid_input(format!(
+                "a transaction holds at most {MAX_RECORDS} records, what one frame holds"
+            )))
+        }
     }
 
     /// The generation of changeset `id` if this transaction queued it or the store holds

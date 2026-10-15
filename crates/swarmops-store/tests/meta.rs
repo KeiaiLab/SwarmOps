@@ -9,6 +9,7 @@
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,9 +20,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
 use swarmops_store::{
-    CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
-    JournalEntry, Layout, LinkOutcome, MetaLock, MetaStore, RealFs, Record, RefMoveEntry, RefState,
-    StoreError,
+    CRASH_AT_ENV, CasResult, ChangesetMeta, CommitInfo, CrashAtFs, Frame, FsOps, Index,
+    InsertOutcome, Journal, JournalEntry, Layout, LinkOutcome, MetaLock, MetaStore, RealFs, Record,
+    RefMoveEntry, RefState, StoreError,
 };
 use tempfile::TempDir;
 
@@ -41,6 +42,37 @@ const PER_CHILD: u64 = 50;
 const REPORT: &str = "meta-child: ";
 
 const ACTOR: &str = "test/1";
+
+const SIGABRT: i32 = 6;
+
+/// Set only in the children of `crash_at_any_create_call_leaves_a_store_open_or_create_takes`:
+/// the store root.
+const CREATE_CRASH_ROOT: &str = "SWARMOPS_TEST_META_CREATE_CRASH_ROOT";
+
+/// The FsOps calls of `MetaStore::create`, in order: the journal, `journal.ckpt` and the index
+/// staged in `meta.tmp/meta/`, then `refs/` and the lock file, the staged directory synced,
+/// and the rename to `meta/` (which syncs the store root).
+const CREATE_CALLS: [&str; 19] = [
+    "create_dir_all meta",
+    "append_durable journal.log",
+    "append_durable journal.off",
+    "fsync_dir meta",
+    "fsync_dir meta.tmp",
+    "atomic_replace journal.ckpt",
+    "create_dir_all idx",
+    "create_dir_all sorted",
+    "append ids.col",
+    "append gen.col",
+    "append dh.col",
+    "append par.col",
+    "append parents.log",
+    "fsync_dir idx",
+    "fsync_dir meta",
+    "create_dir_all refs",
+    "append lock",
+    "fsync_dir meta",
+    "rename_durable meta",
+];
 
 fn new_root() -> (TempDir, Utf8PathBuf) {
     let dir = tempfile::tempdir().expect("create store root");
@@ -1048,11 +1080,154 @@ fn a_ref_move_that_names_no_ref_is_journal_corrupt() {
 }
 
 #[test]
-fn create_lays_out_meta_and_open_requires_it() {
+fn errors_after_the_commit_point_say_the_transaction_committed() {
+    for failing in ["sync_data ids.col", "atomic_replace journal.ckpt"] {
+        let (_dir, root) = new_root();
+        let (fs, _calls) = RecordingFs::new();
+        let fail = fs.failing();
+        let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+        for n in 0..31 {
+            insert(&store, &[cs(n, &[])]); // frames 0..=30
+        }
+        // The 32nd frame past the checkpoint: its batched index sync, or the checkpoint
+        // after it, fails.
+        fail.set(failing);
+        let mut write = store.write().unwrap();
+        write.insert_changeset(cs(31, &[])).unwrap();
+        write.cas_ref("main", None, Some(id(31)), ACTOR).unwrap();
+        match write.commit() {
+            Err(StoreError::PostCommit {
+                frame_seq: 31,
+                source,
+            }) => assert!(
+                matches!(*source, StoreError::Io(_)),
+                "{failing}: {source:?}"
+            ),
+            other => panic!("{failing}: expected PostCommit at frame 31, got {other:?}"),
+        }
+        let read = store.read().unwrap();
+        let committed = read.changeset(id(31)).unwrap();
+        assert_eq!(committed, Some(stored(31, &[], 31, 1)), "{failing}");
+        assert_eq!(
+            read.get_ref("main").unwrap(),
+            Some(ref_state(31, 1)),
+            "{failing}"
+        );
+        drop(read);
+        assert_eq!(ckpt(&root), 0, "{failing}: the checkpoint did not move");
+
+        // Retrying the transaction finds it done. With a healthy fs the next write syncs and
+        // checkpoints (32 frames lie past the checkpoint), and a flush has nothing left.
+        fail.clear();
+        let mut write = store.write().unwrap();
+        let again = write.insert_changeset(cs(31, &[])).unwrap();
+        assert_eq!(again, InsertOutcome::AlreadyPresent);
+        let moved = write.cas_ref("main", None, Some(id(31)), ACTOR).unwrap();
+        assert_eq!(
+            moved,
+            CasResult::Mismatch {
+                actual: Some(id(31))
+            }
+        );
+        assert!(write.commit().unwrap().checkpointed, "{failing}");
+        store.flush().unwrap();
+        assert_eq!(ckpt(&root), log_len(&root), "{failing}");
+    }
+}
+
+#[test]
+fn an_empty_write_reports_its_housekeeping_errors_plainly() {
     let (_dir, root) = new_root();
-    assert_format(MetaStore::open(&root), "open before create");
-    let store = MetaStore::create(&root).unwrap();
-    let meta = Layout::new(&root).meta_dir();
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    // The compaction cannot write the sorted views.
+    fail.set("append ids.key.tmp");
+    let mut write = store.write().unwrap();
+    for n in 0..1100 {
+        write.insert_changeset(cs(n, &[])).unwrap();
+    }
+    match write.commit() {
+        Err(StoreError::PostCommit { frame_seq: 0, .. }) => {}
+        other => panic!("the transaction commits before its compaction fails: {other:?}"),
+    }
+    // A flush, or a commit with nothing queued, commits nothing of its own: the same failure
+    // of the compaction it retries is a plain error.
+    match store.flush() {
+        Err(StoreError::Io(_)) => {}
+        other => panic!("flush: expected a plain Io error, got {other:?}"),
+    }
+    match store.write().unwrap().commit() {
+        Err(StoreError::Io(_)) => {}
+        other => panic!("an empty commit: expected a plain Io error, got {other:?}"),
+    }
+
+    fail.clear();
+    store.flush().unwrap();
+    let index = index(&root);
+    assert_eq!((index.sorted_count(), index.tail_len()), (1100, 0));
+    assert_eq!(compacted_frames(&store), [1]);
+    assert_eq!(ckpt(&root), log_len(&root));
+}
+
+#[track_caller]
+fn assert_invalid_input<T: std::fmt::Debug>(got: Result<T, StoreError>) {
+    match got {
+        Err(StoreError::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_transaction_refuses_more_records_than_a_frame_holds() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[]), cs(2, &[])]);
+    // 65,535 moves of main, back and forth between changesets 1 and 2, fill one frame.
+    let mut write = store.write().unwrap();
+    let mut main = None;
+    for i in 0..65_535 {
+        let target = Some(id(1 + i % 2));
+        let moved = write.cas_ref("main", main, target, ACTOR).unwrap();
+        assert_eq!(moved, CasResult::Applied { old: main });
+        main = target;
+    }
+    // The next record is refused, and nothing is queued; what queues nothing still answers.
+    assert_invalid_input(write.cas_ref("main", main, Some(id(2)), ACTOR));
+    assert_invalid_input(write.insert_changeset(cs(3, &[])));
+    let present = write.insert_changeset(cs(1, &[])).unwrap();
+    assert_eq!(present, InsertOutcome::AlreadyPresent);
+    let stale = write.cas_ref("main", None, Some(id(2)), ACTOR).unwrap();
+    assert_eq!(stale, CasResult::Mismatch { actual: main });
+    assert_eq!(write.commit().unwrap().moved_refs, 65_535);
+    assert_eq!(frames(&root)[1].records.len(), 65_535);
+    assert_eq!(
+        store.read().unwrap().get_ref("main").unwrap(),
+        Some(ref_state(1, 1))
+    );
+}
+
+#[test]
+fn replay_checks_ref_names_before_appending_to_the_index() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    let records = [
+        changeset_record(&cs(2, &[1]), 2),
+        ref_move("../journal.log", None, Some(2), "x/1", 7),
+    ];
+    let frame = append_unmaterialized(&root, &records);
+    assert_journal_corrupt(store.write().map(drop), frame.offset);
+    assert_eq!(
+        index(&root).len(),
+        1,
+        "the frame's changeset was not appended"
+    );
+}
+
+/// Asserts that the store at `root` holds a fresh `meta/`, every file there, and nothing
+/// left of the staging; and that a reader of it writes nothing.
+#[track_caller]
+fn assert_fresh_meta(root: &Utf8Path) {
+    let meta = Layout::new(root).meta_dir();
     let files = [
         ("journal.log", 0),
         ("journal.off", 0),
@@ -1078,6 +1253,79 @@ fn create_lays_out_meta_and_open_requires_it() {
             "{dir} is empty"
         );
     }
+    assert!(!root.join("meta.tmp").exists(), "the staging is gone");
+    let (fs, calls) = RecordingFs::new();
+    let reader = MetaStore::open_with_fs(root, Arc::new(fs)).unwrap();
+    assert_eq!(reader.read().unwrap().count_changesets().unwrap(), 0);
+    assert_eq!(calls(), ["read main"], "a reader writes nothing");
+}
+
+#[test]
+fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
+    if let Ok(root) = std::env::var(CREATE_CRASH_ROOT) {
+        let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
+        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, k));
+        MetaStore::create_with_fs(Utf8Path::new(&root), fs).unwrap();
+        return;
+    }
+    let calls = u64::try_from(CREATE_CALLS.len()).unwrap();
+    for k in 1..=calls + 1 {
+        let (_dir, root) = new_root();
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "crash_at_any_create_call_leaves_a_store_open_or_create_takes",
+                "--nocapture",
+            ])
+            .env(CREATE_CRASH_ROOT, &root)
+            .env(CRASH_AT_ENV, k.to_string())
+            .output()
+            .unwrap();
+        let ended_as_expected = if k <= calls {
+            child.status.signal() == Some(SIGABRT)
+        } else {
+            child.status.success()
+        };
+        assert!(
+            ended_as_expected,
+            "k={k}: {:?}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr)
+        );
+        // The rename into place is the last call: a crash at any call leaves no meta/, so
+        // open refuses and the next create cleans up and succeeds.
+        if k <= calls {
+            assert_format(
+                MetaStore::open(&root),
+                &format!("open after a crash at {k}"),
+            );
+            MetaStore::create(&root).unwrap();
+        }
+        assert_fresh_meta(&root);
+    }
+}
+
+#[test]
+fn create_starts_over_from_what_a_crashed_create_left() {
+    let (_dir, root) = new_root();
+    // A real crash in the middle of a replace leaves its temp file behind, and whatever else
+    // lies in meta.tmp/ is no part of a store either.
+    let staged = root.join("meta.tmp/meta");
+    fs::create_dir_all(&staged).unwrap();
+    fs::write(staged.join(".tmpA1b2C3"), b"half a checkpoint").unwrap();
+    fs::write(staged.join("journal.log"), b"not a frame").unwrap();
+    assert_format(MetaStore::open(&root), "a staged meta/ is no store");
+    MetaStore::create(&root).unwrap();
+    assert_fresh_meta(&root);
+    assert!(!Layout::new(&root).meta_path(".tmpA1b2C3").exists());
+}
+
+#[test]
+fn create_lays_out_meta_and_open_requires_it() {
+    let (_dir, root) = new_root();
+    assert_format(MetaStore::open(&root), "open before create");
+    let store = MetaStore::create(&root).unwrap();
+    assert_fresh_meta(&root);
     assert_format(MetaStore::create(&root), "a second create");
 
     let reopened = MetaStore::open(&root).unwrap();
@@ -1329,11 +1577,36 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
 /// runs.
 type Hook = (&'static str, Box<dyn FnOnce() + Send>);
 
-/// [`RealFs`] that records each call as `"<method> <file name>"`, and can run a hook once,
-/// at the first `read` of a file of a given name, before that read.
+/// Which call a [`RecordingFs`] fails, while set: the call as it records it,
+/// `"<method> <file name>"`. Clones share the setting.
+#[derive(Clone, Default)]
+struct Failing(Arc<Mutex<Option<&'static str>>>);
+
+impl Failing {
+    fn set(&self, call: &'static str) {
+        *self.0.lock().unwrap() = Some(call);
+    }
+
+    fn clear(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+
+    /// An injected error if `call` is the failing call; the call then does nothing.
+    fn check(&self, call: &str) -> io::Result<()> {
+        match *self.0.lock().unwrap() {
+            Some(failing) if failing == call => Err(io::Error::other(format!("injected: {call}"))),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// [`RealFs`] that records each call as `"<method> <file name>"`, can run a hook once, at the
+/// first `read` of a file of a given name, before that read, and fails the call its
+/// [`Failing`] names.
 struct RecordingFs {
     calls: Arc<Mutex<Vec<String>>>,
     hook: Mutex<Option<Hook>>,
+    failing: Failing,
 }
 
 impl RecordingFs {
@@ -1343,6 +1616,7 @@ impl RecordingFs {
         let fs = RecordingFs {
             calls: Arc::clone(&calls),
             hook: Mutex::new(None),
+            failing: Failing::default(),
         };
         (fs, move || std::mem::take(&mut *calls.lock().unwrap()))
     }
@@ -1353,35 +1627,43 @@ impl RecordingFs {
         self
     }
 
-    fn record(&self, method: &str, path: &Path) {
+    /// What sets the call this recorder fails.
+    fn failing(&self) -> Failing {
+        self.failing.clone()
+    }
+
+    /// Records the call, then fails it if it is the failing one.
+    fn record(&self, method: &str, path: &Path) -> io::Result<()> {
         let name = path.file_name().unwrap().to_string_lossy();
-        self.calls.lock().unwrap().push(format!("{method} {name}"));
+        let call = format!("{method} {name}");
+        self.calls.lock().unwrap().push(call.clone());
+        self.failing.check(&call)
     }
 }
 
 impl FsOps for RecordingFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.record("create_dir_all", p);
+        self.record("create_dir_all", p)?;
         RealFs.create_dir_all(p)
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.record("write_durable_temp", dir);
+        self.record("write_durable_temp", dir)?;
         RealFs.write_durable_temp(dir, bytes)
     }
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.record("link_noclobber", to);
+        self.record("link_noclobber", to)?;
         RealFs.link_noclobber(from, to)
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.record("fsync_dir", p);
+        self.record("fsync_dir", p)?;
         RealFs.fsync_dir(p)
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.record("read", p);
+        self.record("read", p)?;
         let hook = {
             let mut slot = self.hook.lock().unwrap();
             let due = slot
@@ -1396,47 +1678,47 @@ impl FsOps for RecordingFs {
     }
 
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.record("exists", p);
+        self.record("exists", p)?;
         RealFs.exists(p)
     }
 
     fn remove(&self, p: &Path) -> io::Result<()> {
-        self.record("remove", p);
+        self.record("remove", p)?;
         RealFs.remove(p)
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append_durable", path);
+        self.record("append_durable", path)?;
         RealFs.append_durable(path, bytes)
     }
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.record("file_len", path);
+        self.record("file_len", path)?;
         RealFs.file_len(path)
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.record("truncate", path);
+        self.record("truncate", path)?;
         RealFs.truncate(path, len)
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.record("atomic_replace", path);
+        self.record("atomic_replace", path)?;
         RealFs.atomic_replace(path, bytes)
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.record("sync_data", path);
+        self.record("sync_data", path)?;
         RealFs.sync_data(path)
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append", path);
+        self.record("append", path)?;
         RealFs.append(path, bytes)
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.record("rename_durable", to);
+        self.record("rename_durable", to)?;
         RealFs.rename_durable(from, to)
     }
 }
@@ -1446,7 +1728,7 @@ fn write_and_commit_make_the_documented_fs_calls() {
     let (_dir, root) = new_root();
     let (fs, calls) = RecordingFs::new();
     let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
-    calls();
+    assert_eq!(calls(), CREATE_CALLS);
     let tail_check = ["file_len journal.log", "file_len journal.off"];
     let frame = ["append_durable journal.log", "append_durable journal.off"];
     let record = [

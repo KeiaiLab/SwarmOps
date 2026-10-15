@@ -34,11 +34,13 @@ pub(crate) fn replay(
     fs: &dyn FsOps,
     frames: &[Frame],
 ) -> Result<(), StoreError> {
+    // The ref names first: frames this version cannot apply change nothing at all.
+    let targets = ref_targets(frames)?;
     let changesets = changesets(frames);
     for record in &changesets[held(index, &changesets)?..] {
         index.append(&record.meta(0))?;
     }
-    for (name, target) in ref_targets(frames)? {
+    for (name, target) in targets {
         refs::write(layout, fs, name, target)?;
     }
     Ok(())

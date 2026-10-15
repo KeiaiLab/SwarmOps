@@ -23,6 +23,9 @@ use crate::error::StoreError;
 /// A frame header: `u32le len | u32le crc32(payload)`.
 pub(crate) const HEADER_LEN: usize = 8;
 
+/// The most records a frame holds: its record count is a `u16le`.
+pub(crate) const MAX_RECORDS: usize = 65_535;
+
 const KIND_CHANGESET: u8 = 1;
 const KIND_REF_MOVE: u8 = 2;
 const KIND_COMPACTED: u8 = 4;
