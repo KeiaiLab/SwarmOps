@@ -1214,6 +1214,17 @@ fn an_empty_write_reports_its_housekeeping_errors_plainly() {
     assert_eq!(ckpt(&root), log_len(&root));
 }
 
+/// A store on a [`RecordingFs`], and what makes its calls fail. Its write transactions sync
+/// the index one file after another, in write order (parallelism 1), so that a failure lands at
+/// the same point of the same call sequence in every run.
+fn failing_store(root: &Utf8Path) -> (MetaStore, Failing) {
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let mut store = MetaStore::create_with_fs(root, Arc::new(fs)).unwrap();
+    store.set_parallelism(1);
+    (store, fail)
+}
+
 /// Changeset `n` of a chain: a root for 0, else on `n - 1`.
 fn chained(n: u64) -> ChangesetMeta {
     match n.checked_sub(1) {
@@ -1263,9 +1274,7 @@ fn chained_want(records: u64) -> [(&'static str, u64); 5] {
 #[test]
 fn a_failed_index_sync_cuts_the_index_back_to_the_checkpoint() {
     let (_dir, root) = new_root();
-    let (fs, _calls) = RecordingFs::new();
-    let fail = fs.failing();
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let (store, fail) = failing_store(&root);
     // Frames 0..=31: the 32nd checkpoints the first 32 records.
     for n in 0..32 {
         insert(&store, &[chained(n)]);
@@ -1322,9 +1331,7 @@ fn a_failed_index_sync_cuts_the_index_back_to_the_checkpoint() {
 #[test]
 fn a_failed_index_sync_never_cuts_what_the_sorted_views_cover() {
     let (_dir, root) = new_root();
-    let (fs, _calls) = RecordingFs::new();
-    let fail = fs.failing();
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let (store, fail) = failing_store(&root);
     fail.set("atomic_replace journal.ckpt");
     let mut write = store.write().unwrap();
     for n in 0..1100 {
@@ -1361,9 +1368,7 @@ fn a_failed_index_sync_never_cuts_what_the_sorted_views_cover() {
 #[test]
 fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
     let (_dir, root) = new_root();
-    let (fs, _calls) = RecordingFs::new();
-    let fail = fs.failing();
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let (store, fail) = failing_store(&root);
     for n in 0..32 {
         insert(&store, &[cs(n, &[])]); // frames 0..=31, checkpointed
     }
@@ -1397,9 +1402,7 @@ fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
 #[test]
 fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
     let (_dir, root) = new_root();
-    let (fs, _calls) = RecordingFs::new();
-    let fail = fs.failing();
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let (store, fail) = failing_store(&root);
     for n in 0..31 {
         insert(&store, &[chained(n)]);
     }
@@ -2163,7 +2166,9 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
     if let Ok(root) = std::env::var(REPLAY_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
         let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, k));
-        let store = MetaStore::open_with_fs(Utf8Path::new(&root), fs).unwrap();
+        let mut store = MetaStore::open_with_fs(Utf8Path::new(&root), fs).unwrap();
+        // One file at a time, in write order, as the dry run: call k is the same call.
+        store.set_parallelism(1);
         store.write().unwrap().commit().unwrap();
         return;
     }
@@ -2175,7 +2180,8 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
     let (_dry_dir, dry) = new_root();
     copy_dir(template.as_std_path(), dry.as_std_path());
     let (fs, calls) = RecordingFs::new();
-    let store = MetaStore::open_with_fs(&dry, Arc::new(fs)).unwrap();
+    let mut store = MetaStore::open_with_fs(&dry, Arc::new(fs)).unwrap();
+    store.set_parallelism(1);
     store.write().unwrap().commit().unwrap();
     let dry_calls = calls();
     for call in ["append ids.col", "atomic_replace main", "remove old"] {

@@ -881,7 +881,9 @@ fn crash_at_fs_counts_its_calls_and_reports_them_when_dropped() {
 fn fs_calls_hook_reports_how_many_calls_a_process_made() {
     if let Some(root) = std::env::var_os(COUNT_CHILD_ROOT) {
         let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");
-        let store = FsObjectStore::open_default(Layout::new(root));
+        let mut store = FsObjectStore::open_default(Layout::new(root));
+        // One directory fsync at a time, in path order: the k-th call is the same call.
+        store.set_parallelism(1);
         store.put(ObjectKind::Blob, CRASH_PAYLOAD).unwrap();
         store.flush().unwrap();
         return;
@@ -889,7 +891,8 @@ fn fs_calls_hook_reports_how_many_calls_a_process_made() {
     // The same put and flush in this process, counted.
     let (_root, layout) = new_root();
     let counted = Arc::new(CrashAtFs::new(RealFs, 0));
-    let store = FsObjectStore::open(layout, Box::new(Arc::clone(&counted)));
+    let mut store = FsObjectStore::open(layout, Box::new(Arc::clone(&counted)));
+    store.set_parallelism(1);
     store.put(ObjectKind::Blob, CRASH_PAYLOAD).unwrap();
     store.flush().unwrap();
     let calls = counted.calls();
