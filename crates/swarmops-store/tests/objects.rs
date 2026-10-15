@@ -4,14 +4,13 @@
 //! Every test owns a fresh store root (`tempfile::tempdir()`), so tests are
 //! independent and may run in any order or in parallel.
 
-mod rendezvous;
+mod support;
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Barrier, Condvar, Mutex};
@@ -23,18 +22,18 @@ use proptest::prelude::Rng;
 use proptest::test_runner::{RngAlgorithm, TestRng};
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 use swarmops_store::{
-    CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsObjectStore, FsOps, Layout, LinkOutcome, ObjectStore,
-    RealFs, StoreError,
+    CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsObjectStore, FsOps, Layout, ObjectStore, RealFs,
+    StoreError,
 };
-use tempfile::TempDir;
 
-use crate::rendezvous::Rendezvous;
+use crate::support::child::{self, SIGABRT, this_test};
+use crate::support::fs::{Call, Rendezvous, Watch, Watched};
+use crate::support::new_root;
 
 /// `"SOB1" | kind u8 | enc u8 | u16 rsvd | u64le ulen` (storage spec §2).
 const HEADER_LEN: usize = 16;
 const ENC_RAW: u8 = 0;
 const ENC_ZSTD: u8 = 1;
-const SIGABRT: i32 = 6;
 
 /// Set only in the child that `crash_at_fs_aborts_child_at_call_k` spawns: the store root.
 const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_CRASH_CHILD_ROOT";
@@ -47,13 +46,6 @@ const CRASH_PAYLOAD: &[u8] = b"this put must never become visible";
 /// Set only in the children of `open_default_under_crash_at_puts_one_object_at_a_time`: the
 /// store root.
 const ONE_AT_A_TIME_ROOT: &str = "SWARMOPS_TEST_ONE_AT_A_TIME_ROOT";
-
-/// A fresh, empty store root and its layout; the directory lives as long as the `TempDir`.
-fn new_root() -> (TempDir, Layout) {
-    let dir = tempfile::tempdir().expect("create store root");
-    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("temp dir is UTF-8");
-    (dir, Layout::new(root))
-}
 
 fn real_store(layout: &Layout) -> FsObjectStore {
     FsObjectStore::open(layout.clone(), Box::new(RealFs))
@@ -89,7 +81,7 @@ fn object_files(layout: &Layout) -> Vec<PathBuf> {
         .collect()
 }
 
-/// What the store asked of a [`CountingFs`], and how it answers.
+/// What the store asked of a [`counting_store`]'s filesystem, and how it answers.
 #[derive(Default)]
 struct Calls {
     write_durable_temp: AtomicUsize,
@@ -115,86 +107,37 @@ impl Calls {
     }
 }
 
-/// [`RealFs`] that records the calls the store makes.
-struct CountingFs {
-    calls: Arc<Calls>,
-}
-
-impl FsOps for CountingFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.calls.write_durable_temp.fetch_add(1, Ordering::SeqCst);
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.calls.link_noclobber.fetch_add(1, Ordering::SeqCst);
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.calls
-            .fsynced_dirs
-            .lock()
-            .unwrap()
-            .push(p.to_path_buf());
-        if self
-            .calls
-            .failing_dirs
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|dir| dir == p)
-        {
-            return Err(io::Error::other(format!(
-                "injected: fsync_dir {}",
-                p.display()
-            )));
+/// Counts the calls the store makes: the real filesystem watched by them is a
+/// [`counting_store`]'s.
+impl Watch for Arc<Calls> {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        match call.method {
+            "write_durable_temp" => {
+                self.write_durable_temp.fetch_add(1, Ordering::SeqCst);
+            }
+            "link_noclobber" => {
+                self.link_noclobber.fetch_add(1, Ordering::SeqCst);
+            }
+            "fsync_dir" => {
+                let p = call.path();
+                self.fsynced_dirs.lock().unwrap().push(p.to_path_buf());
+                if self.failing_dirs.lock().unwrap().iter().any(|dir| dir == p) {
+                    return Err(io::Error::other(format!(
+                        "injected: fsync_dir {}",
+                        p.display()
+                    )));
+                }
+                self.dir_fsyncs.arrive();
+            }
+            _ => {}
         }
-        self.calls.dir_fsyncs.around(|| RealFs.fsync_dir(p))
+        Ok(())
     }
 
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append_durable(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        RealFs.truncate(path, len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        RealFs.atomic_replace(path, bytes)
-    }
-
-    fn sync_data(&self, path: &Path) -> io::Result<()> {
-        RealFs.sync_data(path)
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        RealFs.rename_durable(from, to)
+    fn after(&self, call: &Call<'_>) {
+        if call.method == "fsync_dir" {
+            self.dir_fsyncs.depart();
+        }
     }
 }
 
@@ -219,78 +162,27 @@ impl Gate {
     }
 }
 
-/// [`RealFs`] whose `fsync_dir` reports its directory on `parked`, then waits for `gate`.
-struct GatedFs {
+/// What makes the real filesystem's `fsync_dir` report its directory on `parked`, then wait
+/// for `gate`.
+struct ParkFsyncs {
     parked: mpsc::Sender<PathBuf>,
     gate: Arc<Gate>,
 }
 
-impl FsOps for GatedFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        // A send error would only mean the test stopped listening.
-        let _ = self.parked.send(p.to_path_buf());
-        self.gate.wait();
-        RealFs.fsync_dir(p)
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append_durable(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        RealFs.truncate(path, len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        RealFs.atomic_replace(path, bytes)
-    }
-
-    fn sync_data(&self, path: &Path) -> io::Result<()> {
-        RealFs.sync_data(path)
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        RealFs.rename_durable(from, to)
+impl Watch for ParkFsyncs {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        if call.method == "fsync_dir" {
+            // A send error would only mean the test stopped listening.
+            let _ = self.parked.send(call.path().to_path_buf());
+            self.gate.wait();
+        }
+        Ok(())
     }
 }
 
 fn counting_store(layout: &Layout) -> (FsObjectStore, Arc<Calls>) {
     let calls = Arc::new(Calls::default());
-    let fs = CountingFs {
-        calls: Arc::clone(&calls),
-    };
+    let fs = Watched(Arc::clone(&calls));
     (FsObjectStore::open(layout.clone(), Box::new(fs)), calls)
 }
 
@@ -700,10 +592,10 @@ fn concurrent_flush_waits_for_the_one_in_progress() {
     let (_root, layout) = new_root();
     let gate = Arc::new(Gate::default());
     let (parked_tx, parked_rx) = mpsc::channel();
-    let fs = GatedFs {
+    let fs = Watched(ParkFsyncs {
         parked: parked_tx,
         gate: Arc::clone(&gate),
-    };
+    });
     let store = FsObjectStore::open(layout.clone(), Box::new(fs));
     // Two puts (two callers, say) into one existing fan-out dir: the touched set is {F}.
     let [a, b, _] = three_blobs_in_two_fanout_dirs();
@@ -855,12 +747,11 @@ fn open_default_under_crash_at_puts_one_object_at_a_time() {
         for byte in 0..=u8::MAX {
             fs::create_dir_all(layout.objects_dir().join(format!("{byte:02x}"))).unwrap();
         }
-        let child = Command::new(std::env::current_exe().expect("test binary path"))
-            .args(["--exact", TEST, "--nocapture"])
-            .env(ONE_AT_A_TIME_ROOT, layout.root())
-            .env(CRASH_AT_ENV, (5 * whole + 3).to_string())
-            .output()
-            .expect("spawn the child");
+        let child = child::run(
+            this_test(TEST)
+                .env(ONE_AT_A_TIME_ROOT, layout.root())
+                .env(CRASH_AT_ENV, (5 * whole + 3).to_string()),
+        );
         assert_eq!(
             child.status.signal(),
             Some(SIGABRT),
@@ -888,16 +779,11 @@ fn crash_at_fs_aborts_child_at_call_k() {
     }
 
     let (_root, layout) = new_root();
-    let child = Command::new(std::env::current_exe().expect("test binary path"))
-        .args([
-            "--exact",
-            "crash_at_fs_aborts_child_at_call_k",
-            "--nocapture",
-        ])
-        .env(CRASH_CHILD_ROOT, layout.root())
-        .env(CRASH_AT_ENV, "2")
-        .output()
-        .expect("spawn the child");
+    let child = child::run(
+        this_test("crash_at_fs_aborts_child_at_call_k")
+            .env(CRASH_CHILD_ROOT, layout.root())
+            .env(CRASH_AT_ENV, "2"),
+    );
     assert_eq!(
         child.status.signal(),
         Some(SIGABRT),
@@ -957,20 +843,15 @@ fn fs_calls_hook_reports_how_many_calls_a_process_made() {
     for crash_at in [None, Some(calls)] {
         let (_root, layout) = new_root();
         let report = layout.root().join("calls").into_std_path_buf();
-        let mut child = Command::new(std::env::current_exe().expect("test binary path"));
+        let mut child = this_test("fs_calls_hook_reports_how_many_calls_a_process_made");
         child
-            .args([
-                "--exact",
-                "fs_calls_hook_reports_how_many_calls_a_process_made",
-                "--nocapture",
-            ])
             .env(COUNT_CHILD_ROOT, layout.root())
             .env(FS_CALLS_ENV, &report)
             .env_remove(CRASH_AT_ENV);
         if let Some(k) = crash_at {
             child.env(CRASH_AT_ENV, k.to_string());
         }
-        let output = child.output().expect("spawn the child");
+        let output = child::run(&mut child);
         let shown = format!(
             "{:?}\n--- child stderr ---\n{}",
             output.status,

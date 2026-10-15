@@ -9,84 +9,25 @@
 //!
 //! Every test owns a fresh store (`tempfile::tempdir()`) and damages it by hand.
 
+mod support;
+
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{
-    BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath,
-    Signature, Tree, TreeId, hash_object,
+    Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, Tree, TreeId,
+    hash_object,
 };
-use swarmops_repo::{
-    Change, ChangeOp, CommitRequest, LocalRepo, MismatchCause, RepoError, StoreError,
-    VerifyProblem, VerifyReport,
-};
+use swarmops_repo::{LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem, VerifyReport};
 use swarmops_store::{
     ChangesetMeta, FsObjectStore, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore, RealFs,
     Record,
 };
 use tempfile::TempDir;
 
-fn new_repo() -> (TempDir, Utf8PathBuf, LocalRepo) {
-    let dir = tempfile::tempdir().expect("create a temp dir");
-    let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("temp dir is UTF-8");
-    let repo = LocalRepo::create(&root, "test").expect("create the store");
-    (dir, root, repo)
-}
-
-fn path(s: &str) -> RepoPath {
-    RepoPath::new(s).expect("a valid repo path")
-}
-
-fn blob(content: &[u8]) -> BlobId {
-    BlobId(hash_object(ObjectKind::Blob, content))
-}
-
-fn put(p: &str, content: &[u8]) -> Change {
-    put_as(p, EntryKind::File, content)
-}
-
-fn put_as(p: &str, kind: EntryKind, content: &[u8]) -> Change {
-    Change {
-        path: path(p),
-        op: ChangeOp::Put {
-            kind,
-            content: content.to_vec(),
-        },
-    }
-}
-
-fn delete(p: &str) -> Change {
-    Change {
-        path: path(p),
-        op: ChangeOp::Delete,
-    }
-}
-
-fn signature() -> Signature {
-    Signature {
-        name: b"test/agent".to_vec(),
-        email: b"agent@test.swarmops.local".to_vec(),
-        secs: 1_760_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    }
-}
-
-#[track_caller]
-fn commit(repo: &LocalRepo, parents: &[ChangesetId], changes: Vec<Change>) -> ChangesetId {
-    let req = CommitRequest {
-        parents: parents.to_vec(),
-        changes,
-        author: signature(),
-        committer: signature(),
-        message: b"a test commit".to_vec(),
-        metadata: Vec::new(),
-        allow_empty: false,
-    };
-    repo.commit(req).expect("commit").id
-}
+use crate::support::{blob, commit, delete, new_repo, path, put, put_as, signature};
 
 /// The file of object `id` in the store at `root`.
 fn object_file(root: &Utf8Path, id: ObjectId) -> Utf8PathBuf {

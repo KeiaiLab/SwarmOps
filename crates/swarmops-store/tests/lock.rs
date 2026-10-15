@@ -7,6 +7,8 @@
 //! `/proc/locks`, which lists the holder of each `flock` lock and every waiter blocked on it;
 //! it and its helpers are Linux-only.
 
+mod support;
+
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
@@ -16,16 +18,16 @@ use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use camino::Utf8PathBuf;
 use swarmops_store::{Layout, MetaLock, StoreError};
 use tempfile::TempDir;
+
+use crate::support::common::percentile;
+use crate::support::new_root;
 
 /// A fresh store root with its `meta/` directory, and its layout; the directory lives as long
 /// as the `TempDir`.
 fn new_meta() -> (TempDir, Layout) {
-    let dir = tempfile::tempdir().expect("create store root");
-    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("temp dir is UTF-8");
-    let layout = Layout::new(root);
+    let (dir, layout) = new_root();
     fs::create_dir_all(layout.meta_dir()).expect("create meta/");
     (dir, layout)
 }
@@ -119,12 +121,6 @@ fn abandoned_waiter_releases_the_lock_it_acquires_late() {
 struct Turns {
     waits: Vec<Duration>,
     busy: u64,
-}
-
-/// Nearest-rank percentile over sorted samples.
-fn percentile(sorted: &[Duration], percent: usize) -> Duration {
-    let rank = (sorted.len() * percent).div_ceil(100).max(1);
-    sorted[rank - 1]
 }
 
 #[test]

@@ -7,11 +7,13 @@
 //! run in any order or in parallel. The crash sweep and the multi-process test run this test
 //! binary again as their children (selected by [`CHILD_ROOT`]), on the real filesystem.
 
+mod support;
+
 use std::fs;
 use std::io;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::path::PathBuf;
+use std::process::Output;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -19,16 +21,16 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{
-    BlobId, ChangesetId, CodecError, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath, Signature,
-    Tree, TreeEntry, hash_object,
+    ChangesetId, CodecError, DeltaOp, EntryKind, ObjectId, ObjectKind, Tree, TreeEntry, hash_object,
 };
 use swarmops_repo::{
-    CasResult, Change, ChangeOp, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
+    CasResult, Change, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
 };
-use swarmops_store::{
-    CRASH_AT_ENV, ChangesetMeta, FsOps, Journal, Layout, LinkOutcome, MetaStore, RealFs, StoreError,
-};
-use tempfile::TempDir;
+use swarmops_store::{CRASH_AT_ENV, ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
+
+use crate::support::child::{CHILD_TIMEOUT, Child, SIGABRT, run, this_test};
+use crate::support::fs::{FailingFs, copy_dir};
+use crate::support::{blob, delete, new_repo, path, put, put_as, signature};
 
 /// Set only in the children this file's tests spawn: the store root.
 const CHILD_ROOT: &str = "SWARMOPS_TEST_REPO_COMMIT_CHILD_ROOT";
@@ -43,65 +45,12 @@ const REPORT: &str = "repo-child: ";
 const CHILDREN: u64 = 8;
 const PER_CHILD: u64 = 4;
 
-const SIGABRT: i32 = 6;
-
-/// A fresh store in a temp dir of its own; the directory lives as long as the `TempDir`.
-fn new_repo() -> (TempDir, Utf8PathBuf, LocalRepo) {
-    let dir = tempfile::tempdir().expect("create a temp dir");
-    let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("temp dir is UTF-8");
-    let repo = LocalRepo::create(&root, "test").expect("create the store");
-    (dir, root, repo)
-}
-
-fn path(s: &str) -> RepoPath {
-    RepoPath::new(s).expect("a valid repo path")
-}
-
-fn blob(content: &[u8]) -> BlobId {
-    BlobId(hash_object(ObjectKind::Blob, content))
-}
-
-fn put(p: &str, content: &[u8]) -> Change {
-    put_as(p, EntryKind::File, content)
-}
-
-fn put_as(p: &str, kind: EntryKind, content: &[u8]) -> Change {
-    Change {
-        path: path(p),
-        op: ChangeOp::Put {
-            kind,
-            content: content.to_vec(),
-        },
-    }
-}
-
-fn delete(p: &str) -> Change {
-    Change {
-        path: path(p),
-        op: ChangeOp::Delete,
-    }
-}
-
-/// A fixed signature, so that the same request always makes the same changeset.
-fn signature() -> Signature {
-    Signature {
-        name: b"test/agent".to_vec(),
-        email: b"agent@test.swarmops.local".to_vec(),
-        secs: 1_760_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    }
-}
-
+/// A request for `changes` on `parents` with the message "a test commit", recording the agent
+/// in its metadata.
 fn request(parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
     CommitRequest {
-        parents: parents.to_vec(),
-        changes,
-        author: signature(),
-        committer: signature(),
-        message: b"a test commit".to_vec(),
         metadata: vec![("agent".to_owned(), b"test/agent".to_vec())],
-        allow_empty: false,
+        ..support::request(parents, changes, "a test commit")
     }
 }
 
@@ -565,27 +514,9 @@ fn child_root() -> Option<Utf8PathBuf> {
 /// Runs test `test` again in a child process on the store at `root`, the child's k-th
 /// filesystem call aborting it (`SWARMOPS_TEST_CRASH_AT=k`).
 fn crash_child(test: &str, root: &Utf8Path, k: u64) -> Output {
-    Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture"])
+    run(this_test(test)
         .env(CHILD_ROOT, root)
-        .env(CRASH_AT_ENV, k.to_string())
-        .output()
-        .unwrap()
-}
-
-/// Copies directory `from` to `to`, files and subdirectories, without syncing anything: a
-/// fresh store from a template, faster than creating one (which syncs a dozen times).
-fn copy_dir(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
-    }
+        .env(CRASH_AT_ENV, k.to_string()))
 }
 
 /// The commit the crash sweep's child makes: a root commit of three files in nested
@@ -637,6 +568,7 @@ fn sweep(run: impl Fn(u64) -> bool + Sync) -> u64 {
 fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, bool) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+    // A fresh store from the template, faster than creating one (which syncs a dozen times).
     copy_dir(template.as_std_path(), root.as_std_path());
     let child = crash_child(
         "commit_never_inserts_record_before_objects_are_durable",
@@ -878,105 +810,6 @@ fn commit_records_only_what_changes() {
     );
 }
 
-/// Which calls a [`FailingFs`] fails: given the method's name and its path.
-type FailWhen = dyn Fn(&str, &Path) -> bool + Send + Sync;
-
-/// The real filesystem, except that the calls `fail` picks fail with an injected error.
-struct FailingFs {
-    fail: Box<FailWhen>,
-}
-
-impl FailingFs {
-    fn new(fail: impl Fn(&str, &Path) -> bool + Send + Sync + 'static) -> Self {
-        Self {
-            fail: Box::new(fail),
-        }
-    }
-
-    fn check(&self, method: &str, p: &Path) -> io::Result<()> {
-        if (self.fail)(method, p) {
-            Err(io::Error::other(format!(
-                "injected failure: {method} {}",
-                p.display()
-            )))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-impl FsOps for FailingFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.check("create_dir_all", p)?;
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.check("write_durable_temp", dir)?;
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.check("link_noclobber", to)?;
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.check("fsync_dir", p)?;
-        RealFs.fsync_dir(p)
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.check("read", p)?;
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.check("exists", p)?;
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        self.check("remove", p)?;
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, p: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.check("append_durable", p)?;
-        RealFs.append_durable(p, bytes)
-    }
-
-    fn file_len(&self, p: &Path) -> io::Result<u64> {
-        self.check("file_len", p)?;
-        RealFs.file_len(p)
-    }
-
-    fn truncate(&self, p: &Path, len: u64) -> io::Result<()> {
-        self.check("truncate", p)?;
-        RealFs.truncate(p, len)
-    }
-
-    fn atomic_replace(&self, p: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.check("atomic_replace", p)?;
-        RealFs.atomic_replace(p, bytes)
-    }
-
-    fn sync_data(&self, p: &Path) -> io::Result<()> {
-        self.check("sync_data", p)?;
-        RealFs.sync_data(p)
-    }
-
-    fn append(&self, p: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.check("append", p)?;
-        RealFs.append(p, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.check("rename_durable", to)?;
-        RealFs.rename_durable(from, to)
-    }
-}
-
 #[test]
 fn a_failed_object_flush_fails_the_commit_and_inserts_nothing() {
     let (_dir, root, repo) = new_repo();
@@ -1101,29 +934,22 @@ fn commits_from_many_processes_all_land() {
     repo.cas_ref("main", None, Some(base.id), "test/parent")
         .unwrap();
 
-    let exe = std::env::current_exe().unwrap();
-    let children: Vec<_> = (0..CHILDREN)
+    let children: Vec<Child> = (0..CHILDREN)
         .map(|number| {
-            Command::new(&exe)
-                .args([
-                    "--exact",
-                    "commits_from_many_processes_all_land",
-                    "--nocapture",
-                ])
-                .env(CHILD_ROOT, &root)
-                .env(CHILD_NUMBER, number.to_string())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap()
+            Child::spawn(
+                this_test("commits_from_many_processes_all_land")
+                    .env(CHILD_ROOT, &root)
+                    .env(CHILD_NUMBER, number.to_string()),
+            )
         })
         .collect();
     fs::write(root.join("go"), b"").unwrap();
+    let deadline = Instant::now() + CHILD_TIMEOUT;
     let heads: Vec<ChangesetId> = children
         .into_iter()
         .enumerate()
         .map(|(number, child)| {
-            let output = child.wait_with_output().unwrap();
+            let output = child.wait(deadline);
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 output.status.success(),

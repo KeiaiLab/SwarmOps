@@ -9,15 +9,16 @@
 //! 32 per parent, a ref move 13 bytes plus its name, its actor and 32 per id present, a
 //! `Compacted` record 9 bytes.
 
+mod support;
+
 use std::ffi::OsString;
 use std::fmt::Debug;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::slice;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,27 +26,16 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    CRASH_AT_ENV, CrashAtFs, Frame, FsOps, Journal, Layout, LinkOutcome, MetaLock, RealFs, Record,
-    StoreError,
+    CRASH_AT_ENV, CrashAtFs, Frame, FsOps, Journal, Layout, MetaLock, RealFs, Record, StoreError,
 };
-use tempfile::TempDir;
 
-const SIGABRT: i32 = 6;
+use crate::support::child::{SIGABRT, run, this_test};
+use crate::support::fs::{Hook, RecordingFs, When};
+use crate::support::{append_bytes, file_len, new_root, real_fs, set_len};
 
 /// Set only in the children that `crash_at_any_journal_write_recovers_to_whole_frames`
 /// spawns: the store root.
 const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_JOURNAL_CRASH_ROOT";
-
-/// A fresh, empty store root and its layout; the directory lives as long as the `TempDir`.
-fn new_root() -> (TempDir, Layout) {
-    let dir = tempfile::tempdir().expect("create store root");
-    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("temp dir is UTF-8");
-    (dir, Layout::new(root))
-}
-
-fn real_fs() -> Arc<dyn FsOps> {
-    Arc::new(RealFs)
-}
 
 /// A new, empty journal whose tail this handle has checked: what a writer holds.
 fn new_journal(layout: &Layout) -> Journal {
@@ -124,20 +114,6 @@ fn offsets_on_disk(layout: &Layout) -> Vec<u64> {
         .collect()
 }
 
-fn file_len(path: impl AsRef<Path>) -> u64 {
-    fs::metadata(path).unwrap().len()
-}
-
-fn append_bytes(path: impl AsRef<Path>, bytes: &[u8]) {
-    let mut file = OpenOptions::new().append(true).open(path).unwrap();
-    file.write_all(bytes).unwrap();
-}
-
-fn set_len(path: impl AsRef<Path>, len: u64) {
-    let file = OpenOptions::new().write(true).open(path).unwrap();
-    file.set_len(len).unwrap();
-}
-
 fn flip_byte(path: impl AsRef<Path>, at: usize) {
     let mut bytes = fs::read(&path).unwrap();
     bytes[at] ^= 0x01;
@@ -162,130 +138,8 @@ fn assert_corrupt_at<T: Debug>(got: Result<T, StoreError>, offset: u64, what: &s
     }
 }
 
-/// [`RealFs`] that records each call as `"<method> <file name>"`, and may run a hook once,
-/// right before or right after the call it names: a writer racing the caller.
-struct RecordingFs {
-    calls: Arc<Mutex<Vec<String>>>,
-    hook: Mutex<Option<Hook>>,
-}
-
-/// A call as [`RecordingFs`] records it, when the hook runs, and what it does. `After` hooks
-/// run for `file_len` only, the call with which readers measure the journal.
-type Hook = (String, When, Box<dyn FnOnce() + Send>);
-
-/// When a [`Hook`] runs, around the call it names.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum When {
-    Before,
-    After,
-}
-
 /// A read of the journal from a reader's handle.
 type Read = fn(&Journal) -> Result<Vec<Frame>, StoreError>;
-
-impl RecordingFs {
-    fn record(&self, method: &str, path: &Path) {
-        let call = Self::call(method, path);
-        self.calls.lock().unwrap().push(call.clone());
-        self.run_hook(&call, When::Before);
-    }
-
-    fn call(method: &str, path: &Path) -> String {
-        let name = path.file_name().unwrap().to_string_lossy();
-        format!("{method} {name}")
-    }
-
-    fn run_hook(&self, call: &str, when: When) {
-        let hook = {
-            let mut hook = self.hook.lock().unwrap();
-            if hook
-                .as_ref()
-                .is_some_and(|(at, at_when, _)| at == call && *at_when == when)
-            {
-                hook.take()
-            } else {
-                None
-            }
-        };
-        if let Some((_, _, run)) = hook {
-            run();
-        }
-    }
-}
-
-impl FsOps for RecordingFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.record("create_dir_all", p);
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.record("write_durable_temp", dir);
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.record("link_noclobber", to);
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.record("fsync_dir", p);
-        RealFs.fsync_dir(p)
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.record("read", p);
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.record("exists", p);
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        self.record("remove", p);
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append_durable", path);
-        RealFs.append_durable(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.record("file_len", path);
-        let len = RealFs.file_len(path);
-        self.run_hook(&Self::call("file_len", path), When::After);
-        len
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.record("truncate", path);
-        RealFs.truncate(path, len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.record("atomic_replace", path);
-        RealFs.atomic_replace(path, bytes)
-    }
-
-    fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.record("sync_data", path);
-        RealFs.sync_data(path)
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append", path);
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.record("rename_durable", to);
-        RealFs.rename_durable(from, to)
-    }
-}
 
 /// Another handle on the journal whose FsOps calls are recorded, and a function that
 /// returns the calls made since it last ran.
@@ -293,15 +147,15 @@ fn recording_journal(layout: &Layout) -> (Journal, impl Fn() -> Vec<String>) {
     racing_journal(layout, None)
 }
 
-/// [`recording_journal`], running `hook` once right before the call it names goes ahead.
+/// [`recording_journal`], running `hook` once, right before or right after the call it names.
 fn racing_journal(layout: &Layout, hook: Option<Hook>) -> (Journal, impl Fn() -> Vec<String>) {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let fs = RecordingFs {
-        calls: Arc::clone(&calls),
-        hook: Mutex::new(hook),
+    let (fs, calls) = RecordingFs::new();
+    let fs = match hook {
+        Some(hook) => fs.with_hook(hook),
+        None => fs,
     };
     let journal = Journal::open(layout, Arc::new(fs)).unwrap();
-    (journal, move || std::mem::take(&mut *calls.lock().unwrap()))
+    (journal, calls)
 }
 
 #[test]
@@ -1665,12 +1519,9 @@ fn crash_child(root: OsString) {
 /// `layout` with `SWARMOPS_TEST_CRASH_AT=k`; it must die by SIGABRT, or exit cleanly if `k`
 /// is past its last FsOps call, `calls`.
 fn run_crash_child(test: &str, layout: &Layout, k: u64, calls: u64) {
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", test, "--nocapture"])
+    let child = run(this_test(test)
         .env(CRASH_CHILD_ROOT, layout.root())
-        .env(CRASH_AT_ENV, k.to_string())
-        .output()
-        .unwrap();
+        .env(CRASH_AT_ENV, k.to_string()));
     let ended_as_expected = if k <= calls {
         child.status.signal() == Some(SIGABRT)
     } else {
