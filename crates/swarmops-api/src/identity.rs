@@ -8,8 +8,39 @@ use crate::error::{ErrorCode, OpError};
 /// The longest agent name the store can record: a ref move's actor has a one-byte length.
 const MAX_AGENT_LEN: usize = 255;
 
-/// The agent-name grammar as the JSON Schema states it; [`Identity::parse`] implements it.
-const AGENT_PATTERN: &str = r"^[a-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9._-]*$";
+/// The bytes a family may hold, as a regex character class.
+const FAMILY_BYTES: &str = "a-z0-9-";
+/// The bytes an instance may start with: not `.`, so `.` and `..` are never instances.
+const INSTANCE_FIRST_BYTES: &str = "A-Za-z0-9_-";
+/// The bytes an instance may hold.
+const INSTANCE_BYTES: &str = "A-Za-z0-9._-";
+
+/// The agent-name grammar as the JSON Schema publishes it, built from the byte classes that
+/// [`Identity::parse`] checks, so the two cannot drift apart.
+fn agent_pattern() -> String {
+    format!("^[{FAMILY_BYTES}]+/[{INSTANCE_FIRST_BYTES}][{INSTANCE_BYTES}]*$")
+}
+
+/// Whether `b` is in `class`, a regex character class of ranges (`a-z`) and single bytes, where
+/// a `-` that cannot open a range stands for itself.
+fn in_class(class: &str, b: u8) -> bool {
+    let class = class.as_bytes();
+    let mut i = 0;
+    while i < class.len() {
+        if i + 2 < class.len() && class[i + 1] == b'-' {
+            if (class[i]..=class[i + 2]).contains(&b) {
+                return true;
+            }
+            i += 3;
+        } else {
+            if class[i] == b {
+                return true;
+            }
+            i += 1;
+        }
+    }
+    false
+}
 
 /// The caller of a mutation: an agent name `<family>/<instance>` (`agent/worker-17`,
 /// `human/purple`) and an optional run id. M1 trusts the name as claimed.
@@ -17,9 +48,8 @@ const AGENT_PATTERN: &str = r"^[a-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9._-]*$";
 /// The agent name always follows the grammar below, also in an identity read from JSON.
 #[derive(Serialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
-    /// `<family>/<instance>`: a family of `[a-z0-9-]+` and an instance of `[A-Za-z0-9._-]+` that
-    /// does not start with `.`, at most 255 bytes in all.
-    #[schemars(pattern(AGENT_PATTERN), length(max = MAX_AGENT_LEN))]
+    /// `<family>/<instance>`, exactly as the schema's `pattern` and `maxLength` give it.
+    #[schemars(pattern(agent_pattern()), length(max = MAX_AGENT_LEN))]
     agent: String,
     /// The run the agent acts in, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -34,14 +64,12 @@ impl Identity {
         let valid = s.len() <= MAX_AGENT_LEN
             && s.split_once('/').is_some_and(|(family, instance)| {
                 !family.is_empty()
-                    && family
-                        .bytes()
-                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-                    && !instance.is_empty()
-                    && !instance.starts_with('.')
+                    && family.bytes().all(|b| in_class(FAMILY_BYTES, b))
                     && instance
                         .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+                        .next()
+                        .is_some_and(|b| in_class(INSTANCE_FIRST_BYTES, b))
+                    && instance.bytes().all(|b| in_class(INSTANCE_BYTES, b))
             });
         if !valid {
             return Err(OpError::new(
