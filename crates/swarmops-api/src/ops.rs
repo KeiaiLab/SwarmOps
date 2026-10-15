@@ -7,7 +7,8 @@
 //! which is always written). Ids are lowercase hex. A response that could grow without bound is
 //! capped by its request (`max_bytes`, `limit`, `max_changes`) and says when it was cut
 //! (`truncated`, `changes_truncated`); `read_tree` and `log` also return a `cursor` that resumes
-//! after the page.
+//! after the page. The default page of `read_tree`, `show` and `log` stays within the operations
+//! spec's 64 KiB target for a default response (§9); `read_file`'s 1 MiB is the spec's own.
 //!
 //! No store-facing type carries a filesystem path. The two exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, and [`InitReq::path`],
@@ -32,14 +33,18 @@ use crate::rev::Rev;
 /// The default [`ReadFileReq::max_bytes`]: 1 MiB.
 pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 
-/// The default [`LogReq::limit`].
+/// The default [`LogReq::limit`]: 50 changesets, a page of about 13 KB with titles of typical
+/// length.
 pub const DEFAULT_LOG_LIMIT: usize = 50;
 
-/// The default [`ReadTreeReq::limit`].
-pub const DEFAULT_LS_LIMIT: usize = 1000;
+/// The default [`ReadTreeReq::limit`]: 500 entries. An entry prints in about 100 bytes besides
+/// its name, so a default page stays under the 64 KiB target for names of up to about 30 bytes.
+pub const DEFAULT_LS_LIMIT: usize = 500;
 
-/// The default [`ShowReq::max_changes`].
-pub const DEFAULT_MAX_CHANGES: usize = 1000;
+/// The default [`ShowReq::max_changes`]: 400 changes. A change prints in about 110 bytes
+/// besides its path, so a default page stays under the 64 KiB target for paths of up to about
+/// 50 bytes.
+pub const DEFAULT_MAX_CHANGES: usize = 400;
 
 fn default_max_bytes() -> u64 {
     DEFAULT_MAX_BYTES

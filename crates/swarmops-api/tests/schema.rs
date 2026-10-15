@@ -751,8 +751,10 @@ fn ref_moves_carry_warnings_only_when_there_are_some() {
 
 #[test]
 fn listings_page_with_truncated_and_cursor() {
-    assert_eq!(DEFAULT_LS_LIMIT, 1000);
-    assert_eq!(DEFAULT_MAX_CHANGES, 1000);
+    // Default pages within the operations spec's 64 KiB target for a default response (§9).
+    assert_eq!(DEFAULT_LS_LIMIT, 500);
+    assert_eq!(DEFAULT_MAX_CHANGES, 400);
+    assert_eq!(DEFAULT_LOG_LIMIT, 50);
     // An empty page is a mistake: limits start at 1, and 0 is `E_INVALID_ARG`.
     let all = schema_for_all();
     for (name, field) in [

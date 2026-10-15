@@ -1520,7 +1520,7 @@ expression: s.redact(&all)
           ]
         },
         "limit": {
-          "default": 1000,
+          "default": 500,
           "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
           "format": "uint",
           "minimum": 1,
@@ -1796,7 +1796,7 @@ expression: s.redact(&all)
       "description": "`show`: one changeset in full.",
       "properties": {
         "max_changes": {
-          "default": 1000,
+          "default": 400,
           "description": "The most entries of `changes` to return: at least 1 (0 is `E_INVALID_ARG`).",
           "format": "uint",
           "minimum": 1,
