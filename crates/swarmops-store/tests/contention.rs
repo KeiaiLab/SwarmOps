@@ -1,6 +1,5 @@
 //! 32 writer processes on one native metadata store: how write transactions queue on
-//! `meta/lock`, which [`swarmops_store::MetaLock`] waits for in the kernel's flock queue
-//! (docs/perf.md "M1 store level").
+//! `meta/lock` (docs/perf.md, "M1 store level").
 //!
 //! Ignored, since it runs minutes of fsync'd transactions: `just check-slow` runs it, and
 //! `cargo nextest run --release -p swarmops-store --run-ignored all --test contention
@@ -10,15 +9,11 @@
 //! on a store in a fresh temporary directory under `SWARMOPS_BENCH_DIR` (default
 //! `~/.local/state/swarmops-bench`, on the native filesystem). Each child opens the store,
 //! says it is ready, and waits until the parent, once all are ready, says go; then it runs
-//! [`PER_CHILD`] write transactions back to back, each inserting the next changeset of a chain
-//! of its own and committing it, with the default 10 s lock timeout (a `Busy` is counted, and
-//! the transaction tried again). [`PAUSE`] puts a pause between two transactions of a child,
-//! as an agent leaves at least a process start between two commits. With the lock Task 7a
-//! measured, which polled `try_lock` every 10 ms, the test failed either way, as docs/perf.md
-//! records: back to back, the writer that released the lock took it again before the pollers
-//! woke, so the others starved and met `Busy`; 2 ms apart, the lock went to whichever poller
-//! woke first, and some still waited out the timeout. The kernel's queue wakes the waiters the
-//! moment the lock is released. For every transaction a child times
+//! [`PER_CHILD`] write transactions back to back, as a writer that loops does, each inserting
+//! the next changeset of a chain of its own and committing it, with the default 10 s lock
+//! timeout: a `Busy` is counted and the transaction tried again. [`PAUSE`] puts a pause
+//! between two transactions of a child, as an agent leaves at least a process start between
+//! two commits. For every transaction a child times
 //!
 //! - the transaction: from calling [`MetaStore::write`] until `commit` returns;
 //! - the lock wait: until [`MetaStore::write`] returns, which is the wait for `meta/lock`
@@ -30,12 +25,19 @@
 //! `write`s' cost; then it checks the store as `verify` would (every changeset there, each
 //! chain intact, one frame per transaction, and the seqs contiguous in journal order), prints
 //! what an uncontended transaction costs, and asserts last that no child met `Busy`.
+//!
+//! Nothing in it waits forever, whatever the lock does. A child gives up at its
+//! [`MAX_BUSY_IN_A_ROW`]th `Busy` in a row, and past [`CHILD_DEADLINE`]; the parent fails the
+//! test as soon as a child fails, and waits for the children only until [`PARENT_DEADLINE`];
+//! and whatever ends the test early, [`Children`] kills and reaps every child still running.
+
+#[path = "../benches/common/mod.rs"]
+mod common;
 
 use std::fmt::Write as _;
-use std::fs;
-use std::io::Read;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -45,6 +47,8 @@ use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::{
     ChangesetMeta, Frame, InsertOutcome, Journal, Layout, MetaStore, RealFs, Record, StoreError,
 };
+
+use crate::common::base_dir;
 
 /// How many writer processes the test runs.
 const CHILDREN: u64 = 32;
@@ -59,7 +63,8 @@ const TOTAL: u64 = CHILDREN * PER_CHILD;
 const TEST: &str = "thirty_two_processes_thousand_transactions_each";
 
 /// Set only in the children: the work directory, which holds the store (`store/`), the
-/// barrier files (`ready-<n>`, `go`) and the children's samples (`samples-<n>`).
+/// barrier files (`ready-<n>`, `go`), the children's samples (`samples-<n>`) and their output
+/// (`stdout-<n>`, `stderr-<n>`).
 const WORK_DIR: &str = "SWARMOPS_TEST_CONTENTION_DIR";
 
 /// Set with [`WORK_DIR`]: the child's number, from 0, which is also its chain's.
@@ -71,23 +76,24 @@ const PAUSE: &str = "SWARMOPS_TEST_CONTENTION_PAUSE_US";
 /// How a child's summary line starts.
 const SUMMARY: &str = "{\"child\":";
 
+/// At how many `Busy` errors in a row (the transaction tried again after each) a child gives
+/// up: 5 minutes at the default 10 s lock timeout.
+const MAX_BUSY_IN_A_ROW: u64 = 30;
+
+/// How long after the go a child may still start a transaction: three times what a whole run
+/// takes on this host.
+const CHILD_DEADLINE: Duration = Duration::from_mins(15);
+
+/// How long after the go the parent waits for the children before it kills them: a child's
+/// deadline, one more transaction that meets every `Busy` it may at 10 s each, and a minute.
+const PARENT_DEADLINE: Duration =
+    CHILD_DEADLINE.saturating_add(Duration::from_secs(MAX_BUSY_IN_A_ROW * 10 + 60));
+
 /// How many uncontended `write`s, and transactions, the parent times once the children are done.
 const SOLO: u64 = 100;
 
 /// How long a process waits at the barrier before it gives up.
 const BARRIER_TIMEOUT: Duration = Duration::from_secs(120);
-
-fn base_dir() -> PathBuf {
-    let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").expect("HOME is set");
-            PathBuf::from(home).join(".local/state/swarmops-bench")
-        },
-        PathBuf::from,
-    );
-    fs::create_dir_all(&dir).expect("create bench base dir");
-    dir
-}
 
 fn store_root(work: &Path) -> Utf8PathBuf {
     Utf8PathBuf::from_path_buf(work.join("store")).expect("UTF-8 work dir")
@@ -186,6 +192,7 @@ fn child(work: &Path, number: u64) {
     wait_for(&work.join("go"));
     let pause = pause();
     let started = Instant::now();
+    let deadline = started + CHILD_DEADLINE;
     let capacity = usize::try_from(PER_CHILD).expect("PER_CHILD fits in usize");
     let (mut transactions, mut waits) =
         (Vec::with_capacity(capacity), Vec::with_capacity(capacity));
@@ -194,12 +201,24 @@ fn child(work: &Path, number: u64) {
         if j > 0 && !pause.is_zero() {
             thread::sleep(pause);
         }
+        assert!(
+            Instant::now() < deadline,
+            "child {number}: transaction {j} not started {CHILD_DEADLINE:?} after the go"
+        );
         let meta = changeset(number, j);
         let begun = Instant::now();
+        let mut in_a_row = 0;
         let mut write = loop {
             match store.write() {
                 Ok(write) => break write,
-                Err(StoreError::Busy) => busy += 1,
+                Err(StoreError::Busy) => {
+                    busy += 1;
+                    in_a_row += 1;
+                    assert!(
+                        in_a_row < MAX_BUSY_IN_A_ROW,
+                        "child {number}, transaction {j}: Busy {in_a_row} times in a row"
+                    );
+                }
                 Err(err) => panic!("child {number}, transaction {j}: {err}"),
             }
         };
@@ -248,35 +267,62 @@ fn field(line: &str, name: &str) -> u64 {
         .unwrap_or_else(|_| panic!("{name} in {line} is not an integer"))
 }
 
-/// Spawns the children on the store in `work`.
-fn spawn_children(work: &Path) -> Vec<Child> {
+/// The children, killed and reaped if still running when this drops: whatever ends the test
+/// early (a panic, a failed spawn, a missed deadline), no child outlives it.
+struct Children(Vec<Child>);
+
+impl Drop for Children {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            // A child that has exited already is reaped (or was), and is not signalled.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// The file in `work` that child `number`'s `stream` ("stdout" or "stderr") goes to.
+fn output_file(work: &Path, stream: &str, number: u64) -> PathBuf {
+    work.join(format!("{stream}-{number}"))
+}
+
+/// What child `number` wrote to `stream`.
+fn output(work: &Path, stream: &str, number: u64) -> String {
+    fs::read_to_string(output_file(work, stream, number))
+        .unwrap_or_else(|e| format!("({stream} of child {number} unreadable: {e})"))
+}
+
+/// Spawns the children on the store in `work`, each writing its stdout and stderr to files
+/// there.
+fn spawn_children(work: &Path) -> Children {
     let exe = std::env::current_exe().expect("this test binary");
-    (0..CHILDREN)
-        .map(|number| {
-            Command::new(&exe)
-                .args(["--exact", TEST, "--ignored", "--nocapture"])
-                .env(WORK_DIR, work)
-                .env(CHILD_NUMBER, number.to_string())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn a child")
-        })
-        .collect()
+    let mut children = Children(Vec::new());
+    for number in 0..CHILDREN {
+        let file = |stream| {
+            File::create(output_file(work, stream, number)).expect("create a child's output file")
+        };
+        let child = Command::new(&exe)
+            .args(["--exact", TEST, "--ignored", "--nocapture"])
+            .env(WORK_DIR, work)
+            .env(CHILD_NUMBER, number.to_string())
+            .stdout(file("stdout"))
+            .stderr(file("stderr"))
+            .spawn()
+            .expect("spawn a child");
+        children.0.push(child);
+    }
+    children
 }
 
 /// Waits until every child is ready; a child that exits first fails the test with its
 /// stderr.
-fn wait_until_ready(work: &Path, children: &mut [Child]) {
+fn wait_until_ready(work: &Path, children: &mut Children) {
     let deadline = Instant::now() + BARRIER_TIMEOUT;
     let ready = |number| work.join(format!("ready-{number}")).exists();
     while !(0..CHILDREN).all(ready) {
-        for (number, child) in children.iter_mut().enumerate() {
+        for (number, child) in (0..).zip(&mut children.0) {
             if let Some(status) = child.try_wait().expect("poll a child") {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    pipe.read_to_string(&mut stderr).expect("read its stderr");
-                }
+                let stderr = output(work, "stderr", number);
                 panic!("child {number} exited before it was ready: {status}\n{stderr}");
             }
         }
@@ -285,16 +331,37 @@ fn wait_until_ready(work: &Path, children: &mut [Child]) {
     }
 }
 
-/// The summary line a child printed, after asserting that it exited cleanly.
-#[track_caller]
-fn summary(number: usize, output: &Output) -> String {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        output.status.success(),
-        "child {number}: {:?}\n--- stdout ---\n{stdout}\n--- stderr ---\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr),
-    );
+/// Waits until every child has exited cleanly. A child that fails fails the test at once,
+/// with its output, and so do children still running at `deadline`; the guard then kills the
+/// rest.
+fn wait_for_children(work: &Path, children: &mut Children, deadline: Instant) {
+    loop {
+        let mut running = Vec::new();
+        for (number, child) in (0..).zip(&mut children.0) {
+            match child.try_wait().expect("poll a child") {
+                None => running.push(number),
+                Some(status) if status.success() => {}
+                Some(status) => panic!(
+                    "child {number}: {status}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                    output(work, "stdout", number),
+                    output(work, "stderr", number),
+                ),
+            }
+        }
+        if running.is_empty() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "children {running:?} still running {PARENT_DEADLINE:?} after the go"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The summary line child `number` printed.
+fn summary(work: &Path, number: u64) -> String {
+    let stdout = output(work, "stdout", number);
     stdout
         .lines()
         .find(|line| line.starts_with(SUMMARY))
@@ -324,15 +391,9 @@ fn run_children(work: &Path) -> (Vec<String>, Duration) {
     wait_until_ready(work, &mut children);
     let started = Instant::now();
     fs::write(work.join("go"), b"").expect("say go");
-    let outputs: Vec<Output> = children
-        .into_iter()
-        .map(|child| child.wait_with_output().expect("wait for a child"))
-        .collect();
+    wait_for_children(work, &mut children, started + PARENT_DEADLINE);
     let wall = started.elapsed();
-    let lines = (0..)
-        .zip(&outputs)
-        .map(|(number, output)| summary(number, output))
-        .collect();
+    let lines = (0..CHILDREN).map(|number| summary(work, number)).collect();
     (lines, wall)
 }
 
@@ -482,7 +543,7 @@ fn print_uncontended_transaction(store: &MetaStore) {
 }
 
 #[test]
-#[ignore = "measurement, ~6 min: 32 processes x 1,000 fsync'd write transactions; prints the table docs/perf.md cites"]
+#[ignore = "measurement, ~5 min: 32 processes x 1,000 fsync'd write transactions; prints the table docs/perf.md cites"]
 fn thirty_two_processes_thousand_transactions_each() {
     if let Some((work, number)) = child_env() {
         child(&work, number);

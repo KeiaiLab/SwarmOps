@@ -26,7 +26,7 @@ Criterion means for the same variants: 49 µs, 4.07 ms, 4.01 ms, 8.81 ms (consis
 
 The store-level half of the M1 Task 7 experiments; the CLI-level contention test follows with the CLI. Same host as M0: WSL2 (kernel 5.15.153.1), ext4 (`data=ordered`) on the virtual disk `/dev/sdd`, AMD Ryzen 9 7950X3D (16 cores, 32 threads), 106 GiB RAM; Rust 1.99.0, optimized builds (`cargo bench`; the contention test with `--release`). Every store lives in a fresh temporary directory under `~/.local/state/swarmops-bench`.
 
-The host was not quiet. Three JetBrains remote-dev-server processes kept about 8.5 cores busy throughout, and other worktrees were compiling and testing. Before each run, the harness waited up to 10 minutes for the 1-minute load average to drop below 8. It did so three times, before `put_batch` runs 1, 2 and 4; every other run started at load 8.5–17. Each table gives the load at the start of each run, and the range sampled every 15 s during it. Threads blocked in fsync count towards the load average, so the I/O-bound runs raise it themselves. Every measurement ran twice. Where the two runs agree within 20 % the better one is shown; otherwise both are.
+The host was not quiet. Three JetBrains remote-dev-server processes kept about 8.5 cores busy throughout, and other worktrees were compiling and testing. Before each run, the harness waited up to 10 minutes for the 1-minute load average to drop below 8. It did so three times, before `put_batch` runs 1, 2 and 4; every other run started at load 8.5–20.1. Each table gives the load at the start of each run, and the range sampled every 15 s during it. Threads blocked in fsync count towards the load average, so the I/O-bound runs raise it themselves. Every measurement ran twice. Where the two runs agree within 20 % the better one is shown; otherwise both are.
 
 ### `put_batch` fsync scaling
 
@@ -43,18 +43,20 @@ The "busy writer" variants keep a thread appending 64 bytes to a file of its own
 | 8 | 234 ms | 1,094 | 4.3× | 790 ms | 324 | 2.0× | 228 ms | 1,125 | 4.4× |
 | 32 | 69.8 ms | 3,666 | 14.5× | 632 ms | 405 | 2.5× | 67.0 ms | 3,823 | 14.8× |
 
-`flush` alone, after a 256-object batch: 4.1 ms, and 571 ms with the busy writer.
+The "vs 1" ratios divide each cell's better run. Run by run (run 3 / run 4), 32 threads against 1 give 13.8× / 14.6× for `put_batch` + `flush`, 2.56× / 2.45× with the busy writer, and 14.9× / 13.2× for `put_batch` alone; 8 threads against 1 give 4.3× / 4.3×, 2.0× / 2.0× and 4.4× / 4.4×.
+
+`flush` alone, after a 256-object batch: 4.1 ms (4.2 / 4.1 ms), and 571 ms with the busy writer (571 / 580 ms).
 
 Runs 1 and 2 came before the busy-writer variants existed, and the host put them in different regimes. They disagree, so both count:
 
-| run | load at start (range) | 32 threads, `put_batch` + `flush` | 1 thread | `flush` alone, median |
-|---|---|---|---|---|
-| 1 | 7.7 (7.5–21.4) | 587 ms | 1,174 ms | 412 ms, its samples spread from 4 ms to 568 ms |
-| 2 | 7.6 (7.6–29.7) | 77 ms | 1,003 ms | 31 ms |
+| run | load at start (range) | 32 threads, `put_batch` + `flush` | 8 threads | 1 thread | `flush` alone, median |
+|---|---|---|---|---|---|
+| 1 | 7.7 (7.5–21.4) | 587 ms | 872 ms | 1,174 ms | 412 ms, its samples spread from 4 ms to 568 ms |
+| 2 | 7.6 (7.6–29.7) | 77 ms | 250 ms | 1,003 ms | 31 ms |
 
 The per-object fsyncs scale: 14.8× on 32 threads, because the virtual disk and ext4's journal commit concurrent fsyncs together. `flush` scales only when nothing else is writing to the filesystem. On this kernel, a directory fsync becomes a full journal commit of its own whenever any process has metadata pending on the filesystem. That happens even for a directory that has not changed.
 
-A side check bears this out. 162 fsyncs of unchanged directories took 0.1 ms on a quiet filesystem. With one shell loop appending to a file, they took 567–616 ms over 5 rounds, every fsync a 3.7 ms commit. The same fsyncs issued from 32 threads took 44–47 ms.
+A side check bears this out (the two scripts are in the appendix below; the load was 11–12 throughout). 162 fsyncs of unchanged directories took 0.1 ms per round on a quiet filesystem. With one shell loop appending to a file, they took 567–616 ms per round over 5 rounds, every fsync a 3.7 ms commit (p50). The same fsyncs issued from 32 threads took 44–47 ms, against 567–585 ms serially in the same session.
 
 So on a busy host a commit's `flush` costs about 3.5 ms per touched fan-out directory: 571 ms for 256 objects. That breaks the "≤ 5 ms + 0.3 ms per changed file" commit target, which is 82 ms for 256 files, although `put_batch` alone on 32 threads (67 ms) meets it.
 
@@ -71,7 +73,7 @@ So on a busy host a commit's `flush` costs about 3.5 ms per touched fan-out dire
 | 200,000 | compacted | 7.1 µs | 6.6 µs | 7.7 µs | 7.6 µs |
 | 200,000 | 1,000-record tail | 8.2 µs | 8.5 µs | 10.9 µs | 8.9 µs |
 
-The one cell with two values is where the runs differ by more than 20 % (run 1 / run 2). Every lookup takes under 11 µs, so the spec's read target (< 1 ms) holds by two orders of magnitude, at 200,000 changesets as at 10,000. A lookup is about log2 n `read_at`s of one 32-byte key (14 at 10,000, 18 at 200,000), so going from 10,000 to 200,000 changesets adds about 2 µs. A full tail adds 0.5–3.2 µs: one 32 KiB `read_at` and a linear scan. `find_prefix` pays the tail scan even when the sorted view holds the match. `find` miss is what every insert of a new changeset asks, under the lock.
+The one cell with two values is where the runs differ by more than 20 % (run 1 / run 2). Run once more on the integration branch, where the bench lays the index out with `Index::create` (`Index::open` creates nothing), at load 23.7 (21.9–27.4 during the run): every median within 12 % of the value shown. Every lookup takes under 11 µs, so the spec's read target (< 1 ms) holds by two orders of magnitude, at 200,000 changesets as at 10,000. A lookup is about log2 n `read_at`s of one 32-byte key (14 at 10,000, 18 at 200,000), so going from 10,000 to 200,000 changesets adds about 2 µs. A full tail adds 0.5–3.2 µs: one 32 KiB `read_at` and a linear scan. `find_prefix` pays the tail scan even when the sorted view holds the match. `find` miss is what every insert of a new changeset asks, under the lock.
 
 ### fsync fan-out (`Index::sync`)
 
@@ -111,7 +113,7 @@ Serial costs five fsyncs (5 × 3.8 ms). Parallel costs about two, because ext4 c
 | child total time min / max (spread) | 121.6 / 264.8 s (2.18×) | 144.6 / 291.3 s (2.01×) | 269.8 / 320.8 s (1.19×) | 258.6 / 281.7 s (1.09×) |
 | test | fails (`Busy`) | fails (`Busy`) | fails (`Busy`) | passes |
 
-The two runs of each pacing disagree by more than 20 % on max and on the `Busy` count, so all four are shown. Under `just check-slow` (unoptimized, beside the other slow tests, load about 14) the default run failed the same way: 270 `Busy`, p99 lock wait 8.45 s, max 49.7 s, spread 1.47×, and 111 transactions/s.
+The two runs of each pacing disagree by more than 20 % on max and on the `Busy` count, so all four are shown. Under `just check-slow` (unoptimized, beside the other slow tests) the default run failed the same way, twice. The first gate run started at load 14.8: 270 `Busy`, p99 lock wait 8.45 s, max 49.7 s, spread 1.47× and 111.0 transactions/s. The run on the final commit of the measurement started at load 12.9: 260 `Busy`, p99 lock wait 8.11 s, max 40.7 s, spread 1.55× and 108.6 transactions/s. Neither gate run sampled the load during the run.
 
 The journal at the end of every run holds the same:
 
@@ -133,12 +135,13 @@ What differs is who waits, and `MetaLock`'s poll makes that unfair. A writer tha
 
 So the spec's "32 processes are serialized fairly by the flock queue" does not hold for this lock. Nor does the plan's "Busy only after the 10 s lock timeout, 0 failures": `Busy` comes at either pacing.
 
-Side experiment (not in the repo; the program is in the Task 7a report): 32 processes × 300 transactions, each two small appends with `sync_data` under the lock, taken either by std's `File::try_lock` every 10 ms (`MetaLock` today) or by the blocking `File::lock` (`flock(LOCK_EX)`).
+Side experiment (the program is in the appendix below): 32 processes × 300 transactions, each two small appends with `sync_data` under the lock, taken either by std's `File::try_lock` every 10 ms (what `MetaLock` did when these runs were made) or by the blocking `File::lock` (`flock(LOCK_EX)`).
 
-Each cell gives run 1 and run 2. The load at the start of the six runs was 8.6, 20.1, 18.2, 14.0, 14.7 and 12.3. The controller ruled that these side runs not wait for it.
+Each cell gives run 1 / run 2, and the first row the load at the start of each. These runs did not wait for the load to drop, and nobody sampled it during them.
 
 | | `try_lock` every 10 ms, back to back | `File::lock`, back to back | `File::lock`, 2 ms apart |
 |---|---|---|---|
+| load at start | 8.6 / 14.0 | 20.1 / 14.7 | 18.2 / 12.3 |
 | transactions/s | 93.6 / 125.2 | 122.1 / 135.6 | 120.8 / 132.5 |
 | lock wait p50 | 0.01 / 0.01 ms | 0.01 / 0.01 ms | 226 / 225 ms |
 | lock wait p99 | 8.66 / 7.16 s | 1.06 / 0.80 s | 0.78 / 0.34 s |
@@ -152,18 +155,192 @@ A blocking `flock` wakes a waiter the moment the lock is released. That removes 
 
 ### Decisions
 
-The controller decides what changes, and in which task.
-
-- **(a) `--durability fast`: recommended to reconsider in M2.** The rule: reconsider it if 32-way `put_batch` throughput is below 4× the 1-way.
-  - `put_batch` + `flush` on 32 threads against 1 reaches 14.5× (3,666 against 253 objects/s) while nothing else writes to the filesystem.
-  - It reaches only 2.5× (405 against 161 objects/s) with another writer, which is the normal state of a swarm host. That is below 4×.
-  - What to reconsider follows from the same data. The per-object fsyncs, which a fast mode would skip, scale 14.8×. The shortfall is `flush`'s serial directory fsyncs: 571 of the 632 ms. A fast mode that skips object fsyncs would leave those in place.
-  - Issuing the directory fsyncs in parallel keeps full durability, and took 162 of them from 575 ms to 45 ms in the side check. Try that first.
+- **(a) `--durability fast`: not justified by this data; parallel directory fsyncs in `flush` come first.** The rule: reconsider the flag if 32-way `put_batch` throughput is below 4× the 1-way.
+  - The trigger is met only with another writer on the filesystem, which is the normal state of a swarm host: `put_batch` + `flush` on 32 threads against 1 then reaches 2.5× (405 against 161 objects/s; 2.56× and 2.45× in runs 3 and 4), below 4×. While nothing else writes it reaches 14.5× (3,666 against 253 objects/s; 13.8× and 14.6×).
+  - The shortfall is not what a fast mode would skip. The per-object fsyncs scale 14.8× (14.9× and 13.2×); `flush`'s serial directory fsyncs take 571 of the 632 ms. A fast mode that skipped the object fsyncs would leave those in place.
+  - Issuing the directory fsyncs in parallel keeps full durability, and took 162 of them from 575 ms to 45 ms in the side check. That comes first, and this data does not justify a `--durability fast` flag, which exists only with a measurement here that does.
 - **(b) Parallel `Index::sync()`: recommended.** The rule: only if five parallel fsyncs are at least 2× faster than serial.
   - Measured: 7.5 ms against 18.8 ms, 2.5× (2.48× and 2.97× in the two runs).
   - It saves about 11 ms at every batched sync (every 32nd transaction, and before each compaction), all of it time under the lock.
-- **(c) A blocking lock instead of polling: recommended.** The rule: if the fairness spread exceeds 2× or the p99 lock wait exceeds 1 s.
-  - Back to back: p99 lock wait 8.2 s and 9.4 s, spread 2.18× and 2.01×, and 386 and 427 `Busy`, so both criteria are exceeded.
+- **(c) A blocking lock instead of polling: recommended.** The rule: if the fairness spread exceeds 2× or the p99 lock wait exceeds 1 s. The p99 lock wait carries the decision: it exceeds 1 s in every run, while the spread exceeds 2× only in back-to-back runs 1 and 2.
+  - Back to back: p99 lock wait 8.2 s and 9.4 s, spread 2.18× and 2.01×, and 386 and 427 `Busy`, so both criteria are exceeded. The third back-to-back run (p99 9.3 s, spread 1.74×) and the two `just check-slow` runs (p99 8.5 s and 8.1 s, spreads 1.47× and 1.55×) exceed the p99 criterion alone.
   - 2 ms apart: p99 2.3 s and 1.9 s, with spread 1.19× and 1.09×. The p99 criterion is still exceeded, and `Busy` still occurs.
   - At 2 ms apart the spread understates the problem: over a whole run the lottery evens out, so every child finishes close to the others while single waits run to seconds. The wait tail is the indicator.
   - The side experiment says the change works: with the blocking `File::lock`, `Busy` disappears, and the p99 wait drops from 7–9 s to 0.8–1.1 s back to back and to 0.3–0.8 s 2 ms apart. The 10 s timeout can stay, with a thread that blocks in `File::lock` while the caller waits for it with a timeout; these runs never came near it. A strictly fair order for a writer that loops (a bulk import) needs a FIFO handoff on top of it.
+
+### Appendix: the side-experiment programs
+
+The side experiments above ran outside the workspace; here they are, so that they can be run again.
+
+**Directory fsyncs** (Python 3). `python3 dirsync.py <dir>` times 162 fsyncs of unchanged directories in a fresh directory under `<dir>`, in 5 rounds; `python3 dirsync_par.py <dir>` times the same serially and from 32 threads. For the busy case, a shell loop appended to a file on the same filesystem meanwhile (`while :; do echo x >> f; done`).
+
+`dirsync.py`:
+
+```python
+"""Times fsync of directories that have not changed: 162 in a row, 5 rounds."""
+import os
+import sys
+import tempfile
+import time
+
+base = sys.argv[1]
+with tempfile.TemporaryDirectory(dir=base) as d:
+    dirs = [os.path.join(d, f"{i:02x}") for i in range(162)]
+    for p in dirs:
+        os.mkdir(p)
+    fd = os.open(d, os.O_RDONLY)
+    os.fsync(fd)
+    os.close(fd)
+    for rnd in range(5):
+        times = []
+        for p in dirs:
+            fd = os.open(p, os.O_RDONLY)
+            t = time.perf_counter()
+            os.fsync(fd)
+            times.append(time.perf_counter() - t)
+            os.close(fd)
+        times.sort()
+        print(f"round {rnd}: total {sum(times)*1e3:.1f} ms, per fsync p50 {times[81]*1e6:.0f} us, "
+              f"p90 {times[145]*1e6:.0f} us, max {times[-1]*1e6:.0f} us, "
+              f"{sum(1 for x in times if x > 1e-3)} of 162 over 1 ms")
+```
+
+`dirsync_par.py`:
+
+```python
+"""Times fsync of 162 unchanged directories, serially and from 32 threads (5 rounds each)."""
+import os
+import sys
+import tempfile
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+base = sys.argv[1]
+
+
+def sync(p):
+    fd = os.open(p, os.O_RDONLY)
+    os.fsync(fd)
+    os.close(fd)
+
+
+with tempfile.TemporaryDirectory(dir=base) as d, ThreadPoolExecutor(32) as pool:
+    dirs = [os.path.join(d, f"{i:02x}") for i in range(162)]
+    for p in dirs:
+        os.mkdir(p)
+    sync(d)
+    for mode in ("serial", "32 threads"):
+        totals = []
+        for _ in range(5):
+            t = time.perf_counter()
+            if mode == "serial":
+                for p in dirs:
+                    sync(p)
+            else:
+                list(pool.map(sync, dirs))
+            totals.append((time.perf_counter() - t) * 1e3)
+        print(f"{mode}: 162 directory fsyncs take " + ", ".join(f"{x:.1f}" for x in totals) + " ms")
+```
+
+**Lock fairness** (Rust, std only). Built with `rustc --edition 2024 -O flock_fairness.rs`, and run as `flock_fairness <dir> <poll|block> 32 300 <pause-us>`.
+
+```rust
+//! Side experiment for decision (c), in Rust with std's file locks (what MetaLock uses).
+//! usage: flock_fairness <dir> <poll|block> <processes> <per-process> <pause-us>
+//! Each process runs <per-process> transactions: open <dir>/lock, take it (poll: try_lock every
+//! 10 ms, a Busy counted after 10 s and the wait restarted; block: File::lock), append + sync_data
+//! 120 B to journal.log and 8 B to journal.off, unlock (drop). Pause between transactions.
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+fn append(path: &Path, bytes: &[u8]) {
+    let mut f = OpenOptions::new().append(true).create(true).open(path).unwrap();
+    f.write_all(bytes).unwrap();
+    f.sync_data().unwrap();
+}
+
+fn child(dir: &Path, mode: &str, per: u64, pause: Duration) {
+    while !dir.join("go").exists() {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let started = Instant::now();
+    let mut waits = Vec::new();
+    let mut busy = 0;
+    for i in 0..per {
+        if i > 0 && !pause.is_zero() {
+            std::thread::sleep(pause);
+        }
+        let begun = Instant::now();
+        let lock = OpenOptions::new().write(true).create(true).truncate(false).open(dir.join("lock")).unwrap();
+        if mode == "poll" {
+            let mut deadline = begun + Duration::from_secs(10);
+            loop {
+                match lock.try_lock() {
+                    Ok(()) => break,
+                    Err(TryLockError::WouldBlock) => {}
+                    Err(TryLockError::Error(e)) => panic!("{e}"),
+                }
+                let now = Instant::now();
+                if now >= deadline {
+                    busy += 1;
+                    deadline = now + Duration::from_secs(10);
+                }
+                std::thread::sleep(Duration::from_millis(10).min(deadline - now));
+            }
+        } else {
+            lock.lock().unwrap();
+        }
+        waits.push(begun.elapsed().as_micros());
+        append(&dir.join("journal.log"), &[0x78; 120]);
+        append(&dir.join("journal.off"), &[0x79; 8]);
+        let _ = lock.unlock();
+        drop(lock);
+    }
+    let total = started.elapsed().as_micros();
+    let w: Vec<String> = waits.iter().map(u128::to_string).collect();
+    println!("{total} {busy} {}", w.join(","));
+}
+
+fn pct(sorted: &[u128], p: usize) -> u128 {
+    let rank = (sorted.len() * p).div_ceil(100).max(1);
+    sorted[rank - 1]
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let dir = PathBuf::from(&args[1]);
+    let (mode, procs, per, pause_us) = (&args[2], args[3].parse::<u64>().unwrap(), args[4].parse::<u64>().unwrap(), args[5].parse::<u64>().unwrap());
+    if std::env::var_os("FLOCK_CHILD").is_some() {
+        child(&dir, mode, per, Duration::from_micros(pause_us));
+        return;
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let children: Vec<_> = (0..procs)
+        .map(|_| Command::new(&exe).args(&args[1..]).env("FLOCK_CHILD", "1").stdout(Stdio::piped()).spawn().unwrap())
+        .collect();
+    std::thread::sleep(Duration::from_millis(500));
+    let started = Instant::now();
+    File::create(dir.join("go")).unwrap();
+    let outs: Vec<String> = children.into_iter().map(|c| String::from_utf8(c.wait_with_output().unwrap().stdout).unwrap()).collect();
+    let wall = started.elapsed().as_secs_f64();
+    let (mut waits, mut totals, mut busy) = (Vec::new(), Vec::new(), 0);
+    for out in &outs {
+        let mut parts = out.trim().split(' ');
+        totals.push(parts.next().unwrap().parse::<u128>().unwrap());
+        busy += parts.next().unwrap().parse::<u64>().unwrap();
+        waits.extend(parts.next().unwrap().split(',').map(|w| w.parse::<u128>().unwrap()));
+    }
+    waits.sort_unstable();
+    let (min, max) = (*totals.iter().min().unwrap(), *totals.iter().max().unwrap());
+    println!(
+        "mode={mode} procs={procs} per={per} pause={pause_us}us: wall {wall:.1} s, {:.1} txn/s, Busy {busy}; lock wait p50 {:.2} ms p99 {:.1} ms max {:.1} ms; spread {:.2}x (min {:.1} s, max {:.1} s)",
+        (procs * per) as f64 / wall,
+        pct(&waits, 50) as f64 / 1e3, pct(&waits, 99) as f64 / 1e3, *waits.last().unwrap() as f64 / 1e3,
+        max as f64 / min as f64, min as f64 / 1e6, max as f64 / 1e6
+    );
+}
+```

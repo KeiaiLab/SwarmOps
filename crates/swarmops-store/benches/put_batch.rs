@@ -25,9 +25,11 @@
 //!
 //! Throughput is reported in objects per second; docs/perf.md cites criterion's median.
 
+mod common;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -41,6 +43,8 @@ use swarmops_core::ObjectKind;
 use swarmops_store::{FsObjectStore, Layout, ObjectStore, RealFs};
 use tempfile::{NamedTempFile, TempDir};
 
+use crate::common::{base_dir, mix};
+
 /// Objects per iteration.
 const OBJECTS: u64 = 256;
 
@@ -49,26 +53,6 @@ const WORDS: u64 = 512;
 
 /// The pool sizes measured.
 const THREADS: [usize; 3] = [1, 8, 32];
-
-fn base_dir() -> PathBuf {
-    let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").expect("HOME is set");
-            PathBuf::from(home).join(".local/state/swarmops-bench")
-        },
-        PathBuf::from,
-    );
-    fs::create_dir_all(&dir).expect("create bench base dir");
-    dir
-}
-
-/// SplitMix64's output function: a bijection on `u64` that scatters its input.
-fn mix(n: u64) -> u64 {
-    let mut z = n.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
 
 /// The next 256 payloads of the run: object `n` of the run holds `mix` of the words
 /// `n × 512 ..`, so no two objects are alike.

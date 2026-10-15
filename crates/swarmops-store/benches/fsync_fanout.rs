@@ -13,7 +13,9 @@
 //!
 //! Each variant runs in a directory of its own; docs/perf.md cites criterion's median.
 
-use std::fs::{self, File, OpenOptions};
+mod common;
+
+use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -22,28 +24,10 @@ use std::time::{Duration, Instant};
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
 
+use crate::common::{base_dir, mix};
+
 /// New bytes appended to every file before each iteration, in 8-byte words (64 KiB).
 const WORDS: u64 = 8 * 1024;
-
-fn base_dir() -> PathBuf {
-    let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").expect("HOME is set");
-            PathBuf::from(home).join(".local/state/swarmops-bench")
-        },
-        PathBuf::from,
-    );
-    fs::create_dir_all(&dir).expect("create bench base dir");
-    dir
-}
-
-/// SplitMix64's output function: a bijection on `u64` that scatters its input.
-fn mix(n: u64) -> u64 {
-    let mut z = n.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
 
 /// Files in a fresh directory, each kept open for appending.
 struct Files {

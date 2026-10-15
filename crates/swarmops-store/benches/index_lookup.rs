@@ -20,9 +20,10 @@
 //! Each lookup cycles through 1,024 targets in a scattered order. The parameter is the
 //! index's size; docs/perf.md cites criterion's median as the p50 per lookup.
 
-use std::fs;
+mod common;
+
 use std::hint::black_box;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,6 +34,8 @@ use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::{ChangesetMeta, Index, Layout, RealFs};
 use tempfile::TempDir;
 
+use crate::common::{base_dir, mix};
+
 /// The index sizes measured, in changesets.
 const SIZES: [u64; 3] = [10_000, 100_000, 200_000];
 
@@ -41,26 +44,6 @@ const TAIL: u64 = 1_000;
 
 /// How many targets each lookup cycles through.
 const TARGETS: u64 = 1_024;
-
-fn base_dir() -> PathBuf {
-    let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").expect("HOME is set");
-            PathBuf::from(home).join(".local/state/swarmops-bench")
-        },
-        PathBuf::from,
-    );
-    fs::create_dir_all(&dir).expect("create bench base dir");
-    dir
-}
-
-/// SplitMix64's output function: a bijection on `u64` that scatters its input.
-fn mix(n: u64) -> u64 {
-    let mut z = n.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
 
 /// The id of changeset `n`.
 fn id(n: u64) -> ChangesetId {
@@ -85,10 +68,12 @@ fn changeset(n: u64) -> ChangesetMeta {
 
 /// An index of changesets `0..size` in a fresh directory under `base`: the first
 /// `size - TAIL` compacted into the sorted views, the last [`TAIL`] in the tail, all synced.
+/// [`Index::create`] lays its files out, as a store's create does ([`Index::open`] creates
+/// nothing).
 fn build(base: &Path, size: u64) -> (TempDir, Index) {
     let dir = tempfile::tempdir_in(base).expect("create store dir");
     let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("UTF-8 store dir");
-    let mut index = Index::open(&Layout::new(root), Arc::new(RealFs)).expect("open index");
+    let mut index = Index::create(&Layout::new(root), Arc::new(RealFs)).expect("create index");
     for n in 0..size - TAIL {
         index.append(&changeset(n)).expect("append");
     }
