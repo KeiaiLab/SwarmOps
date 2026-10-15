@@ -373,7 +373,10 @@ fn default_fs() -> (Arc<dyn FsOps>, bool) {
 /// parent is synced: the directories above it that the crashed create may have made are not
 /// known any more. That is enough on the filesystems a store lives on (ext4, XFS): their
 /// journal is one ordered log for the whole filesystem, so the parent's sync commits every
-/// metadata change made before it, those directories' entries among them.
+/// metadata change made before it, those directories' entries among them. Not on btrfs, whose
+/// fsync logs what it syncs alone: there a power loss after a resumed create may take back the
+/// directories the crashed one made above the store, and the store with them; creating it
+/// again mends that, as nothing but a fresh store is at stake.
 fn native_root(store: &Utf8Path, fs: &dyn FsOps) -> Result<Utf8PathBuf, RepoError> {
     let (target, missing) = resolve(&camino::absolute_utf8(store)?)?;
     if !is_native_linux_fs(&target) {

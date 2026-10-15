@@ -541,8 +541,9 @@ fn entries(dir: &str) -> Option<Vec<String>> {
 
 #[test]
 fn create_refuses_a_path_that_leads_under_mnt_before_touching_it() {
-    // As given, the path is not under /mnt/, but it leads there: the check resolves the
-    // nearest existing ancestor, and refuses before anything is created.
+    // As given, the path is not under /mnt/, but it leads there: the check resolves it one
+    // component at a time, as the kernel will once its missing directories exist (a `..` takes
+    // back the name before it, there or not), and refuses before anything is created.
     let before = entries("/mnt");
     for (store, leads_to) in [
         ("/tmp/../mnt/x", "/mnt/x"),
