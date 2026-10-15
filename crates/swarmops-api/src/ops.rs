@@ -3,10 +3,11 @@
 //!
 //! Requests and responses alike ignore fields they do not know: the operations spec (§0) forbids
 //! `deny_unknown_fields`, so stores and clients of different versions keep working together.
-//! Absent options are omitted, never written as null. Ids are lowercase hex. A response that
-//! could grow without bound is capped by its request (`max_bytes`, `limit`, `max_changes`) and
-//! says when it was cut (`truncated`, `changes_truncated`); `ls` and `log` also return a
-//! `cursor` that resumes after the page.
+//! Absent options in these types are omitted, never written as null (unlike `OpError.hint`,
+//! which is always written). Ids are lowercase hex. A response that could grow without bound is
+//! capped by its request (`max_bytes`, `limit`, `max_changes`) and says when it was cut
+//! (`truncated`, `changes_truncated`); `ls` and `log` also return a `cursor` that resumes after
+//! the page.
 //!
 //! No store-facing type carries a filesystem path. The two exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, and [`InitReq::path`],
@@ -445,18 +446,20 @@ pub struct RefOut {
     pub version: u64,
 }
 
-/// `ref set`: move a ref, or create one, by compare-and-swap.
+/// `ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of
+/// `expected_old` and `create`; both or neither is `E_INVALID_ARG`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct RefSetReq {
     /// The ref: `main` or `release/<name>`.
     pub name: String,
     /// The revision to point it at.
     pub new: Rev,
-    /// The target the caller last saw; if the ref holds another, the move fails with
-    /// `E_CAS_MISMATCH`.
+    /// To move an existing ref: the target the caller last saw; if the ref holds another, the
+    /// move fails with `E_CAS_MISMATCH`. Give this or `create`, not both.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_old: Option<Rev>,
-    /// Create the ref; if it exists already, the move fails with `E_CAS_MISMATCH`.
+    /// To create the ref; if it exists already, the move fails with `E_CAS_MISMATCH`. Give this
+    /// or `expected_old`, not both.
     #[serde(default)]
     pub create: bool,
 }

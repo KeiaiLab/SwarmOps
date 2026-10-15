@@ -28,18 +28,22 @@ pub use rev::Rev;
 
 /// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
 ///
-/// [`Envelope`] has no entry: its `result` is an operation's response type, and its `error` and
-/// `meta` are [`OpError`] and [`Meta`], which do.
+/// [`Envelope`] is listed as `Envelope<serde_json::Value>`: its `result` is an operation's
+/// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
     macro_rules! schemas {
-        ($($ty:ident),+ $(,)?) => {
+        ($($ty:ident $(<$arg:ty>)?),+ $(,)?) => {
             serde_json::Value::Object(serde_json::Map::from_iter([
-                $((stringify!($ty).to_owned(), schemars::schema_for!($ty).to_value()),)+
+                $((
+                    stringify!($ty).to_owned(),
+                    schemars::schema_for!($ty $(<$arg>)?).to_value(),
+                ),)+
             ]))
         };
     }
     schemas![
         // Shared by every operation.
+        Envelope<serde_json::Value>,
         Rev,
         Identity,
         ErrorCode,

@@ -12,17 +12,18 @@ pub const API_VERSION: u32 = 1;
 
 /// One command's output: `result` on success, `error` on failure, `meta` either way.
 ///
-/// `Envelope::ok` and `Envelope::err` set exactly one of `result` and `error`; the other is
-/// omitted from the JSON, never written as null.
+/// Exactly one of `result` and `error` is present (`Envelope::ok` and `Envelope::err` guarantee
+/// it); the other is omitted, never written as null.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[schemars(rename = "Envelope")]
 pub struct Envelope<T> {
     /// Whether the operation succeeded.
     pub ok: bool,
     /// The operation's name, such as `commit`.
     pub op: String,
-    /// The API version: `API_VERSION`.
+    /// The API version.
     pub api: u32,
-    /// The response; present exactly when `ok`.
+    /// The operation's response; present exactly when `ok`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<T>,
     /// The failure; present exactly when not `ok`.

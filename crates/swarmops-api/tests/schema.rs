@@ -40,6 +40,7 @@ const RESPONSES: &[&str] = &[
     "ChangesetDetail",
     "ChangesetSummary",
     "CommitResp",
+    "Envelope",
     "FileContent",
     "IdentityInfo",
     "LogPage",
@@ -101,6 +102,21 @@ fn every_request_and_response_has_a_json_schema() {
     }
 }
 
+#[test]
+fn every_nested_type_is_registered_too() {
+    let all = schema_for_all();
+    let all = all.as_object().expect("an object keyed by type name");
+    for (name, schema) in all {
+        let nested = schema.get("$defs").and_then(Value::as_object);
+        for inner in nested.into_iter().flat_map(serde_json::Map::keys) {
+            assert!(
+                all.contains_key(inner),
+                "{name} uses {inner}, which schema_for_all does not register"
+            );
+        }
+    }
+}
+
 /// Pins every `StoreOps` method's name, request type and response type. Instantiated with
 /// `S = dyn StoreOps`, it also proves the trait object-safe.
 fn store_ops_signatures<S: StoreOps + ?Sized>() {
@@ -148,6 +164,9 @@ fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
         ErrorCode::Io => ("E_IO", 1, false),
         ErrorCode::Busy => ("E_BUSY", 4, true),
         ErrorCode::Internal => ("E_INTERNAL", 1, false),
+        ErrorCode::Auth => ("E_AUTH", 5, false),
+        ErrorCode::PolicyDenied => ("E_POLICY_DENIED", 5, false),
+        ErrorCode::MaintenanceBusy => ("E_MAINTENANCE_BUSY", 4, true),
     }
 }
 
@@ -183,7 +202,7 @@ fn error_codes_map_to_spec_strings_and_exits() {
                 message: "boom".to_owned(),
                 retryable,
                 exit,
-                details: Value::Null,
+                details: json!({}),
                 hint: None,
             }
         );
@@ -210,6 +229,13 @@ fn error_codes_map_to_spec_strings_and_exits() {
     assert_eq!(err.details, json!({ "actual": "c9f1" }));
     assert_eq!(err.hint.as_deref(), Some("swarmops ref list"));
     assert_eq!(err.to_string(), "E_CAS_MISMATCH: main moved");
+    // Details are never null: `Value::Null` stands for none.
+    assert_eq!(
+        OpError::new(ErrorCode::Io, "m")
+            .with_details(Value::Null)
+            .details,
+        json!({})
+    );
 }
 
 fn meta() -> Meta {
@@ -280,10 +306,11 @@ fn envelope_for_failure_carries_the_error_and_no_result() {
             "meta": {"elapsed_ms": 12, "resolved": {"main": "c9f1"}, "auth": "trust"},
         })
     );
-    // Without details or a hint, neither key appears.
+    // Without details or a hint both keys are still written: details as `{}`, hint as null.
+    let bare = OpError::new(ErrorCode::RevNotFound, "no rev x");
     assert_eq!(
-        serde_json::to_value(OpError::new(ErrorCode::RevNotFound, "no rev x")).unwrap(),
-        json!({"code": "E_REV_NOT_FOUND", "message": "no rev x", "retryable": false, "exit": 6})
+        serde_json::to_string(&bare).unwrap(),
+        r#"{"code":"E_REV_NOT_FOUND","message":"no rev x","retryable":false,"exit":6,"details":{},"hint":null}"#
     );
     let text = serde_json::to_string(&envelope).unwrap();
     assert_eq!(

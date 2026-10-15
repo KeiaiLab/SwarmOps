@@ -90,6 +90,13 @@ error_codes! {
     Busy => "E_BUSY", EXIT_RETRYABLE, true;
     /// A bug in SwarmOps, such as a caught panic.
     Internal => "E_INTERNAL", EXIT_ERROR, false;
+    // Not raised in M1: token checks, `policy.toml` and the maintenance lease arrive later.
+    /// The caller's token failed verification.
+    Auth => "E_AUTH", EXIT_AUTH, false;
+    /// A policy refused the operation for this identity.
+    PolicyDenied => "E_POLICY_DENIED", EXIT_AUTH, false;
+    /// Maintenance (gc or verify) holds the store's maintenance lease.
+    MaintenanceBusy => "E_MAINTENANCE_BUSY", EXIT_RETRYABLE, true;
 }
 
 impl ErrorCode {
@@ -125,31 +132,40 @@ pub struct OpError {
     pub retryable: bool,
     /// The exit code of the CLI.
     pub exit: i32,
-    /// Machine-readable context, such as `actual` for `E_CAS_MISMATCH`; omitted when null.
-    #[serde(default, skip_serializing_if = "Value::is_null")]
+    /// Machine-readable context, such as `actual` for `E_CAS_MISMATCH`; `{}` when there is none,
+    /// never null.
+    #[serde(default = "no_details")]
     pub details: Value,
-    /// The next command to run, when there is an obvious one.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// The next command to run when there is an obvious one, else null; always written.
     pub hint: Option<String>,
 }
 
+/// The details of an error that has none: an empty object.
+fn no_details() -> Value {
+    Value::Object(serde_json::Map::new())
+}
+
 impl OpError {
-    /// An error with `code`'s string, exit code and retry advice, no details and no hint.
+    /// An error with `code`'s string, exit code and retry advice, no details (`{}`) and no hint.
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code: code.as_str().to_owned(),
             message: message.into(),
             retryable: code.retryable(),
             exit: code.exit(),
-            details: Value::Null,
+            details: no_details(),
             hint: None,
         }
     }
 
-    /// Replaces the details.
+    /// Replaces the details; `Value::Null` stands for none and is kept as `{}`.
     #[must_use]
     pub fn with_details(mut self, details: Value) -> Self {
-        self.details = details;
+        self.details = if details.is_null() {
+            no_details()
+        } else {
+            details
+        };
         self
     }
 
