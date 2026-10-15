@@ -14,7 +14,6 @@ workspace = true
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 camino.workspace = true
 crc32fast.workspace = true
-fd-lock.workspace = true
 rayon.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true

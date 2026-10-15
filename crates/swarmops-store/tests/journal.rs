@@ -226,17 +226,19 @@ fn frame_roundtrip_all_record_kinds() {
     }
 
     let (_root, layout) = new_root();
-    let frame = new_journal(&layout).append_frame(&records).unwrap();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[compacted(0)]).unwrap(); // frame 0, 19 bytes
+    let frame = journal.append_frame(&records).unwrap();
     let want = Frame {
-        seq: 0,
-        offset: 0,
+        seq: 1,
+        offset: 19,
         records: records.to_vec(),
     };
     assert_eq!(frame, want);
-    assert_eq!(file_len(layout.journal_log()), 8 + 2 + 555);
+    assert_eq!(file_len(layout.journal_log()), 19 + 8 + 2 + 555);
     let reader = reopen(&layout);
-    assert_eq!(reader.frames_after(0, 1).unwrap(), vec![want.clone()]);
-    assert_eq!(reader.tail_frames_from(0).unwrap(), vec![want]);
+    assert_eq!(reader.frames_after(0, 1).unwrap(), slice::from_ref(&want));
+    assert_eq!(reader.tail_frames_from(19).unwrap(), [want]);
 }
 
 #[test]
@@ -408,21 +410,26 @@ fn append_frame_assigns_sequential_seq_and_offsets() {
     assert_eq!(file_len(layout.journal_log()), 276);
     assert_eq!(offsets_on_disk(&layout), [0, 84, 257]);
 
+    // frames_after(seq, ..) is exclusive: the frames whose seq is greater than `seq`.
     let all = [first.clone(), second.clone(), third.clone()];
-    assert_eq!(journal.frames_after(1, 10).unwrap(), all[1..]);
+    assert_eq!(journal.frames_after(0, 10).unwrap(), all[1..]);
+    assert_eq!(journal.frames_after(1, 10).unwrap(), all[2..]);
+    assert_eq!(journal.frames_after(2, 10).unwrap(), Vec::<Frame>::new());
     assert_eq!(
-        journal.frames_after(0, 2).unwrap(),
-        all[..2],
+        journal.frames_after(0, 1).unwrap(),
+        all[1..2],
         "at most limit"
     );
-    assert_eq!(journal.frames_after(2, 1).unwrap(), all[2..]);
-    assert_eq!(journal.frames_after(3, 10).unwrap(), Vec::<Frame>::new());
     assert_eq!(journal.frames_after(0, 0).unwrap(), Vec::<Frame>::new());
+    assert_eq!(
+        journal.frames_after(u64::MAX, 10).unwrap(),
+        Vec::<Frame>::new()
+    );
 
     // Another handle reads the same frames, numbered from any frame boundary.
     let reader = reopen(&layout);
     assert_eq!(reader.len(), 276);
-    assert_eq!(reader.frames_after(0, 10).unwrap(), all);
+    assert_eq!(reader.frames_after(0, 10).unwrap(), all[1..]);
     assert_eq!(reader.tail_frames_from(0).unwrap(), all);
     assert_eq!(reader.tail_frames_from(84).unwrap(), all[1..]);
     assert_eq!(reader.tail_frames_from(276).unwrap(), Vec::<Frame>::new());
@@ -443,7 +450,7 @@ fn open_needs_a_journal_and_create_keeps_an_existing_one() {
     let journal = new_journal(&layout);
     let first = journal.append_frame(&[root_changeset()]).unwrap();
     let again = Journal::create(&layout, real_fs()).unwrap();
-    assert_eq!(again.frames_after(0, 10).unwrap(), [first]);
+    assert_eq!(again.tail_frames_from(0).unwrap(), [first]);
     assert_eq!(again.len(), 84);
 }
 
@@ -478,7 +485,7 @@ fn torn_tail_is_ignored_by_readers_and_truncated_by_writer() {
         let reader = reopen(&layout);
         let whole = [first.clone(), second.clone()];
         assert_eq!(reader.tail_frames_from(0).unwrap(), whole, "{what}");
-        assert_eq!(reader.frames_after(0, 10).unwrap(), whole, "{what}");
+        assert_eq!(reader.frames_after(0, 10).unwrap(), whole[1..], "{what}");
 
         assert_eq!(journal.truncate_torn_tail().unwrap(), Some(257), "{what}");
         assert_eq!(file_len(layout.journal_log()), 257, "{what}");
@@ -505,16 +512,19 @@ fn crc_mismatch_is_journal_corrupt_not_panic() {
         .unwrap();
 
     flip_byte(layout.journal_log(), 40); // a payload byte of frame 0 (bytes 10..84)
-    assert_corrupt_at(journal.frames_after(0, 10), 0, "frames_after");
     assert_corrupt_at(journal.tail_frames_from(0), 0, "tail_frames_from");
-    assert_eq!(journal.frames_after(1, 10).unwrap(), [second]);
+    assert_eq!(
+        journal.frames_after(0, 10).unwrap(),
+        [second],
+        "frame 0 itself is not read"
+    );
     assert_eq!(journal.truncate_torn_tail().unwrap(), None);
     assert_eq!(file_len(layout.journal_log()), 257);
 
-    // journal.off lists the last frame, so it was whole once: a CRC mismatch there is
-    // damage, not a torn write, and recovery must not cut it.
+    // Frame 1 of 2, the last: journal.off lists it, so it was whole once. A CRC mismatch
+    // there is damage, not a torn write, and recovery must not cut it.
     flip_byte(layout.journal_log(), 200); // a payload byte of frame 1 (bytes 94..257)
-    assert_corrupt_at(journal.frames_after(1, 10), 84, "frames_after");
+    assert_corrupt_at(journal.frames_after(0, 10), 84, "frames_after");
     assert_corrupt_at(journal.tail_frames_from(84), 84, "tail_frames_from");
     assert_corrupt_at(journal.truncate_torn_tail(), 84, "truncate_torn_tail");
     assert_eq!(file_len(layout.journal_log()), 257, "nothing was cut");
@@ -539,21 +549,22 @@ fn frames_no_writer_produces_are_journal_corrupt_not_torn() {
     for (what, bad) in cases {
         let (_root, layout) = new_root();
         let journal = new_journal(&layout);
-        let first = journal.append_frame(&[root_changeset()]).unwrap();
+        journal.append_frame(&[root_changeset()]).unwrap();
+        let second = journal.append_frame(&[compacted(1)]).unwrap(); // bytes 84..103
         append_bytes(layout.journal_log(), &bad);
-        assert_corrupt_at(reopen(&layout).tail_frames_from(0), 84, what);
-        assert_corrupt_at(journal.truncate_torn_tail(), 84, what);
+        assert_corrupt_at(reopen(&layout).tail_frames_from(0), 103, what);
+        assert_corrupt_at(journal.truncate_torn_tail(), 103, what);
         assert_eq!(
             file_len(layout.journal_log()),
-            84 + u64::try_from(bad.len()).unwrap(),
+            103 + u64::try_from(bad.len()).unwrap(),
             "{what}: nothing was cut"
         );
 
-        append_bytes(layout.journal_off(), &84_u64.to_le_bytes());
-        assert_corrupt_at(reopen(&layout).frames_after(0, 10), 84, what);
+        append_bytes(layout.journal_off(), &103_u64.to_le_bytes());
+        assert_corrupt_at(reopen(&layout).frames_after(0, 10), 103, what);
         assert_eq!(
             reopen(&layout).frames_after(0, 1).unwrap(),
-            [first],
+            [second],
             "{what}"
         );
     }
@@ -575,10 +586,14 @@ fn truncate_torn_tail_lists_a_whole_frame_that_lost_its_entry() {
         append_bytes(layout.journal_off(), partial_entry);
 
         let reader = reopen(&layout);
-        assert_eq!(reader.frames_after(0, 10).unwrap(), slice::from_ref(&first));
+        assert_eq!(
+            reader.frames_after(0, 10).unwrap(),
+            Vec::<Frame>::new(),
+            "journal.off does not list frame 1 yet"
+        );
         assert_eq!(
             reader.tail_frames_from(0).unwrap(),
-            [first.clone(), second.clone()],
+            [first, second.clone()],
             "the whole frame is committed, so readers see it"
         );
 
@@ -589,7 +604,7 @@ fn truncate_torn_tail_lists_a_whole_frame_that_lost_its_entry() {
         );
         assert_eq!(offsets_on_disk(&layout), [0, 84]);
         assert_eq!(file_len(layout.journal_log()), 257);
-        assert_eq!(reader.frames_after(0, 10).unwrap(), [first, second]);
+        assert_eq!(reader.frames_after(0, 10).unwrap(), [second]);
         assert_eq!(journal.append_frame(&[compacted(2)]).unwrap().seq, 2);
     }
 }
@@ -608,7 +623,11 @@ fn truncate_torn_tail_drops_the_entry_of_a_frame_cut_short() {
         set_len(layout.journal_log(), log_end);
 
         let reader = reopen(&layout);
-        assert_eq!(reader.frames_after(0, 10).unwrap(), slice::from_ref(&first));
+        assert_eq!(
+            reader.frames_after(0, 10).unwrap(),
+            Vec::<Frame>::new(),
+            "the cut frame is skipped"
+        );
         assert_eq!(reader.tail_frames_from(0).unwrap(), [first]);
 
         assert_eq!(
@@ -654,7 +673,7 @@ fn offset_entries_out_of_order_are_journal_corrupt_not_a_panic() {
 
     let reader = reopen(&layout);
     assert_corrupt_at(
-        reader.frames_after(1, 1),
+        reader.frames_after(0, 1),
         84,
         "frame 1 would end before it starts",
     );
@@ -662,6 +681,11 @@ fn offset_entries_out_of_order_are_journal_corrupt_not_a_panic() {
         reader.frames_after(0, 10),
         50,
         "frame 2 does not follow frame 1",
+    );
+    assert_corrupt_at(
+        reader.frames_after(1, 10),
+        50,
+        "frame 2 does not start where frame 1 ends",
     );
     assert_corrupt_at(journal.truncate_torn_tail(), 50, "truncate_torn_tail");
     assert_eq!(file_len(layout.journal_log()), 257, "nothing was cut");
@@ -673,7 +697,7 @@ fn a_journal_cut_below_its_last_listed_frame_is_journal_corrupt() {
     // earlier listed frame has lost committed frames.
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
-    let first = journal.append_frame(&[root_changeset()]).unwrap();
+    journal.append_frame(&[root_changeset()]).unwrap();
     journal
         .append_frame(&[child_changeset(), main_created()])
         .unwrap();
@@ -682,12 +706,8 @@ fn a_journal_cut_below_its_last_listed_frame_is_journal_corrupt() {
 
     let reader = reopen(&layout);
     assert_corrupt_at(reader.frames_after(0, 10), 84, "frames_after");
+    assert_corrupt_at(reader.frames_after(1, 10), 257, "frame 2 lies past the end");
     assert_corrupt_at(reader.tail_frames_from(0), 84, "tail_frames_from");
-    assert_eq!(
-        reader.frames_after(0, 1).unwrap(),
-        [first],
-        "earlier frames still read"
-    );
     assert_corrupt_at(journal.truncate_torn_tail(), 257, "truncate_torn_tail");
     assert_eq!(file_len(layout.journal_log()), 104, "nothing was cut");
     assert_eq!(offsets_on_disk(&layout), [0, 84, 257]);
@@ -786,7 +806,7 @@ fn append_frame_refuses_records_the_layout_cannot_hold() {
         },
     ];
     let frame = journal.append_frame(&at_the_limits).unwrap();
-    assert_eq!(reopen(&layout).frames_after(0, 1).unwrap(), [frame]);
+    assert_eq!(reopen(&layout).tail_frames_from(0).unwrap(), [frame]);
 }
 
 #[test]
@@ -941,7 +961,7 @@ fn crash_at_any_journal_write_recovers_to_whole_frames() {
                 records: vec![compacted(7)],
             });
         }
-        assert_eq!(journal.frames_after(0, 10).unwrap(), want, "k={k}");
+        assert_eq!(journal.frames_after(0, 10).unwrap(), want[1..], "k={k}");
         assert_eq!(journal.tail_frames_from(0).unwrap(), want, "k={k}");
     }
 }

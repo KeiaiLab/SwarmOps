@@ -1,9 +1,7 @@
-//! `meta/lock`: the exclusive advisory lock (`flock`, through fd-lock) that serializes
-//! metadata writers across threads and processes (storage spec §3).
+//! `meta/lock`: the exclusive advisory lock (the standard library's file lock, `flock` on
+//! Linux) that serializes metadata writers across threads and processes (storage spec §3).
 
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::mem;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,11 +14,11 @@ const RETRY_EVERY: Duration = Duration::from_millis(10);
 /// The exclusive lock on `meta/lock`, held until dropped.
 ///
 /// The lock belongs to this value's own open file, so two acquisitions conflict even within
-/// one process. Dropping the value closes the file, which releases the lock; the kernel
-/// releases it too when the process dies, so a crashed writer leaves no stale lock behind.
+/// one process. Dropping the value unlocks the file and closes it; the kernel releases the
+/// lock too when the process dies, so a crashed writer leaves no stale lock behind.
 #[derive(Debug)]
 pub struct MetaLock {
-    _locked: fd_lock::RwLock<File>,
+    file: File,
 }
 
 impl MetaLock {
@@ -33,21 +31,12 @@ impl MetaLock {
             .create(true)
             .truncate(false)
             .open(layout.meta_lock())?;
-        let mut lock = fd_lock::RwLock::new(file);
         let deadline = Instant::now().checked_add(timeout);
         loop {
-            let locked = match lock.try_write() {
-                Ok(guard) => {
-                    // The guard borrows `lock`, so it cannot be returned along with it.
-                    // Forgetting it keeps the lock, which then lasts while the file is open.
-                    mem::forget(guard);
-                    true
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => false,
-                Err(e) => return Err(e.into()),
-            };
-            if locked {
-                return Ok(Self { _locked: lock });
+            match file.try_lock() {
+                Ok(()) => return Ok(Self { file }),
+                Err(TryLockError::WouldBlock) => {}
+                Err(TryLockError::Error(e)) => return Err(e.into()),
             }
             let now = Instant::now();
             let nap = match deadline {
@@ -57,5 +46,14 @@ impl MetaLock {
             };
             thread::sleep(nap);
         }
+    }
+}
+
+impl Drop for MetaLock {
+    fn drop(&mut self) {
+        // Closing the file (right after this) would release the lock as well, but only once
+        // no forked child still shares the descriptor; unlocking releases it at once. An
+        // error leaves the close to do it.
+        let _ = self.file.unlock();
     }
 }

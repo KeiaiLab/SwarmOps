@@ -130,9 +130,11 @@ impl Journal {
         })
     }
 
-    /// Up to `limit` frames in journal order, from frame `seq` on (`seq` counts from 0):
-    /// the frames `journal.off` lists, read with one `read_at` for their entries and one
-    /// for their bytes.
+    /// Up to `limit` frames in journal order after frame `seq`: the frames `journal.off`
+    /// lists whose seq is strictly greater than `seq`. Seqs count from 0, so frame 0 is
+    /// never among them; [`Journal::tail_frames_from`]`(0)` reads from the very start.
+    /// Reads the entries (frame `seq`'s, the wanted frames', and the next one) with one
+    /// `read_at`, frame `seq`'s header with another, and the frames' bytes with a third.
     ///
     /// Every listed frame was whole once, so one that fails its CRC or does not decode is
     /// [`StoreError::JournalCorrupt`], as is an entry that does not point where the
@@ -140,19 +142,27 @@ impl Journal {
     /// that [`Journal::truncate_torn_tail`] repairs); the frames before it are returned.
     pub fn frames_after(&self, seq: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
         let listed = self.off.metadata()?.len() / ENTRY_LEN;
+        let first = seq.saturating_add(1);
         let wanted = u64::try_from(limit)
             .unwrap_or(u64::MAX)
-            .min(listed.saturating_sub(seq));
+            .min(listed.saturating_sub(first));
         if wanted == 0 {
             return Ok(Vec::new());
         }
-        // The wanted frames' entries, plus the next one, where the last wanted frame ends.
-        let offsets = self.entries(seq, wanted + u64::from(seq + wanted < listed))?;
-        let wanted = usize::try_from(wanted).map_or(offsets.len(), |n| n.min(offsets.len()));
-        let Some(&start) = offsets.first() else {
+        // Frame `seq`'s entry (the first wanted frame starts where that frame ends), the
+        // wanted frames' entries, and the next one (where the last wanted frame ends).
+        let entries = self.entries(seq, 1 + wanted + u64::from(first + wanted < listed))?;
+        let Some((&previous, offsets)) = entries.split_first() else {
             return Ok(Vec::new()); // journal.off was cut since its length was read
         };
+        let wanted = usize::try_from(wanted).map_or(offsets.len(), |n| n.min(offsets.len()));
+        let Some(&start) = offsets.first() else {
+            return Ok(Vec::new());
+        };
         let log_len = self.log.metadata()?.len();
+        if self.frame_end(previous, log_len)? != Some(start) {
+            return Err(StoreError::JournalCorrupt { offset: start });
+        }
         let end = offsets
             .get(wanted)
             .map_or(log_len, |&next| next.min(log_len));
@@ -163,8 +173,8 @@ impl Journal {
 
         let mut frames = Vec::with_capacity(wanted);
         let mut at = 0;
-        for (frame_seq, &offset) in (seq..).zip(&offsets[..wanted]) {
-            if offset != start + to_u64(at) || (frame_seq == 0 && offset != 0) {
+        for (frame_seq, &offset) in (first..).zip(&offsets[..wanted]) {
+            if offset != start + to_u64(at) {
                 return Err(StoreError::JournalCorrupt { offset });
             }
             match parse_frame(&buf[at..]) {
