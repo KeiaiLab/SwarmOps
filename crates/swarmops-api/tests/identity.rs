@@ -13,6 +13,9 @@ fn parse_accepts_family_slash_instance() {
         ("ci-2/Run_3.a-b", "ci-2", "Run_3.a-b"),
         ("a/_x", "a", "_x"),
         ("a/-x", "a", "-x"),
+        // Every range's first and last byte: 0-9, a-z, A-Z.
+        ("0a/A0a", "0a", "A0a"),
+        ("z9-/Z9z_.-", "z9-", "Z9z_.-"),
     ] {
         let id = Identity::parse(agent).unwrap();
         assert_eq!((id.agent(), id.run_id()), (agent, None));
@@ -38,6 +41,16 @@ fn parse_rejects_names_outside_the_grammar() {
         "a/.hidden",
         "a/..",
         "a/.",
+        // The byte just outside each range: `/0-9:`, `` `a-z{ ``, `@A-Z[`.
+        "a:/x",
+        "a`/x",
+        "a{/x",
+        "a/x:",
+        "a/x`",
+        "a/x{",
+        "a/x@",
+        "a/x[",
+        "a/@x",
         " a/b",
         "é/worker",
         "a/é",
