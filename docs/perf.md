@@ -572,3 +572,18 @@ The two kernel-queue runs agree within 20 % on throughput, the median and the sp
 **The read snapshot after the merge.** The merged reader also checks the frame listed just before where it reads. `just perf`'s `read_snapshot` run on it (load 15–28 during the benches, the disk at M0's speed) gives the same numbers within 3 % with the checkpoint at the journal's end (100k: `read_changeset` p50 54 µs, p99 97 µs). With 31 frames past the checkpoint they are 5–6 % slower (100k: 73 and 126 µs), as `tail_frames` takes 12.7–13.1 µs p50 against 10.5–11.7 µs before. `off_search` is unchanged (4.0–5.2 µs), and so is the answer on caching it.
 
 **Size.** The test took 473.2 s and 517.4 s at 32 × 1,000, under 10 minutes both times. So its default is the spec's 32 × 1,000 again, and `just check-slow` runs that. Under `just check-slow`, unoptimized, it first passed in 513.5 s beside the store-level contention test (499.1 s; load 22.6–36.2 during). `.config/nextest.toml` now runs the two one after the other: the suite then took 725.1 s, this test 449.3 s and the store-level one 274.3 s after it (load 16.9 at the start and 12.0–37.1 during, raw `fdatasync` 3.8 ms at both ends).
+
+## M1 — `just perf` after all merges (2026-10-16, controller run)
+
+Head `a4da77d` (every M1 task merged), `just perf` (store-level contention → CLI contention → store benches, one after another), start load 16.4 → end load 14.6 (one concurrent debug build of another worktree during the benches; no other 32-process test). Raw log: the SDD workspace (`just-perf-after-merges.log`). Nearest-rank percentiles.
+
+| Measurement | Result |
+|---|---|
+| Store-level 32 × 1,000 `MetaStore::write()` | wall 264.8 s, **120.9 tx/s**, Busy 0; transaction p50 8.12 ms, p99 899 ms, max 1,211 ms; lock wait p50 0.11 ms, p99 891 ms, max 1,198 ms; spread 1.12×; uncontended transaction p50 7.24 ms, p99 21.7 ms |
+| CLI 32 × 1,000 `swarmops commit` | 32,000 commits in 440.0 s, **72.7 commits/s**; `meta.elapsed_ms` p50 427, p90 498, p99 656, p99.9 739, max 918 ms; spread 1.01×; uncontended commit p50 21 ms (wall 23.5 ms); estimated lock wait p50 406, p99 635, max 897 ms |
+| `fsync_fanout` | serial 18.0 ms, parallel 7.2 ms (2.5×), one file 3.5 ms; `index_sync/1` 11.7 ms vs `index_sync/5` 4.7 ms |
+| `index_lookup` (p50 ns, criterion) | 10k: find 4.9 µs compacted / 5.8 µs with a 1,000 tail; 100k: 6.3 / 7.6 µs; 200k: 6.9 / 8.3 µs; `find_prefix` ≤ 10.7 µs; `find_delta_hash` ≤ 9.0 µs |
+| `put_batch` 256 × 4 KiB + flush | 1 thread 974 ms (263 obj/s), 8 threads 231 ms, **32 threads 70.4 ms (3,636 obj/s, 13.8×)**; with a busy writer 1,516 / 301 / 97.9 ms (15.5×); `flush_only` 5.3 ms (32.1 ms busy) |
+| `read_snapshot` (`read()` + `changeset(id)`, p50) | 10k: 47.7 µs (ckpt at end) / 67.4 µs (31 frames past); 100k: 53.8 / 75.0 µs; p99 ≤ 126 µs; `journal.off` search 4.0–5.2 µs |
+
+Decisions confirmed on this run: the kernel-queue lock keeps `Busy` at 0 with every longest wait under 1.2 s, so `lock_timeout` stays at 10 s (FIFO hand-off remains an M6 experiment); parallel `Index::sync` and parallel flush directory fsyncs hold their 7c gains; 32-thread `put_batch` scales 13.8× (15.5× with a busy writer), so a `--durability fast` flag is not justified by this data. The CLI harness now writes each change list to a file (7b fix round); the 21 ms uncontended commit matches the earlier stdin-based harness within noise.
