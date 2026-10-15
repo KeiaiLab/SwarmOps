@@ -2,10 +2,13 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 
 default: check
 
-# The definition of done for every session.
+# The definition of done for every session. The fuzz crate is a workspace of its own, built
+# with nightly by `just fuzz`; stable formats and lints it here.
 check:
     cargo fmt --all --check
+    cargo fmt --manifest-path fuzz/Cargo.toml --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo nextest run --workspace --all-features --no-tests=warn
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
     cargo deny check
