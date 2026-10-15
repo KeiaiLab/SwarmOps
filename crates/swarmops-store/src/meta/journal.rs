@@ -320,7 +320,9 @@ impl Journal {
     ///   must start where the one listed before it ends (frame 0 at 0) and read whole, or
     ///   garbage in `journal.off` could make the cut or the new entries destroy or misnumber
     ///   committed frames;
-    /// - a partial entry at the end of `journal.off` is dropped;
+    /// - a partial entry at the end of `journal.off` is dropped, and so are zeroed entries
+    ///   past frame 0 before it (a zero-filled block: no frame but the first starts at 0);
+    ///   the frame then left last is checked as any last listed frame is;
     /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a last listed
     ///   frame that does not start where the frame before it ends, or that is cut short,
     ///   missing (`journal.log` ends where it starts), fails its CRC or does not decode (a
@@ -405,13 +407,20 @@ impl Journal {
     fn check_tail(&self) -> Result<(Tail, Option<u64>), StoreError> {
         let log_len = self.fs.file_len(self.log_path.as_std_path())?;
         let off_len = self.fs.file_len(self.off_path.as_std_path())?;
-        let listed = off_len / ENTRY_LEN;
+        let mut listed = off_len / ENTRY_LEN;
         // Read from the last listed frame's start: that frame is checked again, and the
         // frames `journal.off` does not list yet follow it.
-        let start = match listed.checked_sub(1) {
+        let mut start = match listed.checked_sub(1) {
             Some(last) => self.entry(last)?,
             None => 0,
         };
+        // Zeroed entries past frame 0 at the end are what a zero-filled block leaves (no
+        // frame but the first starts at 0): dropped like a partial entry, and the frame left
+        // last is checked as the last listed one.
+        while start == 0 && listed > 1 {
+            listed -= 1;
+            start = self.entry(listed - 1)?;
+        }
         if start > log_len {
             return Err(StoreError::JournalCorrupt { offset: start });
         }

@@ -1009,9 +1009,9 @@ fn readers_measure_off_before_log() {
 
 #[test]
 fn a_zeroed_entry_is_journal_corrupt_for_readers_too() {
-    // A zero-filled block at the end of journal.off reads as entries pointing at 0. Unlike
-    // zeros at the end of journal.log, that is no torn write, for the writer or for readers:
-    // frame 2's entry must point where frame 1 ends (257), whether frame 2 is there or not.
+    // A zero-filled block at the end of journal.off reads as entries pointing at 0, which no
+    // frame but the first starts at. Readers report it (frame 2's entry must point where frame
+    // 1 ends, 257, whether frame 2 is there or not); the writer's recovery drops it.
     for unlisted in [false, true] {
         let what = if unlisted {
             "with frame 2 in journal.log"
@@ -1029,16 +1029,22 @@ fn a_zeroed_entry_is_journal_corrupt_for_readers_too() {
             set_len(layout.journal_off(), 16);
         }
         append_bytes(layout.journal_off(), &[0; 8]);
-        assert_corrupt_at(journal.truncate_torn_tail(), 0, what);
         let reader = reopen(&layout);
         assert_corrupt_at(reader.tail_frames_from(0), 0, what);
         assert_corrupt_at(reader.tail_frames_from(84), 0, what);
         assert_corrupt_at(reader.frames_from(0, 10), 0, what);
         assert_corrupt_at(reader.frames_after(0, 10), 0, what);
+        assert_eq!(journal.truncate_torn_tail().unwrap(), None, "{what}");
+        let listed: &[u64] = if unlisted { &[0, 84, 257] } else { &[0, 84] };
         assert_eq!(
             offsets_on_disk(&layout),
-            [0, 84, 0],
-            "{what}: nothing changed"
+            listed,
+            "{what}: dropped, then listed"
+        );
+        assert_eq!(
+            reader.frames_from(0, 10).unwrap().len(),
+            listed.len(),
+            "{what}"
         );
     }
 
@@ -1055,6 +1061,76 @@ fn a_zeroed_entry_is_journal_corrupt_for_readers_too() {
         fs::write(layout.journal_off(), off).unwrap();
         assert_corrupt_at(reopen(&layout).tail_frames_from(19), 0, &what);
     }
+}
+
+#[test]
+fn trailing_zeroed_entries_are_dropped_like_a_partial_entry() {
+    // A zero-filled block at the end of journal.off holds entries pointing at 0. Past frame 0
+    // no entry can be genuine, so recovery drops them as it drops a partial entry, and the
+    // frame left last is then checked as the last listed frame is.
+    let tails: [(&str, &[u8]); 3] = [
+        ("a zeroed entry", &[0; 8]),
+        ("two zeroed entries", &[0; 16]),
+        ("two zeroed entries and part of a third", &[0; 19]),
+    ];
+    for (what, tail) in tails {
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+        journal
+            .append_frame(&[child_changeset(), main_created()])
+            .unwrap(); // bytes 84..257
+        append_bytes(layout.journal_off(), tail);
+        assert_eq!(journal.truncate_torn_tail().unwrap(), None, "{what}");
+        assert_eq!(offsets_on_disk(&layout), [0, 84], "{what}: dropped");
+        assert_eq!(
+            file_len(layout.journal_log()),
+            257,
+            "{what}: journal.log kept"
+        );
+        assert_eq!(journal.truncate_torn_tail().unwrap(), None, "{what}: again");
+        assert_eq!(
+            reopen(&layout).tail_frames_from(0).unwrap().len(),
+            2,
+            "{what}"
+        );
+    }
+
+    // Entries [0, 0, 0] over frame 0 alone: entry 0 is frame 0's, the others are dropped.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    append_bytes(layout.journal_off(), &[0; 16]);
+    assert_eq!(journal.truncate_torn_tail().unwrap(), None);
+    assert_eq!(offsets_on_disk(&layout), [0]);
+
+    // The frame left last fails its CRC: damage, so nothing is dropped.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    flip_byte(layout.journal_log(), 200); // a payload byte of frame 1
+    append_bytes(layout.journal_off(), &[0; 8]);
+    assert_corrupt_at(
+        journal.truncate_torn_tail(),
+        84,
+        "frame 1 left last fails its CRC",
+    );
+    assert_eq!(offsets_on_disk(&layout), [0, 84, 0], "nothing was dropped");
+
+    // Zeros in journal.log stay a torn tail only up to its end: followed by data they are
+    // still JournalCorrupt, and nothing is cut.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    append_bytes(
+        layout.journal_log(),
+        &[[0; 16].as_slice(), b"data"].concat(),
+    );
+    assert_corrupt_at(journal.truncate_torn_tail(), 84, "zeros, then data");
+    assert_eq!(file_len(layout.journal_log()), 104, "nothing was cut");
 }
 
 #[test]
@@ -1143,9 +1219,10 @@ fn an_offset_entry_off_a_frame_boundary_is_journal_corrupt() {
 #[test]
 fn offset_entries_out_of_order_are_journal_corrupt_not_a_panic() {
     // A third entry that does not start where frame 1 ends (257): one inside frame 0 (50),
-    // a zeroed one pointing back at frame 0 (0), and frame 1's entry again (84). The last
-    // two point at whole frames, so only their place in journal.off gives them away.
-    for bad in [50_u64, 0, 84] {
+    // and frame 1's entry again (84), which points at a whole frame, so only its place in
+    // journal.off gives it away. (A zeroed one is what a zero-filled block leaves, which
+    // recovery drops: `trailing_zeroed_entries_are_dropped_like_a_partial_entry`.)
+    for bad in [50_u64, 84] {
         let what = format!("third entry {bad}");
         let (_root, layout) = new_root();
         let journal = new_journal(&layout);

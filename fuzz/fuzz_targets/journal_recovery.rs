@@ -33,7 +33,8 @@
 //! - (c) So recovery only cuts a suffix, and only a torn tail: whatever `journal.off` holds, a
 //!   frame a listed entry points at that reads whole survives byte-identical, since recovery
 //!   checks every listed frame before it cuts or lists anything; and no listed entry is
-//!   dropped.
+//!   dropped but zeroed ones at the end of `journal.off`, which no frame past the first can
+//!   have.
 //! - (d) Mode 1: with the files undamaged, every appended frame reads back unchanged through
 //!   every reader and recovery changes nothing. Damaged, the frames before the first damaged
 //!   byte of `journal.log` still read back unchanged from the start, and through `frames_from`
@@ -201,8 +202,8 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
 
 /// Asserts that a successful recovery, which returned `cut` and left `after` of `before`, did
 /// what the model says: the same cut, `journal.log` the prefix up to it, `journal.off` the
-/// entries the model lists; and that every frame a listed entry pointed at that read whole
-/// survives, whatever the entries held.
+/// entries the model lists (the zeroed ones at its end dropped); and that every frame a listed
+/// entry pointed at that read whole survives, whatever the entries held.
 fn recovered_as_modelled(recovery: &Recovery, cut: Option<u64>, before: &Files, after: &Files) {
     let Recovery::Clean { entries, cut: want } = recovery else {
         panic!("truncate_torn_tail returned {cut:?}, the model says {recovery:?}");
@@ -251,6 +252,10 @@ impl Recovery {
     fn of(files: &Files) -> Recovery {
         let log_len = to_u64(files.log.len());
         let mut entries = files.entries();
+        // Zeroed entries past frame 0 at the end are dropped, like a partial entry.
+        while entries.len() > 1 && entries.last() == Some(&0) {
+            entries.pop();
+        }
         let mut at = 0;
         if let Some(&start) = entries.last() {
             if start > log_len {
@@ -1024,6 +1029,8 @@ enum Edit {
     /// Append 1 to 256 zero bytes to `journal.log`: blocks a filesystem exposed zero-filled
     /// after a crash.
     AppendZeros(u8),
+    /// Append 1 to 4 zeroed entries to `journal.off`: the same, in `journal.off`.
+    ZeroEntries(u8),
 }
 
 impl Edit {
@@ -1041,6 +1048,10 @@ impl Edit {
             Self::AppendFrame(payload) => files.log.extend(frame_around(&payload)),
             Self::AppendOff(bytes) => files.off.extend(bytes),
             Self::AppendZeros(n) => files.log.resize(files.log.len() + usize::from(n) + 1, 0),
+            Self::ZeroEntries(n) => {
+                let len = files.off.len() + (usize::from(n % 4) + 1) * ENTRY_LEN;
+                files.off.resize(len, 0);
+            }
         }
     }
 }
