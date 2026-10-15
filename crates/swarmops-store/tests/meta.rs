@@ -12,7 +12,7 @@ use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1837,49 +1837,102 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
     assert_eq!(moves, [(Some(id(1)), Some(id(2))), (None, Some(id(1)))]);
 }
 
-/// Readers taking snapshots throughout 1,100 commits, the 1,025th of which takes the tail
-/// past the threshold and compacts it into the sorted views: every snapshot is whole, before,
-/// during and after the compaction's renames, and lookups by id, by prefix and by delta hash
-/// agree with it.
+/// How many changesets [`snapshots_stay_consistent_across_a_compaction`] seeds its store with,
+/// compacted at once, so that the sorted views a snapshot holds are not empty.
+const SEEDS: u64 = 1100;
+
+/// The number of seed changeset `i`.
+fn seed(i: u64) -> u64 {
+    1_000_000 + i
+}
+
+/// The lookups of [`snapshots_stay_consistent_across_a_compaction`] on snapshot `read`, taken
+/// with main at version `n`: main names changeset `n`, the snapshot holds exactly the seeds and
+/// changesets 1..=`n`, and changesets 1, `n / 2` and `n` (in the tail) and every 64th seed (in
+/// the sorted views) are found by id, by a 16-digit prefix and by delta hash. Returns `n`.
+#[track_caller]
+fn assert_whole_snapshot(read: &MetaRead<'_>) -> u64 {
+    let main = read.get_ref("main").unwrap().expect("main exists");
+    let n = main.version;
+    assert_eq!(main.target, id(n), "{main:?}");
+    assert_eq!(
+        read.count_changesets().unwrap(),
+        SEEDS + n,
+        "one changeset per move"
+    );
+    let moved = [1, n.div_ceil(2), n].map(|k| (k, SEEDS + k - 1));
+    let seeds = (0..SEEDS).step_by(64).map(|i| (seed(i), i));
+    for (k, seq) in moved.into_iter().chain(seeds) {
+        let found = read.changeset(id(k)).unwrap();
+        assert_eq!(found, Some(stored(k, &[], seq, 1)), "{k} at {n}");
+        let prefix = &id(k).to_string()[..16];
+        assert_eq!(read.resolve_prefix(prefix).unwrap(), [id(k)], "{k} at {n}");
+        assert_eq!(
+            read.by_delta_hash(&delta(k)).unwrap(),
+            [id(k)],
+            "{k} at {n}"
+        );
+    }
+    assert_eq!(
+        read.changeset(id(n + 1)).unwrap(),
+        None,
+        "nothing after {n}"
+    );
+    n
+}
+
+/// Readers take snapshots throughout 1,100 commits (each inserts changeset n and moves main to
+/// it) on a store seeded with 1,100 changesets compacted into the sorted views; the 1,025th
+/// commit takes the tail past the threshold, and compacts it and the views into new views.
+/// Every snapshot is whole ([`assert_whole_snapshot`]); some may land in the middle of the
+/// compaction, though nothing here makes sure one does. And each reader holds the snapshot it
+/// took right before that compaction (the writer waits until every reader holds one), and once
+/// the compaction is done runs the same lookups on it, with the same answers: a snapshot keeps
+/// its own handles on the view files the compaction renames new ones over.
 #[test]
 fn snapshots_stay_consistent_across_a_compaction() {
-    // Commit n inserts changeset n and moves main to it, so main at version n names
-    // changeset n, and the snapshot holds changesets 1..=n.
     const MOVES: u64 = 1100;
+    // The commit whose changeset makes the tail one longer than the threshold.
     const COMPACTS: u64 = Index::COMPACT_THRESHOLD + 1;
     let (_dir, root) = new_root();
     let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    let seeds: Vec<ChangesetMeta> = (0..SEEDS).map(|i| cs(seed(i), &[])).collect();
+    assert!(insert(&store, &seeds).checkpointed, "the seeds compact");
+    assert_eq!(index(&root).sorted_count(), SEEDS);
     let done = AtomicBool::new(false);
-    // The version of main each reader saw last.
-    let latest: [AtomicU64; 4] = Default::default();
+    let compacted = AtomicBool::new(false);
+    // Whether each reader holds a snapshot from right before the compaction.
+    let holding: [AtomicBool; 4] = Default::default();
     thread::scope(|scope| {
-        let readers: Vec<_> = latest
+        let readers: Vec<_> = holding
             .iter()
-            .map(|latest| {
-                let (root, done) = (&root, &done);
+            .map(|holds| {
+                let (root, done, compacted) = (&root, &done, &compacted);
                 scope.spawn(move || {
                     // A handle of its own, as a reader in another process has.
                     let store = MetaStore::open(root).unwrap();
-                    let (mut first, mut last) = (u64::MAX, 0);
+                    let mut before = None;
+                    let mut read_again = false;
+                    let mut last = 0;
                     loop {
                         let finished = done.load(Ordering::Acquire);
                         let read = store.read().unwrap();
-                        if let Some(main) = read.get_ref("main").unwrap() {
-                            let n = main.version;
-                            assert_eq!(main.target, id(n), "{main:?}");
-                            assert!(read.count_changesets().unwrap() >= n);
-                            for k in [1, n.div_ceil(2), n] {
-                                let found = read.changeset(id(k)).unwrap();
-                                assert_eq!(found, Some(stored(k, &[], k - 1, 1)), "{k} of {n}");
-                                let prefix = &id(k).to_string()[..16];
-                                assert_eq!(read.resolve_prefix(prefix).unwrap(), [id(k)]);
-                                assert_eq!(read.by_delta_hash(&delta(k)).unwrap(), [id(k)]);
+                        if read.get_ref("main").unwrap().is_some() {
+                            last = assert_whole_snapshot(&read);
+                            if last == COMPACTS - 1 && before.is_none() {
+                                before = Some(read);
+                                holds.store(true, Ordering::Release);
                             }
-                            latest.store(n, Ordering::Release);
-                            (first, last) = (first.min(n), n);
+                        }
+                        if let Some(before) = &before
+                            && !read_again
+                            && compacted.load(Ordering::Acquire)
+                        {
+                            assert_eq!(assert_whole_snapshot(before), COMPACTS - 1);
+                            read_again = true;
                         }
                         if finished {
-                            return (first, last);
+                            return (read_again, last);
                         }
                     }
                 })
@@ -1890,12 +1943,8 @@ fn snapshots_stay_consistent_across_a_compaction() {
             let _stop = SetOnDrop(&done);
             for n in 1..=MOVES {
                 if n == COMPACTS {
-                    // Every reader holds a snapshot from right before the compaction.
                     let deadline = Instant::now() + Duration::from_secs(60);
-                    while latest
-                        .iter()
-                        .any(|seen| seen.load(Ordering::Acquire) < n - 1)
-                    {
+                    while holding.iter().any(|holds| !holds.load(Ordering::Acquire)) {
                         assert!(Instant::now() < deadline, "the readers fell behind");
                         thread::sleep(Duration::from_millis(1));
                     }
@@ -1904,21 +1953,26 @@ fn snapshots_stay_consistent_across_a_compaction() {
                 let mut write = store.write().unwrap();
                 write.insert_changeset(cs(n, &[])).unwrap();
                 write.cas_ref("main", expected, Some(id(n)), ACTOR).unwrap();
-                write.commit().unwrap();
+                let info = write.commit().unwrap();
+                if n == COMPACTS {
+                    assert!(info.checkpointed, "the compacting commit checkpoints");
+                    compacted.store(true, Ordering::Release);
+                }
             }
         }
         for reader in readers {
-            let (first, last) = reader.join().unwrap();
+            let (read_again, last) = reader.join().unwrap();
             assert!(
-                first < COMPACTS,
-                "a snapshot before the compaction: {first}"
+                read_again,
+                "the snapshot from before the compaction, read after it"
             );
             assert_eq!(last, MOVES, "the last snapshot holds every commit");
         }
     });
-    // Commit n is frame n - 1; the compaction's Compacted frame follows commit 1,025's.
-    assert_eq!(compacted_frames(&store), [COMPACTS]);
-    assert!(index(&root).sorted_count() >= COMPACTS);
+    // The seeds' write is frame 0 and its Compacted frame 1; commit n is frame n + 1, and the
+    // compaction's Compacted frame follows commit 1,025's.
+    assert_eq!(compacted_frames(&store), [1, COMPACTS + 2]);
+    assert!(index(&root).sorted_count() >= SEEDS + COMPACTS);
 }
 
 /// A ref deleted in a frame past the checkpoint that no writer materialized (a writer died
