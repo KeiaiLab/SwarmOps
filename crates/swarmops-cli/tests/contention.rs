@@ -212,7 +212,7 @@ fn a_hung_child_is_killed_and_reported() {
         child(&env);
         return;
     }
-    let work = tempfile::tempdir_in(base_dir()).expect("create the work dir");
+    let work = tempfile::tempdir().expect("create the work dir");
     let base = create_store(work.path());
     let mut children = spawn_children(
         work.path(),
