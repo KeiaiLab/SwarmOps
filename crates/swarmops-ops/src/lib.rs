@@ -13,6 +13,7 @@
 //! `StoreOps` over the same types later, resolving identities and file contents the same way.
 
 pub mod content;
+mod error;
 pub mod identity;
 mod local;
 
