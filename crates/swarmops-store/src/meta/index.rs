@@ -261,7 +261,9 @@ impl Index {
     /// order [`Index::append`] writes the files, and the first error stops them. With more,
     /// up to that many threads make them at once, each taking its share of the files in write
     /// order and stopping at its first error (one file each at 5); once every thread is done,
-    /// the error of the first file in write order that failed comes back. ext4 commits
+    /// the error of the first file in write order that failed comes back. A share whose thread
+    /// cannot be spawned (the process is out of threads) is synced on the calling thread
+    /// instead, so that a commit never fails, or panics, for want of a thread. ext4 commits
     /// concurrent fsyncs together: five at once cost about two (docs/perf.md).
     pub fn sync(&self) -> Result<(), StoreError> {
         let files = self.write_order();
@@ -278,13 +280,20 @@ impl Index {
         let results: Vec<io::Result<()>> = thread::scope(|scope| {
             let syncs: Vec<_> = files
                 .chunks(files.len().div_ceil(threads))
-                .map(|share| scope.spawn(move || sync_all(share)))
+                .map(|share| {
+                    thread::Builder::new()
+                        .spawn_scoped(scope, move || sync_all(share))
+                        .map_err(|_| share)
+                })
                 .collect();
             syncs
                 .into_iter()
-                .map(|sync| {
-                    sync.join()
-                        .unwrap_or_else(|panic| panic::resume_unwind(panic))
+                .map(|sync| match sync {
+                    Ok(sync) => sync
+                        .join()
+                        .unwrap_or_else(|panic| panic::resume_unwind(panic)),
+                    // No thread for this share: sync it here, in its place in write order.
+                    Err(share) => sync_all(share),
                 })
                 .collect()
         });
