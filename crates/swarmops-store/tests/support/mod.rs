@@ -2,7 +2,7 @@
 //! [`FsOps`](swarmops_store::FsOps) doubles in [`fs`], the child-process runner in [`child`],
 //! and what the measurement tests share with the benches in [`common`]. A module directory, so
 //! that Cargo does not take it for a test target of its own. The repository's tests include
-//! [`child`] and [`fs`] too.
+//! [`child`] and [`fs`] by their paths, and the CLI's tests [`fs`].
 
 #![allow(dead_code)] // Each test binary uses the part it needs.
 

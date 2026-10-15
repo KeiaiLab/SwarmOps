@@ -6,7 +6,8 @@
 //! - [`FastFs`]: the real filesystem without a single flush to stable storage.
 //! - [`Rendezvous`]: tells calls made at once from calls made one after another.
 //!
-//! The store's tests and the repository's (which include this file) use them.
+//! The store's tests use them, and so do the repository's and the CLI's, which include this
+//! file by its path.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
