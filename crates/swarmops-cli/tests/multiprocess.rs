@@ -494,7 +494,10 @@ fn crash_commit_at(template: &Store, k: u64, dry: &DryRun) -> Crashed {
 
     let before = TEMPLATE_FRAMES - 1; // one of the template's frames moved main
     let changesets = store.info()["changesets"].as_u64().unwrap();
-    let committed = match changesets - before {
+    let new = changesets.checked_sub(before).unwrap_or_else(|| {
+        panic!("k={k}: {changesets} changesets, fewer than the template's {before}")
+    });
+    let committed = match new {
         0 => false,
         1 => true,
         n => panic!("k={k}: {n} new changesets"),
