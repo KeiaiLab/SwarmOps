@@ -133,6 +133,21 @@ fn set(name: &str, new: &str, expected_old: Option<&str>, create: bool) -> RefSe
     }
 }
 
+/// `word` as a hint writes it: as it is when it is made of `[A-Za-z0-9_./:@-]` only, else in
+/// single quotes, each `'` in it written `'\''` (the crate's own rule, which its unit tests pin),
+/// so that a temp dir holding a space, a `+` or a `~` still matches.
+fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_./:@-".contains(&b));
+    if plain {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
+}
+
 /// The id of a blob holding `content`, as the API writes ids.
 fn blob(content: &[u8]) -> String {
     hash_object(ObjectKind::Blob, content).to_hex()
@@ -261,7 +276,8 @@ fn init_then_info_roundtrip() {
 
     // A second init of the store is refused, and the hint opens the one there.
     let err = expect_err(LocalOps::init(&root, "acme"), ErrorCode::ExistsAlready);
-    assert_eq!(err.hint, Some(format!("swarmops --repo {root} info")));
+    let repo = shell_word(root.as_str());
+    assert_eq!(err.hint, Some(format!("swarmops --repo {repo} info")));
     assert_eq!(
         reopened.repo_info(InfoReq {}).unwrap(),
         now,
@@ -801,7 +817,14 @@ fn ref_set_create_update_mismatch_and_already_applied() {
         ErrorCode::CasMismatch,
     );
     assert_eq!(err.details["actual"], json!(c1));
-    assert!(err.message.contains("exists"), "{err:?}");
+    assert_eq!(
+        err.message,
+        format!(
+            "ref main exists already and points at {c1}: commit your change on top of it \
+             (--parent {c1}), then retry with --expect {c1}; re-apply your edits to the content \
+             at {c1} rather than re-sending your old files"
+        )
+    );
     assert_eq!(err.hint, Some(format!("swarmops show {c1}")));
 
     // Move with the target last seen, then replay the move.
@@ -824,7 +847,8 @@ fn ref_set_create_update_mismatch_and_already_applied() {
         err.message,
         format!(
             "ref main moved to {c2}: commit your change on top of it (--parent {c2}), then \
-             retry with --expect {c2}"
+             retry with --expect {c2}; re-apply your edits to the content at {c2} rather than \
+             re-sending your old files"
         )
     );
     assert_eq!(err.hint, Some(format!("swarmops show {c2}")));
@@ -997,13 +1021,26 @@ fn hints_quote_what_they_interpolate() {
     let spaced = utf8(dir.path().join("my store"));
     let (_spaced_ops, _) = LocalOps::init(&spaced, "spaced").unwrap();
     let err = expect_err(LocalOps::init(&spaced, "spaced"), ErrorCode::ExistsAlready);
-    assert_eq!(err.hint, Some(format!("swarmops --repo '{spaced}' info")));
+    let quoted = shell_word(spaced.as_str());
+    assert!(
+        quoted.starts_with('\''),
+        "a path with a space is quoted: {quoted}"
+    );
+    assert_eq!(err.hint, Some(format!("swarmops --repo {quoted} info")));
     let nowhere = utf8(dir.path().join("no store"));
     let err = expect_err(LocalOps::open(&nowhere), ErrorCode::NotARepo);
-    assert_eq!(err.hint, Some(format!("swarmops init '{nowhere}'")));
+    let quoted = shell_word(nowhere.as_str());
+    assert!(
+        quoted.starts_with('\''),
+        "a path with a space is quoted: {quoted}"
+    );
+    assert_eq!(err.hint, Some(format!("swarmops init {quoted}")));
     assert_eq!(
         expect_err(LocalOps::init(&root, "acme"), ErrorCode::ExistsAlready).hint,
-        Some(format!("swarmops --repo {root} info"))
+        Some(format!(
+            "swarmops --repo {} info",
+            shell_word(root.as_str())
+        ))
     );
 }
 
@@ -1108,7 +1145,8 @@ fn open_on_non_repo_is_e_not_a_repo() {
     for path in [base.clone(), base.join("missing")] {
         let err = expect_err(LocalOps::open(&path), ErrorCode::NotARepo);
         assert_eq!(err.exit, 6);
-        assert_eq!(err.hint, Some(format!("swarmops init {path}")), "{err:?}");
+        let init = format!("swarmops init {}", shell_word(path.as_str()));
+        assert_eq!(err.hint, Some(init), "{err:?}");
     }
     assert!(!base.join("missing").exists(), "open creates nothing");
     // Neither a file nor that broken store is a store, and init cannot help there.
