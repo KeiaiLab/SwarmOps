@@ -11,9 +11,9 @@ mod common;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use crate::common::base_dir;
+use crate::common::{base_dir, percentile};
 
 const N: usize = 1000;
 const PAYLOAD: [u8; 4096] = [0xA5; 4096];
@@ -26,12 +26,6 @@ fn write_payload(path: &Path) -> File {
         .expect("create file");
     f.write_all(&PAYLOAD).expect("write payload");
     f
-}
-
-/// Nearest-rank percentile over sorted samples; `q` in 0..=1.
-fn percentile(sorted: &[Duration], q_percent: usize) -> Duration {
-    let rank = (sorted.len() * q_percent).div_ceil(100).max(1);
-    sorted[rank - 1]
 }
 
 fn measure(name: &str, base: &Path, mut step: impl FnMut(&Path, &File)) {

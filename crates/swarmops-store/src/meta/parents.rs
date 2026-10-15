@@ -11,12 +11,11 @@
 //! offsets grow with the records. A record with no parents points where the next record's
 //! parents will start.
 
-use std::fs::File;
 use std::io;
-use std::os::unix::fs::FileExt;
 
 use swarmops_core::{ChangesetId, ObjectId};
 
+use super::column::AppendOnlyColumn;
 use crate::error::StoreError;
 
 /// The size of one parent id in `parents.log`.
@@ -85,7 +84,7 @@ pub(crate) fn encode<'a>(parents: &[ChangesetId], buf: &'a mut [u8]) -> &'a [u8]
 /// `parents.log` the caller's records use: parents that lie off a parent boundary or past it
 /// are [`StoreError::IndexCorrupt`].
 pub(crate) fn read(
-    log: &File,
+    log: &AppendOnlyColumn<1>,
     at: ParentsAt,
     log_len: u64,
 ) -> Result<Vec<ChangesetId>, StoreError> {
@@ -96,17 +95,15 @@ pub(crate) fn read(
     }
     let mut buf = [0; MAX_PARENTS_LEN];
     let bytes = &mut buf[..32 * usize::from(at.count)];
-    if !bytes.is_empty() {
-        log.read_exact_at(bytes, at.offset).map_err(|e| {
-            if e.kind() == io::ErrorKind::UnexpectedEof {
-                StoreError::IndexCorrupt {
-                    what: "a record's parents lie past the end of parents.log",
-                }
-            } else {
-                e.into()
+    log.read_at(at.offset, bytes).map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            StoreError::IndexCorrupt {
+                what: "a record's parents lie past the end of parents.log",
             }
-        })?;
-    }
+        } else {
+            e.into()
+        }
+    })?;
     Ok(bytes
         .as_chunks::<32>()
         .0

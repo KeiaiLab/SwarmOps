@@ -8,8 +8,8 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use swarmops_api::{
     API_VERSION, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
-    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_LS_LIMIT,
-    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, EntryKindOut, Envelope, ErrorCode, FileContent,
+    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, Envelope, ErrorCode, FileContent,
     FileKind, Identity, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, Meta, ModeInput, OpError,
     ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp,
     RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
@@ -752,7 +752,7 @@ fn ref_moves_carry_warnings_only_when_there_are_some() {
 #[test]
 fn listings_page_with_truncated_and_cursor() {
     // Default pages within the operations spec's 64 KiB target for a default response (§9).
-    assert_eq!(DEFAULT_LS_LIMIT, 500);
+    assert_eq!(DEFAULT_READ_TREE_LIMIT, 500);
     assert_eq!(DEFAULT_MAX_CHANGES, 400);
     assert_eq!(DEFAULT_LOG_LIMIT, 50);
     // An empty page is a mistake: limits start at 1, and 0 is `E_INVALID_ARG`.
@@ -772,7 +772,7 @@ fn listings_page_with_truncated_and_cursor() {
         ReadTreeReq {
             rev: Rev("main".to_owned()),
             path: None,
-            limit: DEFAULT_LS_LIMIT,
+            limit: DEFAULT_READ_TREE_LIMIT,
             cursor: None,
         }
     );

@@ -24,6 +24,7 @@
 //! an explicit [`MetaStore::flush`]. Readers take no lock and overlay the frames past the
 //! checkpoint (storage spec §3).
 
+mod column;
 pub mod frame;
 pub mod index;
 pub mod journal;
@@ -44,3 +45,8 @@ pub use store::{
     CasResult, CommitInfo, InsertOutcome, JournalEntry, MetaRead, MetaStore, MetaWrite,
     RefMoveEntry,
 };
+
+/// `n` as a file offset or a count of records: a `usize` always fits in a `u64` here.
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("usize fits in u64")
+}

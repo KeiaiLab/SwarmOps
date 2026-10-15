@@ -20,13 +20,14 @@
 //! [`Journal::set_ckpt`] replaces by rename, is read by path.
 
 use std::fs::{self, File};
-use std::io;
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::{fmt, io};
 
 use camino::Utf8PathBuf;
 
 use super::frame::{Frame, HEADER_LEN, Parsed, Record, encode_frame, parse_frame};
+use super::to_u64;
 use crate::error::StoreError;
 use crate::fs_ops::FsOps;
 use crate::layout::Layout;
@@ -47,6 +48,15 @@ pub struct Journal {
     /// Read-only handle on `journal.off`.
     off: File,
     tail: Mutex<Tail>,
+}
+
+impl fmt::Debug for Journal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Journal")
+            .field("log", &self.log_path)
+            .field("tail", &self.tail)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Where this handle last saw the journal end.
@@ -221,7 +231,10 @@ impl Journal {
 
     /// Every frame from `offset` to the end of `journal.log`, read with one `read_at`: what
     /// a reader applies past [`Journal::ckpt`]. `offset` must be a frame boundary: 0, a
-    /// listed frame's start, or the end of the last listed frame.
+    /// listed frame's start, or the end of the last listed frame. The listed frame just before
+    /// the read (the last listed one, if the read starts past them all) must start where the
+    /// one listed before it ends (frame 0 at 0), as recovery checks it too: a zeroed or stale
+    /// entry there is [`StoreError::JournalCorrupt`].
     ///
     /// `journal.off` is measured, and the entries read, before `journal.log`: every frame
     /// listed then was whole and durable before its entry was written, so it is whole in
@@ -338,17 +351,18 @@ impl Journal {
     ///   past frame 0 before it (a zero-filled block: no frame but the first starts at 0);
     ///   the frame then left last is checked as any last listed frame is;
     /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a last listed
-    ///   frame that does not start where the frame before it ends, or that is cut short,
-    ///   missing (`journal.log` ends where it starts), fails its CRC or does not decode (a
-    ///   listed frame's bytes were durable before it was listed, so its loss is a
-    ///   filesystem's, never a torn write); an unlisted empty payload (unless only zeros
-    ///   follow it), or an unlisted frame that matches its CRC but does not decode (a newer
-    ///   version may have written it).
+    ///   frame, or the frame listed before it, that does not start where the frame listed
+    ///   before it ends; a last listed frame that is cut short, missing (`journal.log` ends
+    ///   where it starts), fails its CRC or does not decode (a listed frame's bytes were
+    ///   durable before it was listed, so its loss is a filesystem's, never a torn write); a
+    ///   listed frame that fails the check before a cut or a listing; an unlisted empty payload
+    ///   (unless only zeros follow it), or an unlisted frame that matches its CRC but does not
+    ///   decode (a newer version may have written it).
     ///
     /// Only the last listed frame, the headers of the two frames before it, and what follows
-    /// are read, unless there is something to cut or list: then every listed frame is. `journal.off`
-    /// is repaired before `journal.log` is cut, so a crash in between leaves a torn frame the
-    /// next call cuts. The caller must hold [`crate::MetaLock`].
+    /// are read, unless there is something to cut or list: then every listed frame is.
+    /// `journal.off` is repaired before `journal.log` is cut, so a crash in between leaves a torn
+    /// frame the next call cuts. The caller must hold [`crate::MetaLock`].
     pub fn truncate_torn_tail(&self) -> Result<Option<u64>, StoreError> {
         let mut tail = self.tail();
         tail.checked = false;
@@ -644,8 +658,4 @@ fn read_upto(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     }
     buf.truncate(filled);
     Ok(buf)
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
 }

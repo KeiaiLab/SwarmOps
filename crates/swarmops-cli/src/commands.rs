@@ -35,8 +35,8 @@ use swarmops_api::{
     ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev, ShowReq, StoreOps,
     VerifyReport, VerifyReq, schema_for_all,
 };
-use swarmops_ops::LocalOps;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
+use swarmops_ops::{LocalOps, shell_word};
 
 use crate::cli::{self, Command, Global, RefCommand};
 use crate::context::{self, Env};
@@ -480,19 +480,10 @@ fn details<const N: usize>(entries: [(&str, Value); N]) -> Map<String, Value> {
         .collect()
 }
 
-/// `arg` as one shell word in a hint: as it is when it is made of `[A-Za-z0-9_./:@-]` only,
-/// else in single quotes, each `'` in it written `'\''`; control characters escaped, so that
-/// the hint stays one line (the rule of the ops crate's hints).
+/// `arg` as one shell word in a hint ([`shell_word`]), control characters escaped so that the
+/// hint stays one line (the rule of the ops crate's hints).
 fn quoted(arg: &str) -> String {
-    let plain = !arg.is_empty()
-        && arg
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_./:@-".contains(&b));
-    if plain {
-        arg.to_owned()
-    } else {
-        output::printable(&format!("'{}'", arg.replace('\'', r"'\''")))
-    }
+    output::printable(&shell_word(arg))
 }
 
 #[cfg(test)]

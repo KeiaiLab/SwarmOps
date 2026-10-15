@@ -7,15 +7,14 @@
 //! may run in any order or in parallel. The multi-process tests run this test binary again
 //! as their children (selected by [`CHILD_ROOT`]), all on the real filesystem.
 
-mod rendezvous;
+mod support;
 
 use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::io;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -23,12 +22,15 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
 use swarmops_store::{
     CRASH_AT_ENV, CasResult, ChangesetMeta, CommitInfo, CrashAtFs, Frame, FsOps, Index,
-    InsertOutcome, Journal, JournalEntry, Layout, LinkOutcome, MetaLock, MetaRead, MetaStore,
-    RealFs, Record, RefMoveEntry, RefState, StoreError,
+    InsertOutcome, Journal, JournalEntry, Layout, MetaLock, MetaRead, MetaStore, RealFs, Record,
+    RefMoveEntry, RefState, StoreError,
 };
 use tempfile::TempDir;
 
-use crate::rendezvous::Rendezvous;
+use crate::support::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
+use crate::support::fs::{Failing, FastFs, RecordingFs, When, copy_dir};
+use crate::support::temp_dir as new_root;
+use crate::support::{append_bytes, file_len};
 
 /// Set only in the children the multi-process tests spawn: the store root.
 const CHILD_ROOT: &str = "SWARMOPS_TEST_META_CHILD_ROOT";
@@ -46,8 +48,6 @@ const PER_CHILD: u64 = 50;
 const REPORT: &str = "meta-child: ";
 
 const ACTOR: &str = "test/1";
-
-const SIGABRT: i32 = 6;
 
 /// Set only in the child of `a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer`,
 /// which runs with no thread to spare: the store root.
@@ -88,12 +88,6 @@ const CREATE_CALLS: [&str; 24] = [
     "fsync_dir meta",
     "rename_durable meta",
 ];
-
-fn new_root() -> (TempDir, Utf8PathBuf) {
-    let dir = tempfile::tempdir().expect("create store root");
-    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("temp dir is UTF-8");
-    (dir, root)
-}
 
 /// A fresh store; its directory lives as long as the `TempDir`.
 fn new_store() -> (TempDir, Utf8PathBuf, MetaStore) {
@@ -184,15 +178,6 @@ fn ckpt(root: &Utf8Path) -> u64 {
 
 fn log_len(root: &Utf8Path) -> u64 {
     file_len(Layout::new(root).journal_log())
-}
-
-fn file_len(path: impl AsRef<Path>) -> u64 {
-    fs::metadata(path).unwrap().len()
-}
-
-fn append_bytes(path: impl AsRef<Path>, bytes: &[u8]) {
-    let mut file = OpenOptions::new().append(true).open(path).unwrap();
-    file.write_all(bytes).unwrap();
 }
 
 /// The content of the file of ref `name`, if there is one.
@@ -837,26 +822,23 @@ fn wait_for_go(root: &Utf8Path) {
 }
 
 /// Runs the test named `test` again in [`CHILDREN`] child processes on the store at `root`,
-/// lets them go together, and returns what each one printed and how it ended.
+/// lets them go together, and returns what each one printed and how it ended; each must end
+/// within [`CHILD_TIMEOUT`] of the go.
 fn run_children(test: &str, root: &Utf8Path) -> Vec<Output> {
-    let exe = std::env::current_exe().unwrap();
-    let children: Vec<_> = (0..CHILDREN)
+    let children: Vec<Child> = (0..CHILDREN)
         .map(|number| {
-            // `--include-ignored`: the test may be one the slow suite runs.
-            Command::new(&exe)
-                .args(["--exact", test, "--include-ignored", "--nocapture"])
-                .env(CHILD_ROOT, root)
-                .env(CHILD_NUMBER, number.to_string())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap()
+            Child::spawn(
+                this_test(test)
+                    .env(CHILD_ROOT, root)
+                    .env(CHILD_NUMBER, number.to_string()),
+            )
         })
         .collect();
     fs::write(root.join("go"), b"").unwrap();
+    let deadline = Instant::now() + CHILD_TIMEOUT;
     children
         .into_iter()
-        .map(|child| child.wait_with_output().unwrap())
+        .map(|child| child.wait(deadline))
         .collect()
 }
 
@@ -1547,16 +1529,11 @@ fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
     let calls = u64::try_from(CREATE_CALLS.len()).unwrap();
     for k in 1..=calls + 1 {
         let (_dir, root) = new_root();
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "crash_at_any_create_call_leaves_a_store_open_or_create_takes",
-                "--nocapture",
-            ])
-            .env(CREATE_CRASH_ROOT, &root)
-            .env(CRASH_AT_ENV, k.to_string())
-            .output()
-            .unwrap();
+        let child = run(
+            this_test("crash_at_any_create_call_leaves_a_store_open_or_create_takes")
+                .env(CREATE_CRASH_ROOT, &root)
+                .env(CRASH_AT_ENV, k.to_string()),
+        );
         let ended_as_expected = if k <= calls {
             child.status.signal() == Some(SIGABRT)
         } else {
@@ -1831,15 +1808,19 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
     // changeset 2 and moved main to it: a frame that its look at the journal did not see.
     let writer_root = root.clone();
     let (fs, _calls) = RecordingFs::new();
-    let fs = fs.with_hook("main", move || {
-        let writer = MetaStore::open(&writer_root).unwrap();
-        let mut write = writer.write().unwrap();
-        write.insert_changeset(cs(2, &[1])).unwrap();
-        write
-            .cas_ref("main", Some(id(1)), Some(id(2)), ACTOR)
-            .unwrap();
-        write.commit().unwrap();
-    });
+    let fs = fs.with_hook((
+        "read main".to_owned(),
+        When::Before,
+        Box::new(move || {
+            let writer = MetaStore::open(&writer_root).unwrap();
+            let mut write = writer.write().unwrap();
+            write.insert_changeset(cs(2, &[1])).unwrap();
+            write
+                .cas_ref("main", Some(id(1)), Some(id(2)), ACTOR)
+                .unwrap();
+            write.commit().unwrap();
+        }),
+    ));
     let reader = MetaStore::open_with_fs(&root, Arc::new(fs)).unwrap();
 
     let read = reader.read().unwrap();
@@ -2155,20 +2136,6 @@ fn assert_replayed(read: &MetaRead<'_>, what: &str) {
     assert_eq!(read.list_refs().unwrap(), refs, "{what}");
 }
 
-/// Copies directory `from` to `to`, files and subdirectories, without syncing anything.
-fn copy_dir(from: &Path, to: &Path) {
-    fs::create_dir_all(to).unwrap();
-    for entry in fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
-
 /// A crash at any FsOps call of a write's replay (the index appends of three frames, the ref
 /// files they move) leaves a store whose snapshots show the journal's state, and the next
 /// write finishes the replay: every record once, in journal order, and each ref file as its
@@ -2204,16 +2171,11 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
     for k in 1..=total + 1 {
         let (_dir, root) = new_root();
         copy_dir(template.as_std_path(), root.as_std_path());
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "crash_at_any_replay_call_recovers_to_the_journal",
-                "--nocapture",
-            ])
-            .env(REPLAY_CRASH_ROOT, &root)
-            .env(CRASH_AT_ENV, k.to_string())
-            .output()
-            .unwrap();
+        let child = run(
+            this_test("crash_at_any_replay_call_recovers_to_the_journal")
+                .env(REPLAY_CRASH_ROOT, &root)
+                .env(CRASH_AT_ENV, k.to_string()),
+        );
         let ended_as_expected = if k <= total {
             child.status.signal() == Some(SIGABRT)
         } else {
@@ -2239,240 +2201,6 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
         let new = ref_file(&root, "release/new");
         assert_eq!(new, Some(ref_content(2, 1)), "k={k}");
         assert_eq!(ref_file(&root, "release/old"), None, "k={k}");
-    }
-}
-
-/// [`RealFs`] without a single flush to stable storage: for tests whose subject is what the
-/// files hold and what snapshots show, which a skipped fsync does not change, and that make
-/// too many transactions to pay for their fsyncs.
-struct FastFs;
-
-impl FsOps for FastFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
-        temp.write_all(bytes)?;
-        let (_file, path) = temp.keep().map_err(|e| e.error)?;
-        Ok(path)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, _p: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        OpenOptions::new().write(true).open(path)?.set_len(len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let dir = path.parent().expect("a file in a directory");
-        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
-        temp.write_all(bytes)?;
-        temp.persist(path).map_err(|e| e.error)?;
-        Ok(())
-    }
-
-    fn sync_data(&self, _path: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)
-    }
-}
-
-/// A hook for [`RecordingFs`]: the name of the file whose first `read` runs it, and what it
-/// runs.
-type Hook = (&'static str, Box<dyn FnOnce() + Send>);
-
-/// Which calls a [`RecordingFs`] fails, while set: each call as it records it,
-/// `"<method> <file name>"`. Clones share the setting.
-#[derive(Clone, Default)]
-struct Failing(Arc<Mutex<Vec<&'static str>>>);
-
-impl Failing {
-    /// Fails `call`, and no other.
-    fn set(&self, call: &'static str) {
-        *self.0.lock().unwrap() = vec![call];
-    }
-
-    /// Fails `call` too.
-    fn also(&self, call: &'static str) {
-        self.0.lock().unwrap().push(call);
-    }
-
-    fn clear(&self) {
-        self.0.lock().unwrap().clear();
-    }
-
-    /// An injected error if `call` is a failing call; the call then does nothing.
-    fn check(&self, call: &str) -> io::Result<()> {
-        if self.0.lock().unwrap().contains(&call) {
-            Err(io::Error::other(format!("injected: {call}")))
-        } else {
-            Ok(())
-        }
-    }
-}
-
-/// [`RealFs`] that records each call as `"<method> <file name>"`, can run a hook once, at the
-/// first `read` of a file of a given name, before that read, fails the call its [`Failing`]
-/// names, and counts its `sync_data` calls in flight ([`Rendezvous`]).
-struct RecordingFs {
-    calls: Arc<Mutex<Vec<String>>>,
-    hook: Mutex<Option<Hook>>,
-    failing: Failing,
-    syncs: Rendezvous,
-}
-
-impl RecordingFs {
-    /// A recorder, and a function that returns the calls made since it last ran.
-    fn new() -> (RecordingFs, impl Fn() -> Vec<String>) {
-        let calls = Arc::new(Mutex::new(Vec::new()));
-        let fs = RecordingFs {
-            calls: Arc::clone(&calls),
-            hook: Mutex::new(None),
-            failing: Failing::default(),
-            syncs: Rendezvous::default(),
-        };
-        (fs, move || std::mem::take(&mut *calls.lock().unwrap()))
-    }
-
-    /// What counts this recorder's `sync_data` calls in flight.
-    fn syncs(&self) -> Rendezvous {
-        self.syncs.clone()
-    }
-
-    /// This recorder, running `hook` at the first `read` of a file named `file`.
-    fn with_hook(self, file: &'static str, hook: impl FnOnce() + Send + 'static) -> Self {
-        *self.hook.lock().unwrap() = Some((file, Box::new(hook)));
-        self
-    }
-
-    /// What sets the call this recorder fails.
-    fn failing(&self) -> Failing {
-        self.failing.clone()
-    }
-
-    /// Records the call, then fails it if it is the failing one.
-    fn record(&self, method: &str, path: &Path) -> io::Result<()> {
-        let name = path.file_name().unwrap().to_string_lossy();
-        let call = format!("{method} {name}");
-        self.calls.lock().unwrap().push(call.clone());
-        self.failing.check(&call)
-    }
-}
-
-impl FsOps for RecordingFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.record("create_dir_all", p)?;
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.record("write_durable_temp", dir)?;
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.record("link_noclobber", to)?;
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.record("fsync_dir", p)?;
-        RealFs.fsync_dir(p)
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.record("read", p)?;
-        let hook = {
-            let mut slot = self.hook.lock().unwrap();
-            let due = slot
-                .as_ref()
-                .is_some_and(|(file, _)| p.file_name() == Some(file.as_ref()));
-            if due { slot.take() } else { None }
-        };
-        if let Some((_, hook)) = hook {
-            hook();
-        }
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.record("exists", p)?;
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        self.record("remove", p)?;
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append_durable", path)?;
-        RealFs.append_durable(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.record("file_len", path)?;
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.record("truncate", path)?;
-        RealFs.truncate(path, len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.record("atomic_replace", path)?;
-        RealFs.atomic_replace(path, bytes)
-    }
-
-    fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.record("sync_data", path)?;
-        self.syncs.around(|| RealFs.sync_data(path))
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append", path)?;
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.record("rename_durable", to)?;
-        RealFs.rename_durable(from, to)
     }
 }
 
@@ -2590,11 +2318,28 @@ fn commit_with_no_thread_to_spare(root: &Utf8Path) {
         println!("{REPORT}threads can be spawned");
         return;
     }
-    let store = MetaStore::create(root).unwrap();
+    let (fs, calls) = RecordingFs::new();
+    let store = MetaStore::create_with_fs(root, Arc::new(fs)).unwrap();
     for n in 0..31 {
         insert(&store, &[cs(n, &[])]);
     }
+    calls();
     assert!(insert(&store, &[cs(31, &[])]).checkpointed);
+    // No thread could take a share of the sync: each file was synced here, in write order,
+    // all before the checkpoint moved.
+    let made = calls();
+    let synced_then_checkpointed = [
+        "sync_data parents.log",
+        "sync_data par.col",
+        "sync_data gen.col",
+        "sync_data dh.col",
+        "sync_data ids.col",
+        "atomic_replace journal.ckpt",
+    ];
+    assert_eq!(
+        made[made.len().saturating_sub(6)..],
+        synced_then_checkpointed
+    );
     assert_eq!(ckpt(root), log_len(root));
     println!("{REPORT}checkpointed");
 }
@@ -2609,21 +2354,21 @@ fn a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer() {
         return;
     }
     let (_dir, root) = new_root();
-    // `ulimit -u 1`: this user's processes and threads are past the limit, so the child can
-    // spawn no thread (the test harness then runs the test on its main thread).
-    let child = Command::new("bash")
+    // RLIMIT_NPROC at 1 (`ulimit -u` in bash, `ulimit -p` in dash): this user's processes and
+    // threads are past the limit, so the child can spawn no thread (the test harness then runs
+    // the test on its main thread).
+    let child = run(Command::new("sh")
         .arg("-c")
-        .arg("ulimit -u 1 && exec \"$0\" \"$@\"")
+        .arg("ulimit -u 1 2>/dev/null || ulimit -p 1; exec \"$0\" \"$@\"")
         .arg(std::env::current_exe().unwrap())
-        .args(["--exact", TEST, "--nocapture"])
-        .env(NO_THREADS_ROOT, &root)
-        .output()
-        .unwrap();
+        .args(test_args(TEST))
+        .env(NO_THREADS_ROOT, &root));
     let report = report(0, &child);
-    assert!(
-        report == "checkpointed" || report == "threads can be spawned",
-        "{report}"
-    );
+    if report == "threads can be spawned" {
+        eprintln!("the thread limit does not bind here (as root, say): the fallback went untested");
+    } else {
+        assert_eq!(report, "checkpointed");
+    }
 }
 
 /// The five index syncs, sorted.

@@ -6,89 +6,25 @@
 //! Every test owns a fresh store (`tempfile::tempdir()`). The crash sweep runs this test
 //! binary again as its children (selected by [`CHILD_ROOT`]).
 
+mod support;
+
 use std::fs;
-use std::io;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_core::{
-    BlobId, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
-};
-use swarmops_repo::{
-    CasOutcome, CasResult, Change, ChangeOp, CommitRequest, LocalRepo, RefState, RepoError,
-    RepoInfo,
-};
-use swarmops_store::{
-    CRASH_AT_ENV, ChangesetMeta, FsOps, LinkOutcome, MetaStore, RealFs, StoreError,
-};
-use tempfile::TempDir;
+use swarmops_core::{ChangesetId, EntryKind, ObjectId, ObjectKind, hash_object};
+use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
+use swarmops_store::{CRASH_AT_ENV, ChangesetMeta, MetaStore, StoreError};
+
+use crate::support::child::{SIGABRT, run, this_test};
+use crate::support::fs::RecordingFs;
+use crate::support::{blob, commit, new_repo, path, put, put_as, request};
 
 /// Set only in the children of the crash sweep: the store root.
 const CHILD_ROOT: &str = "SWARMOPS_TEST_REPO_READ_CHILD_ROOT";
-
-const SIGABRT: i32 = 6;
-
-fn new_repo() -> (TempDir, Utf8PathBuf, LocalRepo) {
-    let dir = tempfile::tempdir().expect("create a temp dir");
-    let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("temp dir is UTF-8");
-    let repo = LocalRepo::create(&root, "test").expect("create the store");
-    (dir, root, repo)
-}
-
-fn path(s: &str) -> RepoPath {
-    RepoPath::new(s).expect("a valid repo path")
-}
-
-fn blob(content: &[u8]) -> BlobId {
-    BlobId(hash_object(ObjectKind::Blob, content))
-}
-
-fn put(p: &str, content: &[u8]) -> Change {
-    put_as(p, EntryKind::File, content)
-}
-
-fn put_as(p: &str, kind: EntryKind, content: &[u8]) -> Change {
-    Change {
-        path: path(p),
-        op: ChangeOp::Put {
-            kind,
-            content: content.to_vec(),
-        },
-    }
-}
-
-fn signature() -> Signature {
-    Signature {
-        name: b"test/agent".to_vec(),
-        email: b"agent@test.swarmops.local".to_vec(),
-        secs: 1_760_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    }
-}
-
-fn request(parents: &[ChangesetId], changes: Vec<Change>, message: &str) -> CommitRequest {
-    CommitRequest {
-        parents: parents.to_vec(),
-        changes,
-        author: signature(),
-        committer: signature(),
-        message: message.as_bytes().to_vec(),
-        metadata: Vec::new(),
-        allow_empty: false,
-    }
-}
-
-#[track_caller]
-fn commit(repo: &LocalRepo, parents: &[ChangesetId], changes: Vec<Change>) -> ChangesetId {
-    repo.commit(request(parents, changes, "a test commit"))
-        .expect("commit")
-        .id
-}
 
 fn unknown_id() -> ChangesetId {
     ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"))
@@ -605,8 +541,9 @@ fn entries(dir: &str) -> Option<Vec<String>> {
 
 #[test]
 fn create_refuses_a_path_that_leads_under_mnt_before_touching_it() {
-    // As given, the path is not under /mnt/, but it leads there: the check resolves the
-    // nearest existing ancestor, and refuses before anything is created.
+    // As given, the path is not under /mnt/, but it leads there: the check resolves it one
+    // component at a time, as the kernel will once its missing directories exist (a `..` takes
+    // back the name before it, there or not), and refuses before anything is created.
     let before = entries("/mnt");
     for (store, leads_to) in [
         ("/tmp/../mnt/x", "/mnt/x"),
@@ -670,13 +607,10 @@ fn create_syncs_each_directory_it_makes() {
     // made durable, by syncing the directory that holds it, outermost first.
     let dir = tempfile::tempdir().unwrap();
     let base = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let fs = RecordingFs {
-        root: base.clone().into_std_path_buf(),
-        calls: Arc::clone(&calls),
-    };
+    let (fs, calls) = RecordingFs::new();
+    let fs = fs.naming_paths_in(base.clone().into_std_path_buf());
     LocalRepo::create_with_fs(&base.join("a/b/store"), "demo", Arc::new(fs)).unwrap();
-    let recorded = calls.lock().unwrap().clone();
+    let recorded = calls();
     assert_eq!(
         recorded[..5],
         [
@@ -691,107 +625,14 @@ fn create_syncs_each_directory_it_makes() {
     // A store directory that exists already (made by hand, or by a create that crashed) has
     // its entry synced once all the same.
     fs::create_dir(base.join("made")).unwrap();
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let fs = RecordingFs {
-        root: base.clone().into_std_path_buf(),
-        calls: Arc::clone(&calls),
-    };
+    let (fs, calls) = RecordingFs::new();
+    let fs = fs.naming_paths_in(base.clone().into_std_path_buf());
     LocalRepo::create_with_fs(&base.join("made"), "demo", Arc::new(fs)).unwrap();
-    let recorded = calls.lock().unwrap().clone();
+    let recorded = calls();
     assert_eq!(
         recorded[..3],
         ["create_dir_all made", "fsync_dir .", "exists made/FORMAT"]
     );
-}
-
-/// The real filesystem, recording each call as `"<method> <path in the store>"`.
-struct RecordingFs {
-    root: PathBuf,
-    calls: Arc<Mutex<Vec<String>>>,
-}
-
-impl RecordingFs {
-    fn record(&self, method: &str, p: &Path) {
-        let rel = match p.strip_prefix(&self.root) {
-            Ok(rel) if rel.as_os_str().is_empty() => ".".to_owned(),
-            Ok(rel) => rel.display().to_string(),
-            Err(_) if Some(p) == self.root.parent() => "..".to_owned(),
-            Err(_) => p.display().to_string(),
-        };
-        self.calls.lock().unwrap().push(format!("{method} {rel}"));
-    }
-}
-
-impl FsOps for RecordingFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.record("create_dir_all", p);
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.record("write_durable_temp", dir);
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.record("link_noclobber", to);
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.record("fsync_dir", p);
-        RealFs.fsync_dir(p)
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.record("read", p);
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.record("exists", p);
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        self.record("remove", p);
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, p: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append_durable", p);
-        RealFs.append_durable(p, bytes)
-    }
-
-    fn file_len(&self, p: &Path) -> io::Result<u64> {
-        self.record("file_len", p);
-        RealFs.file_len(p)
-    }
-
-    fn truncate(&self, p: &Path, len: u64) -> io::Result<()> {
-        self.record("truncate", p);
-        RealFs.truncate(p, len)
-    }
-
-    fn atomic_replace(&self, p: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.record("atomic_replace", p);
-        RealFs.atomic_replace(p, bytes)
-    }
-
-    fn sync_data(&self, p: &Path) -> io::Result<()> {
-        self.record("sync_data", p);
-        RealFs.sync_data(p)
-    }
-
-    fn append(&self, p: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append", p);
-        RealFs.append(p, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.record("rename_durable", to);
-        RealFs.rename_durable(from, to)
-    }
 }
 
 /// The filesystem calls of `LocalRepo::create`, in order, on a fresh store.
@@ -800,13 +641,10 @@ fn create_calls() -> Vec<String> {
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
     // create canonicalizes the store path; record paths against the canonical root.
     let canonical_dir = dir.path().canonicalize().unwrap();
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let fs = RecordingFs {
-        root: canonical_dir.join("store"),
-        calls: Arc::clone(&calls),
-    };
+    let (fs, calls) = RecordingFs::new();
+    let fs = fs.naming_paths_in(canonical_dir.join("store"));
     LocalRepo::create_with_fs(&root, "demo", Arc::new(fs)).unwrap();
-    calls.lock().unwrap().clone()
+    calls()
 }
 
 /// Where in [`create_calls`] the metadata store's own create runs: after `exists meta`, up to
@@ -888,16 +726,9 @@ fn create_makes_the_documented_fs_calls() {
 fn create_crashing_at(k: u64, total: u64) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-    let child = Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "create_resumes_after_a_crash_at_any_call",
-            "--nocapture",
-        ])
+    let child = run(this_test("create_resumes_after_a_crash_at_any_call")
         .env(CHILD_ROOT, &root)
-        .env(CRASH_AT_ENV, k.to_string())
-        .output()
-        .unwrap();
+        .env(CRASH_AT_ENV, k.to_string()));
     let finished = child.status.success();
     assert_eq!(
         finished,

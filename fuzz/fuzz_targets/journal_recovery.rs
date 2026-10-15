@@ -233,12 +233,14 @@ fn recovered_as_modelled(recovery: &Recovery, cut: Option<u64>, before: &Files, 
 }
 
 /// What `truncate_torn_tail` does with `files`, by the model. Under the lock the files are
-/// quiescent, so the last listed frame must lie within `journal.log`, start where the header of
-/// the frame listed before it says that one ends (frame 0 at 0), and read whole: cut short,
-/// missing, failing its CRC or not decoding, it is damage, as is a header before it announcing
-/// an empty payload. After it, unlisted whole frames are listed up to the end of the file or a
-/// torn tail, which is cut; an unlisted frame no writer produces is damage. A partial entry is
-/// dropped.
+/// quiescent. A partial entry is dropped, and so are zeroed entries past frame 0 at the end of
+/// `journal.off`. The last listed frame must lie within `journal.log`, start where the header of
+/// the frame listed before it says that one ends (frame 0 at 0), as must that frame, one link
+/// further back, and read whole: cut short, missing, failing its CRC or not decoding, it is
+/// damage, as is a header before it announcing an empty payload. After it, unlisted whole
+/// frames are listed up to the end of the file or a torn tail, which is cut; an unlisted frame
+/// no writer produces is damage. Before anything is cut or listed, every listed frame must be
+/// sound (start where the one listed before it ends, and read whole), or that is damage too.
 #[derive(Debug, PartialEq, Eq)]
 enum Recovery {
     /// Recovery succeeds: `journal.off` lists `entries` after it, and `journal.log` is cut at

@@ -6,6 +6,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// The directory the measurements make their temporary directories in, created if missing:
 /// `SWARMOPS_BENCH_DIR`, or `~/.local/state/swarmops-bench` (on the native filesystem, unlike
@@ -28,4 +29,10 @@ pub fn mix(n: u64) -> u64 {
     z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     z ^ (z >> 31)
+}
+
+/// Nearest-rank percentile over sorted samples.
+pub fn percentile(sorted: &[Duration], percent: usize) -> Duration {
+    let rank = (sorted.len() * percent).div_ceil(100).max(1);
+    sorted[rank - 1]
 }

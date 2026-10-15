@@ -34,11 +34,12 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
+use support::doubles::{Call, Watch, Watched};
 use support::{Racers, Run, Store, agent, run, run_within};
 use swarmops_core::{EntryKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_ops::NOW_ENV;
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
-use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, FsOps, Layout, LinkOutcome, MetaLock, RealFs};
+use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, Layout, MetaLock};
 
 /// How many children the commit tests race.
 const COMMITTERS: usize = 8;
@@ -715,84 +716,35 @@ fn kill9_during_init_leaves_no_store_or_a_whole_one() {
 // A failed index sync (storage spec §3, the batched sync).
 // ---------------------------------------------------------------------------------------------
 
-/// The real filesystem, except that the first `sync_data` of a file named `name` fails: what
-/// a writeback error looks like to the store, reported once, to the next sync after it.
+/// What makes the real filesystem's first `sync_data` of a file named `name` fail: what a
+/// writeback error looks like to the store, reported once, to the next sync after it.
 struct FailFirstSync {
     name: &'static str,
     failed: AtomicBool,
 }
 
 impl FailFirstSync {
-    fn of(name: &'static str) -> FailFirstSync {
-        FailFirstSync {
+    fn of(name: &'static str) -> Watched<FailFirstSync> {
+        Watched(FailFirstSync {
             name,
             failed: AtomicBool::new(false),
-        }
+        })
     }
 }
 
-impl FsOps for FailFirstSync {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        RealFs.fsync_dir(p)
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append_durable(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        RealFs.truncate(path, len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        RealFs.atomic_replace(path, bytes)
-    }
-
-    fn sync_data(&self, path: &Path) -> io::Result<()> {
-        let named = path.file_name().is_some_and(|name| name == self.name);
-        if named && !self.failed.swap(true, Ordering::SeqCst) {
+impl Watch for FailFirstSync {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        let named = call
+            .path()
+            .file_name()
+            .is_some_and(|name| name == self.name);
+        if call.method == "sync_data" && named && !self.failed.swap(true, Ordering::SeqCst) {
             return Err(io::Error::other(format!(
                 "injected: the writeback of {} failed",
                 self.name
             )));
         }
-        RealFs.sync_data(path)
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        RealFs.rename_durable(from, to)
+        Ok(())
     }
 }
 

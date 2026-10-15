@@ -1,6 +1,6 @@
 //! One directory: `"SWTR" ver=1 | varint n | n × (kind u8 | varint len | name | id[32])`.
 
-use super::codec::{CodecError, Reader, check_strictly_sorted, put_count, put_len_prefixed};
+use super::codec::{CodecError, check_strictly_sorted, put_count, put_len_prefixed, reader};
 use crate::id::{ObjectId, ObjectKind, TreeId, hash_object};
 use crate::path::RepoPath;
 
@@ -105,14 +105,14 @@ impl Tree {
 
     /// Parses canonical bytes; an empty tree decodes successfully (it may be the root).
     pub fn decode(buf: &[u8]) -> Result<Self, CodecError> {
-        let mut r = Reader::new(buf);
+        let mut r = reader(buf);
         r.magic(*MAGIC, VERSION)?;
         let n = r.count()?;
         let mut entries = Vec::with_capacity(n.min(1024));
         for _ in 0..n {
             let kind = EntryKind::from_u8(r.u8()?)?;
             let name = r.utf8()?;
-            let id = ObjectId(r.array32()?);
+            let id = ObjectId(r.array()?);
             entries.push(TreeEntry { name, kind, id });
         }
         r.finish()?;

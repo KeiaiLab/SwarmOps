@@ -78,9 +78,10 @@ impl Identity {
                     "invalid agent name {s:?}: expected <family>/<instance> of at most {MAX_AGENT_LEN} bytes"
                 ),
             )
-            .with_hint(
-                "agent names look like agent/worker-17: family [a-z0-9-]+, instance [A-Za-z0-9._-]+ not starting with '.'",
-            ));
+            .with_hint(format!(
+                "agent names look like agent/worker-17: family [{FAMILY_BYTES}]+, instance \
+                 [{INSTANCE_BYTES}]+ not starting with '.'"
+            )));
         }
         Ok(Self {
             agent: s.to_owned(),

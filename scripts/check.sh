@@ -3,7 +3,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 cargo fmt --all --check
+cargo fmt --manifest-path fuzz/Cargo.toml --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 if cargo nextest --version >/dev/null 2>&1; then
   cargo nextest run --workspace --all-features --no-tests=warn
 else

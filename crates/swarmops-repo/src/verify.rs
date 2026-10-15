@@ -19,6 +19,9 @@
 //!   past it are checked as the index holds them. A ref
 //!   file that is not a ref file is a [`VerifyProblem::CorruptRef`], one that names no
 //!   changeset a [`VerifyProblem::DanglingRef`]; one that cannot be read at all fails verify.
+//!   A ref's target is checked only if the journal reads whole or the index opens: with
+//!   neither, no changeset is known for certain, and the [`VerifyProblem::MetaCorrupt`] says
+//!   that the refs' targets go unchecked.
 //! - Every changeset, in seq order: its object, its record against its object (parents, delta
 //!   hash) and its parents' generations, its parents ([`VerifyProblem::MissingParent`]), every
 //!   tree under its root, and its root against its first parent's root with its delta applied

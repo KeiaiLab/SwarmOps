@@ -6,5 +6,8 @@ use swarmops_core::Changeset;
 
 fuzz_target!(|cs: Changeset| {
     let bytes = cs.encode().expect("arbitrary changesets are canonical");
-    assert_eq!(Changeset::decode(&bytes).expect("canonical bytes decode"), cs);
+    assert_eq!(
+        Changeset::decode(&bytes).expect("canonical bytes decode"),
+        cs
+    );
 });

@@ -48,7 +48,7 @@ use swarmops_store::{
     ChangesetMeta, Frame, InsertOutcome, Journal, Layout, MetaStore, RealFs, Record, StoreError,
 };
 
-use crate::common::base_dir;
+use crate::common::{base_dir, percentile};
 
 /// How many writer processes the test runs.
 const CHILDREN: u64 = 32;
@@ -131,12 +131,6 @@ fn changeset(chain: u64, j: u64) -> ChangesetMeta {
         delta_hash: delta(chain, j),
         parents: parents(chain, j),
     }
-}
-
-/// Nearest-rank percentile over sorted samples.
-fn percentile(sorted: &[Duration], percent: usize) -> Duration {
-    let rank = (sorted.len() * percent).div_ceil(100).max(1);
-    sorted[rank - 1]
 }
 
 /// `d` in milliseconds, with two decimals.

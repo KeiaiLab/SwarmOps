@@ -5,16 +5,16 @@
 //! Every test owns a fresh store root (`tempfile::tempdir()`), so tests are independent and
 //! may run in any order or in parallel.
 
+mod support;
+
 use std::ffi::OsString;
 use std::fmt::Debug;
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::num::NonZero;
 use std::os::unix::process::ExitStatusExt;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,11 +22,15 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    CRASH_AT_ENV, ChangesetMeta, CrashAtFs, FsOps, Index, Layout, LinkOutcome, RealFs, StoreError,
+    CRASH_AT_ENV, ChangesetMeta, CrashAtFs, FsOps, Index, Layout, RealFs, StoreError,
 };
 use tempfile::TempDir;
 
-const SIGABRT: i32 = 6;
+use crate::support::child::{SIGABRT, run, this_test};
+use crate::support::common::{mix, percentile};
+use crate::support::fs::{FastFs, RecordingFs};
+use crate::support::new_root as bare_root;
+use crate::support::{append_bytes, file_len, real_fs, set_len};
 
 /// Set only in the children that `crash_at_any_index_write_recovers_to_whole_records`
 /// spawns: the store root.
@@ -56,24 +60,12 @@ const VIEWS: [(&str, u64); 4] = [
     ("sorted/dh.rec", 8),
 ];
 
-/// A fresh store root and its layout, with no index files yet; the directory lives as long as
-/// the `TempDir`.
-fn bare_root() -> (TempDir, Layout) {
-    let dir = tempfile::tempdir().expect("create store root");
-    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("temp dir is UTF-8");
-    (dir, Layout::new(root))
-}
-
 /// A fresh store root and its layout, with an empty index laid out as `MetaStore::create`
 /// lays it out.
 fn new_root() -> (TempDir, Layout) {
     let (dir, layout) = bare_root();
     Index::create(&layout, real_fs()).expect("create the index files");
     (dir, layout)
-}
-
-fn real_fs() -> Arc<dyn FsOps> {
-    Arc::new(RealFs)
 }
 
 fn open(layout: &Layout) -> Index {
@@ -121,14 +113,6 @@ fn at_seq(meta: &ChangesetMeta, seq: u64) -> ChangesetMeta {
     }
 }
 
-/// SplitMix64's output function: a bijection on `u64` that scatters its input.
-fn mix(n: u64) -> u64 {
-    let mut z = n.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
-
 /// An id that looks like a hash, a different one for each `n` (its first 8 bytes are
 /// `mix(4n)`, and `mix` is a bijection).
 fn spread_id(n: u64) -> ChangesetId {
@@ -147,24 +131,6 @@ fn spread_meta(n: u64) -> ChangesetMeta {
 
 fn hex(bytes: &[u8; 32]) -> String {
     ObjectId(*bytes).to_hex()
-}
-
-fn file_len(path: impl AsRef<Path>) -> u64 {
-    fs::metadata(path).unwrap().len()
-}
-
-fn append_bytes(path: impl AsRef<Path>, bytes: &[u8]) {
-    let mut file = OpenOptions::new().append(true).open(path).unwrap();
-    file.write_all(bytes).unwrap();
-}
-
-fn set_len(path: impl AsRef<Path>, len: u64) {
-    OpenOptions::new()
-        .write(true)
-        .open(path)
-        .unwrap()
-        .set_len(len)
-        .unwrap();
 }
 
 /// The lengths of the [`COLUMNS`] files, in that order.
@@ -213,138 +179,11 @@ fn assert_invalid_input<T: Debug>(got: Result<T, StoreError>, what: &str) {
     }
 }
 
-/// [`RealFs`], recording each call as `"<method> <file name>…"` when `calls` is set, and
-/// skipping every flush to stable storage when `durable` is false: for tests whose subject
-/// is what the files hold, which a process crash or a skipped fsync does not change.
-struct TestFs {
-    calls: Option<Arc<Mutex<Vec<String>>>>,
-    durable: bool,
-}
-
-impl TestFs {
-    fn record(&self, method: &str, paths: &[&Path]) {
-        if let Some(calls) = &self.calls {
-            let mut call = method.to_owned();
-            for path in paths {
-                call.push(' ');
-                call.push_str(&path.file_name().unwrap().to_string_lossy());
-            }
-            calls.lock().unwrap().push(call);
-        }
-    }
-}
-
-/// Real files, every FsOps call recorded, and a function that returns the calls made since
-/// it last ran.
+/// Real files, every FsOps call recorded as `"<method> <file name of each path>"`, and a
+/// function that returns the calls made since it last ran.
 fn recording_fs() -> (Arc<dyn FsOps>, impl Fn() -> Vec<String>) {
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let fs = TestFs {
-        calls: Some(Arc::clone(&calls)),
-        durable: true,
-    };
-    (Arc::new(fs), move || {
-        std::mem::take(&mut *calls.lock().unwrap())
-    })
-}
-
-/// Real files, no fsyncs.
-fn fast_fs() -> TestFs {
-    TestFs {
-        calls: None,
-        durable: false,
-    }
-}
-
-impl FsOps for TestFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.record("create_dir_all", &[p]);
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.record("write_durable_temp", &[dir]);
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.record("link_noclobber", &[from, to]);
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.record("fsync_dir", &[p]);
-        if self.durable {
-            RealFs.fsync_dir(p)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.record("read", &[p]);
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.record("exists", &[p]);
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        self.record("remove", &[p]);
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append_durable", &[path]);
-        if self.durable {
-            RealFs.append_durable(path, bytes)
-        } else {
-            RealFs.append(path, bytes)
-        }
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.record("file_len", &[path]);
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.record("truncate", &[path]);
-        if self.durable {
-            RealFs.truncate(path, len)
-        } else {
-            OpenOptions::new().write(true).open(path)?.set_len(len)
-        }
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.record("atomic_replace", &[path]);
-        RealFs.atomic_replace(path, bytes)
-    }
-
-    fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.record("sync_data", &[path]);
-        if self.durable {
-            RealFs.sync_data(path)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.record("append", &[path]);
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.record("rename_durable", &[from, to]);
-        if self.durable {
-            RealFs.rename_durable(from, to)
-        } else {
-            fs::rename(from, to)
-        }
-    }
+    let (fs, calls) = RecordingFs::new();
+    (Arc::new(fs.naming_all_paths()), calls)
 }
 
 #[test]
@@ -646,7 +485,7 @@ proptest! {
         probes in prop::collection::vec((arb_key(), 1..=16_usize), 0..16),
     ) {
         let (_root, layout) = new_root();
-        let fast = || -> Arc<dyn FsOps> { Arc::new(fast_fs()) };
+        let fast = || -> Arc<dyn FsOps> { Arc::new(FastFs) };
         let mut index = Index::open(&layout, fast()).unwrap();
         let mut model: Vec<ChangesetMeta> = Vec::new();
         for op in ops {
@@ -719,12 +558,6 @@ fn read_at_binary_search_touches_only_key_column() {
         assert!(view.probes() - keys_read <= 15);
         assert_eq!(view.rec_reads(), recs_read, "no rec_at for a miss");
     }
-}
-
-/// Nearest-rank percentile over sorted samples.
-fn percentile(sorted: &[Duration], percent: usize) -> Duration {
-    let rank = (sorted.len() * percent).div_ceil(100).max(1);
-    sorted[rank - 1]
 }
 
 #[test]
@@ -1190,7 +1023,7 @@ fn readers_opening_during_compactions_see_whole_views() {
     let readers = 2 * thread::available_parallelism().map_or(4, NonZero::get);
     let (_root, layout) = new_root();
     let metas: Vec<ChangesetMeta> = (0..600).map(spread_meta).collect();
-    let mut index = Index::open(&layout, Arc::new(fast_fs())).unwrap();
+    let mut index = Index::open(&layout, Arc::new(FastFs)).unwrap();
     append_all(&mut index, &metas[..4]);
     index.compact().unwrap();
     let writing = AtomicBool::new(true);
@@ -1207,7 +1040,7 @@ fn readers_opening_during_compactions_see_whole_views() {
             scope.spawn(move || {
                 let mut opens = 0_u64;
                 while writing.load(Ordering::SeqCst) {
-                    let index = Index::open(layout, Arc::new(fast_fs())).unwrap();
+                    let index = Index::open(layout, Arc::new(FastFs)).unwrap();
                     let rec = mix((reader << 32) | opens) % index.len();
                     let meta = &metas[usize::try_from(rec).unwrap()];
                     assert_eq!(index.find(meta.id).unwrap(), Some(rec));
@@ -1464,7 +1297,7 @@ fn crash_metas() -> Vec<ChangesetMeta> {
 fn crash_child(root: OsString) {
     let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
     let layout = Layout::new(Utf8PathBuf::from_path_buf(root.into()).unwrap());
-    let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(fast_fs(), k));
+    let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(FastFs, k));
     let mut index = Index::open(&layout, fs).unwrap();
     index.repair_tail().unwrap();
     for meta in &crash_metas()[5..] {
@@ -1484,21 +1317,16 @@ fn crash_at_any_index_write_recovers_to_whole_records() {
     let metas = crash_metas();
     for k in 1..=CRASH_CHILD_CALLS + 1 {
         let (_root, layout) = new_root();
-        let mut index = Index::open(&layout, Arc::new(fast_fs())).unwrap();
+        let mut index = Index::open(&layout, Arc::new(FastFs)).unwrap();
         append_all(&mut index, &metas[..5]);
         index.compact().unwrap();
         drop(index);
 
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "crash_at_any_index_write_recovers_to_whole_records",
-            ])
-            .arg("--nocapture")
-            .env(CRASH_CHILD_ROOT, layout.root())
-            .env(CRASH_AT_ENV, k.to_string())
-            .output()
-            .unwrap();
+        let child = run(
+            this_test("crash_at_any_index_write_recovers_to_whole_records")
+                .env(CRASH_CHILD_ROOT, layout.root())
+                .env(CRASH_AT_ENV, k.to_string()),
+        );
         let ended_as_expected = if k <= CRASH_CHILD_CALLS {
             child.status.signal() == Some(SIGABRT)
         } else {

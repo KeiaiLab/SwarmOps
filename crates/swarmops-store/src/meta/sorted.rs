@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use camino::{Utf8Path, Utf8PathBuf};
 
+use super::to_u64;
 use crate::error::StoreError;
 use crate::fs_ops::FsOps;
 
@@ -530,8 +531,4 @@ pub(crate) fn index_file_error(e: io::Error) -> StoreError {
 /// How many entries from index `start` a read of at most `max` takes, in a view of `len`.
 fn entries_from(start: u64, len: u64, max: usize) -> usize {
     usize::try_from(len.saturating_sub(start)).map_or(max, |left| left.min(max))
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
 }

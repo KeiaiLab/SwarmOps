@@ -17,4 +17,5 @@ mod error;
 pub mod identity;
 mod local;
 
+pub use error::shell_word;
 pub use local::{LocalOps, NOW_ENV};

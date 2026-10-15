@@ -45,6 +45,7 @@
 //! count, and their ref moves the ref files do not show yet.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -59,7 +60,8 @@ use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
-use crate::error::StoreError;
+use super::to_u64;
+use crate::error::{StoreError, invalid_input};
 use crate::fs_ops::{FsOps, RealFs};
 use crate::layout::Layout;
 
@@ -177,7 +179,7 @@ impl MetaStore {
         Self::create_with_fs(dir, Arc::new(RealFs))
     }
 
-    /// Creates `meta/` under `dir`, every change going through `fs`: an empty journal
+    /// Creates `meta/` under `dir`, every file made through `fs`: an empty journal
     /// (`journal.log`, `journal.off`) with `journal.ckpt` at 0, an empty index (`idx/` with
     /// its four columns, `parents.log`, `sorted/` with its four view files: the only place a
     /// store's index files are made), `refs/` and the lock file, all durable.
@@ -188,7 +190,9 @@ impl MetaStore {
     /// `meta/`), made durable, and renamed to `meta/` last, which syncs the store root. A crash
     /// before the rename leaves no `meta/`: [`MetaStore::open`] refuses the store with
     /// [`StoreError::Format`], and the next create removes what is left of `meta.tmp/` and
-    /// starts over. Two creates of one store at once are not supported.
+    /// starts over. That removal, and the one of the emptied `meta.tmp/` after the rename, go
+    /// through `std::fs`: [`FsOps`] removes no directories. Two creates of one store at once
+    /// are not supported.
     pub fn create_with_fs(dir: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
         let meta = Layout::new(dir).meta_dir();
         if std::fs::exists(&meta)? {
@@ -340,6 +344,17 @@ impl MetaStore {
     }
 }
 
+impl fmt::Debug for MetaStore {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MetaStore")
+            .field("root", &self.layout.root())
+            .field("journal", &self.journal)
+            .field("lock_timeout", &self.lock_timeout)
+            .field("parallelism", &self.parallelism)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A snapshot of the metadata, from [`MetaStore::read`]: the index and the ref files as they
 /// were, with the frames past the checkpoint applied on top. Later commits do not show.
 pub struct MetaRead<'a> {
@@ -475,6 +490,16 @@ impl MetaRead<'_> {
         recs.into_iter()
             .map(|rec| self.index.get(rec).map(|meta| meta.id))
             .collect()
+    }
+}
+
+impl fmt::Debug for MetaRead<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MetaRead")
+            .field("ckpt", &self.ckpt)
+            .field("index", &self.index)
+            .field("frames_past_ckpt", &self.frames.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -703,6 +728,17 @@ impl MetaWrite<'_> {
     }
 }
 
+impl fmt::Debug for MetaWrite<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MetaWrite")
+            .field("index", &self.index)
+            .field("checkpointed_records", &self.checkpointed_records)
+            .field("uncheckpointed", &self.uncheckpointed)
+            .field("records_queued", &self.records.len())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Appends to `log` the moves of ref `name` that `frames` (newest first) record, newest
 /// first, until it holds `limit`.
 fn collect_moves<'f>(
@@ -760,14 +796,6 @@ fn unix_now() -> i64 {
         Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_secs()).map_or(i64::MIN, |secs| -secs),
     }
-}
-
-fn invalid_input(message: String) -> StoreError {
-    io::Error::new(io::ErrorKind::InvalidInput, message).into()
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
 }
 
 /// `n`, or `usize::MAX` if it does not fit (a limit that large means no limit).
