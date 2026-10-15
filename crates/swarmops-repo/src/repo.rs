@@ -127,8 +127,8 @@ impl LocalRepo {
     ///
     /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests), the object store and the metadata
     /// store share one [`CrashAtFs`] whose k-th call aborts the process, and objects are
-    /// written (and the index's files synced) one at a time, so that the k-th call is the same
-    /// call in every run.
+    /// written (and the directories and the index's files synced) one at a time, so that the
+    /// k-th call is the same call in every run.
     pub fn create(store: &Utf8Path, name: &str) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::create_on(store, name, fs, one_thread)
@@ -352,7 +352,7 @@ fn ref_error(e: StoreError) -> RepoError {
 /// The filesystem a store opens on: the real one; or, with `SWARMOPS_TEST_CRASH_AT=<k>` set
 /// to a positive k (crash tests), one [`CrashAtFs`] for both stores, so that the k-th call of
 /// either aborts the process. `true` with the latter: objects are then written, and the
-/// index's files synced, one at a time.
+/// directories and the index's files synced, one at a time.
 fn default_fs() -> (Arc<dyn FsOps>, bool) {
     let crash_at = std::env::var(CRASH_AT_ENV)
         .ok()
