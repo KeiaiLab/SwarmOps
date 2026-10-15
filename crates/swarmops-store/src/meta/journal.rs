@@ -274,15 +274,18 @@ impl Journal {
     /// - whole frames that `journal.off` does not list (a crash between a frame's two
     ///   appends) are committed: `journal.log` is synced, then their entries are appended;
     /// - a partial entry at the end of `journal.off` is dropped, and so is the entry of
-    ///   the last listed frame if `journal.log` ends inside it;
+    ///   the last listed frame if `journal.log` ends inside it; the frame before it is then
+    ///   the last listed frame, and is checked as one;
     /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a last listed
     ///   frame that does not start where the frame before it ends, a listed frame that
     ///   fails its CRC, an empty payload, or a frame that matches its CRC but does not
     ///   decode (a newer version may have written it).
     ///
     /// Only the last listed frame, the header of the frame before it, and what follows are
-    /// read. `journal.off` is repaired before `journal.log` is cut, so a crash in between
-    /// leaves a torn frame the next call cuts. The caller must hold [`crate::MetaLock`].
+    /// read; if the last listed frame's entry dangles, so are the frame before it and the
+    /// header of the one before that. `journal.off` is repaired before `journal.log` is cut,
+    /// so a crash in between leaves a torn frame the next call cuts. The caller must hold
+    /// [`crate::MetaLock`].
     pub fn truncate_torn_tail(&self) -> Result<Option<u64>, StoreError> {
         let mut tail = self.tail();
         tail.checked = false;
@@ -368,20 +371,26 @@ impl Journal {
         let buf = read_upto(&self.log, start, log_len - start)?;
         let mut at = 0; // where in `buf` the unlisted frames begin
         if let Some(last) = listed.checked_sub(1) {
-            // The last listed frame must start where the frame before it ends. An entry that
-            // does not (zeroed, stale, or pointing into a frame) is garbage: frames listed or
-            // numbered after it would be wrong, and cutting at it could destroy a whole frame.
-            let previous_end = match last.checked_sub(1) {
-                Some(previous) => self.frame_end(self.entry(previous)?, log_len)?,
-                None => Some(0),
-            };
-            if previous_end != Some(start) {
-                return Err(StoreError::JournalCorrupt { offset: start });
-            }
+            let previous_start = self.entry_before(last)?;
+            self.check_starts_after(previous_start, start, log_len)?;
             match parse_frame(&buf) {
                 Parsed::Whole { size, .. } => at = size,
-                // `journal.log` ends inside the last listed frame, so its entry dangles.
-                Parsed::Short => listed = last,
+                // `journal.log` ends inside the last listed frame, so its entry dangles. Once
+                // it is dropped, the frame before it is the last listed frame, so it is checked
+                // as one; it ends where the dangling frame starts, so it is all there.
+                Parsed::Short => {
+                    listed = last;
+                    if let Some(previous_start) = previous_start {
+                        let before = self.entry_before(last - 1)?;
+                        self.check_starts_after(before, previous_start, log_len)?;
+                        let bytes = read_upto(&self.log, previous_start, start - previous_start)?;
+                        if !matches!(parse_frame(&bytes), Parsed::Whole { .. }) {
+                            return Err(StoreError::JournalCorrupt {
+                                offset: previous_start,
+                            });
+                        }
+                    }
+                }
                 Parsed::BadCrc | Parsed::Invalid => {
                     return Err(StoreError::JournalCorrupt { offset: start });
                 }
@@ -426,6 +435,34 @@ impl Journal {
             checked: true,
         };
         Ok((tail, cut))
+    }
+
+    /// Where the frame listed before frame `seq` starts; `None` for frame 0.
+    fn entry_before(&self, seq: u64) -> Result<Option<u64>, StoreError> {
+        seq.checked_sub(1)
+            .map(|previous| self.entry(previous))
+            .transpose()
+    }
+
+    /// Checks that the listed frame at `start` starts where the frame listed before it, at
+    /// `previous_start`, ends (frame 0, with none before it, at 0). An entry that does not
+    /// (zeroed, stale, or pointing into a frame) is garbage: frames listed or numbered after
+    /// it would be wrong, and cutting at it could destroy a whole frame.
+    fn check_starts_after(
+        &self,
+        previous_start: Option<u64>,
+        start: u64,
+        log_len: u64,
+    ) -> Result<(), StoreError> {
+        let previous_end = match previous_start {
+            Some(previous_start) => self.frame_end(previous_start, log_len)?,
+            None => Some(0),
+        };
+        if previous_end == Some(start) {
+            Ok(())
+        } else {
+            Err(StoreError::JournalCorrupt { offset: start })
+        }
     }
 
     /// Entry `index` of `journal.off`: where frame `index` starts.

@@ -784,6 +784,48 @@ fn truncate_torn_tail_drops_the_entry_of_a_frame_cut_short() {
 }
 
 #[test]
+fn dropping_a_dangling_entry_checks_the_frame_left_last() {
+    // Found by `fuzz/fuzz_targets/journal_recovery.rs`. When journal.log ends inside the last
+    // listed frame, that frame's entry is dropped and the frame before it becomes the last
+    // listed frame, so it must check out as the last listed frame does: it starts where the
+    // frame before it ends, and it is whole. Recovery read only its header, returned Ok, and
+    // left a journal that the next recovery reports as corrupt.
+
+    // Frame 0 fails its CRC: damage to a listed frame, never a torn write.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[compacted(1)]).unwrap(); // bytes 0..19
+    journal.append_frame(&[compacted(2)]).unwrap(); // bytes 19..38
+    set_len(layout.journal_log(), 21); // 2 bytes into frame 1
+    flip_byte(layout.journal_log(), 17); // a payload byte of frame 0
+    assert_corrupt_at(journal.truncate_torn_tail(), 0, "frame 0 fails its CRC");
+    assert_eq!(file_len(layout.journal_log()), 21, "nothing was cut");
+    assert_eq!(offsets_on_disk(&layout), [0, 19], "no entry was dropped");
+    assert_corrupt_at(reopen(&layout).tail_frames_from(0), 0, "readers agree");
+
+    // Entry 1 (43) points into frame 0 (bytes 0..84), at its generation, which reads as a
+    // header announcing 1 byte: a frame ending at 52, where the dangling entry 2 points.
+    // Dropping entry 2 and cutting journal.log at 52 would destroy frame 0.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let first = journal.append_frame(&[root_changeset()]).unwrap();
+    append_bytes(layout.journal_off(), &43_u64.to_le_bytes());
+    append_bytes(layout.journal_off(), &52_u64.to_le_bytes());
+    assert_corrupt_at(
+        journal.truncate_torn_tail(),
+        43,
+        "entry 1 is not where frame 0 ends",
+    );
+    assert_eq!(file_len(layout.journal_log()), 84, "nothing was cut");
+    assert_eq!(
+        offsets_on_disk(&layout),
+        [0, 43, 52],
+        "no entry was dropped"
+    );
+    assert_eq!(reopen(&layout).tail_frames_from(0).unwrap(), [first]);
+}
+
+#[test]
 fn an_offset_entry_off_a_frame_boundary_is_journal_corrupt() {
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
