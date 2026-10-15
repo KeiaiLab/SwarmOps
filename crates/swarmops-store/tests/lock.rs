@@ -27,16 +27,17 @@ fn new_meta() -> (TempDir, Layout) {
     (dir, layout)
 }
 
-/// The `flock` locks on `path`'s file as `/proc/locks` lists them: how many are held, and how
-/// many waiters are blocked on them (its `->` lines). A line names its file as
-/// `<major>:<minor>:<inode>`, the device numbers in hex.
+/// The `flock` locks this process holds on `path`'s file, as `/proc/locks` lists them: how
+/// many are held, and how many of its waiters are blocked on them (the `->` lines). A line
+/// names its process and its file, as `<major>:<minor>:<inode>`; the inode and this process's
+/// id pick the lines out (the device `stat` reports need not be the one the line shows, on
+/// btrfs for one).
 fn flocks_on(path: &Path) -> (usize, usize) {
-    let meta = fs::metadata(path).expect("stat the lock file");
-    let dev = meta.dev();
-    // glibc's major()/minor() of a Linux dev_t.
-    let major = ((dev >> 8) & 0xfff) | ((dev >> 32) & !0xfff);
-    let minor = (dev & 0xff) | ((dev >> 12) & !0xff);
-    let file = format!("{major:02x}:{minor:02x}:{}", meta.ino());
+    let inode = fs::metadata(path)
+        .expect("stat the lock file")
+        .ino()
+        .to_string();
+    let pid = std::process::id().to_string();
     let table = fs::read_to_string("/proc/locks").expect("read /proc/locks");
     let (mut held, mut waiting) = (0, 0);
     for line in table.lines() {
@@ -45,7 +46,11 @@ fn flocks_on(path: &Path) -> (usize, usize) {
             Some(&"->") => (true, &fields[2..]),
             _ => (false, fields.get(1..).unwrap_or_default()),
         };
-        if rest.first() == Some(&"FLOCK") && rest.get(4) == Some(&file.as_str()) {
+        let ours = rest.get(3) == Some(&pid.as_str())
+            && rest
+                .get(4)
+                .is_some_and(|file| file.rsplit(':').next() == Some(inode.as_str()));
+        if rest.first() == Some(&"FLOCK") && ours {
             if blocked {
                 waiting += 1;
             } else {
