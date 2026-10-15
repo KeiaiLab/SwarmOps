@@ -640,6 +640,65 @@ fn torn_tail_is_ignored_by_readers_and_truncated_by_writer() {
 }
 
 #[test]
+fn zero_filled_tail_is_torn_and_cut() {
+    // A filesystem may expose zero-filled blocks at the end of a file after a crash. No frame
+    // starts with `len == 0`, so unlisted bytes that are zero all the way to the end of
+    // journal.log hold no committed frame: a torn tail, whatever its length. (Up to 7 bytes
+    // they are a header cut short as well; from 8 on, a header announcing an empty payload.)
+    for zeros in [1, 7, 8, 9, 100] {
+        let what = format!("{zeros} zero bytes after the last listed frame");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+        append_bytes(layout.journal_log(), &vec![0; zeros]);
+
+        let reader = reopen(&layout);
+        assert_eq!(
+            reader.tail_frames_from(0).unwrap(),
+            slice::from_ref(&first),
+            "{what}"
+        );
+        assert_eq!(
+            reader.tail_frames_from(84).unwrap(),
+            Vec::<Frame>::new(),
+            "{what}"
+        );
+        assert_eq!(journal.truncate_torn_tail().unwrap(), Some(84), "{what}");
+        assert_eq!(file_len(layout.journal_log()), 84, "{what}: cut");
+        assert_eq!(offsets_on_disk(&layout), [0], "{what}");
+        assert_eq!(
+            journal.truncate_torn_tail().unwrap(),
+            None,
+            "{what}: a second call"
+        );
+        assert_eq!(
+            reopen(&layout).tail_frames_from(0).unwrap(),
+            [first],
+            "{what}"
+        );
+    }
+
+    // A non-zero byte anywhere keeps the rules for frames: zeros, then a 1, make a whole
+    // header announcing an empty payload (from 7 zeros on), which no writer produces.
+    for zeros in [7, 8, 100] {
+        let what = format!("{zeros} zero bytes, then a 1");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[root_changeset()]).unwrap();
+        let mut tail = vec![0; zeros];
+        tail.push(1);
+        append_bytes(layout.journal_log(), &tail);
+        assert_corrupt_at(reopen(&layout).tail_frames_from(0), 84, &what);
+        assert_corrupt_at(journal.truncate_torn_tail(), 84, &what);
+        assert_eq!(
+            file_len(layout.journal_log()),
+            84 + u64::try_from(tail.len()).unwrap(),
+            "{what}: nothing was cut"
+        );
+    }
+}
+
+#[test]
 fn crc_mismatch_is_journal_corrupt_not_panic() {
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
@@ -670,8 +729,14 @@ fn crc_mismatch_is_journal_corrupt_not_panic() {
 
 #[test]
 fn frames_no_writer_produces_are_journal_corrupt_not_torn() {
+    // An empty payload has CRC 0, so its frame is 8 zero bytes: at the very end of
+    // journal.log it reads as a zero-filled tail (`zero_filled_tail_is_torn_and_cut`), and
+    // a byte that is not zero after it keeps it a frame here.
     let cases = [
-        ("an empty payload", frame_bytes(&[])),
+        (
+            "an empty payload, then a byte",
+            [frame_bytes(&[]), vec![0xee]].concat(),
+        ),
         ("zero records", frame_bytes(&[0, 0])),
         ("an unknown record kind", frame_bytes(&[1, 0, 3])),
         (

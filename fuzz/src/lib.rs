@@ -102,6 +102,13 @@ fn records_of(payload: &[u8]) -> Option<Vec<Record>> {
     rest.is_empty().then_some(records)
 }
 
+/// Whether `rest`, the unlisted bytes from a frame boundary to the end of `journal.log`, are
+/// zero-filled: at least one byte, every byte 0. A filesystem may expose such blocks after a
+/// crash, and no frame starts with `len == 0`, so they are a torn tail, never a frame.
+pub fn zero_filled(rest: &[u8]) -> bool {
+    !rest.is_empty() && rest.iter().all(|&byte| byte == 0)
+}
+
 /// Whether `e` is an error the journal reports for damage: `JournalCorrupt`, or `Io` with
 /// `InvalidData`, `UnexpectedEof` or `InvalidInput`.
 pub fn is_typed(e: &StoreError) -> bool {

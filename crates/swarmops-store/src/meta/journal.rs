@@ -207,7 +207,7 @@ impl Journal {
                     });
                     at += size;
                 }
-                parsed if may_be_torn(&parsed, frame_seq, listed) => break,
+                parsed if may_be_torn(&parsed, frame_seq, listed, &buf[at..]) => break,
                 _ => return Err(StoreError::JournalCorrupt { offset }),
             }
         }
@@ -225,9 +225,10 @@ impl Journal {
     /// listed frame's start, or the end of the last listed frame.
     ///
     /// Stops silently at a torn tail: a frame cut short by the end of the file (an append
-    /// in progress looks the same) or an unlisted frame that fails its CRC. Whole frames
-    /// that `journal.off` does not list yet are included. Anything else, an `offset` that
-    /// is not a frame boundary included, is [`StoreError::JournalCorrupt`].
+    /// in progress looks the same), an unlisted frame that fails its CRC, or unlisted bytes
+    /// that are zero to the end of the file. Whole frames that `journal.off` does not list
+    /// yet are included. Anything else, an `offset` that is not a frame boundary included,
+    /// is [`StoreError::JournalCorrupt`].
     pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
         let log_len = self.log.metadata()?.len();
         if offset >= log_len {
@@ -255,7 +256,7 @@ impl Journal {
                     seq += 1;
                     at += size;
                 }
-                parsed if may_be_torn(&parsed, seq, listed) => break,
+                parsed if may_be_torn(&parsed, seq, listed, &buf[at..]) => break,
                 _ => {
                     return Err(StoreError::JournalCorrupt {
                         offset: frame_offset,
@@ -269,8 +270,9 @@ impl Journal {
     /// Brings the journal to a clean end after a crash, and returns where `journal.log`
     /// was cut, if it was:
     ///
-    /// - an unlisted frame at the end that is cut short or fails its CRC is a torn write:
-    ///   `journal.log` is cut where it starts;
+    /// - an unlisted frame at the end that is cut short or fails its CRC is a torn write,
+    ///   and so are unlisted bytes that are zero to the end of the file (blocks a filesystem
+    ///   exposed zero-filled after a crash): `journal.log` is cut where they start;
     /// - whole frames that `journal.off` does not list (a crash between a frame's two
     ///   appends) are committed: `journal.log` is synced, then their entries are appended;
     /// - a partial entry at the end of `journal.off` is dropped, and so is the entry of
@@ -278,8 +280,8 @@ impl Journal {
     ///   the last listed frame, and is checked as one;
     /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a last listed
     ///   frame that does not start where the frame before it ends, a listed frame that
-    ///   fails its CRC, an empty payload, or a frame that matches its CRC but does not
-    ///   decode (a newer version may have written it).
+    ///   fails its CRC, an empty payload (unless only zeros follow it), or a frame that
+    ///   matches its CRC but does not decode (a newer version may have written it).
     ///
     /// Only the last listed frame, the header of the frame before it, and what follows are
     /// read; if the last listed frame's entry dangles, so are the frame before it and the
@@ -405,11 +407,11 @@ impl Journal {
                     unlisted.push(offset);
                     at += size;
                 }
-                Parsed::Short | Parsed::BadCrc => {
+                parsed if is_torn_unlisted(&parsed, &buf[at..]) => {
                     cut = Some(offset);
                     break;
                 }
-                Parsed::Invalid => return Err(StoreError::JournalCorrupt { offset }),
+                _ => return Err(StoreError::JournalCorrupt { offset }),
             }
         }
 
@@ -529,16 +531,28 @@ impl Journal {
 }
 
 /// Whether a frame that did not parse whole may be a torn write rather than damage, given
-/// its seq and how many frames `journal.off` lists.
-fn may_be_torn(parsed: &Parsed, seq: u64, listed: u64) -> bool {
+/// its seq, how many frames `journal.off` lists, and `rest`, the bytes read from its start
+/// on (for an unlisted frame, to the end of `journal.log`).
+fn may_be_torn(parsed: &Parsed, seq: u64, listed: u64, rest: &[u8]) -> bool {
+    if seq >= listed {
+        return is_torn_unlisted(parsed, rest);
+    }
+    // A listed frame was whole and durable before its entry was written; only the last one
+    // may be cut short, its entry then dangling.
+    matches!(parsed, Parsed::Short) && seq + 1 >= listed
+}
+
+/// Whether unlisted bytes that do not parse as a whole frame are a torn tail: a frame cut
+/// short by the end of the file (the append a crash tore, or one still in progress), one
+/// that fails its CRC, or zeros all the way to the end of the file, which a filesystem may
+/// expose after a crash in place of blocks it never wrote. No frame starts with `len == 0`,
+/// so zeros hold nothing a writer committed. `rest` runs from where the frame would start to
+/// the end of `journal.log`.
+fn is_torn_unlisted(parsed: &Parsed, rest: &[u8]) -> bool {
     match parsed {
-        // Cut short by the end of the file: the unlisted append a crash tore (or one still
-        // in progress), or the last listed frame, whose entry then dangles.
-        Parsed::Short => seq + 1 >= listed,
-        // Failing its CRC: only a frame that was never listed, since a listed frame was
-        // whole and durable before its entry was written.
-        Parsed::BadCrc => seq >= listed,
-        Parsed::Whole { .. } | Parsed::Invalid => false,
+        Parsed::Short | Parsed::BadCrc => true,
+        Parsed::Invalid => !rest.is_empty() && rest.iter().all(|&byte| byte == 0),
+        Parsed::Whole { .. } => false,
     }
 }
 

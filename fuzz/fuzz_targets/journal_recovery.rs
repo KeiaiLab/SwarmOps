@@ -6,22 +6,26 @@
 //! entries, `journal.ckpt` if given), or a valid journal built with `Journal::create` and
 //! `append_frame` from arbitrary records and then damaged by a patch (mode 1): bytes flipped, a
 //! file cut, the last `journal.off` entry dropped (a crash between a frame's two appends),
-//! garbage or a frame with a correct CRC appended. Each case runs in a fresh
-//! `tempfile::tempdir()`. A typed error is `JournalCorrupt`, or `Io` with `InvalidData`,
-//! `UnexpectedEof` or `InvalidInput`.
+//! garbage, zeros (blocks a filesystem exposed zero-filled after a crash) or a frame with a
+//! correct CRC appended. Each case runs in a fresh `tempfile::tempdir()`. A typed error is
+//! `JournalCorrupt`, or `Io` with `InvalidData`, `UnexpectedEof` or `InvalidInput`. A torn
+//! tail is an unlisted frame cut short or failing its CRC, or unlisted bytes that are zero to
+//! the end of `journal.log`; the last listed frame may also be cut short.
 //!
 //! - (a) `open`, `frame_count` and `ckpt` succeed; `tail_frames_from` (from the checkpoint and
 //!   from 0), `frames_from(0, 64)`, `frames_after(0, 64)` and `frames_from(0, usize::MAX)` return
 //!   `Ok` or a typed error, before recovery and after it. A frame they return is the canonical
 //!   encoding of its records at its offset (so its CRC matches), frames returned together abut,
 //!   readers agree where they overlap, and a reader stops early only at a torn tail.
-//! - (b) `truncate_torn_tail` returns `Ok` or a typed error, and an error changes no file. After
-//!   an `Ok`, a second call returns `Ok(None)` and changes no file, and the journal ends cleanly:
+//! - (b) `truncate_torn_tail` returns `Ok` or a typed error, and an error changes no file; what
+//!   it cuts is a torn tail. After an `Ok`, a second call returns `Ok(None)` and changes no
+//!   file, and the journal ends cleanly:
 //!   `journal.log` ends with the last listed frame, which reads whole (or is empty if nothing is
 //!   listed). If every listed frame read before recovery (`frames_from(0, usize::MAX)` was `Ok`),
-//!   every listed frame reads after it, and they are exactly the frames `tail_frames_from(0)`
-//!   returned before and returns after; recovery then fails exactly when `tail_frames_from(0)`
-//!   did.
+//!   the model says how the bytes after them read: whole frames up to the end or a torn tail,
+//!   which `tail_frames_from(0)` returns before and after recovery and recovery lists, cutting
+//!   exactly the torn tail; or a frame no writer produces, where both fail with `JournalCorrupt`
+//!   at its offset.
 //! - (c) Recovery only cuts a suffix: `journal.log` keeps a prefix of itself, never shorter than
 //!   the last listed frame's start, and `journal.off` keeps its whole entries but maybe the last
 //!   (dropped only if `journal.log` now ends where that frame started), then lists the whole
@@ -45,7 +49,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_fuzz::{
-    ENTRY_LEN, HEADER_LEN, Model, frame_around, frame_bytes, is_typed, model, to_u64,
+    ENTRY_LEN, HEADER_LEN, Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_filled,
 };
 use swarmops_store::{Frame, FsOps, Journal, Layout, LinkOutcome, RealFs, Record, StoreError};
 
@@ -115,6 +119,15 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
     if let Some(built) = built {
         built.reads_back(&journal, &before, &seen);
     }
+    // With every listed frame read, the model says how what follows them reads.
+    let expected = seen
+        .listed
+        .as_ref()
+        .ok()
+        .map(|listed| Expected::after(&before, listed));
+    if let Some(expected) = &expected {
+        expected.read_by("tail_frames_from(0)", &seen.from_start);
+    }
 
     let cut = match journal.truncate_torn_tail() {
         Ok(cut) => cut,
@@ -124,10 +137,12 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
                 Files::read(layout) == before,
                 "truncate_torn_tail changed the files, then failed with {e:?}"
             );
-            assert!(
-                seen.listed.is_err() || seen.from_start.is_err(),
-                "every frame read, yet truncate_torn_tail failed with {e:?}"
-            );
+            if let Some(expected) = &expected {
+                assert!(
+                    matches!((expected, &e), (Expected::Corrupt { offset }, StoreError::JournalCorrupt { offset: at }) if at == offset),
+                    "truncate_torn_tail failed with {e:?}, the model says {expected:?}"
+                );
+            }
             return;
         }
     };
@@ -144,29 +159,21 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
     );
     ends_cleanly(&journal, &after);
     let seen_after = Seen::read(&journal, &after, ckpt);
-    if let Ok(listed) = &seen.listed {
-        let now = seen_after.listed.as_ref().unwrap_or_else(|e| {
-            panic!("every listed frame read before recovery, not after it: {e:?}")
-        });
+    if let Some(expected) = &expected {
+        let Expected::Torn { frames, cut: want } = expected else {
+            panic!("truncate_torn_tail returned {cut:?}, the model says {expected:?}");
+        };
         assert_eq!(
-            now.len(),
-            after.entries().len(),
-            "a listed frame does not read after recovery"
+            cut, *want,
+            "truncate_torn_tail cut elsewhere than the model says"
         );
+        // Every frame that read is listed now, and the journal holds nothing after them.
         assert!(
-            now.starts_with(listed),
-            "recovery changed a listed frame that read"
+            seen_after.listed.as_ref().ok() == Some(frames),
+            "after recovery, frames_from(0, usize::MAX) returned {:?}, not {frames:?}",
+            seen_after.listed
         );
-        assert_eq!(
-            seen.from_start.as_ref().ok(),
-            Some(now),
-            "recovery kept other frames than tail_frames_from(0) returned"
-        );
-        assert_eq!(
-            seen_after.from_start.as_ref().ok(),
-            Some(now),
-            "after recovery, tail_frames_from(0) returns other frames than the listed ones"
-        );
+        expected.read_by("tail_frames_from(0) after recovery", &seen_after.from_start);
     }
     if let Some(built) = built
         && before == built.files
@@ -175,6 +182,72 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
         assert!(after == before, "recovery changed an undamaged journal");
     }
     appends_at_the_end(&journal, layout, &after);
+}
+
+/// How the bytes after the listed frames read when every listed frame read, by the model: what
+/// `tail_frames_from(0)` returns and what recovery does.
+#[derive(Debug)]
+enum Expected {
+    /// They read up to the end or a torn tail: `tail_frames_from(0)` returns `frames` (the listed
+    /// ones, then the unlisted whole ones), and recovery lists them all and cuts at `cut`.
+    Torn {
+        frames: Vec<Frame>,
+        cut: Option<u64>,
+    },
+    /// An unlisted frame at `offset` no writer produces: both fail with `JournalCorrupt` there.
+    Corrupt { offset: u64 },
+}
+
+impl Expected {
+    /// What follows `listed`, every listed frame that read, in `files`.
+    fn after(files: &Files, listed: &[Frame]) -> Expected {
+        let log_len = to_u64(files.log.len());
+        let mut frames = listed.to_vec();
+        // Fewer frames read than are listed only if the last listed one is cut short
+        // (`listed_run`): its entry dangles, and its bytes are cut if there are any.
+        if let Some(&dangling) = files.entries().get(listed.len()) {
+            let cut = (dangling < log_len).then_some(dangling);
+            return Expected::Torn { frames, cut };
+        }
+        let mut at = listed.last().map_or(0, |frame| {
+            frame.offset + to_u64(frame_bytes(&frame.records).len())
+        });
+        // Each pass moves `at` forward by a whole frame or returns.
+        while at < log_len {
+            match files.frame_at(at) {
+                Model::Whole { records, size } => {
+                    frames.push(Frame {
+                        seq: to_u64(frames.len()),
+                        offset: at,
+                        records,
+                    });
+                    at += to_u64(size);
+                }
+                Model::Invalid if !zero_filled(&files.log[to_usize(at)..]) => {
+                    return Expected::Corrupt { offset: at };
+                }
+                Model::Short | Model::BadCrc | Model::Invalid => {
+                    return Expected::Torn {
+                        frames,
+                        cut: Some(at),
+                    };
+                }
+            }
+        }
+        Expected::Torn { frames, cut: None }
+    }
+
+    /// Asserts that a reader from offset 0 returned what the model says.
+    fn read_by(&self, what: &str, got: &Result<Vec<Frame>, StoreError>) {
+        let agrees = match (self, got) {
+            (Expected::Torn { frames, .. }, Ok(read)) => read == frames,
+            (Expected::Corrupt { offset }, Err(StoreError::JournalCorrupt { offset: at })) => {
+                at == offset
+            }
+            _ => false,
+        };
+        assert!(agrees, "{what} returned {got:?}, the model says {self:?}");
+    }
 }
 
 /// What the readers returned for the files as they were.
@@ -284,7 +357,8 @@ fn same_frames(a: &[Frame], b: &[Frame]) -> bool {
 /// The frames start at `from` and abut, each the canonical encoding of its records; their seqs
 /// count up from `from`'s place in `journal.off` (or from the listed count, if `from` is where
 /// the last listed frame ends). They stop at the end of `journal.log` or at a torn tail: a frame
-/// cut short (unlisted, or the last listed) or an unlisted frame failing its CRC.
+/// cut short (unlisted, or the last listed), an unlisted frame failing its CRC, or unlisted
+/// zeros to the end of the file.
 fn tail_run(
     what: &str,
     got: Result<Vec<Frame>, StoreError>,
@@ -348,6 +422,10 @@ fn tail_run(
             Model::BadCrc => assert!(
                 next.is_none_or(|seq| seq >= listed),
                 "{what}: stopped at listed frame {next:?} of {listed}, which fails its CRC"
+            ),
+            Model::Invalid if zero_filled(&files.log[to_usize(at)..]) => assert!(
+                next.is_none_or(|seq| seq >= listed),
+                "{what}: stopped at listed frame {next:?} of {listed}, which is zeros"
             ),
             other => panic!("{what}: stopped at {at}, at a frame that reads as {other:?}"),
         }
@@ -487,7 +565,8 @@ fn ends_cleanly(journal: &Journal, files: &Files) {
 }
 
 /// Recovery only cuts a suffix: `journal.log` keeps a prefix of itself, never shorter than the
-/// last listed frame's start, and the cut it reports is where it ends now. `journal.off` keeps
+/// last listed frame's start, the cut it reports is where it ends now, and what it cut is a
+/// torn tail: a frame cut short or failing its CRC, or zeros to the end. `journal.off` keeps
 /// its whole entries but maybe the last, which is dropped only if `journal.log` now ends where
 /// that frame started; otherwise that frame reads whole, and the entries after it list the
 /// whole frames that follow it, in order.
@@ -511,6 +590,12 @@ fn cuts_only_a_suffix(before: &Files, after: &Files, cut: Option<u64>) {
             assert!(
                 after.log.len() < before.log.len(),
                 "a cut at {at} that removed nothing"
+            );
+            let removed = &before.log[after.log.len()..];
+            assert!(
+                matches!(model(removed), Model::Short | Model::BadCrc) || zero_filled(removed),
+                "recovery cut bytes at {at} that read as {:?}, not a torn tail",
+                model(removed)
             );
         }
     }
@@ -850,6 +935,9 @@ enum Edit {
     AppendFrame(Vec<u8>),
     /// Append bytes to `journal.off`: entries, or part of one.
     AppendOff(Vec<u8>),
+    /// Append 1 to 256 zero bytes to `journal.log`: blocks a filesystem exposed zero-filled
+    /// after a crash.
+    AppendZeros(u8),
 }
 
 impl Edit {
@@ -866,6 +954,7 @@ impl Edit {
             Self::AppendLog(bytes) => files.log.extend(bytes),
             Self::AppendFrame(payload) => files.log.extend(frame_around(&payload)),
             Self::AppendOff(bytes) => files.off.extend(bytes),
+            Self::AppendZeros(n) => files.log.resize(files.log.len() + usize::from(n) + 1, 0),
         }
     }
 }
