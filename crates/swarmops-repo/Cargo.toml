@@ -10,6 +10,11 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The store's test hooks (`swarmops-store/test-hooks`), which `LocalRepo::create` and `open`
+# honor: for the crash tests, which require it.
+test-hooks = ["swarmops-store/test-hooks"]
+
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }

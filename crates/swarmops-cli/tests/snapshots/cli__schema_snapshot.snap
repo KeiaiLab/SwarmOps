@@ -1048,6 +1048,11 @@ expression: s.redact(&all)
           "type": "string"
         },
         {
+          "const": "E_IO_TRANSIENT",
+          "description": "The filesystem failed once a write had gone far enough that it may have committed\n(`details.may_have_committed`). Running the same operation again is safe and settles it,\nbut a `commit` run again signs at its own time: if the first did commit, the second may\nrecord another changeset while the first stays unreferenced (M4's idempotency key closes\nthis).",
+          "type": "string"
+        },
+        {
           "const": "E_BUSY",
           "description": "Another writer held the store's metadata lock for the whole wait.",
           "type": "string"
@@ -1300,7 +1305,7 @@ expression: s.redact(&all)
       "description": "`log`: a page of changesets, newest first, following first parents.",
       "properties": {
         "cursor": {
-          "description": "When `truncated`: the last entry's id; pass it as `cursor` to continue.",
+          "description": "When `truncated`: where the next page continues. Opaque: pass it back as given, as the\nnext request's `cursor`.",
           "type": [
             "string",
             "null"
@@ -1336,7 +1341,7 @@ expression: s.redact(&all)
       "description": "`log`: history along first parents, a page at a time.",
       "properties": {
         "cursor": {
-          "description": "Resume a log: the previous page's `cursor`, the last changeset id it returned. This page\ncontinues from that changeset's first parent, and `rev` is not used.",
+          "description": "Resume a log: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page continues from the first parent of the\nchangeset it names, and `rev` is not used.",
           "type": [
             "string",
             "null"
@@ -1513,7 +1518,7 @@ expression: s.redact(&all)
       "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime.",
       "properties": {
         "cursor": {
-          "description": "Resume a listing: the previous page's `cursor`; this page starts after that entry name.",
+          "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
           "type": [
             "string",
             "null"
@@ -2004,7 +2009,7 @@ expression: s.redact(&all)
       "description": "`read_tree` (CLI `ls`): a page of a directory's entries, in the tree's order (by name bytes).",
       "properties": {
         "cursor": {
-          "description": "When `truncated`: the last entry's name; pass it as `cursor` to get the next page.",
+          "description": "When `truncated`: where the next page starts. Opaque: pass it back as given, as the next\nrequest's `cursor`.",
           "type": [
             "string",
             "null"

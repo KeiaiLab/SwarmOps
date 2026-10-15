@@ -43,8 +43,8 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `commit` builds on `parent`, or, when it is omitted, on `main`'s head if `main` exists and
 ///   on nothing otherwise (a root changeset). The changeset is the caller's: author and
 ///   committer are both the agent name with the email `<instance>@<family>.swarmops.local` at
-///   the current time, UTC (or at [`NOW_ENV`]'s, a test hook); its metadata holds `agent` and,
-///   when the caller has one, `run_id`.
+///   the current time, UTC (or at [`NOW_ENV`]'s, a test hook of builds with the `test-hooks`
+///   feature); its metadata holds `agent` and, when the caller has one, `run_id`.
 ///   `files_changed` counts the changeset's delta, which leaves out puts of what a path holds
 ///   already. The change list follows [`crate::content`]'s rules. `file` content is read here,
 ///   in the caller's process: `LocalOps` runs on the client. A server that exposes
@@ -105,6 +105,10 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`; the hint
 ///   points at a native filesystem.
 /// - `E_IO`: any other `Io` error.
+/// - `E_IO_TRANSIENT` (retryable) `{may_have_committed}`, always `true`: the store's `Undecided`,
+///   a journal append that failed once its frame was whole, so the write may have committed;
+///   the hint says to run the same command again, which is safe whether it did or not (a ref
+///   move run again reports `already_applied` if it did; a commit moves no ref).
 /// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning, so
 ///   that it never reaches here.
 ///
@@ -625,12 +629,13 @@ fn at_least_one(field: &str, value: usize) -> Result<(), OpError> {
     Ok(())
 }
 
-/// Test hook: with `SWARMOPS_TEST_NOW=<unix seconds>` set to an integer, [`LocalOps`] signs the
-/// changesets it commits at that time instead of the clock's. The same commit made twice is then
-/// the same changeset, whenever it runs: a crash test's runs write the same objects, and so make
-/// the same filesystem calls, which the store's own test hooks count and crash at
-/// (`swarmops_store::CRASH_AT_ENV`, `swarmops_store::FS_CALLS_ENV`). Unset, or not an integer:
-/// the clock's time.
+/// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_NOW=<unix seconds>`
+/// set to an integer, [`LocalOps`] signs the changesets it commits at that time instead of the
+/// clock's. The same commit made twice is then the same changeset, whenever it runs: a crash
+/// test's runs write the same objects, and so make the same filesystem calls, which the store's
+/// own test hooks count and crash at (`swarmops_store::CRASH_AT_ENV`,
+/// `swarmops_store::FS_CALLS_ENV`). Unset, not an integer, or in a build without the feature (a
+/// release build among them): the clock's time.
 pub const NOW_ENV: &str = "SWARMOPS_TEST_NOW";
 
 /// The signature of a changeset that `who` records now: the agent name, the email
@@ -645,13 +650,10 @@ fn native_signature(who: &Identity) -> Signature {
     }
 }
 
-/// Now, in Unix seconds: [`NOW_ENV`]'s seconds if it is set to an integer (a test hook), else
-/// the clock's.
+/// Now, in Unix seconds: [`NOW_ENV`]'s seconds if the test hook gives them ([`test_now`]),
+/// else the clock's.
 fn signing_time() -> i64 {
-    if let Some(secs) = std::env::var(NOW_ENV)
-        .ok()
-        .and_then(|secs| secs.parse().ok())
-    {
+    if let Some(secs) = test_now() {
         return secs;
     }
     SystemTime::now()
@@ -659,6 +661,20 @@ fn signing_time() -> i64 {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         })
+}
+
+/// [`NOW_ENV`]'s seconds, if it is set to an integer, in a build with the `test-hooks` feature.
+#[cfg(feature = "test-hooks")]
+fn test_now() -> Option<i64> {
+    std::env::var(NOW_ENV)
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+}
+
+/// In a build without the `test-hooks` feature, [`NOW_ENV`] is ignored.
+#[cfg(not(feature = "test-hooks"))]
+fn test_now() -> Option<i64> {
+    None
 }
 
 /// Whom a changeset's `metadata` attributes it to.
@@ -932,5 +948,47 @@ mod tests {
         let info = fresh.repo_info(InfoReq {}).unwrap();
         assert_eq!(info.main.as_deref(), Some(committed.changeset.as_str()));
         assert_eq!(info.changesets, 1);
+    }
+
+    /// A commit whose journal frame is written but cannot be listed (journal.off refuses its
+    /// entry) may have committed: `E_IO_TRANSIENT`, retryable, `may_have_committed`, with a hint
+    /// to run it again. It has: a fresh handle sees the changeset.
+    #[test]
+    fn an_undecided_commit_is_retryable_and_says_it_may_have_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        drop(LocalOps::init(&root, "acme").unwrap());
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let ops = ops_on(
+            &root,
+            FailingFs {
+                method: "append_durable",
+                suffix: "journal.off",
+            },
+        );
+        let put = ChangeInput {
+            path: "f".to_owned(),
+            op: ChangeOp::Put,
+            content: Some(ContentInput::Inline("x".to_owned())),
+            mode: None,
+        };
+        let req = CommitReq {
+            parent: None,
+            changes: vec![put],
+            message: "m".to_owned(),
+            allow_empty: false,
+        };
+        let error = ops.commit(&who, req).unwrap_err();
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_IO_TRANSIENT", 4, true),
+            "{error:?}"
+        );
+        assert_eq!(error.details["may_have_committed"], true, "{error:?}");
+        assert!(error.hint.is_some(), "{error:?}");
+        drop(ops);
+
+        let fresh = LocalOps::open(&root).unwrap();
+        assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 1);
     }
 }

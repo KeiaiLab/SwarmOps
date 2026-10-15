@@ -3,17 +3,25 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default: check
 
 # The definition of done for every session. The fuzz crate is a workspace of its own, built
-# with nightly by `just fuzz`; stable formats and lints it here.
+# with nightly by `just fuzz`; stable formats and lints it here. Its clippy step runs
+# libfuzzer-sys's build script, which compiles libFuzzer's C++ sources: on a cold cache it
+# needs a C++ compiler (`c++`). `--all-features` turns on `test-hooks`, the hooks the crash
+# tests drive (`SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_NOW`); the
+# release run of `test_hooks` after it is built without the feature, as `cargo build
+# --release` is, and checks that it ignores them. That test exists only without the feature,
+# so `--no-tests=fail` fails a build that turns it on all the same.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo nextest run --workspace --all-features --no-tests=warn
+    cargo nextest run --release -p swarmops-cli --test test_hooks --no-tests=fail
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
     cargo deny check
 
-# Slow suite: more proptest cases plus ignored (multi-process, crash, perf-ratio) tests.
+# Slow suite: more proptest cases plus ignored (multi-process, crash, perf-ratio) tests, the
+# test hooks on (`--all-features`) as in `just check`.
 check-slow:
     PROPTEST_CASES=2000 cargo nextest run --workspace --all-features --run-ignored all -E 'not test(regenerate_golden)'
 

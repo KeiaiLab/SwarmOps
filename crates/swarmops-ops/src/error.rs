@@ -123,6 +123,11 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         StoreError::DuplicateParent(id) => error(ErrorCode::InvalidArg, message)
             .with_details(details([("parent", id.to_string().into())])),
         StoreError::PostCommit { .. } => error(ErrorCode::Internal, message),
+        StoreError::Undecided { .. } => error(ErrorCode::IoTransient, message)
+            .with_details(details([("may_have_committed", true.into())]))
+            .with_hint(
+                "run the same command again: that is safe whether or not this one committed",
+            ),
     }
 }
 
@@ -358,6 +363,30 @@ mod tests {
             source: Box::new(StoreError::Busy),
         };
         maps(store(post), op, ErrorCode::Internal);
+        let undecided = StoreError::Undecided {
+            source: Box::new(StoreError::Io(io::Error::other("boom"))),
+        };
+        maps(store(undecided), op, ErrorCode::IoTransient);
+    }
+
+    #[test]
+    fn an_undecided_write_is_retryable_and_may_have_committed() {
+        let undecided = StoreError::Undecided {
+            source: Box::new(StoreError::Io(io::Error::other("listing it failed"))),
+        };
+        let error = repo_error(RepoError::Store(undecided), During::Op);
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_IO_TRANSIENT", 4, true)
+        );
+        assert_eq!(error.details["may_have_committed"], true);
+        assert!(
+            error.message.contains("may have committed"),
+            "{}",
+            error.message
+        );
+        let hint = error.hint.unwrap_or_default();
+        assert!(hint.contains("same command"), "{hint}");
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod support;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
+#[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,15 +18,16 @@ use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
 
+#[cfg(feature = "test-hooks")]
 use camino::Utf8PathBuf;
 use proptest::prelude::Rng;
 use proptest::test_runner::{RngAlgorithm, TestRng};
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
-use swarmops_store::{
-    CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsObjectStore, FsOps, Layout, ObjectStore, RealFs,
-    StoreError,
-};
+#[cfg(feature = "test-hooks")]
+use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV};
+use swarmops_store::{CrashAtFs, FsObjectStore, FsOps, Layout, ObjectStore, RealFs, StoreError};
 
+#[cfg(feature = "test-hooks")]
 use crate::support::child::{self, SIGABRT, this_test};
 use crate::support::fs::{Call, Rendezvous, Watch, Watched};
 use crate::support::new_root;
@@ -36,15 +38,19 @@ const ENC_RAW: u8 = 0;
 const ENC_ZSTD: u8 = 1;
 
 /// Set only in the child that `crash_at_fs_aborts_child_at_call_k` spawns: the store root.
+#[cfg(feature = "test-hooks")]
 const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_CRASH_CHILD_ROOT";
 
 /// Set only in the children that `fs_calls_hook_reports_how_many_calls_a_process_made`
 /// spawns: the store root.
+#[cfg(feature = "test-hooks")]
 const COUNT_CHILD_ROOT: &str = "SWARMOPS_TEST_COUNT_CHILD_ROOT";
+#[cfg(feature = "test-hooks")]
 const CRASH_PAYLOAD: &[u8] = b"this put must never become visible";
 
 /// Set only in the children of `open_default_under_crash_at_puts_one_object_at_a_time`: the
 /// store root.
+#[cfg(feature = "test-hooks")]
 const ONE_AT_A_TIME_ROOT: &str = "SWARMOPS_TEST_ONE_AT_A_TIME_ROOT";
 
 fn real_store(layout: &Layout) -> FsObjectStore {
@@ -717,6 +723,7 @@ fn list_returns_every_stored_object_in_id_order() {
 }
 
 /// The batch the children of `open_default_under_crash_at_puts_one_object_at_a_time` put.
+#[cfg(feature = "test-hooks")]
 fn one_at_a_time_batch() -> Vec<(ObjectKind, Vec<u8>)> {
     (0..64)
         .map(|i| (ObjectKind::Blob, format!("one at a time {i}").into_bytes()))
@@ -724,6 +731,7 @@ fn one_at_a_time_batch() -> Vec<(ObjectKind, Vec<u8>)> {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn open_default_under_crash_at_puts_one_object_at_a_time() {
     const TEST: &str = "open_default_under_crash_at_puts_one_object_at_a_time";
     if let Some(root) = std::env::var_os(ONE_AT_A_TIME_ROOT) {
@@ -768,6 +776,7 @@ fn open_default_under_crash_at_puts_one_object_at_a_time() {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_at_fs_aborts_child_at_call_k() {
     if let Some(root) = std::env::var_os(CRASH_CHILD_ROOT) {
         // Child: SWARMOPS_TEST_CRASH_AT is set, so `open_default` wraps RealFs in
@@ -820,6 +829,7 @@ fn crash_at_fs_counts_its_calls_and_reports_them_when_dropped() {
 /// the process and writes how many it made to the file when it is dropped, a crash test's dry
 /// run; with `SWARMOPS_TEST_CRASH_AT=<k>` set too, it aborts at call k and writes nothing.
 #[test]
+#[cfg(feature = "test-hooks")]
 fn fs_calls_hook_reports_how_many_calls_a_process_made() {
     if let Some(root) = std::env::var_os(COUNT_CHILD_ROOT) {
         let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");

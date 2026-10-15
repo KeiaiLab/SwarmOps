@@ -14,6 +14,16 @@ workspace = true
 name = "swarmops"
 path = "src/main.rs"
 
+[features]
+# A `swarmops` that honors the test hooks (`swarmops-ops/test-hooks` turns on all of them):
+# for the crash tests, which require it, never for a release.
+test-hooks = ["swarmops-ops/test-hooks"]
+
+# The crash tests drive the test hooks: without the feature, `cargo test` skips them.
+[[test]]
+name = "crash"
+required-features = ["test-hooks"]
+
 [dependencies]
 swarmops-api = { path = "../swarmops-api", version = "0.1.0" }
 swarmops-ops = { path = "../swarmops-ops", version = "0.1.0" }

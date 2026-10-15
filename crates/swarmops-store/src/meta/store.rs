@@ -25,11 +25,13 @@
 //! synced afresh. A snapshot taken before the cut can then fail with an I/O error on lookups
 //! that read cut records or scan the index's tail (as [`Index::truncate_to`] lists); a new one
 //! reads right.
-//! An error from the append itself may come after the frame's bytes reached the journal, so
-//! that transaction may or may not have committed: the next [`MetaStore::write`] settles it
-//! (it lists or cuts what the journal holds, then replays). A caller that retries after either
-//! must look again first: an insert is idempotent ([`InsertOutcome::AlreadyPresent`]), and a
-//! ref move compares against the ref as it is then.
+//! An error from the append itself once the frame is whole in the journal (its sync, or its
+//! listing in `journal.off`, failed) is [`StoreError::Undecided`]: the transaction may or may
+//! not have committed, and the next [`MetaStore::write`] settles it (it lists or cuts what the
+//! journal holds, then replays). Any other error from the append leaves no whole frame: the
+//! transaction did not commit. A caller that retries after `PostCommit` or `Undecided` must look
+//! again first: an insert is idempotent ([`InsertOutcome::AlreadyPresent`]), and a ref move
+//! compares against the ref as it is then.
 //!
 //! A compaction appends a `Compacted` record, in a frame of its own, as an advisory marker: a
 //! compaction that [`Index::repair_tail`] finishes after a crash appends none, so nothing may
@@ -622,8 +624,10 @@ impl MetaWrite<'_> {
     /// checkpoint.
     ///
     /// Once the frame is appended, every error is [`StoreError::PostCommit`]: the transaction
-    /// committed. An error from the append itself leaves that open; with nothing queued,
-    /// errors are the housekeeping's own.
+    /// committed. An append that fails once the frame is whole in the journal is
+    /// [`StoreError::Undecided`]: the transaction may have committed, and the next write settles
+    /// it. Any other error means it did not commit. With nothing queued, errors are the
+    /// housekeeping's own.
     pub fn commit(self) -> Result<CommitInfo, StoreError> {
         self.finish(false)
     }

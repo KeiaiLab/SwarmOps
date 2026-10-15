@@ -140,7 +140,7 @@ pub enum Command {
         /// The most entries to list.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_READ_TREE_LIMIT)]
         limit: usize,
-        /// Resume after this entry name: the previous page's cursor.
+        /// Resume a listing: the previous page's cursor, exactly as it was returned.
         #[arg(long)]
         cursor: Option<String>,
     },
@@ -159,7 +159,7 @@ pub enum Command {
         /// The most changesets to list.
         #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_LOG_LIMIT)]
         limit: usize,
-        /// Resume after this changeset: the previous page's cursor.
+        /// Resume a log: the previous page's cursor, exactly as it was returned.
         #[arg(long)]
         cursor: Option<String>,
     },
