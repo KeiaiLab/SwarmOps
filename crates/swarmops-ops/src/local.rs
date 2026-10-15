@@ -48,10 +48,10 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   the current time, UTC; its metadata holds `agent` and, when the caller has one, `run_id`.
 ///   `files_changed` counts the changeset's delta, which leaves out puts of what a path holds
 ///   already. The change list follows [`crate::content`]'s rules.
-/// - `read_file` returns at most `max_bytes` bytes from the file's start, cut in the raw bytes
-///   and then encoded: UTF-8 text when they are UTF-8 (a cut through a character leaves bytes
-///   that are not), base64 otherwise. A directory there is `E_IS_DIR`, nothing there
-///   `E_PATH_NOT_FOUND`.
+/// - `read_file` returns at most `max_bytes` bytes from the file's start: UTF-8 text when they
+///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
+///   fewer); otherwise exactly `max_bytes` bytes, in base64. A directory there is `E_IS_DIR`,
+///   nothing there `E_PATH_NOT_FOUND`.
 /// - `read_tree` lists a directory (the root for an omitted or empty path) in name order, a page
 ///   of at most `limit` entries after the `cursor` name; a file or nothing at the path is
 ///   `E_PATH_NOT_FOUND`.
@@ -63,9 +63,8 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   first parent of the changeset it names, which must be a full id the store holds; a page
 ///   is `truncated` when older history follows its last entry.
 /// - `ref_set` and `ref_delete` move a ref by compare-and-swap, recorded for the caller's agent.
-///   A `ref_set` that finds the ref at its `new` target already is a replay: `already_applied`,
-///   with the response the move gave. A `ref_delete` of a ref that does not exist is
-///   `E_REF_NOT_FOUND`.
+///   A move that finds the ref as it asks already (at `new` for `ref_set`; gone, or never there,
+///   for `ref_delete`) is a replay: `already_applied`, with the response the move gave.
 /// - `verify` checks the store and lists each problem as one line.
 ///
 /// Limits of 0 (`limit`, `max_changes`) are `E_INVALID_ARG`.
@@ -105,8 +104,9 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///
 /// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
 /// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does
-/// not exist), whose hint is the move that would succeed now; `E_REF_NOT_FOUND` `{name}`; and
-/// `E_INVALID_ARG` for limits, cursors and requests that break their own rules.
+/// not exist), whose hint is the move that would succeed now; `E_TOO_LARGE`
+/// `{index, path, size, limit}` for a put over 512 MiB; and `E_INVALID_ARG` for limits, cursors
+/// and requests that break their own rules.
 pub struct LocalOps {
     repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.
@@ -341,7 +341,7 @@ impl StoreOps for LocalOps {
             });
         };
         let keep = usize::try_from(max_bytes).map_or(bytes.len(), |max| max.min(bytes.len()));
-        let (encoding, content) = content::encode(&bytes[..keep]);
+        let (encoding, content) = content::encode(&bytes, keep);
         Ok(FileContent {
             // The store verified the bytes against the entry's id as it read them, so hashing
             // them gives that id, without a second walk down the trees for the entry.
@@ -515,27 +515,24 @@ impl StoreOps for LocalOps {
             .repo
             .cas_ref(&name, Some(expected), None, who.agent())
             .map_err(op)?;
-        match outcome.result {
-            CasResult::Applied { .. } => Ok(RefSetResp {
-                name,
-                old: Some(expected.to_string()),
-                new: None,
-                already_applied: false,
-                warnings: outcome.warnings,
-            }),
-            CasResult::Mismatch { actual: None } => Err(error(
-                ErrorCode::RefNotFound,
-                format!("there is no ref {name}"),
-            )
-            .with_details(details([("name", name.into())]))
-            .with_hint("swarmops ref list")),
+        let replay = match outcome.result {
+            CasResult::Applied { .. } => false,
+            // Gone already, as the delete asks: a replay of it, or of another's.
+            CasResult::Mismatch { actual: None } => true,
             CasResult::Mismatch {
                 actual: Some(actual),
             } => {
                 let hint = format!("swarmops ref delete {name} --expect {actual}");
-                Err(cas_mismatch(&name, Some(expected), Some(actual), hint))
+                return Err(cas_mismatch(&name, Some(expected), Some(actual), hint));
             }
-        }
+        };
+        Ok(RefSetResp {
+            name,
+            old: Some(expected.to_string()),
+            new: None,
+            already_applied: replay,
+            warnings: outcome.warnings,
+        })
     }
 
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {

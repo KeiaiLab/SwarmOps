@@ -614,26 +614,123 @@ fn cat_truncates_to_max_bytes() {
     let none = read(0);
     assert!(none.truncated);
     assert_eq!(none.content, "");
+}
 
-    // The cut is made in the raw bytes: text cut on a character boundary stays UTF-8, and a
-    // cut through a character leaves bytes that are not UTF-8, so base64.
-    let c = commit(&ops, Some(&c), vec![text("text.txt", "añb")]);
-    let cut = |max_bytes: u64| {
+#[test]
+fn cat_keeps_text_as_text_at_a_cut() {
+    let (_dir, _root, ops) = new_store();
+    let base64 =
+        |path: &str, bytes: &[u8]| put(path, ContentInput::Base64(STANDARD.encode(bytes)), None);
+    let c = commit(
+        &ops,
+        None,
+        vec![
+            text("emoji.txt", "a😀b"),
+            text("only.txt", "😀"),
+            base64("fake.bin", b"ab\xf0\x9f\xff\xff"),
+            base64("tail.bin", b"ab\xf0\x9f"),
+        ],
+    );
+    let cut = |path: &str, max_bytes: u64| {
         ops.read_file(ReadFileReq {
             max_bytes,
-            ..cat(&c, "text.txt")
+            ..cat(&c, path)
         })
         .unwrap()
     };
-    let on_boundary = cut(1);
+
+    // A cut inside the 4-byte emoji backs off to its start, up to 3 bytes short of the cap; the
+    // file is still truncated, and its size is still the whole blob's.
+    for (max_bytes, kept) in [
+        (1, "a"),
+        (2, "a"),
+        (3, "a"),
+        (4, "a"),
+        (5, "a😀"),
+        (6, "a😀b"),
+    ] {
+        let read = cut("emoji.txt", max_bytes);
+        assert_eq!(
+            (read.encoding, read.content.as_str()),
+            (ContentEncoding::Utf8, kept),
+            "max_bytes {max_bytes}"
+        );
+        assert_eq!(
+            (read.size, read.truncated),
+            (6, max_bytes < 6),
+            "max_bytes {max_bytes}"
+        );
+    }
+    let nothing_whole = cut("only.txt", 2);
     assert_eq!(
-        (on_boundary.encoding, on_boundary.content.as_str()),
-        (ContentEncoding::Utf8, "a")
+        (nothing_whole.encoding, nothing_whole.content.as_str()),
+        (ContentEncoding::Utf8, "")
     );
-    let mid_char = cut(2);
-    assert_eq!(mid_char.encoding, ContentEncoding::Base64);
-    assert_eq!(STANDARD.decode(&mid_char.content).unwrap(), b"a\xc3");
-    assert!(mid_char.truncated);
+    assert_eq!((nothing_whole.size, nothing_whole.truncated), (4, true));
+
+    // Bytes that only look like the start of a character are not text: base64 of exactly the
+    // cap's bytes. So is a blob that ends inside one, read whole.
+    let fake = cut("fake.bin", 3);
+    assert_eq!(fake.encoding, ContentEncoding::Base64);
+    assert_eq!(STANDARD.decode(&fake.content).unwrap(), b"ab\xf0");
+    let tail = cut("tail.bin", DEFAULT_MAX_BYTES);
+    assert_eq!(
+        (tail.encoding, tail.truncated),
+        (ContentEncoding::Base64, false)
+    );
+    assert_eq!(STANDARD.decode(&tail.content).unwrap(), b"ab\xf0\x9f");
+
+    // Random bytes cut anywhere are base64 of exactly the cap's bytes.
+    let c = commit(&ops, Some(&c), vec![base64("noise.bin", &noise(64))]);
+    for max_bytes in [1, 2, 3, 17, 63] {
+        let read = ops
+            .read_file(ReadFileReq {
+                max_bytes,
+                ..cat(&c, "noise.bin")
+            })
+            .unwrap();
+        assert_eq!(read.encoding, ContentEncoding::Base64);
+        let decoded = STANDARD.decode(&read.content).unwrap();
+        assert_eq!(decoded, &noise(64)[..usize::try_from(max_bytes).unwrap()]);
+    }
+}
+
+#[test]
+fn puts_over_512_mib_are_refused_before_their_content_is_read() {
+    let (dir, _root, ops) = new_store();
+    let limit: u64 = 512 * 1024 * 1024;
+    // A sparse file one byte over the limit: it takes no disk, and is refused by its length,
+    // before a byte of it is read.
+    let huge = utf8(dir.path().join("huge.bin"));
+    fs::File::create(&huge).unwrap().set_len(limit + 1).unwrap();
+    let err = expect_err(
+        ops.commit(
+            &agent(),
+            commit_req(
+                None,
+                vec![
+                    text("small", "fine"),
+                    put("big/huge.bin", ContentInput::File(huge.to_string()), None),
+                ],
+            ),
+        ),
+        ErrorCode::TooLarge,
+    );
+    assert_eq!(err.exit, 1);
+    assert_eq!(
+        (&err.details["index"], &err.details["path"]),
+        (&json!(1), &json!("big/huge.bin"))
+    );
+    assert_eq!(
+        (&err.details["size"], &err.details["limit"]),
+        (&json!(limit + 1), &json!(limit))
+    );
+    assert_eq!(err.details["file"], huge.as_str());
+    assert_eq!(
+        ops.repo_info(InfoReq {}).unwrap().changesets,
+        0,
+        "nothing was written"
+    );
 }
 
 #[test]
@@ -749,36 +846,45 @@ fn ref_set_create_update_mismatch_and_already_applied() {
 
 /// `main` names `c3`, and `c1` is an older changeset: delete it by compare-and-swap.
 fn delete_refs_by_compare_and_swap(ops: &LocalOps, who: &Identity, [c1, c3]: [&str; 2]) {
-    let delete = |expected: &str| {
+    let delete = |name: &str, expected: &str| {
         ops.ref_delete(
             who,
             RefDeleteReq {
-                name: "main".to_owned(),
+                name: name.to_owned(),
                 expected_old: expected.into(),
             },
         )
     };
-    let err = expect_err(delete(c1), ErrorCode::CasMismatch);
+    let deleted = |name: &str, old: &str, already_applied: bool| RefSetResp {
+        name: name.to_owned(),
+        old: Some(old.to_owned()),
+        new: None,
+        already_applied,
+        warnings: Vec::new(),
+    };
+    let err = expect_err(delete("main", c1), ErrorCode::CasMismatch);
     assert_eq!(err.details["actual"], json!(c3));
     assert_eq!(
         err.hint,
         Some(format!("swarmops ref delete main --expect {c3}"))
     );
-    assert_eq!(
-        delete(c3).unwrap(),
-        RefSetResp {
-            name: "main".to_owned(),
-            old: Some(c3.to_owned()),
-            new: None,
-            already_applied: false,
-            warnings: Vec::new(),
-        }
-    );
+    assert_eq!(delete("main", c3).unwrap(), deleted("main", c3, false));
     let refs = ops.ref_list(RefListReq {}).unwrap().refs;
     assert!(refs.is_empty(), "{refs:?}");
-    // The ref is gone now.
-    let err = expect_err(delete(c3), ErrorCode::RefNotFound);
-    assert_eq!(err.details["name"], "main");
+    // Deleting it again finds it gone, as asked: a replay, already applied, which answers as
+    // the delete did. A ref that never existed is gone just the same.
+    assert_eq!(delete("main", c3).unwrap(), deleted("main", c3, true));
+    assert_eq!(
+        delete("release/never", c1).unwrap(),
+        deleted("release/never", c1, true)
+    );
+    // A name that cannot be a ref's is refused, not taken for a ref that is gone.
+    let err = expect_err(delete("feature/x", c1), ErrorCode::RefNameInvalid);
+    assert_eq!(err.details["name"], "feature/x");
+    assert!(
+        ops.ref_list(RefListReq {}).unwrap().refs.is_empty(),
+        "nothing was created"
+    );
     // Moving a ref that does not exist is a mismatch with no actual target.
     let err = expect_err(
         ops.ref_set(who, set("main", c1, Some(c3), false)),

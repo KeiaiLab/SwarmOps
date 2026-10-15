@@ -127,7 +127,8 @@ pub struct ChangeInput {
     pub path: String,
     /// Whether to write the path or remove it.
     pub op: ChangeOp,
-    /// The new content; a `put` needs it, a `delete` takes none.
+    /// The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`
+    /// takes none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentInput>,
     /// The kind of entry a `put` writes; `file` when omitted.
@@ -211,10 +212,12 @@ pub struct FileContent {
     pub size: u64,
     /// The file's kind.
     pub kind: FileKind,
-    /// How `content` encodes the bytes it returns.
+    /// How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they
+    /// are not.
     pub encoding: ContentEncoding,
-    /// The bytes returned: the whole blob, or at most `max_bytes` from its start when
-    /// `truncated`.
+    /// The bytes returned: the whole blob, or the start of it when `truncated`. A cut keeps text
+    /// as text: it falls where a character starts, so text may stop up to 3 bytes short of
+    /// `max_bytes`, while bytes that are not text stop at exactly `max_bytes`.
     pub content: String,
     /// Whether `content` stops before the end of the blob.
     pub truncated: bool,
