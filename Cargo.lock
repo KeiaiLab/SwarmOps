@@ -1070,6 +1070,7 @@ dependencies = [
  "swarmops-api",
  "swarmops-core",
  "swarmops-ops",
+ "swarmops-repo",
  "swarmops-store",
  "tempfile",
 ]
