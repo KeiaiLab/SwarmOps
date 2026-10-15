@@ -1121,6 +1121,68 @@ fn compaction_refuses_damaged_views_and_ids_held_twice() {
 }
 
 #[test]
+fn damage_under_an_open_handle_is_index_corrupt_and_cuts_nothing() {
+    // gen.col cut back to 4 of 8 records under an open handle. No crash and no writer cuts
+    // a whole record, so this is damage: whichever write meets it must refuse, without
+    // cutting the other files to match, and leave the handle as it was. The handle counts
+    // all 8 records, with views over them or none, or it counts 4 and another handle
+    // appended and compacted the other 4 since.
+    for compacted_by in ["this handle", "nobody", "another handle"] {
+        for op in ["append", "compact", "repair_tail"] {
+            let what = format!("{op}, compacted by {compacted_by}");
+            let (_root, layout) = new_root();
+            let mut index = open(&layout);
+            let metas: Vec<ChangesetMeta> = (0..9).map(spread_meta).collect();
+            append_all(&mut index, &metas[..4]);
+            let (counted, sorted) = match compacted_by {
+                "this handle" => {
+                    append_all(&mut index, &metas[4..8]);
+                    index.compact().unwrap();
+                    (8, 8)
+                }
+                "nobody" => {
+                    append_all(&mut index, &metas[4..8]);
+                    (8, 0)
+                }
+                _ => {
+                    let mut other = open(&layout);
+                    append_all(&mut other, &metas[4..8]);
+                    other.compact().unwrap();
+                    (4, 0)
+                }
+            };
+            set_len(layout.meta_path("idx/gen.col"), 4 * 8);
+            let read_all = || -> Vec<Vec<u8>> {
+                COLUMNS
+                    .iter()
+                    .chain(&VIEWS)
+                    .map(|(rel, _)| fs::read(layout.meta_path(rel)).unwrap_or_default())
+                    .collect()
+            };
+            let before = read_all();
+
+            let got = match op {
+                "append" => index.append(&metas[8]),
+                "compact" => index.compact(),
+                _ => index.repair_tail(),
+            };
+            assert_index_corrupt(got, &what);
+            assert!(read_all() == before, "{what}: a file was changed");
+            assert_eq!(index.len(), counted, "{what}");
+            assert_eq!(index.sorted_count(), sorted, "{what}");
+            assert_eq!(index.tail_len(), counted - sorted, "{what}");
+            assert_eq!(index.find(spread_id(100)).unwrap(), None, "{what}");
+            let last = usize::try_from(counted - 1).unwrap();
+            assert_eq!(
+                index.find(metas[last].id).unwrap(),
+                Some(counted - 1),
+                "{what}"
+            );
+        }
+    }
+}
+
+#[test]
 fn open_rejects_index_files_no_crash_leaves() {
     // Five records compacted, then three more; the views of the five are kept aside.
     let setup = || {

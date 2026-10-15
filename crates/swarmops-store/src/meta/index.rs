@@ -147,7 +147,9 @@ impl Index {
 
     /// How many records the sorted views do not both cover: the ones lookups scan.
     pub fn tail_len(&self) -> u64 {
-        self.len - self.sorted_count()
+        // The views never cover more than `len`: the two change only together, after the
+        // checks. Saturating all the same, so that no state can make this panic.
+        self.len.saturating_sub(self.sorted_count())
     }
 
     /// The sorted view by changeset id.
@@ -167,9 +169,11 @@ impl Index {
     /// The caller must hold [`crate::MetaLock`]. If the files do not end where this
     /// handle's records do (another handle appended, or a crash left part of a record),
     /// this handle catches up first, cutting off what is not whole, as
-    /// [`Index::repair_tail`] does. More than 255 parents is an `InvalidInput` error, and
-    /// nothing is written then. After any other error, what was written is cut off by the
-    /// next append or repair.
+    /// [`Index::repair_tail`] does; files that hold fewer whole records than this handle
+    /// counts, or than the sorted views cover, are damaged, [`StoreError::IndexCorrupt`],
+    /// and nothing is cut or written then. More than 255 parents is an `InvalidInput` error,
+    /// and nothing is written then either. After any other error, what was written is cut
+    /// off by the next append or repair.
     pub fn append(&mut self, meta: &ChangesetMeta) -> Result<u64, StoreError> {
         let count = u8::try_from(meta.parents.len()).map_err(|_| {
             invalid_input(format!(
@@ -178,8 +182,7 @@ impl Index {
             ))
         })?;
         if !self.ends_where_counted()? {
-            self.repair_columns()?;
-            self.views.check_within(self.len)?;
+            self.catch_up()?;
         }
         let rec = self.len;
         let at = ParentsAt {
@@ -202,8 +205,8 @@ impl Index {
     }
 
     /// Flushes the five files to stable storage, one `sync_data` each, in the order
-    /// [`Index::append`] writes them: once after a transaction's appends, before
-    /// `journal.ckpt` moves past them.
+    /// [`Index::append`] writes them. The writer calls it before it moves `journal.ckpt` past
+    /// the records, which it does in batches, not per transaction (see [`crate::meta`]).
     pub fn sync(&self) -> Result<(), StoreError> {
         for path in self.write_order() {
             self.fs.sync_data(path.as_std_path())?;
@@ -330,6 +333,11 @@ impl Index {
     /// - A crash in the middle of a compaction's renames leaves the views out of step: the
     ///   compaction is run again.
     ///
+    /// Files that hold fewer whole records than this handle counts, or than the sorted views
+    /// cover, are damaged rather than torn: [`StoreError::IndexCorrupt`], and nothing is cut.
+    /// (A handle opened after such damage counts only what is whole; the journal, not the
+    /// index, can tell it records are missing.)
+    ///
     /// Records it keeps may be ones a crashed writer appended and never synced: sync before
     /// moving `journal.ckpt` past them.
     pub fn repair_tail(&mut self) -> Result<u64, StoreError> {
@@ -341,11 +349,13 @@ impl Index {
     }
 
     /// Reopens the sorted views (another handle may have compacted since this one opened
-    /// them) and repairs the columns; returns how many records were dropped.
+    /// them) and repairs the columns; returns how many records were dropped. On an error the
+    /// handle is left as it was.
     fn catch_up(&mut self) -> Result<u64, StoreError> {
-        self.views = Views::open(&self.sorted_dir)?;
-        let dropped = self.repair_columns()?;
-        self.views.check_within(self.len)?;
+        let views = Views::open(&self.sorted_dir)?;
+        let (whole, dropped) = self.repair_files(&views)?;
+        (self.len, self.parents_len) = (whole.records, whole.parents_len);
+        self.views = views;
         Ok(dropped)
     }
 
@@ -373,14 +383,25 @@ impl Index {
             });
         }
         sorted::rebuild(&*self.fs, &self.sorted_dir, &rebuilds)?;
-        self.views = Views::open(&self.sorted_dir)?;
-        self.views.check_within(self.len)
+        let views = Views::open(&self.sorted_dir)?;
+        views.check_within(self.len)?;
+        self.views = views;
+        Ok(())
     }
 
-    /// Cuts the files back to the records that all five hold whole, and counts those;
-    /// returns how many record slots were cut from the longest column.
-    fn repair_columns(&mut self) -> Result<u64, StoreError> {
+    /// Cuts the files back to the records that all five hold whole, and returns those, with
+    /// how many record slots were cut from the longest column; the caller makes them this
+    /// handle's count. Checks first, and cuts nothing if the files hold fewer whole records
+    /// than this handle counts (no crash and no writer cuts a whole record, so the files are
+    /// damaged) or than `views` cover: [`StoreError::IndexCorrupt`].
+    fn repair_files(&self, views: &Views) -> Result<(Whole, u64), StoreError> {
         let whole = self.whole()?;
+        if whole.records < self.len {
+            return Err(StoreError::IndexCorrupt {
+                what: "records this handle counted are no longer whole in every index file",
+            });
+        }
+        views.check_within(whole.records)?;
         let [parents, pars, gens, dhs, ids] = whole.lens;
         let mut dropped = 0;
         // Cut in the reverse of the write order, so that ids.col goes first.
@@ -401,8 +422,7 @@ impl Index {
             self.fs
                 .truncate(self.parents_path.as_std_path(), whole.parents_len)?;
         }
-        (self.len, self.parents_len) = (whole.records, whole.parents_len);
-        Ok(dropped)
+        Ok((whole, dropped))
     }
 
     /// What the files hold whole now, judged from their lengths (one `fstat` each) and the
@@ -506,8 +526,14 @@ impl<const W: usize> Column<W> {
     }
 
     /// The entries of records `[from, to)`, read with one `read_at` (none for no records).
-    fn entries(&self, from: u64, to: u64) -> io::Result<Vec<u8>> {
-        let len = usize::try_from((to - from) * to_u64(W))
+    /// A range that starts past its end is [`StoreError::IndexCorrupt`].
+    fn entries(&self, from: u64, to: u64) -> Result<Vec<u8>, StoreError> {
+        let Some(count) = to.checked_sub(from) else {
+            return Err(StoreError::IndexCorrupt {
+                what: "a sorted view covers records past those the index counts",
+            });
+        };
+        let len = usize::try_from(count * to_u64(W))
             .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
         let mut bytes = vec![0; len];
         if len > 0 {
