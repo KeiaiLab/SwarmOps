@@ -26,3 +26,7 @@ proptest.workspace = true
 [[bench]]
 name = "fsync_latency"
 harness = false
+
+[[bench]]
+name = "read_snapshot"
+harness = false
