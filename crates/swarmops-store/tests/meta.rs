@@ -479,6 +479,34 @@ fn cas_ref_rejects_unknown_target_and_bad_name() {
 }
 
 /// A root changeset whose id starts with `prefix`, its other bytes `fill`.
+#[test]
+fn ref_files_lists_each_ref_file_even_when_one_is_damaged() {
+    let (_dir, root, store) = new_store();
+    assert!(store.ref_files().unwrap().is_empty());
+    insert(&store, &[cs(1, &[]), cs(2, &[1])]);
+    cas(&store, "main", None, Some(1));
+    cas(&store, "release/a", None, Some(2));
+    cas(&store, "release/a", Some(2), Some(1));
+
+    // A damaged ref file fails every snapshot; ref_files reports it and lists the rest. Temp
+    // files and names that are no refs are passed over, as snapshots pass over them.
+    let release = Layout::new(&root).meta_path("refs/release");
+    fs::write(release.join("broken"), b"not a ref file\n").unwrap();
+    fs::write(release.join(".tmpA1b2C3"), b"half a ref file").unwrap();
+    fs::write(release.join("no spaces"), ref_content(1, 1)).unwrap();
+    assert!(store.read().is_err());
+
+    let files = store.ref_files().unwrap();
+    let names: Vec<&str> = files.iter().map(|file| file.name.as_str()).collect();
+    assert_eq!(names, ["main", "release/a", "release/broken"]);
+    assert_eq!(files[0].state.as_ref().unwrap(), &ref_state(1, 1));
+    assert_eq!(files[1].state.as_ref().unwrap(), &ref_state(1, 2));
+    match &files[2].state {
+        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
+        other => panic!("expected InvalidData, got {other:?}"),
+    }
+}
+
 fn with_prefix(prefix: &[u8], fill: u8) -> ChangesetMeta {
     let mut bytes = [fill; 32];
     bytes[..prefix.len()].copy_from_slice(prefix);

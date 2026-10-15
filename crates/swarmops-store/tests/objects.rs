@@ -664,6 +664,42 @@ fn put_batch_returns_ids_in_input_order() {
 }
 
 #[test]
+fn list_returns_every_stored_object_in_id_order() {
+    let (_root, layout) = new_root();
+    let store = real_store(&layout);
+    assert_eq!(
+        store.list().unwrap(),
+        [],
+        "a store never written to lists nothing"
+    );
+    let mut ids: Vec<ObjectId> = [b"one".as_slice(), b"two", b"three"]
+        .into_iter()
+        .map(|payload| store.put(ObjectKind::Blob, payload).unwrap())
+        .collect();
+    ids.push(store.put(ObjectKind::Tree, b"a tree's bytes").unwrap());
+    store.flush().unwrap();
+
+    // Only the fan-out directories hold objects: temp files, stray entries and names this
+    // store never writes are passed over.
+    fs::write(layout.objects_tmp().join("leftover"), b"x").unwrap();
+    let fanout = layout.object_path(ids[0]).parent().unwrap().to_owned();
+    fs::write(fanout.join("not-an-object"), b"x").unwrap();
+    fs::write(fanout.join("A".repeat(62)), b"x").unwrap();
+    fs::create_dir(fanout.join("c".repeat(62))).unwrap();
+    fs::write(layout.objects_dir().join("stray"), b"x").unwrap();
+    fs::create_dir(layout.objects_dir().join("zz")).unwrap();
+    fs::write(layout.objects_dir().join("zz").join("b".repeat(62)), b"x").unwrap();
+    // Listing reads no object: a corrupt one is listed all the same (get finds it out).
+    let corrupt = layout.object_path(ids[1]);
+    let mut bytes = fs::read(&corrupt).unwrap();
+    *bytes.last_mut().unwrap() ^= 0x01;
+    fs::write(&corrupt, bytes).unwrap();
+
+    ids.sort();
+    assert_eq!(store.list().unwrap(), ids);
+}
+
+#[test]
 fn crash_at_fs_aborts_child_at_call_k() {
     if let Some(root) = std::env::var_os(CRASH_CHILD_ROOT) {
         // Child: SWARMOPS_TEST_CRASH_AT is set, so `open_default` wraps RealFs in
