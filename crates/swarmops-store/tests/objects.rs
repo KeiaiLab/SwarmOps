@@ -157,6 +157,14 @@ impl FsOps for CountingFs {
     fn sync_data(&self, path: &Path) -> io::Result<()> {
         RealFs.sync_data(path)
     }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        RealFs.append(path, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        RealFs.rename_durable(from, to)
+    }
 }
 
 /// A one-way gate: `wait` blocks until `open` has been called.
@@ -236,6 +244,14 @@ impl FsOps for GatedFs {
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
         RealFs.sync_data(path)
+    }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        RealFs.append(path, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        RealFs.rename_durable(from, to)
     }
 }
 

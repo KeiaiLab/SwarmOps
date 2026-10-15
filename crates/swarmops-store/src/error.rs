@@ -59,4 +59,21 @@ pub enum StoreError {
     /// A ref would point at a changeset that is not in the index.
     #[error("ref target {0} is not a changeset in the store")]
     UnknownRefTarget(ChangesetId),
+    /// The changeset index files hold what no crash leaves behind, as `what` says: a sorted
+    /// view file that ends in a partial entry; sorted views out of order, out of step in a
+    /// way the order compaction renames them in cannot explain, or covering records the
+    /// columns do not hold; an id the index holds twice; a record whose parents lie off
+    /// `parents.log`'s 32-byte boundaries or past its end; or an index file that changed
+    /// during an append (a writer without `meta/lock`). The journal can rebuild the index.
+    #[error("the changeset index is corrupt: {what}")]
+    IndexCorrupt {
+        /// What is wrong.
+        what: &'static str,
+    },
+    /// The changeset index disagrees with the journal about record `seq` (found by verify).
+    #[error("the changeset index disagrees with the journal at seq {seq}")]
+    IndexMismatch {
+        /// The record that disagrees.
+        seq: u64,
+    },
 }

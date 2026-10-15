@@ -5,16 +5,25 @@
 //!   metadata file is a projection of it.
 //! - [`Record`] and [`Frame`]: what the journal holds, in a fixed byte layout.
 //! - [`MetaLock`] (`meta/lock`): the flock that serializes writers.
+//! - [`Index`] (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/`): the columnar
+//!   changeset index, one [`ChangesetMeta`] record per changeset in journal order, with
+//!   [`SortedView`]s by id and by delta hash for `O(log n)` lookups.
 //!
-//! A write transaction holds the lock throughout: [`Journal::truncate_torn_tail`], replay
-//! of the frames past [`Journal::ckpt`] into the materialized files, one
-//! [`Journal::append_frame`] (the commit point), materialization, then
-//! [`Journal::set_ckpt`]. Readers take no lock.
+//! A write transaction holds the lock throughout: [`Journal::truncate_torn_tail`] and
+//! [`Index::repair_tail`], replay of the frames past [`Journal::ckpt`] into the materialized
+//! files, one [`Journal::append_frame`] (the commit point), materialization (for the index,
+//! [`Index::append`] per changeset, then one [`Index::sync`]), then [`Journal::set_ckpt`].
+//! Readers take no lock.
 
 pub mod frame;
+pub mod index;
 pub mod journal;
 pub mod lock;
+mod parents;
+pub mod sorted;
 
 pub use frame::{Frame, Record};
+pub use index::{ChangesetMeta, Index};
 pub use journal::Journal;
 pub use lock::MetaLock;
+pub use sorted::SortedView;

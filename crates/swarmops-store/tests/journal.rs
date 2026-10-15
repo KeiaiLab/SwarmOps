@@ -234,6 +234,16 @@ impl FsOps for RecordingFs {
         self.record("sync_data", path);
         RealFs.sync_data(path)
     }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.record("append", path);
+        RealFs.append(path, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.record("rename_durable", to);
+        RealFs.rename_durable(from, to)
+    }
 }
 
 /// Another handle on the journal whose FsOps calls are recorded, and a function that

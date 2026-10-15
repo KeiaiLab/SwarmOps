@@ -1,5 +1,6 @@
-//! The filesystem operations the object store and the metadata journal perform, behind a
-//! trait so tests can count them or crash the process at an exact point of a write.
+//! The filesystem operations the object store and the metadata store (journal and index)
+//! perform, behind a trait so tests can count them or crash the process at an exact point of
+//! a write.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -20,7 +21,7 @@ pub enum LinkOutcome {
     AlreadyExists,
 }
 
-/// The filesystem operations of the object store and the metadata journal.
+/// The filesystem operations of the object store and the metadata store.
 ///
 /// Implementations are called from many threads at once, and many processes may
 /// operate on the same store concurrently.
@@ -71,6 +72,17 @@ pub trait FsOps: Send + Sync {
     /// Flushes the data of the existing file `path` to stable storage (`sync_data`),
     /// whichever process wrote it.
     fn sync_data(&self, path: &Path) -> io::Result<()>;
+
+    /// Appends `bytes` to file `path` (created if missing) without flushing them to stable
+    /// storage: a later [`FsOps::sync_data`] does that, once for many appends. Returns the
+    /// file's length before the append, as [`FsOps::append_durable`] does. A new file's
+    /// directory entry is not made durable.
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64>;
+
+    /// Renames `from` to `to`, replacing `to` if it exists (atomically: readers see the old
+    /// file or the new one), then flushes `to`'s directory to stable storage, making the new
+    /// name durable. `from`'s data must be durable already, or `to` may lose it in a crash.
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()>;
 }
 
 /// The real filesystem.
@@ -143,10 +155,7 @@ impl FsOps for RealFs {
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let dir = match path.parent() {
-            Some(dir) if !dir.as_os_str().is_empty() => dir,
-            _ => Path::new("."),
-        };
+        let dir = parent_dir(path);
         let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
         temp.write_all(bytes)?;
         temp.as_file().sync_all()?;
@@ -157,6 +166,26 @@ impl FsOps for RealFs {
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
         File::open(path)?.sync_data()
+    }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        let mut file = OpenOptions::new().append(true).create(true).open(path)?;
+        let offset = file.metadata()?.len();
+        file.write_all(bytes)?;
+        Ok(offset)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        fs::rename(from, to)?;
+        self.fsync_dir(parent_dir(to))
+    }
+}
+
+/// The directory that holds `path`; `.` for a bare file name.
+fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
     }
 }
 
@@ -209,6 +238,14 @@ impl<F: FsOps + ?Sized> FsOps for Arc<F> {
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
         (**self).sync_data(path)
+    }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        (**self).append(path, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        (**self).rename_durable(from, to)
     }
 }
 
@@ -302,6 +339,16 @@ impl<F: FsOps> FsOps for CrashAtFs<F> {
     fn sync_data(&self, path: &Path) -> io::Result<()> {
         self.tick();
         self.inner.sync_data(path)
+    }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.tick();
+        self.inner.append(path, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.tick();
+        self.inner.rename_durable(from, to)
     }
 }
 
