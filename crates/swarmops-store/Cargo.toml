@@ -13,3 +13,9 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
+criterion.workspace = true
+tempfile.workspace = true
+
+[[bench]]
+name = "fsync_latency"
+harness = false
