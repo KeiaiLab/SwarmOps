@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 if cargo nextest --version >/dev/null 2>&1; then
-  cargo nextest run --workspace --no-tests=warn
+  cargo nextest run --workspace --all-features --no-tests=warn
 else
   cargo test --workspace
 fi

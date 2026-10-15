@@ -3,6 +3,8 @@
 //! The layouts here are the hash contract (storage-core spec §1). They change
 //! only by introducing a new magic/version, never in place.
 
+#[cfg(feature = "arbitrary")]
+mod arbitrary_impls;
 pub mod changeset;
 pub mod codec;
 pub mod tree;

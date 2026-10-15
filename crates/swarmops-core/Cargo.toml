@@ -10,10 +10,15 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Derive `arbitrary::Arbitrary` for the object types (fuzzing and property tests).
+arbitrary = ["dep:arbitrary"]
+
 [dependencies]
 blake3.workspace = true
 thiserror.workspace = true
 hex.workspace = true
+arbitrary = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true

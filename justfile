@@ -6,7 +6,7 @@ default: check
 check:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
-    cargo nextest run --workspace --no-tests=warn
+    cargo nextest run --workspace --all-features --no-tests=warn
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
     cargo deny check
 

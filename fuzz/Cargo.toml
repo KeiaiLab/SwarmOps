@@ -1,0 +1,30 @@
+[package]
+name = "swarmops-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+arbitrary = { version = "1.5.0", features = ["derive"] }
+swarmops-core = { path = "../crates/swarmops-core", features = ["arbitrary"] }
+
+[[bin]]
+name = "codec_roundtrip"
+path = "fuzz_targets/codec_roundtrip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_decode"
+path = "fuzz_targets/tree_decode.rs"
+test = false
+doc = false
+bench = false
+
+# Own workspace: nightly-only, excluded from the root `just check`.
+[workspace]
