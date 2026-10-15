@@ -16,7 +16,7 @@ pub mod meta;
 
 pub use error::StoreError;
 pub use fs_objects::{FsObjectStore, ObjectStore};
-pub use fs_ops::{CRASH_AT_ENV, CrashAtFs, FsOps, LinkOutcome, RealFs};
+pub use fs_ops::{CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsOps, LinkOutcome, RealFs};
 pub use layout::{Layout, is_native_linux_fs};
 pub use meta::{
     CasResult, ChangesetMeta, CommitInfo, Frame, Index, InsertOutcome, Journal, JournalEntry,

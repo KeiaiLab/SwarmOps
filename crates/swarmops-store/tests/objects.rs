@@ -20,7 +20,8 @@ use proptest::prelude::Rng;
 use proptest::test_runner::{RngAlgorithm, TestRng};
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 use swarmops_store::{
-    CRASH_AT_ENV, FsObjectStore, FsOps, Layout, LinkOutcome, ObjectStore, RealFs, StoreError,
+    CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsObjectStore, FsOps, Layout, LinkOutcome, ObjectStore,
+    RealFs, StoreError,
 };
 use tempfile::TempDir;
 
@@ -32,6 +33,10 @@ const SIGABRT: i32 = 6;
 
 /// Set only in the child that `crash_at_fs_aborts_child_at_call_k` spawns: the store root.
 const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_CRASH_CHILD_ROOT";
+
+/// Set only in the children that `fs_calls_hook_reports_how_many_calls_a_process_made`
+/// spawns: the store root.
+const COUNT_CHILD_ROOT: &str = "SWARMOPS_TEST_COUNT_CHILD_ROOT";
 const CRASH_PAYLOAD: &[u8] = b"this put must never become visible";
 
 /// A fresh, empty store root and its layout; the directory lives as long as the `TempDir`.
@@ -734,4 +739,74 @@ fn crash_at_fs_aborts_child_at_call_k() {
         Vec::<PathBuf>::new(),
         "no object file is visible after the crash"
     );
+}
+
+/// A [`CrashAtFs`] counts every call, and with a report file writes the count there when it
+/// is dropped.
+#[test]
+fn crash_at_fs_counts_its_calls_and_reports_them_when_dropped() {
+    let (_root, layout) = new_root();
+    let report = layout.root().join("calls").into_std_path_buf();
+    let fs = CrashAtFs::new(RealFs, 0).reporting_calls_to(report.clone());
+    let dir = layout.root().join("d").into_std_path_buf();
+    fs.create_dir_all(&dir).unwrap();
+    assert!(fs.exists(&dir).unwrap());
+    assert_eq!(fs.read(&dir.join("none")).unwrap(), None);
+    assert_eq!(fs.calls(), 3);
+    assert!(!report.exists(), "the count is written when it is dropped");
+    drop(fs);
+    assert_eq!(fs::read_to_string(&report).unwrap(), "3");
+}
+
+/// `SWARMOPS_TEST_FS_CALLS=<file>`: the object store `open_default` gives counts the calls of
+/// the process and writes how many it made to the file when it is dropped, a crash test's dry
+/// run; with `SWARMOPS_TEST_CRASH_AT=<k>` set too, it aborts at call k and writes nothing.
+#[test]
+fn fs_calls_hook_reports_how_many_calls_a_process_made() {
+    if let Some(root) = std::env::var_os(COUNT_CHILD_ROOT) {
+        let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");
+        let store = FsObjectStore::open_default(Layout::new(root));
+        store.put(ObjectKind::Blob, CRASH_PAYLOAD).unwrap();
+        store.flush().unwrap();
+        return;
+    }
+    // The same put and flush in this process, counted.
+    let (_root, layout) = new_root();
+    let counted = Arc::new(CrashAtFs::new(RealFs, 0));
+    let store = FsObjectStore::open(layout, Box::new(Arc::clone(&counted)));
+    store.put(ObjectKind::Blob, CRASH_PAYLOAD).unwrap();
+    store.flush().unwrap();
+    let calls = counted.calls();
+    assert!(calls > 3, "a put makes several calls: {calls}");
+
+    for crash_at in [None, Some(calls)] {
+        let (_root, layout) = new_root();
+        let report = layout.root().join("calls").into_std_path_buf();
+        let mut child = Command::new(std::env::current_exe().expect("test binary path"));
+        child
+            .args([
+                "--exact",
+                "fs_calls_hook_reports_how_many_calls_a_process_made",
+                "--nocapture",
+            ])
+            .env(COUNT_CHILD_ROOT, layout.root())
+            .env(FS_CALLS_ENV, &report)
+            .env_remove(CRASH_AT_ENV);
+        if let Some(k) = crash_at {
+            child.env(CRASH_AT_ENV, k.to_string());
+        }
+        let output = child.output().expect("spawn the child");
+        let shown = format!(
+            "{:?}\n--- child stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if crash_at.is_some() {
+            assert_eq!(output.status.signal(), Some(SIGABRT), "{shown}");
+            assert!(!report.exists(), "a run that crashes reports nothing");
+        } else {
+            assert!(output.status.success(), "{shown}");
+            assert_eq!(fs::read_to_string(&report).unwrap(), calls.to_string());
+        }
+    }
 }
