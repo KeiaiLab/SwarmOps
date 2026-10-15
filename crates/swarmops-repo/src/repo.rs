@@ -127,7 +127,8 @@ impl LocalRepo {
     ///
     /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests), the object store and the metadata
     /// store share one [`CrashAtFs`] whose k-th call aborts the process, and objects are
-    /// written one at a time, so that the k-th call is the same call in every run.
+    /// written (and the index's files synced) one at a time, so that the k-th call is the same
+    /// call in every run.
     pub fn create(store: &Utf8Path, name: &str) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::create_on(store, name, fs, one_thread)
@@ -240,13 +241,14 @@ impl LocalRepo {
     fn assemble(
         layout: Layout,
         fs: Arc<dyn FsOps>,
-        meta: MetaStore,
+        mut meta: MetaStore,
         identity: Identity,
         one_thread: bool,
     ) -> LocalRepo {
         let mut objects = FsObjectStore::open(layout.clone(), Box::new(Arc::clone(&fs)));
         if one_thread {
             objects.set_parallelism(1);
+            meta.set_parallelism(1);
         }
         Repo {
             objects,
@@ -349,7 +351,8 @@ fn ref_error(e: StoreError) -> RepoError {
 
 /// The filesystem a store opens on: the real one; or, with `SWARMOPS_TEST_CRASH_AT=<k>` set
 /// to a positive k (crash tests), one [`CrashAtFs`] for both stores, so that the k-th call of
-/// either aborts the process. `true` with the latter: objects are then written one at a time.
+/// either aborts the process. `true` with the latter: objects are then written, and the
+/// index's files synced, one at a time.
 fn default_fs() -> (Arc<dyn FsOps>, bool) {
     let crash_at = std::env::var(CRASH_AT_ENV)
         .ok()
