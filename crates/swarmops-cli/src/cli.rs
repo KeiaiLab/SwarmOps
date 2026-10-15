@@ -118,6 +118,8 @@ pub enum Command {
     },
     /// Print one file at a revision.
     Cat {
+        // Split at the first ':' by commands::split_target: M1's revision grammar has no ':'.
+        // `ws:<name>` and `cr:CR-n[@k]` arrive later, and the split must become prefix-aware.
         /// The revision and the file's path, split at the first ':'.
         #[arg(value_name = "REV:PATH")]
         target: String,
@@ -127,6 +129,7 @@ pub enum Command {
     },
     /// List one directory at a revision (the root without a PATH).
     Ls {
+        // Split at the first ':' as `cat`'s target is (see there).
         /// The revision, and the directory's path after the first ':'.
         #[arg(value_name = "REV[:PATH]")]
         target: String,

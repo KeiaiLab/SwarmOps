@@ -13,9 +13,13 @@
 //! `LocalOps::take_resolved` reports them, also when it failed; `auth` is the store's
 //! authentication mode, `trust` in M1.
 //!
+//! A panic's envelope has the same `repo` and `resolved` (see [`Used`]), or neither when it
+//! came before a store was named.
+//!
 //! `whoami` prints `IdentityInfo` as the API writes it: for a caller without an identity,
 //! `{"auth":"anonymous"}`, with `agent` omitted rather than null.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
@@ -52,6 +56,33 @@ pub struct Ctx<'a> {
     pub format: Format,
     /// When the process started, for `meta.elapsed_ms`.
     pub started: Instant,
+    /// What the command has used so far, for `meta`, a panic's envelope's too.
+    pub used: Used,
+}
+
+/// What a command has used so far: the store the user named, and the store once opened. It
+/// lives outside the code that can panic, so that a panic's envelope can report what the
+/// command's own would: `meta.repo` and `meta.resolved`.
+#[derive(Default)]
+pub struct Used {
+    /// The store as the user named it.
+    repo: RefCell<Option<String>>,
+    /// The store, once opened.
+    store: RefCell<Option<LocalOps>>,
+}
+
+impl Used {
+    /// `meta.repo` and `meta.resolved` as far as the command got: the store named, and what the
+    /// opened store resolved since this was last asked.
+    pub fn meta(&self) -> (Option<String>, BTreeMap<String, String>) {
+        let resolved = self
+            .store
+            .borrow()
+            .as_ref()
+            .map(LocalOps::take_resolved)
+            .unwrap_or_default();
+        (self.repo.borrow().clone(), resolved)
+    }
 }
 
 /// Runs `command`, which names operation `op`, and renders its envelope.
@@ -59,9 +90,12 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
     let agent = ctx.global.agent.as_deref();
     match command {
         Command::Init { dir, name } => {
+            if !dir.is_empty() {
+                ctx.used.repo.replace(Some(dir.clone()));
+            }
             let result = init(&dir, name.as_deref());
-            let repo = Some(dir).filter(|dir| !dir.is_empty());
-            ctx.finish(op, repo, BTreeMap::new(), result)
+            let (repo, resolved) = ctx.used.meta();
+            ctx.finish(op, repo, resolved, result)
         }
         Command::Info => ctx.on_store(op, || Ok(InfoReq {}), |ops, req| ops.repo_info(req)),
         Command::Whoami => {
@@ -107,13 +141,10 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         } => ctx.on_store(
             op,
             || {
-                let (rev, path) = match target.split_once(':') {
-                    Some((rev, path)) => (rev, Some(path.to_owned())),
-                    None => (target.as_str(), None),
-                };
+                let (rev, path) = split_target(&target);
                 Ok(ReadTreeReq {
                     rev: rev.into(),
-                    path,
+                    path: path.map(str::to_owned),
                     limit,
                     cursor,
                 })
@@ -189,24 +220,31 @@ fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
 
 impl Ctx<'_> {
     /// Runs operation `op` on the store the user named: `prepare` builds its input without
-    /// the store, then `call` runs it on the store, opened.
-    fn on_store<P, T: Serialize>(
+    /// the store, then `call` runs it on the store, opened. Both are kept in [`Ctx::used`].
+    pub fn on_store<P, T: Serialize>(
         &self,
         op: &str,
         prepare: impl FnOnce() -> Result<P, OpError>,
         call: impl FnOnce(&dyn StoreOps, P) -> Result<T, OpError>,
     ) -> Printed {
         let named = context::store_named(self.global.repo.as_deref(), self.env);
-        let repo = named.as_ref().ok().cloned().flatten();
-        let mut resolved = BTreeMap::new();
+        if let Ok(Some(store)) = &named {
+            self.used.repo.replace(Some(store.clone()));
+        }
         let result = named.and_then(|named| {
             let input = prepare()?;
-            let store = named.ok_or_else(context::no_store_named)?;
-            let ops = LocalOps::open(Utf8Path::new(&store))?;
-            let result = call(&ops, input);
-            resolved = ops.take_resolved();
-            result
+            let store =
+                named.ok_or_else(|| context::no_store_named(self.global.repo.as_deref()))?;
+            self.used
+                .store
+                .replace(Some(LocalOps::open(Utf8Path::new(&store))?));
+            let opened = self.used.store.borrow();
+            call(
+                opened.as_ref().expect("the store was opened just now"),
+                input,
+            )
         });
+        let (repo, resolved) = self.used.meta();
         self.finish(op, repo, resolved, result)
     }
 
@@ -225,6 +263,19 @@ impl Ctx<'_> {
 /// The envelope of `op` failing with `error` before it could use a store.
 pub fn failed(op: &str, error: OpError, format: Format, started: Instant) -> Printed {
     envelope::<()>(op, None, BTreeMap::new(), Err(error), format, started)
+}
+
+/// The envelope of `op` failing with `error` after it used what `used` holds, which `meta`
+/// reports.
+pub fn failed_after(
+    op: &str,
+    error: OpError,
+    used: &Used,
+    format: Format,
+    started: Instant,
+) -> Printed {
+    let (repo, resolved) = used.meta();
+    envelope::<()>(op, repo, resolved, Err(error), format, started)
 }
 
 /// The envelope of a command line clap refused: `E_INVALID_ARG` (exit 2) with clap's message
@@ -369,9 +420,24 @@ fn read_changes(source: &str) -> Result<Vec<ChangeInput>, OpError> {
     })
 }
 
-/// `cat`'s `<rev>:<path>`, split at the first `:`: a revision never holds one, a path may.
+/// `<rev>:<path>` split at the first `:`, or all of `target` as the revision when it holds
+/// none (`ls <rev>`).
+///
+/// This is the M1 revision grammar's split, where a revision never holds a `:` and a path
+/// may. `ws:<name>` and `cr:CR-n[@k]` revisions arrive in later milestones, and the split must
+/// become prefix-aware then.
+fn split_target(target: &str) -> (&str, Option<&str>) {
+    match target.split_once(':') {
+        Some((rev, path)) => (rev, Some(path)),
+        None => (target, None),
+    }
+}
+
+/// `cat`'s `<rev>:<path>`, as [`split_target`] splits it; a target without a path is
+/// `E_INVALID_ARG`.
 fn file_target(target: &str) -> Result<(&str, &str), OpError> {
-    target.split_once(':').ok_or_else(|| {
+    let (rev, path) = split_target(target);
+    path.map(|path| (rev, path)).ok_or_else(|| {
         OpError::new(
             ErrorCode::InvalidArg,
             format!("{target:?} names no file: cat takes <rev>:<path>"),
