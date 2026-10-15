@@ -14,12 +14,10 @@
 //! length against the bytes at hand before it slices, so garbage gives an error, never a
 //! panic.
 
-use std::io;
-
 use swarmops_core::bytes::Reader;
 use swarmops_core::{ChangesetId, ObjectId};
 
-use crate::error::StoreError;
+use crate::error::{StoreError, invalid_input};
 
 /// A frame header: `u32le len | u32le crc32(payload)`.
 pub(crate) const HEADER_LEN: usize = 8;
@@ -207,10 +205,6 @@ pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
     frame[..4].copy_from_slice(&len.to_le_bytes());
     frame[4..HEADER_LEN].copy_from_slice(&crc.to_le_bytes());
     Ok(frame)
-}
-
-fn invalid_input(message: String) -> StoreError {
-    io::Error::new(io::ErrorKind::InvalidInput, message).into()
 }
 
 /// What the bytes at a frame boundary hold.

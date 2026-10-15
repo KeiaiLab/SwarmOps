@@ -59,7 +59,8 @@ use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
-use crate::error::StoreError;
+use super::to_u64;
+use crate::error::{StoreError, invalid_input};
 use crate::fs_ops::{FsOps, RealFs};
 use crate::layout::Layout;
 
@@ -760,14 +761,6 @@ fn unix_now() -> i64 {
         Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_secs()).map_or(i64::MIN, |secs| -secs),
     }
-}
-
-fn invalid_input(message: String) -> StoreError {
-    io::Error::new(io::ErrorKind::InvalidInput, message).into()
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
 }
 
 /// `n`, or `usize::MAX` if it does not fit (a limit that large means no limit).

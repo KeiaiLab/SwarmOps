@@ -92,3 +92,9 @@ pub enum StoreError {
         source: Box<StoreError>,
     },
 }
+
+/// An `InvalidInput` I/O error: what the metadata store returns for a request it cannot carry
+/// out as asked (a record past what its layout holds, a rec past the index's end).
+pub(crate) fn invalid_input(message: String) -> StoreError {
+    io::Error::new(io::ErrorKind::InvalidInput, message).into()
+}

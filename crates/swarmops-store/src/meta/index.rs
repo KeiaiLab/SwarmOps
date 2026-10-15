@@ -35,10 +35,8 @@
 //! handle opened before it, a reader's snapshot's included: [`Index::truncate_to`] says which
 //! lookups then fail.
 
-use std::fs::File;
 use std::io;
 use std::num::NonZero;
-use std::os::unix::fs::FileExt;
 use std::panic;
 use std::sync::Arc;
 use std::thread;
@@ -46,9 +44,11 @@ use std::thread;
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
 
+use super::column::AppendOnlyColumn;
 use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
-use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views, index_file_error};
-use crate::error::StoreError;
+use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views};
+use super::to_u64;
+use crate::error::{StoreError, invalid_input};
 use crate::fs_ops::FsOps;
 use crate::layout::Layout;
 
@@ -85,13 +85,12 @@ const PARENTS: &str = "parents.log";
 pub struct Index {
     fs: Arc<dyn FsOps>,
     sorted_dir: Utf8PathBuf,
-    ids: Column<32>,
-    gens: Column<8>,
-    dhs: Column<32>,
-    pars: Column<8>,
-    parents_path: Utf8PathBuf,
-    /// Read-only.
-    parents: File,
+    ids: AppendOnlyColumn<32>,
+    gens: AppendOnlyColumn<8>,
+    dhs: AppendOnlyColumn<32>,
+    pars: AppendOnlyColumn<8>,
+    /// Addressed by byte offset, as `par.col` entries hold them.
+    parents: AppendOnlyColumn<1>,
     /// The records this handle counts.
     len: u64,
     /// The bytes of `parents.log` those records' parents take.
@@ -147,14 +146,12 @@ impl Index {
         // ran, and whole records stay, so the columns read afterwards hold all that the
         // views cover.
         let views = Views::open(&sorted_dir)?;
-        let parents_path = layout.meta_path(PARENTS);
         let mut index = Index {
-            ids: Column::open(layout.meta_path(IDS)).map_err(index_file_error)?,
-            gens: Column::open(layout.meta_path(GENS)).map_err(index_file_error)?,
-            dhs: Column::open(layout.meta_path(DHS)).map_err(index_file_error)?,
-            pars: Column::open(layout.meta_path(PARS)).map_err(index_file_error)?,
-            parents: File::open(&parents_path).map_err(index_file_error)?,
-            parents_path,
+            ids: AppendOnlyColumn::open(layout.meta_path(IDS))?,
+            gens: AppendOnlyColumn::open(layout.meta_path(GENS))?,
+            dhs: AppendOnlyColumn::open(layout.meta_path(DHS))?,
+            pars: AppendOnlyColumn::open(layout.meta_path(PARS))?,
+            parents: AppendOnlyColumn::open(layout.meta_path(PARENTS))?,
             fs,
             sorted_dir,
             len: 0,
@@ -232,11 +229,12 @@ impl Index {
         }
         let mut buf = [0; MAX_PARENTS_LEN];
         let parents = parents::encode(&meta.parents, &mut buf);
-        self.append_at(&self.parents_path, parents, at.offset)?;
-        self.append_at(&self.pars.path, &at.entry().to_le_bytes(), rec * 8)?;
-        self.append_at(&self.gens.path, &meta.generation.to_le_bytes(), rec * 8)?;
-        self.append_at(&self.dhs.path, &meta.delta_hash, rec * 32)?;
-        self.append_at(&self.ids.path, &meta.id.0.0, rec * 32)?;
+        let fs = &*self.fs;
+        self.parents.append(fs, parents, at.offset)?;
+        self.pars.append(fs, &at.entry().to_le_bytes(), rec)?;
+        self.gens.append(fs, &meta.generation.to_le_bytes(), rec)?;
+        self.dhs.append(fs, &meta.delta_hash, rec)?;
+        self.ids.append(fs, &meta.id.0.0, rec)?;
         self.len = rec + 1;
         self.parents_len = at.end();
         Ok(rec)
@@ -263,12 +261,12 @@ impl Index {
     /// order and stopping at its first error (one file each at 5); once every thread is done,
     /// the error of the first file in write order that failed comes back. A share whose thread
     /// cannot be spawned (the process is out of threads) is synced on the calling thread
-    /// instead, so that a commit never fails, or panics, for want of a thread. ext4 commits
+    /// instead, so that this step never fails, or panics, for want of a thread. ext4 commits
     /// concurrent fsyncs together: five at once cost about two (docs/perf.md).
     pub fn sync(&self) -> Result<(), StoreError> {
         let files = self.write_order();
         let fs = &*self.fs;
-        let sync_all = |share: &[&Utf8PathBuf]| -> io::Result<()> {
+        let sync_all = |share: &[&Utf8Path]| -> io::Result<()> {
             share
                 .iter()
                 .try_for_each(|path| fs.sync_data(path.as_std_path()))
@@ -350,36 +348,37 @@ impl Index {
     /// of the tail of `ids.col`.
     pub fn find_prefix(&self, prefix_nibbles: &str) -> Result<Vec<u64>, StoreError> {
         let prefix = Prefix::parse(prefix_nibbles)?;
-        let view = &self.views.ids;
-        let start = view.lower_bound(&prefix.low)?;
-        let end = view.run_end(start, |key| prefix.matches(key))?;
-        let mut recs = view.recs(start..end)?;
-        let from = view.len();
-        let tail = self.ids.entries(from, self.len)?;
-        recs.extend(
-            (from..)
-                .zip(tail.as_chunks::<32>().0)
-                .filter(|(_, key)| prefix.matches(key))
-                .map(|(rec, _)| rec),
-        );
-        recs.sort_unstable();
-        Ok(recs)
+        self.find_all(&self.views.ids, &self.ids, &prefix.low, |key| {
+            prefix.matches(key)
+        })
     }
 
     /// The recs, ascending, of the changesets whose delta hash is `dh`: changesets that make
     /// the same change on different bases, as a clean rebase does. Searched like
     /// [`Index::find_prefix`], in the delta-hash view and the tail of `dh.col`.
     pub fn find_delta_hash(&self, dh: &[u8; 32]) -> Result<Vec<u64>, StoreError> {
-        let view = &self.views.dh;
-        let start = view.lower_bound(dh)?;
-        let end = view.run_end(start, |key| key == dh)?;
+        self.find_all(&self.views.dh, &self.dhs, dh, |key| key == dh)
+    }
+
+    /// The recs, ascending, of the records whose key `matches` accepts, the keys it accepts
+    /// being a run in key order that starts at `low` or after it: that run of `view`, from a
+    /// lower-bound search, one read of its recs, and a scan of the tail of `column`.
+    fn find_all(
+        &self,
+        view: &SortedView<32>,
+        column: &AppendOnlyColumn<32>,
+        low: &[u8; 32],
+        matches: impl Fn(&[u8; 32]) -> bool,
+    ) -> Result<Vec<u64>, StoreError> {
+        let start = view.lower_bound(low)?;
+        let end = view.run_end(start, &matches)?;
         let mut recs = view.recs(start..end)?;
         let from = view.len();
-        let tail = self.dhs.entries(from, self.len)?;
+        let tail = column.entries(from, self.len)?;
         recs.extend(
             (from..)
                 .zip(tail.as_chunks::<32>().0)
-                .filter(|(_, key)| *key == dh)
+                .filter(|(_, key)| matches(key))
                 .map(|(rec, _)| rec),
         );
         recs.sort_unstable();
@@ -465,22 +464,20 @@ impl Index {
             None => 0,
         };
         (self.len, self.parents_len) = (keep, parents_len);
-        let cuts = [
-            (&self.ids.path, self.ids.byte_len()?, keep * 32),
-            (&self.dhs.path, self.dhs.byte_len()?, keep * 32),
-            (&self.gens.path, self.gens.byte_len()?, keep * 8),
-            (&self.pars.path, self.pars.byte_len()?, keep * 8),
-            (
-                &self.parents_path,
-                self.parents.metadata()?.len(),
-                parents_len,
-            ),
+        // Every length first, then the cuts.
+        let [ids, dhs, gens, pars, parents] = [
+            self.ids.len()?,
+            self.dhs.len()?,
+            self.gens.len()?,
+            self.pars.len()?,
+            self.parents.len()?,
         ];
-        for (path, len, cut) in cuts {
-            if len > cut {
-                self.fs.truncate(path.as_std_path(), cut)?;
-            }
-        }
+        let fs = &*self.fs;
+        self.ids.truncate(fs, ids, keep)?;
+        self.dhs.truncate(fs, dhs, keep)?;
+        self.gens.truncate(fs, gens, keep)?;
+        self.pars.truncate(fs, pars, keep)?;
+        self.parents.truncate(fs, parents, parents_len)?;
         Ok(keep)
     }
 
@@ -539,26 +536,16 @@ impl Index {
         }
         views.check_within(whole.records)?;
         let [parents, pars, gens, dhs, ids] = whole.lens;
-        let mut dropped = 0;
+        let (fs, records) = (&*self.fs, whole.records);
         // Cut in the reverse of the write order, so that ids.col goes first.
-        let columns = [
-            (&self.ids.path, ids, 32),
-            (&self.dhs.path, dhs, 32),
-            (&self.gens.path, gens, 8),
-            (&self.pars.path, pars, 8),
+        let dropped = [
+            self.ids.truncate(fs, ids, records)?,
+            self.dhs.truncate(fs, dhs, records)?,
+            self.gens.truncate(fs, gens, records)?,
+            self.pars.truncate(fs, pars, records)?,
         ];
-        for (path, len, width) in columns {
-            let keep = whole.records * width;
-            if len != keep {
-                dropped = dropped.max(len.div_ceil(width) - whole.records);
-                self.fs.truncate(path.as_std_path(), keep)?;
-            }
-        }
-        if parents != whole.parents_len {
-            self.fs
-                .truncate(self.parents_path.as_std_path(), whole.parents_len)?;
-        }
-        Ok((whole, dropped))
+        self.parents.truncate(fs, parents, whole.parents_len)?;
+        Ok((whole, dropped.into_iter().max().unwrap_or(0)))
     }
 
     /// What the files hold whole now, judged from their lengths (one `fstat` each) and the
@@ -566,12 +553,15 @@ impl Index {
     fn whole(&self) -> Result<Whole, StoreError> {
         // ids.col first: append writes it last, so with no power lost a record it holds is
         // whole in the files read after it. The minimum covers a power loss as well.
-        let ids = self.ids.byte_len()?;
-        let dhs = self.dhs.byte_len()?;
-        let gens = self.gens.byte_len()?;
-        let pars = self.pars.byte_len()?;
-        let parents = self.parents.metadata()?.len();
-        let mut records = (ids / 32).min(dhs / 32).min(gens / 8).min(pars / 8);
+        let ids = self.ids.len()?;
+        let dhs = self.dhs.len()?;
+        let gens = self.gens.len()?;
+        let pars = self.pars.len()?;
+        let parents = self.parents.len()?;
+        let mut records = AppendOnlyColumn::<32>::whole(ids)
+            .min(AppendOnlyColumn::<32>::whole(dhs))
+            .min(AppendOnlyColumn::<8>::whole(gens))
+            .min(AppendOnlyColumn::<8>::whole(pars));
         let parents_len = loop {
             let Some(last) = records.checked_sub(1) else {
                 break 0;
@@ -596,32 +586,21 @@ impl Index {
 
     /// Whether the files end exactly where this handle's records do.
     fn ends_where_counted(&self) -> io::Result<bool> {
-        Ok(self.parents.metadata()?.len() == self.parents_len
-            && self.pars.byte_len()? == self.len * 8
-            && self.gens.byte_len()? == self.len * 8
-            && self.dhs.byte_len()? == self.len * 32
-            && self.ids.byte_len()? == self.len * 32)
-    }
-
-    /// Appends `bytes` to `path`, which must be `expected` bytes long until then.
-    fn append_at(&self, path: &Utf8Path, bytes: &[u8], expected: u64) -> Result<(), StoreError> {
-        if self.fs.append(path.as_std_path(), bytes)? == expected {
-            Ok(())
-        } else {
-            Err(StoreError::IndexCorrupt {
-                what: "an index file changed during an append: a writer without meta/lock?",
-            })
-        }
+        Ok(self.parents.holds(self.parents_len)?
+            && self.pars.holds(self.len)?
+            && self.gens.holds(self.len)?
+            && self.dhs.holds(self.len)?
+            && self.ids.holds(self.len)?)
     }
 
     /// The five files in the order [`Index::append`] writes them.
-    fn write_order(&self) -> [&Utf8PathBuf; 5] {
+    fn write_order(&self) -> [&Utf8Path; 5] {
         [
-            &self.parents_path,
-            &self.pars.path,
-            &self.gens.path,
-            &self.dhs.path,
-            &self.ids.path,
+            self.parents.path(),
+            self.pars.path(),
+            self.gens.path(),
+            self.dhs.path(),
+            self.ids.path(),
         ]
     }
 }
@@ -637,52 +616,10 @@ struct Whole {
     lens: [u64; 5],
 }
 
-/// One column file: `W` bytes per record, record `rec` at byte `rec × W`.
-struct Column<const W: usize> {
-    path: Utf8PathBuf,
-    /// Read-only.
-    file: File,
-}
-
-impl<const W: usize> Column<W> {
-    fn open(path: Utf8PathBuf) -> io::Result<Self> {
-        let file = File::open(&path)?;
-        Ok(Self { path, file })
-    }
-
-    fn byte_len(&self) -> io::Result<u64> {
-        Ok(self.file.metadata()?.len())
-    }
-
-    /// Record `rec`'s entry.
-    fn entry(&self, rec: u64) -> io::Result<[u8; W]> {
-        let mut entry = [0; W];
-        self.file.read_exact_at(&mut entry, rec * to_u64(W))?;
-        Ok(entry)
-    }
-
-    /// The entries of records `[from, to)`, read with one `read_at` (none for no records).
-    /// A range that starts past its end is [`StoreError::IndexCorrupt`].
-    fn entries(&self, from: u64, to: u64) -> Result<Vec<u8>, StoreError> {
-        let Some(count) = to.checked_sub(from) else {
-            return Err(StoreError::IndexCorrupt {
-                what: "a sorted view covers records past those the index counts",
-            });
-        };
-        let len = usize::try_from(count * to_u64(W))
-            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
-        let mut bytes = vec![0; len];
-        if len > 0 {
-            self.file.read_exact_at(&mut bytes, from * to_u64(W))?;
-        }
-        Ok(bytes)
-    }
-}
-
 /// The (key, rec) pairs of records `[from, to)` of `column`, read with one `read_at`, sorted
 /// by key, then rec.
 fn sorted_tail(
-    column: &Column<32>,
+    column: &AppendOnlyColumn<32>,
     from: u64,
     to: u64,
 ) -> Result<Vec<([u8; 32], u64)>, StoreError> {
@@ -736,12 +673,4 @@ impl Prefix {
         key[..whole] == self.low[..whole]
             && (self.nibbles.is_multiple_of(2) || key[whole] >> 4 == self.low[whole] >> 4)
     }
-}
-
-fn invalid_input(message: String) -> StoreError {
-    io::Error::new(io::ErrorKind::InvalidInput, message).into()
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
 }

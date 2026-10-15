@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use camino::Utf8PathBuf;
 
 use super::frame::{Frame, HEADER_LEN, Parsed, Record, encode_frame, parse_frame};
+use super::to_u64;
 use crate::error::StoreError;
 use crate::fs_ops::FsOps;
 use crate::layout::Layout;
@@ -644,8 +645,4 @@ fn read_upto(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     }
     buf.truncate(filled);
     Ok(buf)
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
 }
