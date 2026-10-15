@@ -565,6 +565,39 @@ fn frames_from_is_inclusive_and_starts_at_frame_zero() {
 }
 
 #[test]
+fn frames_from_strict_reports_a_last_listed_frame_cut_short() {
+    // journal.off lists the last frame, but journal.log ends inside it (at 104) or right
+    // before it (at 84). frames_from passes over it, as the torn tail a writer repairs;
+    // frames_from_strict, for checking the journal, reports it at its start.
+    for log_end in [104, 84] {
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        let first = journal.append_frame(&[root_changeset()]).unwrap();
+        let second = journal
+            .append_frame(&[child_changeset(), main_created()])
+            .unwrap();
+        let whole = [first.clone(), second];
+        assert_eq!(reopen(&layout).frames_from_strict(0, 10).unwrap(), whole);
+        assert_eq!(
+            reopen(&layout).frames_from_strict(1, 1).unwrap(),
+            whole[1..]
+        );
+
+        set_len(layout.journal_log(), log_end);
+        let reader = reopen(&layout);
+        assert_eq!(reader.frames_from(0, 10).unwrap(), whole[..1]);
+        let what = format!("log ends at {log_end}");
+        assert_corrupt_at(reader.frames_from_strict(0, 10), 84, &what);
+        assert_corrupt_at(reader.frames_from_strict(1, 10), 84, &what);
+        assert_eq!(
+            reader.frames_from_strict(0, 1).unwrap(),
+            [first],
+            "{what}: the frames before it read"
+        );
+    }
+}
+
+#[test]
 fn a_first_frame_that_does_not_start_at_zero_is_journal_corrupt() {
     // journal.off lists the frame at 19 as frame 0: the bytes before it are no frame.
     let (_root, layout) = new_root();

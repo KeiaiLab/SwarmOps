@@ -48,6 +48,10 @@ pub trait ObjectStore: Send + Sync {
 
     /// Makes every object put since the last flush durable.
     fn flush(&self) -> Result<(), StoreError>;
+
+    /// The id of every object stored, in ascending order. Reads no object, so it verifies
+    /// none: [`ObjectStore::get`] does.
+    fn list(&self) -> Result<Vec<ObjectId>, StoreError>;
 }
 
 /// [`ObjectStore`] over loose files in a store's `objects/` directory.
@@ -193,6 +197,36 @@ impl ObjectStore for FsObjectStore {
         Ok(self.fs.exists(self.layout.object_path(id).as_std_path())?)
     }
 
+    /// The files of the 256 fan-out directories whose names are object ids (62 lowercase hex
+    /// digits). Everything else under `objects/` is passed over: `objects/tmp/`, where the
+    /// temp files a crash left behind lie, and stray entries. Lists the directories with
+    /// `std::fs` (an [`FsOps`] has no listing), and runs no [`FsOps`] call.
+    fn list(&self) -> Result<Vec<ObjectId>, StoreError> {
+        let mut ids = Vec::new();
+        for byte in 0..=u8::MAX {
+            let fanout = format!("{byte:02x}");
+            let entries = match std::fs::read_dir(self.layout.objects_dir().join(&fanout)) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name();
+                let Some(rest) = name.to_str().filter(|rest| is_object_name(rest)) else {
+                    continue;
+                };
+                if entry.file_type()?.is_file() {
+                    let id = ObjectId::from_hex(&format!("{fanout}{rest}"))
+                        .expect("two and 62 hex digits make an id");
+                    ids.push(id);
+                }
+            }
+        }
+        ids.sort_unstable();
+        Ok(ids)
+    }
+
     fn flush(&self) -> Result<(), StoreError> {
         // `()` carries no state that a panicking holder could have left inconsistent.
         let _flushing = self
@@ -211,6 +245,12 @@ impl ObjectStore for FsObjectStore {
         }
         Ok(())
     }
+}
+
+/// Whether `name` is what an object file in a fan-out directory is named: the last 62 hex
+/// digits of its id, lowercase.
+fn is_object_name(name: &str) -> bool {
+    name.len() == 62 && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn kind_byte(kind: ObjectKind) -> u8 {

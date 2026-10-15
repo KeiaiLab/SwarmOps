@@ -879,6 +879,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "swarmops-repo"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "swarmops-core",
+ "swarmops-store",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
 name = "swarmops-store"
 version = "0.1.0"
 dependencies = [

@@ -9,6 +9,7 @@ fn layout_paths_follow_the_store_spec() {
     let layout = Layout::new("/srv/store");
     assert_eq!(layout.root(), "/srv/store");
     assert_eq!(layout.format_file(), "/srv/store/FORMAT");
+    assert_eq!(layout.repo_file(), "/srv/store/REPO");
     assert_eq!(layout.meta_dir(), "/srv/store/meta");
     assert_eq!(layout.meta_path("index/v1"), "/srv/store/meta/index/v1");
     assert_eq!(layout.meta_lock(), "/srv/store/meta/lock");
