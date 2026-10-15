@@ -728,6 +728,28 @@ fn responses_follow_the_spec_shape_and_field_order() {
 }
 
 #[test]
+fn ref_moves_carry_warnings_only_when_there_are_some() {
+    let mut moved = RefSetResp {
+        name: "main".to_owned(),
+        old: Some("b0b0".to_owned()),
+        new: Some("c9f1".to_owned()),
+        already_applied: false,
+        warnings: Vec::new(),
+    };
+    assert_eq!(
+        serde_json::to_string(&moved).unwrap(),
+        r#"{"name":"main","old":"b0b0","new":"c9f1","already_applied":false}"#
+    );
+    moved.warnings.push("the ref move is committed".to_owned());
+    let text = serde_json::to_string(&moved).unwrap();
+    assert_eq!(
+        text,
+        r#"{"name":"main","old":"b0b0","new":"c9f1","already_applied":false,"warnings":["the ref move is committed"]}"#
+    );
+    assert_eq!(serde_json::from_str::<RefSetResp>(&text).unwrap(), moved);
+}
+
+#[test]
 fn listings_page_with_truncated_and_cursor() {
     assert_eq!(DEFAULT_LS_LIMIT, 1000);
     assert_eq!(DEFAULT_MAX_CHANGES, 1000);

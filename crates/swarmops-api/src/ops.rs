@@ -309,7 +309,7 @@ pub struct ShowReq {
 }
 
 /// `show`: a changeset's header, changes and metadata. Byte strings are decoded as UTF-8, with
-/// invalid bytes replaced.
+/// invalid bytes replaced, except metadata values (see `metadata`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct ChangesetDetail {
     /// The changeset's id.
@@ -333,7 +333,8 @@ pub struct ChangesetDetail {
     pub files_changed: u64,
     /// Whether `changes` stops before the changeset's last change.
     pub changes_truncated: bool,
-    /// SwarmOps metadata, such as `agent` and `run_id`.
+    /// SwarmOps metadata, such as `agent` and `run_id`. A value that is not UTF-8 is given in
+    /// standard, padded base64, under its key with `:b64` appended.
     pub metadata: BTreeMap<String, String>,
     /// The git author and committer signatures, kept for git fidelity.
     pub signatures: Signatures,
@@ -342,7 +343,8 @@ pub struct ChangesetDetail {
 /// Whom a changeset is attributed to (operations spec §5).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct Attribution {
-    /// The agent that wrote it: the changeset's `agent` metadata.
+    /// The agent that wrote it: the changeset's `agent` metadata, or `unknown/unknown` for a
+    /// changeset that records none.
     pub agent: String,
     /// The run it was written in: the changeset's `run_id` metadata, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -424,7 +426,7 @@ pub struct ChangesetSummary {
     pub id: String,
     /// The parents' ids, mainline parent first.
     pub parents: Vec<String>,
-    /// The agent that wrote it.
+    /// The agent that wrote it, as `show` gives `author.agent`.
     pub author_agent: String,
     /// When it was recorded: the committer signature's time, in Unix milliseconds.
     pub created_at: u64,
@@ -485,6 +487,10 @@ pub struct RefSetResp {
     pub new: Option<String>,
     /// The ref was already in the requested state, so nothing changed and a replay is safe.
     pub already_applied: bool,
+    /// Problems found after the move became durable, such as failed housekeeping; the move
+    /// itself succeeded. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// `ref delete`: remove a ref by compare-and-swap.
