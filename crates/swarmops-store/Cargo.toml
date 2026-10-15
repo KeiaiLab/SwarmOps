@@ -1,6 +1,6 @@
 [package]
 name = "swarmops-store"
-description = "SwarmOps store: loose object files, SQLite metadata, fsck and gc"
+description = "SwarmOps store: loose object files, metadata, fsck and gc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,10 +11,16 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+camino.workspace = true
+rayon.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-tempfile.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "fsync_latency"
