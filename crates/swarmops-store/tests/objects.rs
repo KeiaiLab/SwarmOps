@@ -44,6 +44,10 @@ const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_CRASH_CHILD_ROOT";
 const COUNT_CHILD_ROOT: &str = "SWARMOPS_TEST_COUNT_CHILD_ROOT";
 const CRASH_PAYLOAD: &[u8] = b"this put must never become visible";
 
+/// Set only in the children of `open_default_under_crash_at_puts_one_object_at_a_time`: the
+/// store root.
+const ONE_AT_A_TIME_ROOT: &str = "SWARMOPS_TEST_ONE_AT_A_TIME_ROOT";
+
 /// A fresh, empty store root and its layout; the directory lives as long as the `TempDir`.
 fn new_root() -> (TempDir, Layout) {
     let dir = tempfile::tempdir().expect("create store root");
@@ -818,6 +822,58 @@ fn list_returns_every_stored_object_in_id_order() {
 
     ids.sort();
     assert_eq!(store.list().unwrap(), ids);
+}
+
+/// The batch the children of `open_default_under_crash_at_puts_one_object_at_a_time` put.
+fn one_at_a_time_batch() -> Vec<(ObjectKind, Vec<u8>)> {
+    (0..64)
+        .map(|i| (ObjectKind::Blob, format!("one at a time {i}").into_bytes()))
+        .collect()
+}
+
+#[test]
+fn open_default_under_crash_at_puts_one_object_at_a_time() {
+    const TEST: &str = "open_default_under_crash_at_puts_one_object_at_a_time";
+    if let Some(root) = std::env::var_os(ONE_AT_A_TIME_ROOT) {
+        let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");
+        let store = FsObjectStore::open_default(Layout::new(root));
+        let outcome = store.put_batch(one_at_a_time_batch());
+        panic!("the crash hook did not fire: put_batch returned {outcome:?}");
+    }
+    // With its fan-out dir in place, a new object's put makes five FsOps calls: exists,
+    // create_dir_all objects/tmp, exists of the fan-out dir, write_durable_temp,
+    // link_noclobber. One object at a time, call 5 × 20 + 3 comes in the middle of the 21st
+    // object's put, after 20 whole ones: the first 20, in every run.
+    let whole = 20;
+    let want: BTreeSet<ObjectId> = one_at_a_time_batch()[..whole]
+        .iter()
+        .map(|(kind, payload)| hash_object(*kind, payload))
+        .collect();
+    for run in 0..2 {
+        let (_root, layout) = new_root();
+        fs::create_dir_all(layout.objects_tmp()).unwrap();
+        for byte in 0..=u8::MAX {
+            fs::create_dir_all(layout.objects_dir().join(format!("{byte:02x}"))).unwrap();
+        }
+        let child = Command::new(std::env::current_exe().expect("test binary path"))
+            .args(["--exact", TEST, "--nocapture"])
+            .env(ONE_AT_A_TIME_ROOT, layout.root())
+            .env(CRASH_AT_ENV, (5 * whole + 3).to_string())
+            .output()
+            .expect("spawn the child");
+        assert_eq!(
+            child.status.signal(),
+            Some(SIGABRT),
+            "run {run}: {:?}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr),
+        );
+        let stored: BTreeSet<ObjectId> = real_store(&layout).list().unwrap().into_iter().collect();
+        assert_eq!(
+            stored, want,
+            "run {run}: the first {whole} objects, and only they"
+        );
+    }
 }
 
 #[test]

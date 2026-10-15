@@ -4,10 +4,13 @@
 //! The basic acquire, timeout and release tests are in `journal.rs`. Every test here owns a
 //! fresh store root (`tempfile::tempdir()`), so tests are independent and may run in any order
 //! or in parallel. The abandoned-waiter test watches the kernel's own lock table,
-//! `/proc/locks`, which lists the holder of each `flock` lock and every waiter blocked on it.
+//! `/proc/locks`, which lists the holder of each `flock` lock and every waiter blocked on it;
+//! it and its helpers are Linux-only.
 
 use std::fs;
+#[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::Barrier;
 use std::thread;
@@ -32,6 +35,7 @@ fn new_meta() -> (TempDir, Layout) {
 /// names its process and its file, as `<major>:<minor>:<inode>`; the inode and this process's
 /// id pick the lines out (the device `stat` reports need not be the one the line shows, on
 /// btrfs for one).
+#[cfg(target_os = "linux")]
 fn flocks_on(path: &Path) -> (usize, usize) {
     let inode = fs::metadata(path)
         .expect("stat the lock file")
@@ -62,6 +66,7 @@ fn flocks_on(path: &Path) -> (usize, usize) {
 }
 
 /// Waits up to 10 s until `flocks_on(path)` is `want`, and returns what it was last.
+#[cfg(target_os = "linux")]
 fn wait_for_flocks(path: &Path, want: (usize, usize)) -> (usize, usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -73,6 +78,7 @@ fn wait_for_flocks(path: &Path, want: (usize, usize)) -> (usize, usize) {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn abandoned_waiter_releases_the_lock_it_acquires_late() {
     let (_root, layout) = new_meta();
