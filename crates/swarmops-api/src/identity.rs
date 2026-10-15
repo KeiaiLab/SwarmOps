@@ -14,7 +14,7 @@ const AGENT_PATTERN: &str = r"^[a-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9._-]*$";
 /// The caller of a mutation: an agent name `<family>/<instance>` (`agent/worker-17`,
 /// `human/purple`) and an optional run id. M1 trusts the name as claimed.
 ///
-/// Every identity is checked by `Identity::parse`, also when it is read from JSON.
+/// The agent name always follows the grammar below, also in an identity read from JSON.
 #[derive(Serialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct Identity {
     /// `<family>/<instance>`: a family of `[a-z0-9-]+` and an instance of `[A-Za-z0-9._-]+` that

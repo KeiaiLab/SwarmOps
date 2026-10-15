@@ -264,8 +264,9 @@ pub struct LsReq {
     /// The directory's repository path; omitted for the root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// The most entries to return.
+    /// The most entries to return: at least 1 (0 is `E_INVALID_ARG`).
     #[serde(default = "default_ls_limit")]
+    #[schemars(range(min = 1))]
     pub limit: usize,
     /// Resume a listing: the previous page's `cursor`; this page starts after that entry name.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -300,8 +301,9 @@ pub struct TreeEntryOut {
 pub struct ShowReq {
     /// The changeset to show.
     pub rev: Rev,
-    /// The most entries of `changes` to return.
+    /// The most entries of `changes` to return: at least 1 (0 is `E_INVALID_ARG`).
     #[serde(default = "default_max_changes")]
+    #[schemars(range(min = 1))]
     pub max_changes: usize,
 }
 
@@ -392,8 +394,9 @@ pub struct LogReq {
     /// Where to start; `main` when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rev: Option<Rev>,
-    /// The most entries to return.
+    /// The most entries to return: at least 1 (0 is `E_INVALID_ARG`).
     #[serde(default = "default_log_limit")]
+    #[schemars(range(min = 1))]
     pub limit: usize,
     /// Resume a log: the previous page's `cursor`, the last changeset id it returned. This page
     /// continues from that changeset's first parent, and `rev` is not used.

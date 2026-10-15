@@ -117,6 +117,29 @@ fn every_nested_type_is_registered_too() {
     }
 }
 
+#[test]
+fn schema_descriptions_name_no_rust_items() {
+    fn check(at: &str, value: &Value) {
+        match value {
+            Value::Object(map) => {
+                if let Some(Value::String(text)) = map.get("description") {
+                    assert!(!text.contains("::") && !text.contains("[`"), "{at}: {text}");
+                }
+                for (key, inner) in map {
+                    check(&format!("{at}/{key}"), inner);
+                }
+            }
+            Value::Array(items) => {
+                for (i, inner) in items.iter().enumerate() {
+                    check(&format!("{at}[{i}]"), inner);
+                }
+            }
+            _ => {}
+        }
+    }
+    check("", &schema_for_all());
+}
+
 /// Pins every `StoreOps` method's name, request type and response type. Instantiated with
 /// `S = dyn StoreOps`, it also proves the trait object-safe.
 fn store_ops_signatures<S: StoreOps + ?Sized>() {
@@ -704,6 +727,18 @@ fn responses_follow_the_spec_shape_and_field_order() {
 fn listings_page_with_truncated_and_cursor() {
     assert_eq!(DEFAULT_LS_LIMIT, 1000);
     assert_eq!(DEFAULT_MAX_CHANGES, 1000);
+    // An empty page is a mistake: limits start at 1, and 0 is `E_INVALID_ARG`.
+    let all = schema_for_all();
+    for (name, field) in [
+        ("LsReq", "limit"),
+        ("LogReq", "limit"),
+        ("ShowReq", "max_changes"),
+    ] {
+        assert_eq!(
+            all[name]["properties"][field]["minimum"], 1,
+            "{name}.{field}"
+        );
+    }
     assert_eq!(
         serde_json::from_value::<LsReq>(json!({"rev": "main"})).unwrap(),
         LsReq {

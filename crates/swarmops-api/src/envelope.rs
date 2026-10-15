@@ -12,8 +12,7 @@ pub const API_VERSION: u32 = 1;
 
 /// One command's output: `result` on success, `error` on failure, `meta` either way.
 ///
-/// Exactly one of `result` and `error` is present (`Envelope::ok` and `Envelope::err` guarantee
-/// it); the other is omitted, never written as null.
+/// Exactly one of `result` and `error` is present; the other is omitted, never written as null.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[schemars(rename = "Envelope")]
 pub struct Envelope<T> {

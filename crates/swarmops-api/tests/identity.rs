@@ -1,4 +1,4 @@
-//! `Identity`: `<family>/<instance>` (umbrella spec §5), `^[a-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9._-]*$`
+//! `Identity`: `<family>/<instance>` (operations spec §5), `^[a-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9._-]*$`
 //! (the instance may not start with `.`), at most 255 bytes, checked by `parse` and on
 //! deserialization alike.
 
