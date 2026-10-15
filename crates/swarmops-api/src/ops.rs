@@ -3,9 +3,17 @@
 //!
 //! Requests and responses alike ignore fields they do not know: the operations spec (§0) forbids
 //! `deny_unknown_fields`, so stores and clients of different versions keep working together.
-//! Absent options are omitted, never written as null. Ids are lowercase hex. Apart from where a
-//! store lives ([`InitReq::path`], [`RepoInfo::path`]), no type names a filesystem location;
-//! [`ContentInput::File`] is resolved to bytes on the client before a request reaches the store.
+//! Absent options are omitted, never written as null. Ids are lowercase hex. A response that
+//! could grow without bound is capped by its request (`max_bytes`, `limit`, `max_changes`) and
+//! says when it was cut (`truncated`, `changes_truncated`); `ls` and `log` also return a
+//! `cursor` that resumes after the page.
+//!
+//! No store-facing type carries a filesystem path. The two exceptions are client-side:
+//! [`ContentInput::File`], which the client reads and sends as bytes, and [`InitReq::path`],
+//! because `init` runs on the client and is not a [`StoreOps`] method.
+//!
+//! Not in M1 yet: `ContentInput::Blob` and `CatReq.range` (M2), `idempotency_key` and
+//! `replayed` on `commit` (M4, with land), and `RepoInfo.workspaces` (M5).
 
 use std::collections::BTreeMap;
 
@@ -22,12 +30,26 @@ pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 /// The default [`LogReq::limit`].
 pub const DEFAULT_LOG_LIMIT: usize = 50;
 
+/// The default [`LsReq::limit`].
+pub const DEFAULT_LS_LIMIT: usize = 1000;
+
+/// The default [`ShowReq::max_changes`].
+pub const DEFAULT_MAX_CHANGES: usize = 1000;
+
 fn default_max_bytes() -> u64 {
     DEFAULT_MAX_BYTES
 }
 
 fn default_log_limit() -> usize {
     DEFAULT_LOG_LIMIT
+}
+
+fn default_ls_limit() -> usize {
+    DEFAULT_LS_LIMIT
+}
+
+fn default_max_changes() -> usize {
+    DEFAULT_MAX_CHANGES
 }
 
 /// `init`: create a store.
@@ -50,8 +72,6 @@ pub struct RepoInfo {
     pub repo_id: String,
     /// The name given at `init`.
     pub name: String,
-    /// Where the store lives, for display.
-    pub path: String,
     /// The changeset `main` points at; omitted until `main` exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main: Option<String>,
@@ -82,13 +102,14 @@ pub struct IdentityInfo {
 pub struct CommitReq {
     /// The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,
     /// the current head of `main` is used if `main` exists, and otherwise the commit is a root
-    /// commit.
+    /// commit. `null` is the same as omitting it. Once `main` exists, this API cannot express a
+    /// root commit (a known M1 limitation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<Rev>,
+    /// What to change, relative to the parent.
+    pub changes: Vec<ChangeInput>,
     /// The commit message.
     pub message: String,
-    /// What to change, relative to `parent`.
-    pub changes: Vec<ChangeInput>,
     /// Record the changeset even if it changes nothing.
     #[serde(default)]
     pub allow_empty: bool,
@@ -100,7 +121,7 @@ pub struct ChangeInput {
     /// The repository path: `/`-separated, relative to the root.
     pub path: String,
     /// Whether to write the path or remove it.
-    pub op: ChangeOpInput,
+    pub op: ChangeOp,
     /// The new content; a `put` needs it, a `delete` takes none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentInput>,
@@ -109,10 +130,10 @@ pub struct ChangeInput {
     pub mode: Option<ModeInput>,
 }
 
-/// What a change does to its path.
+/// What a change does to its path, in a commit's change list and a changeset's changes alike.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
-pub enum ChangeOpInput {
+pub enum ChangeOp {
     /// Write the content at the path, creating or replacing the entry.
     Put,
     /// Remove the path.
@@ -183,8 +204,8 @@ pub struct FileContent {
     pub blob: String,
     /// The whole blob's size in bytes, also when `content` is truncated.
     pub size: u64,
-    /// The entry's kind: `file`, `exec` or `symlink`.
-    pub kind: EntryKindOut,
+    /// The file's kind.
+    pub kind: FileKind,
     /// How `content` encodes the bytes it returns.
     pub encoding: ContentEncoding,
     /// The bytes returned: the whole blob, or at most `max_bytes` from its start when
@@ -204,6 +225,18 @@ pub enum ContentEncoding {
     Base64,
 }
 
+/// What a file is; never a directory.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum FileKind {
+    /// A regular file.
+    File,
+    /// An executable file.
+    Exec,
+    /// A symlink.
+    Symlink,
+}
+
 /// What a tree entry is.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -218,7 +251,7 @@ pub enum EntryKindOut {
     Dir,
 }
 
-/// `ls`: list one directory at a revision, without a checkout.
+/// `ls`: list one directory at a revision, without a checkout, a page at a time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct LsReq {
     /// The revision to read at.
@@ -226,13 +259,24 @@ pub struct LsReq {
     /// The directory's repository path; omitted for the root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// The most entries to return.
+    #[serde(default = "default_ls_limit")]
+    pub limit: usize,
+    /// Resume a listing: the previous page's `cursor`; this page starts after that entry name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
-/// `ls`: a directory's entries, in the tree's order (by name bytes).
+/// `ls`: a page of a directory's entries, in the tree's order (by name bytes).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct TreeListing {
     /// The entries.
     pub entries: Vec<TreeEntryOut>,
+    /// Whether more entries follow this page.
+    pub truncated: bool,
+    /// When `truncated`: the last entry's name; pass it as `cursor` to get the next page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// One entry of a directory.
@@ -251,6 +295,9 @@ pub struct TreeEntryOut {
 pub struct ShowReq {
     /// The changeset to show.
     pub rev: Rev,
+    /// The most entries of `changes` to return.
+    #[serde(default = "default_max_changes")]
+    pub max_changes: usize,
 }
 
 /// `show`: a changeset's header, changes and metadata. Byte strings are decoded as UTF-8, with
@@ -266,20 +313,47 @@ pub struct ChangesetDetail {
     /// The root tree's id.
     pub root: String,
     /// Who wrote the change.
-    pub author: SignatureOut,
-    /// Who recorded it.
-    pub committer: SignatureOut,
-    /// When it was recorded: the committer time, in Unix milliseconds.
-    pub created_at: i64,
+    pub author: Attribution,
+    /// When it was recorded: the committer signature's time, in Unix milliseconds.
+    pub created_at: u64,
     /// The message.
     pub message: String,
-    /// What changed relative to the first parent, ordered by path.
+    /// What changed relative to the first parent, ordered by path: at most `max_changes`
+    /// entries.
     pub changes: Vec<ChangeOut>,
+    /// How many paths the changeset changes in all, also when `changes` is truncated.
+    pub files_changed: u64,
+    /// Whether `changes` stops before the changeset's last change.
+    pub changes_truncated: bool,
     /// SwarmOps metadata, such as `agent` and `run_id`.
     pub metadata: BTreeMap<String, String>,
+    /// The git author and committer signatures, kept for git fidelity.
+    pub signatures: Signatures,
 }
 
-/// An author or committer with the time.
+/// Whom a changeset is attributed to (operations spec §5).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct Attribution {
+    /// The agent that wrote it: the changeset's `agent` metadata.
+    pub agent: String,
+    /// The run it was written in: the changeset's `run_id` metadata, when present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    /// Whom the agent acted for; recorded once the review model exists, so omitted in M1.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub on_behalf_of: Option<String>,
+}
+
+/// A changeset's git signatures: git-fidelity data for import and export.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct Signatures {
+    /// The git author.
+    pub author: SignatureOut,
+    /// The git committer; its time is `created_at`.
+    pub committer: SignatureOut,
+}
+
+/// A git signature: who, and when.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct SignatureOut {
     /// The name; the agent name for a native changeset.
@@ -298,16 +372,16 @@ pub struct ChangeOut {
     /// The repository path.
     pub path: String,
     /// What happened to the path.
-    pub op: ChangeOpInput,
-    /// For a `put`: the entry's kind (never `dir`).
+    pub op: ChangeOp,
+    /// For a `put`: the file's kind.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub kind: Option<EntryKindOut>,
+    pub kind: Option<FileKind>,
     /// For a `put`: the content's blob id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub blob: Option<String>,
 }
 
-/// `log`: history along first parents.
+/// `log`: history along first parents, a page at a time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct LogReq {
     /// Where to start; `main` when omitted.
@@ -316,13 +390,22 @@ pub struct LogReq {
     /// The most entries to return.
     #[serde(default = "default_log_limit")]
     pub limit: usize,
+    /// Resume a log: the previous page's `cursor`, the last changeset id it returned. This page
+    /// continues from that changeset's first parent, and `rev` is not used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
-/// `log`: changesets, newest first, following first parents.
+/// `log`: a page of changesets, newest first, following first parents.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct LogPage {
     /// The changesets.
     pub entries: Vec<ChangesetSummary>,
+    /// Whether older history follows this page.
+    pub truncated: bool,
+    /// When `truncated`: the last entry's id; pass it as `cursor` to continue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// One changeset of a log.
@@ -334,8 +417,8 @@ pub struct ChangesetSummary {
     pub parents: Vec<String>,
     /// The agent that wrote it.
     pub author_agent: String,
-    /// When it was recorded: the committer time, in Unix milliseconds.
-    pub created_at: i64,
+    /// When it was recorded: the committer signature's time, in Unix milliseconds.
+    pub created_at: u64,
     /// The message's first line.
     pub title: String,
 }

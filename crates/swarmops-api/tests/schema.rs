@@ -7,11 +7,13 @@ use std::fmt::Debug;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use swarmops_api::{
-    API_VERSION, CatReq, ChangeInput, ChangeOpInput, ChangesetDetail, CommitReq, CommitResp,
-    ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, EntryKindOut, Envelope,
-    ErrorCode, FileContent, Identity, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, LsReq, Meta,
+    API_VERSION, Attribution, CatReq, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail,
+    ChangesetSummary, CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT,
+    DEFAULT_LS_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, EntryKindOut, Envelope, ErrorCode,
+    FileContent, FileKind, Identity, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, LsReq, Meta,
     ModeInput, OpError, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp, RepoInfo,
-    Rev, ShowReq, StoreOps, TreeListing, VerifyReport, VerifyReq, schema_for_all,
+    Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyReport,
+    VerifyReq, schema_for_all,
 };
 
 /// Requests and the input types inside them.
@@ -33,6 +35,7 @@ const REQUESTS: &[&str] = &[
 
 /// Responses and the output types inside them.
 const RESPONSES: &[&str] = &[
+    "Attribution",
     "ChangeOut",
     "ChangesetDetail",
     "ChangesetSummary",
@@ -47,6 +50,7 @@ const RESPONSES: &[&str] = &[
     "RefSetResp",
     "RepoInfo",
     "SignatureOut",
+    "Signatures",
     "TreeEntryOut",
     "TreeListing",
     "VerifyReport",
@@ -54,11 +58,12 @@ const RESPONSES: &[&str] = &[
 
 /// Enums and newtypes, which have no object fields of their own.
 const SCALARS: &[&str] = &[
-    "ChangeOpInput",
+    "ChangeOp",
     "ContentEncoding",
     "ContentInput",
     "EntryKindOut",
     "ErrorCode",
+    "FileKind",
     "ModeInput",
     "Rev",
 ];
@@ -335,7 +340,7 @@ fn requests_and_responses_ignore_unknown_fields() {
     let signature = json!({"name": "human/purple", "email": "purple@human.swarmops.local", "secs": 0, "offset_secs": 0});
     assert_ignores_unknown_fields::<RepoInfo>(
         "RepoInfo",
-        json!({"repo_id": "r", "name": "acme", "path": "/srv/s", "store_version": 1, "changesets": 0, "refs": 0}),
+        json!({"repo_id": "r", "name": "acme", "store_version": 1, "changesets": 0, "refs": 0}),
     );
     assert_ignores_unknown_fields::<IdentityInfo>("IdentityInfo", json!({"auth": "trust"}));
     assert_ignores_unknown_fields::<CommitResp>(
@@ -348,20 +353,22 @@ fn requests_and_responses_ignore_unknown_fields() {
     );
     assert_ignores_unknown_fields::<TreeListing>(
         "TreeListing",
-        json!({"entries": [{"name": "src", "kind": "dir", "id": "t", "zz_nested": 1}]}),
+        json!({"entries": [{"name": "src", "kind": "dir", "id": "t", "zz_nested": 1}], "truncated": false}),
     );
     assert_ignores_unknown_fields::<ChangesetDetail>(
         "ChangesetDetail",
         json!({
             "id": "c", "seq": 0, "parents": [], "root": "t",
-            "author": signature, "committer": signature, "created_at": 0, "message": "m",
+            "author": {"agent": "human/purple", "zz_nested": 1}, "created_at": 0, "message": "m",
             "changes": [{"path": "a", "op": "put", "kind": "file", "blob": "b"}, {"path": "b", "op": "delete"}],
+            "files_changed": 2, "changes_truncated": false,
             "metadata": {"agent": "human/purple"},
+            "signatures": {"author": signature, "committer": signature},
         }),
     );
     assert_ignores_unknown_fields::<LogPage>(
         "LogPage",
-        json!({"entries": [{"id": "c", "parents": [], "author_agent": "human/purple", "created_at": 0, "title": "t"}]}),
+        json!({"entries": [{"id": "c", "parents": [], "author_agent": "human/purple", "created_at": 0, "title": "t"}], "truncated": false}),
     );
     assert_ignores_unknown_fields::<RefListResp>(
         "RefListResp",
@@ -419,6 +426,7 @@ fn omitted_request_fields_take_their_defaults() {
         LogReq {
             rev: None,
             limit: DEFAULT_LOG_LIMIT,
+            cursor: None,
         }
     );
     assert_eq!(
@@ -455,7 +463,7 @@ fn change_lists_and_enums_use_their_wire_forms() {
     let commit: CommitReq = serde_json::from_value(wire).unwrap();
     let put = |path: &str, content: ContentInput, mode: Option<ModeInput>| ChangeInput {
         path: path.to_owned(),
-        op: ChangeOpInput::Put,
+        op: ChangeOp::Put,
         content: Some(content),
         mode,
     };
@@ -478,7 +486,7 @@ fn change_lists_and_enums_use_their_wire_forms() {
                 ),
                 ChangeInput {
                     path: "old.txt".to_owned(),
-                    op: ChangeOpInput::Delete,
+                    op: ChangeOp::Delete,
                     content: None,
                     mode: None,
                 },
@@ -486,10 +494,17 @@ fn change_lists_and_enums_use_their_wire_forms() {
             allow_empty: false,
         }
     );
-    // Serializing writes no nulls for the options left out.
+    // Serializing writes no nulls for the options left out, and keeps the spec's field order
+    // (`{parent, changes}, message, allow_empty`).
+    let rooted = CommitReq {
+        parent: Some(Rev("main".to_owned())),
+        changes: vec![commit.changes[3].clone()],
+        message: "m".to_owned(),
+        allow_empty: true,
+    };
     assert_eq!(
-        serde_json::to_value(&commit.changes[3]).unwrap(),
-        json!({"path": "old.txt", "op": "delete"})
+        serde_json::to_string(&rooted).unwrap(),
+        r#"{"parent":"main","changes":[{"path":"old.txt","op":"delete"}],"message":"m","allow_empty":true}"#
     );
 
     assert_eq!(
@@ -511,12 +526,16 @@ fn change_lists_and_enums_use_their_wire_forms() {
         json!(["file", "exec", "symlink", "dir"])
     );
     assert_eq!(
+        serde_json::to_value([FileKind::File, FileKind::Exec, FileKind::Symlink]).unwrap(),
+        json!(["file", "exec", "symlink"])
+    );
+    assert_eq!(
         serde_json::to_value([ContentEncoding::Utf8, ContentEncoding::Base64]).unwrap(),
         json!(["utf8", "base64"])
     );
     for bad in [
         json!({"inline": "x", "base64": "eA=="}),
-        json!({"blob": "c9f1"}),
+        json!({"carrier_pigeon": "c9f1"}),
         json!("x"),
     ] {
         assert!(
@@ -524,6 +543,192 @@ fn change_lists_and_enums_use_their_wire_forms() {
             "{bad}"
         );
     }
-    assert!(serde_json::from_value::<ChangeOpInput>(json!("rename")).is_err());
+    assert!(serde_json::from_value::<ChangeOp>(json!("rename")).is_err());
     assert!(serde_json::from_value::<ModeInput>(json!("dir")).is_err());
+    assert!(serde_json::from_value::<FileKind>(json!("dir")).is_err());
+}
+
+fn signature() -> SignatureOut {
+    SignatureOut {
+        name: "agent/worker-17".to_owned(),
+        email: "worker-17@claude-code.swarmops.local".to_owned(),
+        secs: 1_760_000_000,
+        offset_secs: 0,
+    }
+}
+
+#[test]
+fn responses_follow_the_spec_shape_and_field_order() {
+    let info = RepoInfo {
+        repo_id: "r1".to_owned(),
+        name: "acme".to_owned(),
+        main: Some("c9f1".to_owned()),
+        store_version: 1,
+        changesets: 3,
+        refs: 1,
+    };
+    assert_eq!(
+        serde_json::to_string(&info).unwrap(),
+        r#"{"repo_id":"r1","name":"acme","main":"c9f1","store_version":1,"changesets":3,"refs":1}"#
+    );
+
+    let detail = ChangesetDetail {
+        id: "c9f1".to_owned(),
+        seq: 7,
+        parents: vec!["b0b0".to_owned()],
+        root: "7a0b".to_owned(),
+        author: Attribution {
+            agent: "agent/worker-17".to_owned(),
+            run_id: Some("run-3".to_owned()),
+            on_behalf_of: None,
+        },
+        created_at: 1_760_000_000_000,
+        message: "add files".to_owned(),
+        changes: vec![
+            ChangeOut {
+                path: "a.txt".to_owned(),
+                op: ChangeOp::Put,
+                kind: Some(FileKind::File),
+                blob: Some("b1".to_owned()),
+            },
+            ChangeOut {
+                path: "old.txt".to_owned(),
+                op: ChangeOp::Delete,
+                kind: None,
+                blob: None,
+            },
+        ],
+        files_changed: 3,
+        changes_truncated: true,
+        metadata: BTreeMap::from([
+            ("agent".to_owned(), "agent/worker-17".to_owned()),
+            ("run_id".to_owned(), "run-3".to_owned()),
+        ]),
+        signatures: Signatures {
+            author: signature(),
+            committer: signature(),
+        },
+    };
+    let text = serde_json::to_string(&detail).unwrap();
+    let git = r#"{"name":"agent/worker-17","email":"worker-17@claude-code.swarmops.local","secs":1760000000,"offset_secs":0}"#;
+    assert_eq!(
+        text,
+        [
+            r#"{"id":"c9f1","seq":7,"parents":["b0b0"],"root":"7a0b","#,
+            r#""author":{"agent":"agent/worker-17","run_id":"run-3"},"#,
+            r#""created_at":1760000000000,"message":"add files","#,
+            r#""changes":[{"path":"a.txt","op":"put","kind":"file","blob":"b1"},{"path":"old.txt","op":"delete"}],"#,
+            r#""files_changed":3,"changes_truncated":true,"#,
+            r#""metadata":{"agent":"agent/worker-17","run_id":"run-3"},"#,
+            &format!(r#""signatures":{{"author":{git},"committer":{git}}}}}"#),
+        ]
+        .concat()
+    );
+    assert_eq!(
+        serde_json::from_str::<ChangesetDetail>(&text).unwrap(),
+        detail
+    );
+    // `created_at` is Unix milliseconds (operations spec §5), never negative.
+    let all = schema_for_all();
+    for name in ["ChangesetDetail", "ChangesetSummary"] {
+        assert_eq!(
+            all[name]["properties"]["created_at"]["format"], "uint64",
+            "{name}"
+        );
+    }
+
+    let file = FileContent {
+        blob: "b1".to_owned(),
+        size: 3,
+        kind: FileKind::Exec,
+        encoding: ContentEncoding::Utf8,
+        content: "hi\n".to_owned(),
+        truncated: false,
+    };
+    assert_eq!(
+        serde_json::to_string(&file).unwrap(),
+        r#"{"blob":"b1","size":3,"kind":"exec","encoding":"utf8","content":"hi\n","truncated":false}"#
+    );
+}
+
+#[test]
+fn listings_page_with_truncated_and_cursor() {
+    assert_eq!(DEFAULT_LS_LIMIT, 1000);
+    assert_eq!(DEFAULT_MAX_CHANGES, 1000);
+    assert_eq!(
+        serde_json::from_value::<LsReq>(json!({"rev": "main"})).unwrap(),
+        LsReq {
+            rev: Rev("main".to_owned()),
+            path: None,
+            limit: DEFAULT_LS_LIMIT,
+            cursor: None,
+        }
+    );
+    assert_eq!(
+        serde_json::from_value::<LsReq>(
+            json!({"rev": "main", "path": "src", "limit": 2, "cursor": "b.rs"})
+        )
+        .unwrap(),
+        LsReq {
+            rev: Rev("main".to_owned()),
+            path: Some("src".to_owned()),
+            limit: 2,
+            cursor: Some("b.rs".to_owned()),
+        }
+    );
+    assert_eq!(
+        serde_json::from_value::<ShowReq>(json!({"rev": "main"})).unwrap(),
+        ShowReq {
+            rev: Rev("main".to_owned()),
+            max_changes: DEFAULT_MAX_CHANGES,
+        }
+    );
+    assert_eq!(
+        serde_json::from_value::<LogReq>(json!({"cursor": "c9f1"})).unwrap(),
+        LogReq {
+            rev: None,
+            limit: DEFAULT_LOG_LIMIT,
+            cursor: Some("c9f1".to_owned()),
+        }
+    );
+
+    let entry = |name: &str| TreeEntryOut {
+        name: name.to_owned(),
+        kind: EntryKindOut::File,
+        id: "b1".to_owned(),
+    };
+    let page = TreeListing {
+        entries: vec![entry("a.rs"), entry("b.rs")],
+        truncated: true,
+        cursor: Some("b.rs".to_owned()),
+    };
+    assert_eq!(
+        serde_json::to_string(&page).unwrap(),
+        r#"{"entries":[{"name":"a.rs","kind":"file","id":"b1"},{"name":"b.rs","kind":"file","id":"b1"}],"truncated":true,"cursor":"b.rs"}"#
+    );
+    let last = TreeListing {
+        entries: vec![entry("c.rs")],
+        truncated: false,
+        cursor: None,
+    };
+    assert_eq!(
+        serde_json::to_string(&last).unwrap(),
+        r#"{"entries":[{"name":"c.rs","kind":"file","id":"b1"}],"truncated":false}"#
+    );
+
+    let log = LogPage {
+        entries: vec![ChangesetSummary {
+            id: "c9f1".to_owned(),
+            parents: vec!["b0b0".to_owned()],
+            author_agent: "human/purple".to_owned(),
+            created_at: 1_760_000_000_000,
+            title: "add files".to_owned(),
+        }],
+        truncated: true,
+        cursor: Some("c9f1".to_owned()),
+    };
+    assert_eq!(
+        serde_json::to_string(&log).unwrap(),
+        r#"{"entries":[{"id":"c9f1","parents":["b0b0"],"author_agent":"human/purple","created_at":1760000000000,"title":"add files"}],"truncated":true,"cursor":"c9f1"}"#
+    );
 }
