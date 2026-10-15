@@ -1204,6 +1204,219 @@ fn an_empty_write_reports_its_housekeeping_errors_plainly() {
     assert_eq!(ckpt(&root), log_len(&root));
 }
 
+/// Changeset `n` of a chain: a root for 0, else on `n - 1`.
+fn chained(n: u64) -> ChangesetMeta {
+    match n.checked_sub(1) {
+        Some(parent) => cs(n, &[parent]),
+        None => cs(n, &[]),
+    }
+}
+
+/// [`chained`]`(n)` as the store holds it: at seq `n`, generation `n + 1`.
+fn chained_stored(n: u64) -> ChangesetMeta {
+    ChangesetMeta {
+        seq: n,
+        generation: n + 1,
+        ..chained(n)
+    }
+}
+
+/// The lengths of the index columns and `parents.log` at `root`.
+fn chained_lens(root: &Utf8Path) -> [(&'static str, u64); 5] {
+    let meta = Layout::new(root).meta_dir();
+    [
+        "idx/ids.col",
+        "idx/dh.col",
+        "idx/gen.col",
+        "idx/par.col",
+        "parents.log",
+    ]
+    .map(|file| (file, file_len(meta.join(file))))
+}
+
+/// What [`chained_lens`] gives for `records` records of [`chained`]: 32 bytes of
+/// `parents.log` for each but the root.
+fn chained_want(records: u64) -> [(&'static str, u64); 5] {
+    [
+        ("idx/ids.col", records * 32),
+        ("idx/dh.col", records * 32),
+        ("idx/gen.col", records * 8),
+        ("idx/par.col", records * 8),
+        ("parents.log", records.saturating_sub(1) * 32),
+    ]
+}
+
+/// A failed index sync may have lost pages whose writeback failed, and a later sync can
+/// succeed without saying so (Linux reports a writeback error once): so the writer cuts the
+/// index back to the records the checkpoint has passed, and the next write's replay appends
+/// the others again from the journal, to be synced afresh.
+#[test]
+fn a_failed_index_sync_cuts_the_index_back_to_the_checkpoint() {
+    let (_dir, root) = new_root();
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    // Frames 0..=31: the 32nd checkpoints the first 32 records.
+    for n in 0..32 {
+        insert(&store, &[chained(n)]);
+    }
+    let checkpoint = ckpt(&root);
+    assert_eq!(checkpoint, log_len(&root), "the 32nd frame checkpointed");
+    // Frames 32..=62 past the checkpoint, then the 32nd past it, whose sync fails at ids.col,
+    // the last of the five files it syncs.
+    for n in 32..63 {
+        insert(&store, &[chained(n)]);
+    }
+    fail.set("sync_data ids.col");
+    let mut write = store.write().unwrap();
+    write.insert_changeset(chained(63)).unwrap();
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 63,
+            source,
+        }) => assert!(matches!(*source, StoreError::Io(_)), "{source:?}"),
+        other => panic!("expected PostCommit at frame 63, got {other:?}"),
+    }
+    fail.clear();
+
+    // The index holds the 32 records the checkpoint passed, and nothing after them.
+    assert_eq!(chained_lens(&root), chained_want(32));
+    assert_eq!(index(&root).len(), 32);
+    assert_eq!(ckpt(&root), checkpoint, "the checkpoint did not move");
+    // Readers find every changeset all the same: those past the checkpoint in the journal.
+    let read = store.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), 64);
+    for n in [0, 31, 32, 63] {
+        assert_eq!(
+            read.changeset(id(n)).unwrap(),
+            Some(chained_stored(n)),
+            "{n}"
+        );
+    }
+    drop(read);
+
+    // The next write appends the 32 records again, syncs them and checkpoints.
+    assert!(store.write().unwrap().commit().unwrap().checkpointed);
+    assert_eq!(chained_lens(&root), chained_want(64));
+    let index = index(&root);
+    for n in 0..64 {
+        assert_eq!(index.get(n).unwrap(), chained_stored(n), "{n}");
+    }
+    assert_eq!(ckpt(&root), log_len(&root));
+}
+
+/// The cut never goes below what the sorted views cover: they would cover records the
+/// columns lack, and no handle would open the index. A compaction syncs the records it
+/// covers before it writes the views, so those are durable even past the checkpoint (here
+/// the compaction's own checkpoint failed).
+#[test]
+fn a_failed_index_sync_never_cuts_what_the_sorted_views_cover() {
+    let (_dir, root) = new_root();
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    fail.set("atomic_replace journal.ckpt");
+    let mut write = store.write().unwrap();
+    for n in 0..1100 {
+        write.insert_changeset(cs(n, &[])).unwrap();
+    }
+    match write.commit() {
+        Err(StoreError::PostCommit { frame_seq: 0, .. }) => {}
+        other => panic!("expected PostCommit at frame 0, got {other:?}"),
+    }
+    fail.clear();
+    assert_eq!((ckpt(&root), index(&root).sorted_count()), (0, 1100));
+
+    // A changeset past the views, then a flush whose sync fails.
+    insert(&store, &[cs(1100, &[])]);
+    fail.set("sync_data ids.col");
+    match store.flush() {
+        Err(StoreError::Io(_)) => {}
+        other => panic!("flush: expected a plain Io error, got {other:?}"),
+    }
+    fail.clear();
+    let cut = index(&root);
+    assert_eq!((cut.len(), cut.sorted_count()), (1100, 1100));
+
+    store.flush().unwrap();
+    let index = index(&root);
+    assert_eq!(index.len(), 1101);
+    assert_eq!(index.find(id(1100)).unwrap(), Some(1100));
+    assert_eq!(ckpt(&root), log_len(&root));
+}
+
+/// A write that takes the tail past the compaction threshold syncs the index before it
+/// compacts: a failed sync cuts the index back to the checkpoint, as at any sync point, and
+/// nothing is compacted; the next write appends the records again and compacts them.
+#[test]
+fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
+    let (_dir, root) = new_root();
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    for n in 0..32 {
+        insert(&store, &[cs(n, &[])]); // frames 0..=31, checkpointed
+    }
+    fail.set("sync_data ids.col");
+    let mut write = store.write().unwrap();
+    for n in 32..1100 {
+        write.insert_changeset(cs(n, &[])).unwrap();
+    }
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 32,
+            source,
+        }) => assert!(matches!(*source, StoreError::Io(_)), "{source:?}"),
+        other => panic!("expected PostCommit at frame 32, got {other:?}"),
+    }
+    fail.clear();
+    let cut = index(&root);
+    assert_eq!((cut.len(), cut.sorted_count()), (32, 0));
+    assert_eq!(compacted_frames(&store), [], "nothing was compacted");
+
+    assert!(store.write().unwrap().commit().unwrap().checkpointed);
+    let index = index(&root);
+    let counts = (index.len(), index.sorted_count(), index.tail_len());
+    assert_eq!(counts, (1100, 1100, 0));
+    assert_eq!(compacted_frames(&store), [33]);
+    assert_eq!(ckpt(&root), log_len(&root));
+}
+
+/// When the cut fails too, the error says so beside the sync's: the next writer finds the
+/// records whole and keeps them, and syncs them again before it checkpoints.
+#[test]
+fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
+    let (_dir, root) = new_root();
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    for n in 0..31 {
+        insert(&store, &[chained(n)]);
+    }
+    fail.set("sync_data ids.col");
+    fail.also("truncate ids.col");
+    let mut write = store.write().unwrap();
+    write.insert_changeset(chained(31)).unwrap();
+    let message = match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 31,
+            source,
+        }) => source.to_string(),
+        other => panic!("expected PostCommit at frame 31, got {other:?}"),
+    };
+    for injected in ["injected: sync_data ids.col", "injected: truncate ids.col"] {
+        assert!(message.contains(injected), "{message}");
+    }
+    fail.clear();
+    assert_eq!(chained_lens(&root), chained_want(32), "nothing was cut");
+    assert!(store.write().unwrap().commit().unwrap().checkpointed);
+    assert_eq!(ckpt(&root), log_len(&root));
+    let index = index(&root);
+    for n in 0..32 {
+        assert_eq!(index.get(n).unwrap(), chained_stored(n), "{n}");
+    }
+}
+
 #[track_caller]
 fn assert_invalid_input<T: std::fmt::Debug>(got: Result<T, StoreError>) {
     match got {
@@ -1622,25 +1835,32 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
 /// runs.
 type Hook = (&'static str, Box<dyn FnOnce() + Send>);
 
-/// Which call a [`RecordingFs`] fails, while set: the call as it records it,
+/// Which calls a [`RecordingFs`] fails, while set: each call as it records it,
 /// `"<method> <file name>"`. Clones share the setting.
 #[derive(Clone, Default)]
-struct Failing(Arc<Mutex<Option<&'static str>>>);
+struct Failing(Arc<Mutex<Vec<&'static str>>>);
 
 impl Failing {
+    /// Fails `call`, and no other.
     fn set(&self, call: &'static str) {
-        *self.0.lock().unwrap() = Some(call);
+        *self.0.lock().unwrap() = vec![call];
+    }
+
+    /// Fails `call` too.
+    fn also(&self, call: &'static str) {
+        self.0.lock().unwrap().push(call);
     }
 
     fn clear(&self) {
-        *self.0.lock().unwrap() = None;
+        self.0.lock().unwrap().clear();
     }
 
-    /// An injected error if `call` is the failing call; the call then does nothing.
+    /// An injected error if `call` is a failing call; the call then does nothing.
     fn check(&self, call: &str) -> io::Result<()> {
-        match *self.0.lock().unwrap() {
-            Some(failing) if failing == call => Err(io::Error::other(format!("injected: {call}"))),
-            _ => Ok(()),
+        if self.0.lock().unwrap().contains(&call) {
+            Err(io::Error::other(format!("injected: {call}")))
+        } else {
+            Ok(())
         }
     }
 }

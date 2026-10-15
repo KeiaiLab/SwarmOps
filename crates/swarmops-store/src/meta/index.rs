@@ -12,12 +12,14 @@
 //!
 //! [`Index::create`] lays the files out, empty, when the store is created, and nothing else
 //! creates or removes one, so a missing file is [`StoreError::IndexCorrupt`]. A record's
-//! number, its rec, is its position in the columns and its `seq`. The files only grow, by
+//! number, its rec, is its position in the columns and its `seq`. The files grow by
 //! [`Index::append`], which writes `parents.log`, `par.col`, `gen.col`, `dh.col` and
 //! `ids.col`, in that order, with plain appends; [`Index::sync`] then makes them durable,
-//! once for many appends. Lookups binary-search a sorted view's key column, then scan the
-//! records past the view, the unsorted tail, read from `ids.col` (or `dh.col`) with one
-//! `read_at`; [`Index::compact`] merges the tail into the views.
+//! once for many appends. They shrink only at the end, when a writer cuts what a crash left
+//! of a record ([`Index::repair_tail`]) or, after a failed sync, the records past the
+//! checkpoint ([`Index::truncate_to`]). Lookups binary-search a sorted view's key column,
+//! then scan the records past the view, the unsorted tail, read from `ids.col` (or `dh.col`)
+//! with one `read_at`; [`Index::compact`] merges the tail into the views.
 //!
 //! # Crashes and concurrency
 //!
@@ -28,7 +30,9 @@
 //! [`Index::repair_tail`] cuts the rest off. A crash in the middle of a compaction's renames
 //! leaves the sorted views out of step; each view still covers the records it covers, or is
 //! read as empty, so lookups stay right, and [`Index::repair_tail`] runs the compaction
-//! again.
+//! again. The one cut of whole records, after a failed sync, can take records from under a
+//! reader's handle: a lookup that reads one is then an I/O error, never wrong data, until
+//! the reader opens the index again.
 
 use std::fs::File;
 use std::io;
@@ -372,6 +376,49 @@ impl Index {
             self.rebuild_views()?;
         }
         Ok(dropped)
+    }
+
+    /// Cuts the index back to its first `records` records, or to as many as the sorted views
+    /// cover if that is more, and returns how many it keeps; a handle that counts no more
+    /// than that cuts nothing. What a writer whose [`Index::sync`] failed calls, holding
+    /// [`crate::MetaLock`] (see [`crate::meta`]): pages whose writeback failed may be lost
+    /// even though a later sync succeeds, so the records past the checkpoint are cut, and
+    /// replay appends them again from the journal. The views' records were synced before the
+    /// views were written, and a view must not cover records the columns lack.
+    ///
+    /// The files are cut in the reverse of the write order, `ids.col` first, each cut synced
+    /// ([`FsOps::truncate`]), so that a crash in the middle leaves a torn tail for
+    /// [`Index::repair_tail`] to cut the rest of; this handle counts only the records kept
+    /// from before the first cut. Another handle that counted records cut (a reader's) gets
+    /// an I/O error from a lookup that reads one, until the index is opened again.
+    pub fn truncate_to(&mut self, records: u64) -> Result<u64, StoreError> {
+        let keep = records.max(self.views.covered());
+        if keep >= self.len {
+            return Ok(self.len);
+        }
+        // The parents of the records kept end where the last one's par.col entry says.
+        let parents_len = match keep.checked_sub(1) {
+            Some(last) => ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(last)?)).end(),
+            None => 0,
+        };
+        (self.len, self.parents_len) = (keep, parents_len);
+        let cuts = [
+            (&self.ids.path, self.ids.byte_len()?, keep * 32),
+            (&self.dhs.path, self.dhs.byte_len()?, keep * 32),
+            (&self.gens.path, self.gens.byte_len()?, keep * 8),
+            (&self.pars.path, self.pars.byte_len()?, keep * 8),
+            (
+                &self.parents_path,
+                self.parents.metadata()?.len(),
+                parents_len,
+            ),
+        ];
+        for (path, len, cut) in cuts {
+            if len > cut {
+                self.fs.truncate(path.as_std_path(), cut)?;
+            }
+        }
+        Ok(keep)
     }
 
     /// Reopens the sorted views (another handle may have compacted since this one opened

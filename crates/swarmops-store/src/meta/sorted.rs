@@ -255,11 +255,16 @@ impl Views {
         self.ids.len().min(self.dh.len())
     }
 
+    /// The most records any of the four files covers, out of step or not: `ids.key`'s count,
+    /// the largest, since the counts never grow along the rename order.
+    pub(crate) fn covered(&self) -> u64 {
+        self.counts[0]
+    }
+
     /// Refuses views that cover more records than `records`, the number the index columns
     /// hold whole.
     pub(crate) fn check_within(&self, records: u64) -> Result<(), StoreError> {
-        // counts[0] is the largest.
-        if self.counts[0] > records {
+        if self.covered() > records {
             return Err(StoreError::IndexCorrupt {
                 what: "a sorted view covers records the index columns do not hold",
             });
