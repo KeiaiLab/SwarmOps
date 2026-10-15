@@ -17,12 +17,12 @@ pub use envelope::{API_VERSION, Envelope, Meta};
 pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
-    Attribution, CatReq, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
-    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_LS_LIMIT,
+    Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq,
+    CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_LS_LIMIT,
     DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, EntryKindOut, FileContent, FileKind, IdentityInfo,
-    InfoReq, InitReq, LogPage, LogReq, LsReq, ModeInput, RefDeleteReq, RefListReq, RefListResp,
-    RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps,
-    TreeEntryOut, TreeListing, VerifyReport, VerifyReq,
+    InfoReq, InitReq, LogPage, LogReq, ModeInput, ReadFileReq, ReadTreeReq, RefDeleteReq,
+    RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut,
+    Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyReport, VerifyReq,
 };
 pub use rev::Rev;
 
@@ -61,13 +61,13 @@ pub fn schema_for_all() -> serde_json::Value {
         ContentInput,
         ModeInput,
         CommitResp,
-        // cat, ls.
-        CatReq,
+        // read_file, read_tree.
+        ReadFileReq,
         FileContent,
         FileKind,
         ContentEncoding,
         EntryKindOut,
-        LsReq,
+        ReadTreeReq,
         TreeListing,
         TreeEntryOut,
         // show, log.

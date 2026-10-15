@@ -6,15 +6,15 @@
 //! Absent options in these types are omitted, never written as null (unlike `OpError.hint`,
 //! which is always written). Ids are lowercase hex. A response that could grow without bound is
 //! capped by its request (`max_bytes`, `limit`, `max_changes`) and says when it was cut
-//! (`truncated`, `changes_truncated`); `ls` and `log` also return a `cursor` that resumes after
-//! the page.
+//! (`truncated`, `changes_truncated`); `read_tree` and `log` also return a `cursor` that resumes
+//! after the page.
 //!
 //! No store-facing type carries a filesystem path. The two exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, and [`InitReq::path`],
 //! because `init` runs on the client and is not a [`StoreOps`] method.
 //!
 //! Not in M1 yet:
-//! - M2: `ContentInput::Blob`, `CatReq.range`, `LsReq.depth`, the `size` of each `TreeEntryOut`,
+//! - M2: `ContentInput::Blob`, `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each `TreeEntryOut`,
 //!   and `LogReq.paths` and `LogReq.first_parent`;
 //! - M4 (with land): `idempotency_key` and `replayed` on `commit`;
 //! - M4/M7: `lander`, `land_key`, `cr` and `annotations` on `ChangesetDetail` (`show`);
@@ -29,13 +29,13 @@ use crate::error::OpError;
 use crate::identity::Identity;
 use crate::rev::Rev;
 
-/// The default [`CatReq::max_bytes`]: 1 MiB.
+/// The default [`ReadFileReq::max_bytes`]: 1 MiB.
 pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 
 /// The default [`LogReq::limit`].
 pub const DEFAULT_LOG_LIMIT: usize = 50;
 
-/// The default [`LsReq::limit`].
+/// The default [`ReadTreeReq::limit`].
 pub const DEFAULT_LS_LIMIT: usize = 1000;
 
 /// The default [`ShowReq::max_changes`].
@@ -190,9 +190,9 @@ pub struct CommitResp {
     pub warnings: Vec<String>,
 }
 
-/// `cat`: read one file at a revision, without a checkout.
+/// `read_file` (CLI `cat`): read one file at a revision, without a checkout.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-pub struct CatReq {
+pub struct ReadFileReq {
     /// The revision to read at.
     pub rev: Rev,
     /// The file's repository path.
@@ -202,7 +202,7 @@ pub struct CatReq {
     pub max_bytes: u64,
 }
 
-/// `cat`: a file's content.
+/// `read_file` (CLI `cat`): a file's content.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct FileContent {
     /// The blob's id.
@@ -256,9 +256,10 @@ pub enum EntryKindOut {
     Dir,
 }
 
-/// `ls`: list one directory at a revision, without a checkout, a page at a time.
+/// `read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a
+/// time.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-pub struct LsReq {
+pub struct ReadTreeReq {
     /// The revision to read at.
     pub rev: Rev,
     /// The directory's repository path; omitted for the root.
@@ -273,7 +274,7 @@ pub struct LsReq {
     pub cursor: Option<String>,
 }
 
-/// `ls`: a page of a directory's entries, in the tree's order (by name bytes).
+/// `read_tree` (CLI `ls`): a page of a directory's entries, in the tree's order (by name bytes).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct TreeListing {
     /// The entries.
@@ -529,10 +530,10 @@ pub trait StoreOps {
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
 
     /// Reads one file at a revision (CLI `cat`).
-    fn read_file(&self, req: CatReq) -> Result<FileContent, OpError>;
+    fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError>;
 
     /// Lists one directory at a revision (CLI `ls`).
-    fn read_tree(&self, req: LsReq) -> Result<TreeListing, OpError>;
+    fn read_tree(&self, req: ReadTreeReq) -> Result<TreeListing, OpError>;
 
     /// One changeset in full (CLI `show`).
     fn show(&self, req: ShowReq) -> Result<ChangesetDetail, OpError>;

@@ -7,25 +7,25 @@ use std::fmt::Debug;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use swarmops_api::{
-    API_VERSION, Attribution, CatReq, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail,
-    ChangesetSummary, CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT,
-    DEFAULT_LS_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, EntryKindOut, Envelope, ErrorCode,
-    FileContent, FileKind, Identity, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, LsReq, Meta,
-    ModeInput, OpError, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp, RepoInfo,
-    Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyReport,
-    VerifyReq, schema_for_all,
+    API_VERSION, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
+    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_LS_LIMIT,
+    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, EntryKindOut, Envelope, ErrorCode, FileContent,
+    FileKind, Identity, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, Meta, ModeInput, OpError,
+    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp,
+    RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
+    VerifyReport, VerifyReq, schema_for_all,
 };
 
 /// Requests and the input types inside them.
 const REQUESTS: &[&str] = &[
-    "CatReq",
     "ChangeInput",
     "CommitReq",
     "Identity",
     "InfoReq",
     "InitReq",
     "LogReq",
-    "LsReq",
+    "ReadFileReq",
+    "ReadTreeReq",
     "RefDeleteReq",
     "RefListReq",
     "RefSetReq",
@@ -145,8 +145,8 @@ fn schema_descriptions_name_no_rust_items() {
 fn store_ops_signatures<S: StoreOps + ?Sized>() {
     let _: fn(&S, InfoReq) -> Result<RepoInfo, OpError> = S::repo_info;
     let _: fn(&S, &Identity, CommitReq) -> Result<CommitResp, OpError> = S::commit;
-    let _: fn(&S, CatReq) -> Result<FileContent, OpError> = S::read_file;
-    let _: fn(&S, LsReq) -> Result<TreeListing, OpError> = S::read_tree;
+    let _: fn(&S, ReadFileReq) -> Result<FileContent, OpError> = S::read_file;
+    let _: fn(&S, ReadTreeReq) -> Result<TreeListing, OpError> = S::read_tree;
     let _: fn(&S, ShowReq) -> Result<ChangesetDetail, OpError> = S::show;
     let _: fn(&S, LogReq) -> Result<LogPage, OpError> = S::log;
     let _: fn(&S, RefListReq) -> Result<RefListResp, OpError> = S::ref_list;
@@ -395,8 +395,11 @@ fn requests_and_responses_ignore_unknown_fields() {
         "ChangeInput",
         json!({"path": "a", "op": "delete"}),
     );
-    assert_ignores_unknown_fields::<CatReq>("CatReq", json!({"rev": "main", "path": "a"}));
-    assert_ignores_unknown_fields::<LsReq>("LsReq", json!({"rev": "main"}));
+    assert_ignores_unknown_fields::<ReadFileReq>(
+        "ReadFileReq",
+        json!({"rev": "main", "path": "a"}),
+    );
+    assert_ignores_unknown_fields::<ReadTreeReq>("ReadTreeReq", json!({"rev": "main"}));
     assert_ignores_unknown_fields::<ShowReq>("ShowReq", json!({"rev": "main"}));
     assert_ignores_unknown_fields::<LogReq>("LogReq", json!({}));
     assert_ignores_unknown_fields::<RefSetReq>("RefSetReq", json!({"name": "main", "new": "c9f1"}));
@@ -486,8 +489,9 @@ fn omitted_request_fields_take_their_defaults() {
         VerifyReq { deep: false }
     );
     assert_eq!(
-        serde_json::from_value::<CatReq>(json!({"rev": "main", "path": "src/lib.rs"})).unwrap(),
-        CatReq {
+        serde_json::from_value::<ReadFileReq>(json!({"rev": "main", "path": "src/lib.rs"}))
+            .unwrap(),
+        ReadFileReq {
             rev: Rev("main".to_owned()),
             path: "src/lib.rs".to_owned(),
             max_bytes: DEFAULT_MAX_BYTES,
@@ -730,7 +734,7 @@ fn listings_page_with_truncated_and_cursor() {
     // An empty page is a mistake: limits start at 1, and 0 is `E_INVALID_ARG`.
     let all = schema_for_all();
     for (name, field) in [
-        ("LsReq", "limit"),
+        ("ReadTreeReq", "limit"),
         ("LogReq", "limit"),
         ("ShowReq", "max_changes"),
     ] {
@@ -740,8 +744,8 @@ fn listings_page_with_truncated_and_cursor() {
         );
     }
     assert_eq!(
-        serde_json::from_value::<LsReq>(json!({"rev": "main"})).unwrap(),
-        LsReq {
+        serde_json::from_value::<ReadTreeReq>(json!({"rev": "main"})).unwrap(),
+        ReadTreeReq {
             rev: Rev("main".to_owned()),
             path: None,
             limit: DEFAULT_LS_LIMIT,
@@ -749,11 +753,11 @@ fn listings_page_with_truncated_and_cursor() {
         }
     );
     assert_eq!(
-        serde_json::from_value::<LsReq>(
+        serde_json::from_value::<ReadTreeReq>(
             json!({"rev": "main", "path": "src", "limit": 2, "cursor": "b.rs"})
         )
         .unwrap(),
-        LsReq {
+        ReadTreeReq {
             rev: Rev("main".to_owned()),
             path: Some("src".to_owned()),
             limit: 2,
