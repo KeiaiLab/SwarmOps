@@ -19,24 +19,26 @@
 
 mod support;
 
+use std::any::Any;
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
 use std::ops::RangeInclusive;
 use std::os::unix::fs::MetadataExt;
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
-use support::{Racers, Run, Store, agent, run};
+use support::{Racers, Run, Store, agent, run, run_within};
 use swarmops_core::{EntryKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_ops::NOW_ENV;
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
-use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, FsOps, Layout, LinkOutcome, RealFs};
+use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, FsOps, Layout, LinkOutcome, MetaLock, RealFs};
 
 /// How many children the commit tests race.
 const COMMITTERS: usize = 8;
@@ -286,6 +288,82 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The harness's own deadlines.
+// ---------------------------------------------------------------------------------------------
+
+/// The message of a panic that `catch_unwind` caught.
+fn panic_message(panic: Box<dyn Any + Send>) -> String {
+    match panic.downcast::<String>() {
+        Ok(message) => *message,
+        Err(panic) => panic.downcast_ref::<&str>().map_or_else(
+            || "a panic without a message".to_owned(),
+            |m| (*m).to_owned(),
+        ),
+    }
+}
+
+/// Holds `store`'s writer lock, as a writer in another process would: a commit then waits, for
+/// as long as the lock's timeout (10 s), for the lock.
+fn hold_the_lock(store: &Store) -> MetaLock {
+    let layout = Layout::new(Utf8PathBuf::from(store.path()));
+    MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap()
+}
+
+/// A run still going at its deadline is killed (SIGKILL), reaped, and fails the test with what
+/// it printed; at its deadline, not at the end of its wait.
+#[test]
+fn a_run_past_its_deadline_is_killed_and_reported() {
+    let store = Store::init();
+    let lock = hold_the_lock(&store);
+    let changes = store.changes("waits", "waits.txt", "waits for the lock\n");
+    let args = store.args(&agent(0), &["commit", "-m", "waits", "--changes", &changes]);
+    let started = Instant::now();
+    let caught = panic::catch_unwind(|| run_within(&args, &[], Duration::from_millis(300)));
+    let message = panic_message(caught.expect_err("a run past its deadline fails the test"));
+    assert!(message.contains("past its deadline"), "{message}");
+    assert!(message.contains("signal: 9"), "killed: {message}");
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(5),
+        "killed at its deadline: {waited:?}"
+    );
+    drop(lock);
+    store.assert_clean("after a commit killed while it waited for the lock");
+}
+
+/// Racers still going at their deadline are killed and reaped, every one of them, though the
+/// test fails at the first: none is left running, nor unreaped.
+#[test]
+fn racers_past_their_deadline_are_killed_and_reaped() {
+    let store = Store::init();
+    let lock = hold_the_lock(&store);
+    let mut racers = Racers::new(store.tmp());
+    for n in 0..3 {
+        let changes = store.changes(&format!("waits-{n}"), &format!("{n}.txt"), "waits\n");
+        let args = store.args(&agent(n), &["commit", "-m", "waits", "--changes", &changes]);
+        racers.spawn(&args, &[]);
+    }
+    let pids = racers.pids();
+    let started = Instant::now();
+    let caught = panic::catch_unwind(AssertUnwindSafe(|| {
+        racers.race_within(Duration::from_millis(300))
+    }));
+    let message = panic_message(caught.expect_err("racers past their deadline fail the test"));
+    assert!(message.contains("past its deadline"), "{message}");
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(5),
+        "killed at their deadline: {waited:?}"
+    );
+    for pid in pids {
+        let proc = PathBuf::from(format!("/proc/{pid}"));
+        assert!(!proc.exists(), "child {pid} is gone, reaped");
+    }
+    drop(lock);
+    store.assert_clean("after commits killed while they waited for the lock");
+}
+
+// ---------------------------------------------------------------------------------------------
 // Crashes.
 // ---------------------------------------------------------------------------------------------
 
@@ -448,7 +526,7 @@ fn wait_for_the_next_second() {
     };
     let start = second();
     while second() == start {
-        thread::sleep(std::time::Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(10));
     }
 }
 

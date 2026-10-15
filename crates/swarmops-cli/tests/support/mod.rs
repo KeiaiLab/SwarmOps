@@ -5,16 +5,20 @@
 //! Every child runs with none of the developer's `SWARMOPS_*` variables, only those the test
 //! sets, and its envelope is checked against the contract before a test reads it: stdout holds
 //! one JSON line, `ok` holds exactly when the exit code is 0, and an error's `exit` is the exit
-//! code.
+//! code. Every child has a deadline ([`RUN_TIMEOUT`] unless a test gives another): one still
+//! running then is killed and fails the test with what it printed. A child is reaped however
+//! the test ends: its handle kills and waits for it when it is dropped, a panic's unwinding
+//! included.
 
 #![allow(dead_code)] // Each test binary uses the part it needs.
 
 use std::fs;
+use std::io::{Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
@@ -28,6 +32,13 @@ const SIGABRT: i32 = 6;
 
 /// How long [`Racers::race`] waits for every child to reach the barrier.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a child may run, unless a test says otherwise ([`run_within`],
+/// [`Racers::race_within`]).
+pub const RUN_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How often a wait looks whether a child has ended.
+const POLL: Duration = Duration::from_millis(1);
 
 /// The agent of test child `n`: one identity per child.
 pub fn agent(n: usize) -> String {
@@ -58,10 +69,87 @@ fn with_env(command: &mut Command, env: &[(&str, &str)]) {
         .stderr(Stdio::piped());
 }
 
-/// Runs the binary with `args` and `env` to its end.
+/// Runs the binary with `args` and `env` to its end, within [`RUN_TIMEOUT`].
 pub fn run<S: AsRef<str>>(args: &[S], env: &[(&str, &str)]) -> Run {
-    let output = swarmops(args, env).output().expect("run swarmops");
-    Run::new(args, output.status, &output.stdout, &output.stderr)
+    run_within(args, env, RUN_TIMEOUT)
+}
+
+/// Runs the binary with `args` and `env` to its end; one still running after `timeout` is
+/// killed and fails the test.
+pub fn run_within<S: AsRef<str>>(args: &[S], env: &[(&str, &str)], timeout: Duration) -> Run {
+    let child = swarmops(args, env).spawn().expect("run swarmops");
+    Running::start(args, child).finish(Instant::now() + timeout)
+}
+
+/// The threads that read a child's stdout and stderr to their ends.
+type Readers = (JoinHandle<Vec<u8>>, JoinHandle<Vec<u8>>);
+
+/// A child whose stdout and stderr threads of their own read. Dropped, it is killed if it still
+/// runs, and reaped either way.
+struct Running {
+    args: Vec<String>,
+    child: Child,
+    output: Option<Readers>,
+}
+
+impl Running {
+    fn start<S: AsRef<str>>(args: &[S], mut child: Child) -> Running {
+        let stdout = drain(child.stdout.take());
+        let stderr = drain(child.stderr.take());
+        Running {
+            args: args.iter().map(|arg| arg.as_ref().to_owned()).collect(),
+            child,
+            output: Some((stdout, stderr)),
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Waits for the child to end, until `deadline`: one still running then is killed, reaped,
+    /// and fails the test with what it printed.
+    fn finish(&mut self, deadline: Instant) -> Run {
+        let mut killed = false;
+        let status = loop {
+            if let Some(status) = self.child.try_wait().expect("look whether a child ended") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                killed = true;
+                break self
+                    .child
+                    .wait()
+                    .expect("reap a child killed at its deadline");
+            }
+            thread::sleep(POLL);
+        };
+        let (stdout, stderr) = self.output.take().expect("finished once");
+        let stdout = stdout.join().expect("read a child's stdout");
+        let stderr = stderr.join().expect("read a child's stderr");
+        let run = Run::new(&self.args, status, &stdout, &stderr);
+        assert!(!killed, "past its deadline, so killed: {run}");
+        run
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        // An error is a child reaped already.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A thread that reads `pipe` to its end.
+fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
+    let mut pipe = pipe.expect("a piped output");
+    thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = pipe.read_to_end(&mut bytes);
+        bytes
+    })
 }
 
 /// One finished run of the binary.
@@ -142,51 +230,69 @@ impl std::fmt::Display for Run {
 }
 
 /// Children of the binary that start together: each is a shell that makes its ready file,
-/// waits until the go file exists, then becomes the binary (`exec`). [`Racers::race`] creates
-/// the go file once every child is ready, so that they all run at once and race for real.
-/// Children still running when this is dropped (a test failed) are killed.
+/// then reads a line from its stdin, a pipe from the parent, then becomes the binary (`exec`).
+/// [`Racers::race`] writes each child its line once every child is ready, so that they all run
+/// at once and race for real. Every child is reaped however the test ends ([`Running`]), and a
+/// child whose pipe closes without its line (the parent gave up) exits without running.
 pub struct Racers {
-    /// The barrier's files: `ready-<n>` for each child, and `go`.
+    /// The children's ready files, `ready-<n>`.
     dir: TempDir,
-    children: Vec<(Vec<String>, Child)>,
+    children: Vec<Running>,
+    /// Each child's stdin, until its line is written.
+    gates: Vec<ChildStdin>,
 }
 
-/// What each child's shell runs: `$1` its ready file, `$2` the go file, the rest the command.
+/// What each child's shell runs: `$1` its ready file, the rest the command.
 const BARRIER: &str = r#"
 : > "$1"
-while [ ! -e "$2" ]; do sleep 0.001; done
-shift 2
+read -r _ || exit 125
+shift
 exec "$@"
 "#;
 
 impl Racers {
-    /// Racers whose barrier files go in a fresh directory under `dir`.
+    /// Racers whose ready files go in a fresh directory under `dir`.
     pub fn new(dir: &Path) -> Racers {
         Racers {
             dir: tempfile::tempdir_in(dir).expect("make a barrier directory"),
             children: Vec::new(),
+            gates: Vec::new(),
         }
     }
 
     /// Spawns the binary with `args` and `env` as one more child; it waits at the barrier.
     pub fn spawn<S: AsRef<str>>(&mut self, args: &[S], env: &[(&str, &str)]) {
-        let dir = self.dir.path();
+        let ready = self
+            .dir
+            .path()
+            .join(format!("ready-{}", self.children.len()));
         let mut shell = Command::new("/bin/sh");
         shell
             .args(["-c", BARRIER, "sh"])
-            .arg(dir.join(format!("ready-{}", self.children.len())))
-            .arg(dir.join("go"))
+            .arg(ready)
             .arg(BIN)
             .args(args.iter().map(AsRef::as_ref));
         with_env(&mut shell, env);
-        let child = shell.spawn().expect("spawn a child");
-        let args = args.iter().map(|arg| arg.as_ref().to_owned()).collect();
-        self.children.push((args, child));
+        shell.stdin(Stdio::piped());
+        let mut child = shell.spawn().expect("spawn a child");
+        self.gates.push(child.stdin.take().expect("a piped stdin"));
+        self.children.push(Running::start(args, child));
+    }
+
+    /// The process ids of the children.
+    pub fn pids(&self) -> Vec<u32> {
+        self.children.iter().map(Running::id).collect()
+    }
+
+    /// [`Racers::race_within`] [`RUN_TIMEOUT`].
+    pub fn race(self) -> Vec<Run> {
+        self.race_within(RUN_TIMEOUT)
     }
 
     /// Lets every child go at once, once all of them wait at the barrier, then waits for each
-    /// to end; their runs, in the order they were spawned.
-    pub fn race(mut self) -> Vec<Run> {
+    /// to end; their runs, in the order they were spawned. Children still running `timeout`
+    /// after they were let go are killed, and fail the test.
+    pub fn race_within(mut self, timeout: Duration) -> Vec<Run> {
         let deadline = Instant::now() + READY_TIMEOUT;
         for at in 0..self.children.len() {
             let ready = self.dir.path().join(format!("ready-{at}"));
@@ -195,27 +301,18 @@ impl Racers {
                     Instant::now() < deadline,
                     "child {at} never reached the barrier"
                 );
-                thread::sleep(Duration::from_millis(1));
+                thread::sleep(POLL);
             }
         }
-        fs::write(self.dir.path().join("go"), b"").expect("open the barrier");
-        let children = std::mem::take(&mut self.children);
-        children
-            .into_iter()
-            .map(|(args, child)| {
-                let output = child.wait_with_output().expect("wait for a child");
-                Run::new(&args, output.status, &output.stdout, &output.stderr)
-            })
-            .collect()
-    }
-}
-
-impl Drop for Racers {
-    fn drop(&mut self) {
-        for (_, child) in &mut self.children {
-            let _ = child.kill();
-            let _ = child.wait();
+        for mut gate in self.gates.drain(..) {
+            // A child that died before reading its line shows in its run.
+            let _ = gate.write_all(b"\n");
         }
+        let deadline = Instant::now() + timeout;
+        self.children
+            .iter_mut()
+            .map(|child| child.finish(deadline))
+            .collect()
     }
 }
 
