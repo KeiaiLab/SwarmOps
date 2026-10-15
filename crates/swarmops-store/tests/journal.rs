@@ -163,29 +163,51 @@ fn assert_corrupt_at<T: Debug>(got: Result<T, StoreError>, offset: u64, what: &s
 }
 
 /// [`RealFs`] that records each call as `"<method> <file name>"`, and may run a hook once,
-/// right before the call it names goes ahead: a writer racing the caller.
+/// right before or right after the call it names: a writer racing the caller.
 struct RecordingFs {
     calls: Arc<Mutex<Vec<String>>>,
     hook: Mutex<Option<Hook>>,
 }
 
-/// A call as [`RecordingFs`] records it, and what runs right before it goes ahead.
-type Hook = (String, Box<dyn FnOnce() + Send>);
+/// A call as [`RecordingFs`] records it, when the hook runs, and what it does. `After` hooks
+/// run for `file_len` only, the call with which readers measure the journal.
+type Hook = (String, When, Box<dyn FnOnce() + Send>);
+
+/// When a [`Hook`] runs, around the call it names.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum When {
+    Before,
+    After,
+}
+
+/// A read of the journal from a reader's handle.
+type Read = fn(&Journal) -> Result<Vec<Frame>, StoreError>;
 
 impl RecordingFs {
     fn record(&self, method: &str, path: &Path) {
+        let call = Self::call(method, path);
+        self.calls.lock().unwrap().push(call.clone());
+        self.run_hook(&call, When::Before);
+    }
+
+    fn call(method: &str, path: &Path) -> String {
         let name = path.file_name().unwrap().to_string_lossy();
-        let call = format!("{method} {name}");
+        format!("{method} {name}")
+    }
+
+    fn run_hook(&self, call: &str, when: When) {
         let hook = {
             let mut hook = self.hook.lock().unwrap();
-            if hook.as_ref().is_some_and(|(at, _)| *at == call) {
+            if hook
+                .as_ref()
+                .is_some_and(|(at, at_when, _)| at == call && *at_when == when)
+            {
                 hook.take()
             } else {
                 None
             }
         };
-        self.calls.lock().unwrap().push(call);
-        if let Some((_, run)) = hook {
+        if let Some((_, _, run)) = hook {
             run();
         }
     }
@@ -234,7 +256,9 @@ impl FsOps for RecordingFs {
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
         self.record("file_len", path);
-        RealFs.file_len(path)
+        let len = RealFs.file_len(path);
+        self.run_hook(&Self::call("file_len", path), When::After);
+        len
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
@@ -969,7 +993,7 @@ fn readers_measure_off_before_log() {
             append_bytes(&log, &frame);
             append_bytes(&off, &84_u64.to_le_bytes());
         };
-        (call.to_owned(), Box::new(append))
+        (call.to_owned(), When::Before, Box::new(append))
     };
     let racing = || racing_at("file_len journal.log");
     let raced = Frame {
@@ -1005,6 +1029,48 @@ fn readers_measure_off_before_log() {
     set_len(layout.journal_off(), 8);
     let (reader, _) = racing_journal(&layout, Some(racing_at("file_len journal.off")));
     assert_eq!(reader.tail_frames_from(0).unwrap(), [first, raced]);
+}
+
+#[test]
+fn journal_off_cut_after_a_reader_measured_it_is_journal_corrupt() {
+    // A reader measures journal.off, then reads the entries it holds. If journal.off is
+    // shorter by then (a writer's recovery dropped entries that snapshot held, which are never
+    // genuine ones), the snapshot is not one: JournalCorrupt, never fewer frames read
+    // silently.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    let cut_to_one_entry = || -> Hook {
+        let off = layout.journal_off();
+        let cut = move || set_len(&off, 8);
+        (
+            "file_len journal.off".to_owned(),
+            When::After,
+            Box::new(cut),
+        )
+    };
+    let reads: [(&str, Read, u64); 3] = [
+        (
+            "tail_frames_from(0)",
+            |reader| reader.tail_frames_from(0),
+            0,
+        ),
+        ("frames_from(0, 10)", |reader| reader.frames_from(0, 10), 0),
+        (
+            "frames_after(0, 10)",
+            |reader| reader.frames_after(0, 10),
+            0,
+        ),
+    ];
+    for (what, read, offset) in reads {
+        set_len(layout.journal_off(), 8);
+        append_bytes(layout.journal_off(), &84_u64.to_le_bytes());
+        let (reader, _) = racing_journal(&layout, Some(cut_to_one_entry()));
+        assert_corrupt_at(read(&reader), offset, what);
+    }
 }
 
 #[test]

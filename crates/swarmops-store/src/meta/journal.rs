@@ -155,7 +155,9 @@ impl Journal {
     /// listed then was whole and durable before its entry was written, so it is whole in
     /// `journal.log` as measured after. One that is cut short or missing, fails its CRC or
     /// does not decode is [`StoreError::JournalCorrupt`], as is an entry that does not point
-    /// where the previous frame ends.
+    /// where the previous frame ends, and a `journal.off` that holds fewer entries when they
+    /// are read than it did when measured (a writer dropped entries that were never genuine):
+    /// that is reported at the first wanted frame's start, or 0 if its entry is gone too.
     pub fn frames_from(&self, first: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
         let listed = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
         let wanted = u64::try_from(limit)
@@ -167,29 +169,21 @@ impl Journal {
         // The previous frame's entry (the first wanted frame starts where that frame ends),
         // the wanted frames' entries, and the next one (where the last wanted frame ends).
         let previous = first.checked_sub(1);
-        let entries = self.entries(
-            previous.unwrap_or(first),
-            u64::from(previous.is_some()) + wanted + u64::from(first + wanted < listed),
-        )?;
-        let (previous, offsets) = match (previous, entries.split_first()) {
-            (None, _) => (None, entries.as_slice()),
-            (Some(_), Some((&previous, offsets))) => (Some(previous), offsets),
-            // journal.off was cut since its length was read.
-            (Some(_), None) => return Ok(Vec::new()),
-        };
+        let count = u64::from(previous.is_some()) + wanted + u64::from(first + wanted < listed);
+        let entries = self.entries(previous.unwrap_or(first), count)?;
+        let skip = usize::from(previous.is_some());
+        if to_u64(entries.len()) != count {
+            // journal.off was cut since it was measured: entries of the snapshot are gone.
+            let offset = entries.get(skip).copied().unwrap_or(0);
+            return Err(StoreError::JournalCorrupt { offset });
+        }
+        let previous = previous.map(|_| entries[0]);
+        let offsets = &entries[skip..];
         let wanted = usize::try_from(wanted).map_or(offsets.len(), |n| n.min(offsets.len()));
-        let Some(&start) = offsets.first() else {
-            return Ok(Vec::new());
-        };
+        let start = offsets[0];
         // Only now journal.log, which holds whole every frame listed above.
         let log_len = self.fs.file_len(self.log_path.as_std_path())?;
-        let previous_end = match previous {
-            Some(previous) => self.frame_end(previous, log_len)?,
-            None => Some(0),
-        };
-        if previous_end != Some(start) {
-            return Err(StoreError::JournalCorrupt { offset: start });
-        }
+        self.check_starts_after(previous, start, log_len)?;
         let end = offsets
             .get(wanted)
             .map_or(log_len, |&next| next.min(log_len));
@@ -237,15 +231,30 @@ impl Journal {
     /// frame's two appends. The read stops silently at a torn tail: an unlisted frame cut
     /// short (an append in progress looks the same) or failing its CRC, or unlisted bytes
     /// that are zero to the end of the file. Anything else, an `offset` that is not a frame
-    /// boundary included, is [`StoreError::JournalCorrupt`].
+    /// boundary included, is [`StoreError::JournalCorrupt`]; a `journal.off` that holds fewer
+    /// entries when they are read than it did when measured (a writer dropped entries that were
+    /// never genuine) is reported at `offset`.
     pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
         let listed = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
-        let first = self.first_at_or_after(offset, listed)?;
+        // journal.off cut since it was measured: entries of the snapshot are gone.
+        let gone = |e: StoreError| match e {
+            StoreError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                StoreError::JournalCorrupt { offset }
+            }
+            e => e,
+        };
+        let first = self.first_at_or_after(offset, listed).map_err(gone)?;
         // Where each listed frame from `first` on starts; with none from there on, where the
         // last listed frame and the one before it start.
         let entries = self.entries(first, listed - first)?;
+        if to_u64(entries.len()) != listed - first {
+            return Err(StoreError::JournalCorrupt { offset });
+        }
         let listed_end_of = match (entries.is_empty(), listed.checked_sub(1)) {
-            (true, Some(last)) => Some((self.entry_before(last)?, self.entry(last)?)),
+            (true, Some(last)) => Some((
+                self.entry_before(last).map_err(gone)?,
+                self.entry(last).map_err(gone)?,
+            )),
             _ => None,
         };
         // Only now journal.log, which holds whole every frame listed above.
