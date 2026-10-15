@@ -1341,7 +1341,7 @@ expression: s.redact(&all)
       "description": "`log`: history along first parents, a page at a time.",
       "properties": {
         "cursor": {
-          "description": "Resume a log: the previous page's `cursor`, the last changeset id it returned. This page\ncontinues from that changeset's first parent, and `rev` is not used.",
+          "description": "Resume a log: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page continues from the first parent of the\nchangeset it names, and `rev` is not used.",
           "type": [
             "string",
             "null"
@@ -1518,7 +1518,7 @@ expression: s.redact(&all)
       "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime.",
       "properties": {
         "cursor": {
-          "description": "Resume a listing: the previous page's `cursor`; this page starts after that entry name.",
+          "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
           "type": [
             "string",
             "null"

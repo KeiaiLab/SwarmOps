@@ -3,10 +3,12 @@ set shell := ["bash", "-euo", "pipefail", "-c"]
 default: check
 
 # The definition of done for every session. The fuzz crate is a workspace of its own, built
-# with nightly by `just fuzz`; stable formats and lints it here. `--all-features` turns on
-# `test-hooks`, the hooks the crash tests drive (`SWARMOPS_TEST_CRASH_AT`,
-# `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_NOW`); the release run of `test_hooks` after it is
-# built without the feature, as `cargo build --release` is, and checks that it ignores them.
+# with nightly by `just fuzz`; stable formats and lints it here. Its clippy step runs
+# libfuzzer-sys's build script, which compiles libFuzzer's C++ sources: on a cold cache it
+# needs a C++ compiler (`c++`). `--all-features` turns on `test-hooks`, the hooks the crash
+# tests drive (`SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_NOW`); the
+# release run of `test_hooks` after it is built without the feature, as `cargo build
+# --release` is, and checks that it ignores them.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check

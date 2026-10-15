@@ -277,7 +277,8 @@ pub struct ReadTreeReq {
     #[serde(default = "default_read_tree_limit")]
     #[schemars(range(min = 1))]
     pub limit: usize,
-    /// Resume a listing: the previous page's `cursor`; this page starts after that entry name.
+    /// Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not
+    /// construct it (cursors are opaque). This page starts after the entry it names.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
@@ -410,8 +411,9 @@ pub struct LogReq {
     #[serde(default = "default_log_limit")]
     #[schemars(range(min = 1))]
     pub limit: usize,
-    /// Resume a log: the previous page's `cursor`, the last changeset id it returned. This page
-    /// continues from that changeset's first parent, and `rev` is not used.
+    /// Resume a log: the previous page's `cursor`. Pass it back exactly as returned; do not
+    /// construct it (cursors are opaque). This page continues from the first parent of the
+    /// changeset it names, and `rev` is not used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
