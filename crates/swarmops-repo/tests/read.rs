@@ -19,7 +19,8 @@ use swarmops_core::{
     BlobId, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
 };
 use swarmops_repo::{
-    CasResult, Change, ChangeOp, CommitRequest, LocalRepo, RefState, RepoError, RepoInfo,
+    CasOutcome, CasResult, Change, ChangeOp, CommitRequest, LocalRepo, RefState, RepoError,
+    RepoInfo,
 };
 use swarmops_store::{
     CRASH_AT_ENV, ChangesetMeta, FsOps, LinkOutcome, MetaStore, RealFs, StoreError,
@@ -383,10 +384,12 @@ fn cas_ref_through_repo_records_reflog() {
 
     assert_eq!(repo.get_ref("main").unwrap(), None);
     assert_eq!(
-        repo.cas_ref("main", None, Some(c1), "agent/one")
-            .unwrap()
-            .result,
-        CasResult::Applied { old: None }
+        repo.cas_ref("main", None, Some(c1), "agent/one").unwrap(),
+        CasOutcome {
+            result: CasResult::Applied { old: None },
+            warnings: Vec::new(),
+        },
+        "a move whose every step succeeds has no warnings"
     );
     assert_eq!(
         repo.cas_ref("main", Some(c1), Some(c2), "agent/two")
@@ -625,6 +628,45 @@ fn create_refuses_a_path_that_leads_under_mnt_before_touching_it() {
         }
     }
     assert_eq!(entries("/mnt"), before, "nothing was created under /mnt");
+}
+
+#[test]
+fn create_follows_symlinks_below_a_missing_directory_before_touching_anything() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
+    // Each link leads under /mnt/: one to a path that does not exist (where a directory
+    // would be made all the same), one to /mnt itself. `nope/..` cancels a directory that does
+    // not exist, so a walk up to the nearest existing ancestor would not see the link.
+    std::os::unix::fs::symlink("/mnt/swarmops-test-nowhere", base.join("dangling")).unwrap();
+    std::os::unix::fs::symlink("/mnt", base.join("mnt")).unwrap();
+    for (store, leads_to) in [
+        ("nope/../dangling/x", "/mnt/swarmops-test-nowhere/x"),
+        ("nope/../mnt/x", "/mnt/x"),
+        ("dangling/deeper/x", "/mnt/swarmops-test-nowhere/deeper/x"),
+    ] {
+        match LocalRepo::create(&base.join(store), "x") {
+            Err(RepoError::Store(StoreError::UnsupportedFs(refused))) => {
+                assert_eq!(refused, leads_to, "{store}");
+            }
+            other => panic!(
+                "{store}: expected UnsupportedFs, got {:?}",
+                other.map(|r| r.info())
+            ),
+        }
+    }
+    assert_eq!(
+        entries(base.as_str()),
+        Some(vec!["dangling".to_owned(), "mnt".to_owned()]),
+        "nothing was created here"
+    );
+    assert!(!Path::new("/mnt/swarmops-test-nowhere").exists());
+
+    // A symlink loop is an error, not a hang.
+    std::os::unix::fs::symlink(base.join("loop"), base.join("loop")).unwrap();
+    match LocalRepo::create(&base.join("loop/x"), "x") {
+        Err(RepoError::Store(StoreError::Io(_))) => {}
+        other => panic!("expected an I/O error, got {:?}", other.map(|r| r.info())),
+    }
 }
 
 #[test]

@@ -127,9 +127,10 @@ pub enum MismatchCause {
     /// the record's, it is out of order, or the view does not name the record once. The views
     /// can be rebuilt from the columns.
     SortedView,
-    /// The record the journal holds disagrees with the changeset's object (its parents or its
-    /// delta hash) or with its parents' generations: the metadata was recorded wrong, so
-    /// rebuilding the index from the journal cannot mend it.
+    /// The changeset's metadata record (the journal's, or the index's where the journal
+    /// cannot be read) disagrees with its object (its parents or its delta hash) or with its
+    /// parents' generations: the record was written wrong, and must be derived from the object
+    /// again.
     Object,
 }
 
@@ -166,9 +167,10 @@ impl fmt::Display for VerifyProblem {
                 ),
                 MismatchCause::Object => write!(
                     f,
-                    "changeset record {seq}: the journal recorded it unlike its object (parents, \
-                     delta hash) or its parents' generations; rebuilding the index cannot mend \
-                     that: the record must be derived from the object again"
+                    "changeset record {seq}: its metadata record (the journal's, or the index's \
+                     where the journal cannot be read) disagrees with its object (parents, delta \
+                     hash) or with its parents' generations; derive the record from the object \
+                     again"
                 ),
             },
             Self::JournalCorrupt { offset } => {
@@ -246,12 +248,18 @@ impl<'r, O: ObjectStore> Check<'r, O> {
 
     /// Reads and compares the metadata; returns the changesets to check, in seq order.
     fn metadata(&mut self) -> Result<Vec<ChangesetMeta>, RepoError> {
-        let journal = self.open_journal()?;
+        let (journal, journal_damage) = match self.open_journal()? {
+            Ok(journal) => (Some(journal), None),
+            Err(what) => (None, Some(what)),
+        };
         let ckpt = match &journal {
             Some(journal) => self.checkpoint(journal)?,
             None => None,
         };
-        let index = self.open_index()?;
+        let (index, index_damage) = match self.open_index()? {
+            Ok(index) => (Some(index), None),
+            Err(what) => (None, Some(what)),
+        };
         let ref_files = self.repo.meta.ref_files()?;
         let (frames, whole) = match &journal {
             Some(journal) => {
@@ -261,6 +269,34 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             }
             None => (Vec::new(), false),
         };
+
+        // What the damaged files leave unchecked depends on which of the others read.
+        if let Some(what) = journal_damage {
+            let rest = if index.is_some() {
+                ", and the index is checked as it is"
+            } else {
+                ""
+            };
+            self.meta.push(VerifyProblem::MetaCorrupt(format!(
+                "{what}: the journal is not checked{rest}"
+            )));
+        }
+        if let Some(what) = index_damage {
+            let rest = if whole {
+                ", and the journal's changesets are"
+            } else if journal.is_none() {
+                "; with no journal either, no changeset is known, so neither changesets nor the \
+                 targets of refs are checked"
+            } else {
+                "; with the journal read only up to its damage, neither the changesets past it \
+                 nor the targets of refs are checked"
+            };
+            self.meta.push(VerifyProblem::MetaCorrupt(format!(
+                "the changeset index does not open ({what}): it is not checked{rest}"
+            )));
+        }
+        // Without them, a ref's target could be a changeset no readable file lists.
+        let targets_known = whole || index.is_some();
 
         let journaled = journal_changesets(&frames);
         let mut records = Vec::new();
@@ -285,7 +321,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             .collect();
         for RefFile { name, state } in ref_files {
             match state {
-                Ok(state) if !self.generations.contains_key(&state.target) => {
+                Ok(state) if targets_known && !self.generations.contains_key(&state.target) => {
                     self.refs.push(VerifyProblem::DanglingRef(name));
                 }
                 Ok(_) => {}
@@ -299,23 +335,21 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         Ok(changesets)
     }
 
-    /// A handle on the journal; `None`, reported, if one of its files is missing.
-    fn open_journal(&mut self) -> Result<Option<Journal>, RepoError> {
+    /// A handle on the journal, or what is wrong with it if one of its files is missing.
+    fn open_journal(&self) -> Result<Result<Journal, String>, RepoError> {
         let layout = &self.repo.layout;
         match Journal::open(layout, Arc::clone(&self.repo.fs)) {
-            Ok(journal) => Ok(Some(journal)),
+            Ok(journal) => Ok(Ok(journal)),
             Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
                 let missing = [layout.journal_log(), layout.journal_off()]
                     .into_iter()
                     .find(|file| !file.exists());
-                let what = match missing.as_ref().and_then(|file| file.file_name()) {
-                    Some(file) => format!("meta/{file} is missing"),
-                    None => format!("the journal does not open ({e})"),
-                };
-                self.meta.push(VerifyProblem::MetaCorrupt(format!(
-                    "{what}: the journal is not checked, and the index is checked as it is"
-                )));
-                Ok(None)
+                Ok(Err(
+                    match missing.as_ref().and_then(|file| file.file_name()) {
+                        Some(file) => format!("meta/{file} is missing"),
+                        None => format!("the journal does not open ({e})"),
+                    },
+                ))
             }
             Err(e) => Err(e.into()),
         }
@@ -337,17 +371,12 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         }
     }
 
-    /// A handle on the changeset index; `None`, reported, if its files are too damaged to open.
-    fn open_index(&mut self) -> Result<Option<Index>, RepoError> {
+    /// A handle on the changeset index, or what is wrong with its files if they are too
+    /// damaged to open.
+    fn open_index(&self) -> Result<Result<Index, &'static str>, RepoError> {
         match Index::open(&self.repo.layout, Arc::clone(&self.repo.fs)) {
-            Ok(index) => Ok(Some(index)),
-            Err(StoreError::IndexCorrupt { what }) => {
-                self.meta.push(VerifyProblem::MetaCorrupt(format!(
-                    "the changeset index does not open ({what}): it is not checked, and the \
-                     journal's changesets are"
-                )));
-                Ok(None)
-            }
+            Ok(index) => Ok(Ok(index)),
+            Err(StoreError::IndexCorrupt { what }) => Ok(Err(what)),
             Err(e) => Err(e.into()),
         }
     }

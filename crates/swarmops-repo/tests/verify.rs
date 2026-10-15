@@ -119,8 +119,7 @@ fn compact(root: &Utf8Path) -> u64 {
         .unwrap()
 }
 
-/// Asserts that verify finds exactly `want`, in any order, deep (`deep`) or shallow; returns
-/// its report.
+/// An index mismatch of record `seq`, as `cause` says.
 fn mismatch(seq: u64, cause: MismatchCause) -> VerifyProblem {
     VerifyProblem::IndexMismatch { seq, cause }
 }
@@ -187,6 +186,8 @@ fn first_two_recs(root: &Utf8Path) -> [u64; 2] {
     [view.rec_at(0).unwrap(), view.rec_at(1).unwrap()]
 }
 
+/// Asserts that verify finds exactly `want`, in any order, deep (`deep`) or shallow; returns
+/// its report.
 #[track_caller]
 fn assert_problems_when(
     repo: &LocalRepo,
@@ -519,70 +520,125 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
     }
 }
 
+/// A store for the damaged-metadata tests: two changesets, `main` on the second, a ref
+/// `release/gone` that names no changeset, and the first blob corrupt.
+fn store_with_refs_and_a_corrupt_blob() -> (TempDir, Utf8PathBuf, LocalRepo) {
+    let (dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    let c2 = commit(&repo, &[c1], vec![put("g", b"2")]);
+    repo.cas_ref("main", None, Some(c2), "test/agent").unwrap();
+    let release = Layout::new(&root).meta_path("refs/release");
+    fs::create_dir_all(&release).unwrap();
+    let nowhere = ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"));
+    fs::write(release.join("gone"), format!("{nowhere}\n1\n")).unwrap();
+    let file = object_file(&root, blob(b"1").0);
+    let mut bytes = fs::read(&file).unwrap();
+    *bytes.last_mut().unwrap() ^= 0x01;
+    fs::write(&file, bytes).unwrap();
+    (dir, root, repo)
+}
+
 #[test]
 fn verify_reports_damaged_metadata_files_and_checks_on() {
-    let corrupt_meta = |what: &str| {
-        let what = what.to_owned();
-        move |problem: &VerifyProblem| matches!(problem, VerifyProblem::MetaCorrupt(said) if said.starts_with(&what))
+    // Whatever metadata file is damaged, verify reports it and checks the rest: it still finds
+    // the corrupt blob, and the dangling ref (not main, whose changeset it knows).
+    let meta = |what: &str| VerifyProblem::MetaCorrupt(what.to_owned());
+    let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
+    let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
+    let journal_gone = |file: &str| {
+        format!(
+            "meta/{file} is missing: the journal is not checked, and the index is checked as it is"
+        )
     };
-    // Each time, a blob is damaged too: verify still checks the objects, and finds it.
-    let damaged_store = || {
-        let (dir, root, repo) = new_repo();
-        let c1 = commit(&repo, &[], vec![put("f", b"1")]);
-        commit(&repo, &[c1], vec![put("g", b"2")]);
-        let file = object_file(&root, blob(b"1").0);
-        let mut bytes = fs::read(&file).unwrap();
-        *bytes.last_mut().unwrap() ^= 0x01;
-        fs::write(&file, bytes).unwrap();
-        (dir, root, repo)
-    };
-    let layout_of = |root: &Utf8Path| Layout::new(root);
-    for (damage, what) in [
-        ("journal.ckpt", "meta/journal.ckpt"),
-        ("journal.log", "meta/journal.log"),
-        ("journal.off", "meta/journal.off"),
-    ] {
-        let (_dir, root, repo) = damaged_store();
-        let file = layout_of(&root).meta_path(damage);
-        if damage == "journal.ckpt" {
-            fs::write(&file, b"bad").unwrap();
-        } else {
-            fs::remove_file(&file).unwrap();
-        }
+    let index_damage = "the changeset index does not open (a sorted view file ends in a partial \
+                        entry): it is not checked";
+    let cases: [(&str, String); 4] = [
+        (
+            "journal.ckpt",
+            "meta/journal.ckpt does not hold a u64le offset: the records the checkpoint passed \
+             are not checked against the index"
+                .to_owned(),
+        ),
+        ("journal.log", journal_gone("journal.log")),
+        ("journal.off", journal_gone("journal.off")),
+        (
+            "sorted/ids.rec",
+            format!("{index_damage}, and the journal's changesets are"),
+        ),
+    ];
+    for (damage, what) in cases {
+        let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
+        damage_meta(&root, damage);
         let report = repo.verify(true).unwrap();
-        assert_eq!(report.problems.len(), 2, "{damage}: {:?}", report.problems);
-        assert!(
-            report.problems.iter().any(corrupt_meta(what)),
-            "{damage}: {:?}",
-            report.problems
-        );
-        assert!(
-            report
-                .problems
-                .contains(&VerifyProblem::CorruptObject(blob(b"1").0)),
-            "{damage}: {:?}",
-            report.problems
+        assert_eq!(
+            report.problems,
+            [meta(&what), dangling.clone(), corrupt.clone()],
+            "{damage}"
         );
         assert_eq!(report.changesets_checked, 2, "{damage}");
     }
 
-    // Index files that do not open: the journal's changesets are checked all the same.
-    let (_dir, root, repo) = damaged_store();
-    assert_eq!(compact(&root), 2);
-    let view = layout_of(&root).meta_path("sorted/ids.rec");
-    let bytes = fs::read(&view).unwrap();
-    fs::write(&view, &bytes[..bytes.len() - 1]).unwrap();
+    // With neither the journal nor the index, no changeset is known: no ref's target can be
+    // checked, which the report says, rather than calling every ref dangling.
+    let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
+    damage_meta(&root, "journal.log");
+    damage_meta(&root, "sorted/ids.rec");
     let report = repo.verify(true).unwrap();
-    assert_eq!(report.problems.len(), 2, "{:?}", report.problems);
-    assert!(
-        report
-            .problems
-            .iter()
-            .any(corrupt_meta("the changeset index")),
-        "{:?}",
-        report.problems
+    assert_eq!(
+        report.problems,
+        [
+            meta("meta/journal.log is missing: the journal is not checked"),
+            meta(&format!(
+                "{index_damage}; with no journal either, no changeset is known, so neither \
+                 changesets nor the targets of refs are checked"
+            )),
+            corrupt,
+        ]
     );
-    assert_eq!(report.changesets_checked, 2);
+    assert_eq!(report.changesets_checked, 0);
+    assert_eq!(
+        report.problems[0].to_string(),
+        "damaged metadata: meta/journal.log is missing: the journal is not checked"
+    );
+}
+
+/// Damages metadata file `file` of the store at `root`: `journal.ckpt` malformed, a journal
+/// file removed, or a sorted view (compacted first) cut inside an entry.
+fn damage_meta(root: &Utf8Path, file: &str) {
+    let path = Layout::new(root).meta_path(file);
+    match file {
+        "journal.ckpt" => fs::write(&path, b"bad").unwrap(),
+        "sorted/ids.rec" => {
+            compact(root);
+            let bytes = fs::read(&path).unwrap();
+            fs::write(&path, &bytes[..bytes.len() - 1]).unwrap();
+        }
+        _ => fs::remove_file(&path).unwrap(),
+    }
+}
+
+#[test]
+fn verify_problem_messages_name_the_cause_and_the_remedy() {
+    for (cause, text) in [
+        (
+            MismatchCause::Journal,
+            "changeset record 3: the index disagrees with the journal; rebuild the index from \
+             the journal",
+        ),
+        (
+            MismatchCause::SortedView,
+            "changeset record 3: a sorted view disagrees with the index columns; rebuild the \
+             sorted views from the columns",
+        ),
+        (
+            MismatchCause::Object,
+            "changeset record 3: its metadata record (the journal's, or the index's where the \
+             journal cannot be read) disagrees with its object (parents, delta hash) or with its \
+             parents' generations; derive the record from the object again",
+        ),
+    ] {
+        assert_eq!(mismatch(3, cause).to_string(), text, "{cause:?}");
+    }
 }
 
 #[test]

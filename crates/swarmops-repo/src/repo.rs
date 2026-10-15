@@ -33,8 +33,11 @@
 //! [`LocalRepo::create`] lays a store out so that it is whole once `FORMAT` exists, and
 //! resumes after a crash at any of its steps:
 //!
-//! 1. It refuses a path under `/mnt/` (where WSL mounts Windows drives): first as given, before
-//!    it creates anything, then once the directory exists and symlinks are resolved.
+//! 1. It works out where the store path leads (each symlink followed, `..` taken, missing
+//!    directories kept as named) and refuses a path that leads under `/mnt/` (where WSL mounts
+//!    Windows drives) before it creates anything. Then it makes the missing directories, syncs
+//!    the parent of each one it made (or of the store directory alone if that was there), and
+//!    checks again once the path is canonical.
 //! 2. It refuses a directory that holds `FORMAT`: a store is there already
 //!    ([`RepoError::Exists`]).
 //! 3. It creates `objects/` with its 256 fan-out directories and `tmp/`, keeping those that
@@ -54,7 +57,7 @@ use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
     CRASH_AT_ENV, CasResult, CrashAtFs, FsObjectStore, FsOps, Layout, LinkOutcome, MetaStore,
@@ -362,6 +365,12 @@ fn default_fs() -> (Arc<dyn FsOps>, bool) {
 /// missing, each new directory's entry made durable. Where the path leads is worked out before
 /// anything is created ([`resolve`]): a path that leads under `/mnt/` is refused then, and,
 /// should anything have swapped in a symlink meanwhile, again once the directory exists.
+///
+/// When the store directory exists already, perhaps made by a create that crashed, only its
+/// parent is synced: the directories above it that the crashed create may have made are not
+/// known any more. That is enough on the filesystems a store lives on (ext4, XFS): their
+/// journal is one ordered log for the whole filesystem, so the parent's sync commits every
+/// metadata change made before it, those directories' entries among them.
 fn native_root(store: &Utf8Path, fs: &dyn FsOps) -> Result<Utf8PathBuf, RepoError> {
     let (target, missing) = resolve(&camino::absolute_utf8(store)?)?;
     if !is_native_linux_fs(&target) {
@@ -387,40 +396,63 @@ fn native_root(store: &Utf8Path, fs: &dyn FsOps) -> Result<Utf8PathBuf, RepoErro
     Ok(canonical)
 }
 
-/// Where absolute path `path` leads once its missing directories are made, and those
-/// directories, outermost first. Its nearest ancestor that exists is canonicalized (its
-/// symlinks resolved), and the components below it follow, their `..` taken by name: none of
-/// them exists, so none is a symlink.
+/// Where absolute path `path` leads once its missing directories are made, resolved as the
+/// kernel will resolve it then, with the directories in it that do not exist yet, outermost
+/// first. One component at a time: `..` takes back the one before it (resolved already, so no
+/// symlink); a symlink gives way to its target, whether that exists or not (a directory made
+/// through it lands where it points); a name that does not exist is kept as it is.
 fn resolve(path: &Utf8Path) -> io::Result<(Utf8PathBuf, Vec<Utf8PathBuf>)> {
-    let mut existing = path.to_owned();
-    let mut below = Vec::new();
-    let mut target = loop {
-        match existing.canonicalize_utf8() {
-            Ok(canonical) => break canonical,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                let last = existing
-                    .components()
-                    .next_back()
-                    .map(|c| c.as_str().to_owned());
-                match last {
-                    Some(name) if existing.pop() => below.push(name),
-                    _ => return Err(e),
-                }
-            }
-            Err(e) => return Err(e),
-        }
-    };
-    let mut missing = Vec::new();
-    for name in below.iter().rev() {
+    // Linux's MAXSYMLINKS: more symlinks than that on one path is a loop.
+    const MAX_LINKS: usize = 40;
+    let mut target = Utf8PathBuf::from("/");
+    let mut pending = components(path);
+    let mut links = 0;
+    while let Some(name) = pending.pop() {
         if name == ".." {
             target.pop();
-            missing.pop();
-        } else {
-            target.push(name);
-            missing.push(target.clone());
+            continue;
+        }
+        let next = target.join(&name);
+        match std::fs::symlink_metadata(&next) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                links += 1;
+                if links > MAX_LINKS {
+                    return Err(io::Error::other(format!(
+                        "{path}: too many levels of symbolic links"
+                    )));
+                }
+                let link = Utf8PathBuf::try_from(std::fs::read_link(&next)?)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                if link.is_absolute() {
+                    target = Utf8PathBuf::from("/");
+                }
+                pending.extend(components(&link));
+            }
+            Ok(_) => target = next,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => target = next,
+            Err(e) => return Err(e),
         }
     }
+    // No symlink is left in it, so the directories it lacks are its last ones.
+    let mut missing: Vec<Utf8PathBuf> = target
+        .ancestors()
+        .take_while(|dir| std::fs::symlink_metadata(dir).is_err())
+        .map(Utf8Path::to_path_buf)
+        .collect();
+    missing.reverse();
     Ok((target, missing))
+}
+
+/// The names and `..`s of `path`, the last one first: a stack whose top is the next.
+fn components(path: &Utf8Path) -> Vec<String> {
+    path.components()
+        .rev()
+        .filter_map(|component| match component {
+            Utf8Component::Normal(name) => Some(name.to_owned()),
+            Utf8Component::ParentDir => Some("..".to_owned()),
+            Utf8Component::RootDir | Utf8Component::CurDir | Utf8Component::Prefix(_) => None,
+        })
+        .collect()
 }
 
 /// The identity `REPO` holds: a line with the id, then the name to the end of the file.
