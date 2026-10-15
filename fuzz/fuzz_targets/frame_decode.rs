@@ -32,7 +32,7 @@ fuzz_target!(|data: &[u8]| {
     fs::create_dir(layout.meta_dir()).expect("create meta/");
     fs::write(layout.journal_off(), []).expect("write journal.off");
     fs::write(layout.journal_log(), data).expect("write journal.log");
-    // Reading needs no FsOps; the journal is handed the real ones all the same.
+    // Readers measure the files' lengths through FsOps: the real ones.
     let journal = Journal::open(&layout, Arc::new(RealFs)).expect("open the journal");
     agrees(
         "the input as journal.log",

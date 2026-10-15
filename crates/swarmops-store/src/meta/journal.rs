@@ -39,7 +39,8 @@ pub struct Journal {
     log_path: Utf8PathBuf,
     off_path: Utf8PathBuf,
     ckpt_path: Utf8PathBuf,
-    /// Every durable write goes through here.
+    /// Every durable write goes through here, and so do the readers' measurements of the
+    /// files' lengths (`journal.off` first).
     fs: Arc<dyn FsOps>,
     /// Read-only handle on `journal.log`.
     log: File,

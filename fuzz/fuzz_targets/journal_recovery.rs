@@ -123,8 +123,8 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
     if let Some(built) = built {
         built.reads_back(&journal, &before, &seen);
     }
-    // With sound entries, the model says what the readers from the start return; a reader
-    // races appends, so it must not fail at a last listed frame cut short.
+    // With sound entries, the model says what the readers from the start return: the listed
+    // frames, all whole, or JournalCorrupt at the first that is not.
     let listed = listed_frames(&before);
     let from_start = match &listed {
         Some(Ok(listed)) => Some(read_from_start(&before, listed)),
