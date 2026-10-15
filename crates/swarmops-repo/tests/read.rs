@@ -9,21 +9,27 @@
 mod support;
 
 use std::fs;
+#[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(feature = "test-hooks")]
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, EntryKind, ObjectId, ObjectKind, hash_object};
 use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
-use swarmops_store::{CRASH_AT_ENV, ChangesetMeta, MetaStore, StoreError};
+#[cfg(feature = "test-hooks")]
+use swarmops_store::CRASH_AT_ENV;
+use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
 
+#[cfg(feature = "test-hooks")]
 use crate::support::child::{SIGABRT, run, this_test};
 use crate::support::fs::RecordingFs;
 use crate::support::{blob, commit, new_repo, path, put, put_as, request};
 
 /// Set only in the children of the crash sweep: the store root.
+#[cfg(feature = "test-hooks")]
 const CHILD_ROOT: &str = "SWARMOPS_TEST_REPO_READ_CHILD_ROOT";
 
 fn unknown_id() -> ChangesetId {
@@ -723,6 +729,7 @@ fn create_makes_the_documented_fs_calls() {
 /// (of `total`) aborts it. A store must then open only if `FORMAT` is in place, and a create
 /// must otherwise pick up where the crashed one stopped; either way the store is fresh and
 /// takes a commit.
+#[cfg(feature = "test-hooks")]
 fn create_crashing_at(k: u64, total: u64) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
@@ -761,6 +768,7 @@ fn create_crashing_at(k: u64, total: u64) {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn create_resumes_after_a_crash_at_any_call() {
     if let Some(root) = std::env::var(CHILD_ROOT).ok().map(Utf8PathBuf::from) {
         // SWARMOPS_TEST_CRASH_AT is set: create's k-th filesystem call aborts the process.

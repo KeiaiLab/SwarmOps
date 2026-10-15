@@ -26,8 +26,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use camino::Utf8PathBuf;
 use doubles::copy_dir;
 use serde_json::{Value, json};
+use swarmops_store::Layout;
 use tempfile::TempDir;
 
 /// The binary under test.
@@ -387,6 +389,23 @@ impl Store {
     /// The temp dir: the store and the files the tests write.
     pub fn tmp(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// The store's paths.
+    pub fn layout(&self) -> Layout {
+        Layout::new(Utf8PathBuf::from(self.path()))
+    }
+
+    /// `meta/journal.ckpt`: how far the checkpoint is.
+    pub fn checkpoint(&self) -> u64 {
+        let bytes = fs::read(self.layout().journal_ckpt()).expect("read meta/journal.ckpt");
+        u64::from_le_bytes(bytes.try_into().expect("8 bytes"))
+    }
+
+    /// The length of `meta/journal.log`.
+    pub fn journal_len(&self) -> u64 {
+        let log = self.layout().journal_log();
+        fs::metadata(log).expect("meta/journal.log").len()
     }
 
     /// Writes a change list that puts `content` at `path` to the temp dir as `<name>.json`;

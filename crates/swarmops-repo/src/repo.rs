@@ -125,12 +125,14 @@ impl LocalRepo {
     /// [`RepoError::Exists`] if the directory holds a store already (its `FORMAT` file);
     /// [`StoreError::UnsupportedFs`] for a path under `/mnt/`. Any name is kept verbatim.
     ///
-    /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests), the object store and the metadata
+    /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests; only in a build with the store's
+    /// `test-hooks` feature, which this crate's turns on), the object store and the metadata
     /// store share one [`CrashAtFs`] whose k-th call aborts the process, and objects are
     /// written (and the directories and the index's files synced) one at a time, so that the
     /// k-th call is the same call in every run. With `SWARMOPS_TEST_FS_CALLS=<file>` set, the
     /// same holds, and that [`CrashAtFs`] writes how many calls both stores made to `<file>`
-    /// when the repository is dropped: a dry run's count.
+    /// when the repository is dropped: a dry run's count. A build without the feature ignores
+    /// both variables.
     pub fn create(store: &Utf8Path, name: &str) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::create_on(store, name, fs, one_thread)
@@ -352,11 +354,12 @@ fn ref_error(e: StoreError) -> RepoError {
 }
 
 /// The filesystem a store opens on: the real one; or, when a crash test's hook asks for it
-/// ([`CrashAtFs::from_env`]: `SWARMOPS_TEST_CRASH_AT=<k>` to abort at call k,
-/// `SWARMOPS_TEST_FS_CALLS=<file>` to write the call count when the repository is dropped), one
-/// [`CrashAtFs`] for both stores, so that they count their calls together. `true` with the
-/// latter: objects are then written, and the directories and the index's files synced, one at
-/// a time, so that call k is the same call in every run.
+/// ([`CrashAtFs::from_env`], in a build with the `test-hooks` feature only:
+/// `SWARMOPS_TEST_CRASH_AT=<k>` to abort at call k, `SWARMOPS_TEST_FS_CALLS=<file>` to write the
+/// call count when the repository is dropped), one [`CrashAtFs`] for both stores, so that they
+/// count their calls together. `true` with the latter: objects are then written, and the
+/// directories and the index's files synced, one at a time, so that call k is the same call in
+/// every run.
 fn default_fs() -> (Arc<dyn FsOps>, bool) {
     match CrashAtFs::from_env() {
         Some(fs) => (Arc::new(fs), true),

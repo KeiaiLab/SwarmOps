@@ -100,9 +100,10 @@ impl FsObjectStore {
 
     /// [`FsObjectStore::open`] on the real filesystem, wrapped in a [`CrashAtFs`] when a test
     /// hook asks for one ([`CrashAtFs::from_env`]: `SWARMOPS_TEST_CRASH_AT=<k>`,
-    /// `SWARMOPS_TEST_FS_CALLS=<file>`). Under either hook the store runs with parallelism 1
-    /// ([`FsObjectStore::set_parallelism`]): `put_batch` then writes one object at a time and
-    /// `flush` fsyncs one directory at a time, so that call k is the same call in every run.
+    /// `SWARMOPS_TEST_FS_CALLS=<file>`, in a build with the `test-hooks` feature only). Under
+    /// either hook the store runs with parallelism 1 ([`FsObjectStore::set_parallelism`]):
+    /// `put_batch` then writes one object at a time and `flush` fsyncs one directory at a time,
+    /// so that call k is the same call in every run.
     pub fn open_default(layout: Layout) -> Self {
         match CrashAtFs::from_env() {
             Some(fs) => {

@@ -10,6 +10,12 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The crash tests' hooks, `SWARMOPS_TEST_CRASH_AT` and `SWARMOPS_TEST_FS_CALLS`, which
+# `CrashAtFs::from_env` reads. Off unless asked for, so that every other build (a release build
+# included) ignores them; the workspace's gates turn it on with `--all-features`.
+test-hooks = []
+
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 camino.workspace = true

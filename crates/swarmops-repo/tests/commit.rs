@@ -11,10 +11,13 @@ mod support;
 
 use std::fs;
 use std::io;
+#[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
+#[cfg(feature = "test-hooks")]
 use std::process::Output;
 use std::sync::Arc;
+#[cfg(feature = "test-hooks")]
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,10 +29,16 @@ use swarmops_core::{
 use swarmops_repo::{
     CasResult, Change, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
 };
-use swarmops_store::{CRASH_AT_ENV, ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
+#[cfg(feature = "test-hooks")]
+use swarmops_store::CRASH_AT_ENV;
+use swarmops_store::{ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
 
-use crate::support::child::{CHILD_TIMEOUT, Child, SIGABRT, run, this_test};
-use crate::support::fs::{FailingFs, copy_dir};
+use crate::support::child::{CHILD_TIMEOUT, Child, this_test};
+#[cfg(feature = "test-hooks")]
+use crate::support::child::{SIGABRT, run};
+use crate::support::fs::FailingFs;
+#[cfg(feature = "test-hooks")]
+use crate::support::fs::copy_dir;
 use crate::support::{blob, delete, new_repo, path, put, put_as, signature};
 
 /// Set only in the children this file's tests spawn: the store root.
@@ -513,6 +522,7 @@ fn child_root() -> Option<Utf8PathBuf> {
 
 /// Runs test `test` again in a child process on the store at `root`, the child's k-th
 /// filesystem call aborting it (`SWARMOPS_TEST_CRASH_AT=k`).
+#[cfg(feature = "test-hooks")]
 fn crash_child(test: &str, root: &Utf8Path, k: u64) -> Output {
     run(this_test(test)
         .env(CHILD_ROOT, root)
@@ -521,6 +531,7 @@ fn crash_child(test: &str, root: &Utf8Path, k: u64) -> Output {
 
 /// The commit the crash sweep's child makes: a root commit of three files in nested
 /// directories, so that it writes blobs, trees and its changeset.
+#[cfg(feature = "test-hooks")]
 fn crash_request() -> CommitRequest {
     request(
         &[],
@@ -534,11 +545,13 @@ fn crash_request() -> CommitRequest {
 
 /// How many runs of the crash sweep go at once: each has a child process and a store of its
 /// own.
+#[cfg(feature = "test-hooks")]
 const AT_ONCE: u64 = 8;
 
 /// Runs `run(k)` for k = 1, 2, … [`AT_ONCE`] at a time, until a run reports that its child
 /// finished; returns how many filesystem calls the child makes (the last k it crashed at).
 /// Every run past that one must finish too.
+#[cfg(feature = "test-hooks")]
 fn sweep(run: impl Fn(u64) -> bool + Sync) -> u64 {
     let run = &run;
     let mut first = 1;
@@ -565,6 +578,7 @@ fn sweep(run: impl Fn(u64) -> bool + Sync) -> u64 {
 /// `template` until its k-th filesystem call aborts it. The store must then hold nothing or
 /// the whole changeset `want`, verify clean, and take the commit again. Returns whether the
 /// child finished (k was past its last call), and whether the changeset was committed.
+#[cfg(feature = "test-hooks")]
 fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, bool) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
@@ -624,6 +638,7 @@ fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, 
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn commit_never_inserts_record_before_objects_are_durable() {
     if let Some(root) = child_root() {
         // SWARMOPS_TEST_CRASH_AT is set: open shares one CrashAtFs between the object store

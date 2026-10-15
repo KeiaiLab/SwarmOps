@@ -10,6 +10,11 @@
 //! `LocalRepo::open` and `create`, which share one for both stores). A third, test-only too,
 //! `SWARMOPS_TEST_NOW=<unix seconds>`, has `swarmops-ops` sign changesets at that time: a commit
 //! then writes the same objects in every run, so call k is the same call in every run.
+//!
+//! The hooks act only in a build with the `test-hooks` feature (this crate's, which the
+//! `test-hooks` features of `swarmops-repo`, `swarmops-ops` and `swarmops-cli` turn on): any
+//! other build, a release build among them, ignores the variables. The workspace's gates build
+//! the tests with it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -17,15 +22,16 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Test hook: with `SWARMOPS_TEST_CRASH_AT=<k>` set to a positive k, the filesystem a store
-/// opens on by default is a [`CrashAtFs`] that aborts the process on its k-th call (see
-/// [`CrashAtFs::from_env`]).
+/// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_CRASH_AT=<k>` set
+/// to a positive k, the filesystem a store opens on by default is a [`CrashAtFs`] that aborts
+/// the process on its k-th call (see [`CrashAtFs::from_env`]).
 pub const CRASH_AT_ENV: &str = "SWARMOPS_TEST_CRASH_AT";
 
-/// Test hook: with `SWARMOPS_TEST_FS_CALLS=<file>` set, the filesystem a store opens on by
-/// default is a [`CrashAtFs`] that writes how many calls it made to `<file>`, in decimal, when
-/// it is dropped: a crash test's dry run, to count the calls of a run it then crashes at each
-/// of (see [`CrashAtFs::from_env`]). A run that crashes writes nothing.
+/// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_FS_CALLS=<file>`
+/// set, the filesystem a store opens on by default is a [`CrashAtFs`] that writes how many calls
+/// it made to `<file>`, in decimal, when it is dropped: a crash test's dry run, to count the
+/// calls of a run it then crashes at each of (see [`CrashAtFs::from_env`]). A run that crashes
+/// writes nothing.
 pub const FS_CALLS_ENV: &str = "SWARMOPS_TEST_FS_CALLS";
 
 /// What [`FsOps::link_noclobber`] found at its target.
@@ -284,19 +290,33 @@ impl CrashAtFs<RealFs> {
     /// The filesystem the test hooks ask for, if they ask for one: the real filesystem in a
     /// [`CrashAtFs`] that aborts at call k when `SWARMOPS_TEST_CRASH_AT=<k>` is set to a
     /// positive k, and reports its call count to `<file>` when `SWARMOPS_TEST_FS_CALLS=<file>`
-    /// is set (either, or both). `None` when neither is set, or both are empty.
+    /// is set (either, or both). `None` when neither is set, or both are empty; and always
+    /// `None` in a build without the `test-hooks` feature, which ignores both variables.
     pub fn from_env() -> Option<CrashAtFs<RealFs>> {
-        let crash_at = crash_at_from_env();
-        let report = std::env::var_os(FS_CALLS_ENV).filter(|file| !file.is_empty());
-        if crash_at.is_none() && report.is_none() {
-            return None;
-        }
-        let fs = CrashAtFs::new(RealFs, crash_at.unwrap_or(0));
-        Some(match report {
-            Some(file) => fs.reporting_calls_to(file.into()),
-            None => fs,
-        })
+        hooked_fs()
     }
+}
+
+/// [`CrashAtFs::from_env`] in a build with the `test-hooks` feature.
+#[cfg(feature = "test-hooks")]
+fn hooked_fs() -> Option<CrashAtFs<RealFs>> {
+    let crash_at = crash_at_from_env();
+    let report = std::env::var_os(FS_CALLS_ENV).filter(|file| !file.is_empty());
+    if crash_at.is_none() && report.is_none() {
+        return None;
+    }
+    let fs = CrashAtFs::new(RealFs, crash_at.unwrap_or(0));
+    Some(match report {
+        Some(file) => fs.reporting_calls_to(file.into()),
+        None => fs,
+    })
+}
+
+/// [`CrashAtFs::from_env`] in a build without the `test-hooks` feature: the hooks' variables
+/// are ignored.
+#[cfg(not(feature = "test-hooks"))]
+fn hooked_fs() -> Option<CrashAtFs<RealFs>> {
+    None
 }
 
 impl<F: FsOps> CrashAtFs<F> {
@@ -419,6 +439,7 @@ impl<F: FsOps> FsOps for CrashAtFs<F> {
 }
 
 /// The k of `SWARMOPS_TEST_CRASH_AT=<k>`; `None` unless set to a positive integer.
+#[cfg(feature = "test-hooks")]
 fn crash_at_from_env() -> Option<u64> {
     std::env::var(CRASH_AT_ENV)
         .ok()?
