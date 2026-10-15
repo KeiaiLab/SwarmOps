@@ -79,6 +79,7 @@ fn commit(repo: &LocalRepo, parents: &[ChangesetId], changes: Vec<Change>) -> Ch
         committer: signature(),
         message: b"a test commit".to_vec(),
         metadata: Vec::new(),
+        allow_empty: false,
     };
     repo.commit(req).expect("commit").id
 }
@@ -416,6 +417,39 @@ fn verify_reports_a_corrupt_journal_frame() {
         }],
     );
     assert_eq!(report.changesets_checked, 2);
+}
+
+#[test]
+fn verify_reports_a_listed_frame_cut_short() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    commit(&repo, &[c1], vec![put("f", b"2")]);
+    let layout = Layout::new(&root);
+    let frames = Journal::open(&layout, Arc::new(RealFs))
+        .unwrap()
+        .frames_from(0, 10)
+        .unwrap();
+    assert_eq!(frames.len(), 2);
+
+    // journal.off lists the last frame, so it was whole and durable before that: journal.log
+    // ending inside it (or right at its start) is damage, though readers pass over it as the
+    // torn tail a writer repairs.
+    let log = layout.journal_log();
+    let end = fs::metadata(&log).unwrap().len();
+    for cut in [end - 1, frames[1].offset + 3, frames[1].offset] {
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&log)
+            .unwrap()
+            .set_len(cut)
+            .unwrap();
+        assert_problems(
+            &repo,
+            vec![VerifyProblem::JournalCorrupt {
+                offset: frames[1].offset,
+            }],
+        );
+    }
 }
 
 #[test]

@@ -11,8 +11,8 @@ use thiserror::Error;
 pub enum RepoError {
     /// The store failed: I/O, a corrupt object file, damaged metadata, a writer lock held for
     /// the whole wait ([`StoreError::Busy`], retryable), or a store that is not what the call
-    /// needs ([`StoreError::Format`]: `open` of a directory that holds no store, `create` of
-    /// one that holds one already; [`StoreError::UnsupportedFs`]: a path under `/mnt/`).
+    /// needs ([`StoreError::Format`]: `open` of a directory that holds no store, or one of a
+    /// layout this build does not read; [`StoreError::UnsupportedFs`]: a path under `/mnt/`).
     #[error(transparent)]
     Store(#[from] StoreError),
     /// An object is not canonical: a stored one does not decode, or the changeset a commit
@@ -34,10 +34,14 @@ pub enum RepoError {
         /// The path of the change.
         path: RepoPath,
     },
-    /// The change list is empty, or changes nothing: every change puts what its path holds
-    /// already.
+    /// The change list is empty, or changes nothing (every change puts what its path holds
+    /// already), and the request does not allow an empty changeset.
     #[error("the change list changes nothing")]
     EmptyChanges,
+    /// `create` found a store there already: the directory holds a `FORMAT` file. (Without
+    /// one, what is there is a store a create left half done, and create finishes it.)
+    #[error("a store exists there already")]
+    Exists,
     /// A parent the commit names is not in the store.
     #[error("parent changeset {0} is not in the store")]
     UnknownParent(ChangesetId),

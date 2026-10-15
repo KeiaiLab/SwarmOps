@@ -548,13 +548,14 @@ impl<'r, O: ObjectStore> Check<'r, O> {
 }
 
 /// Every committed frame of `journal`, in order, read without a lock: the frames
-/// `journal.off` lists, then the whole frames after them that a crash left unlisted. With
-/// where the journal is corrupt, if it is; the frames are then the ones before that point.
+/// `journal.off` lists, each of which must read whole (the last one too), then the whole
+/// frames after them that a crash left unlisted. With where the journal is corrupt, if it is;
+/// the frames are then the ones before that point.
 fn read_frames(journal: &Journal) -> Result<(Vec<Frame>, Option<u64>), RepoError> {
     let mut frames: Vec<Frame> = Vec::new();
     let mut batch = FRAME_BATCH;
     loop {
-        match journal.frames_from(to_u64(frames.len()), batch) {
+        match journal.frames_from_strict(to_u64(frames.len()), batch) {
             Ok(read) if read.is_empty() => break,
             Ok(read) => frames.extend(read),
             Err(StoreError::JournalCorrupt { offset }) if batch == 1 => {

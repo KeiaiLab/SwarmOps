@@ -99,6 +99,7 @@ fn request(parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
         committer: signature(),
         message: b"a test commit".to_vec(),
         metadata: vec![("agent".to_owned(), b"test/agent".to_vec())],
+        allow_empty: false,
     }
 }
 
@@ -418,6 +419,42 @@ fn commit_rejects_a_changeset_it_cannot_encode() {
     }
     assert_eq!(object_files(&root), objects, "nothing was written");
     assert_eq!(repo.info().unwrap().changesets, 0);
+}
+
+#[test]
+fn allow_empty_commits_a_changeset_with_the_parent_root() {
+    let (_dir, _root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("a", b"a")]);
+    let empty = |parents: &[ChangesetId], changes| CommitRequest {
+        allow_empty: true,
+        message: b"nothing changes".to_vec(),
+        ..request(parents, changes)
+    };
+
+    // No changes: the changeset keeps its parent's root, with an empty delta.
+    let out = repo.commit(empty(&[base.id], Vec::new())).unwrap();
+    assert_ne!(out.id, base.id);
+    assert_eq!(out.root, base.root);
+    assert_eq!((out.blobs_written, out.trees_written), (0, 0));
+    assert_eq!(out.insert, InsertOutcome::Inserted { seq: 1 });
+    let stored = repo.changeset(out.id).unwrap().unwrap();
+    assert_eq!(stored.changeset.parents, [base.id]);
+    assert_eq!(stored.changeset.delta, []);
+    assert_eq!(stored.changeset.message, b"nothing changes");
+    assert_eq!(stored.generation, 2);
+    assert_eq!(content(&repo, out.id, "a"), Some(b"a".to_vec()));
+
+    // Changes that change nothing count as none.
+    let same = repo.commit(empty(&[out.id], vec![put("a", b"a")])).unwrap();
+    assert_eq!(same.root, base.root);
+    assert_eq!(delta(&repo, same.id), []);
+
+    // A root changeset of nothing has the empty tree, written so that it reads.
+    let first = repo.commit(empty(&[], Vec::new())).unwrap();
+    assert_eq!(first.root, Tree::empty_root().id());
+    assert_eq!(first.trees_written, 1, "the empty tree was not stored yet");
+    assert_eq!(listing(&repo, first.id, None), Some(Vec::new()));
+    assert_eq!(repo.verify(true).unwrap().problems, []);
 }
 
 #[test]

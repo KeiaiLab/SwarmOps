@@ -1,16 +1,17 @@
 //! Commits from change lists (storage spec §2 rule 2, §4): [`Repo::commit`] applies a
 //! [`CommitRequest`]'s changes to its first parent's tree and records the result.
 //!
-//! 1. Checks the request before it reads or writes anything: changes to make
-//!    ([`RepoError::EmptyChanges`]), no directory put ([`RepoError::DirPut`]), each path once
-//!    ([`RepoError::DuplicatePath`]), parents distinct and in the store
+//! 1. Checks the request before it reads or writes anything: changes to make, unless
+//!    `allow_empty` ([`RepoError::EmptyChanges`]), no directory put ([`RepoError::DirPut`]),
+//!    each path once ([`RepoError::DuplicatePath`]), parents distinct and in the store
 //!    ([`RepoError::UnknownParent`]).
 //! 2. Hashes each put's content into its blob id, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
 //!    or where a directory is, or a delete of a directory, is a [`RepoError::TypeConflict`]; a
 //!    delete of a path that is no file, a [`RepoError::PathNotFound`]. A put of what its path
 //!    holds already changes nothing and stays out of the delta; a request of nothing else is
-//!    [`RepoError::EmptyChanges`].
+//!    [`RepoError::EmptyChanges`], unless `allow_empty`: then the changeset keeps its first
+//!    parent's root (the empty tree for a root changeset), with an empty delta.
 //! 3. Encodes the changed directories bottom-up, then the changeset: its delta is the changes
 //!    that changed the tree, sorted by path.
 //! 4. Writes the blobs the delta puts, the changed trees and the changeset object in one
@@ -78,6 +79,9 @@ pub struct CommitRequest {
     pub message: Vec<u8>,
     /// SwarmOps-owned key/value pairs; keys strictly ascending.
     pub metadata: Vec<(String, Vec<u8>)>,
+    /// Whether a changeset that changes nothing may be made (no changes, or only puts of what
+    /// their paths hold already); otherwise that is [`RepoError::EmptyChanges`].
+    pub allow_empty: bool,
 }
 
 /// What [`Repo::commit`] did.
@@ -110,8 +114,9 @@ impl<O: ObjectStore> Repo<O> {
             committer,
             message,
             metadata,
+            allow_empty,
         } = req;
-        let changes = sorted_changes(changes)?;
+        let changes = sorted_changes(changes, allow_empty)?;
         self.check_parents(&parents)?;
         let (candidates, mut contents) = candidate_delta(changes);
         let mut edit = match parents.first() {
@@ -124,7 +129,7 @@ impl<O: ObjectStore> Repo<O> {
             .zip(effective)
             .filter_map(|(entry, effective)| effective.then_some(entry))
             .collect();
-        if delta.is_empty() {
+        if delta.is_empty() && !allow_empty {
             return Err(RepoError::EmptyChanges);
         }
         let Encoded {
@@ -236,9 +241,10 @@ impl<O: ObjectStore> Repo<O> {
     }
 }
 
-/// `changes` sorted by path, once checked: not empty, no directory put, each path once.
-fn sorted_changes(mut changes: Vec<Change>) -> Result<Vec<Change>, RepoError> {
-    if changes.is_empty() {
+/// `changes` sorted by path, once checked: not empty (unless `allow_empty`), no directory
+/// put, each path once.
+fn sorted_changes(mut changes: Vec<Change>, allow_empty: bool) -> Result<Vec<Change>, RepoError> {
+    if changes.is_empty() && !allow_empty {
         return Err(RepoError::EmptyChanges);
     }
     let dir_put = changes.iter().find(|change| {

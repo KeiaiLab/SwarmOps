@@ -78,6 +78,7 @@ fn request(parents: &[ChangesetId], changes: Vec<Change>, message: &str) -> Comm
         committer: signature(),
         message: message.as_bytes().to_vec(),
         metadata: Vec::new(),
+        allow_empty: false,
     }
 }
 
@@ -468,13 +469,6 @@ fn create_open_and_info() {
         "reopened"
     );
 
-    // A second create refuses: the store exists. It changes nothing.
-    match LocalRepo::create(&root, "other") {
-        Err(RepoError::Store(StoreError::Format(_))) => {}
-        other => panic!("expected Format, got {:?}", other.map(|r| r.info())),
-    }
-    assert_eq!(LocalRepo::open(&root).unwrap().info().unwrap().name, "demo");
-
     // Any name round-trips, line breaks and all.
     let odd = "a name\nwith a line break and ünïcödé";
     let other = LocalRepo::create(&base.join("odd"), odd).unwrap();
@@ -505,6 +499,53 @@ fn create_open_and_info() {
         Err(RepoError::Store(StoreError::Format(_))) => {}
         other => panic!("expected Format, got {:?}", other.map(|r| r.info())),
     }
+}
+
+#[test]
+fn create_on_existing_store_is_exists() {
+    let (_dir, root, repo) = new_repo();
+    let id = commit(&repo, &[], vec![put("f", b"1")]);
+    let info = repo.info().unwrap();
+    // FORMAT is there: a store exists, and create changes nothing of it.
+    match LocalRepo::create(&root, "other") {
+        Err(RepoError::Exists) => {}
+        other => panic!("expected Exists, got {:?}", other.map(|r| r.info())),
+    }
+    let reopened = LocalRepo::open(&root).unwrap();
+    assert_eq!(reopened.info().unwrap(), info);
+    assert!(reopened.changeset(id).unwrap().is_some());
+
+    // Without FORMAT, the store is one a create left half done: a create finishes it.
+    fs::remove_file(root.join("FORMAT")).unwrap();
+    let resumed = LocalRepo::create(&root, "other").unwrap();
+    assert_eq!(resumed.info().unwrap().name, "other");
+    assert!(resumed.changeset(id).unwrap().is_some());
+}
+
+#[test]
+fn open_requires_the_repo_file() {
+    let (_dir, root, repo) = new_repo();
+    let info = repo.info().unwrap();
+    let repo_file = root.join("REPO");
+    // A line with the id, then the name to the end of the file.
+    assert_eq!(
+        fs::read_to_string(&repo_file).unwrap(),
+        format!("{}\ntest", info.repo_id)
+    );
+    let refused = |what: &str| match LocalRepo::open(&root) {
+        Err(RepoError::Store(StoreError::Format(_))) => {}
+        other => panic!("{what}: expected Format, got {:?}", other.map(|r| r.info())),
+    };
+    for (bytes, what) in [
+        (b"no line break".as_slice(), "no id line"),
+        (b"0123\ntest", "an id that is not 32 hex digits"),
+        (b"\xff\ntest", "not UTF-8"),
+    ] {
+        fs::write(&repo_file, bytes).unwrap();
+        refused(what);
+    }
+    fs::remove_file(&repo_file).unwrap();
+    refused("no REPO");
 }
 
 #[test]

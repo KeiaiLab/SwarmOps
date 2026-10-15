@@ -10,6 +10,24 @@
 //! <store>/objects/  the 256 fan-out directories of the loose objects, and tmp/
 //! ```
 //!
+//! # The `REPO` file
+//!
+//! `REPO` holds the repository's identity: a line with its id, 32 lowercase hex digits chosen
+//! at random by create, then its name, verbatim (any UTF-8, line breaks included) to the end
+//! of the file, with no line break added:
+//!
+//! ```text
+//! 3f9c2d0a8e1b4c7f6a5d2e9b0c8f1a37
+//! acme
+//! ```
+//!
+//! Create writes it in step 5 below, after `meta/` and before `FORMAT`, replacing it
+//! atomically (a temp file in the store root, synced, renamed over it, the root synced), so a
+//! store with `FORMAT` always has it; a create that resumes after a crash writes it again,
+//! with a new id. Open requires it alongside `FORMAT`: after checking `FORMAT`, it reads
+//! `REPO`, and refuses a store whose `REPO` is missing, not UTF-8, or does not start with an
+//! id line ([`StoreError::Format`]).
+//!
 //! # Create
 //!
 //! [`LocalRepo::create`] lays a store out so that it is whole once `FORMAT` exists, and
@@ -17,12 +35,13 @@
 //!
 //! 1. It refuses a path under `/mnt/` (where WSL mounts Windows drives): first as given, before
 //!    it creates anything, then once the directory exists and symlinks are resolved.
-//! 2. It refuses a directory that holds `FORMAT`: a store is there already.
+//! 2. It refuses a directory that holds `FORMAT`: a store is there already
+//!    ([`RepoError::Exists`]).
 //! 3. It creates `objects/` with its 256 fan-out directories and `tmp/`, keeping those that
 //!    exist already, and makes them durable: one fsync of `objects/`, one of the store root.
 //! 4. It creates `meta/` with `MetaStore::create`, which is crash-atomic, or opens the whole one
 //!    a crashed create left behind.
-//! 5. It writes `REPO` atomically, with a new repository id.
+//! 5. It writes `REPO` atomically, with a new repository id (see above).
 //! 6. Last, it links `FORMAT` into place without replacing anything, from a temp file in
 //!    `objects/tmp/` that is synced first (so `FORMAT` is never seen half written), and syncs
 //!    the store root.
@@ -89,7 +108,7 @@ struct Identity {
 impl LocalRepo {
     /// Creates a store at `store` (the directory is created if missing) for a repository
     /// named `name`, and opens it: see [the module documentation](self) for the steps.
-    /// [`StoreError::Format`] if the directory holds a store already;
+    /// [`RepoError::Exists`] if the directory holds a store already (its `FORMAT` file);
     /// [`StoreError::UnsupportedFs`] for a path under `/mnt/`. Any name is kept verbatim.
     ///
     /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests), the object store and the metadata
@@ -110,9 +129,10 @@ impl LocalRepo {
         Self::create_on(store, name, fs, false)
     }
 
-    /// Opens the store at `store`. Checks `FORMAT` first: [`StoreError::Format`] if it is
-    /// missing (no store there) or names another layout version, or if `REPO` or `meta/` is
-    /// missing. Honors `SWARMOPS_TEST_CRASH_AT` as [`LocalRepo::create`] does.
+    /// Opens the store at `store`. Checks `FORMAT` first, then reads `REPO`:
+    /// [`StoreError::Format`] if `FORMAT` is missing (no store there) or names another layout
+    /// version, if `REPO` is missing or malformed, or if `meta/` is missing. Honors
+    /// `SWARMOPS_TEST_CRASH_AT` as [`LocalRepo::create`] does.
     pub fn open(store: &Utf8Path) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::open_on(store, fs, one_thread)
@@ -145,7 +165,7 @@ impl LocalRepo {
         let root = native_root(store, &*fs)?;
         let layout = Layout::new(root.clone());
         if fs.exists(layout.format_file().as_std_path())? {
-            return Err(StoreError::Format(format!("{root} holds a store already")).into());
+            return Err(RepoError::Exists);
         }
         let objects = layout.objects_dir();
         for byte in 0..=u8::MAX {
@@ -169,11 +189,9 @@ impl LocalRepo {
         fs.atomic_replace(layout.repo_file().as_std_path(), repo_file.as_bytes())?;
         let temp = fs.write_durable_temp(layout.objects_tmp().as_std_path(), FORMAT)?;
         let format_file = layout.format_file();
+        // Another create that finished first.
         if fs.link_noclobber(&temp, format_file.as_std_path())? == LinkOutcome::AlreadyExists {
-            return Err(StoreError::Format(format!(
-                "{root} holds a store already: another create finished first"
-            ))
-            .into());
+            return Err(RepoError::Exists);
         }
         fs.fsync_dir(root.as_std_path())?;
         Ok(Self::assemble(layout, fs, meta, identity, one_thread))

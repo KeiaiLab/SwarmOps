@@ -69,15 +69,13 @@ impl<'o, O: ObjectStore> TreeEdit<'o, O> {
         })
     }
 
-    /// An edit of the empty tree: the base of a root changeset.
+    /// An edit of the empty tree: the base of a root changeset. Its root counts as made, not
+    /// read, so [`TreeEdit::finish`] returns the root tree among the changed ones even if it
+    /// stays empty: the store need not hold the empty tree yet.
     pub(crate) fn empty(objects: &'o O) -> Self {
-        let root = Dir {
-            entries: BTreeMap::new(),
-            read_from: Some(Tree::empty_root().id()),
-        };
         Self {
             objects,
-            dirs: vec![root],
+            dirs: vec![Dir::made()],
         }
     }
 
