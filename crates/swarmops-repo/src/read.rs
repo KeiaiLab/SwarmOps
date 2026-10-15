@@ -40,9 +40,10 @@ impl<O: ObjectStore> Repo<O> {
 
     /// The changeset revision `rev` names, in one snapshot of the metadata: see
     /// [the module documentation](self) for the grammar. [`RepoError::NotFound`] when it names
-    /// none (a ref that does not exist, an id or a prefix of none, a `~N` past a root),
-    /// [`RepoError::Ambiguous`] for a prefix of more than one, [`RepoError::BadRev`] for
-    /// anything that is not a revision. The errors carry `rev` as given.
+    /// none (a ref that does not exist or names a changeset the store does not hold, an id or a
+    /// prefix of none, a `~N` past a root), [`RepoError::Ambiguous`] for a prefix of more than
+    /// one, [`RepoError::BadRev`] for anything that is not a revision. The errors carry `rev`
+    /// as given (a dangling ref's error adds the changeset it names).
     pub fn resolve(&self, rev: &str) -> Result<ChangesetId, RepoError> {
         let bad = || RepoError::BadRev(rev.to_owned());
         let mut parts = rev.split('~');
@@ -155,7 +156,12 @@ fn resolve_base(read: &MetaRead<'_>, base: &str, rev: &str) -> Result<ChangesetI
     if !hex {
         // No ref name is all hex digits: main, or release/<x>.
         return match read.get_ref(base) {
-            Ok(Some(state)) => Ok(state.target),
+            Ok(Some(state)) if read.changeset(state.target)?.is_some() => Ok(state.target),
+            // A dangling ref (damage verify reports): the revision names nothing.
+            Ok(Some(state)) => Err(RepoError::NotFound(format!(
+                "{rev} (ref {base} names {}, which the store does not hold)",
+                state.target
+            ))),
             Ok(None) => Err(not_found()),
             Err(StoreError::RefName(_)) => Err(RepoError::BadRev(rev.to_owned())),
             Err(e) => Err(e.into()),

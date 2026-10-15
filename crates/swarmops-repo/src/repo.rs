@@ -50,6 +50,7 @@
 //! picks up where the crashed one stopped. Two creates of one store at once are not supported.
 
 use std::hash::{BuildHasher, RandomState};
+use std::io;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -97,6 +98,16 @@ pub struct RepoInfo {
     pub refs: u64,
     /// What `main` names, if it exists.
     pub main: Option<ChangesetId>,
+}
+
+/// What [`Repo::cas_ref`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CasOutcome {
+    /// Whether the ref moved, as the store decided.
+    pub result: CasResult,
+    /// Steps after the commit point that failed, one line each: the move is committed all
+    /// the same.
+    pub warnings: Vec<String>,
 }
 
 /// What `REPO` holds.
@@ -262,27 +273,32 @@ impl<O: ObjectStore> Repo<O> {
     /// recorded in the journal (the reflog). [`RepoError::RefName`] for a bad name,
     /// [`RepoError::NotFound`] for a `new` that is not a changeset in the store.
     ///
-    /// A move whose journal frame is durable counts as applied even if a step after that
-    /// failed ([`StoreError::PostCommit`]): the next write to the store repairs the ref file.
+    /// A move whose journal frame is durable is applied even if a step after that failed
+    /// ([`StoreError::PostCommit`]): the outcome carries a warning, and the next write to the
+    /// store repairs the ref file.
     pub fn cas_ref(
         &self,
         name: &str,
         expected: Option<ChangesetId>,
         new: Option<ChangesetId>,
         actor: &str,
-    ) -> Result<CasResult, RepoError> {
+    ) -> Result<CasOutcome, RepoError> {
         let mut write = self.meta.write()?;
         let result = write
             .cas_ref(name, expected, new, actor)
             .map_err(ref_error)?;
+        let mut warnings = Vec::new();
         // A mismatch queued nothing: dropping the write releases the lock and commits nothing.
         if let CasResult::Applied { .. } = result {
             match write.commit() {
-                Ok(_) | Err(StoreError::PostCommit { .. }) => {}
+                Ok(_) => {}
+                Err(StoreError::PostCommit { frame_seq, source }) => {
+                    warnings.push(post_commit_warning("the ref move", frame_seq, &source));
+                }
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(result)
+        Ok(CasOutcome { result, warnings })
     }
 
     /// Changeset `id`'s object, decoded.
@@ -290,6 +306,15 @@ impl<O: ObjectStore> Repo<O> {
         let payload = object(&self.objects, id.0, ObjectKind::Changeset)?;
         Ok(Changeset::decode(&payload)?)
     }
+}
+
+/// The warning for a transaction (`what`) committed at journal frame `frame_seq` whose step
+/// after the commit point failed with `source`.
+pub(crate) fn post_commit_warning(what: &str, frame_seq: u64, source: &StoreError) -> String {
+    format!(
+        "{what} is committed (journal frame {frame_seq}), but a step after the commit point \
+         failed: {source}; the next write to the store repairs it"
+    )
 }
 
 /// The payload of `kind` object `id`, verified against its id. [`RepoError::MissingObject`] if
@@ -334,19 +359,68 @@ fn default_fs() -> (Arc<dyn FsOps>, bool) {
 }
 
 /// `store` as a canonical path on a native Linux filesystem, created (through `fs`) if
-/// missing. A path under `/mnt/` is refused before anything is created; one that leads there
-/// through a symlink, once the directory exists.
+/// missing, each new directory's entry made durable. Where the path leads is worked out before
+/// anything is created ([`resolve`]): a path that leads under `/mnt/` is refused then, and,
+/// should anything have swapped in a symlink meanwhile, again once the directory exists.
 fn native_root(store: &Utf8Path, fs: &dyn FsOps) -> Result<Utf8PathBuf, RepoError> {
-    let absolute = camino::absolute_utf8(store)?;
-    if !is_native_linux_fs(&absolute) {
-        return Err(StoreError::UnsupportedFs(absolute).into());
+    let (target, missing) = resolve(&camino::absolute_utf8(store)?)?;
+    if !is_native_linux_fs(&target) {
+        return Err(StoreError::UnsupportedFs(target).into());
     }
-    fs.create_dir_all(absolute.as_std_path())?;
-    let canonical = absolute.canonicalize_utf8()?;
+    fs.create_dir_all(target.as_std_path())?;
+    // A directory's entry lives in its parent: sync the parent of each directory just made,
+    // outermost first, or of the root alone if it was there (a crashed create may have made it).
+    let made = if missing.is_empty() {
+        std::slice::from_ref(&target)
+    } else {
+        &missing[..]
+    };
+    for dir in made {
+        if let Some(parent) = dir.parent() {
+            fs.fsync_dir(parent.as_std_path())?;
+        }
+    }
+    let canonical = target.canonicalize_utf8()?;
     if !is_native_linux_fs(&canonical) {
         return Err(StoreError::UnsupportedFs(canonical).into());
     }
     Ok(canonical)
+}
+
+/// Where absolute path `path` leads once its missing directories are made, and those
+/// directories, outermost first. Its nearest ancestor that exists is canonicalized (its
+/// symlinks resolved), and the components below it follow, their `..` taken by name: none of
+/// them exists, so none is a symlink.
+fn resolve(path: &Utf8Path) -> io::Result<(Utf8PathBuf, Vec<Utf8PathBuf>)> {
+    let mut existing = path.to_owned();
+    let mut below = Vec::new();
+    let mut target = loop {
+        match existing.canonicalize_utf8() {
+            Ok(canonical) => break canonical,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let last = existing
+                    .components()
+                    .next_back()
+                    .map(|c| c.as_str().to_owned());
+                match last {
+                    Some(name) if existing.pop() => below.push(name),
+                    _ => return Err(e),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let mut missing = Vec::new();
+    for name in below.iter().rev() {
+        if name == ".." {
+            target.pop();
+            missing.pop();
+        } else {
+            target.push(name);
+            missing.push(target.clone());
+        }
+    }
+    Ok((target, missing))
 }
 
 /// The identity `REPO` holds: a line with the id, then the name to the end of the file.

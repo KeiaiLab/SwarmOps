@@ -16,11 +16,15 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{
     BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath,
-    Signature, Tree, hash_object,
+    Signature, Tree, TreeId, hash_object,
 };
-use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo, VerifyProblem, VerifyReport};
+use swarmops_repo::{
+    Change, ChangeOp, CommitRequest, LocalRepo, MismatchCause, RepoError, StoreError,
+    VerifyProblem, VerifyReport,
+};
 use swarmops_store::{
     ChangesetMeta, FsObjectStore, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore, RealFs,
+    Record,
 };
 use tempfile::TempDir;
 
@@ -117,6 +121,72 @@ fn compact(root: &Utf8Path) -> u64 {
 
 /// Asserts that verify finds exactly `want`, in any order, deep (`deep`) or shallow; returns
 /// its report.
+fn mismatch(seq: u64, cause: MismatchCause) -> VerifyProblem {
+    VerifyProblem::IndexMismatch { seq, cause }
+}
+
+/// A changeset by the test signature, with no changes of its own unless `delta` says.
+fn changeset(parents: Vec<ChangesetId>, root: TreeId, delta: Vec<DeltaEntry>) -> Changeset {
+    Changeset {
+        parents,
+        root,
+        delta,
+        author: signature(),
+        committer: signature(),
+        message: b"written by hand".to_vec(),
+        extra_headers: Vec::new(),
+        metadata: Vec::new(),
+    }
+}
+
+/// Stores `cs`'s object in the store at `root`, durably, and records it in a write
+/// transaction of its own with `parents` and `delta_hash` (which may not be the object's);
+/// returns its id.
+fn record_by_hand(
+    root: &Utf8Path,
+    cs: &Changeset,
+    parents: Vec<ChangesetId>,
+    delta_hash: [u8; 32],
+) -> ChangesetId {
+    let objects = FsObjectStore::open(Layout::new(root), Box::new(RealFs));
+    let id = ChangesetId(
+        objects
+            .put(ObjectKind::Changeset, &cs.encode().unwrap())
+            .unwrap(),
+    );
+    objects.flush().unwrap();
+    let meta = MetaStore::open(root).unwrap();
+    let mut write = meta.write().unwrap();
+    write
+        .insert_changeset(ChangesetMeta {
+            id,
+            seq: 0,
+            generation: 0,
+            delta_hash,
+            parents,
+        })
+        .unwrap();
+    write.commit().unwrap();
+    id
+}
+
+/// Swaps entries `a` and `b` (each `width` bytes) of file `path`.
+fn swap_entries(path: &Utf8Path, width: usize, a: usize, b: usize) {
+    let mut bytes = fs::read(path).unwrap();
+    let first = bytes[a * width..(a + 1) * width].to_vec();
+    let second = bytes[b * width..(b + 1) * width].to_vec();
+    bytes[a * width..(a + 1) * width].copy_from_slice(&second);
+    bytes[b * width..(b + 1) * width].copy_from_slice(&first);
+    fs::write(path, bytes).unwrap();
+}
+
+/// The recs of the id view's first two entries, in the store at `root`.
+fn first_two_recs(root: &Utf8Path) -> [u64; 2] {
+    let index = Index::open(&Layout::new(root), Arc::new(RealFs)).unwrap();
+    let view = index.ids_view();
+    [view.rec_at(0).unwrap(), view.rec_at(1).unwrap()]
+}
+
 #[track_caller]
 fn assert_problems_when(
     repo: &LocalRepo,
@@ -330,7 +400,7 @@ fn verify_detects_index_journal_mismatch() {
         assert_eq!(index.append(&bogus).unwrap(), 2);
         index.sync().unwrap();
     }
-    assert_problems(&repo, vec![VerifyProblem::IndexMismatch { seq: 2 }]);
+    assert_problems(&repo, vec![mismatch(2, MismatchCause::Journal)]);
 
     // Two records in each other's places.
     let ids = layout.meta_path("idx/ids.col");
@@ -341,9 +411,9 @@ fn verify_detects_index_journal_mismatch() {
     assert_problems(
         &repo,
         vec![
-            VerifyProblem::IndexMismatch { seq: 0 },
-            VerifyProblem::IndexMismatch { seq: 1 },
-            VerifyProblem::IndexMismatch { seq: 2 },
+            mismatch(0, MismatchCause::Journal),
+            mismatch(1, MismatchCause::Journal),
+            mismatch(2, MismatchCause::Journal),
         ],
     );
 }
@@ -359,7 +429,7 @@ fn verify_detects_index_records_lost_below_the_checkpoint() {
     let ids = Layout::new(&root).meta_path("idx/ids.col");
     let column = fs::read(&ids).unwrap();
     fs::write(&ids, &column[..32]).unwrap();
-    assert_problems(&repo, vec![VerifyProblem::IndexMismatch { seq: 1 }]);
+    assert_problems(&repo, vec![mismatch(1, MismatchCause::Journal)]);
 }
 
 #[test]
@@ -386,9 +456,133 @@ fn verify_checks_the_sorted_views_against_the_columns() {
     fs::write(&keys, view).unwrap();
     assert_problems(
         &repo,
-        recs.map(|seq| VerifyProblem::IndexMismatch { seq })
+        recs.map(|seq| mismatch(seq, MismatchCause::SortedView))
             .to_vec(),
     );
+}
+
+#[test]
+fn verify_checks_the_order_of_a_sorted_view() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
+    commit(&repo, &[c2], vec![put("f", b"3")]);
+    assert_eq!(compact(&root), 3);
+    // Swap the first two entries whole, key and rec: each still names its record by its key,
+    // but they are out of order, which the entry now second shows.
+    let [rec_first, _] = first_two_recs(&root);
+    let layout = Layout::new(&root);
+    swap_entries(&layout.meta_path("sorted/ids.key"), 32, 0, 1);
+    swap_entries(&layout.meta_path("sorted/ids.rec"), 8, 0, 1);
+    assert_problems(&repo, vec![mismatch(rec_first, MismatchCause::SortedView)]);
+}
+
+#[test]
+fn verify_checks_each_record_is_named_once_in_a_sorted_view() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
+    commit(&repo, &[c2], vec![put("f", b"3")]);
+    assert_eq!(compact(&root), 3);
+    // The second entry names the first entry's record again: under its own key, so that is
+    // wrong, and the record it named before is named by no entry at all.
+    let [first, second] = first_two_recs(&root);
+    let recs = Layout::new(&root).meta_path("sorted/ids.rec");
+    let mut view = fs::read(&recs).unwrap();
+    view[8..16].copy_from_slice(&first.to_le_bytes());
+    fs::write(&recs, view).unwrap();
+    assert_problems(
+        &repo,
+        vec![
+            mismatch(first, MismatchCause::SortedView),
+            mismatch(second, MismatchCause::SortedView),
+        ],
+    );
+}
+
+#[test]
+fn verify_fails_on_a_ref_file_it_cannot_read() {
+    // A ref file that is no ref file is damage verify reports (CorruptRef); one that cannot be
+    // read at all is an error it cannot get past.
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    repo.cas_ref("release/a", None, Some(c1), "test/agent")
+        .unwrap();
+    fs::create_dir(Layout::new(&root).meta_path("refs/release/b")).unwrap();
+    for deep in [true, false] {
+        match repo.verify(deep) {
+            Err(RepoError::Store(StoreError::Io(e))) => {
+                assert_eq!(e.kind(), std::io::ErrorKind::IsADirectory, "{e}");
+            }
+            other => panic!("deep: {deep}: expected an I/O error, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn verify_reports_damaged_metadata_files_and_checks_on() {
+    let corrupt_meta = |what: &str| {
+        let what = what.to_owned();
+        move |problem: &VerifyProblem| matches!(problem, VerifyProblem::MetaCorrupt(said) if said.starts_with(&what))
+    };
+    // Each time, a blob is damaged too: verify still checks the objects, and finds it.
+    let damaged_store = || {
+        let (dir, root, repo) = new_repo();
+        let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+        commit(&repo, &[c1], vec![put("g", b"2")]);
+        let file = object_file(&root, blob(b"1").0);
+        let mut bytes = fs::read(&file).unwrap();
+        *bytes.last_mut().unwrap() ^= 0x01;
+        fs::write(&file, bytes).unwrap();
+        (dir, root, repo)
+    };
+    let layout_of = |root: &Utf8Path| Layout::new(root);
+    for (damage, what) in [
+        ("journal.ckpt", "meta/journal.ckpt"),
+        ("journal.log", "meta/journal.log"),
+        ("journal.off", "meta/journal.off"),
+    ] {
+        let (_dir, root, repo) = damaged_store();
+        let file = layout_of(&root).meta_path(damage);
+        if damage == "journal.ckpt" {
+            fs::write(&file, b"bad").unwrap();
+        } else {
+            fs::remove_file(&file).unwrap();
+        }
+        let report = repo.verify(true).unwrap();
+        assert_eq!(report.problems.len(), 2, "{damage}: {:?}", report.problems);
+        assert!(
+            report.problems.iter().any(corrupt_meta(what)),
+            "{damage}: {:?}",
+            report.problems
+        );
+        assert!(
+            report
+                .problems
+                .contains(&VerifyProblem::CorruptObject(blob(b"1").0)),
+            "{damage}: {:?}",
+            report.problems
+        );
+        assert_eq!(report.changesets_checked, 2, "{damage}");
+    }
+
+    // Index files that do not open: the journal's changesets are checked all the same.
+    let (_dir, root, repo) = damaged_store();
+    assert_eq!(compact(&root), 2);
+    let view = layout_of(&root).meta_path("sorted/ids.rec");
+    let bytes = fs::read(&view).unwrap();
+    fs::write(&view, &bytes[..bytes.len() - 1]).unwrap();
+    let report = repo.verify(true).unwrap();
+    assert_eq!(report.problems.len(), 2, "{:?}", report.problems);
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(corrupt_meta("the changeset index")),
+        "{:?}",
+        report.problems
+    );
+    assert_eq!(report.changesets_checked, 2);
 }
 
 #[test]
@@ -457,39 +651,6 @@ fn verify_detects_missing_parents_root_mismatches_and_metadata_drift() {
     let (_dir, root, repo) = new_repo();
     let base = commit(&repo, &[], vec![put("a", b"a")]);
     let base_root = repo.changeset(base).unwrap().unwrap().changeset.root;
-    let objects = FsObjectStore::open(Layout::new(&root), Box::new(RealFs));
-    let changeset = |parents: Vec<ChangesetId>, root, delta| Changeset {
-        parents,
-        root,
-        delta,
-        author: signature(),
-        committer: signature(),
-        message: b"written by hand".to_vec(),
-        extra_headers: Vec::new(),
-        metadata: Vec::new(),
-    };
-    // Stores `cs` and records it with `parents` (which may not be the object's).
-    let record = |cs: &Changeset, parents: Vec<ChangesetId>| {
-        let id = ChangesetId(
-            objects
-                .put(ObjectKind::Changeset, &cs.encode().unwrap())
-                .unwrap(),
-        );
-        objects.flush().unwrap();
-        let meta = MetaStore::open(&root).unwrap();
-        let mut write = meta.write().unwrap();
-        write
-            .insert_changeset(ChangesetMeta {
-                id,
-                seq: 0,
-                generation: 0,
-                delta_hash: cs.delta_hash().unwrap(),
-                parents,
-            })
-            .unwrap();
-        write.commit().unwrap();
-        id
-    };
 
     // A changeset whose delta puts b, but whose root is its parent's: applying the delta to
     // the parent's root does not give its root.
@@ -501,17 +662,18 @@ fn verify_detects_missing_parents_root_mismatches_and_metadata_drift() {
         },
         renamed_from: None,
     }];
-    let wrong_root = record(&changeset(vec![base], base_root, put_b), vec![base]);
+    let wrong = changeset(vec![base], base_root, put_b);
+    let wrong_root = record_by_hand(&root, &wrong, vec![base], wrong.delta_hash().unwrap());
 
     // A changeset whose object names a parent the store does not hold, recorded without it:
-    // the parent is missing, and the metadata disagrees with the object.
+    // the parent is missing, and the record disagrees with the object.
     let empty_root = Tree::empty_root();
-    objects.put(ObjectKind::Tree, &empty_root.encode()).unwrap();
+    FsObjectStore::open(Layout::new(&root), Box::new(RealFs))
+        .put(ObjectKind::Tree, &empty_root.encode())
+        .unwrap();
     let nowhere = ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"));
-    let drifted = record(
-        &changeset(vec![nowhere], empty_root.id(), Vec::new()),
-        Vec::new(),
-    );
+    let orphan = changeset(vec![nowhere], empty_root.id(), Vec::new());
+    let drifted = record_by_hand(&root, &orphan, Vec::new(), orphan.delta_hash().unwrap());
 
     assert_problems(
         &repo,
@@ -521,7 +683,57 @@ fn verify_detects_missing_parents_root_mismatches_and_metadata_drift() {
                 child: drifted,
                 parent: nowhere,
             },
-            VerifyProblem::IndexMismatch { seq: 2 },
+            mismatch(2, MismatchCause::Object),
         ],
     );
+}
+
+#[test]
+fn verify_detects_generation_and_delta_hash_drift() {
+    // Each field on its own: a delta hash the object does not have, a generation the index
+    // holds wrong, and a generation the journal recorded wrong.
+    let (_dir, root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("a", b"a")]);
+    let base_root = repo.changeset(base).unwrap().unwrap().changeset.root;
+    let empty = changeset(vec![base], base_root, Vec::new());
+    record_by_hand(&root, &empty, vec![base], [9; 32]);
+    assert_problems(&repo, vec![mismatch(1, MismatchCause::Object)]);
+
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    commit(&repo, &[c1], vec![put("f", b"2")]);
+    let generations = Layout::new(&root).meta_path("idx/gen.col");
+    let mut column = fs::read(&generations).unwrap();
+    column[8..16].copy_from_slice(&9_u64.to_le_bytes());
+    fs::write(&generations, column).unwrap();
+    assert_problems(&repo, vec![mismatch(1, MismatchCause::Journal)]);
+
+    // A frame a writer appended (and died before it was materialized) with a generation
+    // that is not 1 + its parent's.
+    let (_dir, root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("a", b"a")]);
+    let base_root = repo.changeset(base).unwrap().unwrap().changeset.root;
+    let empty = changeset(vec![base], base_root, Vec::new());
+    let objects = FsObjectStore::open(Layout::new(&root), Box::new(RealFs));
+    let id = ChangesetId(
+        objects
+            .put(ObjectKind::Changeset, &empty.encode().unwrap())
+            .unwrap(),
+    );
+    objects.flush().unwrap();
+    let layout = Layout::new(&root);
+    {
+        let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+        let journal = Journal::open(&layout, Arc::new(RealFs)).unwrap();
+        journal.truncate_torn_tail().unwrap();
+        journal
+            .append_frame(&[Record::Changeset {
+                id,
+                generation: 7,
+                delta_hash: empty.delta_hash().unwrap(),
+                parents: vec![base],
+            }])
+            .unwrap();
+    }
+    assert_problems(&repo, vec![mismatch(1, MismatchCause::Object)]);
 }

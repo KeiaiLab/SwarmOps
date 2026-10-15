@@ -1,7 +1,8 @@
 //! Checking a store (storage spec §2–§3): [`Repo::verify`] reads all of a store once, without
 //! the writer lock and without writing, and reports what it finds damaged as
-//! [`VerifyProblem`]s. It fails only where it cannot read on: an I/O error, or index files too
-//! damaged to open.
+//! [`VerifyProblem`]s. It fails only on an I/O error it cannot get past. A metadata file it
+//! cannot read as one (a journal file missing, `journal.ckpt` malformed, index files that do
+//! not open) is a [`VerifyProblem::MetaCorrupt`], and the rest is checked without it.
 //!
 //! It reads in this order, so that a commit running meanwhile never looks like damage: the
 //! checkpoint, the changeset index, the ref files, then the journal (whatever the index or a
@@ -12,11 +13,12 @@
 //!   by place: a record unlike the journal's at its seq, one the journal does not hold, and a
 //!   journal record below the checkpoint that the index lacks are each an
 //!   [`VerifyProblem::IndexMismatch`], and so are sorted-view entries that disagree with the
-//!   index columns (the advisory `Compacted` frames are never consulted). A frame the
-//!   journal's reader finds corrupt is a [`VerifyProblem::JournalCorrupt`]: the comparison
-//!   stops there, and the index's records past it are checked as the index holds them. A ref
-//!   file that does not read is a [`VerifyProblem::CorruptRef`], one that names no changeset a
-//!   [`VerifyProblem::DanglingRef`].
+//!   index columns (the advisory `Compacted` frames are never consulted); each names its
+//!   [`MismatchCause`]. A frame the journal's reader finds corrupt is a
+//!   [`VerifyProblem::JournalCorrupt`]: the comparison stops there, and the index's records
+//!   past it are checked as the index holds them. A ref
+//!   file that is not a ref file is a [`VerifyProblem::CorruptRef`], one that names no
+//!   changeset a [`VerifyProblem::DanglingRef`]; one that cannot be read at all fails verify.
 //! - Every changeset, in seq order: its object, its record against its object (parents, delta
 //!   hash) and its parents' generations, its parents ([`VerifyProblem::MissingParent`]), every
 //!   tree under its root, and its root against its first parent's root with its delta applied
@@ -37,6 +39,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::io;
 use std::sync::Arc;
 
 use swarmops_core::{Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, Tree, TreeId};
@@ -59,8 +62,9 @@ pub struct VerifyReport {
     pub objects_checked: u64,
     /// How many changesets it checked.
     pub changesets_checked: u64,
-    /// What is damaged: the journal first, then the index records, the refs, the changesets
-    /// in seq order, and the objects. Empty for a sound store.
+    /// What is damaged: metadata files that do not read first, then the journal, the index
+    /// records, the refs, the changesets in seq order, and the objects. Empty for a sound
+    /// store.
     pub problems: Vec<VerifyProblem>,
 }
 
@@ -93,14 +97,12 @@ pub enum VerifyProblem {
     /// A ref file that does not read as one (`<64 hex digits>\n<version>\n`); carries the
     /// ref's name.
     CorruptRef(String),
-    /// The metadata of changeset record `seq` is wrong: the index's record is not the
-    /// journal's at that place (or the journal holds no record there); the journal holds the
-    /// record below the checkpoint, and the index lacks it; a sorted view's entry for it
-    /// disagrees with the index columns; or the record disagrees with the changeset's object
-    /// (parents, delta hash) or with its parents' generations.
+    /// The metadata of changeset record `seq` is wrong, as `cause` says.
     IndexMismatch {
         /// The record's place among the changesets, from 0.
         seq: u64,
+        /// What disagrees with what.
+        cause: MismatchCause,
     },
     /// A journal frame that the journal's reader finds corrupt starts at this offset of
     /// `journal.log`; nothing after it is read.
@@ -108,6 +110,27 @@ pub enum VerifyProblem {
         /// Where the frame starts.
         offset: u64,
     },
+    /// A metadata file that verify cannot read as one, so that what depends on it goes
+    /// unchecked: a journal file missing, `journal.ckpt` malformed, or index files that do not
+    /// open. Carries what is damaged and what is not checked for it.
+    MetaCorrupt(String),
+}
+
+/// What an [`VerifyProblem::IndexMismatch`] found disagreeing, which says what can mend it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum MismatchCause {
+    /// The index's record is not the journal's at that place, the index holds a record the
+    /// journal does not, or it lacks one the checkpoint has passed. The journal is the source
+    /// of truth: the index can be rebuilt from it.
+    Journal,
+    /// A sorted view's entry for the record disagrees with the index columns: its key is not
+    /// the record's, it is out of order, or the view does not name the record once. The views
+    /// can be rebuilt from the columns.
+    SortedView,
+    /// The record the journal holds disagrees with the changeset's object (its parents or its
+    /// delta hash) or with its parents' generations: the metadata was recorded wrong, so
+    /// rebuilding the index from the journal cannot mend it.
+    Object,
 }
 
 impl fmt::Display for VerifyProblem {
@@ -130,15 +153,28 @@ impl fmt::Display for VerifyProblem {
             ),
             Self::DanglingRef(name) => write!(f, "ref {name} names no changeset in the store"),
             Self::CorruptRef(name) => write!(f, "the file of ref {name} is not a ref file"),
-            Self::IndexMismatch { seq } => {
-                write!(
+            Self::IndexMismatch { seq, cause } => match cause {
+                MismatchCause::Journal => write!(
                     f,
-                    "the metadata of changeset record {seq} disagrees with the journal"
-                )
-            }
+                    "changeset record {seq}: the index disagrees with the journal; rebuild the \
+                     index from the journal"
+                ),
+                MismatchCause::SortedView => write!(
+                    f,
+                    "changeset record {seq}: a sorted view disagrees with the index columns; \
+                     rebuild the sorted views from the columns"
+                ),
+                MismatchCause::Object => write!(
+                    f,
+                    "changeset record {seq}: the journal recorded it unlike its object (parents, \
+                     delta hash) or its parents' generations; rebuilding the index cannot mend \
+                     that: the record must be derived from the object again"
+                ),
+            },
             Self::JournalCorrupt { offset } => {
                 write!(f, "the journal is corrupt at offset {offset}")
             }
+            Self::MetaCorrupt(what) => write!(f, "damaged metadata: {what}"),
         }
     }
 }
@@ -164,9 +200,11 @@ struct Check<'r, O: ObjectStore> {
     repo: &'r Repo<O>,
     /// Whether every object file is re-hashed.
     deep: bool,
+    /// Metadata files that do not read.
+    meta: Vec<VerifyProblem>,
     journal_corrupt: Option<u64>,
-    /// The seqs of the records found wrong, by any of the checks that compare them.
-    mismatches: BTreeSet<u64>,
+    /// The records found wrong, with what disagreed, each pair once.
+    mismatches: BTreeSet<(u64, MismatchCause)>,
     /// The refs' problems, in the order of their names.
     refs: Vec<VerifyProblem>,
     /// The changesets' and the objects' problems, in the order found.
@@ -191,6 +229,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         Self {
             repo,
             deep,
+            meta: Vec::new(),
             journal_corrupt: None,
             mismatches: BTreeSet::new(),
             refs: Vec::new(),
@@ -207,25 +246,37 @@ impl<'r, O: ObjectStore> Check<'r, O> {
 
     /// Reads and compares the metadata; returns the changesets to check, in seq order.
     fn metadata(&mut self) -> Result<Vec<ChangesetMeta>, RepoError> {
-        let repo = self.repo;
-        let journal = Journal::open(&repo.layout, Arc::clone(&repo.fs))?;
-        let ckpt = journal.ckpt()?;
-        let index = Index::open(&repo.layout, Arc::clone(&repo.fs))?;
-        let ref_files = repo.meta.ref_files()?;
-        let (frames, corrupt) = read_frames(&journal)?;
-        self.journal_corrupt = corrupt;
+        let journal = self.open_journal()?;
+        let ckpt = match &journal {
+            Some(journal) => self.checkpoint(journal)?,
+            None => None,
+        };
+        let index = self.open_index()?;
+        let ref_files = self.repo.meta.ref_files()?;
+        let (frames, whole) = match &journal {
+            Some(journal) => {
+                let (frames, corrupt) = read_frames(journal)?;
+                self.journal_corrupt = corrupt;
+                (frames, corrupt.is_none())
+            }
+            None => (Vec::new(), false),
+        };
 
         let journaled = journal_changesets(&frames);
-        let records = self.index_records(&index)?;
-        self.compare(&journaled, &records, ckpt);
-        self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, true)?;
-        self.check_view(index.dh_view(), &records, |meta| meta.delta_hash, false)?;
+        let mut records = Vec::new();
+        if let Some(index) = &index {
+            records = self.index_records(index)?;
+            self.compare(&journaled, &records, ckpt, whole);
+            self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, true)?;
+            self.check_view(index.dh_view(), &records, |meta| meta.delta_hash, false)?;
+        }
 
         let journaled_count = journaled.len();
         let mut changesets: Vec<ChangesetMeta> =
             journaled.into_iter().map(|(meta, _)| meta).collect();
-        if corrupt.is_some() {
-            // The journal stops at the damage: past it, the index's records are what there is.
+        if !whole {
+            // The journal stops at damage, or is gone: past it, the index's records are what
+            // there is to check.
             changesets.extend(records.into_iter().skip(journaled_count).flatten());
         }
         self.generations = changesets
@@ -234,14 +285,71 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             .collect();
         for RefFile { name, state } in ref_files {
             match state {
-                Err(_) => self.refs.push(VerifyProblem::CorruptRef(name)),
                 Ok(state) if !self.generations.contains_key(&state.target) => {
                     self.refs.push(VerifyProblem::DanglingRef(name));
                 }
                 Ok(_) => {}
+                // A file that is no ref file; anything else that fails is no damage to report.
+                Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                    self.refs.push(VerifyProblem::CorruptRef(name));
+                }
+                Err(e) => return Err(e.into()),
             }
         }
         Ok(changesets)
+    }
+
+    /// A handle on the journal; `None`, reported, if one of its files is missing.
+    fn open_journal(&mut self) -> Result<Option<Journal>, RepoError> {
+        let layout = &self.repo.layout;
+        match Journal::open(layout, Arc::clone(&self.repo.fs)) {
+            Ok(journal) => Ok(Some(journal)),
+            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
+                let missing = [layout.journal_log(), layout.journal_off()]
+                    .into_iter()
+                    .find(|file| !file.exists());
+                let what = match missing.as_ref().and_then(|file| file.file_name()) {
+                    Some(file) => format!("meta/{file} is missing"),
+                    None => format!("the journal does not open ({e})"),
+                };
+                self.meta.push(VerifyProblem::MetaCorrupt(format!(
+                    "{what}: the journal is not checked, and the index is checked as it is"
+                )));
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The journal's checkpoint; `None`, reported, if `journal.ckpt` is malformed.
+    fn checkpoint(&mut self, journal: &Journal) -> Result<Option<u64>, RepoError> {
+        match journal.ckpt() {
+            Ok(ckpt) => Ok(Some(ckpt)),
+            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData => {
+                self.meta.push(VerifyProblem::MetaCorrupt(
+                    "meta/journal.ckpt does not hold a u64le offset: the records the checkpoint \
+                     passed are not checked against the index"
+                        .to_owned(),
+                ));
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// A handle on the changeset index; `None`, reported, if its files are too damaged to open.
+    fn open_index(&mut self) -> Result<Option<Index>, RepoError> {
+        match Index::open(&self.repo.layout, Arc::clone(&self.repo.fs)) {
+            Ok(index) => Ok(Some(index)),
+            Err(StoreError::IndexCorrupt { what }) => {
+                self.meta.push(VerifyProblem::MetaCorrupt(format!(
+                    "the changeset index does not open ({what}): it is not checked, and the \
+                     journal's changesets are"
+                )));
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// The index's records, by rec; `None` for one that does not read (a mismatch).
@@ -251,7 +359,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             match index.get(rec) {
                 Ok(meta) => records.push(Some(meta)),
                 Err(StoreError::IndexCorrupt { .. }) => {
-                    self.mismatches.insert(rec);
+                    self.mismatches.insert((rec, MismatchCause::Journal));
                     records.push(None);
                 }
                 Err(e) => return Err(e.into()),
@@ -266,24 +374,28 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         &mut self,
         journaled: &[(ChangesetMeta, u64)],
         records: &[Option<ChangesetMeta>],
-        ckpt: u64,
+        ckpt: Option<u64>,
+        whole: bool,
     ) {
         for (rec, record) in records.iter().enumerate() {
             let Some(record) = record else { continue };
             let wrong = match journaled.get(rec) {
                 Some((want, _)) => want != record,
-                // A record no committed transaction holds; past damage in the journal, there
-                // is no telling.
-                None => self.journal_corrupt.is_none(),
+                // A record no committed transaction holds; past damage in the journal, or with
+                // no journal, there is no telling.
+                None => whole,
             };
             if wrong {
-                self.mismatches.insert(to_u64(rec));
+                self.mismatches
+                    .insert((to_u64(rec), MismatchCause::Journal));
             }
         }
         // The checkpoint passes a record only once the index holds it durably.
+        let Some(ckpt) = ckpt else { return };
         for (seq, (_, offset)) in journaled.iter().enumerate().skip(records.len()) {
             if *offset < ckpt {
-                self.mismatches.insert(to_u64(seq));
+                self.mismatches
+                    .insert((to_u64(seq), MismatchCause::Journal));
             }
         }
     }
@@ -305,11 +417,12 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         for at in 0..view.len() {
             let (key, rec) = (view.key_at(at)?, view.rec_at(at)?);
             let slot = usize::try_from(rec).ok().filter(|&slot| slot < named.len());
+            // A record named twice is named once under a key that is not its own, or out of
+            // order: the coverage below finds the record it pushed out.
             let keyed = slot.is_some_and(|slot| {
-                !named[slot]
-                    && records[slot]
-                        .as_ref()
-                        .is_some_and(|meta| key_of(meta) == key)
+                records[slot]
+                    .as_ref()
+                    .is_some_and(|meta| key_of(meta) == key)
             });
             let ordered = previous.is_none_or(|before| {
                 if unique_keys {
@@ -322,13 +435,14 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                 named[slot] = true;
             }
             if !(keyed && ordered) {
-                self.mismatches.insert(rec);
+                self.mismatches.insert((rec, MismatchCause::SortedView));
             }
             previous = Some((key, rec));
         }
         for (rec, named) in named.iter().enumerate() {
             if !named {
-                self.mismatches.insert(to_u64(rec));
+                self.mismatches
+                    .insert((to_u64(rec), MismatchCause::SortedView));
             }
         }
         Ok(())
@@ -358,7 +472,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             || meta.delta_hash != cs.delta_hash()?
             || generation.is_some_and(|want| meta.generation != want)
         {
-            self.mismatches.insert(meta.seq);
+            self.mismatches.insert((meta.seq, MismatchCause::Object));
         }
         for &parent in &cs.parents {
             if !self.generations.contains_key(&parent) {
@@ -527,7 +641,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             let unread = self.blobs.keys().filter(|id| !self.hashed.contains(*id));
             unread.count()
         };
-        let mut problems = Vec::new();
+        let mut problems = self.meta;
         problems.extend(
             self.journal_corrupt
                 .map(|offset| VerifyProblem::JournalCorrupt { offset }),
@@ -535,7 +649,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         problems.extend(
             self.mismatches
                 .iter()
-                .map(|&seq| VerifyProblem::IndexMismatch { seq }),
+                .map(|&(seq, cause)| VerifyProblem::IndexMismatch { seq, cause }),
         );
         problems.extend(self.refs);
         problems.extend(self.problems);

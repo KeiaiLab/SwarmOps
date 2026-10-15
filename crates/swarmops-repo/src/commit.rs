@@ -3,7 +3,8 @@
 //!
 //! 1. Checks the request before it reads or writes anything: changes to make, unless
 //!    `allow_empty` ([`RepoError::EmptyChanges`]), no directory put ([`RepoError::DirPut`]),
-//!    each path once ([`RepoError::DuplicatePath`]), parents distinct and in the store
+//!    each path once ([`RepoError::DuplicatePath`]), at most 255 parents (an `InvalidInput`
+//!    error, as the metadata store gives), distinct and in the store
 //!    ([`RepoError::UnknownParent`]).
 //! 2. Hashes each put's content into its blob id, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
@@ -27,6 +28,7 @@
 //! ([`InsertOutcome::AlreadyPresent`]) without appending a transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::io;
 
 use swarmops_core::{
     BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath,
@@ -35,8 +37,11 @@ use swarmops_core::{
 use swarmops_store::{ChangesetMeta, InsertOutcome, ObjectStore, StoreError};
 
 use crate::error::RepoError;
-use crate::repo::Repo;
+use crate::repo::{Repo, post_commit_warning};
 use crate::tree_edit::{Encoded, TreeEdit};
+
+/// The most parents a changeset may have: what a journal record holds (its count is a byte).
+const MAX_PARENTS: usize = 255;
 
 /// One change of a [`CommitRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -166,11 +171,21 @@ impl<O: ObjectStore> Repo<O> {
 
         let blobs_written = self.count_missing(contents.keys().copied())?;
         let trees_written = self.count_missing(trees.iter().map(|(tree, _)| tree.0))?;
-        let mut batch = Vec::with_capacity(contents.len() + trees.len() + 1);
+        let ids: Vec<ObjectId> = contents
+            .keys()
+            .copied()
+            .chain(trees.iter().map(|(tree, _)| tree.0))
+            .chain([id.0])
+            .collect();
+        let mut batch = Vec::with_capacity(ids.len());
         batch.extend(contents.into_values().map(|blob| (ObjectKind::Blob, blob)));
         batch.extend(trees.into_iter().map(|(_, tree)| (ObjectKind::Tree, tree)));
         batch.push((ObjectKind::Changeset, bytes));
-        self.objects.put_batch(batch)?;
+        let stored = self.objects.put_batch(batch)?;
+        debug_assert_eq!(
+            stored, ids,
+            "the store hashed the objects as the commit did"
+        );
         self.objects.flush()?;
 
         let (insert, warnings) = self.record(meta)?;
@@ -184,9 +199,17 @@ impl<O: ObjectStore> Repo<O> {
         })
     }
 
-    /// Refuses a parent listed twice ([`StoreError::DuplicateParent`]) or not in the store
-    /// ([`RepoError::UnknownParent`]).
+    /// Refuses more parents than a journal record holds (an `InvalidInput` error, as the
+    /// metadata store gives at insert), a parent listed twice ([`StoreError::DuplicateParent`]),
+    /// or one not in the store ([`RepoError::UnknownParent`]).
     fn check_parents(&self, parents: &[ChangesetId]) -> Result<(), RepoError> {
+        if parents.len() > MAX_PARENTS {
+            let message = format!(
+                "a changeset has at most {MAX_PARENTS} parents, not {}",
+                parents.len()
+            );
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, message).into());
+        }
         for (at, parent) in parents.iter().enumerate() {
             if parents[..at].contains(parent) {
                 return Err(StoreError::DuplicateParent(*parent).into());
@@ -230,10 +253,9 @@ impl<O: ObjectStore> Repo<O> {
         if let InsertOutcome::Inserted { .. } = insert {
             match write.commit() {
                 Ok(_) => {}
-                Err(StoreError::PostCommit { frame_seq, source }) => warnings.push(format!(
-                    "the changeset is committed (journal frame {frame_seq}), but a step after \
-                     the commit point failed: {source}; the next write to the store repairs it"
-                )),
+                Err(StoreError::PostCommit { frame_seq, source }) => {
+                    warnings.push(post_commit_warning("the changeset", frame_seq, &source));
+                }
                 Err(e) => return Err(e.into()),
             }
         }

@@ -478,7 +478,6 @@ fn cas_ref_rejects_unknown_target_and_bad_name() {
     assert!(listed.iter().all(|(_, state)| *state == ref_state(1, 1)));
 }
 
-/// A root changeset whose id starts with `prefix`, its other bytes `fill`.
 #[test]
 fn ref_files_lists_each_ref_file_even_when_one_is_damaged() {
     let (_dir, root, store) = new_store();
@@ -507,6 +506,7 @@ fn ref_files_lists_each_ref_file_even_when_one_is_damaged() {
     }
 }
 
+/// A root changeset whose id starts with `prefix`, its other bytes `fill`.
 fn with_prefix(prefix: &[u8], fill: u8) -> ChangesetMeta {
     let mut bytes = [fill; 32];
     bytes[..prefix.len()].copy_from_slice(prefix);

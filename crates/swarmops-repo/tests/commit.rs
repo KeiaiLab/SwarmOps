@@ -23,9 +23,11 @@ use swarmops_core::{
     Tree, TreeEntry, hash_object,
 };
 use swarmops_repo::{
-    Change, ChangeOp, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
+    CasResult, Change, ChangeOp, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
 };
-use swarmops_store::{CRASH_AT_ENV, FsOps, Journal, Layout, LinkOutcome, RealFs, StoreError};
+use swarmops_store::{
+    CRASH_AT_ENV, ChangesetMeta, FsOps, Journal, Layout, LinkOutcome, MetaStore, RealFs, StoreError,
+};
 use tempfile::TempDir;
 
 /// Set only in the children this file's tests spawn: the store root.
@@ -455,6 +457,81 @@ fn allow_empty_commits_a_changeset_with_the_parent_root() {
     assert_eq!(first.trees_written, 1, "the empty tree was not stored yet");
     assert_eq!(listing(&repo, first.id, None), Some(Vec::new()));
     assert_eq!(repo.verify(true).unwrap().problems, []);
+}
+
+#[test]
+fn commit_refuses_more_than_255_parents_before_writing() {
+    let (_dir, root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("a", b"a")]);
+    // 255 more changesets for parents, recorded straight in the metadata (no objects): a
+    // journal record holds at most 255 parents, so 256 cannot be recorded.
+    let others: Vec<ChangesetId> = (0..255_u32)
+        .map(|n| ChangesetId(hash_object(ObjectKind::Changeset, &n.to_le_bytes())))
+        .collect();
+    let meta = MetaStore::open(&root).unwrap();
+    let mut write = meta.write().unwrap();
+    for (n, &id) in others.iter().enumerate() {
+        let record = ChangesetMeta {
+            id,
+            seq: 0,
+            generation: 0,
+            delta_hash: [u8::try_from(n).unwrap(); 32],
+            parents: Vec::new(),
+        };
+        write.insert_changeset(record).unwrap();
+    }
+    write.commit().unwrap();
+    let objects = object_files(&root);
+
+    let mut parents = vec![base.id];
+    parents.extend(others);
+    match repo.commit(request(&parents, vec![put("b", b"b")])) {
+        Err(RepoError::Store(StoreError::Io(e))) => {
+            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+    assert_eq!(object_files(&root), objects, "nothing was written");
+}
+
+#[test]
+fn commit_root_matches_a_root_commit_of_the_same_files() {
+    // However a tree got to its files, its root is the root of those files: a commit on a
+    // parent gives the root a root commit of its final files gives.
+    let (_dir, _root, repo) = new_repo();
+    let base = commit(
+        &repo,
+        &[],
+        vec![
+            put("a.rs", b"a"),
+            put("src/lib.rs", b"v1"),
+            put("src/x/y.txt", b"y"),
+            put("old/gone.txt", b"g"),
+        ],
+    );
+    let child = commit(
+        &repo,
+        &[base.id],
+        vec![
+            put("src/lib.rs", b"v2"),
+            delete("src/x/y.txt"),
+            delete("old/gone.txt"),
+            put("src/x/z.txt", b"z"),
+            put_as("bin/run", EntryKind::Exec, b"#!/bin/sh\n"),
+        ],
+    );
+    let (_other_dir, _other_root, fresh) = new_repo();
+    let direct = commit(
+        &fresh,
+        &[],
+        vec![
+            put("a.rs", b"a"),
+            put("src/lib.rs", b"v2"),
+            put("src/x/z.txt", b"z"),
+            put_as("bin/run", EntryKind::Exec, b"#!/bin/sh\n"),
+        ],
+    );
+    assert_eq!(child.root, direct.root);
 }
 
 #[test]
@@ -937,6 +1014,40 @@ fn a_failure_after_the_commit_point_is_a_warning() {
         .unwrap();
     assert_eq!(next.insert, InsertOutcome::Inserted { seq: 1 });
     assert_eq!(next.warnings, Vec::<String>::new());
+    assert_eq!(fresh.verify(true).unwrap().problems, []);
+}
+
+#[test]
+fn a_ref_move_whose_file_write_fails_is_applied_with_a_warning() {
+    let (_dir, root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("a", b"a")]);
+    drop(repo);
+    // Writing the ref file fails after the move's journal frame is durable.
+    let fs = FailingFs::new(|method, p| method == "atomic_replace" && p.ends_with("refs/main"));
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+    let out = repo
+        .cas_ref("main", None, Some(base.id), "test/agent")
+        .unwrap();
+    assert_eq!(out.result, CasResult::Applied { old: None });
+    let [warning] = &out.warnings[..] else {
+        panic!("expected one warning, got {:?}", out.warnings);
+    };
+    assert!(warning.contains("frame 1"), "{warning}");
+    assert!(warning.contains("injected"), "{warning}");
+
+    // The move is committed: another handle sees it, and its next write writes the file.
+    let ref_file = root.join("meta/refs/main");
+    assert!(!ref_file.exists());
+    let fresh = LocalRepo::open(&root).unwrap();
+    let main = fresh.get_ref("main").unwrap().map(|state| state.target);
+    assert_eq!(main, Some(base.id));
+    fresh
+        .commit(request(&[base.id], vec![put("b", b"b")]))
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(&ref_file).unwrap(),
+        format!("{}\n1\n", base.id)
+    );
     assert_eq!(fresh.verify(true).unwrap().problems, []);
 }
 

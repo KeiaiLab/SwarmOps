@@ -256,6 +256,11 @@ fn resolve_ref_full_prefix_and_tilde() {
     assert_eq!(resolve(&hex), c2);
     assert_eq!(resolve(&hex.to_uppercase()), c2);
     assert_eq!(resolve(&hex[..12]), c2, "a 12-digit prefix");
+    assert_eq!(
+        resolve(&hex[..20].to_uppercase()),
+        c2,
+        "an uppercase prefix"
+    );
     assert_eq!(resolve(&format!("{}~1", &hex[..40])), c1);
 
     // Revisions that name nothing.
@@ -302,6 +307,24 @@ fn resolve_ref_full_prefix_and_tilde() {
         match repo.resolve(rev) {
             Err(RepoError::BadRev(bad)) => assert_eq!(bad, rev),
             other => panic!("expected BadRev({rev:?}), got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn resolve_through_a_dangling_ref_is_not_found() {
+    let (_dir, root, repo) = new_repo();
+    commit(&repo, &[], vec![put("f", b"1")]);
+    // main's file names a changeset the store does not hold (damage verify reports).
+    let nowhere = unknown_id();
+    fs::write(root.join("meta/refs/main"), format!("{nowhere}\n1\n")).unwrap();
+    for rev in ["main", "main~1"] {
+        match repo.resolve(rev) {
+            Err(RepoError::NotFound(what)) => {
+                assert!(what.starts_with(&format!("{rev} ")), "{what}");
+                assert!(what.contains(&nowhere.to_string()), "{what}");
+            }
+            other => panic!("{rev}: expected NotFound, got {other:?}"),
         }
     }
 }
@@ -360,17 +383,21 @@ fn cas_ref_through_repo_records_reflog() {
 
     assert_eq!(repo.get_ref("main").unwrap(), None);
     assert_eq!(
-        repo.cas_ref("main", None, Some(c1), "agent/one").unwrap(),
+        repo.cas_ref("main", None, Some(c1), "agent/one")
+            .unwrap()
+            .result,
         CasResult::Applied { old: None }
     );
     assert_eq!(
         repo.cas_ref("main", Some(c1), Some(c2), "agent/two")
-            .unwrap(),
+            .unwrap()
+            .result,
         CasResult::Applied { old: Some(c1) }
     );
     assert_eq!(
         repo.cas_ref("main", Some(c1), Some(c1), "agent/three")
-            .unwrap(),
+            .unwrap()
+            .result,
         CasResult::Mismatch { actual: Some(c2) },
         "a stale expectation moves nothing"
     );
@@ -411,7 +438,9 @@ fn cas_ref_through_repo_records_reflog() {
     );
 
     assert_eq!(
-        repo.cas_ref("main", Some(c2), None, "agent/two").unwrap(),
+        repo.cas_ref("main", Some(c2), None, "agent/two")
+            .unwrap()
+            .result,
         CasResult::Applied { old: Some(c2) },
         "a delete"
     );
@@ -566,6 +595,78 @@ fn create_refuses_mnt_paths_before_touching_them() {
     }
 }
 
+/// The entries of directory `dir`, sorted; `None` if it does not exist.
+fn entries(dir: &str) -> Option<Vec<String>> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .ok()?
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    Some(names)
+}
+
+#[test]
+fn create_refuses_a_path_that_leads_under_mnt_before_touching_it() {
+    // As given, the path is not under /mnt/, but it leads there: the check resolves the
+    // nearest existing ancestor, and refuses before anything is created.
+    let before = entries("/mnt");
+    for (store, leads_to) in [
+        ("/tmp/../mnt/x", "/mnt/x"),
+        ("/tmp/../mnt/no/such/../drive/store", "/mnt/no/drive/store"),
+    ] {
+        match LocalRepo::create(Utf8Path::new(store), "x") {
+            Err(RepoError::Store(StoreError::UnsupportedFs(refused))) => {
+                assert_eq!(refused, leads_to);
+            }
+            other => panic!(
+                "{store}: expected UnsupportedFs, got {:?}",
+                other.map(|r| r.info())
+            ),
+        }
+    }
+    assert_eq!(entries("/mnt"), before, "nothing was created under /mnt");
+}
+
+#[test]
+fn create_syncs_each_directory_it_makes() {
+    // create makes the store root and the missing directories above it: each new entry is
+    // made durable, by syncing the directory that holds it, outermost first.
+    let dir = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let fs = RecordingFs {
+        root: base.clone().into_std_path_buf(),
+        calls: Arc::clone(&calls),
+    };
+    LocalRepo::create_with_fs(&base.join("a/b/store"), "demo", Arc::new(fs)).unwrap();
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(
+        recorded[..5],
+        [
+            "create_dir_all a/b/store",
+            "fsync_dir .",
+            "fsync_dir a",
+            "fsync_dir a/b",
+            "exists a/b/store/FORMAT",
+        ]
+    );
+
+    // A store directory that exists already (made by hand, or by a create that crashed) has
+    // its entry synced once all the same.
+    fs::create_dir(base.join("made")).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let fs = RecordingFs {
+        root: base.clone().into_std_path_buf(),
+        calls: Arc::clone(&calls),
+    };
+    LocalRepo::create_with_fs(&base.join("made"), "demo", Arc::new(fs)).unwrap();
+    let recorded = calls.lock().unwrap().clone();
+    assert_eq!(
+        recorded[..3],
+        ["create_dir_all made", "fsync_dir .", "exists made/FORMAT"]
+    );
+}
+
 /// The real filesystem, recording each call as `"<method> <path in the store>"`.
 struct RecordingFs {
     root: PathBuf,
@@ -577,6 +678,7 @@ impl RecordingFs {
         let rel = match p.strip_prefix(&self.root) {
             Ok(rel) if rel.as_os_str().is_empty() => ".".to_owned(),
             Ok(rel) => rel.display().to_string(),
+            Err(_) if Some(p) == self.root.parent() => "..".to_owned(),
             Err(_) => p.display().to_string(),
         };
         self.calls.lock().unwrap().push(format!("{method} {rel}"));
@@ -684,7 +786,10 @@ fn meta_create_span(calls: &[String]) -> (usize, usize) {
 #[test]
 fn create_makes_the_documented_fs_calls() {
     let calls = create_calls();
-    let mut want = vec!["create_dir_all .".to_owned(), "exists FORMAT".to_owned()];
+    // The store root made, and its entry in its parent made durable.
+    let mut want = ["create_dir_all .", "fsync_dir ..", "exists FORMAT"]
+        .map(str::to_owned)
+        .to_vec();
     want.extend((0..=255u8).map(|byte| format!("create_dir_all objects/{byte:02x}")));
     want.extend(
         [
@@ -775,15 +880,21 @@ fn create_resumes_after_a_crash_at_any_call() {
     // the first, the middle and the last two: the 257 directory creations of objects/, and
     // the metadata store's own create, whose own crash sweep covers it call by call. Past the
     // last call, the child finishes.
+    let k_of = |call: &str| {
+        let at = calls.iter().position(|c| c == call).unwrap();
+        u64::try_from(at + 1).unwrap()
+    };
     let (meta_start, meta_end) = meta_create_span(&calls);
     let runs = [
-        (3, 259),
+        (
+            k_of("create_dir_all objects/00"),
+            k_of("create_dir_all objects/tmp"),
+        ),
         (
             u64::try_from(meta_start + 1).unwrap(),
             u64::try_from(meta_end + 1).unwrap(),
         ),
     ];
-    assert!(calls[2].ends_with("objects/00") && calls[258].ends_with("objects/tmp"));
     let sampled = |k: u64| {
         runs.iter().all(|&(first, last)| {
             !(first..=last).contains(&k)

@@ -21,6 +21,6 @@ pub mod verify;
 pub use commit::{Change, ChangeOp, CommitOutcome, CommitRequest};
 pub use error::RepoError;
 pub use read::StoredChangeset;
-pub use repo::{LocalRepo, Repo, RepoInfo};
+pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
-pub use verify::{VerifyProblem, VerifyReport};
+pub use verify::{MismatchCause, VerifyProblem, VerifyReport};
