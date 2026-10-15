@@ -10,8 +10,10 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use camino::Utf8PathBuf;
 use proptest::prelude::Rng;
@@ -121,6 +123,66 @@ impl FsOps for CountingFs {
             .lock()
             .unwrap()
             .push(p.to_path_buf());
+        RealFs.fsync_dir(p)
+    }
+
+    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+        RealFs.read(p)
+    }
+
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        RealFs.exists(p)
+    }
+
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        RealFs.remove(p)
+    }
+}
+
+/// A one-way gate: `wait` blocks until `open` has been called.
+#[derive(Default)]
+struct Gate {
+    is_open: Mutex<bool>,
+    opened: Condvar,
+}
+
+impl Gate {
+    fn wait(&self) {
+        let mut is_open = self.is_open.lock().unwrap();
+        while !*is_open {
+            is_open = self.opened.wait(is_open).unwrap();
+        }
+    }
+
+    fn open(&self) {
+        *self.is_open.lock().unwrap() = true;
+        self.opened.notify_all();
+    }
+}
+
+/// [`RealFs`] whose `fsync_dir` reports its directory on `parked`, then waits for `gate`.
+struct GatedFs {
+    parked: mpsc::Sender<PathBuf>,
+    gate: Arc<Gate>,
+}
+
+impl FsOps for GatedFs {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        RealFs.create_dir_all(p)
+    }
+
+    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        RealFs.write_durable_temp(dir, bytes)
+    }
+
+    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+        RealFs.link_noclobber(from, to)
+    }
+
+    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+        // A send error would only mean the test stopped listening.
+        let _ = self.parked.send(p.to_path_buf());
+        self.gate.wait();
         RealFs.fsync_dir(p)
     }
 
@@ -449,6 +511,51 @@ fn flush_fsyncs_objects_dir_for_a_new_fanout_dir() {
         calls.fsynced()[2..],
         [fanout],
         "an existing fan-out dir needs only its own fsync"
+    );
+}
+
+#[test]
+fn concurrent_flush_waits_for_the_one_in_progress() {
+    let (_root, layout) = new_root();
+    let gate = Arc::new(Gate::default());
+    let (parked_tx, parked_rx) = mpsc::channel();
+    let fs = GatedFs {
+        parked: parked_tx,
+        gate: Arc::clone(&gate),
+    };
+    let store = FsObjectStore::open(layout.clone(), Box::new(fs));
+    // Two puts (two callers, say) into one existing fan-out dir: the touched set is {F}.
+    let [a, b, _] = three_blobs_in_two_fanout_dirs();
+    let fanout = fanout_dir(&layout, &a);
+    fs::create_dir_all(&fanout).unwrap();
+    store.put(ObjectKind::Blob, &a).unwrap();
+    store.put(ObjectKind::Blob, &b).unwrap();
+
+    // Assertions wait until the gate is open and both flushes are joined, so a failure
+    // cannot leave the first flush parked forever.
+    let (parked, early) = thread::scope(|s| {
+        let store = &store;
+        let first = s.spawn(move || store.flush());
+        let parked = parked_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the first flush reaches fsync_dir");
+        let (done_tx, done_rx) = mpsc::channel();
+        let second = s.spawn(move || {
+            let flushed = store.flush();
+            let _ = done_tx.send(());
+            flushed
+        });
+        let early = done_rx.recv_timeout(Duration::from_millis(200));
+        gate.open();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+        (parked, early)
+    });
+    assert_eq!(parked, fanout, "the first flush is fsyncing F");
+    assert_eq!(
+        early,
+        Err(RecvTimeoutError::Timeout),
+        "the second flush returned while the first was still parked in fsync_dir(F)"
     );
 }
 

@@ -60,6 +60,10 @@ pub struct FsObjectStore {
     /// Directories `flush` must fsync: the fan-out directory of every object put since
     /// the last flush, and `objects/` if one of those fan-out directories was created.
     touched: Mutex<BTreeSet<Utf8PathBuf>>,
+    /// Held by `flush` from taking the touched set through its last fsync, so that no
+    /// flush returns while an earlier one is still fsyncing directories the caller's
+    /// objects rely on. Lock order: `flush_lock`, then `touched`; `put` takes only `touched`.
+    flush_lock: Mutex<()>,
     /// `put_batch`'s pool once [`FsObjectStore::set_parallelism`] is called; until then,
     /// rayon's global pool.
     pool: Option<rayon::ThreadPool>,
@@ -73,6 +77,7 @@ impl FsObjectStore {
             layout,
             fs,
             touched: Mutex::new(BTreeSet::new()),
+            flush_lock: Mutex::new(()),
             pool: None,
         }
     }
@@ -189,6 +194,11 @@ impl ObjectStore for FsObjectStore {
     }
 
     fn flush(&self) -> Result<(), StoreError> {
+        // `()` carries no state that a panicking holder could have left inconsistent.
+        let _flushing = self
+            .flush_lock
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let mut pending = std::mem::take(&mut *self.touched()).into_iter();
         while let Some(dir) = pending.next() {
             if let Err(err) = self.fs.fsync_dir(dir.as_std_path()) {
