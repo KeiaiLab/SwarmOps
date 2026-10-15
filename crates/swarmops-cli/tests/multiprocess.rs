@@ -7,10 +7,12 @@
 //!   ([`support::Racers`]).
 //! - A crash is `SWARMOPS_TEST_CRASH_AT=k`: the store's k-th filesystem call aborts the
 //!   process, as a `kill -9` at that exact point would (no destructor runs; what reached the
-//!   kernel stays). The object store and the metadata store share one call count, and objects
-//!   are written one at a time then, so call k is the same call in every run. A dry run with
-//!   `SWARMOPS_TEST_FS_CALLS=<file>` counts a command's calls first, and the sweep crashes the
-//!   command at every one of them.
+//!   kernel stays). The object store and the metadata store share one call count, objects are
+//!   written one at a time then, and a sweep's commits sign at a fixed time
+//!   (`SWARMOPS_TEST_NOW`), so that they write the same objects: every run of a command makes
+//!   the same calls in the same order, and call k is the same call in every run. A dry run with
+//!   `SWARMOPS_TEST_FS_CALLS=<file>` counts a command's calls first (twice, in two seconds of
+//!   the clock, for the commit), and the sweep crashes the command at every one of them.
 //! - Every test ends with `verify --deep` through the binary, and reads its `problems`.
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
@@ -143,7 +145,7 @@ fn blob_write_idempotent_across_processes() {
     let mut racers = Racers::new(store.tmp());
     for n in 0..COMMITTERS {
         let args = store.args(&agent(n), &["commit", "-m", "same", "--changes", &changes]);
-        racers.spawn(&args, &[]);
+        racers.spawn(&args, &[("SWARMOPS_RUN_ID", &format!("run-{n}"))]);
     }
     let results: Vec<Value> = racers.race().iter().map(Run::ok).collect();
     let ids: BTreeSet<&str> = results
@@ -208,7 +210,11 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
             if let Some(main) = &main {
                 args.extend(["--parent", main]);
             }
-            commits.spawn(&store.args(&agent(racer), &args), &[]);
+            let run_id = format!("round-{round}-racer-{racer}");
+            commits.spawn(
+                &store.args(&agent(racer), &args),
+                &[("SWARMOPS_RUN_ID", &run_id)],
+            );
         }
         let ids: Vec<String> = commits
             .race()
@@ -376,9 +382,11 @@ fn journal_len(store: &Store) -> u64 {
 }
 
 /// A store for the commit sweep: main at a first changeset, then changesets on it, until
-/// [`TEMPLATE_FRAMES`] frames lie past the checkpoint (which has passed none).
+/// [`TEMPLATE_FRAMES`] frames lie past the checkpoint (which has passed none). Every command
+/// on it, and on its copies, signs at [`NOW`], so the store and every commit on it are the same
+/// in every run.
 fn commit_template() -> Store {
-    let store = Store::init();
+    let store = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
     let first = store.commit(&agent(0), "README.md", "# crash test\n", None);
     let create = store.run_as(&agent(0), &["ref", "set", "main", &first, "--create"], &[]);
     create.ok();
@@ -404,18 +412,44 @@ fn crash_commit(store: &Store, env: &[(&str, &str)]) -> Run {
     )
 }
 
-/// Runs the crash commit on a copy of `template` without a crash; how many filesystem calls
-/// it made.
-fn dry_commit(template: &Store) -> u64 {
+/// What the crash commit does when nothing crashes it.
+#[derive(Debug, PartialEq, Eq)]
+struct DryRun {
+    /// How many filesystem calls it makes.
+    calls: u64,
+    /// The changeset it commits.
+    changeset: String,
+}
+
+/// Runs the crash commit on a copy of `template` without a crash.
+fn dry_commit(template: &Store) -> DryRun {
     let store = Store::copy_of(template);
     let file = calls_file(&store);
-    crash_commit(&store, &[(FS_CALLS_ENV, file.to_str().unwrap())]).ok();
+    let result = crash_commit(&store, &[(FS_CALLS_ENV, file.to_str().unwrap())]).ok();
     assert_eq!(
         checkpoint(&store),
         journal_len(&store),
         "the 32nd frame past the checkpoint moves it to the journal's end"
     );
-    reported_calls(&file)
+    DryRun {
+        calls: reported_calls(&file),
+        changeset: result["changeset"].as_str().unwrap().to_owned(),
+    }
+}
+
+/// Waits until the clock's second changes: a run after it signs at another second, unless
+/// something fixes the time.
+fn wait_for_the_next_second() {
+    let second = || {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    };
+    let start = second();
+    while second() == start {
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
 }
 
 /// What one run of the commit sweep found.
@@ -429,10 +463,11 @@ struct Crashed {
 }
 
 /// One run of the commit sweep: the crash commit on a copy of `template`, its k-th filesystem
-/// call (of the `calls` a dry run counted) aborting it. The store must then verify clean (the
-/// temp files a crash leaves in `objects/tmp/` are no objects), hold the changeset or not, and
-/// take a fresh commit, which `show` finds.
-fn crash_commit_at(template: &Store, k: u64, calls: u64) -> Crashed {
+/// call aborting it. It makes the dry run's calls, in the same order, so it must abort when k is
+/// one of them, and otherwise commit the dry run's changeset after the dry run's calls. The
+/// store must then verify clean (the temp files a crash leaves in `objects/tmp/` are no
+/// objects), hold the changeset or not, and take a fresh commit, which `show` finds.
+fn crash_commit_at(template: &Store, k: u64, dry: &DryRun) -> Crashed {
     let store = Store::copy_of(template);
     let file = calls_file(&store);
     let crash_at = k.to_string();
@@ -441,22 +476,18 @@ fn crash_commit_at(template: &Store, k: u64, calls: u64) -> Crashed {
         (FS_CALLS_ENV, file.to_str().unwrap()),
     ];
     let crash = crash_commit(&store, &env);
-    let finished = !crash.aborted();
+    let finished = k > dry.calls;
     if finished {
-        crash.ok();
-        // Past its last call: one this run did not make, as a run whose objects share fewer
-        // fan-out directories (one flush sync each) makes one call fewer than the dry runs.
+        let result = crash.ok();
+        assert_eq!(result["changeset"], dry.changeset.as_str(), "k={k}");
         let made = reported_calls(&file);
-        assert!(made < k, "k={k}: it finished after {made} calls");
-        assert!(
-            k >= calls,
-            "k={k}: it finished before call {calls}: {crash}"
+        assert_eq!(
+            made, dry.calls,
+            "k={k}: the dry run's calls, no more and no fewer"
         );
     } else {
-        assert!(
-            k <= calls,
-            "k={k}: it crashed past its last call, {calls}: {crash}"
-        );
+        assert!(crash.aborted(), "k={k} of {} calls: {crash}", dry.calls);
+        assert!(!file.exists(), "k={k}: a run that crashes reports nothing");
     }
     let leftovers = store.temp_files();
     store.assert_clean(&format!("k={k}: after the crash"));
@@ -472,6 +503,13 @@ fn crash_commit_at(template: &Store, k: u64, calls: u64) -> Crashed {
         committed || !finished,
         "k={k}: it returned, but is not stored"
     );
+    // The changeset the store holds, if any, is the dry run's.
+    let shown = store.read(&["show", &dry.changeset]);
+    if committed {
+        shown.ok();
+    } else {
+        shown.err("E_REV_NOT_FOUND");
+    }
 
     let next = format!("after a crash at call {k}\n");
     let fresh = store.commit(&agent(2), "after-crash.txt", &next, None);
@@ -489,18 +527,23 @@ fn crash_commit_at(template: &Store, k: u64, calls: u64) -> Crashed {
 /// A commit crashed at each of its filesystem calls in turn, from the first to past the last
 /// (k = 1..=N + 1, N counted by a dry run): after each crash the store verifies clean, and the
 /// next commit succeeds and is shown. The commit's frame is the 32nd past the checkpoint, so
-/// the sweep crashes its index sync and checkpoint too.
+/// the sweep crashes its index sync and checkpoint too. Every run signs at [`NOW`], so every
+/// run makes the same calls, in the same order: two dry runs, in different seconds of the
+/// clock, must count the same calls and commit the same changeset.
 #[test]
 #[ignore = "slow, ~20 s: ~90 crashed commits; just check-slow runs it"]
 fn kill9_during_commit_store_verifies_and_next_commit_succeeds() {
     let template = commit_template();
-    // The changeset's id depends on the time, and objects that share a fan-out directory
-    // share its one flush sync, so a run can make one call fewer: the longest of three dry
-    // runs, so that the sweep reaches the end.
-    let calls = (0..3).map(|_| dry_commit(&template)).max().unwrap();
-    assert!(calls > 30, "a commit makes dozens of calls: {calls}");
+    let dry = dry_commit(&template);
+    wait_for_the_next_second();
+    assert_eq!(
+        dry_commit(&template),
+        dry,
+        "one call sequence for every run"
+    );
+    assert!(dry.calls > 30, "a commit makes dozens of calls: {dry:?}");
 
-    let crashes = sweep(1..=calls + 1, |k| crash_commit_at(&template, k, calls));
+    let crashes = sweep(1..=dry.calls + 1, |k| crash_commit_at(&template, k, &dry));
     let after_commit_point = crashes
         .iter()
         .filter(|crash| crash.committed && !crash.finished)
@@ -516,10 +559,6 @@ fn kill9_during_commit_store_verifies_and_next_commit_succeeds() {
     assert!(
         crashes.iter().any(|crash| crash.leftovers > 0),
         "some crash left a temp file in objects/tmp, which verify passed over"
-    );
-    assert!(
-        crashes.last().unwrap().finished,
-        "past the last call it finishes"
     );
 }
 

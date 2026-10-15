@@ -225,6 +225,8 @@ pub struct Store {
     path: String,
     /// How many change lists [`Store::commit`] has written, for their names.
     commits: AtomicU64,
+    /// Variables every command run on the store sets ([`Store::with_env`]).
+    env: Vec<(String, String)>,
 }
 
 impl Store {
@@ -244,14 +246,27 @@ impl Store {
             dir,
             path,
             commits: AtomicU64::new(0),
+            env: Vec::new(),
         }
     }
 
-    /// A copy of `template`'s store in a temp dir of its own, nothing synced: what a test
-    /// crashes a run in, from the same starting point each time.
+    /// This store, every command run on it setting `env` too (before the command's own).
+    #[must_use]
+    pub fn with_env(mut self, env: &[(&str, &str)]) -> Store {
+        let env = env
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()));
+        self.env.extend(env);
+        self
+    }
+
+    /// A copy of `template`'s store, and of the variables its commands set, in a temp dir of
+    /// its own, nothing synced: what a test crashes a run in, from the same starting point
+    /// each time.
     pub fn copy_of(template: &Store) -> Store {
-        let store = Store::empty();
+        let mut store = Store::empty();
         copy_dir(Path::new(template.path()), Path::new(store.path()));
+        store.env.clone_from(&template.env);
         store
     }
 
@@ -294,19 +309,28 @@ impl Store {
             .collect()
     }
 
-    /// Runs `args` on the store as `agent`, with `env` set.
+    /// Runs `args` on the store as `agent`, with the store's variables and `env` set.
     pub fn run_as(&self, agent: &str, args: &[&str], env: &[(&str, &str)]) -> Run {
-        run(&self.args(agent, args), env)
+        run(&self.args(agent, args), &self.env_with(env))
     }
 
-    /// Runs the read `args` on the store (no identity).
+    /// Runs the read `args` on the store (no identity), with the store's variables set.
     pub fn read(&self, args: &[&str]) -> Run {
         let args: Vec<&str> = ["--repo", self.path()]
             .iter()
             .chain(args)
             .copied()
             .collect();
-        run(&args, &[])
+        run(&args, &self.env_with(&[]))
+    }
+
+    /// The store's variables, then `env`.
+    fn env_with<'a>(&'a self, env: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+        let own = self
+            .env
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()));
+        own.chain(env.iter().copied()).collect()
     }
 
     /// Commits `content` at `path` as `agent`, on `parent` (default: main, if it exists);
