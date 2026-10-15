@@ -68,6 +68,6 @@ pub struct Meta {
     pub elapsed_ms: u64,
     /// Every revision the command resolved: the string given and the full changeset id it named.
     pub resolved: BTreeMap<String, String>,
-    /// How the caller's identity was established; `"trust"` (claimed, not verified) in M1.
+    /// The store's authentication mode (`trust` in M1), not how this caller was identified.
     pub auth: String,
 }

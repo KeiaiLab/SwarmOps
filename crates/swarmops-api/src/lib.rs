@@ -19,9 +19,9 @@ pub use identity::Identity;
 pub use ops::{
     CatReq, ChangeInput, ChangeOpInput, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq,
     CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, EntryKindOut,
-    FileContent, InitReq, LogPage, LogReq, LsReq, ModeInput, RefDeleteReq, RefListResp, RefOut,
-    RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, StoreOps, TreeEntryOut, TreeListing,
-    VerifyResp, WhoamiResp,
+    FileContent, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, LsReq, ModeInput, RefDeleteReq,
+    RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut,
+    StoreOps, TreeEntryOut, TreeListing, VerifyReport, VerifyReq,
 };
 pub use rev::Rev;
 
@@ -46,8 +46,9 @@ pub fn schema_for_all() -> serde_json::Value {
         Meta,
         // init, info, whoami.
         InitReq,
+        InfoReq,
         RepoInfo,
-        WhoamiResp,
+        IdentityInfo,
         // commit.
         CommitReq,
         ChangeInput,
@@ -72,11 +73,13 @@ pub fn schema_for_all() -> serde_json::Value {
         LogPage,
         ChangesetSummary,
         // ref list, ref set, ref delete, verify.
+        RefListReq,
         RefListResp,
         RefOut,
         RefSetReq,
         RefSetResp,
         RefDeleteReq,
-        VerifyResp,
+        VerifyReq,
+        VerifyReport,
     ]
 }

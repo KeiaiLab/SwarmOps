@@ -9,9 +9,9 @@ use serde_json::{Value, json};
 use swarmops_api::{
     API_VERSION, CatReq, ChangeInput, ChangeOpInput, ChangesetDetail, CommitReq, CommitResp,
     ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, EntryKindOut, Envelope,
-    ErrorCode, FileContent, Identity, InitReq, LogPage, LogReq, LsReq, Meta, ModeInput, OpError,
-    RefDeleteReq, RefListResp, RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, TreeListing,
-    VerifyResp, WhoamiResp, schema_for_all,
+    ErrorCode, FileContent, Identity, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, LsReq, Meta,
+    ModeInput, OpError, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp, RepoInfo,
+    Rev, ShowReq, StoreOps, TreeListing, VerifyReport, VerifyReq, schema_for_all,
 };
 
 /// Requests and the input types inside them.
@@ -20,12 +20,15 @@ const REQUESTS: &[&str] = &[
     "ChangeInput",
     "CommitReq",
     "Identity",
+    "InfoReq",
     "InitReq",
     "LogReq",
     "LsReq",
     "RefDeleteReq",
+    "RefListReq",
     "RefSetReq",
     "ShowReq",
+    "VerifyReq",
 ];
 
 /// Responses and the output types inside them.
@@ -35,6 +38,7 @@ const RESPONSES: &[&str] = &[
     "ChangesetSummary",
     "CommitResp",
     "FileContent",
+    "IdentityInfo",
     "LogPage",
     "Meta",
     "OpError",
@@ -45,8 +49,7 @@ const RESPONSES: &[&str] = &[
     "SignatureOut",
     "TreeEntryOut",
     "TreeListing",
-    "VerifyResp",
-    "WhoamiResp",
+    "VerifyReport",
 ];
 
 /// Enums and newtypes, which have no object fields of their own.
@@ -91,6 +94,26 @@ fn every_request_and_response_has_a_json_schema() {
             "{name} must ignore unknown fields"
         );
     }
+}
+
+/// Pins every `StoreOps` method's name, request type and response type. Instantiated with
+/// `S = dyn StoreOps`, it also proves the trait object-safe.
+fn store_ops_signatures<S: StoreOps + ?Sized>() {
+    let _: fn(&S, InfoReq) -> Result<RepoInfo, OpError> = S::repo_info;
+    let _: fn(&S, &Identity, CommitReq) -> Result<CommitResp, OpError> = S::commit;
+    let _: fn(&S, CatReq) -> Result<FileContent, OpError> = S::read_file;
+    let _: fn(&S, LsReq) -> Result<TreeListing, OpError> = S::read_tree;
+    let _: fn(&S, ShowReq) -> Result<ChangesetDetail, OpError> = S::show;
+    let _: fn(&S, LogReq) -> Result<LogPage, OpError> = S::log;
+    let _: fn(&S, RefListReq) -> Result<RefListResp, OpError> = S::ref_list;
+    let _: fn(&S, &Identity, RefSetReq) -> Result<RefSetResp, OpError> = S::ref_set;
+    let _: fn(&S, &Identity, RefDeleteReq) -> Result<RefSetResp, OpError> = S::ref_delete;
+    let _: fn(&S, VerifyReq) -> Result<VerifyReport, OpError> = S::verify;
+}
+
+#[test]
+fn every_operation_takes_a_request_and_returns_a_response() {
+    store_ops_signatures::<dyn StoreOps>();
 }
 
 /// Each code's string, exit code and retry advice, written out independently of the crate's
@@ -305,13 +328,16 @@ fn requests_and_responses_ignore_unknown_fields() {
         json!({"name": "main", "expected_old": "c9f1"}),
     );
     assert_ignores_unknown_fields::<Identity>("Identity", json!({"agent": "human/purple"}));
+    assert_ignores_unknown_fields::<InfoReq>("InfoReq", json!({}));
+    assert_ignores_unknown_fields::<RefListReq>("RefListReq", json!({}));
+    assert_ignores_unknown_fields::<VerifyReq>("VerifyReq", json!({"deep": true}));
 
     let signature = json!({"name": "human/purple", "email": "purple@human.swarmops.local", "secs": 0, "offset_secs": 0});
     assert_ignores_unknown_fields::<RepoInfo>(
         "RepoInfo",
         json!({"repo_id": "r", "name": "acme", "path": "/srv/s", "store_version": 1, "changesets": 0, "refs": 0}),
     );
-    assert_ignores_unknown_fields::<WhoamiResp>("WhoamiResp", json!({"auth": "trust"}));
+    assert_ignores_unknown_fields::<IdentityInfo>("IdentityInfo", json!({"auth": "trust"}));
     assert_ignores_unknown_fields::<CommitResp>(
         "CommitResp",
         json!({"changeset": "c", "root": "t", "files_changed": 1, "blobs_written": 1}),
@@ -345,8 +371,8 @@ fn requests_and_responses_ignore_unknown_fields() {
         "RefSetResp",
         json!({"name": "main", "new": "c", "already_applied": false}),
     );
-    assert_ignores_unknown_fields::<VerifyResp>(
-        "VerifyResp",
+    assert_ignores_unknown_fields::<VerifyReport>(
+        "VerifyReport",
         json!({"objects_checked": 0, "changesets_checked": 0, "problems": []}),
     );
     assert_ignores_unknown_fields::<Meta>(
@@ -368,6 +394,18 @@ fn requests_and_responses_ignore_unknown_fields() {
 fn omitted_request_fields_take_their_defaults() {
     assert_eq!(DEFAULT_MAX_BYTES, 1024 * 1024);
     assert_eq!(DEFAULT_LOG_LIMIT, 50);
+    assert_eq!(
+        serde_json::from_value::<InfoReq>(json!({})).unwrap(),
+        InfoReq {}
+    );
+    assert_eq!(
+        serde_json::from_value::<RefListReq>(json!({})).unwrap(),
+        RefListReq {}
+    );
+    assert_eq!(
+        serde_json::from_value::<VerifyReq>(json!({})).unwrap(),
+        VerifyReq { deep: false }
+    );
     assert_eq!(
         serde_json::from_value::<CatReq>(json!({"rev": "main", "path": "src/lib.rs"})).unwrap(),
         CatReq {

@@ -39,6 +39,10 @@ pub struct InitReq {
     pub name: String,
 }
 
+/// `info`: describe the store. It has no options yet.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct InfoReq {}
+
 /// `init` and `info`: what the store is and holds.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct RepoInfo {
@@ -61,14 +65,15 @@ pub struct RepoInfo {
 
 /// `whoami`: the identity the caller's mutations carry.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-pub struct WhoamiResp {
+pub struct IdentityInfo {
     /// `<family>/<instance>`; omitted for an anonymous caller.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
     /// The run the agent acts in, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
-    /// How the identity was established: `"trust"` (claimed, not verified) or `"anonymous"`.
+    /// How this caller's identity was established: `trust` (claimed, not verified) or
+    /// `anonymous`.
     pub auth: String,
 }
 
@@ -335,6 +340,10 @@ pub struct ChangesetSummary {
     pub title: String,
 }
 
+/// `ref list`: list every ref. It has no options yet.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct RefListReq {}
+
 /// `ref list`: every ref.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct RefListResp {
@@ -394,9 +403,18 @@ pub struct RefDeleteReq {
     pub expected_old: Rev,
 }
 
-/// `verify`: a consistency check of the whole store.
+/// `verify`: check the whole store's consistency.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-pub struct VerifyResp {
+pub struct VerifyReq {
+    /// Re-hash every object. When `false`, verify checks structure only: parents, that
+    /// referenced objects exist, the index against the journal, and refs.
+    #[serde(default)]
+    pub deep: bool,
+}
+
+/// `verify`: what the consistency check found.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct VerifyReport {
     /// How many objects were checked.
     pub objects_checked: u64,
     /// How many changesets were checked.
@@ -411,35 +429,35 @@ pub struct VerifyResp {
 /// Synchronous and object-safe, so callers hold a `dyn StoreOps`. Mutations take the caller's
 /// [`Identity`]; reads take none.
 pub trait StoreOps {
-    /// `info`: what the store is and holds.
-    fn repo_info(&self) -> Result<RepoInfo, OpError>;
+    /// What the store is and holds (CLI `info`).
+    fn repo_info(&self, req: InfoReq) -> Result<RepoInfo, OpError>;
 
-    /// `commit`: records a changeset from an explicit change list; moves no ref.
+    /// Records a changeset from an explicit change list; moves no ref (CLI `commit`).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
 
-    /// `cat`: reads one file at a revision.
-    fn cat(&self, req: CatReq) -> Result<FileContent, OpError>;
+    /// Reads one file at a revision (CLI `cat`).
+    fn read_file(&self, req: CatReq) -> Result<FileContent, OpError>;
 
-    /// `ls`: lists one directory at a revision.
-    fn ls(&self, req: LsReq) -> Result<TreeListing, OpError>;
+    /// Lists one directory at a revision (CLI `ls`).
+    fn read_tree(&self, req: LsReq) -> Result<TreeListing, OpError>;
 
-    /// `show`: one changeset in full.
+    /// One changeset in full (CLI `show`).
     fn show(&self, req: ShowReq) -> Result<ChangesetDetail, OpError>;
 
-    /// `log`: history along first parents, newest first.
+    /// History along first parents, newest first (CLI `log`).
     fn log(&self, req: LogReq) -> Result<LogPage, OpError>;
 
-    /// `ref list`: every ref.
-    fn ref_list(&self) -> Result<RefListResp, OpError>;
+    /// Every ref (CLI `ref list`).
+    fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError>;
 
-    /// `ref set`: moves a ref, or creates one, by compare-and-swap.
+    /// Moves a ref, or creates one, by compare-and-swap (CLI `ref set`).
     fn ref_set(&self, who: &Identity, req: RefSetReq) -> Result<RefSetResp, OpError>;
 
-    /// `ref delete`: removes a ref by compare-and-swap.
+    /// Removes a ref by compare-and-swap (CLI `ref delete`).
     fn ref_delete(&self, who: &Identity, req: RefDeleteReq) -> Result<RefSetResp, OpError>;
 
-    /// `verify`: checks the whole store.
-    fn verify(&self) -> Result<VerifyResp, OpError>;
+    /// Checks the whole store's consistency (CLI `verify`).
+    fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError>;
 }
 
 // The CLI holds a `dyn StoreOps` (operations spec §7); this stops compiling if the trait stops
