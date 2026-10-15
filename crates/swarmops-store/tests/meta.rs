@@ -833,8 +833,9 @@ fn run_children(test: &str, root: &Utf8Path) -> Vec<Output> {
     let exe = std::env::current_exe().unwrap();
     let children: Vec<_> = (0..CHILDREN)
         .map(|number| {
+            // `--include-ignored`: the test may be one the slow suite runs.
             Command::new(&exe)
-                .args(["--exact", test, "--nocapture"])
+                .args(["--exact", test, "--include-ignored", "--nocapture"])
                 .env(CHILD_ROOT, root)
                 .env(CHILD_NUMBER, number.to_string())
                 .stdout(Stdio::piped())
@@ -888,7 +889,12 @@ fn insert_child(root: &Utf8Path, child: u64) {
     println!("{REPORT}done");
 }
 
+/// Eight processes, each making 50 write transactions of its own chain at once: every insert
+/// persists, seqs are contiguous, a frame per write. 400 fsync'd transactions: the slow suite
+/// runs it; the default gate's acceptance test for concurrent writers is the CLI's
+/// `eight_processes_commit_concurrently_all_persist`, through the binary.
 #[test]
+#[ignore = "slow, 8-20 s: 400 fsync'd transactions; just check-slow runs it"]
 fn multi_process_inserts_all_persist() {
     if let Some((root, child)) = child_env() {
         insert_child(&root, child);
