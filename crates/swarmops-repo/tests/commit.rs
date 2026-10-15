@@ -1,0 +1,1004 @@
+//! Commits through `Repo::commit`: change lists turned into blobs, rebuilt trees and a
+//! changeset whose delta lists what changed, the checks a request must pass before anything
+//! is written, and the durability order (every object durable before the changeset's journal
+//! record), after a crash at any filesystem call and with writers in several processes.
+//!
+//! Every test owns a fresh store (`tempfile::tempdir()`), so tests are independent and may
+//! run in any order or in parallel. The crash sweep and the multi-process test run this test
+//! binary again as their children (selected by [`CHILD_ROOT`]), on the real filesystem.
+
+use std::fs;
+use std::io;
+use std::os::unix::process::ExitStatusExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use camino::{Utf8Path, Utf8PathBuf};
+use swarmops_core::{
+    BlobId, ChangesetId, CodecError, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath, Signature,
+    Tree, TreeEntry, hash_object,
+};
+use swarmops_repo::{
+    Change, ChangeOp, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
+};
+use swarmops_store::{CRASH_AT_ENV, FsOps, Journal, Layout, LinkOutcome, RealFs, StoreError};
+use tempfile::TempDir;
+
+/// Set only in the children this file's tests spawn: the store root.
+const CHILD_ROOT: &str = "SWARMOPS_TEST_REPO_COMMIT_CHILD_ROOT";
+
+/// Set with [`CHILD_ROOT`] in the children of the multi-process test: the child's number.
+const CHILD_NUMBER: &str = "SWARMOPS_TEST_REPO_COMMIT_CHILD_NUMBER";
+
+/// How the multi-process test's children report to their parent, among the harness's output.
+const REPORT: &str = "repo-child: ";
+
+/// How many children the multi-process test spawns, and how many commits each makes.
+const CHILDREN: u64 = 8;
+const PER_CHILD: u64 = 4;
+
+const SIGABRT: i32 = 6;
+
+/// A fresh store in a temp dir of its own; the directory lives as long as the `TempDir`.
+fn new_repo() -> (TempDir, Utf8PathBuf, LocalRepo) {
+    let dir = tempfile::tempdir().expect("create a temp dir");
+    let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("temp dir is UTF-8");
+    let repo = LocalRepo::create(&root, "test").expect("create the store");
+    (dir, root, repo)
+}
+
+fn path(s: &str) -> RepoPath {
+    RepoPath::new(s).expect("a valid repo path")
+}
+
+fn blob(content: &[u8]) -> BlobId {
+    BlobId(hash_object(ObjectKind::Blob, content))
+}
+
+fn put(p: &str, content: &[u8]) -> Change {
+    put_as(p, EntryKind::File, content)
+}
+
+fn put_as(p: &str, kind: EntryKind, content: &[u8]) -> Change {
+    Change {
+        path: path(p),
+        op: ChangeOp::Put {
+            kind,
+            content: content.to_vec(),
+        },
+    }
+}
+
+fn delete(p: &str) -> Change {
+    Change {
+        path: path(p),
+        op: ChangeOp::Delete,
+    }
+}
+
+/// A fixed signature, so that the same request always makes the same changeset.
+fn signature() -> Signature {
+    Signature {
+        name: b"test/agent".to_vec(),
+        email: b"agent@test.swarmops.local".to_vec(),
+        secs: 1_760_000_000,
+        offset_secs: 0,
+        negative_zero: false,
+    }
+}
+
+fn request(parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
+    CommitRequest {
+        parents: parents.to_vec(),
+        changes,
+        author: signature(),
+        committer: signature(),
+        message: b"a test commit".to_vec(),
+        metadata: vec![("agent".to_owned(), b"test/agent".to_vec())],
+    }
+}
+
+#[track_caller]
+fn commit(repo: &LocalRepo, parents: &[ChangesetId], changes: Vec<Change>) -> CommitOutcome {
+    repo.commit(request(parents, changes)).expect("commit")
+}
+
+fn file_put(content: &[u8]) -> DeltaOp {
+    DeltaOp::Put {
+        kind: EntryKind::File,
+        id: blob(content),
+    }
+}
+
+/// The delta of changeset `id`, as (path, op) pairs; no entry carries a rename.
+fn delta(repo: &LocalRepo, id: ChangesetId) -> Vec<(String, DeltaOp)> {
+    let stored = repo
+        .changeset(id)
+        .unwrap()
+        .expect("the changeset is stored");
+    stored
+        .changeset
+        .delta
+        .into_iter()
+        .map(|entry| {
+            assert_eq!(entry.renamed_from, None);
+            (entry.path.to_string(), entry.op)
+        })
+        .collect()
+}
+
+/// The names and kinds of directory `dir`'s entries at changeset `id`.
+fn listing(
+    repo: &LocalRepo,
+    id: ChangesetId,
+    dir: Option<&str>,
+) -> Option<Vec<(String, EntryKind)>> {
+    let dir = dir.map(path);
+    repo.list_tree(id, dir.as_ref())
+        .unwrap()
+        .map(|entries| entries.into_iter().map(|e| (e.name, e.kind)).collect())
+}
+
+fn names(entries: &[(&str, EntryKind)]) -> Vec<(String, EntryKind)> {
+    entries
+        .iter()
+        .map(|&(name, kind)| (name.to_owned(), kind))
+        .collect()
+}
+
+/// The content of file `p` at changeset `id`, if it is a file there.
+fn content(repo: &LocalRepo, id: ChangesetId, p: &str) -> Option<Vec<u8>> {
+    repo.read_blob_at(id, &path(p))
+        .unwrap()
+        .map(|(_, bytes)| bytes)
+}
+
+fn entry(name: &str, kind: EntryKind, id: ObjectId) -> TreeEntry {
+    TreeEntry {
+        name: name.to_owned(),
+        kind,
+        id,
+    }
+}
+
+fn tree(entries: Vec<TreeEntry>) -> Tree {
+    Tree::new(entries).expect("a valid tree")
+}
+
+/// Every object file of the store at `root`: the files in its fan-out directories.
+fn object_files(root: &Utf8Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for fanout in fs::read_dir(root.join("objects")).unwrap() {
+        let fanout = fanout.unwrap();
+        if fanout.file_name() == "tmp" {
+            continue;
+        }
+        for file in fs::read_dir(fanout.path()).unwrap() {
+            files.push(file.unwrap().path());
+        }
+    }
+    files.sort();
+    files
+}
+
+/// How many frames the journal of the store at `root` lists.
+fn journal_frames(root: &Utf8Path) -> u64 {
+    Journal::open(&Layout::new(root), Arc::new(RealFs))
+        .unwrap()
+        .frame_count()
+        .unwrap()
+}
+
+#[track_caller]
+fn assert_type_conflict(got: Result<CommitOutcome, RepoError>, want: &str) {
+    match got {
+        Err(RepoError::TypeConflict { path: conflict }) => assert_eq!(conflict, path(want)),
+        other => panic!("expected TypeConflict at {want}, got {other:?}"),
+    }
+}
+
+#[test]
+fn root_commit_from_change_list_builds_trees_and_delta() {
+    let (_dir, _root, repo) = new_repo();
+    // Out of order on purpose: the delta comes out sorted by path.
+    let out = commit(
+        &repo,
+        &[],
+        vec![
+            put("src/x/y.txt", b"y\n"),
+            put("a.rs", b"fn a() {}\n"),
+            put("src/lib.rs", b"pub mod x;\n"),
+        ],
+    );
+    assert_eq!((out.blobs_written, out.trees_written), (3, 3));
+    assert_eq!(out.insert, InsertOutcome::Inserted { seq: 0 });
+    assert_eq!(out.warnings, Vec::<String>::new());
+
+    // The trees as their canonical objects, bottom-up: the root holds a.rs and src.
+    let x = tree(vec![entry("y.txt", EntryKind::File, blob(b"y\n").0)]);
+    let src = tree(vec![
+        entry("lib.rs", EntryKind::File, blob(b"pub mod x;\n").0),
+        entry("x", EntryKind::Dir, x.id().0),
+    ]);
+    let root = tree(vec![
+        entry("a.rs", EntryKind::File, blob(b"fn a() {}\n").0),
+        entry("src", EntryKind::Dir, src.id().0),
+    ]);
+    assert_eq!(out.root, root.id());
+    assert_eq!(
+        listing(&repo, out.id, None),
+        Some(names(&[("a.rs", EntryKind::File), ("src", EntryKind::Dir)]))
+    );
+
+    let stored = repo.changeset(out.id).unwrap().unwrap();
+    assert_eq!((stored.id, stored.seq, stored.generation), (out.id, 0, 1));
+    let cs = &stored.changeset;
+    assert_eq!(cs.id().unwrap(), out.id, "the id is the hash of the bytes");
+    assert_eq!(cs.root, out.root);
+    assert_eq!(cs.parents, []);
+    assert_eq!(
+        delta(&repo, out.id),
+        [
+            ("a.rs".to_owned(), file_put(b"fn a() {}\n")),
+            ("src/lib.rs".to_owned(), file_put(b"pub mod x;\n")),
+            ("src/x/y.txt".to_owned(), file_put(b"y\n")),
+        ]
+    );
+    assert_eq!((&cs.author, &cs.committer), (&signature(), &signature()));
+    assert_eq!(cs.message, b"a test commit");
+    assert_eq!(cs.extra_headers, []);
+    assert_eq!(cs.metadata, [("agent".to_owned(), b"test/agent".to_vec())]);
+}
+
+#[test]
+fn second_commit_modifies_and_deletes() {
+    let (_dir, _root, repo) = new_repo();
+    let first = commit(
+        &repo,
+        &[],
+        vec![
+            put("a.rs", b"a"),
+            put("src/lib.rs", b"v1"),
+            put("src/x/y.txt", b"y"),
+        ],
+    );
+    let second = commit(
+        &repo,
+        &[first.id],
+        vec![put("src/lib.rs", b"v2"), delete("src/x/y.txt")],
+    );
+    // One new blob; src and the root rewritten; src/x is gone, not rewritten.
+    assert_eq!((second.blobs_written, second.trees_written), (1, 2));
+    assert_eq!(
+        delta(&repo, second.id),
+        [
+            ("src/lib.rs".to_owned(), file_put(b"v2")),
+            ("src/x/y.txt".to_owned(), DeltaOp::Delete),
+        ]
+    );
+    assert_eq!(
+        listing(&repo, second.id, Some("src")),
+        Some(names(&[("lib.rs", EntryKind::File)]))
+    );
+    assert_eq!(listing(&repo, second.id, Some("src/x")), None);
+    assert_eq!(
+        content(&repo, second.id, "src/lib.rs"),
+        Some(b"v2".to_vec())
+    );
+    assert_eq!(content(&repo, second.id, "src/x/y.txt"), None);
+    assert_eq!(
+        content(&repo, second.id, "a.rs"),
+        Some(b"a".to_vec()),
+        "an untouched file carries over"
+    );
+    // The first changeset still reads as it was.
+    assert_eq!(content(&repo, first.id, "src/lib.rs"), Some(b"v1".to_vec()));
+    assert_eq!(content(&repo, first.id, "src/x/y.txt"), Some(b"y".to_vec()));
+
+    let stored = repo.changeset(second.id).unwrap().unwrap();
+    assert_eq!((stored.seq, stored.generation), (1, 2));
+    assert_eq!(stored.changeset.parents, [first.id]);
+}
+
+#[test]
+fn delete_prunes_empty_directories() {
+    let (_dir, _root, repo) = new_repo();
+    let first = commit(
+        &repo,
+        &[],
+        vec![
+            put("a/b/c/d.txt", b"deep"),
+            put("a/keep.txt", b"keep"),
+            put("top.txt", b"top"),
+        ],
+    );
+    // Deleting the only file of a/b/c prunes c, then b; a keeps keep.txt.
+    let second = commit(&repo, &[first.id], vec![delete("a/b/c/d.txt")]);
+    assert_eq!(second.trees_written, 2, "a and the root");
+    assert_eq!(
+        listing(&repo, second.id, Some("a")),
+        Some(names(&[("keep.txt", EntryKind::File)]))
+    );
+    for gone in ["a/b", "a/b/c"] {
+        assert_eq!(listing(&repo, second.id, Some(gone)), None, "{gone}");
+    }
+
+    // Deleting the rest leaves the empty root, the one tree that may be empty.
+    let third = commit(
+        &repo,
+        &[second.id],
+        vec![delete("a/keep.txt"), delete("top.txt")],
+    );
+    assert_eq!(third.root, Tree::empty_root().id());
+    assert_eq!(third.trees_written, 1, "the empty root");
+    assert_eq!(listing(&repo, third.id, None), Some(Vec::new()));
+    assert_eq!(listing(&repo, third.id, Some("a")), None);
+
+    // A commit on the empty root builds from nothing.
+    let fourth = commit(&repo, &[third.id], vec![put("a/new.txt", b"new")]);
+    assert_eq!(
+        listing(&repo, fourth.id, None),
+        Some(names(&[("a", EntryKind::Dir)]))
+    );
+    assert_eq!(
+        content(&repo, fourth.id, "a/new.txt"),
+        Some(b"new".to_vec())
+    );
+}
+
+#[test]
+fn commit_rejects_file_dir_type_conflict() {
+    let (_dir, root, repo) = new_repo();
+    let base = commit(
+        &repo,
+        &[],
+        vec![put("a.rs", b"a"), put("src/lib.rs", b"lib")],
+    );
+    let objects = object_files(&root);
+
+    assert_type_conflict(
+        repo.commit(request(&[base.id], vec![put("a.rs/b", b"under a file")])),
+        "a.rs/b",
+    );
+    assert_type_conflict(
+        repo.commit(request(&[base.id], vec![put("src", b"over a directory")])),
+        "src",
+    );
+    assert_type_conflict(repo.commit(request(&[base.id], vec![delete("src")])), "src");
+    // One request may not make a path both a file and a directory, in either order.
+    for changes in [
+        vec![put("new", b"file"), put("new/inner", b"file")],
+        vec![put("new/inner", b"file"), put("new", b"file")],
+    ] {
+        assert_type_conflict(repo.commit(request(&[base.id], changes)), "new/inner");
+    }
+
+    assert_eq!(object_files(&root), objects, "nothing was written");
+    assert_eq!(repo.info().unwrap().changesets, 1);
+}
+
+#[test]
+fn commit_rejects_dir_put_and_empty_changes() {
+    let (_dir, root, repo) = new_repo();
+    match repo.commit(request(
+        &[],
+        vec![put("a", b"a"), put_as("d", EntryKind::Dir, b"")],
+    )) {
+        Err(RepoError::DirPut { path: dir }) => assert_eq!(dir, path("d")),
+        other => panic!("expected DirPut, got {other:?}"),
+    }
+    let empty = repo.commit(request(&[], Vec::new()));
+    assert!(matches!(empty, Err(RepoError::EmptyChanges)), "{empty:?}");
+
+    // A change list that changes nothing is empty too: a put of what the path holds already.
+    let base = commit(&repo, &[], vec![put("a", b"a")]);
+    let objects = object_files(&root);
+    let same = repo.commit(request(&[base.id], vec![put("a", b"a")]));
+    assert!(matches!(same, Err(RepoError::EmptyChanges)), "{same:?}");
+    assert_eq!(object_files(&root), objects, "nothing was written");
+    assert_eq!(repo.info().unwrap().changesets, 1);
+}
+
+#[test]
+fn commit_rejects_a_changeset_it_cannot_encode() {
+    let (_dir, root, repo) = new_repo();
+    let objects = object_files(&root);
+    let mut req = request(&[], vec![put("a", b"a")]);
+    req.metadata = vec![
+        ("run_id".to_owned(), b"r1".to_vec()),
+        ("agent".to_owned(), b"test/agent".to_vec()),
+    ];
+    match repo.commit(req) {
+        Err(RepoError::Codec(CodecError::UnsortedMetadata)) => {}
+        other => panic!("expected UnsortedMetadata, got {other:?}"),
+    }
+    assert_eq!(object_files(&root), objects, "nothing was written");
+    assert_eq!(repo.info().unwrap().changesets, 0);
+}
+
+#[test]
+fn commit_rejects_unknown_parent() {
+    let (_dir, root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("a", b"a")]);
+    let objects = object_files(&root);
+    let unknown = ChangesetId(hash_object(ObjectKind::Changeset, b"never committed"));
+    for parents in [vec![unknown], vec![base.id, unknown]] {
+        match repo.commit(request(&parents, vec![put("b", b"b")])) {
+            Err(RepoError::UnknownParent(parent)) => assert_eq!(parent, unknown),
+            other => panic!("expected UnknownParent, got {other:?}"),
+        }
+    }
+    // A parent listed twice is refused before anything is written, too.
+    match repo.commit(request(&[base.id, base.id], vec![put("b", b"b")])) {
+        Err(RepoError::Store(StoreError::DuplicateParent(parent))) => assert_eq!(parent, base.id),
+        other => panic!("expected DuplicateParent, got {other:?}"),
+    }
+    assert_eq!(object_files(&root), objects, "nothing was written");
+    assert_eq!(repo.info().unwrap().changesets, 1);
+}
+
+/// The store root of this process, if it is a child one of this file's tests spawned.
+fn child_root() -> Option<Utf8PathBuf> {
+    std::env::var(CHILD_ROOT).ok().map(Utf8PathBuf::from)
+}
+
+/// Runs test `test` again in a child process on the store at `root`, the child's k-th
+/// filesystem call aborting it (`SWARMOPS_TEST_CRASH_AT=k`).
+fn crash_child(test: &str, root: &Utf8Path, k: u64) -> Output {
+    Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(CHILD_ROOT, root)
+        .env(CRASH_AT_ENV, k.to_string())
+        .output()
+        .unwrap()
+}
+
+/// Copies directory `from` to `to`, files and subdirectories, without syncing anything: a
+/// fresh store from a template, faster than creating one (which syncs a dozen times).
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// The commit the crash sweep's child makes: a root commit of three files in nested
+/// directories, so that it writes blobs, trees and its changeset.
+fn crash_request() -> CommitRequest {
+    request(
+        &[],
+        vec![
+            put("a.rs", b"a"),
+            put("src/lib.rs", b"lib"),
+            put("src/x/y.txt", b"y"),
+        ],
+    )
+}
+
+/// How many runs of the crash sweep go at once: each has a child process and a store of its
+/// own.
+const AT_ONCE: u64 = 8;
+
+/// Runs `run(k)` for k = 1, 2, … [`AT_ONCE`] at a time, until a run reports that its child
+/// finished; returns how many filesystem calls the child makes (the last k it crashed at).
+/// Every run past that one must finish too.
+fn sweep(run: impl Fn(u64) -> bool + Sync) -> u64 {
+    let run = &run;
+    let mut first = 1;
+    loop {
+        let finished: Vec<bool> = thread::scope(|scope| {
+            let runs: Vec<_> = (first..first + AT_ONCE)
+                .map(|k| scope.spawn(move || run(k)))
+                .collect();
+            runs.into_iter().map(|run| run.join().unwrap()).collect()
+        });
+        if let Some(at) = finished.iter().position(|&done| done) {
+            assert!(
+                finished[at..].iter().all(|&done| done),
+                "a crash after the child's last call: {finished:?} from k={first}"
+            );
+            return first + u64::try_from(at).unwrap() - 1;
+        }
+        first += AT_ONCE;
+        assert!(first < 1_000, "the child never finished");
+    }
+}
+
+/// One run of the commit crash sweep: a child commits [`crash_request`] on a copy of
+/// `template` until its k-th filesystem call aborts it. The store must then hold nothing or
+/// the whole changeset `want`, verify clean, and take the commit again. Returns whether the
+/// child finished (k was past its last call), and whether the changeset was committed.
+fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+    copy_dir(template.as_std_path(), root.as_std_path());
+    let child = crash_child(
+        "commit_never_inserts_record_before_objects_are_durable",
+        &root,
+        k,
+    );
+    let finished = child.status.success();
+    assert!(
+        finished || child.status.signal() == Some(SIGABRT),
+        "k={k}: {:?}\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stderr)
+    );
+
+    // Either nothing is committed, or all of it is, every object there.
+    let repo = LocalRepo::open(&root).unwrap();
+    let committed = match repo.info().unwrap().changesets {
+        0 => false,
+        1 => true,
+        n => panic!("k={k}: {n} changesets"),
+    };
+    assert!(
+        committed || !finished,
+        "k={k}: the commit returned but is not stored"
+    );
+    if committed {
+        assert!(repo.changeset(want).unwrap().is_some(), "k={k}");
+        for (file, bytes) in [
+            ("a.rs", b"a".as_slice()),
+            ("src/lib.rs", b"lib"),
+            ("src/x/y.txt", b"y"),
+        ] {
+            assert_eq!(
+                content(&repo, want, file).as_deref(),
+                Some(bytes),
+                "k={k}: {file}"
+            );
+        }
+    }
+    assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+
+    // The next commit takes the store as the crash left it.
+    let again = repo.commit(crash_request()).unwrap();
+    assert_eq!(again.id, want, "k={k}");
+    let expected = if committed {
+        InsertOutcome::AlreadyPresent
+    } else {
+        InsertOutcome::Inserted { seq: 0 }
+    };
+    assert_eq!(again.insert, expected, "k={k}");
+    assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+    (finished, committed)
+}
+
+#[test]
+fn commit_never_inserts_record_before_objects_are_durable() {
+    if let Some(root) = child_root() {
+        // SWARMOPS_TEST_CRASH_AT is set: open shares one CrashAtFs between the object store
+        // and the metadata store and writes objects one at a time, so that call k is the
+        // same call in every run.
+        let repo = LocalRepo::open(&root).unwrap();
+        repo.commit(crash_request()).unwrap();
+        return;
+    }
+    let want = {
+        let (_dir, _root, reference) = new_repo();
+        reference.commit(crash_request()).unwrap().id
+    };
+    let (_template_dir, template, repo) = new_repo();
+    drop(repo);
+    let past_the_commit_point = AtomicBool::new(false);
+    let calls = sweep(|k| {
+        let (finished, committed) = commit_crashing_at(&template, want, k);
+        if committed && !finished {
+            past_the_commit_point.store(true, Ordering::Relaxed);
+        }
+        finished
+    });
+    // Opening and committing make dozens of filesystem calls; a sweep that ends at once
+    // never crashed anything. And the metadata store's calls count too: some crash comes
+    // after the changeset's journal frame, while it is materialized.
+    assert!(calls > 20, "the child finished after {calls} calls");
+    assert!(
+        past_the_commit_point.load(Ordering::Relaxed),
+        "no crash came after the commit point"
+    );
+}
+
+#[test]
+fn commit_is_idempotent_for_identical_request() {
+    let (_dir, root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("a", b"a")]);
+    let req = request(&[base.id], vec![put("a", b"a2"), put("b/c", b"c")]);
+    let first = repo.commit(req.clone()).unwrap();
+    assert_eq!(first.insert, InsertOutcome::Inserted { seq: 1 });
+    let objects = object_files(&root);
+    let frames = journal_frames(&root);
+
+    let again = repo.commit(req).unwrap();
+    assert_eq!((again.id, again.root), (first.id, first.root));
+    assert_eq!(again.insert, InsertOutcome::AlreadyPresent);
+    assert_eq!(
+        (again.blobs_written, again.trees_written),
+        (0, 0),
+        "nothing new to write"
+    );
+    assert_eq!(again.warnings, Vec::<String>::new());
+    assert_eq!(object_files(&root), objects);
+    assert_eq!(journal_frames(&root), frames, "no new transaction");
+    assert_eq!(repo.info().unwrap().changesets, 2);
+}
+
+#[test]
+fn commit_rejects_duplicate_paths_and_deletes_of_missing_paths() {
+    let (_dir, root, repo) = new_repo();
+    let base = commit(
+        &repo,
+        &[],
+        vec![put("a.rs", b"a"), put("src/lib.rs", b"lib")],
+    );
+    let objects = object_files(&root);
+    for (changes, twice) in [
+        (vec![put("x", b"1"), put("x", b"2")], "x"),
+        (vec![put("a.rs", b"new"), delete("a.rs")], "a.rs"),
+    ] {
+        match repo.commit(request(&[base.id], changes)) {
+            Err(RepoError::DuplicatePath { path: dup }) => assert_eq!(dup, path(twice)),
+            other => panic!("expected DuplicatePath at {twice}, got {other:?}"),
+        }
+    }
+    for missing in ["nope", "src/nope", "a.rs/under-a-file", "deep/er/path"] {
+        match repo.commit(request(&[base.id], vec![delete(missing)])) {
+            Err(RepoError::PathNotFound { path: gone }) => assert_eq!(gone, path(missing)),
+            other => panic!("expected PathNotFound at {missing}, got {other:?}"),
+        }
+    }
+    // A root commit has nothing to delete.
+    match repo.commit(request(&[], vec![put("b", b"b"), delete("a.rs")])) {
+        Err(RepoError::PathNotFound { path: gone }) => assert_eq!(gone, path("a.rs")),
+        other => panic!("expected PathNotFound, got {other:?}"),
+    }
+    assert_eq!(object_files(&root), objects, "nothing was written");
+    assert_eq!(repo.info().unwrap().changesets, 1);
+}
+
+#[test]
+fn commit_replaces_a_file_with_a_directory_and_back() {
+    let (_dir, _root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("node", b"a file")]);
+    // Deletes apply before puts, so one request can turn a file into a directory...
+    let dir = commit(
+        &repo,
+        &[base.id],
+        vec![put("node/child", b"inside"), delete("node")],
+    );
+    assert_eq!(
+        delta(&repo, dir.id),
+        [
+            ("node".to_owned(), DeltaOp::Delete),
+            ("node/child".to_owned(), file_put(b"inside")),
+        ]
+    );
+    assert_eq!(
+        listing(&repo, dir.id, Some("node")),
+        Some(names(&[("child", EntryKind::File)]))
+    );
+    // ...and a directory back into a file, once its last file goes.
+    let file = commit(
+        &repo,
+        &[dir.id],
+        vec![put("node", b"a file again"), delete("node/child")],
+    );
+    assert_eq!(
+        delta(&repo, file.id),
+        [
+            ("node".to_owned(), file_put(b"a file again")),
+            ("node/child".to_owned(), DeltaOp::Delete),
+        ]
+    );
+    assert_eq!(
+        content(&repo, file.id, "node"),
+        Some(b"a file again".to_vec())
+    );
+    assert_eq!(listing(&repo, file.id, Some("node")), None);
+}
+
+#[test]
+fn commit_records_only_what_changes() {
+    let (_dir, _root, repo) = new_repo();
+    let script = b"#!/bin/sh\necho hi\n";
+    let base = commit(
+        &repo,
+        &[],
+        vec![put("same.txt", b"same"), put("tool", script)],
+    );
+    // A put of what a path holds already is left out of the delta; a new kind alone is a
+    // change; two files with the same bytes share one blob.
+    let out = commit(
+        &repo,
+        &[base.id],
+        vec![
+            put("same.txt", b"same"),
+            put_as("tool", EntryKind::Exec, script),
+            put("new.txt", b"new"),
+            put("twin.txt", b"new"),
+        ],
+    );
+    assert_eq!(
+        delta(&repo, out.id),
+        [
+            ("new.txt".to_owned(), file_put(b"new")),
+            (
+                "tool".to_owned(),
+                DeltaOp::Put {
+                    kind: EntryKind::Exec,
+                    id: blob(script),
+                }
+            ),
+            ("twin.txt".to_owned(), file_put(b"new")),
+        ]
+    );
+    assert_eq!(
+        (out.blobs_written, out.trees_written),
+        (1, 1),
+        "one blob for both new files (the script's is stored already), and the root"
+    );
+    assert_eq!(
+        repo.read_blob_at(out.id, &path("tool")).unwrap(),
+        Some((EntryKind::Exec, script.to_vec()))
+    );
+}
+
+/// Which calls a [`FailingFs`] fails: given the method's name and its path.
+type FailWhen = dyn Fn(&str, &Path) -> bool + Send + Sync;
+
+/// The real filesystem, except that the calls `fail` picks fail with an injected error.
+struct FailingFs {
+    fail: Box<FailWhen>,
+}
+
+impl FailingFs {
+    fn new(fail: impl Fn(&str, &Path) -> bool + Send + Sync + 'static) -> Self {
+        Self {
+            fail: Box::new(fail),
+        }
+    }
+
+    fn check(&self, method: &str, p: &Path) -> io::Result<()> {
+        if (self.fail)(method, p) {
+            Err(io::Error::other(format!(
+                "injected failure: {method} {}",
+                p.display()
+            )))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl FsOps for FailingFs {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.check("create_dir_all", p)?;
+        RealFs.create_dir_all(p)
+    }
+
+    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        self.check("write_durable_temp", dir)?;
+        RealFs.write_durable_temp(dir, bytes)
+    }
+
+    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+        self.check("link_noclobber", to)?;
+        RealFs.link_noclobber(from, to)
+    }
+
+    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+        self.check("fsync_dir", p)?;
+        RealFs.fsync_dir(p)
+    }
+
+    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+        self.check("read", p)?;
+        RealFs.read(p)
+    }
+
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        self.check("exists", p)?;
+        RealFs.exists(p)
+    }
+
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        self.check("remove", p)?;
+        RealFs.remove(p)
+    }
+
+    fn append_durable(&self, p: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.check("append_durable", p)?;
+        RealFs.append_durable(p, bytes)
+    }
+
+    fn file_len(&self, p: &Path) -> io::Result<u64> {
+        self.check("file_len", p)?;
+        RealFs.file_len(p)
+    }
+
+    fn truncate(&self, p: &Path, len: u64) -> io::Result<()> {
+        self.check("truncate", p)?;
+        RealFs.truncate(p, len)
+    }
+
+    fn atomic_replace(&self, p: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.check("atomic_replace", p)?;
+        RealFs.atomic_replace(p, bytes)
+    }
+
+    fn sync_data(&self, p: &Path) -> io::Result<()> {
+        self.check("sync_data", p)?;
+        RealFs.sync_data(p)
+    }
+
+    fn append(&self, p: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.check("append", p)?;
+        RealFs.append(p, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.check("rename_durable", to)?;
+        RealFs.rename_durable(from, to)
+    }
+}
+
+#[test]
+fn a_failed_object_flush_fails_the_commit_and_inserts_nothing() {
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    let objects = root.join("objects").into_std_path_buf();
+    // The fan-out directories' fsyncs fail: the objects' names would not survive a power
+    // loss, so the changeset must not be recorded.
+    let fs = FailingFs::new(move |method, p| {
+        method == "fsync_dir" && p.parent() == Some(objects.as_path())
+    });
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+    match repo.commit(request(&[], vec![put("a", b"a")])) {
+        Err(RepoError::Store(StoreError::Io(e))) => {
+            assert!(e.to_string().contains("injected"), "{e}");
+        }
+        other => panic!("expected the flush's error, got {other:?}"),
+    }
+    assert_eq!(journal_frames(&root), 0, "no transaction");
+    let fresh = LocalRepo::open(&root).unwrap();
+    assert_eq!(fresh.info().unwrap().changesets, 0);
+    assert_eq!(fresh.verify(true).unwrap().problems, []);
+}
+
+#[test]
+fn a_failure_after_the_commit_point_is_a_warning() {
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    // Materializing the frame into the index fails after the frame is durable.
+    let fs = FailingFs::new(|method, p| method == "append" && p.ends_with("idx/ids.col"));
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+    let out = repo.commit(request(&[], vec![put("a", b"a")])).unwrap();
+    assert_eq!(out.insert, InsertOutcome::Inserted { seq: 0 });
+    let [warning] = &out.warnings[..] else {
+        panic!("expected one warning, got {:?}", out.warnings);
+    };
+    assert!(warning.contains("frame 0"), "{warning}");
+    assert!(warning.contains("injected"), "{warning}");
+
+    // The changeset is committed: another handle sees it, and its next write repairs the
+    // index.
+    let fresh = LocalRepo::open(&root).unwrap();
+    let stored = fresh.changeset(out.id).unwrap().expect("committed");
+    assert_eq!(stored.seq, 0);
+    let next = fresh
+        .commit(request(&[out.id], vec![put("b", b"b")]))
+        .unwrap();
+    assert_eq!(next.insert, InsertOutcome::Inserted { seq: 1 });
+    assert_eq!(next.warnings, Vec::<String>::new());
+    assert_eq!(fresh.verify(true).unwrap().problems, []);
+}
+
+/// Waits until the parent says go, so that the children commit at the same time.
+fn wait_for_go(root: &Utf8Path) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !root.join("go").exists() {
+        assert!(Instant::now() < deadline, "the parent never said go");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// A child of `commits_from_many_processes_all_land`: a chain of [`PER_CHILD`] commits off
+/// `main`, each adding a file of its own; every child also puts the same `shared.txt`, so
+/// that identical objects race between processes too. Reports the chain's head.
+fn commit_child(root: &Utf8Path, number: u64) {
+    let repo = LocalRepo::open(root).unwrap();
+    let mut parent = repo.resolve("main").unwrap();
+    wait_for_go(root);
+    for j in 0..PER_CHILD {
+        let own = format!("child-{number}/file-{j}.txt");
+        let changes = vec![
+            put(&own, format!("{number}/{j}").as_bytes()),
+            put("shared.txt", b"the same bytes in every process"),
+        ];
+        parent = repo.commit(request(&[parent], changes)).unwrap().id;
+    }
+    println!("{REPORT}{parent}");
+}
+
+#[test]
+fn commits_from_many_processes_all_land() {
+    if let Some(root) = child_root() {
+        let number = std::env::var(CHILD_NUMBER).unwrap().parse().unwrap();
+        commit_child(&root, number);
+        return;
+    }
+    let (_dir, root, repo) = new_repo();
+    let base = commit(&repo, &[], vec![put("README", b"base")]);
+    repo.cas_ref("main", None, Some(base.id), "test/parent")
+        .unwrap();
+
+    let exe = std::env::current_exe().unwrap();
+    let children: Vec<_> = (0..CHILDREN)
+        .map(|number| {
+            Command::new(&exe)
+                .args([
+                    "--exact",
+                    "commits_from_many_processes_all_land",
+                    "--nocapture",
+                ])
+                .env(CHILD_ROOT, &root)
+                .env(CHILD_NUMBER, number.to_string())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap()
+        })
+        .collect();
+    fs::write(root.join("go"), b"").unwrap();
+    let heads: Vec<ChangesetId> = children
+        .into_iter()
+        .enumerate()
+        .map(|(number, child)| {
+            let output = child.wait_with_output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                output.status.success(),
+                "child {number}: {:?}\n{stdout}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let head = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(REPORT))
+                .expect("the child reports its head");
+            ChangesetId(ObjectId::from_hex(head).unwrap())
+        })
+        .collect();
+
+    assert_eq!(repo.info().unwrap().changesets, 1 + CHILDREN * PER_CHILD);
+    for (number, &head) in heads.iter().enumerate() {
+        let log = repo.log_first_parent(head, 100).unwrap();
+        assert_eq!(
+            log.len(),
+            usize::try_from(PER_CHILD + 1).unwrap(),
+            "child {number}"
+        );
+        assert_eq!(log.last().map(|cs| cs.id), Some(base.id), "child {number}");
+        for j in 0..PER_CHILD {
+            assert_eq!(
+                content(&repo, head, &format!("child-{number}/file-{j}.txt")),
+                Some(format!("{number}/{j}").into_bytes()),
+            );
+        }
+        assert_eq!(
+            content(&repo, head, "shared.txt"),
+            Some(b"the same bytes in every process".to_vec())
+        );
+    }
+    assert_eq!(repo.verify(true).unwrap().problems, []);
+}
