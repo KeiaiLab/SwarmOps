@@ -2,3 +2,6 @@
 /fuzz/target
 /fuzz/artifacts
 **/*.rs.bk
+
+# task worktrees (controller-managed)
+.worktrees/

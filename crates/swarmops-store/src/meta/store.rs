@@ -51,7 +51,7 @@ use super::index::{ChangesetMeta, Index};
 use super::journal::Journal;
 use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
-use super::refs::{self, RefState};
+use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
 use crate::error::StoreError;
 use crate::fs_ops::{FsOps, RealFs};
@@ -278,6 +278,17 @@ impl MetaStore {
             moved: HashMap::new(),
             _lock: lock,
         })
+    }
+
+    /// Every ref file, by name (`main`, then `release/<x>` sorted), each with its state or the
+    /// error reading it gave. Takes no lock and writes nothing. For checking the files
+    /// themselves (verify): one damaged ref file fails every [`MetaStore::read`], so this
+    /// reads each file on its own. It shows the files only, not the moves in frames past the
+    /// checkpoint that no write has materialized yet, which a snapshot applies on top.
+    /// Entries of `meta/refs/` that cannot be refs (temp files, names this version does not
+    /// use) are skipped, as snapshots skip them.
+    pub fn ref_files(&self) -> Result<Vec<RefFile>, StoreError> {
+        refs::read_each(&self.layout, &*self.fs)
     }
 
     /// Makes the materialized files durable now: takes the lock, replays, then, if any frame

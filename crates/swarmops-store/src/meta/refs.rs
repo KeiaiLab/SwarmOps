@@ -40,6 +40,16 @@ pub struct RefState {
     pub version: u64,
 }
 
+/// One ref file, as [`crate::MetaStore::ref_files`] reads it.
+#[derive(Debug)]
+pub struct RefFile {
+    /// The ref's name.
+    pub name: String,
+    /// The state the file holds, or the error reading it gave (`InvalidData` for a file that
+    /// is not a ref file).
+    pub state: Result<RefState, StoreError>,
+}
+
 /// Refuses, with [`StoreError::RefName`], a name that is not `main` or `release/<x>`.
 pub(crate) fn check_name(name: &str) -> Result<(), StoreError> {
     let release = |x: &str| {
@@ -75,26 +85,54 @@ pub(crate) fn read_all(
     if let Some(state) = read(layout, fs, "main")? {
         refs.insert("main".to_owned(), state);
     }
-    let entries = match std::fs::read_dir(layout.meta_path("refs/release")) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(refs),
-        Err(e) => return Err(e.into()),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
-            continue; // not UTF-8, so not a ref
-        };
-        let name = format!("release/{file_name}");
-        if check_name(&name).is_err() {
-            continue;
-        }
+    for name in release_names(layout)? {
         // A file removed since the listing is a ref deleted meanwhile.
         if let Some(state) = read(layout, fs, &name)? {
             refs.insert(name, state);
         }
     }
     Ok(refs)
+}
+
+/// Every ref that has a file, by name, each with its state or the error reading its file
+/// gave: [`read_all`], except that a damaged file does not fail the rest. The names are the
+/// ones [`read_all`] reads, and a file removed since the listing is skipped the same way.
+pub(crate) fn read_each(layout: &Layout, fs: &dyn FsOps) -> Result<Vec<RefFile>, StoreError> {
+    let mut names = vec!["main".to_owned()];
+    names.extend(release_names(layout)?);
+    let mut refs = Vec::with_capacity(names.len());
+    for name in names {
+        let state = match read(layout, fs, &name) {
+            Ok(Some(state)) => Ok(state),
+            Ok(None) => continue,
+            Err(e) => Err(e),
+        };
+        refs.push(RefFile { name, state });
+    }
+    Ok(refs)
+}
+
+/// The names of the `release/<x>` refs that `meta/refs/release/` holds a file for, sorted.
+/// Entries that are not refs (temp files, anything this version does not name) are skipped.
+fn release_names(layout: &Layout) -> Result<Vec<String>, StoreError> {
+    let entries = match std::fs::read_dir(layout.meta_path("refs/release")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e.into()),
+    };
+    let mut names = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue; // not UTF-8, so not a ref
+        };
+        let name = format!("release/{file_name}");
+        if check_name(&name).is_ok() {
+            names.push(name);
+        }
+    }
+    names.sort_unstable();
+    Ok(names)
 }
 
 /// The state a ref in state `current` has once a transaction leaves it at `target`: gone

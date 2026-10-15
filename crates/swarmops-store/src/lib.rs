@@ -20,5 +20,5 @@ pub use fs_ops::{CRASH_AT_ENV, CrashAtFs, FsOps, LinkOutcome, RealFs};
 pub use layout::{Layout, is_native_linux_fs};
 pub use meta::{
     CasResult, ChangesetMeta, CommitInfo, Frame, Index, InsertOutcome, Journal, JournalEntry,
-    MetaLock, MetaRead, MetaStore, MetaWrite, Record, RefMoveEntry, RefState, SortedView,
+    MetaLock, MetaRead, MetaStore, MetaWrite, Record, RefFile, RefMoveEntry, RefState, SortedView,
 };

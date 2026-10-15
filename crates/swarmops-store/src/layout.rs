@@ -1,7 +1,8 @@
 //! Where each piece of a store lives on disk (storage spec §2).
 //!
 //! ```text
-//! <root>/FORMAT                 "swarmops-store 1\n"
+//! <root>/FORMAT                 "swarmops-store 1\n", written last by a create
+//! <root>/REPO                   the repository's identity: its id, then its name
 //! <root>/meta/                  metadata store files (storage spec §3), among them:
 //! <root>/meta/lock              the flock that serializes metadata writers
 //! <root>/meta/journal.log       append-only journal frames, the metadata's source of truth
@@ -34,6 +35,12 @@ impl Layout {
     /// `<root>/FORMAT`, the store version marker.
     pub fn format_file(&self) -> Utf8PathBuf {
         self.root.join("FORMAT")
+    }
+
+    /// `<root>/REPO`, the repository's identity: a line with its id (32 hex digits), then its
+    /// name, verbatim, to the end of the file.
+    pub fn repo_file(&self) -> Utf8PathBuf {
+        self.root.join("REPO")
     }
 
     /// `<root>/meta`, the metadata store's directory.
