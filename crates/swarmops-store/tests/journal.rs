@@ -906,13 +906,18 @@ fn a_listed_frame_cut_short_is_journal_corrupt() {
     // Nor do garbage entries: entry 1 (43) points into frame 0 (bytes 0..84), at its
     // generation, which reads as a header announcing 1 byte, so a frame ending at 52, where
     // entry 2 points, at bytes that read as a frame cut short. Cutting at 52 would destroy
-    // frame 0.
+    // frame 0. Recovery checks the two links back from the last listed frame before it reads
+    // that frame, and the second one, entry 1, does not start where frame 0 ends.
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
     journal.append_frame(&[root_changeset()]).unwrap();
     append_bytes(layout.journal_off(), &43_u64.to_le_bytes());
     append_bytes(layout.journal_off(), &52_u64.to_le_bytes());
-    assert_corrupt_at(journal.truncate_torn_tail(), 52, "entry 2 is cut short");
+    assert_corrupt_at(
+        journal.truncate_torn_tail(),
+        43,
+        "entry 1 is not where frame 0 ends",
+    );
     assert_eq!(file_len(layout.journal_log()), 84, "nothing was cut");
     assert_eq!(
         offsets_on_disk(&layout),
@@ -1071,6 +1076,33 @@ fn journal_off_cut_after_a_reader_measured_it_is_journal_corrupt() {
         let (reader, _) = racing_journal(&layout, Some(cut_to_one_entry()));
         assert_corrupt_at(read(&reader), offset, what);
     }
+
+    // Three frames, journal.off cut to two entries: the binary search finds the entries it
+    // reads, and the entries read after it come up one short.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    for n in 1..=3 {
+        journal.append_frame(&[compacted(n)]).unwrap(); // bytes 0..19, 19..38, 38..57
+    }
+    let cut_to_two_entries = || -> Hook {
+        let off = layout.journal_off();
+        let cut = move || set_len(&off, 16);
+        (
+            "file_len journal.off".to_owned(),
+            When::After,
+            Box::new(cut),
+        )
+    };
+    for from in [0, 19] {
+        let what = format!("tail_frames_from({from})");
+        let off: Vec<u8> = [0_u64, 19, 38]
+            .iter()
+            .flat_map(|e| e.to_le_bytes())
+            .collect();
+        fs::write(layout.journal_off(), off).unwrap();
+        let (reader, _) = racing_journal(&layout, Some(cut_to_two_entries()));
+        assert_corrupt_at(reader.tail_frames_from(from), from, &what);
+    }
 }
 
 #[test]
@@ -1126,6 +1158,31 @@ fn a_zeroed_entry_is_journal_corrupt_for_readers_too() {
         let off: Vec<u8> = entries.iter().flat_map(|e: &u64| e.to_le_bytes()).collect();
         fs::write(layout.journal_off(), off).unwrap();
         assert_corrupt_at(reopen(&layout).tail_frames_from(19), 0, &what);
+    }
+
+    // Read from a listed frame's start, 19, with a bad entry before it: the frame listed just
+    // before the read must start where its own predecessor ends (frame 0 at 0) and end where
+    // the read starts. [0, 0, 19] over two frames holds frame 0 twice, so frame 1 would read as
+    // seq 2; [19, 38] over three puts frame 0 at 19. Each tail is clean, so recovery has
+    // nothing to cut or list and does not walk journal.off; it checks the same two links back
+    // from the last listed frame, so it refuses both too.
+    for (entries, log_len, bad) in [(&[0, 0, 19][..], 38, 0), (&[19, 38], 57, 19)] {
+        let what = format!("journal.off {entries:?}, read from 19");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[compacted(1)]).unwrap(); // bytes 0..19
+        journal.append_frame(&[compacted(2)]).unwrap(); // bytes 19..38
+        journal.append_frame(&[compacted(3)]).unwrap(); // bytes 38..57
+        set_len(layout.journal_log(), log_len);
+        let off: Vec<u8> = entries.iter().flat_map(|e: &u64| e.to_le_bytes()).collect();
+        fs::write(layout.journal_off(), &off).unwrap();
+        assert_corrupt_at(reopen(&layout).tail_frames_from(19), bad, &what);
+        assert_corrupt_at(journal.truncate_torn_tail(), bad, &what);
+        assert_eq!(
+            fs::read(layout.journal_off()).unwrap(),
+            off,
+            "{what}: nothing changed"
+        );
     }
 }
 
@@ -1313,6 +1370,23 @@ fn offset_entries_out_of_order_are_journal_corrupt_not_a_panic() {
         assert_corrupt_at(reader.frames_after(0, 10), bad, &what);
         assert_corrupt_at(reader.frames_after(1, 10), bad, &what);
     }
+
+    // A zeroed third entry: readers report it where they reach it, like the others; recovery
+    // drops it, as it drops any zeroed entry at the end of journal.off.
+    let what = "third entry 0";
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap();
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap();
+    append_bytes(layout.journal_off(), &0_u64.to_le_bytes());
+    let reader = reopen(&layout);
+    assert_corrupt_at(reader.frames_after(0, 1), 84, what); // frame 1 cannot end there
+    assert_corrupt_at(reader.frames_after(0, 10), 0, what);
+    assert_corrupt_at(reader.frames_after(1, 10), 0, what);
+    assert_eq!(journal.truncate_torn_tail().unwrap(), None, "{what}");
+    assert_eq!(offsets_on_disk(&layout), [0, 84], "{what}: dropped");
 }
 
 #[test]

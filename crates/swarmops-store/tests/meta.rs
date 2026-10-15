@@ -7,6 +7,8 @@
 //! may run in any order or in parallel. The multi-process tests run this test binary again
 //! as their children (selected by [`CHILD_ROOT`]), all on the real filesystem.
 
+mod rendezvous;
+
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -25,6 +27,8 @@ use swarmops_store::{
     RealFs, Record, RefMoveEntry, RefState, StoreError,
 };
 use tempfile::TempDir;
+
+use crate::rendezvous::Rendezvous;
 
 /// Set only in the children the multi-process tests spawn: the store root.
 const CHILD_ROOT: &str = "SWARMOPS_TEST_META_CHILD_ROOT";
@@ -2325,12 +2329,13 @@ impl Failing {
 }
 
 /// [`RealFs`] that records each call as `"<method> <file name>"`, can run a hook once, at the
-/// first `read` of a file of a given name, before that read, and fails the call its
-/// [`Failing`] names.
+/// first `read` of a file of a given name, before that read, fails the call its [`Failing`]
+/// names, and counts its `sync_data` calls in flight ([`Rendezvous`]).
 struct RecordingFs {
     calls: Arc<Mutex<Vec<String>>>,
     hook: Mutex<Option<Hook>>,
     failing: Failing,
+    syncs: Rendezvous,
 }
 
 impl RecordingFs {
@@ -2341,8 +2346,14 @@ impl RecordingFs {
             calls: Arc::clone(&calls),
             hook: Mutex::new(None),
             failing: Failing::default(),
+            syncs: Rendezvous::default(),
         };
         (fs, move || std::mem::take(&mut *calls.lock().unwrap()))
+    }
+
+    /// What counts this recorder's `sync_data` calls in flight.
+    fn syncs(&self) -> Rendezvous {
+        self.syncs.clone()
     }
 
     /// This recorder, running `hook` at the first `read` of a file named `file`.
@@ -2433,7 +2444,7 @@ impl FsOps for RecordingFs {
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
         self.record("sync_data", path)?;
-        RealFs.sync_data(path)
+        self.syncs.around(|| RealFs.sync_data(path))
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -2451,7 +2462,10 @@ impl FsOps for RecordingFs {
 fn write_and_commit_make_the_documented_fs_calls() {
     let (_dir, root) = new_root();
     let (fs, calls) = RecordingFs::new();
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let mut store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    // One thread: the index's five syncs go one after another, in write order, as crash
+    // sweeps that count calls need them.
+    store.set_parallelism(1);
     assert_eq!(calls(), CREATE_CALLS);
     let tail_check = ["file_len journal.log", "file_len journal.off"];
     // A reader's snapshot of the journal, journal.off measured first: the write's replay
@@ -2546,4 +2560,98 @@ fn write_and_commit_make_the_documented_fs_calls() {
     calls();
     store.flush().unwrap();
     assert_eq!(calls(), [&tail_check[..], &snapshot, &sync].concat());
+}
+
+/// The five index syncs, sorted.
+const INDEX_SYNCS: [&str; 5] = [
+    "sync_data dh.col",
+    "sync_data gen.col",
+    "sync_data ids.col",
+    "sync_data par.col",
+    "sync_data parents.log",
+];
+
+/// `calls`, split into what came before the last `count`, and those sorted.
+fn sorted_tail(mut calls: Vec<String>, count: usize) -> (Vec<String>, Vec<String>) {
+    let mut tail = calls.split_off(calls.len() - count);
+    tail.sort();
+    (calls, tail)
+}
+
+#[test]
+fn the_index_syncs_its_five_files_at_once_and_the_checkpoint_waits_for_them() {
+    let (_dir, root) = new_root();
+    let (fs, calls) = RecordingFs::new();
+    let (syncs, fail) = (fs.syncs(), fs.failing());
+    // The default parallelism: 5.
+    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    for n in 0..31 {
+        insert(&store, &[cs(n, &[])]); // frames 0..=30
+    }
+    calls();
+    let before = [
+        "file_len journal.log",
+        "file_len journal.off",
+        "file_len journal.off",
+        "file_len journal.log",
+        "append_durable journal.log",
+        "append_durable journal.off",
+        "append parents.log",
+        "append par.col",
+        "append gen.col",
+        "append dh.col",
+        "append ids.col",
+    ];
+
+    // The 32nd frame past the checkpoint syncs the index: each of its five syncs waits until
+    // all five are in flight, which only syncs made at once can be. The checkpoint moves once
+    // all five have returned.
+    syncs.arm(5);
+    assert!(insert(&store, &[cs(31, &[])]).checkpointed);
+    assert_eq!(syncs.most(), 5, "the five syncs were in flight together");
+    let (made, last) = sorted_tail(calls(), 1);
+    assert_eq!(last, ["atomic_replace journal.ckpt"]);
+    let (made, index_syncs) = sorted_tail(made, 5);
+    assert_eq!(index_syncs, INDEX_SYNCS);
+    assert_eq!(made, before);
+    assert_eq!(ckpt(&root), log_len(&root), "the checkpoint is at the end");
+
+    // A sync that fails while the others run: all five are made, the error comes back after
+    // the commit point, and the checkpoint stays where it was.
+    syncs.arm(0);
+    for n in 32..63 {
+        insert(&store, &[cs(n, &[])]); // 31 frames past the checkpoint
+    }
+    let ckpt_before = ckpt(&root);
+    calls();
+    fail.set("sync_data gen.col");
+    let mut write = store.write().unwrap();
+    write.insert_changeset(cs(63, &[])).unwrap();
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 63,
+            source,
+        }) => {
+            assert!(matches!(*source, StoreError::Io(_)), "{source:?}");
+        }
+        other => panic!("expected PostCommit at frame 63, got {other:?}"),
+    }
+    fail.clear();
+    let made = calls();
+    let mut index_syncs: Vec<&str> = made
+        .iter()
+        .map(String::as_str)
+        .filter(|call| call.starts_with("sync_data"))
+        .collect();
+    index_syncs.sort_unstable();
+    assert_eq!(index_syncs, INDEX_SYNCS, "every file's sync was made");
+    assert!(
+        !made
+            .iter()
+            .any(|call| call == "atomic_replace journal.ckpt"),
+        "no checkpoint after a failed sync: {made:?}"
+    );
+    assert_eq!(ckpt(&root), ckpt_before);
+    store.flush().unwrap();
+    assert_eq!(ckpt(&root), log_len(&root));
 }

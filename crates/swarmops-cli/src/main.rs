@@ -6,8 +6,9 @@
 //!   with `error.exit` (1 error, 2 usage, 4 retryable, 5 identity, 6 not found).
 //! - A command line clap refuses is `E_INVALID_ARG` (exit 2): clap's message in `message`, the
 //!   usage in `hint`. `--help` and `--version` alone print clap's text and exit 0.
-//! - A panic is caught and printed as `E_INTERNAL` (exit 1), its message in `message`; the
-//!   panic's location goes to stderr.
+//! - A panic is caught and printed as `E_INTERNAL` (exit 1), its message in `message`, with
+//!   `meta.repo` and `meta.resolved` as far as the command got; the panic's location goes to
+//!   stderr.
 //! - stdout carries the envelope, or with `--human` its text rendering, and nothing else;
 //!   diagnostics go to stderr, and there are none by default.
 //!
@@ -28,7 +29,7 @@ use std::time::Instant;
 use swarmops_api::{ErrorCode, OpError};
 
 use crate::cli::Parsed;
-use crate::commands::Ctx;
+use crate::commands::{Ctx, Used};
 use crate::output::{Format, Printed};
 
 fn main() -> ExitCode {
@@ -40,6 +41,7 @@ fn main() -> ExitCode {
         cli::NO_OP,
         Format::Json { pretty: terminal },
         started,
+        None,
         || respond(started, terminal),
     );
     emit(&printed)
@@ -69,15 +71,19 @@ fn respond(started: Instant, terminal: bool) -> Printed {
             commands::usage(&error, &path, format, started)
         }
         Parsed::Run(cli, op) => match context::format(&cli.global, &env, terminal) {
-            Ok(format) => guarded(op, format, started, || {
+            Ok(format) => {
+                // Made outside the guard, so that a panic's envelope can read what it used.
                 let ctx = Ctx {
                     global: &cli.global,
                     env: &env,
                     format,
                     started,
+                    used: Used::default(),
                 };
-                commands::run(&ctx, op, cli.command)
-            }),
+                guarded(op, format, started, Some(&ctx.used), || {
+                    commands::run(&ctx, op, cli.command)
+                })
+            }
             Err(error) => {
                 let format = context::json_format(&cli.global, terminal);
                 commands::failed(op, error, format, started)
@@ -87,8 +93,15 @@ fn respond(started: Instant, terminal: bool) -> Printed {
 }
 
 /// Runs `run`, which prints operation `op`'s envelope, and turns a panic in it into an
-/// `E_INTERNAL` envelope (exit 1) with the panic's message.
-fn guarded(op: &str, format: Format, started: Instant, run: impl FnOnce() -> Printed) -> Printed {
+/// `E_INTERNAL` envelope (exit 1) with the panic's message, and the `meta.repo` and
+/// `meta.resolved` of what the command had `used` (none before there is a command).
+fn guarded(
+    op: &str,
+    format: Format,
+    started: Instant,
+    used: Option<&Used>,
+    run: impl FnOnce() -> Printed,
+) -> Printed {
     panic::catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|payload| {
         let message = payload
             .downcast_ref::<&str>()
@@ -102,7 +115,10 @@ fn guarded(op: &str, format: Format, started: Instant, run: impl FnOnce() -> Pri
                 output::printable(&message)
             ),
         );
-        commands::failed(op, error, format, started)
+        match used {
+            Some(used) => commands::failed_after(op, error, used, format, started),
+            None => commands::failed(op, error, format, started),
+        }
     })
 }
 
@@ -129,9 +145,17 @@ fn emit(printed: &Printed) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::Value;
+    use std::ffi::OsString;
+
+    use camino::Utf8Path;
+    use serde_json::{Value, json};
+    use swarmops_api::{
+        ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, ShowReq, StoreOps,
+    };
+    use swarmops_ops::LocalOps;
 
     use super::*;
+    use crate::cli::Global;
 
     fn envelope(printed: &Printed) -> Value {
         serde_json::from_str(&printed.stdout).expect("one JSON document")
@@ -140,7 +164,7 @@ mod tests {
     #[test]
     fn a_panic_is_e_internal_with_its_message() {
         let format = Format::Json { pretty: false };
-        let printed = guarded("commit", format, Instant::now(), || panic!("boom"));
+        let printed = guarded("commit", format, Instant::now(), None, || panic!("boom"));
         assert_eq!(printed.exit, 1);
         let json = envelope(&printed);
         assert_eq!(
@@ -151,9 +175,12 @@ mod tests {
         assert_eq!(json["error"]["exit"], 1);
         let message = json["error"]["message"].as_str().unwrap();
         assert!(message.ends_with(": boom"), "{message}");
+        // Before a command has named a store, there is none to report.
+        assert_eq!(json["meta"].get("repo"), None);
+        assert_eq!(json["meta"]["resolved"], json!({}));
 
         // A formatted message is a String payload, and stays on one line.
-        let printed = guarded("show", format, Instant::now(), || {
+        let printed = guarded("show", format, Instant::now(), None, || {
             panic!("{}", "two\nlines")
         });
         let message = envelope(&printed)["error"]["message"]
@@ -163,6 +190,62 @@ mod tests {
         assert!(message.ends_with(r": two\nlines"), "{message}");
     }
 
+    /// A panic after the command named its store and resolved a revision reports both, as the
+    /// command's own envelope would.
+    #[test]
+    fn a_panic_keeps_the_store_named_and_what_it_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = format!("{}/store", dir.path().to_str().unwrap());
+        let (ops, _) = LocalOps::init(Utf8Path::new(&store), "acme").unwrap();
+        let who = Identity::parse("agent/worker-1").unwrap();
+        let change = ChangeInput {
+            path: "a.txt".to_owned(),
+            op: ChangeOp::Put,
+            content: Some(ContentInput::Inline("a".to_owned())),
+            mode: None,
+        };
+        let req = CommitReq {
+            parent: None,
+            changes: vec![change],
+            message: "m".to_owned(),
+            allow_empty: false,
+        };
+        let id = ops.commit(&who, req).unwrap().changeset;
+        drop(ops);
+
+        let global = Global {
+            repo: Some(store.clone()),
+            ..Global::default()
+        };
+        let env = |_: &str| -> Option<OsString> { None };
+        let format = Format::Json { pretty: false };
+        let ctx = Ctx {
+            global: &global,
+            env: &env,
+            format,
+            started: Instant::now(),
+            used: Used::default(),
+        };
+        let printed = guarded("show", format, ctx.started, Some(&ctx.used), || {
+            ctx.on_store(
+                "show",
+                || Ok(()),
+                |ops, ()| -> Result<(), OpError> {
+                    let rev = id.as_str().into();
+                    ops.show(ShowReq {
+                        rev,
+                        max_changes: 1,
+                    })?;
+                    panic!("boom after a read")
+                },
+            )
+        });
+        let json = envelope(&printed);
+        assert_eq!(json["error"]["code"], "E_INTERNAL");
+        assert_eq!(json["meta"]["repo"], store.as_str());
+        assert_eq!(json["meta"]["resolved"], json!({ id.as_str(): id }));
+    }
+
     #[test]
     fn no_panic_passes_the_envelope_through() {
         let format = Format::Human;
@@ -170,7 +253,9 @@ mod tests {
             stdout: "name: acme\n".to_owned(),
             exit: 0,
         };
-        let passed = guarded("repo_info", format, Instant::now(), || printed.clone());
+        let passed = guarded("repo_info", format, Instant::now(), None, || {
+            printed.clone()
+        });
         assert_eq!(passed, printed);
     }
 }

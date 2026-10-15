@@ -9,8 +9,10 @@
 //!   (`json` or `human`), else JSON; JSON is pretty with `--pretty`, and by default when
 //!   stdout is a terminal.
 //!
-//! A variable set to the empty string counts as unset, and so does an empty `--repo`; a
-//! variable that is not UTF-8 is `E_INVALID_ARG`, said of the variable (`details.source`).
+//! A variable set to the empty string counts as unset. An explicit empty `--repo` names no
+//! store and does not fall back to `SWARMOPS_REPO` (an unset shell variable in `--repo "$X"`
+//! must not pick another store). A variable that is not UTF-8 is `E_INVALID_ARG`, said of the
+//! variable (`details.source`).
 //! Every function reads the environment through `env`, so that tests can hand it one.
 
 use std::ffi::OsString;
@@ -32,21 +34,23 @@ pub const FORMAT_ENV: &str = "SWARMOPS_FORMAT";
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
 
 /// The store as the user named it: `flag` (`--repo`), else `SWARMOPS_REPO`; `None` when
-/// neither names one.
+/// neither names one, and for an empty `--repo`, which is read as naming none.
 pub fn store_named(flag: Option<&str>, env: Env<'_>) -> Result<Option<String>, OpError> {
     match flag {
-        Some(store) if !store.is_empty() => Ok(Some(store.to_owned())),
-        _ => var(env, REPO_ENV),
+        Some("") => Ok(None),
+        Some(store) => Ok(Some(store.to_owned())),
+        None => var(env, REPO_ENV),
     }
 }
 
-/// `E_NOT_A_REPO` for a command that needs a store when the user named none.
-pub fn no_store_named() -> OpError {
-    OpError::new(
-        ErrorCode::NotARepo,
-        format!("no store named: neither --repo nor {REPO_ENV} gives one"),
-    )
-    .with_hint(format!(
+/// `E_NOT_A_REPO` for a command that needs a store when the user named none, given `flag`
+/// (`--repo`): the message says when it was given empty, which names none.
+pub fn no_store_named(flag: Option<&str>) -> OpError {
+    let why = match flag {
+        Some(_) => "--repo is empty".to_owned(),
+        None => format!("neither --repo nor {REPO_ENV} gives one"),
+    };
+    OpError::new(ErrorCode::NotARepo, format!("no store named: {why}")).with_hint(format!(
         "pass --repo <store> or set {REPO_ENV}; swarmops init <dir> creates a store"
     ))
 }
@@ -150,11 +154,9 @@ mod tests {
             store_named(None, &env).unwrap().as_deref(),
             Some("/from/env")
         );
-        // Empty counts as unset, for the flag and the variable alike.
-        assert_eq!(
-            store_named(Some(""), &env).unwrap().as_deref(),
-            Some("/from/env")
-        );
+        // An explicit empty flag names no store, and does not fall back to the variable.
+        assert_eq!(store_named(Some(""), &env).unwrap(), None);
+        // An empty variable counts as unset.
         let empty = env_of(&[(REPO_ENV, b"")]);
         assert_eq!(store_named(None, &empty).unwrap(), None);
         assert_eq!(store_named(None, &env_of(&[])).unwrap(), None);
@@ -166,8 +168,11 @@ mod tests {
             "{}",
             bad.message
         );
-        let none = no_store_named();
+        let none = no_store_named(None);
         assert_eq!((none.code.as_str(), none.exit), ("E_NOT_A_REPO", 6));
+        let empty = no_store_named(Some(""));
+        assert_eq!(empty.message, "no store named: --repo is empty");
+        assert_eq!((empty.code, empty.hint), (none.code, none.hint));
     }
 
     #[test]

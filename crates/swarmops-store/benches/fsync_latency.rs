@@ -6,6 +6,8 @@
 //! bloated by an earlier one. Criterion reports per-sample means; for true
 //! per-write percentiles see `tests/fsync_percentiles.rs`.
 
+mod common;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,19 +16,9 @@ use std::time::Duration;
 use criterion::{Criterion, criterion_group, criterion_main};
 use tempfile::TempDir;
 
-const PAYLOAD: [u8; 4096] = [0xA5; 4096];
+use crate::common::base_dir;
 
-fn base_dir() -> PathBuf {
-    let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").expect("HOME is set");
-            PathBuf::from(home).join(".local/state/swarmops-bench")
-        },
-        PathBuf::from,
-    );
-    fs::create_dir_all(&dir).expect("create bench base dir");
-    dir
-}
+const PAYLOAD: [u8; 4096] = [0xA5; 4096];
 
 fn fresh_dir(base: &Path) -> TempDir {
     tempfile::tempdir_in(base).expect("create variant dir")

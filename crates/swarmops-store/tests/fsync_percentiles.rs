@@ -5,25 +5,18 @@
 //! under `SWARMOPS_BENCH_DIR` (default `~/.local/state/swarmops-bench`) and
 //! records every iteration's own duration; the table is what `docs/perf.md` cites.
 
+#[path = "../benches/common/mod.rs"]
+mod common;
+
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, Instant};
+
+use crate::common::base_dir;
 
 const N: usize = 1000;
 const PAYLOAD: [u8; 4096] = [0xA5; 4096];
-
-fn base_dir() -> PathBuf {
-    let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").expect("HOME is set");
-            PathBuf::from(home).join(".local/state/swarmops-bench")
-        },
-        PathBuf::from,
-    );
-    fs::create_dir_all(&dir).expect("create bench base dir");
-    dir
-}
 
 fn write_payload(path: &Path) -> File {
     let mut f = OpenOptions::new()

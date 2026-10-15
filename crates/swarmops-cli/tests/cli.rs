@@ -402,6 +402,12 @@ fn not_a_repo_exits_6() {
     let from_env = s.run_env(&[("SWARMOPS_REPO", &missing)], &["show", "main"]);
     assert_eq!((from_env.exit, from_env.code()), (6, "E_NOT_A_REPO"));
     assert_eq!(from_env["meta"]["repo"], missing.as_str());
+    // An explicit empty --repo names no store: it does not fall back to SWARMOPS_REPO.
+    let empty = s.run_env(&[("SWARMOPS_REPO", &missing)], &["--repo", "", "info"]);
+    assert_eq!((empty.exit, empty.code()), (6, "E_NOT_A_REPO"));
+    assert!(empty["meta"].get("repo").is_none(), "no store named");
+    assert_eq!(empty["error"]["message"], "no store named: --repo is empty");
+    assert_eq!(empty["error"]["hint"], unnamed["error"]["hint"]);
     assert!(!fs::exists(&missing).unwrap(), "nothing was created");
 
     insta::assert_json_snapshot!(s.transcript());
@@ -536,6 +542,11 @@ fn human_mode_prints_text_not_json() {
     for (env, args, exit) in human {
         let output = Session::run_raw(env, args, None);
         assert_eq!(output.exit, *exit, "{args:?}: {}", output.stdout);
+        assert!(
+            output.stderr.is_empty(),
+            "{args:?}: nothing on stderr: {}",
+            output.stderr
+        );
         assert!(
             serde_json::from_str::<Value>(&output.stdout).is_err(),
             "{args:?} printed JSON: {}",

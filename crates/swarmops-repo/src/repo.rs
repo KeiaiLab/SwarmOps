@@ -127,9 +127,10 @@ impl LocalRepo {
     ///
     /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests), the object store and the metadata
     /// store share one [`CrashAtFs`] whose k-th call aborts the process, and objects are
-    /// written one at a time, so that the k-th call is the same call in every run. With
-    /// `SWARMOPS_TEST_FS_CALLS=<file>` set, that [`CrashAtFs`] writes how many calls both
-    /// stores made to `<file>` when the repository is dropped: a dry run's count.
+    /// written (and the directories and the index's files synced) one at a time, so that the
+    /// k-th call is the same call in every run. With `SWARMOPS_TEST_FS_CALLS=<file>` set, the
+    /// same holds, and that [`CrashAtFs`] writes how many calls both stores made to `<file>`
+    /// when the repository is dropped: a dry run's count.
     pub fn create(store: &Utf8Path, name: &str) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::create_on(store, name, fs, one_thread)
@@ -242,13 +243,14 @@ impl LocalRepo {
     fn assemble(
         layout: Layout,
         fs: Arc<dyn FsOps>,
-        meta: MetaStore,
+        mut meta: MetaStore,
         identity: Identity,
         one_thread: bool,
     ) -> LocalRepo {
         let mut objects = FsObjectStore::open(layout.clone(), Box::new(Arc::clone(&fs)));
         if one_thread {
             objects.set_parallelism(1);
+            meta.set_parallelism(1);
         }
         Repo {
             objects,
@@ -353,8 +355,8 @@ fn ref_error(e: StoreError) -> RepoError {
 /// ([`CrashAtFs::from_env`]: `SWARMOPS_TEST_CRASH_AT=<k>` to abort at call k,
 /// `SWARMOPS_TEST_FS_CALLS=<file>` to write the call count when the repository is dropped), one
 /// [`CrashAtFs`] for both stores, so that they count their calls together. `true` with the
-/// latter: objects are then written one at a time, so that call k is the same call in every
-/// run.
+/// latter: objects are then written, and the directories and the index's files synced, one at
+/// a time, so that call k is the same call in every run.
 fn default_fs() -> (Arc<dyn FsOps>, bool) {
     match CrashAtFs::from_env() {
         Some(fs) => (Arc::new(fs), true),
