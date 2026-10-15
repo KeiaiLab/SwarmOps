@@ -5,8 +5,8 @@
 //! the CLI prints under `error`.
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Value};
 use thiserror::Error;
 
 /// Exit code 1: the operation failed.
@@ -123,6 +123,7 @@ impl ErrorCode {
 /// can read codes newer than its own table.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq, Error)]
 #[error("{code}: {message}")]
+#[schemars(transform = require_always_written)]
 pub struct OpError {
     /// The `E_*` code.
     pub code: String,
@@ -132,17 +133,26 @@ pub struct OpError {
     pub retryable: bool,
     /// The exit code of the CLI.
     pub exit: i32,
-    /// Machine-readable context, such as `actual` for `E_CAS_MISMATCH`; `{}` when there is none,
-    /// never null.
-    #[serde(default = "no_details")]
-    pub details: Value,
-    /// The next command to run when there is an obvious one, else null; always written.
+    /// Machine-readable context, such as `actual` for `E_CAS_MISMATCH`; `{}` when there is none.
+    #[serde(default, deserialize_with = "null_as_empty")]
+    pub details: Map<String, Value>,
+    /// The next command to run when there is an obvious one, else null.
     pub hint: Option<String>,
 }
 
-/// The details of an error that has none: an empty object.
-fn no_details() -> Value {
-    Value::Object(serde_json::Map::new())
+/// Reads `details`, taking an explicit `null` as `{}`.
+fn null_as_empty<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Map<String, Value>, D::Error> {
+    Ok(Option::<Map<String, Value>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Marks `details` and `hint` required in `OpError`'s schema, since both are always written.
+/// (`#[schemars(required)]` on `hint` would also drop `null` from its type.)
+fn require_always_written(schema: &mut schemars::Schema) {
+    if let Some(Value::Array(required)) = schema.get_mut("required") {
+        required.extend(["details", "hint"].map(Value::from));
+    }
 }
 
 impl OpError {
@@ -153,19 +163,15 @@ impl OpError {
             message: message.into(),
             retryable: code.retryable(),
             exit: code.exit(),
-            details: no_details(),
+            details: Map::new(),
             hint: None,
         }
     }
 
-    /// Replaces the details; `Value::Null` stands for none and is kept as `{}`.
+    /// Replaces the details.
     #[must_use]
-    pub fn with_details(mut self, details: Value) -> Self {
-        self.details = if details.is_null() {
-            no_details()
-        } else {
-            details
-        };
+    pub fn with_details(mut self, details: Map<String, Value>) -> Self {
+        self.details = details;
         self
     }
 

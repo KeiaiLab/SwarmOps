@@ -76,6 +76,12 @@ fn deserializing_an_identity_validates_it() {
         );
     }
     assert!(serde_json::from_value::<Identity>(json!({})).is_err());
+    // A type error names the type the caller sent, not a helper.
+    let err = serde_json::from_value::<Identity>(json!("human/purple")).unwrap_err();
+    assert!(
+        err.to_string().contains("expected struct Identity"),
+        "{err}"
+    );
 }
 
 #[test]

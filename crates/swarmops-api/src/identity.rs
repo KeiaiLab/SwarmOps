@@ -96,6 +96,7 @@ impl<'de> Deserialize<'de> for Identity {
     /// Reads `{agent, run_id?}` and checks `agent` with [`Identity::parse`].
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
+        #[serde(rename = "Identity", expecting = "struct Identity")]
         struct Raw {
             agent: String,
             run_id: Option<String>,

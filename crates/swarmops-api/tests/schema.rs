@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 
 use serde::de::DeserializeOwned;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use swarmops_api::{
     API_VERSION, Attribution, CatReq, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail,
     ChangesetSummary, CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT,
@@ -202,7 +202,7 @@ fn error_codes_map_to_spec_strings_and_exits() {
                 message: "boom".to_owned(),
                 retryable,
                 exit,
-                details: json!({}),
+                details: Map::new(),
                 hint: None,
             }
         );
@@ -223,19 +223,13 @@ fn error_codes_map_to_spec_strings_and_exits() {
         .collect();
     assert_eq!(listed, in_schema);
 
+    let actual = Map::from_iter([("actual".to_owned(), json!("c9f1"))]);
     let err = OpError::new(ErrorCode::CasMismatch, "main moved")
-        .with_details(json!({ "actual": "c9f1" }))
+        .with_details(actual.clone())
         .with_hint("swarmops ref list");
-    assert_eq!(err.details, json!({ "actual": "c9f1" }));
+    assert_eq!(err.details, actual);
     assert_eq!(err.hint.as_deref(), Some("swarmops ref list"));
     assert_eq!(err.to_string(), "E_CAS_MISMATCH: main moved");
-    // Details are never null: `Value::Null` stands for none.
-    assert_eq!(
-        OpError::new(ErrorCode::Io, "m")
-            .with_details(Value::Null)
-            .details,
-        json!({})
-    );
 }
 
 fn meta() -> Meta {
@@ -286,7 +280,7 @@ fn envelope_serializes_without_nulls_for_success() {
 #[test]
 fn envelope_for_failure_carries_the_error_and_no_result() {
     let error = OpError::new(ErrorCode::CasMismatch, "ref main moved")
-        .with_details(json!({ "actual": "d00d" }))
+        .with_details(Map::from_iter([("actual".to_owned(), json!("d00d"))]))
         .with_hint("re-read the ref, then retry with --expect d00d");
     let envelope = Envelope::<RefSetResp>::err("ref_set", error, meta());
     assert_eq!(
@@ -316,6 +310,34 @@ fn envelope_for_failure_carries_the_error_and_no_result() {
     assert_eq!(
         serde_json::from_str::<Envelope<RefSetResp>>(&text).unwrap(),
         envelope
+    );
+}
+
+#[test]
+fn error_object_always_carries_details_and_hint() {
+    // `details` reads as `{}` when it is missing or null.
+    let minimal = json!({"code": "E_IO", "message": "m", "retryable": false, "exit": 1});
+    let mut nulls = minimal.clone();
+    nulls["details"] = Value::Null;
+    nulls["hint"] = Value::Null;
+    for wire in [minimal.clone(), nulls] {
+        let err: OpError = serde_json::from_value(wire).unwrap();
+        assert_eq!((err.details, err.hint), (Map::new(), None));
+    }
+    let mut listed = minimal;
+    listed["details"] = json!([1]);
+    assert!(serde_json::from_value::<OpError>(listed).is_err());
+
+    // The schema says what is always written: `details` an object, `hint` a string or null.
+    let schema = &schema_for_all()["OpError"];
+    assert_eq!(schema["properties"]["details"]["type"], "object");
+    assert_eq!(
+        schema["properties"]["hint"]["type"],
+        json!(["string", "null"])
+    );
+    assert_eq!(
+        schema["required"],
+        json!(["code", "message", "retryable", "exit", "details", "hint"])
     );
 }
 
