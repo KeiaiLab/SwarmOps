@@ -28,5 +28,17 @@ name = "fsync_latency"
 harness = false
 
 [[bench]]
+name = "put_batch"
+harness = false
+
+[[bench]]
+name = "index_lookup"
+harness = false
+
+[[bench]]
+name = "fsync_fanout"
+harness = false
+
+[[bench]]
 name = "read_snapshot"
 harness = false

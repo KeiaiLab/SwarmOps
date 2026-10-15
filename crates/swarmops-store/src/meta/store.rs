@@ -61,6 +61,10 @@ use crate::layout::Layout;
 /// [`MetaStore::with_lock_timeout`] says otherwise.
 const DEFAULT_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many threads a write transaction's [`Index::sync`] syncs the five index files from
+/// unless [`MetaStore::set_parallelism`] says otherwise: all five at once.
+const DEFAULT_PARALLELISM: usize = 5;
+
 /// How many frames past the checkpoint a commit leaves before it syncs the index and moves
 /// the checkpoint.
 const CHECKPOINT_EVERY: u64 = 32;
@@ -81,6 +85,8 @@ pub struct MetaStore {
     fs: Arc<dyn FsOps>,
     journal: Journal,
     lock_timeout: Duration,
+    /// What every write transaction's index gets ([`Index::set_parallelism`]).
+    parallelism: usize,
 }
 
 /// What a write transaction's [`MetaWrite::commit`] did.
@@ -230,6 +236,15 @@ impl MetaStore {
         self
     }
 
+    /// Makes the write transactions sync the five index files (their batched
+    /// [`Index::sync`], and the sync a compaction starts with) from `threads` threads at once
+    /// (0: one per available core), at most one per file. 5 unless set. 1 syncs them one after
+    /// another, in write order, so that a test counting [`FsOps`] calls (a crash sweep's
+    /// [`crate::CrashAtFs`]) meets the same call at the same count in every run.
+    pub fn set_parallelism(&mut self, threads: usize) {
+        self.parallelism = threads;
+    }
+
     /// A snapshot of the metadata as committed now, taken without a lock: see the module
     /// documentation.
     pub fn read(&self) -> Result<MetaRead<'_>, StoreError> {
@@ -266,6 +281,7 @@ impl MetaStore {
         let lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
         self.journal.truncate_torn_tail()?;
         let mut index = Index::open(&self.layout, Arc::clone(&self.fs))?;
+        index.set_parallelism(self.parallelism);
         index.repair_tail()?;
         let frames = self.journal.tail_frames_from(self.journal.ckpt()?)?;
         replay::replay(&mut index, &self.layout, &*self.fs, &frames)?;
@@ -304,6 +320,7 @@ impl MetaStore {
             fs,
             journal,
             lock_timeout: DEFAULT_LOCK_TIMEOUT,
+            parallelism: DEFAULT_PARALLELISM,
         }
     }
 }
