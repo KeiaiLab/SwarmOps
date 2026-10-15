@@ -60,8 +60,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
-    CRASH_AT_ENV, CasResult, CrashAtFs, FsObjectStore, FsOps, Layout, LinkOutcome, MetaStore,
-    ObjectStore, RealFs, RefState, StoreError, is_native_linux_fs,
+    CasResult, CrashAtFs, FsObjectStore, FsOps, Layout, LinkOutcome, MetaStore, ObjectStore,
+    RealFs, RefState, StoreError, is_native_linux_fs,
 };
 
 use crate::error::RepoError;
@@ -128,7 +128,9 @@ impl LocalRepo {
     /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests), the object store and the metadata
     /// store share one [`CrashAtFs`] whose k-th call aborts the process, and objects are
     /// written (and the directories and the index's files synced) one at a time, so that the
-    /// k-th call is the same call in every run.
+    /// k-th call is the same call in every run. With `SWARMOPS_TEST_FS_CALLS=<file>` set, the
+    /// same holds, and that [`CrashAtFs`] writes how many calls both stores made to `<file>`
+    /// when the repository is dropped: a dry run's count.
     pub fn create(store: &Utf8Path, name: &str) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::create_on(store, name, fs, one_thread)
@@ -147,7 +149,7 @@ impl LocalRepo {
     /// Opens the store at `store`. Checks `FORMAT` first, then reads `REPO`:
     /// [`StoreError::Format`] if `FORMAT` is missing (no store there) or names another layout
     /// version, if `REPO` is missing or malformed, or if `meta/` is missing. Honors
-    /// `SWARMOPS_TEST_CRASH_AT` as [`LocalRepo::create`] does.
+    /// `SWARMOPS_TEST_CRASH_AT` and `SWARMOPS_TEST_FS_CALLS` as [`LocalRepo::create`] does.
     pub fn open(store: &Utf8Path) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::open_on(store, fs, one_thread)
@@ -349,17 +351,15 @@ fn ref_error(e: StoreError) -> RepoError {
     }
 }
 
-/// The filesystem a store opens on: the real one; or, with `SWARMOPS_TEST_CRASH_AT=<k>` set
-/// to a positive k (crash tests), one [`CrashAtFs`] for both stores, so that the k-th call of
-/// either aborts the process. `true` with the latter: objects are then written, and the
-/// directories and the index's files synced, one at a time.
+/// The filesystem a store opens on: the real one; or, when a crash test's hook asks for it
+/// ([`CrashAtFs::from_env`]: `SWARMOPS_TEST_CRASH_AT=<k>` to abort at call k,
+/// `SWARMOPS_TEST_FS_CALLS=<file>` to write the call count when the repository is dropped), one
+/// [`CrashAtFs`] for both stores, so that they count their calls together. `true` with the
+/// latter: objects are then written, and the directories and the index's files synced, one at
+/// a time, so that call k is the same call in every run.
 fn default_fs() -> (Arc<dyn FsOps>, bool) {
-    let crash_at = std::env::var(CRASH_AT_ENV)
-        .ok()
-        .and_then(|k| k.parse::<u64>().ok())
-        .filter(|&k| k > 0);
-    match crash_at {
-        Some(k) => (Arc::new(CrashAtFs::new(RealFs, k)), true),
+    match CrashAtFs::from_env() {
+        Some(fs) => (Arc::new(fs), true),
         None => (Arc::new(RealFs), false),
     }
 }

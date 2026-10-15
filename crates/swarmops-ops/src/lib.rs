@@ -17,4 +17,4 @@ mod error;
 pub mod identity;
 mod local;
 
-pub use local::LocalOps;
+pub use local::{LocalOps, NOW_ENV};

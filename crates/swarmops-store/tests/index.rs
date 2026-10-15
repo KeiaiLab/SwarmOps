@@ -1042,6 +1042,90 @@ fn repair_tail_cuts_a_partially_appended_record() {
     }
 }
 
+/// `truncate_to` cuts whole records off the end, `ids.col` first, as a writer whose sync
+/// failed does (see `MetaWrite`), never below what the sorted views cover; appends then carry
+/// on where it cut. A handle opened before the cut fails, with an I/O error rather than wrong
+/// data, on every lookup that reads past the cut, as `truncate_to`'s documentation lists.
+#[test]
+fn truncate_to_cuts_whole_records_back_to_a_count() {
+    let metas = [
+        meta(id_of(1), 1, [0xd1; 32], vec![]),
+        meta(id_of(2), 2, [0xd2; 32], vec![id_of(1)]),
+        meta(id_of(3), 3, [0xd3; 32], vec![id_of(2), id_of(1)]),
+        meta(id_of(4), 1, [0xd4; 32], vec![]),
+        meta(id_of(5), 2, [0xd5; 32], vec![id_of(4)]),
+        meta(id_of(6), 3, [0xd6; 32], vec![id_of(5)]),
+    ];
+    let (_root, layout) = new_root();
+    let (fs, calls) = recording_fs();
+    let mut index = Index::open(&layout, fs).unwrap();
+    append_all(&mut index, &metas[..3]);
+    index.compact().unwrap();
+    append_all(&mut index, &metas[3..]);
+    let stale = open(&layout);
+    calls();
+
+    // Records 0..=3 stay: record 3 has no parents, so parents.log keeps the 3 parents of
+    // records 1 and 2.
+    assert_eq!(index.truncate_to(4).unwrap(), 4);
+    assert_eq!(index.len(), 4);
+    assert_eq!(column_lens(&layout), [96, 32, 32, 128, 128]);
+    let cuts = [
+        "truncate ids.col",
+        "truncate dh.col",
+        "truncate gen.col",
+        "truncate par.col",
+        "truncate parents.log",
+    ];
+    assert_eq!(calls(), cuts);
+    let fresh = open(&layout);
+    assert_eq!(fresh.len(), 4);
+    for (rec, meta) in (0..).zip(&metas[..4]) {
+        assert_eq!(fresh.get(rec).unwrap(), at_seq(meta, rec));
+        assert_eq!(fresh.find(meta.id).unwrap(), Some(rec));
+    }
+    assert_eq!(fresh.find(id_of(5)).unwrap(), None);
+    // The stale handle answers what it reads below the cut: records, and ids the view holds. A
+    // lookup that reads past the cut fails: a record cut, and any scan of the tail, which runs
+    // to the end the handle counts, whether the id it looks for is cut or not.
+    assert_eq!(stale.get(1).unwrap(), at_seq(&metas[1], 1));
+    assert_eq!(stale.find(id_of(1)).unwrap(), Some(0), "the view holds it");
+    let past_the_cut = [
+        ("get of a record cut", stale.get(5).map(drop)),
+        ("find of a record kept", stale.find(id_of(4)).map(drop)),
+        ("find_prefix", stale.find_prefix("01").map(drop)),
+        (
+            "find_delta_hash",
+            stale.find_delta_hash(&[0xd1; 32]).map(drop),
+        ),
+    ];
+    for (what, got) in past_the_cut {
+        match got {
+            Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{what}"),
+            other => panic!("{what} on a stale handle: expected an I/O error, got {other:?}"),
+        }
+    }
+
+    // Never below the 3 records the views cover; parents.log ends there already.
+    assert_eq!(index.truncate_to(1).unwrap(), 3);
+    assert_eq!(column_lens(&layout), [96, 24, 24, 96, 96]);
+    assert_eq!(calls(), cuts[..4]);
+    let fresh = open(&layout);
+    assert_eq!((fresh.len(), fresh.sorted_count()), (3, 3));
+    // Nothing to cut: a count it does not reach.
+    assert_eq!(index.truncate_to(10).unwrap(), 3);
+    assert_eq!(calls(), Vec::<String>::new());
+
+    // Appends carry on at the cut.
+    append_all(&mut index, &metas[3..]);
+    assert_eq!(index.compact().unwrap(), 6);
+    let fresh = open(&layout);
+    for (rec, meta) in (0..).zip(&metas) {
+        assert_eq!(fresh.get(rec).unwrap(), at_seq(meta, rec));
+        assert_eq!(fresh.find(meta.id).unwrap(), Some(rec));
+    }
+}
+
 #[test]
 fn readers_tolerate_an_interrupted_compaction_and_repair_tail_finishes_it() {
     // compact() renames ids.key, ids.rec, dh.key and dh.rec over the old view in that order;

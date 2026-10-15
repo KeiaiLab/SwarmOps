@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 
 use crate::error::StoreError;
-use crate::fs_ops::{CrashAtFs, FsOps, RealFs, crash_at_from_env};
+use crate::fs_ops::{CrashAtFs, FsOps, RealFs};
 use crate::layout::Layout;
 
 const MAGIC: [u8; 4] = *b"SOB1";
@@ -90,11 +90,12 @@ impl FsObjectStore {
         }
     }
 
-    /// [`FsObjectStore::open`] on the real filesystem, wrapped in a [`CrashAtFs`] when
-    /// `SWARMOPS_TEST_CRASH_AT=<k>` is set (see [`crate::CRASH_AT_ENV`]).
+    /// [`FsObjectStore::open`] on the real filesystem, wrapped in a [`CrashAtFs`] when a test
+    /// hook asks for one ([`CrashAtFs::from_env`]: `SWARMOPS_TEST_CRASH_AT=<k>`,
+    /// `SWARMOPS_TEST_FS_CALLS=<file>`).
     pub fn open_default(layout: Layout) -> Self {
-        let fs: Box<dyn FsOps> = match crash_at_from_env() {
-            Some(k) => Box::new(CrashAtFs::new(RealFs, k)),
+        let fs: Box<dyn FsOps> = match CrashAtFs::from_env() {
+            Some(fs) => Box::new(fs),
             None => Box::new(RealFs),
         };
         Self::open(layout, fs)
