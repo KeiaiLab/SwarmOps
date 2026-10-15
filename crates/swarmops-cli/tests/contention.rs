@@ -3,13 +3,12 @@
 //! × 1,000 commits on ext4). The store-level half of the measurement, 32 processes of bare
 //! `MetaStore` transactions, is `swarmops-store`'s `tests/contention.rs`.
 //!
-//! Ignored, since it runs minutes of fsync'd commits. `just check-slow` runs it unoptimized,
-//! with [`COMMITS`] commits per child: 250, the fallback from the spec's [`SPEC_COMMITS`],
-//! which took 8.6 and 14.8 minutes on the loaded host that docs/perf.md "M1 (CLI level)"
-//! records. `just perf` runs the spec's 32 × 1,000 optimized and prints only its summary, as
-//! docs/perf.md cites it: `SWARMOPS_TEST_CLI_CONTENTION_COMMITS=1000 cargo nextest run
-//! --release -p swarmops-cli --run-ignored all --test contention --no-capture`.
-//! [`COMMITS_VAR`] sets how many commits each child makes.
+//! Ignored, since it runs minutes of fsync'd commits: 8–9 minutes with the kernel-queue lock
+//! on the loaded host that docs/perf.md "M1 (CLI level)" records. `just check-slow` runs it
+//! unoptimized; `just perf` runs it optimized and prints only its summary, as docs/perf.md
+//! cites it: `cargo nextest run --release -p swarmops-cli --run-ignored all --test contention
+//! --no-capture`. [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of
+//! the harness itself.
 //!
 //! The parent `init`s a store in a fresh temporary directory under `SWARMOPS_BENCH_DIR`
 //! (default `~/.local/state/swarmops-bench`, on the native filesystem, as every measurement in
@@ -54,12 +53,9 @@ use swarmops_store::{Layout, MetaLock};
 /// How many children commit at once.
 const CHILDREN: usize = 32;
 
-/// How many commits each child makes in the scenario of the storage spec (risk 1).
-const SPEC_COMMITS: usize = 1_000;
-
-/// How many commits each child makes unless [`COMMITS_VAR`] says otherwise: the fallback
-/// from [`SPEC_COMMITS`], whose run takes over 10 minutes on a loaded host.
-const COMMITS: usize = 250;
+/// How many commits each child makes unless [`COMMITS_VAR`] says otherwise: the storage
+/// spec's scenario (risk 1).
+const COMMITS: usize = 1_000;
 
 /// Set to give each child another number of commits than [`COMMITS`].
 const COMMITS_VAR: &str = "SWARMOPS_TEST_CLI_CONTENTION_COMMITS";
@@ -569,15 +565,7 @@ fn print_contention(run: &Contention, commits: usize, control_ms: u64) -> usize 
     let [before, low, high, after] = run.load;
     println!(
         "{SUMMARY}{CHILDREN} children x {commits} commits of one small file each, each child on \
-         its own chain (--parent its previous changeset){}",
-        if commits < SPEC_COMMITS {
-            format!(
-                "; the fallback from the spec's {CHILDREN} x {SPEC_COMMITS}, which takes over \
-                 10 minutes on a loaded host ({COMMITS_VAR}={SPEC_COMMITS} runs it)"
-            )
-        } else {
-            String::new()
-        }
+         its own chain (--parent its previous changeset)"
     );
     println!(
         "{SUMMARY}load (1-minute average): {before:.2} before, {low:.2}-{high:.2} during, \

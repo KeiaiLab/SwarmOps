@@ -29,6 +29,8 @@
 //! for comparison with Task 2b's per-lookup `find` percentiles (`tests/index.rs`,
 //! `index_on_wide_history_is_fast`).
 
+mod common;
+
 use std::fs::{self, File, OpenOptions};
 use std::hint::black_box;
 use std::io::{self, Write};
@@ -45,6 +47,8 @@ use swarmops_store::{
     ChangesetMeta, FsOps, Journal, Layout, LinkOutcome, MetaStore, RealFs, StoreError,
 };
 
+use crate::common::{base_dir, mix};
+
 /// How many changesets the stores hold before the 31 more of `tail31`.
 const SIZES: [u64; 2] = [10_000, 100_000];
 
@@ -56,18 +60,6 @@ const TARGETS: usize = 1_024;
 
 /// The size of one `journal.off` entry.
 const ENTRY_LEN: u64 = 8;
-
-fn base_dir() -> PathBuf {
-    let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
-        || {
-            let home = std::env::var_os("HOME").expect("HOME is set");
-            PathBuf::from(home).join(".local/state/swarmops-bench")
-        },
-        PathBuf::from,
-    );
-    fs::create_dir_all(&dir).expect("create bench base dir");
-    dir
-}
 
 /// The real filesystem without a single flush to stable storage: for building the stores,
 /// whose reads do not depend on the fsyncs a crash would need.
@@ -159,17 +151,10 @@ fn insert(store: &MetaStore, from: u64, to: u64) {
     }
 }
 
-/// A scrambled order of `0..count` (SplitMix64), the same every run.
+/// [`TARGETS`] changesets of `0..count` in a scattered order, the same every run.
 fn scattered(count: u64) -> Vec<u64> {
-    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
     (0..TARGETS)
-        .map(|_| {
-            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
-            let mut z = state;
-            z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-            z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-            (z ^ (z >> 31)) % count
-        })
+        .map(|i| mix(u64::try_from(i).expect("fits")) % count)
         .collect()
 }
 

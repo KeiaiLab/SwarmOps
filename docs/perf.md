@@ -428,7 +428,7 @@ The CLI-level half of the M1 Task 7 experiments: 32 agents committing through th
 
 ### 32 agents committing through the binary
 
-`crates/swarmops-cli/tests/contention.rs`, ignored. `just perf` runs it optimized at the spec's size (`SWARMOPS_TEST_CLI_CONTENTION_COMMITS=1000 cargo nextest run --release -p swarmops-cli --run-ignored all --test contention --no-capture`); `just check-slow` runs it unoptimized at 32 × 250 (below).
+`crates/swarmops-cli/tests/contention.rs`, ignored. `just perf` runs it optimized (`cargo nextest run --release -p swarmops-cli --run-ignored all --test contention --no-capture`), `just check-slow` unoptimized, both at the spec's 32 × 1,000 (at 32 × 250 for a while; see below).
 
 - The parent `init`s a store, commits a base changeset and creates main on it. Then 32 child processes start together behind a barrier (`ready-<n>` files, then `go`). Each runs `swarmops commit` 1,000 times in a row as agent `contention/agent-<n>`: one small file (`agents/<n>.txt`, about 20 bytes) per commit, on `--parent` its own previous changeset. So no child's commit depends on another's, and all they share is the store, and its `meta/lock`.
 - Every commit is a process of its own: start, store open, two metadata snapshots (resolving `--parent`, checking the parents), the blob, two trees and the changeset written and synced (`put_batch` + `flush`), then the metadata write transaction under `meta/lock`, then the envelope.
@@ -461,13 +461,13 @@ The two runs disagree by more than 20 % on nearly everything but the spread, so 
 
 **The spread is not the indicator.** 1.11× and 1.10×: over 1,000 commits each child's luck evens out, while single commits wait for seconds. That matches the store-level runs 2 ms apart, the pacing closest to a CLI agent's.
 
-**An uncontended commit misses the commit target.** 20–30 ms p50 when the disk is calmer (58 ms in run 2), against "≤ 5 ms + 0.3 ms per changed file" (5.3 ms for these commits). Every commit makes at least four fsyncs one after another: its new objects' (in parallel), then each of its fan-out directories' (one after another, the store-level section's finding), then the journal's two `sync_data`s under the lock. At M0's ~4 ms per fsync on this disk, that alone is over 15 ms. The snapshots are not the cost: a commit takes two, about 0.1 ms (below).
+**An uncontended commit costs 20–30 ms, nearly all of it fsyncs.** 20–30 ms p50 when the disk is calmer (58 ms in run 2). Every commit makes at least four fsyncs one after another: its new objects' (in parallel), then its fan-out directories' (one after another before Task 7c, at once since), then the journal's two `sync_data`s under the lock. At M0's ~4 ms per fsync on this disk, that alone is about 15 ms. The snapshots are not the cost: a commit takes two, about 0.1 ms (below). So the spec's "≤ 5 ms + 0.3 ms per changed file" holds only without the syncs, which is how the design spec (§15) now states it, with a full durable commit at 20–30 ms on this host.
 
 `verify --deep` checked 32,101 changesets and about 128,300 objects in 2.0–2.1 s, about 63,000 objects/s. `log -n 5` took under 1 ms.
 
-### `just check-slow` runs 32 × 250
+### 32 × 250 while the lock polled
 
-The test took 516.5 s and 886.1 s at 32 × 1,000, over 10 minutes in run 2. So its default is the fallback, 32 × 250, and its first summary line says so. `just perf`, or `SWARMOPS_TEST_CLI_CONTENTION_COMMITS=1000`, runs the spec's 32 × 1,000.
+With the polling lock the test took 516.5 s and 886.1 s at 32 × 1,000, over 10 minutes in run 2, so its default was cut to 32 × 250 until the lock changed; `just perf` kept the spec's 32 × 1,000. These are its runs at 32 × 250 then.
 
 | 32 × 250 commits | run 1 | run 2 |
 |---|---|---|
@@ -482,9 +482,7 @@ The test took 516.5 s and 886.1 s at 32 × 1,000, over 10 minutes in run 2. So i
 | the whole test | 175.5 s | 135.1 s |
 | test | passes | passes |
 
-No other SwarmOps test ran during either; run 1's load rose to 61 with other work on the host. The runs disagree by more than 20 %, so both are shown. Both passed, but with the polling lock that is luck: their slowest commits waited 9.8 s and 8.4 s of the 10 s timeout. At the 32 × 1,000 runs' rates (2 and 19 `E_BUSY` in 32,000 commits) 8,000 commits meet 0.5 to 4.75 on average, so `just check-slow` fails now and then until the lock changes.
-
-Under `just check-slow` (unoptimized, beside every other slow test, load 18.9 at the start and 19.6–25.9 during) the test passed in 138.6 s, which is also how long the whole suite took.
+No other SwarmOps test ran during either; run 1's load rose to 61 with other work on the host. The runs disagree by more than 20 %, so both are shown. Both passed, but with the polling lock that was luck: their slowest commits waited 9.8 s and 8.4 s of the 10 s timeout. At the 32 × 1,000 runs' rates (2 and 19 `E_BUSY` in 32,000 commits) 8,000 commits meet 0.5 to 4.75 on average, so `just check-slow` would have failed now and then until the lock changed. Under `just check-slow` then (unoptimized, beside every other slow test, load 18.9 at the start and 19.6–25.9 during) the test passed in 138.6 s.
 
 ### Read snapshot after the journal hardening
 
@@ -534,3 +532,43 @@ The rule: recommend a blocking lock with a timeout thread if the fairness spread
 - A blocking `flock` wakes a waiter the moment the lock is released, and so removes the 10 ms window in which every poller sleeps through the release. The store-level side experiment shows the result: no `Busy`, and a p99 wait of 0.3–0.8 s with writers 2 ms apart.
 - CLI commits are further apart than 2 ms: each process spends its 20–60 ms of own work between two lock requests.
 - What it will not change is throughput: the lock stays busy, so the mean wait stays about 0.5 s at 32 back-to-back committers on this disk. A fair lock spreads that wait over every commit, as a queue would, instead of piling it on a few. More commits per second need a shorter transaction under the lock: 7.5 ms alone, 15–27 ms here.
+
+Task 7c applied it, with the parallel `Index::sync` and `flush`; "After 7c" below has the CLI-level result.
+
+### After 7c: the kernel-queue lock
+
+Task 7c's changes (the store-level section's "M1 store fixes (7c)") are merged under the CLI: `MetaLock` waits in the kernel's flock queue, a helper thread blocked in `flock` while the caller waits up to the 10 s timeout; `Index::sync` makes its five syncs at once; and `flush` its directory fsyncs at once. The same test, 32 × 1,000, `--release`, twice:
+
+- run 1 on its own, with no other SwarmOps test running;
+- run 2 inside `just perf`, right after the store-level contention test, with Task 8's multi-process tests (33–46 processes) running for parts of it.
+
+7c's raw `fdatasync` probe (the median of 40 appends) took 3.8 ms at the start and end of run 1 and 3.7 ms at the start of `just perf`: M0's speed, unlike the 6.6–15 ms of the 7c runs. "In lock passes" divides a wait by the run's mean time per commit (wall / 32,000), the time the lock takes to pass once. The polling runs did not print the mean; 32 ÷ commits/s stands in for it. The polling maxima leave out the `E_BUSY` waits, each past 10 s.
+
+| 32 × 1,000 commits | polling, run 1 | polling, run 2 | kernel queue, run 1 | kernel queue, run 2 |
+|---|---|---|---|---|
+| load at start (range during) | 16.1 (15.5–35.7) | 15.7 (15.1–36.0) | 16.9 (16.9–28.4) | 23.1 (18.6–38.7) |
+| raw `fdatasync` p50, start / end | not taken | not taken | 3.83 / 3.79 ms | 3.72 / 3.75 ms, at the start and end of `just perf` |
+| wall, commits/s | 500.7 s, 63.9/s | 867.2 s, 36.9/s | 458.9 s, 69.7/s | 502.6 s, 63.7/s |
+| commit `meta.elapsed_ms` mean / p50 / p99 / max | (0.50 s) / 265 ms / 2.87 s / 10.02 s | (0.87 s) / 432 ms / 5.35 s / 10.00 s | 455 / 441 / 659 ms / 2.83 s | 498 / 450 ms / 1.22 s / 7.93 s |
+| `E_BUSY` | 2 | 19 | **0** | **0** |
+| child total time min / max (spread) | 453.0 / 500.7 s (1.11×) | 786.1 / 867.2 s (1.10×) | 454.9 / 458.9 s (**1.01×**) | 500.1 / 502.6 s (**1.01×**) |
+| children with a commit over 1 s / over 5 s | 32 / 24 | 32 / 32 | 32 / 0 | 32 / 32 |
+| lock wait, estimated, p50 / p99 / max | 235 ms / 2.84 s / 9.99 s | 374 ms / 5.29 s / 9.94 s | 420 / 638 ms / 2.81 s | 429 ms / 1.20 s / 7.91 s |
+| the same in lock passes | 15 / 181 / 638 | 14 / 195 / 367 | 29 / 45 / 196 | 27 / 76 / 503 |
+| uncontended commit afterwards, p50 / p99 | 30 / 54 ms | 58 / 110 ms | 21 / 30 ms | 21 / 54 ms |
+| the whole test | 516.5 s | 886.1 s | 473.2 s | 517.4 s |
+| test | fails (`E_BUSY`) | fails (`E_BUSY`) | passes | passes |
+
+The two kernel-queue runs agree within 20 % on throughput, the median and the spread, and disagree on the tail, so both are shown: run 2's p99 and longest wait are about twice and three times run 1's, with Task 8's tests on the disk.
+
+- **`E_BUSY` is gone**, from 2 and 19 in 32,000 commits to none.
+- **The tail is cut.** p99 0.66 and 1.22 s, from 2.87 and 5.35 s. In lock passes, p99 45 and 76 from 181 and 195, and the longest wait 196 and 503 passes from 367–638 (and the `E_BUSY` waits past 10 s).
+- **The median rose and the mean did not move.** The mean is fixed by the throughput (455 and 498 ms against 32 ÷ 69.7 = 459 and 32 ÷ 63.7 = 502 ms). The lock now rotates: a commit waits about one round of the other 31 writers (27–29 passes), where the poll lottery let most commits through in a fraction of a round and made the unlucky ones wait for seconds. So p50 is 441–450 ms, from 265–432 ms.
+- **Every child finished within 1 % of the others** (spread 1.01×, from 1.10–1.11×).
+- **Throughput is still the lock's.** 63.7–69.7 commits/s, 14.3–15.7 ms per lock pass, on a disk at M0's fsync speed: about four raw `fdatasync`s for a transaction that makes two. The store-level test in the same `just perf`, whose transactions write no objects, passed the lock at the same pace, every 14.1 ms (70.9 transactions/s). So the commits' object writes are not what sets the pace. What the rest of a pass costs under 32 writers is not measured here.
+- **The tail is bounded, not gone**, as 7c found at store level. Run 2's longest wait was about 500 passes (7.9 s at 15.7 ms a pass), and the store-level test in the same `just perf` waited up to 508 (7.2 s at 14.1 ms). On a disk a third slower, 500 passes reach the 10 s timeout. An order fair to the commit needs a FIFO hand-off on top of `flock` (7c).
+- **An uncontended commit took 21 ms p50 in both runs** (p99 30 and 54 ms), about 5.5 raw `fdatasync`s. The four rounds in a row (the objects, their directories, now at once, then `journal.log` and `journal.off`) make about 15 ms of it.
+
+**The read snapshot after the merge.** The merged reader also checks the frame listed just before where it reads. `just perf`'s `read_snapshot` run on it (load 15–28 during the benches, the disk at M0's speed) gives the same numbers within 3 % with the checkpoint at the journal's end (100k: `read_changeset` p50 54 µs, p99 97 µs). With 31 frames past the checkpoint they are 5–6 % slower (100k: 73 and 126 µs), as `tail_frames` takes 12.7–13.1 µs p50 against 10.5–11.7 µs before. `off_search` is unchanged (4.0–5.2 µs), and so is the answer on caching it.
+
+**Size.** The test took 473.2 s and 517.4 s at 32 × 1,000, under 10 minutes both times. So its default is the spec's 32 × 1,000 again, and `just check-slow` runs that. Under `just check-slow` (unoptimized, beside the store-level contention test and every other slow test, load 16.9 at the start and 22.6–36.2 during, raw `fdatasync` 3.9 and 3.7 ms) it passed in 513.5 s, which is also how long the whole suite took; the store-level test took 499.1 s beside it.
