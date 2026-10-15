@@ -535,6 +535,47 @@ fn append_frame_assigns_sequential_seq_and_offsets() {
 }
 
 #[test]
+fn frames_from_is_inclusive_and_starts_at_frame_zero() {
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let first = journal.append_frame(&[root_changeset()]).unwrap();
+    let second = journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap();
+    let third = journal.append_frame(&[compacted(2)]).unwrap();
+    let all = [first, second, third];
+    assert_eq!(journal.frame_count().unwrap(), 3);
+
+    let reader = reopen(&layout);
+    assert_eq!(reader.frame_count().unwrap(), 3);
+    assert_eq!(reader.frames_from(0, 10).unwrap(), all);
+    assert_eq!(reader.frames_from(1, 10).unwrap(), all[1..]);
+    assert_eq!(reader.frames_from(0, 2).unwrap(), all[..2], "at most limit");
+    assert_eq!(reader.frames_from(2, 1).unwrap(), all[2..]);
+    assert_eq!(reader.frames_from(3, 10).unwrap(), Vec::<Frame>::new());
+    assert_eq!(reader.frames_from(0, 0).unwrap(), Vec::<Frame>::new());
+    assert_eq!(
+        reader.frames_from(u64::MAX, 10).unwrap(),
+        Vec::<Frame>::new()
+    );
+    for seq in 0..3 {
+        let after = reader.frames_after(seq, 10).unwrap();
+        assert_eq!(after, reader.frames_from(seq + 1, 10).unwrap(), "seq {seq}");
+    }
+}
+
+#[test]
+fn a_first_frame_that_does_not_start_at_zero_is_journal_corrupt() {
+    // journal.off lists the frame at 19 as frame 0: the bytes before it are no frame.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[compacted(1)]).unwrap(); // bytes 0..19
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 19..103
+    fs::write(layout.journal_off(), 19_u64.to_le_bytes()).unwrap();
+    assert_corrupt_at(reopen(&layout).frames_from(0, 10), 19, "frames_from");
+}
+
+#[test]
 fn open_needs_a_journal_and_create_keeps_an_existing_one() {
     let (_root, layout) = new_root();
     let got = Journal::open(&layout, real_fs()).map(|journal| journal.len());

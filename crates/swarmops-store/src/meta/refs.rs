@@ -1,0 +1,184 @@
+//! Refs (storage spec §3): one file per ref, `meta/refs/<name>`, holding
+//! `<64 hex digits of the target>\n<version>\n`. The files are a projection of the journal's
+//! `RefMove` records: a writer replaces a file atomically (a temp file in its directory,
+//! `sync_all`, rename, directory fsync, all in [`FsOps::atomic_replace`]) and removes it when
+//! the ref is deleted, then fsyncs the directory.
+//!
+//! Ref files are read through [`FsOps::read`] too, the way the object store reads its files,
+//! so that tests can step in between a reader's look at the journal and at the refs.
+//!
+//! A name is `main` or `release/<x>`, where `x` is one or more of `[A-Za-z0-9._-]` and does
+//! not start with `.`, so that `.`, `..` and the store's own temp files (`.tmp…`) are never
+//! refs; at most 255 bytes, what a `RefMove` record holds.
+//!
+//! A ref's version counts the writes of its file since the ref was created, from 1. A
+//! transaction writes the file of each ref it moves once, with the target its last move
+//! leaves, and only if that differs from the file's: so the version grows by one per
+//! transaction that changes the target, however many moves the transaction made, and
+//! applying a frame again to a file that already shows its target changes nothing. That is
+//! what makes replay idempotent.
+
+use std::collections::BTreeMap;
+use std::io;
+
+use camino::{Utf8Path, Utf8PathBuf};
+use swarmops_core::{ChangesetId, ObjectId};
+
+use crate::error::StoreError;
+use crate::fs_ops::FsOps;
+use crate::layout::Layout;
+
+/// The most bytes a ref name may take: its length is one byte of a `RefMove` record.
+const MAX_NAME_LEN: usize = 255;
+
+/// Where a ref points, as its file (or the journal past the checkpoint) says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RefState {
+    /// The changeset the ref names.
+    pub target: ChangesetId,
+    /// How many transactions have changed the target since the ref was created, from 1.
+    pub version: u64,
+}
+
+/// Refuses, with [`StoreError::RefName`], a name that is not `main` or `release/<x>`.
+pub(crate) fn check_name(name: &str) -> Result<(), StoreError> {
+    let release = |x: &str| {
+        !x.is_empty()
+            && !x.starts_with('.')
+            && x.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+    };
+    let valid = name == "main" || name.strip_prefix("release/").is_some_and(release);
+    if valid && name.len() <= MAX_NAME_LEN {
+        Ok(())
+    } else {
+        Err(StoreError::RefName(name.to_owned()))
+    }
+}
+
+/// The state of ref `name` (a valid name) as its file says; `None` if it has no file.
+pub(crate) fn read(
+    layout: &Layout,
+    fs: &dyn FsOps,
+    name: &str,
+) -> Result<Option<RefState>, StoreError> {
+    read_file(fs, &path(layout, name))
+}
+
+/// Every ref that has a file, by name. Entries of `meta/refs/` that are not refs (temp
+/// files, anything this version does not name) are skipped.
+pub(crate) fn read_all(
+    layout: &Layout,
+    fs: &dyn FsOps,
+) -> Result<BTreeMap<String, RefState>, StoreError> {
+    let mut refs = BTreeMap::new();
+    if let Some(state) = read(layout, fs, "main")? {
+        refs.insert("main".to_owned(), state);
+    }
+    let entries = match std::fs::read_dir(layout.meta_path("refs/release")) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(refs),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue; // not UTF-8, so not a ref
+        };
+        let name = format!("release/{file_name}");
+        if check_name(&name).is_err() {
+            continue;
+        }
+        // A file removed since the listing is a ref deleted meanwhile.
+        if let Some(state) = read(layout, fs, &name)? {
+            refs.insert(name, state);
+        }
+    }
+    Ok(refs)
+}
+
+/// The state a ref in state `current` has once a transaction leaves it at `target`: gone
+/// for `None`; unchanged if it names `target` already; otherwise `target` at the next
+/// version (1 for a ref that did not exist).
+pub(crate) fn moved(current: Option<RefState>, target: Option<ChangesetId>) -> Option<RefState> {
+    let target = target?;
+    match current {
+        Some(state) if state.target == target => Some(state),
+        _ => Some(RefState {
+            target,
+            version: current.map_or(0, |state| state.version).saturating_add(1),
+        }),
+    }
+}
+
+/// Makes the file of ref `name` (a valid name) say what [`moved`] gives for `target`:
+/// replaces it, removes it, or leaves it alone if it says that already.
+pub(crate) fn write(
+    layout: &Layout,
+    fs: &dyn FsOps,
+    name: &str,
+    target: Option<ChangesetId>,
+) -> Result<(), StoreError> {
+    let path = path(layout, name);
+    let current = read_file(fs, &path)?;
+    match moved(current, target) {
+        next if next == current => {}
+        Some(state) => {
+            let refs = layout.meta_path("refs");
+            make_dir(fs, &refs, &layout.meta_dir())?;
+            if let Some(dir) = path.parent()
+                && dir != refs
+            {
+                make_dir(fs, dir, &refs)?;
+            }
+            let bytes = format!("{}\n{}\n", state.target, state.version);
+            fs.atomic_replace(path.as_std_path(), bytes.as_bytes())?;
+        }
+        None => {
+            fs.remove(path.as_std_path())?;
+            let dir = path.parent().expect("a ref file lies in meta/refs/");
+            fs.fsync_dir(dir.as_std_path())?;
+        }
+    }
+    Ok(())
+}
+
+/// The file of ref `name`.
+fn path(layout: &Layout, name: &str) -> Utf8PathBuf {
+    layout.meta_path(&format!("refs/{name}"))
+}
+
+/// Creates `dir` if it is missing, and makes its entry in `parent` durable.
+fn make_dir(fs: &dyn FsOps, dir: &Utf8Path, parent: &Utf8Path) -> Result<(), StoreError> {
+    if !dir.is_dir() {
+        fs.create_dir_all(dir.as_std_path())?;
+        fs.fsync_dir(parent.as_std_path())?;
+    }
+    Ok(())
+}
+
+/// The state a ref file holds; `None` if there is no file. Anything but
+/// `<64 hex digits>\n<version>\n`, the version a decimal of at least 1, is `InvalidData`.
+fn read_file(fs: &dyn FsOps, path: &Utf8Path) -> Result<Option<RefState>, StoreError> {
+    let Some(bytes) = fs.read(path.as_std_path())? else {
+        return Ok(None);
+    };
+    let parsed = std::str::from_utf8(&bytes).ok().and_then(|text| {
+        let (hex, rest) = text.split_once('\n')?;
+        let version = rest.strip_suffix('\n')?;
+        if !version.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        Some(RefState {
+            target: ChangesetId(ObjectId::from_hex(hex).ok()?),
+            version: version.parse().ok().filter(|&version| version > 0)?,
+        })
+    });
+    parsed.map(Some).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{path} is not a ref file: \"<64 hex digits>\\n<version>\\n\""),
+        )
+        .into()
+    })
+}

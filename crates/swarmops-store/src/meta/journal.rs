@@ -132,36 +132,56 @@ impl Journal {
     }
 
     /// Up to `limit` frames in journal order after frame `seq`: the frames `journal.off`
-    /// lists whose seq is strictly greater than `seq`. Seqs count from 0, so frame 0 is
-    /// never among them; [`Journal::tail_frames_from`]`(0)` reads from the very start.
-    /// Reads the entries (frame `seq`'s, the wanted frames', and the next one) with one
-    /// `read_at`, frame `seq`'s header with another, and the frames' bytes with a third.
+    /// lists whose seq is strictly greater than `seq`, read as [`Journal::frames_from`]
+    /// reads them. Seqs count from 0, so frame 0 is never among them;
+    /// [`Journal::frames_from`]`(0, ..)` reads from the very start.
+    pub fn frames_after(&self, seq: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
+        match seq.checked_add(1) {
+            Some(first) => self.frames_from(first, limit),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// Up to `limit` frames in journal order from frame `first` on: the frames `journal.off`
+    /// lists whose seq is `first` or greater. Reads the entries (the previous frame's, the
+    /// wanted frames', and the next one) with one `read_at`, the previous frame's header with
+    /// another (frame 0 has none: it starts at 0), and the frames' bytes with a third.
     ///
     /// Every listed frame was whole once, so one that fails its CRC or does not decode is
     /// [`StoreError::JournalCorrupt`], as is an entry that does not point where the
     /// previous frame ends. Only the last listed frame may turn out cut short (by damage
     /// that [`Journal::truncate_torn_tail`] repairs); the frames before it are returned.
-    pub fn frames_after(&self, seq: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
+    pub fn frames_from(&self, first: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
         let listed = self.off.metadata()?.len() / ENTRY_LEN;
-        let first = seq.saturating_add(1);
         let wanted = u64::try_from(limit)
             .unwrap_or(u64::MAX)
             .min(listed.saturating_sub(first));
         if wanted == 0 {
             return Ok(Vec::new());
         }
-        // Frame `seq`'s entry (the first wanted frame starts where that frame ends), the
-        // wanted frames' entries, and the next one (where the last wanted frame ends).
-        let entries = self.entries(seq, 1 + wanted + u64::from(first + wanted < listed))?;
-        let Some((&previous, offsets)) = entries.split_first() else {
-            return Ok(Vec::new()); // journal.off was cut since its length was read
+        // The previous frame's entry (the first wanted frame starts where that frame ends),
+        // the wanted frames' entries, and the next one (where the last wanted frame ends).
+        let previous = first.checked_sub(1);
+        let entries = self.entries(
+            previous.unwrap_or(first),
+            u64::from(previous.is_some()) + wanted + u64::from(first + wanted < listed),
+        )?;
+        let (previous, offsets) = match (previous, entries.split_first()) {
+            (None, _) => (None, entries.as_slice()),
+            (Some(_), Some((&previous, offsets))) => (Some(previous), offsets),
+            // journal.off was cut since its length was read.
+            (Some(_), None) => return Ok(Vec::new()),
         };
         let wanted = usize::try_from(wanted).map_or(offsets.len(), |n| n.min(offsets.len()));
         let Some(&start) = offsets.first() else {
             return Ok(Vec::new());
         };
         let log_len = self.log.metadata()?.len();
-        if self.frame_end(previous, log_len)? != Some(start) {
+        let previous_end = match previous {
+            Some(previous) => self.frame_end(previous, log_len)?,
+            None => Some(0),
+        };
+        if previous_end != Some(start) {
             return Err(StoreError::JournalCorrupt { offset: start });
         }
         let end = offsets
@@ -281,6 +301,12 @@ impl Journal {
     /// Whether [`Journal::len`] is 0.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// How many frames `journal.off` lists now (one `fstat`): the seq the next listed frame
+    /// takes.
+    pub fn frame_count(&self) -> Result<u64, StoreError> {
+        Ok(self.off.metadata()?.len() / ENTRY_LEN)
     }
 
     /// The offset up to which the journal is materialized: what [`Journal::set_ckpt`] last
