@@ -1,0 +1,12 @@
+# The two 32-process contention measurements (`crates/swarmops-store/tests/contention.rs` and
+# `crates/swarmops-cli/tests/contention.rs`) share the host's disk, and each asserts that no
+# writer waits out the store's 10 s lock timeout: they run one after another, never at once,
+# so that neither slows the other's lock passes towards that timeout (docs/perf.md, "M1 (CLI
+# level)"). The rest of the suite still runs beside them.
+
+[test-groups]
+contention = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(contention)'
+test-group = 'contention'

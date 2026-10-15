@@ -5,10 +5,10 @@
 //!
 //! Ignored, since it runs minutes of fsync'd commits: 8–9 minutes with the kernel-queue lock
 //! on the loaded host that docs/perf.md "M1 (CLI level)" records. `just check-slow` runs it
-//! unoptimized; `just perf` runs it optimized and prints only its summary, as docs/perf.md
-//! cites it: `cargo nextest run --release -p swarmops-cli --run-ignored all --test contention
-//! --no-capture`. [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of
-//! the harness itself.
+//! unoptimized (one contention test at a time: `.config/nextest.toml`); `just perf` runs it
+//! optimized and prints only its summary, as docs/perf.md cites it: `cargo nextest run
+//! --release -p swarmops-cli --run-ignored all --test contention --no-capture`.
+//! [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of the harness.
 //!
 //! The parent `init`s a store in a fresh temporary directory under `SWARMOPS_BENCH_DIR`
 //! (default `~/.local/state/swarmops-bench`, on the native filesystem, as every measurement in
@@ -16,30 +16,45 @@
 //! harness sees a `Busy` at all: one commit while the test itself holds `meta/lock` must fail
 //! with `E_BUSY` (exit 4) once the store's 10 s lock timeout has passed.
 //!
-//! Then it runs this test binary again as [`CHILDREN`] children (selected by [`WORK_DIR`]).
-//! Each child says it is ready and waits until the parent, once all are, says go; then it runs
-//! `swarmops commit` [`COMMITS`] times in a row (or as [`COMMITS_VAR`] says), as agent
-//! `contention/agent-<n>`. Each commit puts one small file, `agents/<n>.txt`, whose content
-//! names the commit, on `--parent` the child's own previous changeset (the base for its
-//! first), so that no two children's commits depend on each other. A commit that fails with
-//! `E_BUSY` (exit 4, retryable) is counted and run again; any other failure is recorded and
-//! ends the child's run. The child prints one report line: each commit's `meta.elapsed_ms` and
-//! its wall time from spawn to exit, the `meta.elapsed_ms` of each `E_BUSY`, its failure if it
-//! had one, its total time from go to its last exit, and its last changeset.
+//! Then it runs this test binary again as [`CHILDREN`] children (selected by [`WORK_DIR`]),
+//! each writing its stdout and stderr to files in the work directory. Each child says it is
+//! ready and waits until the parent, once all are, says go; then it runs `swarmops commit`
+//! [`COMMITS`] times in a row (or as [`COMMITS_VAR`] says), as agent `contention/agent-<n>`.
+//! Each commit puts one small file, `agents/<n>.txt`, whose content names the commit, on
+//! `--parent` the child's own previous changeset (the base for its first), so that no two
+//! children's commits depend on each other. A commit that fails with `E_BUSY` (exit 4,
+//! retryable) is counted and run again; anything else fails the child. The child prints one
+//! report line: each commit's `meta.elapsed_ms` and its wall time from spawn to exit, the
+//! `meta.elapsed_ms` of each `E_BUSY`, its total time from go to its last exit, and its last
+//! changeset.
 //!
 //! The parent prints the summary, every line starting [`SUMMARY`]: the 1-minute load average
-//! before, during and after the run, throughput, per-commit latency percentiles, `E_BUSY`s
-//! and failures, the children's total times and the spread between the slowest and the
-//! fastest; then what [`SOLO`] uncontended commits cost on the final store (and so roughly
+//! before, during and after the run, throughput, per-commit latency (nearest-rank
+//! percentiles), `E_BUSY`s, the children's total times and the spread between the slowest and
+//! the fastest; then what [`SOLO`] uncontended commits cost on the final store (and so roughly
 //! how long the contended commits waited for the lock), and what `verify --deep` and
 //! `log -n 5` (from main, moved to child 0's last changeset) return and cost. Only then does
-//! it assert: every `E_BUSY` after the lock timeout, none at all, no other failure, every
-//! commit made (as `info` counts them), `verify --deep` clean, and the log as committed.
+//! it assert: every `E_BUSY` after the lock timeout, none at all, every commit made (as `info`
+//! counts them), `verify --deep` clean, and the log as committed.
+//!
+//! The 0-`E_BUSY` assertion assumes a disk no more than about a third slower than this host's:
+//! with the kernel-queue lock the longest wait measured here was about 500 lock passes (7.9 s
+//! at 15.7 ms a pass, docs/perf.md "After 7c"), and a third more per pass takes that past the
+//! 10 s timeout.
+//!
+//! Nothing in it waits forever, whatever the lock or the binary does. Every `swarmops` run goes
+//! through the support runner, which kills one still running past its deadline and fails with
+//! what it printed. A child gives up at its [`MAX_BUSY_IN_A_ROW`]th `E_BUSY` in a row, and past
+//! [`CHILD_DEADLINE`]; the parent fails as soon as a child fails, and waits for the children
+//! only until [`PARENT_DEADLINE`]; and whatever ends the test early, [`Children`] kills and
+//! reaps every child still running. [`a_hung_child_is_killed_and_reported`] checks the parent's
+//! deadline with a child told ([`HANG`]) to sleep past it.
 
-use std::fs;
-use std::io::{Read as _, Write as _};
+mod support;
+
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Command, ExitStatus};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -60,11 +75,15 @@ const COMMITS: usize = 1_000;
 /// Set to give each child another number of commits than [`COMMITS`].
 const COMMITS_VAR: &str = "SWARMOPS_TEST_CLI_CONTENTION_COMMITS";
 
-/// This test's name, which the children are run with.
+/// The measurement's name, which its children are run with.
 const TEST: &str = "thirty_two_processes_thousand_commits_each";
 
-/// Set only in the children: the work directory, which holds the store (`store/`) and the
-/// barrier files (`ready-<n>`, `go`).
+/// The name of the test of the harness's deadline, which its children are run with.
+const HUNG_TEST: &str = "a_hung_child_is_killed_and_reported";
+
+/// Set only in the children: the work directory, which holds the store (`store/`), the
+/// barrier files (`ready-<n>`, `go`), each child's change list (`changes-<n>.json`) and its
+/// output (`stdout-<n>`, `stderr-<n>`).
 const WORK_DIR: &str = "SWARMOPS_TEST_CLI_CONTENTION_DIR";
 
 /// Set with [`WORK_DIR`]: the child's number, from 0.
@@ -72,6 +91,10 @@ const CHILD_NUMBER: &str = "SWARMOPS_TEST_CLI_CONTENTION_CHILD";
 
 /// Set with [`WORK_DIR`]: the base changeset, every child's first parent.
 const BASE: &str = "SWARMOPS_TEST_CLI_CONTENTION_BASE";
+
+/// Set only by [`a_hung_child_is_killed_and_reported`]: the number of the child that sleeps
+/// past every deadline after the go, as a hung child would.
+const HANG: &str = "SWARMOPS_TEST_CLI_CONTENTION_HANG";
 
 /// How a child's report line starts, among the test harness's own output.
 const REPORT: &str = "contention-child: ";
@@ -85,45 +108,49 @@ const SOLO: usize = 100;
 /// The store's lock timeout (`MetaStore`'s default), after which a writer gets `E_BUSY`.
 const LOCK_TIMEOUT_MS: u64 = 10_000;
 
+/// At how many `E_BUSY` in a row (the commit run again after each) a child gives up: 5
+/// minutes at the 10 s lock timeout, as the store-level test does.
+const MAX_BUSY_IN_A_ROW: u64 = 30;
+
+/// How long one `swarmops` run may take before the support runner kills it.
+const RUN_TIMEOUT: Duration = support::RUN_TIMEOUT;
+
+/// How long after the go a child may still start a commit: well past the longest whole run
+/// measured on this host (14.8 minutes, with the polling lock on a loaded disk).
+const CHILD_DEADLINE: Duration = Duration::from_mins(60);
+
+/// How long after the go the parent waits for the children before it kills them: a child's
+/// deadline, one more commit that meets every `E_BUSY` it may at 10 s each and then takes its
+/// whole run deadline, and a minute.
+const PARENT_DEADLINE: Duration = CHILD_DEADLINE.saturating_add(Duration::from_secs(
+    MAX_BUSY_IN_A_ROW * 10 + RUN_TIMEOUT.as_secs() + 60,
+));
+
 /// How long a process waits at the barrier before it gives up.
 const BARRIER_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// How often the parent samples the load average while the children run.
 const LOAD_EVERY: Duration = Duration::from_secs(5);
 
-/// The variables the binary reads. Every run removes them, so that the developer's
-/// environment never leaks in.
-const VARS: &[&str] = &[
-    "SWARMOPS_REPO",
-    "SWARMOPS_AGENT",
-    "SWARMOPS_RUN_ID",
-    "SWARMOPS_FORMAT",
-    "SWARMOPS_TEST_CRASH_AT",
-];
-
 #[test]
 #[ignore = "measurement, minutes of fsync'd commits: 32 processes committing through the binary"]
 fn thirty_two_processes_thousand_commits_each() {
-    if let Some((work, number, base)) = child_env() {
-        child(&work, number, &base);
+    if let Some(env) = child_env() {
+        child(&env);
         return;
     }
     let started = Instant::now();
     let commits = commits_per_child();
     let work = tempfile::tempdir_in(base_dir()).expect("create the work dir");
-    let store = work.path().join("store");
-    let store = store
-        .to_str()
-        .expect("the work dir's path is UTF-8")
-        .to_owned();
-    let base = create_store(&store);
-    let control = busy_control(&store, &base);
+    let store = store_path(work.path());
+    let base = create_store(work.path());
+    let control = busy_control(work.path(), &base);
 
     let run = run_children(work.path(), &base);
     let busy = print_contention(&run, commits, control);
-    let changesets = swarmops(&["--repo", &store, "info"], None);
-    let solo = print_solo(&store, &base, &run);
-    let verify = swarmops(&["--repo", &store, "verify", "--deep"], None);
+    let changesets = support::run_within(&["--repo", &store, "info"], &[], RUN_TIMEOUT);
+    print_solo(work.path(), &base, &run);
+    let verify = support::run_within(&["--repo", &store, "verify", "--deep"], &[], RUN_TIMEOUT);
     print_verify(&verify);
     let log = log_from_child_zero(&store, &base, &run);
     println!(
@@ -143,14 +170,14 @@ fn thirty_two_processes_thousand_commits_each() {
         early.is_empty(),
         "E_BUSY before the lock timeout: {early:?} ms"
     );
-    let crashed: Vec<&String> = run
+    let missing: Vec<&String> = run
         .reports
         .iter()
         .filter_map(|r| r.as_ref().err())
         .collect();
     assert!(
-        crashed.is_empty(),
-        "children without a report: {crashed:#?}"
+        missing.is_empty(),
+        "children without a report: {missing:#?}"
     );
     assert_eq!(
         busy,
@@ -162,28 +189,70 @@ fn thirty_two_processes_thousand_commits_each() {
             .map(|report| report.busy_ms.len())
             .collect::<Vec<_>>()
     );
-    let failures: Vec<&String> = run
-        .reports
-        .iter()
-        .flatten()
-        .filter_map(|report| report.failure.as_ref())
-        .chain(&solo)
-        .collect();
-    assert!(failures.is_empty(), "failed commands: {failures:#?}");
     for report in run.reports.iter().flatten() {
         assert_eq!(report.elapsed_ms.len(), commits, "child {}", report.child);
     }
     let expected = 1 + CHILDREN * commits;
-    assert_eq!(changesets.exit, 0, "{}", changesets.shown());
     assert_eq!(
-        changesets.envelope["result"]["changesets"].as_u64(),
+        changesets.ok()["changesets"].as_u64(),
         u64::try_from(expected).ok(),
-        "{}",
-        changesets.shown()
+        "{changesets}"
     );
-    assert_eq!(verify.exit, 0, "verify --deep: {}", verify.shown());
-    assert_eq!(verify.envelope["result"]["problems"], json!([]));
+    assert_eq!(verify.exit(), 0, "verify --deep: {verify}");
+    assert_eq!(verify.ok()["problems"], json!([]), "{verify}");
     check_log(&log, &run, commits);
+}
+
+/// The harness's own deadline: of two children, the one told to hang after the go is killed
+/// at the parent's deadline and named in the failure, every child is reaped, and the other's
+/// report stays.
+#[test]
+fn a_hung_child_is_killed_and_reported() {
+    if let Some(env) = child_env() {
+        child(&env);
+        return;
+    }
+    let work = tempfile::tempdir_in(base_dir()).expect("create the work dir");
+    let base = create_store(work.path());
+    let mut children = spawn_children(
+        work.path(),
+        &base,
+        HUNG_TEST,
+        2,
+        &[(COMMITS_VAR, "1"), (HANG, "1")],
+    );
+    wait_until_ready(work.path(), &mut children);
+    fs::write(work.path().join("go"), b"").expect("say go");
+    let pids = children.pids();
+    // Child 0 makes its one commit and exits; child 1 sleeps on.
+    let done = Instant::now() + RUN_TIMEOUT;
+    while children.0[0].try_wait().expect("poll child 0").is_none() {
+        assert!(Instant::now() < done, "child 0 never finished its commit");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let waited = Instant::now();
+    let failure = wait_for_children(
+        work.path(),
+        &mut children,
+        Instant::now() + Duration::from_secs(1),
+    )
+    .expect_err("child 1 sleeps past the deadline");
+    assert!(
+        waited.elapsed() < Duration::from_secs(30),
+        "the wait ended at the deadline, not at the hung child's end"
+    );
+    assert!(
+        failure.contains("children [1] still running at the parent's deadline"),
+        "{failure}"
+    );
+    for pid in pids {
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "child process {pid} was killed and reaped"
+        );
+    }
+    let zero = report_of(work.path(), 0).expect("child 0's report");
+    assert_eq!(zero.elapsed_ms.len(), 1, "{zero:?}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -201,30 +270,41 @@ struct Report {
     wall_us: Vec<u64>,
     /// `meta.elapsed_ms` of each `E_BUSY`.
     busy_ms: Vec<u64>,
-    /// The failure that ended the run, if one did.
-    failure: Option<String>,
     /// From go to the last commit's exit, in µs.
     total_us: u64,
     /// The last changeset committed: the base if none was.
     head: String,
 }
 
-/// The work directory, number and base changeset of this process, if it is a child.
-fn child_env() -> Option<(PathBuf, usize, String)> {
+/// What a child runs with: its work directory, its number and the base changeset.
+struct ChildEnv {
+    work: PathBuf,
+    number: usize,
+    base: String,
+}
+
+/// This process's [`ChildEnv`], if it is a child.
+fn child_env() -> Option<ChildEnv> {
     let work = std::env::var_os(WORK_DIR)?;
     let number = std::env::var(CHILD_NUMBER)
         .expect("a child has a number")
         .parse()
         .expect("a child's number is a number");
     let base = std::env::var(BASE).expect("a child has a base changeset");
-    Some((PathBuf::from(work), number, base))
+    Some(ChildEnv {
+        work: PathBuf::from(work),
+        number,
+        base,
+    })
 }
 
 /// A child's run: [`COMMITS`] commits (or as [`COMMITS_VAR`] says), each on the one before,
-/// then its report.
-fn child(work: &Path, number: usize, base: &str) {
-    let store = work.join("store");
-    let store = store.to_str().expect("UTF-8");
+/// then its report. Anything but a commit or an `E_BUSY` fails it, and so do
+/// [`MAX_BUSY_IN_A_ROW`] `E_BUSY`s in a row and a commit not started by [`CHILD_DEADLINE`].
+fn child(env: &ChildEnv) {
+    let number = env.number;
+    let store = store_path(&env.work);
+    let changes = env.work.join(format!("changes-{number}.json"));
     let agent = format!("contention/agent-{number:02}");
     let path = format!("agents/{number:02}.txt");
     let commits = commits_per_child();
@@ -233,27 +313,42 @@ fn child(work: &Path, number: usize, base: &str) {
         elapsed_ms: Vec::with_capacity(commits),
         wall_us: Vec::with_capacity(commits),
         busy_ms: Vec::new(),
-        failure: None,
         total_us: 0,
-        head: base.to_owned(),
+        head: env.base.clone(),
     };
-    fs::write(work.join(format!("ready-{number}")), b"").expect("say ready");
-    wait_for(&work.join("go"));
+    fs::write(env.work.join(format!("ready-{number}")), b"").expect("say ready");
+    wait_for(&env.work.join("go"));
     let started = Instant::now();
+    let deadline = started + CHILD_DEADLINE;
+    if std::env::var(HANG).ok() == Some(number.to_string()) {
+        // A test of the harness: hang past every deadline, as a stuck child would.
+        thread::sleep(PARENT_DEADLINE);
+        return;
+    }
+    let mut in_a_row = 0;
     while report.elapsed_ms.len() < commits {
         let j = report.elapsed_ms.len();
+        assert!(
+            Instant::now() < deadline,
+            "child {number}: commit {j} not started {CHILD_DEADLINE:?} after the go"
+        );
         let what = format!("agent {number} commit {j}");
-        let run = commit(store, &agent, Some(report.head.as_str()), &path, &what);
-        match outcome(&run, &report.head) {
-            Outcome::Committed(id) => {
-                report.elapsed_ms.push(run.elapsed_ms());
-                report.wall_us.push(micros(run.wall));
+        let parent = report.head.clone();
+        let (run, wall) = commit(&store, &changes, &agent, Some(&parent), &path, &what);
+        match outcome(&run, Some(&parent), &format!("child {number}, commit {j}")) {
+            Outcome::Committed { id, elapsed_ms } => {
+                report.elapsed_ms.push(elapsed_ms);
+                report.wall_us.push(micros(wall));
                 report.head = id;
+                in_a_row = 0;
             }
-            Outcome::Busy => report.busy_ms.push(run.elapsed_ms()),
-            Outcome::Failed(why) => {
-                report.failure = Some(format!("child {number}, commit {j}: {why}"));
-                break;
+            Outcome::Busy { elapsed_ms } => {
+                report.busy_ms.push(elapsed_ms);
+                in_a_row += 1;
+                assert!(
+                    in_a_row < MAX_BUSY_IN_A_ROW,
+                    "child {number}, commit {j}: E_BUSY {in_a_row} times in a row"
+                );
             }
         }
     }
@@ -279,77 +374,36 @@ fn wait_for(path: &Path) {
 // Running the binary.
 // ---------------------------------------------------------------------------------------------
 
-/// One run of the binary.
-struct Run {
-    exit: i32,
-    /// The envelope it printed; `null` if stdout did not hold one.
-    envelope: Value,
-    /// What it printed, for messages.
-    stdout: String,
-    stderr: String,
-    /// From spawn to exit.
-    wall: Duration,
+/// The store in the work directory `work`.
+fn store_path(work: &Path) -> String {
+    work.join("store")
+        .to_str()
+        .expect("the work dir's path is UTF-8")
+        .to_owned()
 }
 
-impl Run {
-    /// The envelope's `meta.elapsed_ms`; `u64::MAX` if it has none.
-    fn elapsed_ms(&self) -> u64 {
-        self.envelope["meta"]["elapsed_ms"]
-            .as_u64()
-            .unwrap_or(u64::MAX)
-    }
-
-    /// The run as a failure message gives it.
-    fn shown(&self) -> String {
-        format!(
-            "exit {}, stdout {:?}, stderr {:?}",
-            self.exit,
-            self.stdout.trim_end(),
-            self.stderr.trim_end()
-        )
-    }
-}
-
-/// Runs the binary with `args`, `stdin` on its standard input, and none of the variables it
-/// reads set.
-fn swarmops(args: &[&str], stdin: Option<&str>) -> Run {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_swarmops"));
-    command
-        .args(args)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    for var in VARS {
-        command.env_remove(var);
-    }
+/// Runs the binary with `args` through the support runner (no `SWARMOPS_*` variable set, a
+/// deadline of [`RUN_TIMEOUT`]); the run, and how long it took from spawn to exit.
+fn timed(args: &[&str]) -> (support::Run, Duration) {
     let started = Instant::now();
-    let mut child = command.spawn().expect("run swarmops");
-    if let Some(stdin) = stdin {
-        let mut pipe = child.stdin.take().expect("stdin is piped");
-        // A process that exits before it reads its input says why in its envelope.
-        let _ = pipe.write_all(stdin.as_bytes());
-    }
-    let output = child.wait_with_output().expect("wait for swarmops");
-    let wall = started.elapsed();
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    Run {
-        // A signal leaves no exit code: -1, which no envelope gives.
-        exit: output.status.code().unwrap_or(-1),
-        envelope: serde_json::from_str(&stdout).unwrap_or(Value::Null),
-        stdout,
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        wall,
-    }
+    let run = support::run_within(args, &[], RUN_TIMEOUT);
+    (run, started.elapsed())
 }
 
 /// Commits one small file, `path`, as `agent` on `parent` (with none, on main if it exists)
-/// to `store`: the file's content and the message are both `what`.
-fn commit(store: &str, agent: &str, parent: Option<&str>, path: &str, what: &str) -> Run {
-    let changes = json!([{"path": path, "op": "put", "content": {"inline": format!("{what}\n")}}]);
+/// to `store`, through the change list file `changes`, which it rewrites: the file's content
+/// and the message are both `what`.
+fn commit(
+    store: &str,
+    changes: &Path,
+    agent: &str,
+    parent: Option<&str>,
+    path: &str,
+    what: &str,
+) -> (support::Run, Duration) {
+    let list = json!([{"path": path, "op": "put", "content": {"inline": format!("{what}\n")}}]);
+    fs::write(changes, list.to_string()).expect("write a change list");
+    let changes = changes.to_str().expect("the work dir's path is UTF-8");
     let mut args = vec![
         "--repo",
         store,
@@ -359,106 +413,284 @@ fn commit(store: &str, agent: &str, parent: Option<&str>, path: &str, what: &str
         "-m",
         what,
         "--changes",
-        "-",
+        changes,
     ];
     if let Some(parent) = parent {
         args.extend(["--parent", parent]);
     }
-    swarmops(&args, Some(&changes.to_string()))
+    timed(&args)
 }
 
 /// What a commit came to.
 enum Outcome {
-    /// It made this changeset, on the parent it was given.
-    Committed(String),
+    /// It made changeset `id`, on the parent it was given.
+    Committed { id: String, elapsed_ms: u64 },
     /// `E_BUSY` (exit 4, retryable): the store's lock stayed taken for the whole timeout.
-    Busy,
-    /// Anything else, as the failure message gives it.
-    Failed(String),
+    Busy { elapsed_ms: u64 },
 }
 
-/// What `run`, a commit on `parent`, came to.
-fn outcome(run: &Run, parent: &str) -> Outcome {
-    let result = &run.envelope["result"];
-    match run.exit {
-        0 if result["parent"] == parent => match result["changeset"].as_str() {
-            Some(id) => Outcome::Committed(id.to_owned()),
-            None => Outcome::Failed(format!("no changeset id: {}", run.shown())),
-        },
-        0 => Outcome::Failed(format!("not on parent {parent}: {}", run.shown())),
-        4 if run.envelope["error"]["code"] == "E_BUSY" => Outcome::Busy,
-        _ => Outcome::Failed(run.shown()),
+/// What `run`, a commit on `parent` that `what` names, came to. Anything else (another error,
+/// another parent, no `meta.elapsed_ms`, an envelope off the contract) fails the test, named
+/// after `what`.
+fn outcome(run: &support::Run, parent: Option<&str>, what: &str) -> Outcome {
+    let envelope = run.envelope();
+    let elapsed_ms = elapsed_ms(&envelope, what);
+    match run.exit() {
+        0 => {
+            let result = &envelope["result"];
+            assert_eq!(
+                result["parent"].as_str(),
+                parent,
+                "{what}: committed on another parent: {run}"
+            );
+            let id = result["changeset"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{what}: no changeset id: {run}"));
+            Outcome::Committed {
+                id: id.to_owned(),
+                elapsed_ms,
+            }
+        }
+        4 if envelope["error"]["code"] == "E_BUSY" => Outcome::Busy { elapsed_ms },
+        _ => panic!("{what}: {run}"),
     }
+}
+
+/// The `meta.elapsed_ms` of `envelope`, which every envelope carries: its absence fails the
+/// test, named after `what`.
+fn elapsed_ms(envelope: &Value, what: &str) -> u64 {
+    envelope["meta"]["elapsed_ms"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("{what}: no meta.elapsed_ms in {envelope}"))
 }
 
 // ---------------------------------------------------------------------------------------------
 // The parent.
 // ---------------------------------------------------------------------------------------------
 
-/// Creates the store at `store`, with a base changeset that main names; the base's id.
-fn create_store(store: &str) -> String {
-    let init = swarmops(&["init", store, "--name", "contention"], None);
-    assert_eq!(init.exit, 0, "init: {}", init.shown());
+/// Creates the store in `work`, with a base changeset that main names; the base's id.
+fn create_store(work: &Path) -> String {
+    let store = store_path(work);
+    support::run_within(&["init", &store, "--name", "contention"], &[], RUN_TIMEOUT).ok();
     // No main yet, so a commit without a parent is a root commit.
-    let base = commit(
-        store,
+    let changes = work.join("changes-base.json");
+    let what = "contention base";
+    let (base, _) = commit(
+        &store,
+        &changes,
         "contention/harness",
         None,
         "README.md",
-        "contention base",
+        what,
     );
-    assert_eq!(base.exit, 0, "the base commit: {}", base.shown());
-    let id = base.envelope["result"]["changeset"]
-        .as_str()
-        .expect("a changeset id")
-        .to_owned();
-    let main = swarmops(
-        &[
-            "--repo",
-            store,
-            "--as",
-            "contention/harness",
-            "ref",
-            "set",
-            "main",
-            &id,
-            "--create",
-        ],
-        None,
-    );
-    assert_eq!(main.exit, 0, "ref set main: {}", main.shown());
+    let Outcome::Committed { id, .. } = outcome(&base, None, "the base commit") else {
+        panic!("the base commit: {base}");
+    };
+    let main = [
+        "--repo",
+        store.as_str(),
+        "--as",
+        "contention/harness",
+        "ref",
+        "set",
+        "main",
+        &id,
+        "--create",
+    ];
+    support::run_within(&main, &[], RUN_TIMEOUT).ok();
     id
 }
 
 /// Checks that the harness sees a `Busy`: a commit while this process holds `meta/lock` must
 /// get `E_BUSY` (exit 4) after the store's lock timeout. Returns its `meta.elapsed_ms`.
-fn busy_control(store: &str, base: &str) -> u64 {
-    let layout = Layout::new(Utf8PathBuf::from(store));
+fn busy_control(work: &Path, base: &str) -> u64 {
+    let store = store_path(work);
+    let layout = Layout::new(Utf8PathBuf::from(store.as_str()));
     let held = MetaLock::acquire(&layout, Duration::from_secs(1)).expect("take meta/lock");
-    let run = commit(
-        store,
+    let changes = work.join("changes-control.json");
+    let (run, _) = commit(
+        &store,
+        &changes,
         "contention/control",
         Some(base),
         "control.txt",
         "the lock is held",
     );
     drop(held);
-    assert!(
-        matches!(outcome(&run, base), Outcome::Busy),
-        "a commit against a held lock: {}",
-        run.shown()
-    );
-    assert!(run.elapsed_ms() >= LOCK_TIMEOUT_MS, "{}", run.shown());
+    let Outcome::Busy { elapsed_ms } = outcome(&run, Some(base), "the control commit") else {
+        panic!("a commit against a held lock committed: {run}");
+    };
+    assert!(elapsed_ms >= LOCK_TIMEOUT_MS, "{run}");
     println!(
-        "{SUMMARY}control: a commit while the test held meta/lock got E_BUSY (exit 4) after {} ms",
-        run.elapsed_ms()
+        "{SUMMARY}control: a commit while the test held meta/lock got E_BUSY (exit 4) after \
+         {elapsed_ms} ms"
     );
-    run.elapsed_ms()
+    elapsed_ms
+}
+
+/// The children, killed and reaped if still running when this drops: whatever ends the test
+/// early (a panic in the barrier wait, a failed spawn, a missed deadline), no child outlives
+/// it.
+struct Children(Vec<Child>);
+
+impl Children {
+    /// The children's process ids.
+    fn pids(&self) -> Vec<u32> {
+        self.0.iter().map(Child::id).collect()
+    }
+
+    /// Kills every child still running, and reaps them all.
+    fn kill_all(&mut self) {
+        for child in &mut self.0 {
+            // A child that has exited already is reaped (or was), and is not signalled.
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl Drop for Children {
+    fn drop(&mut self) {
+        self.kill_all();
+    }
+}
+
+/// The file in `work` that child `number`'s `stream` ("stdout" or "stderr") goes to.
+fn output_file(work: &Path, stream: &str, number: usize) -> PathBuf {
+    work.join(format!("{stream}-{number}"))
+}
+
+/// What child `number` wrote to `stream`.
+fn output(work: &Path, stream: &str, number: usize) -> String {
+    fs::read_to_string(output_file(work, stream, number))
+        .unwrap_or_else(|e| format!("({stream} of child {number} unreadable: {e})"))
+}
+
+/// The output of children `numbers`, for a failure message.
+fn outputs(work: &Path, numbers: &[usize]) -> String {
+    numbers
+        .iter()
+        .map(|&number| {
+            format!(
+                "--- child {number} stdout ---\n{}\n--- child {number} stderr ---\n{}",
+                output(work, "stdout", number),
+                output(work, "stderr", number)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Spawns `count` children of test `test` on the store in `work`, from `base`, with `env` set
+/// besides the child's own variables; each writes its stdout and stderr to files there.
+fn spawn_children(
+    work: &Path,
+    base: &str,
+    test: &str,
+    count: usize,
+    env: &[(&str, &str)],
+) -> Children {
+    let exe = std::env::current_exe().expect("this test binary");
+    let mut children = Children(Vec::with_capacity(count));
+    for number in 0..count {
+        let file = |stream| {
+            File::create(output_file(work, stream, number)).expect("create a child's output file")
+        };
+        let child = Command::new(&exe)
+            .args(["--exact", test, "--include-ignored", "--nocapture"])
+            .env(WORK_DIR, work)
+            .env(CHILD_NUMBER, number.to_string())
+            .env(BASE, base)
+            .envs(env.iter().copied())
+            .stdout(file("stdout"))
+            .stderr(file("stderr"))
+            .spawn()
+            .expect("spawn a child");
+        children.0.push(child);
+    }
+    children
+}
+
+/// Waits until every child is ready; fails at once, with its output, if one exits first.
+fn wait_until_ready(work: &Path, children: &mut Children) {
+    let deadline = Instant::now() + BARRIER_TIMEOUT;
+    let count = children.0.len();
+    let ready = |number: usize| work.join(format!("ready-{number}")).exists();
+    while !(0..count).all(ready) {
+        for (number, child) in children.0.iter_mut().enumerate() {
+            if let Some(status) = child.try_wait().expect("poll a child") {
+                panic!(
+                    "child {number} exited before it was ready ({status}):\n{}",
+                    outputs(work, &[number])
+                );
+            }
+        }
+        assert!(Instant::now() < deadline, "the children never got ready");
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+/// Waits until every child has exited cleanly, until `deadline`. A child that fails, or
+/// children still running at the deadline, end the wait at once: every child still running is
+/// killed and reaped, and the failure is returned with the output of the children it names.
+fn wait_for_children(
+    work: &Path,
+    children: &mut Children,
+    deadline: Instant,
+) -> Result<(), String> {
+    loop {
+        let statuses: Vec<Option<ExitStatus>> = children
+            .0
+            .iter_mut()
+            .map(|child| child.try_wait().expect("poll a child"))
+            .collect();
+        let failed = statuses
+            .iter()
+            .enumerate()
+            .find_map(|(number, status)| status.filter(|s| !s.success()).map(|s| (number, s)));
+        if let Some((number, status)) = failed {
+            children.kill_all();
+            return Err(format!(
+                "child {number} failed ({status}); every other child killed and reaped:\n{}",
+                outputs(work, &[number])
+            ));
+        }
+        let running: Vec<usize> = (0..statuses.len())
+            .filter(|&number| statuses[number].is_none())
+            .collect();
+        if running.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            children.kill_all();
+            return Err(format!(
+                "children {running:?} still running at the parent's deadline, killed and \
+                 reaped:\n{}",
+                outputs(work, &running)
+            ));
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Child `number`'s report, from its stdout file.
+fn report_of(work: &Path, number: usize) -> Result<Report, String> {
+    let stdout = output(work, "stdout", number);
+    let line = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(REPORT))
+        .ok_or_else(|| {
+            format!(
+                "child {number} printed no report:\n{}",
+                outputs(work, &[number])
+            )
+        })?;
+    serde_json::from_str(line).map_err(|e| format!("child {number}'s report: {e}"))
 }
 
 /// What the children did.
 struct Contention {
-    /// Each child's report, or what it printed instead of one.
+    /// Each child's report, or why there is none.
     reports: Vec<Result<Report, String>>,
     /// From go until the last child exited.
     wall: Duration,
@@ -466,82 +698,30 @@ struct Contention {
     load: [f64; 4],
 }
 
-/// Runs the children on the store in `work`, from `base`, and collects their reports.
+/// Runs [`CHILDREN`] children on the store in `work`, from `base`, lets them go together
+/// once all are ready, and collects their reports; a child that fails, or one still running at
+/// [`PARENT_DEADLINE`], fails the test (every child killed and reaped first).
 fn run_children(work: &Path, base: &str) -> Contention {
-    let exe = std::env::current_exe().expect("this test binary");
-    let mut children: Vec<Child> = (0..CHILDREN)
-        .map(|number| {
-            Command::new(&exe)
-                .args(["--exact", TEST, "--ignored", "--nocapture"])
-                .env(WORK_DIR, work)
-                .env(CHILD_NUMBER, number.to_string())
-                .env(BASE, base)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("spawn a child")
-        })
-        .collect();
+    let mut children = spawn_children(work, base, TEST, CHILDREN, &[]);
     wait_until_ready(work, &mut children);
     let before = load_average();
     let sampler = LoadSampler::start();
     let go = Instant::now();
     fs::write(work.join("go"), b"").expect("say go");
-    let outputs: Vec<Output> = children
-        .into_iter()
-        .map(|child| child.wait_with_output().expect("wait for a child"))
-        .collect();
+    let waited = wait_for_children(work, &mut children, go + PARENT_DEADLINE);
     let wall = go.elapsed();
     let (low, high) = sampler.stop();
+    if let Err(failure) = waited {
+        panic!("{failure}");
+    }
     let after = load_average();
     Contention {
-        reports: outputs.iter().enumerate().map(report_of).collect(),
+        reports: (0..CHILDREN)
+            .map(|number| report_of(work, number))
+            .collect(),
         wall,
         load: [before, low, high, after],
     }
-}
-
-/// Waits until every child is ready; fails at once, with what it printed, if one exits first.
-fn wait_until_ready(work: &Path, children: &mut [Child]) {
-    let deadline = Instant::now() + BARRIER_TIMEOUT;
-    loop {
-        let ready = (0..CHILDREN)
-            .filter(|number| work.join(format!("ready-{number}")).exists())
-            .count();
-        if ready == CHILDREN {
-            return;
-        }
-        for (number, child) in children.iter_mut().enumerate() {
-            if let Some(status) = child.try_wait().expect("poll a child") {
-                let mut stderr = String::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    let _ = pipe.read_to_string(&mut stderr);
-                }
-                panic!("child {number} exited before go ({status}): {stderr}");
-            }
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{ready} of {CHILDREN} children ready"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-/// Child `number`'s report, from its output.
-fn report_of((number, output): (usize, &Output)) -> Result<Report, String> {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .find_map(|line| line.strip_prefix(REPORT))
-        .ok_or_else(|| {
-            format!(
-                "child {number} ({}) printed no report:\n{stdout}\n{}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr)
-            )
-        })
-        .and_then(|line| serde_json::from_str(line).map_err(|e| format!("child {number}: {e}")))
 }
 
 /// Prints what the children measured, and returns how many `E_BUSY`s they met.
@@ -558,10 +738,6 @@ fn print_contention(run: &Contention, commits: usize, control_ms: u64) -> usize 
     elapsed.sort_unstable();
     wall.sort_unstable();
     let busy: usize = reports.iter().map(|report| report.busy_ms.len()).sum();
-    let failed = reports
-        .iter()
-        .filter(|report| report.failure.is_some())
-        .count();
     let [before, low, high, after] = run.load;
     println!(
         "{SUMMARY}{CHILDREN} children x {commits} commits of one small file each, each child on \
@@ -605,8 +781,8 @@ fn print_contention(run: &Contention, commits: usize, control_ms: u64) -> usize 
         })
         .collect();
     println!(
-        "{SUMMARY}E_BUSY {busy}{}, children failed {failed}, children without a report {} \
-         (control: E_BUSY after {control_ms} ms)",
+        "{SUMMARY}E_BUSY {busy}{}, children without a report {} (control: E_BUSY after \
+         {control_ms} ms)",
         if busy_at.is_empty() {
             String::new()
         } else {
@@ -649,30 +825,31 @@ fn print_fairness(reports: &[&Report]) {
     );
 }
 
-/// Times [`SOLO`] commits in a row on the final store, uncontended, prints them and the lock
-/// wait they put the contended commits' at, and returns any failure.
-fn print_solo(store: &str, base: &str, contention: &Contention) -> Option<String> {
+/// Times [`SOLO`] commits in a row on the final store, uncontended, and prints them and the
+/// lock wait they put the contended commits' at.
+fn print_solo(work: &Path, base: &str, contention: &Contention) {
+    let store = store_path(work);
+    let changes = work.join("changes-solo.json");
     let mut parent = base.to_owned();
     let mut elapsed = Vec::with_capacity(SOLO);
     let mut wall = Vec::with_capacity(SOLO);
     for j in 0..SOLO {
         let what = format!("solo commit {j}");
-        let run = commit(
-            store,
+        let (run, took) = commit(
+            &store,
+            &changes,
             "contention/solo",
-            Some(parent.as_str()),
+            Some(&parent),
             "solo.txt",
             &what,
         );
-        match outcome(&run, &parent) {
-            Outcome::Committed(id) => {
-                elapsed.push(run.elapsed_ms());
-                wall.push(micros(run.wall));
+        match outcome(&run, Some(&parent), &what) {
+            Outcome::Committed { id, elapsed_ms } => {
+                elapsed.push(elapsed_ms);
+                wall.push(micros(took));
                 parent = id;
             }
-            Outcome::Busy | Outcome::Failed(_) => {
-                return Some(format!("solo commit {j}: {}", run.shown()));
-            }
+            Outcome::Busy { .. } => panic!("{what}, alone on the store: {run}"),
         }
     }
     elapsed.sort_unstable();
@@ -702,70 +879,63 @@ fn print_solo(store: &str, base: &str, contention: &Contention) -> Option<String
             waits[waits.len() - 1]
         );
     }
-    None
 }
 
 /// Prints what `verify --deep` found and what it cost.
-fn print_verify(verify: &Run) {
-    let result = &verify.envelope["result"];
+fn print_verify(verify: &support::Run) {
+    let envelope = verify.envelope();
+    let report = match verify.exit() {
+        0 => &envelope["result"],
+        _ => &envelope["error"]["details"],
+    };
     println!(
         "{SUMMARY}verify --deep: exit {}, {} problems, {} objects and {} changesets checked in {} ms",
-        verify.exit,
-        result["problems"].as_array().map_or(0, Vec::len),
-        result["objects_checked"],
-        result["changesets_checked"],
-        verify.elapsed_ms()
+        verify.exit(),
+        report["problems"].as_array().map_or(0, Vec::len),
+        report["objects_checked"],
+        report["changesets_checked"],
+        elapsed_ms(&envelope, "verify --deep")
     );
 }
 
 /// Moves main from `base` to child 0's last changeset and lists its last five commits.
-fn log_from_child_zero(store: &str, base: &str, run: &Contention) -> Run {
+fn log_from_child_zero(store: &str, base: &str, run: &Contention) -> support::Run {
     let head = match run.reports.first() {
         Some(Ok(report)) => report.head.clone(),
         _ => base.to_owned(),
     };
-    let moved = swarmops(
-        &[
-            "--repo",
-            store,
-            "--as",
-            "contention/harness",
-            "ref",
-            "set",
-            "main",
-            &head,
-            "--expect",
-            base,
-        ],
-        None,
-    );
-    assert!(
-        moved.exit == 0 || head == base,
-        "ref set main: {}",
-        moved.shown()
-    );
-    let log = swarmops(&["--repo", store, "log", "-n", "5"], None);
+    let moved = [
+        "--repo",
+        store,
+        "--as",
+        "contention/harness",
+        "ref",
+        "set",
+        "main",
+        &head,
+        "--expect",
+        base,
+    ];
+    support::run_within(&moved, &[], RUN_TIMEOUT).ok();
+    let log = support::run_within(&["--repo", store, "log", "-n", "5"], &[], RUN_TIMEOUT);
+    let envelope = log.envelope();
     println!(
         "{SUMMARY}log -n 5 from main (child 0's last changeset): exit {}, {} entries in {} ms",
-        log.exit,
-        log.envelope["result"]["entries"]
-            .as_array()
-            .map_or(0, Vec::len),
-        log.elapsed_ms()
+        log.exit(),
+        envelope["result"]["entries"].as_array().map_or(0, Vec::len),
+        elapsed_ms(&envelope, "log -n 5")
     );
     log
 }
 
 /// Checks that `log` lists child 0's last five commits, newest first.
-fn check_log(log: &Run, run: &Contention, commits: usize) {
-    assert_eq!(log.exit, 0, "log -n 5: {}", log.shown());
+fn check_log(log: &support::Run, run: &Contention, commits: usize) {
+    let result = log.ok();
     let Some(Ok(zero)) = run.reports.first() else {
         panic!("child 0 gave no report");
     };
-    let entries = log.envelope["result"]["entries"]
-        .as_array()
-        .expect("log entries");
-    assert_eq!(entries.len(), 5.min(commits + 1), "{}", log.shown());
+    let entries = result["entries"].as_array().expect("log entries");
+    assert_eq!(entries.len(), 5.min(commits + 1), "{log}");
     assert_eq!(entries[0]["id"], zero.head.as_str());
     for (entry, j) in entries.iter().zip((0..commits).rev()) {
         assert_eq!(entry["title"], format!("agent 0 commit {j}"));
