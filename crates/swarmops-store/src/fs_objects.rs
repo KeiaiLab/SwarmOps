@@ -7,7 +7,8 @@
 //! A write hashes the payload, skips the work if the object file exists, writes and
 //! `sync_all`s a temp file in `objects/tmp/`, and links it into `objects/<2hex>/`
 //! without replacing anything. [`ObjectStore::flush`] then fsyncs each touched fan-out
-//! directory once, which is what makes the new names survive power loss.
+//! directory once, plus `objects/` itself when a put created a fan-out directory, which
+//! is what makes the new names survive power loss.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -56,7 +57,8 @@ pub trait ObjectStore: Send + Sync {
 pub struct FsObjectStore {
     layout: Layout,
     fs: Box<dyn FsOps>,
-    /// Fan-out directories holding objects put since the last flush.
+    /// Directories `flush` must fsync: the fan-out directory of every object put since
+    /// the last flush, and `objects/` if one of those fan-out directories was created.
     touched: Mutex<BTreeSet<Utf8PathBuf>>,
     /// `put_batch`'s pool once [`FsObjectStore::set_parallelism`] is called; until then,
     /// rayon's global pool.
@@ -118,7 +120,7 @@ impl FsObjectStore {
         let file = encode(kind, payload)?;
         let tmp_dir = self.layout.objects_tmp();
         self.fs.create_dir_all(tmp_dir.as_std_path())?;
-        self.fs.create_dir_all(fanout.as_std_path())?;
+        self.ensure_fanout(fanout)?;
         let temp = self.fs.write_durable_temp(tmp_dir.as_std_path(), &file)?;
         // `AlreadyExists` counts as success: a racing writer placed the same id, which in a
         // content-addressed store means the same bytes.
@@ -126,6 +128,21 @@ impl FsObjectStore {
             // Best effort: a leftover temp file is harmless; the link error is what to report.
             let _ = self.fs.remove(&temp);
             return Err(err.into());
+        }
+        Ok(())
+    }
+
+    /// Creates fan-out directory `fanout` if it is missing. A new directory's own entry
+    /// lives in `objects/`, so `objects/` then joins the touched set as well.
+    ///
+    /// The set stays locked from the check to the mark: no concurrent flush can fsync
+    /// `objects/` between the mkdir and the mark, and no other put can see the new
+    /// directory before the mark is in.
+    fn ensure_fanout(&self, fanout: &Utf8Path) -> Result<(), StoreError> {
+        let mut touched = self.touched();
+        if !self.fs.exists(fanout.as_std_path())? {
+            self.fs.create_dir_all(fanout.as_std_path())?;
+            touched.insert(self.layout.objects_dir());
         }
         Ok(())
     }

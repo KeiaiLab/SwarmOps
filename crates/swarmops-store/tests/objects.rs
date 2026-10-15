@@ -398,6 +398,11 @@ fn flush_fsyncs_each_touched_dir_once() {
     let (_root, layout) = new_root();
     let (store, calls) = counting_store(&layout);
     let [a, b, c] = three_blobs_in_two_fanout_dirs();
+    // Steady state: both fan-out dirs exist already (creating one also costs an
+    // `objects/` fsync, see `flush_fsyncs_objects_dir_for_a_new_fanout_dir`).
+    for payload in [&a, &c] {
+        fs::create_dir_all(fanout_dir(&layout, payload)).unwrap();
+    }
     for payload in [&a, &b, &c] {
         store.put(ObjectKind::Blob, payload).unwrap();
     }
@@ -414,7 +419,7 @@ fn flush_fsyncs_each_touched_dir_once() {
     expected.sort();
     assert_eq!(
         fsynced, expected,
-        "each touched fan-out dir exactly once, objects/tmp never"
+        "each touched fan-out dir exactly once; objects/ and objects/tmp never"
     );
 
     store.flush().unwrap();
@@ -422,9 +427,37 @@ fn flush_fsyncs_each_touched_dir_once() {
 }
 
 #[test]
+fn flush_fsyncs_objects_dir_for_a_new_fanout_dir() {
+    let (_root, layout) = new_root();
+    let (store, calls) = counting_store(&layout);
+    let [a, b, _] = three_blobs_in_two_fanout_dirs();
+    let fanout = fanout_dir(&layout, &a);
+
+    store.put(ObjectKind::Blob, &a).unwrap(); // creates the fan-out dir
+    store.flush().unwrap();
+    let mut first = calls.fsynced();
+    first.sort();
+    assert_eq!(
+        first,
+        vec![layout.objects_dir().into_std_path_buf(), fanout.clone()],
+        "the new fan-out dir's own entry in objects/ is made durable too"
+    );
+
+    store.put(ObjectKind::Blob, &b).unwrap(); // same fan-out dir, which now exists
+    store.flush().unwrap();
+    assert_eq!(
+        calls.fsynced()[2..],
+        [fanout],
+        "an existing fan-out dir needs only its own fsync"
+    );
+}
+
+#[test]
 fn flush_covers_objects_that_already_existed() {
     let (_root, layout) = new_root();
-    // Another process stored this object but has not flushed its directory yet.
+    // Another process linked this object into an existing fan-out dir but has not
+    // fsynced that dir yet.
+    fs::create_dir_all(fanout_dir(&layout, b"stored elsewhere")).unwrap();
     let id = real_store(&layout)
         .put(ObjectKind::Blob, b"stored elsewhere")
         .unwrap();
