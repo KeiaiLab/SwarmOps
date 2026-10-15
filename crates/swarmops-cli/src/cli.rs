@@ -10,6 +10,31 @@ use swarmops_api::{DEFAULT_LOG_LIMIT, DEFAULT_LS_LIMIT, DEFAULT_MAX_BYTES, DEFAU
 /// The envelope's `op` for a command line that names no operation.
 pub const NO_OP: &str = "swarmops";
 
+// The help of `--expect`, as `help` (`-h`) and `long_help` (`--help`) strings rather than doc
+// comments, which rustdoc would read `<actual>` in as HTML.
+
+/// `--expect`'s short help.
+const EXPECT_HELP: &str = "The changeset the ref holds now: a full id, not a ref name";
+
+/// `ref set --expect`'s long help.
+const SET_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
+
+Prefer a full changeset id over a ref name: a ref-name expectation cannot be resolved once the \
+ref has moved or is gone.
+
+After E_CAS_MISMATCH, re-apply your edits to the content at the error's `actual` and commit \
+with --parent <actual>, then retry with --expect <actual>. Do not re-send your old whole-file \
+puts: M1 has no merge, so they would revert the winner's edits to shared files.";
+
+/// `ref delete --expect`'s long help.
+const DELETE_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
+
+Prefer a full changeset id over a ref name: a ref-name expectation cannot be resolved once the \
+ref has moved or is gone.
+
+After E_CAS_MISMATCH, the ref holds the error's `actual`, which someone else moved it to: look \
+at it (swarmops show <actual>) before you delete it with --expect <actual>.";
+
 /// Source control for coding-agent swarms. Every command prints one JSON envelope on stdout.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version)]
@@ -66,6 +91,9 @@ pub enum Command {
     /// Describe the store.
     Info,
     /// Show the identity this caller's changes carry.
+    ///
+    /// An identified caller gets its agent, its run id when it has one, and auth "trust"; a
+    /// caller without an identity gets auth "anonymous" and no agent field at all.
     Whoami,
     /// Print the JSON Schema of every request and response type, or of TYPE's.
     Schema {
@@ -151,10 +179,7 @@ pub enum RefCommand {
         name: String,
         /// The revision to point it at.
         rev: String,
-        /// The changeset the ref holds now. Give its id: a ref name is read when the command
-        /// runs, so it guards against no move in between, and a replay cannot read it once
-        /// that ref is gone.
-        #[arg(long, value_name = "REV")]
+        #[arg(long, value_name = "REV", help = EXPECT_HELP, long_help = SET_EXPECT_LONG_HELP)]
         expect: Option<String>,
         /// Create the ref; it must not exist.
         #[arg(long)]
@@ -164,10 +189,7 @@ pub enum RefCommand {
     Delete {
         /// The ref.
         name: String,
-        /// The changeset the ref holds now. Give its id: a ref name is read when the command
-        /// runs, so it guards against no move in between, and a replay cannot read it once
-        /// that ref is gone.
-        #[arg(long, value_name = "REV")]
+        #[arg(long, value_name = "REV", help = EXPECT_HELP, long_help = DELETE_EXPECT_LONG_HELP)]
         expect: String,
     },
 }

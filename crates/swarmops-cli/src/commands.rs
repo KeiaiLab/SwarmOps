@@ -8,9 +8,13 @@
 //!
 //! The envelope's `meta`: `repo` is the store as the user named it (for `init`, its
 //! directory), omitted when the command uses no store (`whoami`, `schema`) or none was named;
-//! `elapsed_ms` runs from the start of the process to the result; `resolved` is every
-//! revision the operation resolved, as `LocalOps::take_resolved` reports them, also when it
-//! failed; `auth` is the store's authentication mode, `trust` in M1.
+//! `elapsed_ms` spans the whole command but its printing: reading the command line, opening
+//! the store and the operation; `resolved` is every revision the operation resolved, as
+//! `LocalOps::take_resolved` reports them, also when it failed; `auth` is the store's
+//! authentication mode, `trust` in M1.
+//!
+//! `whoami` prints `IdentityInfo` as the API writes it: for a caller without an identity,
+//! `{"auth":"anonymous"}`, with `agent` omitted rather than null.
 
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
