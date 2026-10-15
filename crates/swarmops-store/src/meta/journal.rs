@@ -152,6 +152,26 @@ impl Journal {
     /// previous frame ends. Only the last listed frame may turn out cut short (by damage
     /// that [`Journal::truncate_torn_tail`] repairs); the frames before it are returned.
     pub fn frames_from(&self, first: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
+        self.listed_frames(first, limit, true)
+    }
+
+    /// [`Journal::frames_from`] for checking the journal: every listed frame must read whole,
+    /// the last one too. A last listed frame cut short by the end of `journal.log`, which
+    /// [`Journal::frames_from`] passes over as the torn tail [`Journal::truncate_torn_tail`]
+    /// repairs, is [`StoreError::JournalCorrupt`] at its start here: a frame is whole and
+    /// durable before it is listed, so the journal lost a committed transaction.
+    pub fn frames_from_strict(&self, first: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
+        self.listed_frames(first, limit, false)
+    }
+
+    /// [`Journal::frames_from`]; `pass_over_cut_last` says whether a last listed frame cut short
+    /// ends the frames returned or is [`StoreError::JournalCorrupt`].
+    fn listed_frames(
+        &self,
+        first: u64,
+        limit: usize,
+        pass_over_cut_last: bool,
+    ) -> Result<Vec<Frame>, StoreError> {
         let listed = self.off.metadata()?.len() / ENTRY_LEN;
         let wanted = u64::try_from(limit)
             .unwrap_or(u64::MAX)
@@ -207,7 +227,7 @@ impl Journal {
                     });
                     at += size;
                 }
-                parsed if may_be_torn(&parsed, frame_seq, listed) => break,
+                parsed if pass_over_cut_last && may_be_torn(&parsed, frame_seq, listed) => break,
                 _ => return Err(StoreError::JournalCorrupt { offset }),
             }
         }
