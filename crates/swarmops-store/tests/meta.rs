@@ -49,6 +49,11 @@ const ACTOR: &str = "test/1";
 
 const SIGABRT: i32 = 6;
 
+/// Set only in the child of `a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer`,
+/// which runs with no thread to spare: the store root.
+#[cfg(target_os = "linux")]
+const NO_THREADS_ROOT: &str = "SWARMOPS_TEST_META_NO_THREADS_ROOT";
+
 /// Set only in the children of `crash_at_any_create_call_leaves_a_store_open_or_create_takes`:
 /// the store root.
 const CREATE_CRASH_ROOT: &str = "SWARMOPS_TEST_META_CREATE_CRASH_ROOT";
@@ -1585,7 +1590,14 @@ fn write_times_out_as_busy() {
         "gave up after {waited:?}"
     );
     drop(held);
-    impatient.write().unwrap().commit().unwrap();
+    // A fresh handle with the default timeout: the abandoned wait lets the lock go as soon as
+    // it gets it, but a 100 ms timeout need not cover a helper thread scheduled late.
+    MetaStore::open(&root)
+        .unwrap()
+        .write()
+        .unwrap()
+        .commit()
+        .unwrap();
 }
 
 #[test]
@@ -1881,6 +1893,52 @@ fn write_and_commit_make_the_documented_fs_calls() {
     calls();
     store.flush().unwrap();
     assert_eq!(calls(), [&tail_check[..], &snapshot, &sync].concat());
+}
+
+/// The child of [`a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer`]: 32
+/// transactions at the default parallelism, the last of which syncs the index after its commit
+/// point, while RLIMIT_NPROC leaves no thread to spawn.
+#[cfg(target_os = "linux")]
+fn commit_with_no_thread_to_spare(root: &Utf8Path) {
+    if thread::Builder::new().spawn(|| ()).is_ok() {
+        // The limit does not bind (root, say): nothing to check here.
+        println!("{REPORT}threads can be spawned");
+        return;
+    }
+    let store = MetaStore::create(root).unwrap();
+    for n in 0..31 {
+        insert(&store, &[cs(n, &[])]);
+    }
+    assert!(insert(&store, &[cs(31, &[])]).checkpointed);
+    assert_eq!(ckpt(root), log_len(root));
+    println!("{REPORT}checkpointed");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer() {
+    const TEST: &str = "a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer";
+    if let Some(root) = std::env::var_os(NO_THREADS_ROOT) {
+        let root = Utf8PathBuf::from_path_buf(root.into()).unwrap();
+        commit_with_no_thread_to_spare(&root);
+        return;
+    }
+    let (_dir, root) = new_root();
+    // `ulimit -u 1`: this user's processes and threads are past the limit, so the child can
+    // spawn no thread (the test harness then runs the test on its main thread).
+    let child = Command::new("bash")
+        .arg("-c")
+        .arg("ulimit -u 1 && exec \"$0\" \"$@\"")
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", TEST, "--nocapture"])
+        .env(NO_THREADS_ROOT, &root)
+        .output()
+        .unwrap();
+    let report = report(0, &child);
+    assert!(
+        report == "checkpointed" || report == "threads can be spawned",
+        "{report}"
+    );
 }
 
 /// The five index syncs, sorted.

@@ -80,9 +80,9 @@ const SUMMARY: &str = "{\"child\":";
 /// up: 5 minutes at the default 10 s lock timeout.
 const MAX_BUSY_IN_A_ROW: u64 = 30;
 
-/// How long after the go a child may still start a transaction: three times what a whole run
-/// takes on this host.
-const CHILD_DEADLINE: Duration = Duration::from_mins(15);
+/// How long after the go a child may still start a transaction: well past the longest whole
+/// run measured on this host (13.2 min, on a slow disk).
+const CHILD_DEADLINE: Duration = Duration::from_mins(60);
 
 /// How long after the go the parent waits for the children before it kills them: a child's
 /// deadline, one more transaction that meets every `Busy` it may at 10 s each, and a minute.

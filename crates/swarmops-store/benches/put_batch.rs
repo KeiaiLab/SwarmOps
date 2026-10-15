@@ -11,17 +11,19 @@
 //! the removal), are not.
 //!
 //! - `put_flush/<threads>`: `put_batch` on a pool of 1, 8 or 32 threads
-//!   ([`FsObjectStore::set_parallelism`]), then `flush`: what a commit's object writes cost.
-//! - `put_only/<threads>`: `put_batch` alone, the part that runs on the pool: per object a
-//!   temp file written and `sync_all`ed, then linked into place.
-//! - `flush_only`: `flush` alone, after an untimed `put_batch` on 32 threads: one directory
-//!   fsync per fan-out directory the 256 objects touched (about 162), one after another.
+//!   ([`FsObjectStore::set_parallelism`]), then `flush`, whose directory fsyncs run on the same
+//!   pool: what a commit's object writes cost.
+//! - `put_only/<threads>`: `put_batch` alone: per object a temp file written and `sync_all`ed,
+//!   then linked into place.
+//! - `flush_only`: `flush` alone, after an untimed `put_batch`, on a pool of 32 threads: one
+//!   directory fsync per fan-out directory the 256 objects touched (about 162), 32 at a time
+//!   (one after another until Task 7c).
 //! - `put_flush_busy/<threads>` and `flush_only_busy`: the same while another thread appends
 //!   64 bytes to a file of its own every 100 µs, as some process always does on a swarm host.
 //!   While any metadata is pending on the filesystem, ext4 turns every directory fsync into a
-//!   journal commit of its own, so `flush` pays one per fan-out directory; on an idle
-//!   filesystem the first commit covers them all. The other variants see whatever the host
-//!   does meanwhile.
+//!   journal commit of its own, and fsyncs made at once share commits; on an idle filesystem
+//!   the first commit covers them all. The other variants see whatever the host does
+//!   meanwhile.
 //!
 //! Throughput is reported in objects per second; docs/perf.md cites criterion's median.
 

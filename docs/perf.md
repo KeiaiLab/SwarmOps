@@ -203,7 +203,7 @@ Tests of other worktrees ran during some of these runs, on the same disk: Task 6
 
 The tail is bounded, not gone. At each release the kernel wakes every waiter and the first to run takes the lock, so a waiter can lose many releases in a row. A uniform random winner among 31 waiters predicts p99 140 and, over 32,000 waits, a longest wait of about 316 transactions; the rotating runs show 131–157 and 283–359. So the longest wait is a few hundred transactions: 2.6 s at run 2's 14 ms per transaction (it would be about 2.5 s at 7a's 8–9 ms), but 5.2–8.9 s at 18–25 ms. That stays inside the 10 s timeout, but on a slow disk not by much. An order fair to the transaction (at most 31) needs a FIFO handoff on top of `flock`.
 
-Throughput follows the disk: an uncontended transaction took 13.2–15.3 ms at the end of these runs (7.4 ms in 7a), and the lock passed every 14–25 ms. The lock's own hand-off (a helper thread woken in the kernel, then a channel to its caller) does not show at that scale. In one process, 32 threads × 16 turns of 2 ms (`tests/lock.rs`) wait at most 0.12–0.13 s with the kernel queue, against 1.22–1.25 s with the polling lock.
+Throughput follows the disk: an uncontended transaction took 13.2–15.3 ms at the end of these runs (7.4 ms in 7a), and the lock passed every 14–25 ms. The lock's own hand-off (a helper thread woken in the kernel, then a channel to its caller) does not show at that scale. In one process, 32 threads × 16 turns of 2 ms (`tests/lock.rs`, twice each) wait at most 0.12–0.13 s with the kernel queue (load 16.0), against 1.22–1.25 s with the polling lock (load 17.0).
 
 #### `Index::sync`
 
