@@ -1,0 +1,82 @@
+//! SwarmOps API: the operation contract (operations spec §0, §7).
+//!
+//! Every operation takes a request type and returns a response type or an [`OpError`]. All of
+//! them are serde and JSON Schema types, so the local store, a future remote client and the CLI
+//! exchange exactly the same JSON. [`StoreOps`] is the store boundary and [`Identity`] the caller
+//! of a mutation. The CLI prints one [`Envelope`] per command and exits with [`OpError::exit`];
+//! `swarmops schema` prints [`schema_for_all`], whose snapshot is where contract changes are
+//! reviewed.
+
+pub mod envelope;
+pub mod error;
+pub mod identity;
+pub mod ops;
+pub mod rev;
+
+pub use envelope::{API_VERSION, Envelope, Meta};
+pub use error::{ErrorCode, OpError};
+pub use identity::Identity;
+pub use ops::{
+    CatReq, ChangeInput, ChangeOpInput, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq,
+    CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, EntryKindOut,
+    FileContent, InitReq, LogPage, LogReq, LsReq, ModeInput, RefDeleteReq, RefListResp, RefOut,
+    RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, StoreOps, TreeEntryOut, TreeListing,
+    VerifyResp, WhoamiResp,
+};
+pub use rev::Rev;
+
+/// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
+///
+/// [`Envelope`] has no entry: its `result` is an operation's response type, and its `error` and
+/// `meta` are [`OpError`] and [`Meta`], which do.
+pub fn schema_for_all() -> serde_json::Value {
+    macro_rules! schemas {
+        ($($ty:ident),+ $(,)?) => {
+            serde_json::Value::Object(serde_json::Map::from_iter([
+                $((stringify!($ty).to_owned(), schemars::schema_for!($ty).to_value()),)+
+            ]))
+        };
+    }
+    schemas![
+        // Shared by every operation.
+        Rev,
+        Identity,
+        ErrorCode,
+        OpError,
+        Meta,
+        // init, info, whoami.
+        InitReq,
+        RepoInfo,
+        WhoamiResp,
+        // commit.
+        CommitReq,
+        ChangeInput,
+        ChangeOpInput,
+        ContentInput,
+        ModeInput,
+        CommitResp,
+        // cat, ls.
+        CatReq,
+        FileContent,
+        ContentEncoding,
+        EntryKindOut,
+        LsReq,
+        TreeListing,
+        TreeEntryOut,
+        // show, log.
+        ShowReq,
+        ChangesetDetail,
+        SignatureOut,
+        ChangeOut,
+        LogReq,
+        LogPage,
+        ChangesetSummary,
+        // ref list, ref set, ref delete, verify.
+        RefListResp,
+        RefOut,
+        RefSetReq,
+        RefSetResp,
+        RefDeleteReq,
+        VerifyResp,
+    ]
+}
