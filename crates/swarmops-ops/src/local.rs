@@ -46,7 +46,12 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   committer are both the agent name with the email `<instance>@<family>.swarmops.local` at
 ///   the current time, UTC; its metadata holds `agent` and, when the caller has one, `run_id`.
 ///   `files_changed` counts the changeset's delta, which leaves out puts of what a path holds
-///   already. The change list follows [`crate::content`]'s rules.
+///   already. The change list follows [`crate::content`]'s rules. `file` content is read here,
+///   in the caller's process: `LocalOps` runs on the client. A server that exposes
+///   [`StoreOps`] over a wire must refuse [`ContentInput::File`](swarmops_api::ContentInput)
+///   instead of reading a path its caller names (M10 adds the client-side pass that turns such
+///   content into bytes before a request leaves the client). A metadata key may not end in
+///   `:b64`, which `show` reserves (`E_INVALID_ARG`).
 /// - `read_file` returns at most `max_bytes` bytes from the file's start: UTF-8 text when they
 ///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
 ///   fewer); otherwise exactly `max_bytes` bytes, in base64. A directory there is `E_IS_DIR`,
@@ -57,7 +62,8 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `show` attributes the changeset by its `agent` and `run_id` metadata (`unknown/unknown`
 ///   when it records no agent); `created_at` is the committer's time in milliseconds (0 before
 ///   1970); a metadata value that is not UTF-8 is given in base64 under its key with `:b64`
-///   appended; `changes` holds at most `max_changes` entries.
+///   appended, a suffix commits refuse in a key, so `k:b64` is always the base64 of `k`'s
+///   value; `changes` holds at most `max_changes` entries.
 /// - `log` follows first parents from `rev` (`main` when omitted) or, given a `cursor`, from the
 ///   first parent of the changeset it names, which must be a full id the store holds; a page
 ///   is `truncated` when older history follows its last entry.
@@ -289,6 +295,7 @@ impl StoreOps for LocalOps {
         if let Some(run_id) = who.run_id() {
             metadata.push(("run_id".to_owned(), run_id.as_bytes().to_vec()));
         }
+        content::check_metadata(&metadata)?;
         let outcome = self
             .repo
             .commit(CommitRequest {

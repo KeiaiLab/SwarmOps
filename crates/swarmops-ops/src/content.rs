@@ -31,7 +31,9 @@
 //! character moves back to the character's start, so the text returned may be up to 3 bytes
 //! shorter than the cap; bytes that are not text are cut at exactly the cap. `show` returns a
 //! metadata value the same way, except that a base64 value goes under its key with `:b64`
-//! appended, since a metadata map has no field for the encoding.
+//! appended, since a metadata map has no field for the encoding. That suffix is reserved: a
+//! commit refuses a metadata key that ends in it, so `k:b64` is always the base64 of `k`'s
+//! value.
 
 use std::collections::BTreeSet;
 use std::fs::File;
@@ -216,6 +218,26 @@ fn starts_with_char(bytes: &[u8]) -> bool {
     }
 }
 
+/// Refuses metadata with a key that ends in `:b64`, the suffix `show` puts on a key whose value
+/// is not UTF-8, so that `k:b64` always means `k`'s value in base64: `E_INVALID_ARG` with the
+/// `key` in `details`.
+pub(crate) fn check_metadata(metadata: &[(String, Vec<u8>)]) -> Result<(), OpError> {
+    match metadata
+        .iter()
+        .find(|(key, _)| key.ends_with(BASE64_KEY_SUFFIX))
+    {
+        Some((key, _)) => Err(OpError::new(
+            ErrorCode::InvalidArg,
+            format!("metadata key {key:?} ends in {BASE64_KEY_SUFFIX:?}, which show reserves"),
+        )
+        .with_details(Map::from_iter([(
+            "key".to_owned(),
+            Value::from(key.as_str()),
+        )]))),
+        None => Ok(()),
+    }
+}
+
 /// How `show` returns metadata entry `key`, `value`: the value as UTF-8 text when it is UTF-8,
 /// else in base64 under the key with `:b64` appended.
 pub(crate) fn metadata_entry(key: &str, value: &[u8]) -> (String, String) {
@@ -261,6 +283,17 @@ mod tests {
         assert_eq!(error.details["size"], size, "{error:?}");
         assert_eq!(error.details["limit"], limit, "{error:?}");
         error
+    }
+
+    #[test]
+    fn metadata_keys_may_not_end_in_the_base64_suffix() {
+        let entry = |key: &str| (key.to_owned(), b"v".to_vec());
+        assert!(check_metadata(&[entry("agent"), entry("run_id"), entry("b64")]).is_ok());
+        for key in ["note:b64", ":b64", "agent:b64"] {
+            let error = check_metadata(&[entry("agent"), entry(key)]).expect_err(key);
+            assert_eq!(error.code, ErrorCode::InvalidArg.as_str(), "{error:?}");
+            assert_eq!(error.details["key"], key, "{error:?}");
+        }
     }
 
     #[test]

@@ -337,7 +337,8 @@ pub struct ChangesetDetail {
     /// Whether `changes` stops before the changeset's last change.
     pub changes_truncated: bool,
     /// SwarmOps metadata, such as `agent` and `run_id`. A value that is not UTF-8 is given in
-    /// standard, padded base64, under its key with `:b64` appended.
+    /// standard, padded base64, under its key with `:b64` appended. A commit refuses a key that
+    /// ends in `:b64`, so `k:b64` is always the base64 of `k`'s value, which is not UTF-8.
     pub metadata: BTreeMap<String, String>,
     /// The git author and committer signatures, kept for git fidelity.
     pub signatures: Signatures,
@@ -536,6 +537,12 @@ pub trait StoreOps {
     fn repo_info(&self, req: InfoReq) -> Result<RepoInfo, OpError>;
 
     /// Records a changeset from an explicit change list; moves no ref (CLI `commit`).
+    ///
+    /// [`ContentInput::File`] names a file on the caller's machine, so it is resolved on the
+    /// client: a store that runs in the caller's process reads the file there, and a store that
+    /// serves these operations over a wire must refuse such content rather than read a path its
+    /// caller names (M10 adds the client-side pass that turns it into bytes before a request
+    /// leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
 
     /// Reads one file at a revision (CLI `cat`).
