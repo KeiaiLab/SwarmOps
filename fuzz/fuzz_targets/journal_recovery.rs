@@ -30,8 +30,10 @@
 //!   prefix up to it, and `journal.off` the whole entries it held, then one per frame listed.
 //!   After an `Ok`, a second call returns `Ok(None)` and changes no file, and `journal.log` ends
 //!   with the last listed frame, which reads whole (or is empty if nothing is listed).
-//! - (c) So recovery only cuts a suffix, and only a torn tail: a listed frame, cut short or not,
-//!   is never cut, nor is any listed entry dropped.
+//! - (c) So recovery only cuts a suffix, and only a torn tail: whatever `journal.off` holds, a
+//!   frame a listed entry points at that reads whole survives byte-identical, since recovery
+//!   checks every listed frame before it cuts or lists anything; and no listed entry is
+//!   dropped.
 //! - (d) Mode 1: with the files undamaged, every appended frame reads back unchanged through
 //!   every reader and recovery changes nothing. Damaged, the frames before the first damaged
 //!   byte of `journal.log` still read back unchanged from the start, and through `frames_from`
@@ -163,23 +165,7 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
         }
     };
     let after = Files::read(layout);
-    let Recovery::Clean { entries, cut: want } = &recovery else {
-        panic!("truncate_torn_tail returned {cut:?}, the model says {recovery:?}");
-    };
-    assert_eq!(
-        cut, *want,
-        "truncate_torn_tail cut elsewhere than the model says"
-    );
-    let kept = cut.map_or(before.log.len(), to_usize);
-    assert!(
-        after.log == before.log[..kept],
-        "journal.log after recovery is not its first {kept} bytes"
-    );
-    assert!(
-        after.off.len() == entries.len() * ENTRY_LEN && after.entries() == *entries,
-        "journal.off after recovery lists {:?}, the model says {entries:?}",
-        after.entries()
-    );
+    recovered_as_modelled(&recovery, cut, &before, &after);
     let again = journal.truncate_torn_tail();
     assert!(
         matches!(again, Ok(None)),
@@ -211,6 +197,38 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
         assert!(after == before, "recovery changed an undamaged journal");
     }
     appends_at_the_end(&journal, layout, &after);
+}
+
+/// Asserts that a successful recovery, which returned `cut` and left `after` of `before`, did
+/// what the model says: the same cut, `journal.log` the prefix up to it, `journal.off` the
+/// entries the model lists; and that every frame a listed entry pointed at that read whole
+/// survives, whatever the entries held.
+fn recovered_as_modelled(recovery: &Recovery, cut: Option<u64>, before: &Files, after: &Files) {
+    let Recovery::Clean { entries, cut: want } = recovery else {
+        panic!("truncate_torn_tail returned {cut:?}, the model says {recovery:?}");
+    };
+    assert_eq!(
+        cut, *want,
+        "truncate_torn_tail cut elsewhere than the model says"
+    );
+    let kept = cut.map_or(before.log.len(), to_usize);
+    assert!(
+        after.log == before.log[..kept],
+        "journal.log after recovery is not its first {kept} bytes"
+    );
+    assert!(
+        after.off.len() == entries.len() * ENTRY_LEN && after.entries() == *entries,
+        "journal.off after recovery lists {:?}, the model says {entries:?}",
+        after.entries()
+    );
+    for entry in before.entries() {
+        if let Model::Whole { size, .. } = before.frame_at(entry) {
+            assert!(
+                entry + to_u64(size) <= to_u64(after.log.len()),
+                "recovery cut the whole frame at {entry}, which journal.off lists"
+            );
+        }
+    }
 }
 
 /// What `truncate_torn_tail` does with `files`, by the model. Under the lock the files are
@@ -253,6 +271,8 @@ impl Recovery {
                 _ => return Recovery::Corrupt { offset: start },
             }
         }
+        let listed = entries.len();
+        let mut cut = None;
         // Each pass moves `at` forward by a whole frame or ends the loop.
         while at < log_len {
             match files.frame_at(at) {
@@ -264,15 +284,33 @@ impl Recovery {
                     return Recovery::Corrupt { offset: at };
                 }
                 Model::Short | Model::BadCrc | Model::Invalid => {
-                    return Recovery::Clean {
-                        entries,
-                        cut: Some(at),
-                    };
+                    cut = Some(at);
+                    break;
                 }
             }
         }
-        Recovery::Clean { entries, cut: None }
+        // Before it cuts or lists anything, every listed frame is checked.
+        if (cut.is_some() || entries.len() > listed)
+            && let Some(offset) = unsound_entry(files, &entries[..listed])
+        {
+            return Recovery::Corrupt { offset };
+        }
+        Recovery::Clean { entries, cut }
     }
+}
+
+/// The first of `entries` whose frame is not sound, by the model: one that does not start where
+/// the frame listed before it ends (frame 0 at 0), or does not read whole.
+fn unsound_entry(files: &Files, entries: &[u64]) -> Option<u64> {
+    let mut next = 0;
+    for &start in entries {
+        let whole = matches!(files.frame_at(start), Model::Whole { .. });
+        match files.header_end(start) {
+            Ok(Some(end)) if start == next && whole => next = end,
+            _ => return Some(start),
+        }
+    }
+    None
 }
 
 /// The listed frames as readers must return them, by the model, if `journal.off`'s entries are

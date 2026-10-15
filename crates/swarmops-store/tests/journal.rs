@@ -1058,6 +1058,74 @@ fn a_zeroed_entry_is_journal_corrupt_for_readers_too() {
 }
 
 #[test]
+fn recovery_checks_every_listed_frame_before_it_writes() {
+    // Recovery reads only the last listed frames to find the tail, but before it cuts
+    // journal.log or lists a frame it walks journal.off whole: every listed frame must start
+    // where the one before it ends (frame 0 at 0) and read whole. Garbage entries could
+    // otherwise make it cut a committed frame, or list a frame under a wrong seq.
+
+    // Crafted entries [0, 84, 116] over one 148-byte frame, whose parents hold a header at 84
+    // announcing a frame that ends at 116, and at 116 a whole 19-byte frame, then a header cut
+    // short at 135: the tail check alone would cut frame 0 there.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let mut fake_header = [0_u8; 32];
+    fake_header[0] = 24;
+    let mut embedded = [0_u8; 32];
+    embedded[..19].copy_from_slice(&frame_bytes(
+        &[&[1, 0][..], &encoded(&compacted(5))].concat(),
+    ));
+    embedded[19..23].copy_from_slice(&[0xff, 0xff, 0xff, 0x7f]);
+    journal
+        .append_frame(&[Record::Changeset {
+            id: id(0x11),
+            generation: 1,
+            delta_hash: [0xdd; 32],
+            parents: vec![
+                ChangesetId(ObjectId(fake_header)),
+                ChangesetId(ObjectId(embedded)),
+            ],
+        }])
+        .unwrap(); // bytes 0..148, its parents at 84..148
+    append_bytes(layout.journal_off(), &84_u64.to_le_bytes());
+    append_bytes(layout.journal_off(), &116_u64.to_le_bytes());
+    assert_corrupt_at(
+        journal.truncate_torn_tail(),
+        84,
+        "frame 0 ends at 148, not 84",
+    );
+    assert_eq!(file_len(layout.journal_log()), 148, "nothing was cut");
+    assert_eq!(offsets_on_disk(&layout), [0, 84, 116], "nothing was listed");
+
+    // Stale entries [0, 19, 0, 19]: frames 0 and 1 listed twice. With a torn tail to cut, or a
+    // whole unlisted frame to list, entry 2 is found not to start where frame 1 ends (38).
+    let unlisted = frame_bytes(&[&[1, 0][..], &encoded(&compacted(3))].concat());
+    for (what, tail) in [
+        ("a torn tail", b"garbage".to_vec()),
+        ("a whole frame", unlisted),
+    ] {
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[compacted(1)]).unwrap(); // bytes 0..19
+        journal.append_frame(&[compacted(2)]).unwrap(); // bytes 19..38
+        append_bytes(layout.journal_off(), &0_u64.to_le_bytes());
+        append_bytes(layout.journal_off(), &19_u64.to_le_bytes());
+        append_bytes(layout.journal_log(), &tail);
+        assert_corrupt_at(journal.truncate_torn_tail(), 0, what);
+        assert_eq!(
+            file_len(layout.journal_log()),
+            38 + u64::try_from(tail.len()).unwrap(),
+            "{what}: nothing was cut"
+        );
+        assert_eq!(
+            offsets_on_disk(&layout),
+            [0, 19, 0, 19],
+            "{what}: nothing was listed"
+        );
+    }
+}
+
+#[test]
 fn an_offset_entry_off_a_frame_boundary_is_journal_corrupt() {
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);

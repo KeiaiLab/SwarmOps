@@ -316,6 +316,10 @@ impl Journal {
     ///   exposed zero-filled after a crash): `journal.log` is cut where they start;
     /// - whole frames that `journal.off` does not list (a crash between a frame's two
     ///   appends) are committed: `journal.log` is synced, then their entries are appended;
+    /// - before it cuts `journal.log` or lists a frame, it checks every listed frame: each
+    ///   must start where the one listed before it ends (frame 0 at 0) and read whole, or
+    ///   garbage in `journal.off` could make the cut or the new entries destroy or misnumber
+    ///   committed frames;
     /// - a partial entry at the end of `journal.off` is dropped;
     /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a last listed
     ///   frame that does not start where the frame before it ends, or that is cut short,
@@ -326,8 +330,9 @@ impl Journal {
     ///   version may have written it).
     ///
     /// Only the last listed frame, the header of the frame before it, and what follows are
-    /// read. `journal.off` is repaired before `journal.log` is cut, so a crash in between
-    /// leaves a torn frame the next call cuts. The caller must hold [`crate::MetaLock`].
+    /// read, unless there is something to cut or list: then every listed frame is. `journal.off`
+    /// is repaired before `journal.log` is cut, so a crash in between leaves a torn frame the
+    /// next call cuts. The caller must hold [`crate::MetaLock`].
     pub fn truncate_torn_tail(&self) -> Result<Option<u64>, StoreError> {
         let mut tail = self.tail();
         tail.checked = false;
@@ -438,6 +443,12 @@ impl Journal {
             }
         }
 
+        if cut.is_some() || !unlisted.is_empty() {
+            // About to cut journal.log or list frames: garbage in journal.off could make that
+            // destroy a committed frame or list one under a wrong seq, so first every listed
+            // frame is checked. Only a crash's repair pays for this.
+            self.check_listed_chain(listed, log_len)?;
+        }
         if off_len != listed * ENTRY_LEN {
             self.fs
                 .truncate(self.off_path.as_std_path(), listed * ENTRY_LEN)?;
@@ -460,6 +471,28 @@ impl Journal {
             checked: true,
         };
         Ok((tail, cut))
+    }
+
+    /// Checks that the first `listed` entries list sound frames: each starts where the one
+    /// listed before it ends (frame 0 at 0) and reads whole, its CRC included. A failure is
+    /// [`StoreError::JournalCorrupt`] at that entry's offset. Reads every listed frame, one
+    /// `read_at` each (and its header with another).
+    fn check_listed_chain(&self, listed: u64, log_len: u64) -> Result<(), StoreError> {
+        let mut next = 0;
+        for start in self.entries(0, listed)? {
+            if start != next {
+                return Err(StoreError::JournalCorrupt { offset: start });
+            }
+            let Some(end) = self.frame_end(start, log_len)? else {
+                return Err(StoreError::JournalCorrupt { offset: start });
+            };
+            let bytes = read_upto(&self.log, start, end - start)?;
+            if !matches!(parse_frame(&bytes), Parsed::Whole { size, .. } if size == bytes.len()) {
+                return Err(StoreError::JournalCorrupt { offset: start });
+            }
+            next = end;
+        }
+        Ok(())
     }
 
     /// Where the frame listed before frame `seq` starts; `None` for frame 0.
