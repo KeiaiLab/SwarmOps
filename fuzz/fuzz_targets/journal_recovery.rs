@@ -271,6 +271,22 @@ impl Recovery {
             if previous_end != Some(start) {
                 return Recovery::Corrupt { offset: start };
             }
+            // One link further back: the frame before the last listed one starts where the one
+            // listed before that ends (frame 0 at 0).
+            if let Some(previous) = entries.len().checked_sub(2) {
+                let before_end = match previous.checked_sub(1) {
+                    Some(before) => match files.header_end(entries[before]) {
+                        Ok(end) => end,
+                        Err(offset) => return Recovery::Corrupt { offset },
+                    },
+                    None => Some(0),
+                };
+                if before_end != Some(entries[previous]) {
+                    return Recovery::Corrupt {
+                        offset: entries[previous],
+                    };
+                }
+            }
             match files.frame_at(start) {
                 Model::Whole { size, .. } => at = start + to_u64(size),
                 _ => return Recovery::Corrupt { offset: start },
@@ -536,6 +552,68 @@ fn tail_run(
             "{what}: stopped at {at}, before listed frame {next} of {listed}"
         );
     }
+    read_started_where_it_may(what, frames, from, files);
+    assert!(
+        at <= to_u64(files.log.len()),
+        "{what}: frames past the end of journal.log"
+    );
+    if at < to_u64(files.log.len()) {
+        let next = frames.last().map(|frame| frame.seq + 1);
+        match files.frame_at(at) {
+            Model::Short => assert!(
+                next.is_none_or(|seq| seq >= listed),
+                "{what}: stopped at listed frame {next:?} of {listed}, which is cut short"
+            ),
+            Model::BadCrc => assert!(
+                next.is_none_or(|seq| seq >= listed),
+                "{what}: stopped at listed frame {next:?} of {listed}, which fails its CRC"
+            ),
+            Model::Invalid if zero_filled(&files.log[to_usize(at)..]) => assert!(
+                next.is_none_or(|seq| seq >= listed),
+                "{what}: stopped at listed frame {next:?} of {listed}, which is zeros"
+            ),
+            other => panic!("{what}: stopped at {at}, at a frame that reads as {other:?}"),
+        }
+    }
+    got
+}
+
+/// Asserts that a successful read from `from` started where a reader may start: at a listed
+/// frame, the frame listed just before it starting where its own predecessor ends (frame 0 at
+/// 0) and ending at `from`, or at 0 with none before it; past every listed frame, where the
+/// last one ends, it too starting where the one before it ends. `frames` are what it read.
+fn read_started_where_it_may(what: &str, frames: &[Frame], from: u64, files: &Files) {
+    let entries = files.entries();
+    let listed = to_u64(entries.len());
+    // A read that starts at a listed frame checked the frame listed just before it: that one
+    // starts where its own predecessor ends (frame 0 at 0) and ends where the read starts. With
+    // none before it, the read starts at frame 0, at 0.
+    if let Some(first) = frames.first()
+        && let Some(&start) = entries.get(to_usize(first.seq))
+    {
+        assert_eq!(
+            start, from,
+            "{what}: the read did not start at its first frame"
+        );
+        match to_usize(first.seq).checked_sub(1) {
+            Some(before) => {
+                let previous_end = before
+                    .checked_sub(1)
+                    .map_or(Some(0), |previous| files.frame_end(entries[previous]));
+                assert_eq!(
+                    previous_end,
+                    Some(entries[before]),
+                    "{what}: the frame listed before the read does not start where the one before it ends"
+                );
+                assert_eq!(
+                    files.frame_end(entries[before]),
+                    Some(from),
+                    "{what}: the frame listed before the read does not end where the read starts"
+                );
+            }
+            None => assert_eq!(from, 0, "{what}: frame 0 read away from 0"),
+        }
+    }
     // An unlisted first frame takes the listed count as its seq, and with none read the read
     // started there too: where the last listed frame ends (0 with none listed).
     let unlisted_first = frames
@@ -570,29 +648,6 @@ fn tail_run(
             );
         }
     }
-    assert!(
-        at <= to_u64(files.log.len()),
-        "{what}: frames past the end of journal.log"
-    );
-    if at < to_u64(files.log.len()) {
-        let next = frames.last().map(|frame| frame.seq + 1);
-        match files.frame_at(at) {
-            Model::Short => assert!(
-                next.is_none_or(|seq| seq >= listed),
-                "{what}: stopped at listed frame {next:?} of {listed}, which is cut short"
-            ),
-            Model::BadCrc => assert!(
-                next.is_none_or(|seq| seq >= listed),
-                "{what}: stopped at listed frame {next:?} of {listed}, which fails its CRC"
-            ),
-            Model::Invalid if zero_filled(&files.log[to_usize(at)..]) => assert!(
-                next.is_none_or(|seq| seq >= listed),
-                "{what}: stopped at listed frame {next:?} of {listed}, which is zeros"
-            ),
-            other => panic!("{what}: stopped at {at}, at a frame that reads as {other:?}"),
-        }
-    }
-    got
 }
 
 /// Checks what `frames_from(first, limit)` returned and passes it on. It is `Ok` or a typed

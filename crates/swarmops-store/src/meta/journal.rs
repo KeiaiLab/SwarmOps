@@ -245,34 +245,38 @@ impl Journal {
             e => e,
         };
         let first = self.first_at_or_after(offset, listed).map_err(gone)?;
-        // Where each listed frame from `first` on starts; with none from there on, where the
-        // last listed frame and the one before it start.
+        // Where each listed frame from `first` on starts, and where the listed frame just
+        // before the read and the one before that start.
         let entries = self.entries(first, listed - first)?;
         if to_u64(entries.len()) != listed - first {
             return Err(StoreError::JournalCorrupt { offset });
         }
-        let listed_end_of = match (entries.is_empty(), listed.checked_sub(1)) {
-            (true, Some(last)) => Some((
-                self.entry_before(last).map_err(gone)?,
-                self.entry(last).map_err(gone)?,
+        let before = match first.checked_sub(1) {
+            Some(before) => Some((
+                self.entry_before(before).map_err(gone)?,
+                self.entry(before).map_err(gone)?,
             )),
-            _ => None,
+            None => None,
         };
         // Only now journal.log, which holds whole every frame listed above.
         let log_len = self.fs.file_len(self.log_path.as_std_path())?;
         if offset > log_len {
             return Err(StoreError::JournalCorrupt { offset });
         }
-        let is_boundary = match (entries.first(), listed_end_of) {
-            (Some(&start), _) => start == offset,
-            // Past every listed frame: `offset` must be where the last one ends, and that one
-            // must start where the frame listed before it ends (a zeroed entry does not).
-            (None, Some((previous, last))) => {
-                self.check_starts_after(previous, last, log_len)?;
-                self.frame_end(last, log_len)? == Some(offset)
+        // The listed frame just before the read (the last listed one, if the read starts past
+        // them all) starts where the one listed before it ends, which a zeroed or stale entry
+        // does not, and ends where the read starts. With none before it, the read starts at
+        // frame 0, at 0.
+        let follows = if let Some((previous, before)) = before {
+            self.check_starts_after(previous, before, log_len)?;
+            self.frame_end(before, log_len)? == Some(offset)
+        } else {
+            if let Some(&start) = entries.first() {
+                self.check_starts_after(None, start, log_len)?;
             }
-            (None, None) => offset == 0,
+            offset == 0
         };
+        let is_boundary = follows && entries.first().is_none_or(|&start| start == offset);
         if !is_boundary {
             return Err(StoreError::JournalCorrupt { offset });
         }
@@ -341,8 +345,8 @@ impl Journal {
     ///   follow it), or an unlisted frame that matches its CRC but does not decode (a newer
     ///   version may have written it).
     ///
-    /// Only the last listed frame, the header of the frame before it, and what follows are
-    /// read, unless there is something to cut or list: then every listed frame is. `journal.off`
+    /// Only the last listed frame, the headers of the two frames before it, and what follows
+    /// are read, unless there is something to cut or list: then every listed frame is. `journal.off`
     /// is repaired before `journal.log` is cut, so a crash in between leaves a torn frame the
     /// next call cuts. The caller must hold [`crate::MetaLock`].
     pub fn truncate_torn_tail(&self) -> Result<Option<u64>, StoreError> {
@@ -437,7 +441,15 @@ impl Journal {
         let buf = read_upto(&self.log, start, log_len - start)?;
         let mut at = 0; // where in `buf` the unlisted frames begin
         if let Some(last) = listed.checked_sub(1) {
-            self.check_starts_after(self.entry_before(last)?, start, log_len)?;
+            let previous_start = self.entry_before(last)?;
+            self.check_starts_after(previous_start, start, log_len)?;
+            // And the frame before it starts where the one listed before that ends (frame 0
+            // at 0), as readers check the frame just before where they read: a zeroed or
+            // stale entry there would otherwise wait, behind a clean tail, for a repair to walk
+            // journal.off whole.
+            if let Some(previous_start) = previous_start {
+                self.check_starts_after(self.entry_before(last - 1)?, previous_start, log_len)?;
+            }
             // It was whole and durable before it was listed: cut short, missing, failing its
             // CRC or not decoding, it is damage, and nothing is cut.
             match parse_frame(&buf) {
