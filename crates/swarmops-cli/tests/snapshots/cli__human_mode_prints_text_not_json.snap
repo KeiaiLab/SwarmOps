@@ -1,0 +1,75 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: text
+---
+$ swarmops --human --repo [tmp]/store info
+[exit 0]
+repo_id: [repo_id]
+name: acme
+main: [c1]
+store_version: 1
+changesets: 1
+refs: 1
+
+$ swarmops --human --repo [tmp]/store cat main:README.md
+[exit 0]
+blob: [id1]
+size: 16
+kind: file
+encoding: utf8
+content: |
+  # acme
+  line two
+truncated: false
+
+$ swarmops --human --repo [tmp]/store ls main
+[exit 0]
+entries[0].name: README.md
+entries[0].kind: file
+entries[0].id: [id1]
+truncated: false
+
+$ swarmops --human --repo [tmp]/store ref list
+[exit 0]
+refs[0].name: main
+refs[0].target: [c1]
+refs[0].version: 1
+
+$ swarmops --human whoami
+[exit 0]
+auth: anonymous
+
+$ swarmops --human --repo [tmp]/missing info
+[exit 6]
+error: E_NOT_A_REPO: [tmp]/missing is not a store: no FORMAT file
+hint: swarmops init [tmp]/missing
+
+$ swarmops --human --repo [tmp]/store ref set main main --create
+[exit 5]
+error: E_IDENTITY_REQUIRED: this operation changes the store, so it needs the caller's identity
+hint: pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1
+
+$ swarmops --human frobnicate
+[exit 2]
+error: E_INVALID_ARG: unrecognized subcommand 'frobnicate'
+hint: |
+  Usage: swarmops [OPTIONS] <COMMAND>
+  For more information, try '--help'.
+
+$ SWARMOPS_FORMAT=human swarmops --repo [tmp]/store info
+[exit 0]
+repo_id: [repo_id]
+name: acme
+main: [c1]
+store_version: 1
+changesets: 1
+refs: 1
+
+$ swarmops --json --human --repo [tmp]/store info
+[exit 0]
+repo_id: [repo_id]
+name: acme
+main: [c1]
+store_version: 1
+changesets: 1
+refs: 1

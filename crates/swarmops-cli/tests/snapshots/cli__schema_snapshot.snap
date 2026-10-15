@@ -1,0 +1,2083 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.redact(&all)
+---
+{
+  "ok": true,
+  "op": "schema",
+  "api": 1,
+  "result": {
+    "Attribution": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Whom a changeset is attributed to (operations spec §5).",
+      "properties": {
+        "agent": {
+          "description": "The agent that wrote it: the changeset's `agent` metadata, or `unknown/unknown` for a\nchangeset that records none.",
+          "type": "string"
+        },
+        "on_behalf_of": {
+          "description": "Whom the agent acted for; recorded once the review model exists, so omitted in M1.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "run_id": {
+          "description": "The run it was written in: the changeset's `run_id` metadata, when present.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "title": "Attribution",
+      "type": "object"
+    },
+    "ChangeInput": {
+      "$defs": {
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One change of a commit.",
+      "properties": {
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`\ntakes none."
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModeInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The kind of entry a `put` writes; `file` when omitted."
+        },
+        "op": {
+          "$ref": "#/$defs/ChangeOp",
+          "description": "Whether to write the path or remove it."
+        },
+        "path": {
+          "description": "The repository path: `/`-separated, relative to the root.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "op"
+      ],
+      "title": "ChangeInput",
+      "type": "object"
+    },
+    "ChangeOp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+      "oneOf": [
+        {
+          "const": "put",
+          "description": "Write the content at the path, creating or replacing the entry.",
+          "type": "string"
+        },
+        {
+          "const": "delete",
+          "description": "Remove the path.",
+          "type": "string"
+        }
+      ],
+      "title": "ChangeOp"
+    },
+    "ChangeOut": {
+      "$defs": {
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
+        "FileKind": {
+          "description": "What a file is; never a directory.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One entry of a changeset's changes.",
+      "properties": {
+        "blob": {
+          "description": "For a `put`: the content's blob id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For a `put`: the file's kind."
+        },
+        "op": {
+          "$ref": "#/$defs/ChangeOp",
+          "description": "What happened to the path."
+        },
+        "path": {
+          "description": "The repository path.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "op"
+      ],
+      "title": "ChangeOut",
+      "type": "object"
+    },
+    "ChangesetDetail": {
+      "$defs": {
+        "Attribution": {
+          "description": "Whom a changeset is attributed to (operations spec §5).",
+          "properties": {
+            "agent": {
+              "description": "The agent that wrote it: the changeset's `agent` metadata, or `unknown/unknown` for a\nchangeset that records none.",
+              "type": "string"
+            },
+            "on_behalf_of": {
+              "description": "Whom the agent acted for; recorded once the review model exists, so omitted in M1.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "run_id": {
+              "description": "The run it was written in: the changeset's `run_id` metadata, when present.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "agent"
+          ],
+          "type": "object"
+        },
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
+        "ChangeOut": {
+          "description": "One entry of a changeset's changes.",
+          "properties": {
+            "blob": {
+              "description": "For a `put`: the content's blob id.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FileKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "For a `put`: the file's kind."
+            },
+            "op": {
+              "$ref": "#/$defs/ChangeOp",
+              "description": "What happened to the path."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "op"
+          ],
+          "type": "object"
+        },
+        "FileKind": {
+          "description": "What a file is; never a directory.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            }
+          ]
+        },
+        "SignatureOut": {
+          "description": "A git signature: who, and when.",
+          "properties": {
+            "email": {
+              "description": "The email.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The name; the agent name for a native changeset.",
+              "type": "string"
+            },
+            "offset_secs": {
+              "description": "The UTC offset in seconds.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "secs": {
+              "description": "Unix time in seconds.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "email",
+            "secs",
+            "offset_secs"
+          ],
+          "type": "object"
+        },
+        "Signatures": {
+          "description": "A changeset's git signatures: git-fidelity data for import and export.",
+          "properties": {
+            "author": {
+              "$ref": "#/$defs/SignatureOut",
+              "description": "The git author."
+            },
+            "committer": {
+              "$ref": "#/$defs/SignatureOut",
+              "description": "The git committer; its time is `created_at`."
+            }
+          },
+          "required": [
+            "author",
+            "committer"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`show`: a changeset's header, changes and metadata. Byte strings are decoded as UTF-8, with\ninvalid bytes replaced, except metadata values (see `metadata`).",
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/Attribution",
+          "description": "Who wrote the change."
+        },
+        "changes": {
+          "description": "What changed relative to the first parent, ordered by path: at most `max_changes`\nentries.",
+          "items": {
+            "$ref": "#/$defs/ChangeOut"
+          },
+          "type": "array"
+        },
+        "changes_truncated": {
+          "description": "Whether `changes` stops before the changeset's last change.",
+          "type": "boolean"
+        },
+        "created_at": {
+          "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "files_changed": {
+          "description": "How many paths the changeset changes in all, also when `changes` is truncated.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "description": "The changeset's id.",
+          "type": "string"
+        },
+        "message": {
+          "description": "The message.",
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "SwarmOps metadata, such as `agent` and `run_id`. A value that is not UTF-8 is given in\nstandard, padded base64, under its key with `:b64` appended. A commit refuses a key that\nends in `:b64`, so `k:b64` is always the base64 of `k`'s value, which is not UTF-8.",
+          "type": "object"
+        },
+        "parents": {
+          "description": "The parents' ids; the first is the mainline parent that `changes` are relative to.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "root": {
+          "description": "The root tree's id.",
+          "type": "string"
+        },
+        "seq": {
+          "description": "Its position in the store's changeset index, in commit order.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signatures": {
+          "$ref": "#/$defs/Signatures",
+          "description": "The git author and committer signatures, kept for git fidelity."
+        }
+      },
+      "required": [
+        "id",
+        "seq",
+        "parents",
+        "root",
+        "author",
+        "created_at",
+        "message",
+        "changes",
+        "files_changed",
+        "changes_truncated",
+        "metadata",
+        "signatures"
+      ],
+      "title": "ChangesetDetail",
+      "type": "object"
+    },
+    "ChangesetSummary": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One changeset of a log.",
+      "properties": {
+        "author_agent": {
+          "description": "The agent that wrote it, as `show` gives `author.agent`.",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "description": "The changeset's id.",
+          "type": "string"
+        },
+        "parents": {
+          "description": "The parents' ids, mainline parent first.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "title": {
+          "description": "The message's first line.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "parents",
+        "author_agent",
+        "created_at",
+        "title"
+      ],
+      "title": "ChangesetSummary",
+      "type": "object"
+    },
+    "CommitReq": {
+      "$defs": {
+        "ChangeInput": {
+          "description": "One change of a commit.",
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`\ntakes none."
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModeInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The kind of entry a `put` writes; `file` when omitted."
+            },
+            "op": {
+              "$ref": "#/$defs/ChangeOp",
+              "description": "Whether to write the path or remove it."
+            },
+            "path": {
+              "description": "The repository path: `/`-separated, relative to the root.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "path",
+            "op"
+          ],
+          "type": "object"
+        },
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`commit`: record a changeset from an explicit change list. It moves no ref.",
+      "properties": {
+        "allow_empty": {
+          "default": false,
+          "description": "Record the changeset even if it changes nothing.",
+          "type": "boolean"
+        },
+        "changes": {
+          "description": "What to change, relative to the parent.",
+          "items": {
+            "$ref": "#/$defs/ChangeInput"
+          },
+          "type": "array"
+        },
+        "message": {
+          "description": "The commit message.",
+          "type": "string"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,\nthe current head of `main` is used if `main` exists, and otherwise the commit is a root\ncommit. `null` is the same as omitting it. Once `main` exists, this API cannot express a\nroot commit (a known M1 limitation)."
+        }
+      },
+      "required": [
+        "changes",
+        "message"
+      ],
+      "title": "CommitReq",
+      "type": "object"
+    },
+    "CommitResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`commit`: the changeset that was recorded.",
+      "properties": {
+        "blobs_written": {
+          "description": "How many blobs the commit wrote to the object store.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changeset": {
+          "description": "The new changeset's id.",
+          "type": "string"
+        },
+        "files_changed": {
+          "description": "How many paths the changeset changes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parent": {
+          "description": "The changeset it was committed on top of; omitted for a root commit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "root": {
+          "description": "The new root tree's id.",
+          "type": "string"
+        },
+        "warnings": {
+          "description": "Problems found after the commit became durable, such as failed housekeeping; the commit\nitself succeeded. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "changeset",
+        "root",
+        "files_changed",
+        "blobs_written"
+      ],
+      "title": "CommitResp",
+      "type": "object"
+    },
+    "ContentEncoding": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How `FileContent.content` encodes bytes.",
+      "oneOf": [
+        {
+          "const": "utf8",
+          "description": "The bytes are UTF-8 text, and `content` is that text.",
+          "type": "string"
+        },
+        {
+          "const": "base64",
+          "description": "`content` is the bytes in standard, padded base64.",
+          "type": "string"
+        }
+      ],
+      "title": "ContentEncoding"
+    },
+    "ContentInput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A `put`'s content, as an object with one key.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "description": "UTF-8 text, verbatim.",
+          "properties": {
+            "inline": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "inline"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Bytes in standard, padded base64.",
+          "properties": {
+            "base64": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "base64"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+          "properties": {
+            "file": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "ContentInput"
+    },
+    "EntryKindOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a tree entry is.",
+      "oneOf": [
+        {
+          "const": "file",
+          "description": "A regular file.",
+          "type": "string"
+        },
+        {
+          "const": "exec",
+          "description": "An executable file.",
+          "type": "string"
+        },
+        {
+          "const": "symlink",
+          "description": "A symlink.",
+          "type": "string"
+        },
+        {
+          "const": "dir",
+          "description": "A directory.",
+          "type": "string"
+        }
+      ],
+      "title": "EntryKindOut"
+    },
+    "Envelope": {
+      "$defs": {
+        "Meta": {
+          "description": "What the envelope reports besides the outcome.",
+          "properties": {
+            "auth": {
+              "description": "The store's authentication mode (`trust` in M1), not how this caller was identified.",
+              "type": "string"
+            },
+            "elapsed_ms": {
+              "description": "How long the command took, in milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "repo": {
+              "description": "The store as the user named it, for display; omitted when the command used no store.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "resolved": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Every revision the command resolved: the string given and the full changeset id it named.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "elapsed_ms",
+            "resolved",
+            "auth"
+          ],
+          "type": "object"
+        },
+        "OpError": {
+          "description": "A failed operation: the envelope's `error` object.\n\n`code`, `exit` and `retryable` come from one `ErrorCode`. `code` stays a string so a client\ncan read codes newer than its own table.",
+          "properties": {
+            "code": {
+              "description": "The `E_*` code.",
+              "type": "string"
+            },
+            "details": {
+              "additionalProperties": true,
+              "default": {},
+              "description": "Machine-readable context, such as `actual` for `E_CAS_MISMATCH`; `{}` when there is none.",
+              "type": "object"
+            },
+            "exit": {
+              "description": "The exit code of the CLI.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "hint": {
+              "description": "The next command to run when there is an obvious one, else null.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "message": {
+              "description": "What went wrong.",
+              "type": "string"
+            },
+            "retryable": {
+              "description": "Whether the same operation can succeed when it is retried unchanged.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "code",
+            "message",
+            "retryable",
+            "exit",
+            "details",
+            "hint"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One command's output: `result` on success, `error` on failure, `meta` either way.\n\nExactly one of `result` and `error` is present; the other is omitted, never written as null.",
+      "properties": {
+        "api": {
+          "description": "The API version.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/OpError"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The failure; present exactly when not `ok`."
+        },
+        "meta": {
+          "$ref": "#/$defs/Meta",
+          "description": "Context for either outcome."
+        },
+        "ok": {
+          "description": "Whether the operation succeeded.",
+          "type": "boolean"
+        },
+        "op": {
+          "description": "The operation's name, such as `commit`.",
+          "type": "string"
+        },
+        "result": {
+          "description": "The operation's response; present exactly when `ok`."
+        }
+      },
+      "required": [
+        "ok",
+        "op",
+        "api",
+        "meta"
+      ],
+      "title": "Envelope",
+      "type": "object"
+    },
+    "ErrorCode": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Why an operation failed: a stable code with a fixed exit code and retry advice.\n\nSerialized as its `E_*` string, which `OpError.code` carries too, so a client can read\ncodes newer than its copy of this enum.",
+      "oneOf": [
+        {
+          "const": "E_EXISTS",
+          "description": "`init` found a store at the target path already.",
+          "type": "string"
+        },
+        {
+          "const": "E_NOT_A_REPO",
+          "description": "No store at the given path, or no store was named.",
+          "type": "string"
+        },
+        {
+          "const": "E_IDENTITY_REQUIRED",
+          "description": "A mutation was asked for without an identity.",
+          "type": "string"
+        },
+        {
+          "const": "E_REV_NOT_FOUND",
+          "description": "A revision names no changeset.",
+          "type": "string"
+        },
+        {
+          "const": "E_AMBIGUOUS_ID",
+          "description": "An id prefix matches more than one changeset; give more digits.",
+          "type": "string"
+        },
+        {
+          "const": "E_PATH_NOT_FOUND",
+          "description": "The path does not exist at that revision.",
+          "type": "string"
+        },
+        {
+          "const": "E_IS_DIR",
+          "description": "A file operation named a directory.",
+          "type": "string"
+        },
+        {
+          "const": "E_TOO_LARGE",
+          "description": "The content is larger than the operation allows.",
+          "type": "string"
+        },
+        {
+          "const": "E_EMPTY_COMMIT",
+          "description": "The commit changes nothing and `allow_empty` is off.",
+          "type": "string"
+        },
+        {
+          "const": "E_TYPE_CONFLICT",
+          "description": "A change puts an entry below a file, or a file onto a directory.",
+          "type": "string"
+        },
+        {
+          "const": "E_UNKNOWN_PARENT",
+          "description": "The parent changeset is not in the store.",
+          "type": "string"
+        },
+        {
+          "const": "E_CAS_MISMATCH",
+          "description": "The ref no longer holds the expected target; `details.actual` holds what it does.",
+          "type": "string"
+        },
+        {
+          "const": "E_REF_NOT_FOUND",
+          "description": "No ref by that name.",
+          "type": "string"
+        },
+        {
+          "const": "E_REF_NAME_INVALID",
+          "description": "The ref name is not `main` or `release/<name>`.",
+          "type": "string"
+        },
+        {
+          "const": "E_STORE_CORRUPT",
+          "description": "Stored data failed verification.",
+          "type": "string"
+        },
+        {
+          "const": "E_INVALID_ARG",
+          "description": "A malformed argument or request, including a command-line usage error.",
+          "type": "string"
+        },
+        {
+          "const": "E_UNSUPPORTED_FS",
+          "description": "The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`).",
+          "type": "string"
+        },
+        {
+          "const": "E_IO",
+          "description": "The filesystem refused an operation.",
+          "type": "string"
+        },
+        {
+          "const": "E_BUSY",
+          "description": "Another writer held the store's metadata lock for the whole wait.",
+          "type": "string"
+        },
+        {
+          "const": "E_INTERNAL",
+          "description": "A bug in SwarmOps, such as a caught panic.",
+          "type": "string"
+        },
+        {
+          "const": "E_AUTH",
+          "description": "The caller's token failed verification.",
+          "type": "string"
+        },
+        {
+          "const": "E_POLICY_DENIED",
+          "description": "A policy refused the operation for this identity.",
+          "type": "string"
+        },
+        {
+          "const": "E_MAINTENANCE_BUSY",
+          "description": "Maintenance (gc or verify) holds the store's maintenance lease.",
+          "type": "string"
+        }
+      ],
+      "title": "ErrorCode"
+    },
+    "FileContent": {
+      "$defs": {
+        "ContentEncoding": {
+          "description": "How `FileContent.content` encodes bytes.",
+          "oneOf": [
+            {
+              "const": "utf8",
+              "description": "The bytes are UTF-8 text, and `content` is that text.",
+              "type": "string"
+            },
+            {
+              "const": "base64",
+              "description": "`content` is the bytes in standard, padded base64.",
+              "type": "string"
+            }
+          ]
+        },
+        "FileKind": {
+          "description": "What a file is; never a directory.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`read_file` (CLI `cat`): a file's content.",
+      "properties": {
+        "blob": {
+          "description": "The blob's id.",
+          "type": "string"
+        },
+        "content": {
+          "description": "The bytes returned: the whole blob, or the start of it when `truncated`. A cut keeps text\nas text: it falls where a character starts, so text may stop up to 3 bytes short of\n`max_bytes`, while bytes that are not text stop at exactly `max_bytes`.",
+          "type": "string"
+        },
+        "encoding": {
+          "$ref": "#/$defs/ContentEncoding",
+          "description": "How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they\nare not."
+        },
+        "kind": {
+          "$ref": "#/$defs/FileKind",
+          "description": "The file's kind."
+        },
+        "size": {
+          "description": "The whole blob's size in bytes, also when `content` is truncated.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "Whether `content` stops before the end of the blob.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "blob",
+        "size",
+        "kind",
+        "encoding",
+        "content",
+        "truncated"
+      ],
+      "title": "FileContent",
+      "type": "object"
+    },
+    "FileKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a file is; never a directory.",
+      "oneOf": [
+        {
+          "const": "file",
+          "description": "A regular file.",
+          "type": "string"
+        },
+        {
+          "const": "exec",
+          "description": "An executable file.",
+          "type": "string"
+        },
+        {
+          "const": "symlink",
+          "description": "A symlink.",
+          "type": "string"
+        }
+      ],
+      "title": "FileKind"
+    },
+    "Identity": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The caller of a mutation: an agent name `<family>/<instance>` (`agent/worker-17`,\n`human/purple`) and an optional run id. M1 trusts the name as claimed.\n\nThe agent name always follows the grammar below, also in an identity read from JSON.",
+      "properties": {
+        "agent": {
+          "description": "`<family>/<instance>`, exactly as the schema's `pattern` and `maxLength` give it.",
+          "maxLength": 255,
+          "pattern": "^[a-z0-9-]+/[A-Za-z0-9_-][A-Za-z0-9._-]*$",
+          "type": "string"
+        },
+        "run_id": {
+          "description": "The run the agent acts in, when it has one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "title": "Identity",
+      "type": "object"
+    },
+    "IdentityInfo": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`whoami`: the identity the caller's mutations carry.",
+      "properties": {
+        "agent": {
+          "description": "`<family>/<instance>`; omitted for an anonymous caller.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "auth": {
+          "description": "How this caller's identity was established: `trust` (claimed, not verified) or\n`anonymous`.",
+          "type": "string"
+        },
+        "run_id": {
+          "description": "The run the agent acts in, when it has one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "auth"
+      ],
+      "title": "IdentityInfo",
+      "type": "object"
+    },
+    "InfoReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`info`: describe the store. It has no options yet.",
+      "title": "InfoReq",
+      "type": "object"
+    },
+    "InitReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`init`: create a store.",
+      "properties": {
+        "name": {
+          "description": "The repository's name.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The directory to create the store in.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "name"
+      ],
+      "title": "InitReq",
+      "type": "object"
+    },
+    "LogPage": {
+      "$defs": {
+        "ChangesetSummary": {
+          "description": "One changeset of a log.",
+          "properties": {
+            "author_agent": {
+              "description": "The agent that wrote it, as `show` gives `author.agent`.",
+              "type": "string"
+            },
+            "created_at": {
+              "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "description": "The changeset's id.",
+              "type": "string"
+            },
+            "parents": {
+              "description": "The parents' ids, mainline parent first.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "The message's first line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "parents",
+            "author_agent",
+            "created_at",
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`log`: a page of changesets, newest first, following first parents.",
+      "properties": {
+        "cursor": {
+          "description": "When `truncated`: the last entry's id; pass it as `cursor` to continue.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entries": {
+          "description": "The changesets.",
+          "items": {
+            "$ref": "#/$defs/ChangesetSummary"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Whether older history follows this page.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "title": "LogPage",
+      "type": "object"
+    },
+    "LogReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`log`: history along first parents, a page at a time.",
+      "properties": {
+        "cursor": {
+          "description": "Resume a log: the previous page's `cursor`, the last changeset id it returned. This page\ncontinues from that changeset's first parent, and `rev` is not used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 50,
+          "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "rev": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where to start; `main` when omitted."
+        }
+      },
+      "title": "LogReq",
+      "type": "object"
+    },
+    "Meta": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What the envelope reports besides the outcome.",
+      "properties": {
+        "auth": {
+          "description": "The store's authentication mode (`trust` in M1), not how this caller was identified.",
+          "type": "string"
+        },
+        "elapsed_ms": {
+          "description": "How long the command took, in milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "repo": {
+          "description": "The store as the user named it, for display; omitted when the command used no store.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolved": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Every revision the command resolved: the string given and the full changeset id it named.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "elapsed_ms",
+        "resolved",
+        "auth"
+      ],
+      "title": "Meta",
+      "type": "object"
+    },
+    "ModeInput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The kind of entry a `put` writes.",
+      "oneOf": [
+        {
+          "const": "file",
+          "description": "A regular file (git mode 100644).",
+          "type": "string"
+        },
+        {
+          "const": "exec",
+          "description": "An executable file (git mode 100755).",
+          "type": "string"
+        },
+        {
+          "const": "symlink",
+          "description": "A symlink; the content is the link's target.",
+          "type": "string"
+        }
+      ],
+      "title": "ModeInput"
+    },
+    "OpError": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A failed operation: the envelope's `error` object.\n\n`code`, `exit` and `retryable` come from one `ErrorCode`. `code` stays a string so a client\ncan read codes newer than its own table.",
+      "properties": {
+        "code": {
+          "description": "The `E_*` code.",
+          "type": "string"
+        },
+        "details": {
+          "additionalProperties": true,
+          "default": {},
+          "description": "Machine-readable context, such as `actual` for `E_CAS_MISMATCH`; `{}` when there is none.",
+          "type": "object"
+        },
+        "exit": {
+          "description": "The exit code of the CLI.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "hint": {
+          "description": "The next command to run when there is an obvious one, else null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "message": {
+          "description": "What went wrong.",
+          "type": "string"
+        },
+        "retryable": {
+          "description": "Whether the same operation can succeed when it is retried unchanged.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "retryable",
+        "exit",
+        "details",
+        "hint"
+      ],
+      "title": "OpError",
+      "type": "object"
+    },
+    "ReadFileReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout.",
+      "properties": {
+        "max_bytes": {
+          "default": 1048576,
+          "description": "The most content bytes to return; a longer file comes back truncated.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The file's repository path.",
+          "type": "string"
+        },
+        "rev": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to read at."
+        }
+      },
+      "required": [
+        "rev",
+        "path"
+      ],
+      "title": "ReadFileReq",
+      "type": "object"
+    },
+    "ReadTreeReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime.",
+      "properties": {
+        "cursor": {
+          "description": "Resume a listing: the previous page's `cursor`; this page starts after that entry name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 500,
+          "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The directory's repository path; omitted for the root.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rev": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to read at."
+        }
+      },
+      "required": [
+        "rev"
+      ],
+      "title": "ReadTreeReq",
+      "type": "object"
+    },
+    "RefDeleteReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref delete`: remove a ref by compare-and-swap.",
+      "properties": {
+        "expected_old": {
+          "$ref": "#/$defs/Rev",
+          "description": "The target the caller last saw; if the ref holds another, the delete fails with\n`E_CAS_MISMATCH`."
+        },
+        "name": {
+          "description": "The ref.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "expected_old"
+      ],
+      "title": "RefDeleteReq",
+      "type": "object"
+    },
+    "RefListReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref list`: list every ref. It has no options yet.",
+      "title": "RefListReq",
+      "type": "object"
+    },
+    "RefListResp": {
+      "$defs": {
+        "RefOut": {
+          "description": "One ref.",
+          "properties": {
+            "name": {
+              "description": "`main` or `release/<name>`.",
+              "type": "string"
+            },
+            "target": {
+              "description": "The changeset it points at.",
+              "type": "string"
+            },
+            "version": {
+              "description": "How many committed moves changed its target.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "target",
+            "version"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref list`: every ref.",
+      "properties": {
+        "refs": {
+          "description": "The refs.",
+          "items": {
+            "$ref": "#/$defs/RefOut"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "refs"
+      ],
+      "title": "RefListResp",
+      "type": "object"
+    },
+    "RefOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One ref.",
+      "properties": {
+        "name": {
+          "description": "`main` or `release/<name>`.",
+          "type": "string"
+        },
+        "target": {
+          "description": "The changeset it points at.",
+          "type": "string"
+        },
+        "version": {
+          "description": "How many committed moves changed its target.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "target",
+        "version"
+      ],
+      "title": "RefOut",
+      "type": "object"
+    },
+    "RefSetReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of\n`expected_old` and `create`; both or neither is `E_INVALID_ARG`.",
+      "properties": {
+        "create": {
+          "default": false,
+          "description": "To create the ref; if it exists already, the move fails with `E_CAS_MISMATCH`. Give this\nor `expected_old`, not both.",
+          "type": "boolean"
+        },
+        "expected_old": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "To move an existing ref: the target the caller last saw; if the ref holds another, the\nmove fails with `E_CAS_MISMATCH`. Give this or `create`, not both."
+        },
+        "name": {
+          "description": "The ref: `main` or `release/<name>`.",
+          "type": "string"
+        },
+        "new": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to point it at."
+        }
+      },
+      "required": [
+        "name",
+        "new"
+      ],
+      "title": "RefSetReq",
+      "type": "object"
+    },
+    "RefSetResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ref set` and `ref delete`: the move that was made.",
+      "properties": {
+        "already_applied": {
+          "description": "The ref was already in the requested state, so nothing changed and a replay is safe.",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "The ref.",
+          "type": "string"
+        },
+        "new": {
+          "description": "Its target after; omitted when the ref was deleted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old": {
+          "description": "Its target before; omitted when the ref was created.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warnings": {
+          "description": "Problems found after the move became durable, such as failed housekeeping; the move\nitself succeeded. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "name",
+        "already_applied"
+      ],
+      "title": "RefSetResp",
+      "type": "object"
+    },
+    "RepoInfo": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`init` and `info`: what the store is and holds.",
+      "properties": {
+        "changesets": {
+          "description": "How many changesets the store holds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "main": {
+          "description": "The changeset `main` points at; omitted until `main` exists.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The name given at `init`.",
+          "type": "string"
+        },
+        "refs": {
+          "description": "How many refs the store holds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "repo_id": {
+          "description": "The store's id, fixed at `init`.",
+          "type": "string"
+        },
+        "store_version": {
+          "description": "The store format version.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "repo_id",
+        "name",
+        "store_version",
+        "changesets",
+        "refs"
+      ],
+      "title": "RepoInfo",
+      "type": "object"
+    },
+    "Rev": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+      "title": "Rev",
+      "type": "string"
+    },
+    "ShowReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`show`: one changeset in full.",
+      "properties": {
+        "max_changes": {
+          "default": 400,
+          "description": "The most entries of `changes` to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "rev": {
+          "$ref": "#/$defs/Rev",
+          "description": "The changeset to show."
+        }
+      },
+      "required": [
+        "rev"
+      ],
+      "title": "ShowReq",
+      "type": "object"
+    },
+    "SignatureOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A git signature: who, and when.",
+      "properties": {
+        "email": {
+          "description": "The email.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The name; the agent name for a native changeset.",
+          "type": "string"
+        },
+        "offset_secs": {
+          "description": "The UTC offset in seconds.",
+          "format": "int32",
+          "type": "integer"
+        },
+        "secs": {
+          "description": "Unix time in seconds.",
+          "format": "int64",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "email",
+        "secs",
+        "offset_secs"
+      ],
+      "title": "SignatureOut",
+      "type": "object"
+    },
+    "Signatures": {
+      "$defs": {
+        "SignatureOut": {
+          "description": "A git signature: who, and when.",
+          "properties": {
+            "email": {
+              "description": "The email.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The name; the agent name for a native changeset.",
+              "type": "string"
+            },
+            "offset_secs": {
+              "description": "The UTC offset in seconds.",
+              "format": "int32",
+              "type": "integer"
+            },
+            "secs": {
+              "description": "Unix time in seconds.",
+              "format": "int64",
+              "type": "integer"
+            }
+          },
+          "required": [
+            "name",
+            "email",
+            "secs",
+            "offset_secs"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A changeset's git signatures: git-fidelity data for import and export.",
+      "properties": {
+        "author": {
+          "$ref": "#/$defs/SignatureOut",
+          "description": "The git author."
+        },
+        "committer": {
+          "$ref": "#/$defs/SignatureOut",
+          "description": "The git committer; its time is `created_at`."
+        }
+      },
+      "required": [
+        "author",
+        "committer"
+      ],
+      "title": "Signatures",
+      "type": "object"
+    },
+    "TreeEntryOut": {
+      "$defs": {
+        "EntryKindOut": {
+          "description": "What a tree entry is.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            },
+            {
+              "const": "dir",
+              "description": "A directory.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One entry of a directory.",
+      "properties": {
+        "id": {
+          "description": "A blob id for a file, an executable or a symlink; a tree id for a directory.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/EntryKindOut",
+          "description": "What the entry is."
+        },
+        "name": {
+          "description": "The entry's name: one path component.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "id"
+      ],
+      "title": "TreeEntryOut",
+      "type": "object"
+    },
+    "TreeListing": {
+      "$defs": {
+        "EntryKindOut": {
+          "description": "What a tree entry is.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            },
+            {
+              "const": "dir",
+              "description": "A directory.",
+              "type": "string"
+            }
+          ]
+        },
+        "TreeEntryOut": {
+          "description": "One entry of a directory.",
+          "properties": {
+            "id": {
+              "description": "A blob id for a file, an executable or a symlink; a tree id for a directory.",
+              "type": "string"
+            },
+            "kind": {
+              "$ref": "#/$defs/EntryKindOut",
+              "description": "What the entry is."
+            },
+            "name": {
+              "description": "The entry's name: one path component.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "name",
+            "kind",
+            "id"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`read_tree` (CLI `ls`): a page of a directory's entries, in the tree's order (by name bytes).",
+      "properties": {
+        "cursor": {
+          "description": "When `truncated`: the last entry's name; pass it as `cursor` to get the next page.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entries": {
+          "description": "The entries.",
+          "items": {
+            "$ref": "#/$defs/TreeEntryOut"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Whether more entries follow this page.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entries",
+        "truncated"
+      ],
+      "title": "TreeListing",
+      "type": "object"
+    },
+    "VerifyReport": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`verify`: what the consistency check found.",
+      "properties": {
+        "changesets_checked": {
+          "description": "How many changesets were checked.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "objects_checked": {
+          "description": "How many objects were checked.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "problems": {
+          "description": "One line per problem found; empty for a clean store.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "objects_checked",
+        "changesets_checked",
+        "problems"
+      ],
+      "title": "VerifyReport",
+      "type": "object"
+    },
+    "VerifyReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`verify`: check the whole store's consistency.",
+      "properties": {
+        "deep": {
+          "default": false,
+          "description": "Re-hash every object. When `false`, verify checks structure only: parents, that\nreferenced objects exist, the index against the journal, and refs.",
+          "type": "boolean"
+        }
+      },
+      "title": "VerifyReq",
+      "type": "object"
+    }
+  },
+  "meta": {
+    "elapsed_ms": "[elapsed_ms]",
+    "resolved": {},
+    "auth": "trust"
+  }
+}

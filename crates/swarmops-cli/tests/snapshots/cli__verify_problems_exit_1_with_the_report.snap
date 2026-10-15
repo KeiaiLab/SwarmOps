@@ -1,0 +1,147 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[id1]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c1 --changes [tmp]/c1.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store verify",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "verify",
+      "api": 1,
+      "result": {
+        "objects_checked": 3,
+        "changesets_checked": 1,
+        "problems": []
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store verify --deep",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "verify",
+      "api": 1,
+      "result": {
+        "objects_checked": 3,
+        "changesets_checked": 1,
+        "problems": []
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store verify",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "verify",
+      "api": 1,
+      "error": {
+        "code": "E_STORE_CORRUPT",
+        "message": "verify found a problem: object [id3] is missing; changeset [c1] references it",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "changesets_checked": 1,
+          "objects_checked": 3,
+          "problems": [
+            "object [id3] is missing; changeset [c1] references it"
+          ]
+        },
+        "hint": "swarmops verify --deep"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store verify --deep",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "verify",
+      "api": 1,
+      "error": {
+        "code": "E_STORE_CORRUPT",
+        "message": "verify found a problem: object [id3] is missing; changeset [c1] references it",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "changesets_checked": 1,
+          "objects_checked": 2,
+          "problems": [
+            "object [id3] is missing; changeset [c1] references it"
+          ]
+        },
+        "hint": "details.problems names each damaged object or record: restore them from a backup of the store"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]
