@@ -86,6 +86,9 @@ error_codes! {
     UnsupportedFs => "E_UNSUPPORTED_FS", EXIT_ERROR, false;
     /// The filesystem refused an operation.
     Io => "E_IO", EXIT_ERROR, false;
+    /// The filesystem failed once a write had gone far enough that it may have committed
+    /// (`details.may_have_committed`): the same operation, run again, is safe and settles it.
+    IoTransient => "E_IO_TRANSIENT", EXIT_RETRYABLE, true;
     /// Another writer held the store's metadata lock for the whole wait.
     Busy => "E_BUSY", EXIT_RETRYABLE, true;
     /// A bug in SwarmOps, such as a caught panic.

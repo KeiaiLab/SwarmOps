@@ -105,6 +105,10 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`; the hint
 ///   points at a native filesystem.
 /// - `E_IO`: any other `Io` error.
+/// - `E_IO_TRANSIENT` (retryable) `{may_have_committed}`, always `true`: the store's `Undecided`,
+///   a journal append that failed once its frame was whole, so the write may have committed;
+///   the hint says to run the same command again, which is safe whether it did or not (a ref
+///   move run again reports `already_applied` if it did; a commit moves no ref).
 /// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning, so
 ///   that it never reaches here.
 ///
@@ -944,5 +948,47 @@ mod tests {
         let info = fresh.repo_info(InfoReq {}).unwrap();
         assert_eq!(info.main.as_deref(), Some(committed.changeset.as_str()));
         assert_eq!(info.changesets, 1);
+    }
+
+    /// A commit whose journal frame is written but cannot be listed (journal.off refuses its
+    /// entry) may have committed: `E_IO_TRANSIENT`, retryable, `may_have_committed`, with a hint
+    /// to run it again. It has: a fresh handle sees the changeset.
+    #[test]
+    fn an_undecided_commit_is_retryable_and_says_it_may_have_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        drop(LocalOps::init(&root, "acme").unwrap());
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let ops = ops_on(
+            &root,
+            FailingFs {
+                method: "append_durable",
+                suffix: "journal.off",
+            },
+        );
+        let put = ChangeInput {
+            path: "f".to_owned(),
+            op: ChangeOp::Put,
+            content: Some(ContentInput::Inline("x".to_owned())),
+            mode: None,
+        };
+        let req = CommitReq {
+            parent: None,
+            changes: vec![put],
+            message: "m".to_owned(),
+            allow_empty: false,
+        };
+        let error = ops.commit(&who, req).unwrap_err();
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_IO_TRANSIENT", 4, true),
+            "{error:?}"
+        );
+        assert_eq!(error.details["may_have_committed"], true, "{error:?}");
+        assert!(error.hint.is_some(), "{error:?}");
+        drop(ops);
+
+        let fresh = LocalOps::open(&root).unwrap();
+        assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 1);
     }
 }

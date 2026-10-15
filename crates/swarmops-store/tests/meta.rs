@@ -28,7 +28,7 @@ use swarmops_store::{
 use tempfile::TempDir;
 
 use crate::support::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
-use crate::support::fs::{Failing, FastFs, RecordingFs, When, copy_dir};
+use crate::support::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
 use crate::support::temp_dir as new_root;
 use crate::support::{append_bytes, file_len};
 
@@ -1415,6 +1415,132 @@ fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
     for n in 0..32 {
         assert_eq!(index.get(n).unwrap(), chained_stored(n), "{n}");
     }
+}
+
+/// How many frames `journal.off` at `root` lists.
+fn listed(root: &Utf8Path) -> u64 {
+    file_len(Layout::new(root).journal_off()) / 8
+}
+
+/// A transaction whose frame is durable in journal.log, but whose listing in journal.off
+/// fails, may have committed: commit says so ([`StoreError::Undecided`]), readers see the frame
+/// already, and the next write lists and replays it, so that retrying the transaction finds it
+/// done.
+#[test]
+fn a_frame_journal_off_fails_to_list_leaves_its_transaction_undecided() {
+    let (_dir, root) = new_root();
+    let (store, fail) = failing_store(&root);
+    insert(&store, &[cs(0, &[])]); // frame 0
+    fail.set("append_durable journal.off");
+    let mut write = store.write().unwrap();
+    write.insert_changeset(cs(1, &[0])).unwrap();
+    write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
+    match write.commit() {
+        Err(StoreError::Undecided { source }) => {
+            assert!(matches!(*source, StoreError::Io(_)), "{source:?}");
+        }
+        other => panic!("expected Undecided, got {other:?}"),
+    }
+    fail.clear();
+    assert_eq!(
+        (listed(&root), frames(&root).len()),
+        (1, 2),
+        "the frame is whole in journal.log, unlisted"
+    );
+    let read = store.read().unwrap();
+    assert_eq!(
+        read.changeset(id(1)).unwrap(),
+        Some(stored(1, &[0], 1, 2)),
+        "readers see it"
+    );
+    drop(read);
+
+    // Retrying finds the transaction done: the write lists the frame and replays it first.
+    let mut write = store.write().unwrap();
+    assert_eq!(listed(&root), 2, "the write listed the frame");
+    let again = write.insert_changeset(cs(1, &[0])).unwrap();
+    assert_eq!(again, InsertOutcome::AlreadyPresent);
+    let moved = write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
+    assert_eq!(
+        moved,
+        CasResult::Mismatch {
+            actual: Some(id(1))
+        }
+    );
+    write.commit().unwrap();
+    let read = store.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+    assert_eq!(read.count_changesets().unwrap(), 2);
+}
+
+/// What fails the next `append_durable` of journal.log once it has run, when armed: the frame
+/// is whole in the file, and the call fails as a sync that fails after its write does.
+#[derive(Default)]
+struct LogSyncFails {
+    armed: AtomicBool,
+}
+
+impl Watch for LogSyncFails {
+    fn before(&self, _call: &Call<'_>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn after_success(&self, call: &Call<'_>) -> io::Result<()> {
+        if call.named() == "append_durable journal.log" && self.armed.swap(false, Ordering::SeqCst)
+        {
+            return Err(io::Error::other(
+                "injected: the sync after the write failed",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// An append to journal.log that fails after it wrote the frame whole (its sync failed) leaves
+/// the transaction undecided too: the next write syncs journal.log and lists the frame. One that
+/// fails before it writes anything leaves no frame: that transaction did not commit, and the
+/// error is the plain one.
+#[test]
+fn a_failed_append_is_undecided_exactly_when_the_frame_reached_journal_log() {
+    let (_dir, root) = new_root();
+    let fs = Arc::new(Watched(LogSyncFails::default()));
+    let store = MetaStore::create_with_fs(&root, Arc::clone(&fs) as Arc<dyn FsOps>).unwrap();
+    insert(&store, &[cs(0, &[])]);
+    fs.armed.store(true, Ordering::SeqCst);
+    let mut write = store.write().unwrap();
+    write.insert_changeset(cs(1, &[0])).unwrap();
+    match write.commit() {
+        Err(StoreError::Undecided { source }) => {
+            assert!(source.to_string().contains("injected"), "{source}");
+        }
+        other => panic!("expected Undecided, got {other:?}"),
+    }
+    let mut write = store.write().unwrap();
+    assert_eq!(
+        listed(&root),
+        2,
+        "the next write synced and listed the frame"
+    );
+    let again = write.insert_changeset(cs(1, &[0])).unwrap();
+    assert_eq!(again, InsertOutcome::AlreadyPresent);
+    drop(write);
+
+    let (_dir, root) = new_root();
+    let (store, fail) = failing_store(&root);
+    insert(&store, &[cs(0, &[])]);
+    fail.set("append_durable journal.log");
+    let mut write = store.write().unwrap();
+    write.insert_changeset(cs(1, &[0])).unwrap();
+    match write.commit() {
+        Err(StoreError::Io(_)) => {}
+        other => panic!("expected a plain Io error, got {other:?}"),
+    }
+    fail.clear();
+    assert_eq!(frames(&root).len(), 1, "no frame of it");
+    let mut write = store.write().unwrap();
+    let fresh = write.insert_changeset(cs(1, &[0])).unwrap();
+    assert_eq!(fresh, InsertOutcome::Inserted { seq: 1 });
+    write.commit().unwrap();
 }
 
 #[track_caller]

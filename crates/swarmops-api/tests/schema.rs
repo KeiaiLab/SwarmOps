@@ -185,6 +185,7 @@ fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
         ErrorCode::InvalidArg => ("E_INVALID_ARG", 2, false),
         ErrorCode::UnsupportedFs => ("E_UNSUPPORTED_FS", 1, false),
         ErrorCode::Io => ("E_IO", 1, false),
+        ErrorCode::IoTransient => ("E_IO_TRANSIENT", 4, true),
         ErrorCode::Busy => ("E_BUSY", 4, true),
         ErrorCode::Internal => ("E_INTERNAL", 1, false),
         ErrorCode::Auth => ("E_AUTH", 5, false),

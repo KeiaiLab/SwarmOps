@@ -284,7 +284,9 @@ impl<O: ObjectStore> Repo<O> {
     ///
     /// A move whose journal frame is durable is applied even if a step after that failed
     /// ([`StoreError::PostCommit`]): the outcome carries a warning, and the next write to the
-    /// store repairs the ref file.
+    /// store repairs the ref file. A journal append that fails once the frame is written
+    /// ([`StoreError::Undecided`]) is returned as it is: the move may be applied, and the same
+    /// move made again finds the ref at `new` ([`CasResult::Mismatch`]) if it was.
     pub fn cas_ref(
         &self,
         name: &str,

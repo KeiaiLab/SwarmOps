@@ -117,8 +117,14 @@ impl Journal {
     /// not end where this handle last saw it end, or the handle never checked its tail,
     /// the tail is checked first, as [`Journal::truncate_torn_tail`] does, so that a frame
     /// never lands after a torn one. Records the layout cannot hold are refused with
-    /// `InvalidInput` before anything is written. After any other error the frame may or
-    /// may not be committed, as after a crash; the next tail check settles it.
+    /// `InvalidInput` before anything is written.
+    ///
+    /// An error once the frame is whole in `journal.log` is [`StoreError::Undecided`]: the
+    /// frame was written and its sync failed, or it was durable and its entry could not be
+    /// appended to `journal.off`. The transaction may then have committed, as after a crash
+    /// between the two appends: the next tail check settles it, listing the frame (or cutting
+    /// it, if a crash took back what was never synced). Any other error leaves no whole frame,
+    /// at most a torn one that the next tail check cuts: the transaction did not commit.
     pub fn append_frame(&self, records: &[Record]) -> Result<Frame, StoreError> {
         let bytes = encode_frame(records)?;
         let mut tail = self.tail();
@@ -127,12 +133,21 @@ impl Journal {
             (*tail, _) = self.check_tail()?;
         }
         tail.checked = false; // a failed append can leave part of a frame or an entry behind
+        let frame_end = tail.len + to_u64(bytes.len());
         let offset = self
             .fs
-            .append_durable(self.log_path.as_std_path(), &bytes)?;
+            .append_durable(self.log_path.as_std_path(), &bytes)
+            .map_err(|e| self.log_append_error(e, frame_end))?;
+        // The frame is whole and durable: whatever fails now, the next tail check lists it.
         let entry_at = self
             .fs
-            .append_durable(self.off_path.as_std_path(), &offset.to_le_bytes())?;
+            .append_durable(self.off_path.as_std_path(), &offset.to_le_bytes())
+            .map_err(|e| {
+                undecided(
+                    "the frame is in journal.log, but listing it in journal.off failed",
+                    &e,
+                )
+            })?;
         let seq = entry_at / ENTRY_LEN;
         *tail = Tail {
             len: offset + to_u64(bytes.len()),
@@ -417,6 +432,21 @@ impl Journal {
         Ok(())
     }
 
+    /// What [`Journal::append_frame`] returns when the append of its frame to `journal.log`
+    /// fails with `e`, the frame ending at `frame_end` had it been written whole: if
+    /// `journal.log` reaches that far, the frame was written and its sync failed, so the next
+    /// tail check syncs and lists it ([`StoreError::Undecided`]; so too if the length cannot be
+    /// read). If not, the frame is torn or was never written, and the error is `e` itself.
+    fn log_append_error(&self, e: io::Error, frame_end: u64) -> StoreError {
+        match self.log.metadata() {
+            Ok(meta) if meta.len() < frame_end => e.into(),
+            _ => undecided(
+                "the frame is written whole in journal.log, but its append failed",
+                &e,
+            ),
+        }
+    }
+
     fn tail(&self) -> MutexGuard<'_, Tail> {
         // `checked` is cleared before every write that could leave the tail stale, so the
         // value a panicking holder leaves behind is still safe to use.
@@ -616,6 +646,15 @@ impl Journal {
             }
         }
         Ok(low)
+    }
+}
+
+/// [`StoreError::Undecided`] for `e`, which failed an append once its frame was whole in
+/// `journal.log`, as `what` says.
+fn undecided(what: &str, e: &io::Error) -> StoreError {
+    let source = io::Error::new(e.kind(), format!("{what}: {e}"));
+    StoreError::Undecided {
+        source: Box::new(source.into()),
     }
 }
 

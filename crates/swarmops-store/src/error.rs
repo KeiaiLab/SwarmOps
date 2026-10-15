@@ -91,6 +91,19 @@ pub enum StoreError {
         /// The step's error.
         source: Box<StoreError>,
     },
+    /// A write transaction's journal append failed once its frame was whole in `journal.log`:
+    /// the frame was written and its sync failed, or it was durable and listing it in
+    /// `journal.off` failed. So the transaction may have committed: the next
+    /// [`crate::MetaStore::write`] settles it, listing the frame (or cutting it, should a crash
+    /// take back what the failed sync never made durable) and replaying what it lists. Retrying
+    /// the same transaction is safe: an insert finds the changeset if it committed
+    /// ([`crate::InsertOutcome::AlreadyPresent`]), and a ref move finds the ref at the caller's
+    /// own target ([`crate::CasResult::Mismatch`], with that target as `actual`). Retryable.
+    #[error("the transaction may have committed: {source}")]
+    Undecided {
+        /// What failed: the sync of `journal.log`, or the append to `journal.off`.
+        source: Box<StoreError>,
+    },
 }
 
 /// An `InvalidInput` I/O error: what the metadata store returns for a request it cannot carry

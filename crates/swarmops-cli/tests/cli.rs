@@ -733,6 +733,10 @@ fn error_codes_reach_the_cli() {
         ),
         ("E_REF_NOT_FOUND", "no M1 operation looks a ref up by name"),
         ("E_IO", "needs a failing filesystem"),
+        (
+            "E_IO_TRANSIENT",
+            "needs a journal.off that refuses writes: tests/crash.rs raises it",
+        ),
         ("E_BUSY", "needs the store's lock held for its 10 s wait"),
         ("E_INTERNAL", "a caught panic: the binary's unit tests"),
         ("E_AUTH", "tokens arrive after M1"),

@@ -17,8 +17,9 @@
 
 mod support;
 
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::ops::RangeInclusive;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -372,4 +373,58 @@ fn kill9_during_init_leaves_no_store_or_a_whole_one() {
         whole[first..].iter().all(|&whole| whole),
         "once FORMAT is linked, the store is whole: {whole:?}"
     );
+}
+
+/// Makes the file at `path` refuse writes (`read_only`), or take them again.
+fn set_read_only(path: &Path, read_only: bool) {
+    let mut permissions = fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(if read_only { 0o444 } else { 0o644 });
+    fs::set_permissions(path, permissions).unwrap();
+}
+
+/// A commit, then a ref move, whose journal frame reaches `journal.log` but whose listing in
+/// `journal.off` fails (the file made read-only): each exits 4 with `E_IO_TRANSIENT`,
+/// retryable, saying that it may have committed, and readers see it already. Run again once
+/// `journal.off` takes writes, the same command finds it done: the same changeset, which the
+/// store holds once, and the move already applied. The store verifies clean.
+#[test]
+fn an_undecided_write_is_retryable_and_running_it_again_settles_it() {
+    let store = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let off = store.layout().journal_off().into_std_path_buf();
+    set_read_only(&off, true);
+    if OpenOptions::new().append(true).open(&off).is_ok() {
+        // Root writes to a read-only file all the same: nothing here can fail the listing.
+        eprintln!("skipped: journal.off takes writes despite its mode (running as root?)");
+        return;
+    }
+    let undecided = |run: &Run| {
+        let error = run.err("E_IO_TRANSIENT");
+        assert_eq!(run.exit(), 4, "{run}");
+        assert_eq!(error["retryable"], true, "{run}");
+        assert_eq!(error["details"]["may_have_committed"], true, "{run}");
+        let hint = error["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("same command"), "{run}");
+    };
+
+    let changes = store.changes("undecided", "undecided.txt", "may have committed\n");
+    let commit = ["commit", "-m", "undecided", "--changes", changes.as_str()];
+    undecided(&store.run_as(&agent(0), &commit, &[]));
+    assert_eq!(store.info()["changesets"], 1, "readers see its frame");
+    set_read_only(&off, false);
+    let again = store.run_as(&agent(0), &commit, &[]).ok();
+    assert_eq!(
+        again["blobs_written"], 0,
+        "the first run wrote them: {again}"
+    );
+    let id = again["changeset"].as_str().unwrap().to_owned();
+    assert_eq!(store.info()["changesets"], 1, "one changeset, found again");
+
+    set_read_only(&off, true);
+    let create = ["ref", "set", "main", id.as_str(), "--create"];
+    undecided(&store.run_as(&agent(0), &create, &[]));
+    set_read_only(&off, false);
+    let again = store.run_as(&agent(0), &create, &[]).ok();
+    assert_eq!(again["already_applied"], true, "{again}");
+    assert_eq!(store.info()["main"], id.as_str());
+    store.assert_clean("after the undecided writes");
 }

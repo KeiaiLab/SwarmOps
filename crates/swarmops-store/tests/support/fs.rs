@@ -1,8 +1,9 @@
 //! [`FsOps`] doubles for the tests, on real files:
 //!
 //! - [`Watched`]: the real filesystem with a [`Watch`] run around each call, to record calls,
-//!   fail them, or hold them; [`RecordingFs`] records, fails the calls a [`Failing`] names, and
-//!   runs a [`Hook`] once; [`FailingFs`] fails the calls a predicate picks.
+//!   fail them (before they run, or after), or hold them; [`RecordingFs`] records, fails the
+//!   calls a [`Failing`] names, and runs a [`Hook`] once; [`FailingFs`] fails the calls a
+//!   predicate picks.
 //! - [`FastFs`]: the real filesystem without a single flush to stable storage.
 //! - [`Rendezvous`]: tells calls made at once from calls made one after another.
 //!
@@ -62,6 +63,13 @@ pub trait Watch: Send + Sync {
 
     /// Runs after the call, unless [`Watch::before`] failed it.
     fn after(&self, _call: &Call<'_>) {}
+
+    /// Runs after a call that succeeded, after [`Watch::after`]. An error fails the call all
+    /// the same, though what it did stays done: a failure after the work, as a sync that fails
+    /// after its write.
+    fn after_success(&self, _call: &Call<'_>) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The real filesystem ([`RealFs`]), its watcher run around each call. It dereferences to the
@@ -87,7 +95,9 @@ impl<W: Watch> Watched<W> {
         self.0.before(&call_info)?;
         let out = call();
         self.0.after(&call_info);
-        out
+        let out = out?;
+        self.0.after_success(&call_info)?;
+        Ok(out)
     }
 }
 
