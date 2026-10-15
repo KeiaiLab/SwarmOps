@@ -16,6 +16,7 @@
 
 use std::io;
 
+use swarmops_core::bytes::Reader;
 use swarmops_core::{ChangesetId, ObjectId};
 
 use crate::error::StoreError;
@@ -95,11 +96,11 @@ impl Record {
     /// Malformed or truncated bytes give [`StoreError::JournalCorrupt`], with `offset` the
     /// position in `buf` where decoding stopped.
     pub fn decode(buf: &[u8]) -> Result<(Record, usize), StoreError> {
-        let mut r = Reader { buf, pos: 0 };
+        let mut r = Reader::new(buf, corrupt_at);
         let record = match r.u8()? {
             KIND_CHANGESET => Self::Changeset {
                 id: r.id()?,
-                generation: r.u64()?,
+                generation: r.u64_le()?,
                 delta_hash: r.array()?,
                 parents: {
                     let n = r.u8()?;
@@ -111,14 +112,14 @@ impl Record {
                 old: r.optional_id()?,
                 new: r.optional_id()?,
                 actor: r.string()?,
-                ts: r.i64()?,
+                ts: r.i64_le()?,
             },
             KIND_COMPACTED => Self::Compacted {
-                sorted_count: r.u64()?,
+                sorted_count: r.u64_le()?,
             },
-            _ => return Err(r.corrupt_at(0)),
+            _ => return Err(r.error_at(0)),
         };
-        Ok((record, r.pos))
+        Ok((record, r.pos()))
     }
 
     /// [`Record::encode`], or which field is too long for its `u8` length; `out` is left
@@ -272,67 +273,44 @@ fn decode_payload(payload: &[u8]) -> Option<Vec<Record>> {
     rest.is_empty().then_some(records)
 }
 
-/// A cursor over a record's bytes; every read checks the length first.
-struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
+/// What a record's bytes that do not decode are: [`StoreError::JournalCorrupt`] at `pos`, the
+/// position in them where decoding stopped.
+fn corrupt_at(pos: usize) -> StoreError {
+    StoreError::JournalCorrupt {
+        offset: u64::try_from(pos).expect("a buffer position fits in u64"),
+    }
 }
 
-impl Reader<'_> {
-    fn array<const N: usize>(&mut self) -> Result<[u8; N], StoreError> {
-        let bytes = self
-            .buf
-            .get(self.pos..)
-            .and_then(<[u8]>::first_chunk::<N>)
-            .ok_or_else(|| self.corrupt_at(self.pos))?;
-        self.pos += N;
-        Ok(*bytes)
-    }
+/// The reads of a record's fields beyond fixed-width integers.
+trait RecordReader {
+    fn id(&mut self) -> Result<ChangesetId, StoreError>;
 
-    fn u8(&mut self) -> Result<u8, StoreError> {
-        let [byte] = self.array()?;
-        Ok(byte)
-    }
+    /// A `u8` flag (0 or 1), then the id if the flag is 1.
+    fn optional_id(&mut self) -> Result<Option<ChangesetId>, StoreError>;
 
-    fn u64(&mut self) -> Result<u64, StoreError> {
-        self.array().map(u64::from_le_bytes)
-    }
+    /// A `u8` length, then that many bytes of UTF-8.
+    fn string(&mut self) -> Result<String, StoreError>;
+}
 
-    fn i64(&mut self) -> Result<i64, StoreError> {
-        self.array().map(i64::from_le_bytes)
-    }
-
+impl RecordReader for Reader<'_, StoreError> {
     fn id(&mut self) -> Result<ChangesetId, StoreError> {
         self.array().map(|bytes| ChangesetId(ObjectId(bytes)))
     }
 
-    /// A `u8` flag (0 or 1), then the id if the flag is 1.
     fn optional_id(&mut self) -> Result<Option<ChangesetId>, StoreError> {
-        let flag_at = self.pos;
+        let flag_at = self.pos();
         match self.u8()? {
             0 => Ok(None),
             1 => self.id().map(Some),
-            _ => Err(self.corrupt_at(flag_at)),
+            _ => Err(self.error_at(flag_at)),
         }
     }
 
-    /// A `u8` length, then that many bytes of UTF-8.
     fn string(&mut self) -> Result<String, StoreError> {
         let len = usize::from(self.u8()?);
-        let start = self.pos;
-        let text = self
-            .buf
-            .get(start..start + len)
-            .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .ok_or_else(|| self.corrupt_at(start))?;
-        self.pos = start + len;
+        let start = self.pos();
+        let bytes = self.bytes(len)?;
+        let text = std::str::from_utf8(bytes).map_err(|_| self.error_at(start))?;
         Ok(text.to_owned())
-    }
-
-    fn corrupt_at(&self, pos: usize) -> StoreError {
-        debug_assert!(pos <= self.buf.len());
-        StoreError::JournalCorrupt {
-            offset: u64::try_from(pos).expect("a buffer position fits in u64"),
-        }
     }
 }
