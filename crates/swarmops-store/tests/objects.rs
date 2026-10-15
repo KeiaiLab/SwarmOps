@@ -153,6 +153,10 @@ impl FsOps for CountingFs {
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         RealFs.atomic_replace(path, bytes)
     }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        RealFs.sync_data(path)
+    }
 }
 
 /// A one-way gate: `wait` blocks until `open` has been called.
@@ -228,6 +232,10 @@ impl FsOps for GatedFs {
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         RealFs.atomic_replace(path, bytes)
+    }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        RealFs.sync_data(path)
     }
 }
 

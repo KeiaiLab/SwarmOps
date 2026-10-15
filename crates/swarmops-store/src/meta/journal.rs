@@ -5,9 +5,10 @@
 //!
 //! A frame is appended with one `append_durable` to `journal.log`, then one to
 //! `journal.off`, so a crash leaves at most one torn frame at the tail, or one whole frame
-//! that `journal.off` does not list yet; [`Journal::truncate_torn_tail`] repairs either.
-//! Every frame `journal.off` lists was whole and durable before it was listed, so damage to
-//! a listed frame is reported as [`StoreError::JournalCorrupt`], never cut away.
+//! that `journal.off` does not list yet; [`Journal::truncate_torn_tail`] repairs either,
+//! syncing `journal.log` before it lists such a frame. So every frame `journal.off` lists was
+//! whole and durable before it was listed, and damage to a listed frame is reported as
+//! [`StoreError::JournalCorrupt`], never cut away.
 //!
 //! Writers hold [`crate::MetaLock`]; the journal itself takes no lock. Writes go through
 //! [`FsOps`]. Reads take no lock and skip a torn tail (or an append still in progress)
@@ -251,17 +252,17 @@ impl Journal {
     /// - an unlisted frame at the end that is cut short or fails its CRC is a torn write:
     ///   `journal.log` is cut where it starts;
     /// - whole frames that `journal.off` does not list (a crash between a frame's two
-    ///   appends) are committed: their entries are appended;
+    ///   appends) are committed: `journal.log` is synced, then their entries are appended;
     /// - a partial entry at the end of `journal.off` is dropped, and so is the entry of
-    ///   the last listed frame if `journal.log` ends inside it (provided the frame before
-    ///   it ends exactly where it starts);
-    /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a listed
-    ///   frame that fails its CRC, an empty payload, or a frame that matches its CRC but
-    ///   does not decode (a newer version may have written it).
+    ///   the last listed frame if `journal.log` ends inside it;
+    /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a last listed
+    ///   frame that does not start where the frame before it ends, a listed frame that
+    ///   fails its CRC, an empty payload, or a frame that matches its CRC but does not
+    ///   decode (a newer version may have written it).
     ///
-    /// Only the last listed frame and what follows it are read. `journal.off` is repaired
-    /// before `journal.log` is cut, so a crash in between leaves a torn frame the next call
-    /// cuts. The caller must hold [`crate::MetaLock`].
+    /// Only the last listed frame, the header of the frame before it, and what follows are
+    /// read. `journal.off` is repaired before `journal.log` is cut, so a crash in between
+    /// leaves a torn frame the next call cuts. The caller must hold [`crate::MetaLock`].
     pub fn truncate_torn_tail(&self) -> Result<Option<u64>, StoreError> {
         let mut tail = self.tail();
         tail.checked = false;
@@ -340,23 +341,21 @@ impl Journal {
         }
         let buf = read_upto(&self.log, start, log_len - start)?;
         let mut at = 0; // where in `buf` the unlisted frames begin
-        if listed > 0 {
+        if let Some(last) = listed.checked_sub(1) {
+            // The last listed frame must start where the frame before it ends. An entry that
+            // does not (zeroed, stale, or pointing into a frame) is garbage: frames listed or
+            // numbered after it would be wrong, and cutting at it could destroy a whole frame.
+            let previous_end = match last.checked_sub(1) {
+                Some(previous) => self.frame_end(self.entry(previous)?, log_len)?,
+                None => Some(0),
+            };
+            if previous_end != Some(start) {
+                return Err(StoreError::JournalCorrupt { offset: start });
+            }
             match parse_frame(&buf) {
                 Parsed::Whole { size, .. } => at = size,
-                Parsed::Short => {
-                    // `journal.log` ends inside the last listed frame, so its entry dangles.
-                    // Drop it only if the frame before ends right where this one starts:
-                    // otherwise the entry is garbage, and cutting there could destroy a
-                    // whole frame.
-                    let previous_end = match listed.checked_sub(2) {
-                        Some(previous) => self.frame_end(self.entry(previous)?, log_len)?,
-                        None => Some(0),
-                    };
-                    if previous_end != Some(start) {
-                        return Err(StoreError::JournalCorrupt { offset: start });
-                    }
-                    listed -= 1;
-                }
+                // `journal.log` ends inside the last listed frame, so its entry dangles.
+                Parsed::Short => listed = last,
                 Parsed::BadCrc | Parsed::Invalid => {
                     return Err(StoreError::JournalCorrupt { offset: start });
                 }
@@ -382,6 +381,11 @@ impl Journal {
         if off_len != listed * ENTRY_LEN {
             self.fs
                 .truncate(self.off_path.as_std_path(), listed * ENTRY_LEN)?;
+        }
+        if !unlisted.is_empty() {
+            // Their writer may have died after its write and before its sync, so their bytes
+            // may still be only in the page cache: a listed frame must be durable.
+            self.fs.sync_data(self.log_path.as_std_path())?;
         }
         for offset in &unlisted {
             self.fs

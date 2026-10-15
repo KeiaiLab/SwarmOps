@@ -67,6 +67,10 @@ pub trait FsOps: Send + Sync {
     /// durably: a temp file in the same directory is written, `sync_all`ed and renamed over
     /// `path`, then the directory is fsynced. Readers see the old content or the new one.
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
+
+    /// Flushes the data of the existing file `path` to stable storage (`sync_data`),
+    /// whichever process wrote it.
+    fn sync_data(&self, path: &Path) -> io::Result<()>;
 }
 
 /// The real filesystem.
@@ -150,6 +154,10 @@ impl FsOps for RealFs {
         temp.persist(path).map_err(|e| e.error)?;
         self.fsync_dir(dir)
     }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        File::open(path)?.sync_data()
+    }
 }
 
 /// One set of operations shared by several stores, so that they share one [`CrashAtFs`]
@@ -197,6 +205,10 @@ impl<F: FsOps + ?Sized> FsOps for Arc<F> {
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         (**self).atomic_replace(path, bytes)
+    }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        (**self).sync_data(path)
     }
 }
 
@@ -285,6 +297,11 @@ impl<F: FsOps> FsOps for CrashAtFs<F> {
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         self.tick();
         self.inner.atomic_replace(path, bytes)
+    }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        self.tick();
+        self.inner.sync_data(path)
     }
 }
 

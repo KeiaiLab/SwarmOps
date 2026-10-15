@@ -14,10 +14,10 @@ use std::fmt::Debug;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::process::ExitStatusExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::slice;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,7 +25,8 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    CRASH_AT_ENV, CrashAtFs, Frame, FsOps, Journal, Layout, MetaLock, RealFs, Record, StoreError,
+    CRASH_AT_ENV, CrashAtFs, Frame, FsOps, Journal, Layout, LinkOutcome, MetaLock, RealFs, Record,
+    StoreError,
 };
 use tempfile::TempDir;
 
@@ -159,6 +160,91 @@ fn assert_corrupt_at<T: Debug>(got: Result<T, StoreError>, offset: u64, what: &s
         Err(StoreError::JournalCorrupt { offset: at }) => assert_eq!(at, offset, "{what}"),
         other => panic!("{what}: expected JournalCorrupt at {offset}, got {other:?}"),
     }
+}
+
+/// [`RealFs`] that records each call as `"<method> <file name>"`.
+struct RecordingFs {
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl RecordingFs {
+    fn record(&self, method: &str, path: &Path) {
+        let name = path.file_name().unwrap().to_string_lossy();
+        self.calls.lock().unwrap().push(format!("{method} {name}"));
+    }
+}
+
+impl FsOps for RecordingFs {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.record("create_dir_all", p);
+        RealFs.create_dir_all(p)
+    }
+
+    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        self.record("write_durable_temp", dir);
+        RealFs.write_durable_temp(dir, bytes)
+    }
+
+    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+        self.record("link_noclobber", to);
+        RealFs.link_noclobber(from, to)
+    }
+
+    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+        self.record("fsync_dir", p);
+        RealFs.fsync_dir(p)
+    }
+
+    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+        self.record("read", p);
+        RealFs.read(p)
+    }
+
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        self.record("exists", p);
+        RealFs.exists(p)
+    }
+
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        self.record("remove", p);
+        RealFs.remove(p)
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.record("append_durable", path);
+        RealFs.append_durable(path, bytes)
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        self.record("file_len", path);
+        RealFs.file_len(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        self.record("truncate", path);
+        RealFs.truncate(path, len)
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.record("atomic_replace", path);
+        RealFs.atomic_replace(path, bytes)
+    }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        self.record("sync_data", path);
+        RealFs.sync_data(path)
+    }
+}
+
+/// Another handle on the journal whose FsOps calls are recorded, and a function that
+/// returns the calls made since it last ran.
+fn recording_journal(layout: &Layout) -> (Journal, impl Fn() -> Vec<String>) {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let fs = RecordingFs {
+        calls: Arc::clone(&calls),
+    };
+    let journal = Journal::open(layout, Arc::new(fs)).unwrap();
+    (journal, move || std::mem::take(&mut *calls.lock().unwrap()))
 }
 
 #[test]
@@ -663,32 +749,98 @@ fn an_offset_entry_off_a_frame_boundary_is_journal_corrupt() {
 
 #[test]
 fn offset_entries_out_of_order_are_journal_corrupt_not_a_panic() {
-    let (_root, layout) = new_root();
-    let journal = new_journal(&layout);
-    journal.append_frame(&[root_changeset()]).unwrap();
-    journal
-        .append_frame(&[child_changeset(), main_created()])
-        .unwrap();
-    append_bytes(layout.journal_off(), &50_u64.to_le_bytes()); // a third entry, before the second
+    // A third entry that does not start where frame 1 ends (257): one inside frame 0 (50),
+    // a zeroed one pointing back at frame 0 (0), and frame 1's entry again (84). The last
+    // two point at whole frames, so only their place in journal.off gives them away.
+    for bad in [50_u64, 0, 84] {
+        let what = format!("third entry {bad}");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[root_changeset()]).unwrap();
+        journal
+            .append_frame(&[child_changeset(), main_created()])
+            .unwrap();
+        append_bytes(layout.journal_off(), &bad.to_le_bytes());
 
-    let reader = reopen(&layout);
-    assert_corrupt_at(
-        reader.frames_after(0, 1),
-        84,
-        "frame 1 would end before it starts",
+        // Writers refuse it, so no frame is listed or numbered after a bad entry.
+        assert_corrupt_at(journal.truncate_torn_tail(), bad, &what);
+        assert_corrupt_at(journal.append_frame(&[compacted(9)]), bad, &what);
+        assert_eq!(
+            file_len(layout.journal_log()),
+            257,
+            "{what}: nothing written"
+        );
+        assert_eq!(offsets_on_disk(&layout), [0, 84, bad], "{what}");
+
+        let reader = reopen(&layout);
+        assert_corrupt_at(reader.frames_after(0, 1), 84, &what); // frame 1 cannot end there
+        assert_corrupt_at(reader.frames_after(0, 10), bad, &what);
+        assert_corrupt_at(reader.frames_after(1, 10), bad, &what);
+    }
+}
+
+#[test]
+fn truncate_torn_tail_syncs_journal_log_before_listing_a_frame() {
+    // A writer that died inside append_durable, after its write and before its sync, left
+    // frame 1 whole in the page cache but maybe not on disk. Listing it unsynced would let
+    // a power loss revert journal.log under an entry, after replay materialized the frame.
+    let entry = 84_u64.to_le_bytes();
+    let cases = [
+        (
+            "entry missing",
+            &[][..],
+            vec![
+                "file_len journal.log",
+                "file_len journal.off",
+                "sync_data journal.log",
+                "append_durable journal.off",
+            ],
+        ),
+        (
+            "entry partly written",
+            &entry[..3],
+            vec![
+                "file_len journal.log",
+                "file_len journal.off",
+                "truncate journal.off",
+                "sync_data journal.log",
+                "append_durable journal.off",
+            ],
+        ),
+    ];
+    for (what, partial_entry, want) in cases {
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[root_changeset()]).unwrap();
+        journal.append_frame(&[compacted(1)]).unwrap();
+        set_len(layout.journal_off(), 8);
+        append_bytes(layout.journal_off(), partial_entry);
+
+        let (recovering, calls) = recording_journal(&layout);
+        assert_eq!(recovering.truncate_torn_tail().unwrap(), None, "{what}");
+        assert_eq!(calls(), want, "{what}");
+        assert_eq!(offsets_on_disk(&layout), [0, 84], "{what}");
+    }
+
+    // With nothing to list there is nothing to sync: a clean tail costs the two lengths, a
+    // torn one the cut as well.
+    let (_root, layout) = new_root();
+    new_journal(&layout)
+        .append_frame(&[root_changeset()])
+        .unwrap();
+    let (recovering, calls) = recording_journal(&layout);
+    assert_eq!(recovering.truncate_torn_tail().unwrap(), None);
+    assert_eq!(calls(), ["file_len journal.log", "file_len journal.off"]);
+    append_bytes(layout.journal_log(), b"garbage");
+    assert_eq!(recovering.truncate_torn_tail().unwrap(), Some(84));
+    assert_eq!(
+        calls(),
+        [
+            "file_len journal.log",
+            "file_len journal.off",
+            "truncate journal.log"
+        ]
     );
-    assert_corrupt_at(
-        reader.frames_after(0, 10),
-        50,
-        "frame 2 does not follow frame 1",
-    );
-    assert_corrupt_at(
-        reader.frames_after(1, 10),
-        50,
-        "frame 2 does not start where frame 1 ends",
-    );
-    assert_corrupt_at(journal.truncate_torn_tail(), 50, "truncate_torn_tail");
-    assert_eq!(file_len(layout.journal_log()), 257, "nothing was cut");
 }
 
 #[test]
@@ -868,6 +1020,12 @@ fn real_fs_appends_truncates_and_replaces_durably() {
 
     RealFs.truncate(&file, 2).unwrap();
     assert_eq!(fs::read(&file).unwrap(), b"ab");
+    RealFs.sync_data(&file).unwrap();
+    let missing = RealFs.sync_data(&dir.path().join("missing"));
+    assert!(
+        matches!(&missing, Err(e) if e.kind() == io::ErrorKind::NotFound),
+        "{missing:?}"
+    );
 
     RealFs.atomic_replace(&file, b"replaced").unwrap();
     assert_eq!(fs::read(&file).unwrap(), b"replaced");
@@ -891,6 +1049,39 @@ fn crash_child(root: OsString) {
     journal.truncate_torn_tail().unwrap();
     journal.append_frame(&[compacted(7)]).unwrap();
     journal.set_ckpt(journal.len()).unwrap();
+}
+
+/// Runs the test named `test` again as a child process that runs [`crash_child`] on
+/// `layout` with `SWARMOPS_TEST_CRASH_AT=k`; it must die by SIGABRT, or exit cleanly if `k`
+/// is past its last FsOps call, `calls`.
+fn run_crash_child(test: &str, layout: &Layout, k: u64, calls: u64) {
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test, "--nocapture"])
+        .env(CRASH_CHILD_ROOT, layout.root())
+        .env(CRASH_AT_ENV, k.to_string())
+        .output()
+        .unwrap();
+    let ended_as_expected = if k <= calls {
+        child.status.signal() == Some(SIGABRT)
+    } else {
+        child.status.success()
+    };
+    assert!(
+        ended_as_expected,
+        "k={k}: {:?}\n--- child stdout ---\n{}\n--- child stderr ---\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stdout),
+        String::from_utf8_lossy(&child.stderr),
+    );
+}
+
+/// `journal.log`, `journal.off` and the checkpoint as a crash left them.
+fn on_disk(layout: &Layout) -> (u64, u64, u64) {
+    (
+        file_len(layout.journal_log()),
+        file_len(layout.journal_off()),
+        reopen(layout).ckpt().unwrap(),
+    )
 }
 
 #[test]
@@ -920,34 +1111,13 @@ fn crash_at_any_journal_write_recovers_to_whole_frames() {
             .unwrap();
         append_bytes(layout.journal_log(), b"garbage"); // an earlier writer crashed mid-append
 
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "crash_at_any_journal_write_recovers_to_whole_frames",
-                "--nocapture",
-            ])
-            .env(CRASH_CHILD_ROOT, layout.root())
-            .env(CRASH_AT_ENV, k.to_string())
-            .output()
-            .unwrap();
-        let ended_as_expected = if k < 7 {
-            child.status.signal() == Some(SIGABRT)
-        } else {
-            child.status.success()
-        };
-        assert!(
-            ended_as_expected,
-            "k={k}: {:?}\n--- child stdout ---\n{}\n--- child stderr ---\n{}",
-            child.status,
-            String::from_utf8_lossy(&child.stdout),
-            String::from_utf8_lossy(&child.stderr),
+        run_crash_child(
+            "crash_at_any_journal_write_recovers_to_whole_frames",
+            &layout,
+            k,
+            6,
         );
-        let on_disk = (
-            file_len(layout.journal_log()),
-            file_len(layout.journal_off()),
-            reopen(&layout).ckpt().unwrap(),
-        );
-        assert_eq!(on_disk, (log, off, ckpt), "k={k}: after the crash");
+        assert_eq!(on_disk(&layout), (log, off, ckpt), "k={k}: after the crash");
 
         // Recovery keeps exactly the whole frames: the child's frame once its bytes were
         // durable (k >= 5), even though its journal.off entry may be missing.
@@ -963,6 +1133,62 @@ fn crash_at_any_journal_write_recovers_to_whole_frames() {
         }
         assert_eq!(journal.frames_after(0, 10).unwrap(), want[1..], "k={k}");
         assert_eq!(journal.tail_frames_from(0).unwrap(), want, "k={k}");
+    }
+}
+
+#[test]
+fn crash_while_recovery_lists_a_frame_recovers_to_whole_frames() {
+    if let Some(root) = std::env::var_os(CRASH_CHILD_ROOT) {
+        crash_child(root);
+        return;
+    }
+    // Frame 1 is whole but unlisted: its writer died between its two appends. The child's
+    // FsOps calls: 1 file_len(journal.log), 2 file_len(journal.off), 3 sync_data(journal.log)
+    // and 4 append_durable(journal.off) listing frame 1, then 5 append_durable(journal.log)
+    // its own frame, 6 append_durable(journal.off) that frame's entry,
+    // 7 atomic_replace(journal.ckpt); k = 8 is past the last call. Per k: journal.log,
+    // journal.off and ckpt as the crash left them.
+    let crash_points: [(u64, u64, u64, u64); 8] = [
+        (1, 103, 8, 0),
+        (2, 103, 8, 0),
+        (3, 103, 8, 0),
+        (4, 103, 8, 0),
+        (5, 103, 16, 0),
+        (6, 122, 16, 0),
+        (7, 122, 24, 0),
+        (8, 122, 24, 122),
+    ];
+    for (k, log, off, ckpt) in crash_points {
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        let first = journal.append_frame(&[root_changeset()]).unwrap();
+        let second = journal.append_frame(&[compacted(1)]).unwrap();
+        set_len(layout.journal_off(), 8);
+
+        run_crash_child(
+            "crash_while_recovery_lists_a_frame_recovers_to_whole_frames",
+            &layout,
+            k,
+            7,
+        );
+        assert_eq!(on_disk(&layout), (log, off, ckpt), "k={k}: after the crash");
+
+        // Frame 1 was committed all along; the child's frame is once its bytes were
+        // durable (k >= 6).
+        let journal = reopen(&layout);
+        assert_eq!(journal.truncate_torn_tail().unwrap(), None, "k={k}");
+        let mut want = vec![first.clone(), second.clone()];
+        let mut offsets = vec![0, 84];
+        if k >= 6 {
+            want.push(Frame {
+                seq: 2,
+                offset: 103,
+                records: vec![compacted(7)],
+            });
+            offsets.push(103);
+        }
+        assert_eq!(journal.tail_frames_from(0).unwrap(), want, "k={k}");
+        assert_eq!(offsets_on_disk(&layout), offsets, "k={k}");
     }
 }
 
