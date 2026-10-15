@@ -11,7 +11,7 @@
 //! index, the ref files and what it has queued already. [`MetaWrite::commit`] appends them
 //! as one frame ([`Journal::append_frame`]: the commit point), materializes the frame (an
 //! [`Index::append`] per changeset, without a sync; a ref file replaced per moved ref), and
-//! unlocks. Every 32 frames past the checkpoint, before a compaction, and on
+//! unlocks. Every 32 frames past the checkpoint, when it compacts (the sync first), and on
 //! [`MetaStore::flush`], it also syncs the index and moves the checkpoint to the end of the
 //! journal: the batched durability of the projections.
 //!
