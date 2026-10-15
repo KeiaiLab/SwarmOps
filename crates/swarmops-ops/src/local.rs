@@ -17,8 +17,7 @@ use swarmops_api::{
     VerifyReport, VerifyReq,
 };
 use swarmops_core::{
-    ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath, Signature,
-    TreeEntry, hash_object,
+    ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, RepoPath, Signature, TreeEntry,
 };
 use swarmops_repo::{CasResult, CommitRequest, LocalRepo, RepoError, StoredChangeset};
 
@@ -308,13 +307,11 @@ impl StoreOps for LocalOps {
                 allow_empty,
             })
             .map_err(op)?;
-        // The delta leaves out puts of what was there already: count what it holds.
-        let files_changed = self.stored(outcome.id)?.changeset.delta.len();
         Ok(CommitResp {
             changeset: outcome.id.to_string(),
             parent: parent.map(|id| id.to_string()),
             root: outcome.root.to_string(),
-            files_changed: count(files_changed),
+            files_changed: count(outcome.files_changed),
             blobs_written: count(outcome.blobs_written),
             warnings: outcome.warnings,
         })
@@ -328,7 +325,7 @@ impl StoreOps for LocalOps {
         } = req;
         let cs = self.resolve(&rev)?;
         let repo_path = content::repo_path(&path)?;
-        let Some((kind, bytes)) = self.repo.read_blob_at(cs, &repo_path).map_err(op)? else {
+        let Some((kind, blob, bytes)) = self.repo.read_blob_at(cs, &repo_path).map_err(op)? else {
             // No file is there: what is, if anything, can only be a directory.
             return Err(match self.entry(cs, &repo_path)? {
                 Some(_) => error(
@@ -346,9 +343,7 @@ impl StoreOps for LocalOps {
         let keep = usize::try_from(max_bytes).map_or(bytes.len(), |max| max.min(bytes.len()));
         let (encoding, content) = content::encode(&bytes, keep);
         Ok(FileContent {
-            // The store verified the bytes against the entry's id as it read them, so hashing
-            // them gives that id, without a second walk down the trees for the entry.
-            blob: hash_object(ObjectKind::Blob, &bytes).to_hex(),
+            blob: blob.to_string(),
             size: count(bytes.len()),
             kind: file_kind(kind),
             encoding,
