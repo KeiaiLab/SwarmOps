@@ -11,6 +11,10 @@ fn layout_paths_follow_the_store_spec() {
     assert_eq!(layout.format_file(), "/srv/store/FORMAT");
     assert_eq!(layout.meta_dir(), "/srv/store/meta");
     assert_eq!(layout.meta_path("index/v1"), "/srv/store/meta/index/v1");
+    assert_eq!(layout.meta_lock(), "/srv/store/meta/lock");
+    assert_eq!(layout.journal_log(), "/srv/store/meta/journal.log");
+    assert_eq!(layout.journal_off(), "/srv/store/meta/journal.off");
+    assert_eq!(layout.journal_ckpt(), "/srv/store/meta/journal.ckpt");
     assert_eq!(layout.objects_dir(), "/srv/store/objects");
     assert_eq!(layout.objects_tmp(), "/srv/store/objects/tmp");
 

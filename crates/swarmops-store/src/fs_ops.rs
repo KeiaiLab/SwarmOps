@@ -1,9 +1,10 @@
-//! The filesystem operations the object store performs, behind a trait so tests can
-//! count them or crash the process at an exact point of a write.
+//! The filesystem operations the object store and the metadata journal perform, behind a
+//! trait so tests can count them or crash the process at an exact point of a write.
 
-use std::fs::{self, File};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Test hook: with `SWARMOPS_TEST_CRASH_AT=<k>` set, [`crate::FsObjectStore::open_default`]
@@ -19,7 +20,7 @@ pub enum LinkOutcome {
     AlreadyExists,
 }
 
-/// The filesystem operations of the object store.
+/// The filesystem operations of the object store and the metadata journal.
 ///
 /// Implementations are called from many threads at once, and many processes may
 /// operate on the same store concurrently.
@@ -48,6 +49,24 @@ pub trait FsOps: Send + Sync {
 
     /// Removes file `p`.
     fn remove(&self, p: &Path) -> io::Result<()>;
+
+    /// Appends `bytes` to file `path` (created if missing) and flushes the file's data to
+    /// stable storage (`sync_data`). Returns the file's length before the append: the
+    /// offset at which `bytes` now start, provided nobody else appends at the same time.
+    /// A new file's directory entry is not made durable.
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64>;
+
+    /// The length of file `path` in bytes; 0 if it does not exist.
+    fn file_len(&self, path: &Path) -> io::Result<u64>;
+
+    /// Cuts the existing file `path` down to `len` bytes and flushes it to stable storage
+    /// (`sync_data`).
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()>;
+
+    /// Replaces the content of `path` (created if missing) with `bytes`, atomically and
+    /// durably: a temp file in the same directory is written, `sync_all`ed and renamed over
+    /// `path`, then the directory is fsynced. Readers see the old content or the new one.
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()>;
 }
 
 /// The real filesystem.
@@ -95,6 +114,89 @@ impl FsOps for RealFs {
 
     fn remove(&self, p: &Path) -> io::Result<()> {
         fs::remove_file(p)
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        let mut file = OpenOptions::new().append(true).create(true).open(path)?;
+        let offset = file.metadata()?.len();
+        file.write_all(bytes)?;
+        file.sync_data()?;
+        Ok(offset)
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        match fs::metadata(path) {
+            Ok(meta) => Ok(meta.len()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        let file = OpenOptions::new().write(true).open(path)?;
+        file.set_len(len)?;
+        file.sync_data()
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let dir = match path.parent() {
+            Some(dir) if !dir.as_os_str().is_empty() => dir,
+            _ => Path::new("."),
+        };
+        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
+        temp.write_all(bytes)?;
+        temp.as_file().sync_all()?;
+        // On failure the temp file is removed when the returned `NamedTempFile` drops.
+        temp.persist(path).map_err(|e| e.error)?;
+        self.fsync_dir(dir)
+    }
+}
+
+/// One set of operations shared by several stores, so that they share one [`CrashAtFs`]
+/// call count.
+impl<F: FsOps + ?Sized> FsOps for Arc<F> {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        (**self).create_dir_all(p)
+    }
+
+    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        (**self).write_durable_temp(dir, bytes)
+    }
+
+    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+        (**self).link_noclobber(from, to)
+    }
+
+    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+        (**self).fsync_dir(p)
+    }
+
+    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+        (**self).read(p)
+    }
+
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        (**self).exists(p)
+    }
+
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        (**self).remove(p)
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        (**self).append_durable(path, bytes)
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        (**self).file_len(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        (**self).truncate(path, len)
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        (**self).atomic_replace(path, bytes)
     }
 }
 
@@ -163,6 +265,26 @@ impl<F: FsOps> FsOps for CrashAtFs<F> {
     fn remove(&self, p: &Path) -> io::Result<()> {
         self.tick();
         self.inner.remove(p)
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.tick();
+        self.inner.append_durable(path, bytes)
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        self.tick();
+        self.inner.file_len(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        self.tick();
+        self.inner.truncate(path, len)
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.tick();
+        self.inner.atomic_replace(path, bytes)
     }
 }
 

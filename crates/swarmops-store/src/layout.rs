@@ -2,7 +2,11 @@
 //!
 //! ```text
 //! <root>/FORMAT                 "swarmops-store 1\n"
-//! <root>/meta/                  metadata store files
+//! <root>/meta/                  metadata store files (storage spec §3), among them:
+//! <root>/meta/lock              the flock that serializes metadata writers
+//! <root>/meta/journal.log       append-only journal frames, the metadata's source of truth
+//! <root>/meta/journal.off       each frame's start offset in journal.log, u64le
+//! <root>/meta/journal.ckpt      how far the journal is materialized, a u64le offset
 //! <root>/objects/tmp/           temp files staged before they are linked into place
 //! <root>/objects/<2hex>/<62hex> loose objects, one fan-out directory per first id byte
 //! ```
@@ -44,6 +48,27 @@ impl Layout {
             "meta path {rel} must be relative"
         );
         self.meta_dir().join(rel)
+    }
+
+    /// `<root>/meta/lock`, whose exclusive flock serializes metadata writers.
+    pub fn meta_lock(&self) -> Utf8PathBuf {
+        self.meta_path("lock")
+    }
+
+    /// `<root>/meta/journal.log`, the append-only journal of metadata frames.
+    pub fn journal_log(&self) -> Utf8PathBuf {
+        self.meta_path("journal.log")
+    }
+
+    /// `<root>/meta/journal.off`, the start offset of each journal frame (`u64le` each).
+    pub fn journal_off(&self) -> Utf8PathBuf {
+        self.meta_path("journal.off")
+    }
+
+    /// `<root>/meta/journal.ckpt`, the journal offset up to which the metadata files are
+    /// materialized (`u64le`).
+    pub fn journal_ckpt(&self) -> Utf8PathBuf {
+        self.meta_path("journal.ckpt")
     }
 
     /// `<root>/objects`, the parent of the fan-out directories and `tmp`.

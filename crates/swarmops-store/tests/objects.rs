@@ -137,6 +137,22 @@ impl FsOps for CountingFs {
     fn remove(&self, p: &Path) -> io::Result<()> {
         RealFs.remove(p)
     }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        RealFs.append_durable(path, bytes)
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        RealFs.file_len(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        RealFs.truncate(path, len)
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        RealFs.atomic_replace(path, bytes)
+    }
 }
 
 /// A one-way gate: `wait` blocks until `open` has been called.
@@ -196,6 +212,22 @@ impl FsOps for GatedFs {
 
     fn remove(&self, p: &Path) -> io::Result<()> {
         RealFs.remove(p)
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        RealFs.append_durable(path, bytes)
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        RealFs.file_len(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        RealFs.truncate(path, len)
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        RealFs.atomic_replace(path, bytes)
     }
 }
 

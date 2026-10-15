@@ -1,0 +1,488 @@
+//! The metadata journal (storage spec §2 rule 3, §3): `meta/journal.log` holds CRC-framed
+//! frames, one per write transaction, and is the source of truth; `meta/journal.off` holds
+//! each frame's start offset (`u64le`), so frame `seq` is found without a scan;
+//! `meta/journal.ckpt` holds the offset up to which the metadata files are materialized.
+//!
+//! A frame is appended with one `append_durable` to `journal.log`, then one to
+//! `journal.off`, so a crash leaves at most one torn frame at the tail, or one whole frame
+//! that `journal.off` does not list yet; [`Journal::truncate_torn_tail`] repairs either.
+//! Every frame `journal.off` lists was whole and durable before it was listed, so damage to
+//! a listed frame is reported as [`StoreError::JournalCorrupt`], never cut away.
+//!
+//! Writers hold [`crate::MetaLock`]; the journal itself takes no lock. Writes go through
+//! [`FsOps`]. Reads take no lock and skip a torn tail (or an append still in progress)
+//! silently; they use `read_at` on read-only handles, except that `journal.ckpt`, which
+//! [`Journal::set_ckpt`] replaces by rename, is read by path.
+
+use std::fs::{self, File};
+use std::io;
+use std::os::unix::fs::FileExt;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+
+use camino::Utf8PathBuf;
+
+use super::frame::{Frame, HEADER_LEN, Parsed, Record, encode_frame, parse_frame};
+use crate::error::StoreError;
+use crate::fs_ops::FsOps;
+use crate::layout::Layout;
+
+/// The size of one `journal.off` entry.
+const ENTRY_LEN: u64 = 8;
+
+/// A handle on one store's metadata journal.
+pub struct Journal {
+    log_path: Utf8PathBuf,
+    off_path: Utf8PathBuf,
+    ckpt_path: Utf8PathBuf,
+    /// Every durable write goes through here.
+    fs: Arc<dyn FsOps>,
+    /// Read-only handle on `journal.log`.
+    log: File,
+    /// Read-only handle on `journal.off`.
+    off: File,
+    tail: Mutex<Tail>,
+}
+
+/// Where this handle last saw the journal end.
+#[derive(Debug, Clone, Copy)]
+struct Tail {
+    /// The length of `journal.log`.
+    len: u64,
+    /// The number of whole entries in `journal.off`.
+    frames: u64,
+    /// Whether the journal was known to end cleanly here, every whole frame listed and no
+    /// torn tail: set by a tail check and by each append, cleared before anything that
+    /// could leave it wrong.
+    checked: bool,
+}
+
+impl Journal {
+    /// Creates `meta/` and the journal files of `layout` where they are missing, makes their
+    /// directory entries durable, and opens the journal. Existing files are kept as they are.
+    pub fn create(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Journal, StoreError> {
+        let meta = layout.meta_dir();
+        fs.create_dir_all(meta.as_std_path())?;
+        for path in [layout.journal_log(), layout.journal_off()] {
+            // An empty append creates a missing file and never truncates an existing one.
+            fs.append_durable(path.as_std_path(), &[])?;
+        }
+        fs.fsync_dir(meta.as_std_path())?;
+        fs.fsync_dir(layout.root().as_std_path())?;
+        Self::open(layout, fs)
+    }
+
+    /// Opens the existing journal of `layout`, durable writes going through `fs`. Opening
+    /// reads only the files' lengths; the tail is checked by the first
+    /// [`Journal::append_frame`] or [`Journal::truncate_torn_tail`].
+    pub fn open(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Journal, StoreError> {
+        let log = File::open(layout.journal_log())?;
+        let off = File::open(layout.journal_off())?;
+        let tail = Tail {
+            len: log.metadata()?.len(),
+            frames: off.metadata()?.len() / ENTRY_LEN,
+            checked: false,
+        };
+        Ok(Self {
+            log_path: layout.journal_log(),
+            off_path: layout.journal_off(),
+            ckpt_path: layout.journal_ckpt(),
+            fs,
+            log,
+            off,
+            tail: Mutex::new(tail),
+        })
+    }
+
+    /// Appends `records` as one frame (one transaction) and returns the frame. Its bytes
+    /// go to `journal.log` in one `append_durable`, then its offset to `journal.off` in
+    /// another; the transaction is committed once the first returns.
+    ///
+    /// The caller must hold [`crate::MetaLock`]: this takes no lock. If the journal does
+    /// not end where this handle last saw it end, or the handle never checked its tail,
+    /// the tail is checked first, as [`Journal::truncate_torn_tail`] does, so that a frame
+    /// never lands after a torn one. Records the layout cannot hold are refused with
+    /// `InvalidInput` before anything is written. After any other error the frame may or
+    /// may not be committed, as after a crash; the next tail check settles it.
+    pub fn append_frame(&self, records: &[Record]) -> Result<Frame, StoreError> {
+        let bytes = encode_frame(records)?;
+        let mut tail = self.tail();
+        if !self.still_ends_at(&tail)? {
+            tail.checked = false;
+            (*tail, _) = self.check_tail()?;
+        }
+        tail.checked = false; // a failed append can leave part of a frame or an entry behind
+        let offset = self
+            .fs
+            .append_durable(self.log_path.as_std_path(), &bytes)?;
+        let entry_at = self
+            .fs
+            .append_durable(self.off_path.as_std_path(), &offset.to_le_bytes())?;
+        let seq = entry_at / ENTRY_LEN;
+        *tail = Tail {
+            len: offset + to_u64(bytes.len()),
+            frames: seq + 1,
+            checked: true,
+        };
+        Ok(Frame {
+            seq,
+            offset,
+            records: records.to_vec(),
+        })
+    }
+
+    /// Up to `limit` frames in journal order, from frame `seq` on (`seq` counts from 0):
+    /// the frames `journal.off` lists, read with one `read_at` for their entries and one
+    /// for their bytes.
+    ///
+    /// Every listed frame was whole once, so one that fails its CRC or does not decode is
+    /// [`StoreError::JournalCorrupt`], as is an entry that does not point where the
+    /// previous frame ends. Only the last listed frame may turn out cut short (by damage
+    /// that [`Journal::truncate_torn_tail`] repairs); the frames before it are returned.
+    pub fn frames_after(&self, seq: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
+        let listed = self.off.metadata()?.len() / ENTRY_LEN;
+        let wanted = u64::try_from(limit)
+            .unwrap_or(u64::MAX)
+            .min(listed.saturating_sub(seq));
+        if wanted == 0 {
+            return Ok(Vec::new());
+        }
+        // The wanted frames' entries, plus the next one, where the last wanted frame ends.
+        let offsets = self.entries(seq, wanted + u64::from(seq + wanted < listed))?;
+        let wanted = usize::try_from(wanted).map_or(offsets.len(), |n| n.min(offsets.len()));
+        let Some(&start) = offsets.first() else {
+            return Ok(Vec::new()); // journal.off was cut since its length was read
+        };
+        let log_len = self.log.metadata()?.len();
+        let end = offsets
+            .get(wanted)
+            .map_or(log_len, |&next| next.min(log_len));
+        if start > end {
+            return Err(StoreError::JournalCorrupt { offset: start });
+        }
+        let buf = read_upto(&self.log, start, end - start)?;
+
+        let mut frames = Vec::with_capacity(wanted);
+        let mut at = 0;
+        for (frame_seq, &offset) in (seq..).zip(&offsets[..wanted]) {
+            if offset != start + to_u64(at) || (frame_seq == 0 && offset != 0) {
+                return Err(StoreError::JournalCorrupt { offset });
+            }
+            match parse_frame(&buf[at..]) {
+                Parsed::Whole { records, size } => {
+                    frames.push(Frame {
+                        seq: frame_seq,
+                        offset,
+                        records,
+                    });
+                    at += size;
+                }
+                parsed if may_be_torn(&parsed, frame_seq, listed) => break,
+                _ => return Err(StoreError::JournalCorrupt { offset }),
+            }
+        }
+        if let Some(&next) = offsets.get(wanted)
+            && frames.len() == wanted
+            && next != start + to_u64(at)
+        {
+            return Err(StoreError::JournalCorrupt { offset: next });
+        }
+        Ok(frames)
+    }
+
+    /// Every frame from `offset` to the end of `journal.log`, read with one `read_at`: what
+    /// a reader applies past [`Journal::ckpt`]. `offset` must be a frame boundary: 0, a
+    /// listed frame's start, or the end of the last listed frame.
+    ///
+    /// Stops silently at a torn tail: a frame cut short by the end of the file (an append
+    /// in progress looks the same) or an unlisted frame that fails its CRC. Whole frames
+    /// that `journal.off` does not list yet are included. Anything else, an `offset` that
+    /// is not a frame boundary included, is [`StoreError::JournalCorrupt`].
+    pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
+        let log_len = self.log.metadata()?.len();
+        if offset >= log_len {
+            return if offset == log_len {
+                Ok(Vec::new())
+            } else {
+                Err(StoreError::JournalCorrupt { offset })
+            };
+        }
+        let listed = self.off.metadata()?.len() / ENTRY_LEN;
+        let mut seq = self.seq_at(offset, listed, log_len)?;
+        let buf = read_upto(&self.log, offset, log_len - offset)?;
+
+        let mut frames = Vec::new();
+        let mut at = 0;
+        while at < buf.len() {
+            let frame_offset = offset + to_u64(at);
+            match parse_frame(&buf[at..]) {
+                Parsed::Whole { records, size } => {
+                    frames.push(Frame {
+                        seq,
+                        offset: frame_offset,
+                        records,
+                    });
+                    seq += 1;
+                    at += size;
+                }
+                parsed if may_be_torn(&parsed, seq, listed) => break,
+                _ => {
+                    return Err(StoreError::JournalCorrupt {
+                        offset: frame_offset,
+                    });
+                }
+            }
+        }
+        Ok(frames)
+    }
+
+    /// Brings the journal to a clean end after a crash, and returns where `journal.log`
+    /// was cut, if it was:
+    ///
+    /// - an unlisted frame at the end that is cut short or fails its CRC is a torn write:
+    ///   `journal.log` is cut where it starts;
+    /// - whole frames that `journal.off` does not list (a crash between a frame's two
+    ///   appends) are committed: their entries are appended;
+    /// - a partial entry at the end of `journal.off` is dropped, and so is the entry of
+    ///   the last listed frame if `journal.log` ends inside it (provided the frame before
+    ///   it ends exactly where it starts);
+    /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a listed
+    ///   frame that fails its CRC, an empty payload, or a frame that matches its CRC but
+    ///   does not decode (a newer version may have written it).
+    ///
+    /// Only the last listed frame and what follows it are read. `journal.off` is repaired
+    /// before `journal.log` is cut, so a crash in between leaves a torn frame the next call
+    /// cuts. The caller must hold [`crate::MetaLock`].
+    pub fn truncate_torn_tail(&self) -> Result<Option<u64>, StoreError> {
+        let mut tail = self.tail();
+        tail.checked = false;
+        let (checked, cut) = self.check_tail()?;
+        *tail = checked;
+        Ok(cut)
+    }
+
+    /// The length of `journal.log` as this handle last saw it: when it opened, then after
+    /// each [`Journal::append_frame`] (the end of that frame) and
+    /// [`Journal::truncate_torn_tail`].
+    pub fn len(&self) -> u64 {
+        self.tail().len
+    }
+
+    /// Whether [`Journal::len`] is 0.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The offset up to which the journal is materialized: what [`Journal::set_ckpt`] last
+    /// stored, or 0 if it never ran.
+    pub fn ckpt(&self) -> Result<u64, StoreError> {
+        let bytes = match fs::read(&self.ckpt_path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e.into()),
+        };
+        let offset = <[u8; 8]>::try_from(bytes.as_slice()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} holds {} bytes, not a u64le",
+                    self.ckpt_path,
+                    bytes.len()
+                ),
+            )
+        })?;
+        Ok(u64::from_le_bytes(offset))
+    }
+
+    /// Stores `offset` as the checkpoint, replacing the old one atomically and durably.
+    pub fn set_ckpt(&self, offset: u64) -> Result<(), StoreError> {
+        self.fs
+            .atomic_replace(self.ckpt_path.as_std_path(), &offset.to_le_bytes())?;
+        Ok(())
+    }
+
+    fn tail(&self) -> MutexGuard<'_, Tail> {
+        // `checked` is cleared before every write that could leave the tail stale, so the
+        // value a panicking holder leaves behind is still safe to use.
+        self.tail.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether `tail` was checked and the files still end exactly there.
+    fn still_ends_at(&self, tail: &Tail) -> io::Result<bool> {
+        Ok(tail.checked
+            && self.log.metadata()?.len() == tail.len
+            && self.off.metadata()?.len() == tail.frames * ENTRY_LEN)
+    }
+
+    /// The work of [`Journal::truncate_torn_tail`]: returns the journal's new end and
+    /// where `journal.log` was cut.
+    fn check_tail(&self) -> Result<(Tail, Option<u64>), StoreError> {
+        let log_len = self.fs.file_len(self.log_path.as_std_path())?;
+        let off_len = self.fs.file_len(self.off_path.as_std_path())?;
+        let mut listed = off_len / ENTRY_LEN;
+        // Read from the last listed frame's start: that frame is checked again, and the
+        // frames `journal.off` does not list yet follow it.
+        let start = match listed.checked_sub(1) {
+            Some(last) => self.entry(last)?,
+            None => 0,
+        };
+        if start > log_len {
+            return Err(StoreError::JournalCorrupt { offset: start });
+        }
+        let buf = read_upto(&self.log, start, log_len - start)?;
+        let mut at = 0; // where in `buf` the unlisted frames begin
+        if listed > 0 {
+            match parse_frame(&buf) {
+                Parsed::Whole { size, .. } => at = size,
+                Parsed::Short => {
+                    // `journal.log` ends inside the last listed frame, so its entry dangles.
+                    // Drop it only if the frame before ends right where this one starts:
+                    // otherwise the entry is garbage, and cutting there could destroy a
+                    // whole frame.
+                    let previous_end = match listed.checked_sub(2) {
+                        Some(previous) => self.frame_end(self.entry(previous)?, log_len)?,
+                        None => Some(0),
+                    };
+                    if previous_end != Some(start) {
+                        return Err(StoreError::JournalCorrupt { offset: start });
+                    }
+                    listed -= 1;
+                }
+                Parsed::BadCrc | Parsed::Invalid => {
+                    return Err(StoreError::JournalCorrupt { offset: start });
+                }
+            }
+        }
+        let mut unlisted = Vec::new();
+        let mut cut = None;
+        while at < buf.len() {
+            let offset = start + to_u64(at);
+            match parse_frame(&buf[at..]) {
+                Parsed::Whole { size, .. } => {
+                    unlisted.push(offset);
+                    at += size;
+                }
+                Parsed::Short | Parsed::BadCrc => {
+                    cut = Some(offset);
+                    break;
+                }
+                Parsed::Invalid => return Err(StoreError::JournalCorrupt { offset }),
+            }
+        }
+
+        if off_len != listed * ENTRY_LEN {
+            self.fs
+                .truncate(self.off_path.as_std_path(), listed * ENTRY_LEN)?;
+        }
+        for offset in &unlisted {
+            self.fs
+                .append_durable(self.off_path.as_std_path(), &offset.to_le_bytes())?;
+        }
+        if let Some(cut) = cut {
+            self.fs.truncate(self.log_path.as_std_path(), cut)?;
+        }
+        let tail = Tail {
+            len: start + to_u64(at),
+            frames: listed + to_u64(unlisted.len()),
+            checked: true,
+        };
+        Ok((tail, cut))
+    }
+
+    /// Entry `index` of `journal.off`: where frame `index` starts.
+    fn entry(&self, index: u64) -> Result<u64, StoreError> {
+        let mut bytes = [0; 8];
+        self.off.read_exact_at(&mut bytes, index * ENTRY_LEN)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    /// Up to `count` entries of `journal.off` from entry `first`, in one `read_at`.
+    fn entries(&self, first: u64, count: u64) -> Result<Vec<u64>, StoreError> {
+        let bytes = read_upto(&self.off, first * ENTRY_LEN, count * ENTRY_LEN)?;
+        let (entries, _partial) = bytes.as_chunks::<8>();
+        Ok(entries
+            .iter()
+            .map(|entry| u64::from_le_bytes(*entry))
+            .collect())
+    }
+
+    /// Where the frame at `offset` ends, judged by its header alone; `None` if the header,
+    /// or the payload it announces, runs past `log_len`.
+    fn frame_end(&self, offset: u64, log_len: u64) -> Result<Option<u64>, StoreError> {
+        let header_end = offset.checked_add(to_u64(HEADER_LEN));
+        if header_end.is_none_or(|header_end| header_end > log_len) {
+            return Ok(None);
+        }
+        let mut len = [0; 4];
+        self.log.read_exact_at(&mut len, offset)?;
+        let len = u32::from_le_bytes(len);
+        if len == 0 {
+            return Err(StoreError::JournalCorrupt { offset });
+        }
+        let end = offset + to_u64(HEADER_LEN) + u64::from(len);
+        Ok((end <= log_len).then_some(end))
+    }
+
+    /// The seq of the frame starting at `offset`: its index in `journal.off` (found by
+    /// binary search), or `listed` if `offset` is where the last listed frame ends.
+    fn seq_at(&self, offset: u64, listed: u64, log_len: u64) -> Result<u64, StoreError> {
+        let (mut low, mut high) = (0, listed);
+        while low < high {
+            let mid = low + (high - low) / 2;
+            if self.entry(mid)? < offset {
+                low = mid + 1;
+            } else {
+                high = mid;
+            }
+        }
+        let is_boundary = if low < listed {
+            self.entry(low)? == offset
+        } else {
+            let listed_end = match listed.checked_sub(1) {
+                Some(last) => self.frame_end(self.entry(last)?, log_len)?,
+                None => Some(0),
+            };
+            listed_end == Some(offset)
+        };
+        if is_boundary {
+            Ok(low)
+        } else {
+            Err(StoreError::JournalCorrupt { offset })
+        }
+    }
+}
+
+/// Whether a frame that did not parse whole may be a torn write rather than damage, given
+/// its seq and how many frames `journal.off` lists.
+fn may_be_torn(parsed: &Parsed, seq: u64, listed: u64) -> bool {
+    match parsed {
+        // Cut short by the end of the file: the unlisted append a crash tore (or one still
+        // in progress), or the last listed frame, whose entry then dangles.
+        Parsed::Short => seq + 1 >= listed,
+        // Failing its CRC: only a frame that was never listed, since a listed frame was
+        // whole and durable before its entry was written.
+        Parsed::BadCrc => seq >= listed,
+        Parsed::Whole { .. } | Parsed::Invalid => false,
+    }
+}
+
+/// Up to `len` bytes of `file` from `offset`; fewer if the file ends first (another
+/// process may have cut it since its length was read).
+fn read_upto(file: &File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+    let len = usize::try_from(len).map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+    let mut buf = vec![0; len];
+    let mut filled = 0;
+    while filled < len {
+        match file.read_at(&mut buf[filled..], offset + to_u64(filled)) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    buf.truncate(filled);
+    Ok(buf)
+}
+
+fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("usize fits in u64")
+}
