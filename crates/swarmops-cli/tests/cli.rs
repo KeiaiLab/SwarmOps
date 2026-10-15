@@ -11,6 +11,8 @@
 //! Every step is checked against the envelope contract as it runs (see [`check`]). The
 //! `--human` test snapshots text instead: each command, its exit code and what it printed.
 
+mod support;
+
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs;
@@ -26,17 +28,6 @@ use swarmops_api::ErrorCode;
 use swarmops_core::{ObjectKind, hash_object};
 use swarmops_store::Layout;
 use tempfile::TempDir;
-
-/// The variables the binary reads. Each run removes those it does not set.
-const VARS: &[&str] = &[
-    "SWARMOPS_REPO",
-    "SWARMOPS_AGENT",
-    "SWARMOPS_RUN_ID",
-    "SWARMOPS_FORMAT",
-    "SWARMOPS_TEST_CRASH_AT",
-    "SWARMOPS_TEST_FS_CALLS",
-    "SWARMOPS_TEST_NOW",
-];
 
 /// The agent most mutations act as.
 const AGENT: &str = "agent/worker-17";
@@ -861,10 +852,10 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
 // Running the binary.
 // ---------------------------------------------------------------------------------------------
 
-/// The binary, with none of the variables it reads set.
+/// The binary, with none of this process's `SWARMOPS_*` variables set.
 fn swarmops() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_swarmops"));
-    for var in VARS {
+    for var in support::swarmops_vars() {
         command.env_remove(var);
     }
     command

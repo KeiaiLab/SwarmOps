@@ -12,6 +12,11 @@
 
 #![allow(dead_code)] // Each test binary uses the part it needs.
 
+/// The store's `FsOps` doubles, for the tests that run a store in this process.
+#[path = "../../../swarmops-store/tests/support/fs.rs"]
+pub mod doubles;
+
+use std::ffi::OsString;
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -21,6 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use doubles::copy_dir;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -54,13 +60,19 @@ pub fn swarmops<S: AsRef<str>>(args: &[S], env: &[(&str, &str)]) -> Command {
     command
 }
 
+/// The names of this process's `SWARMOPS_*` variables: every run of the binary goes without
+/// them, but for those its test sets.
+pub fn swarmops_vars() -> impl Iterator<Item = OsString> {
+    std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| name.to_string_lossy().starts_with("SWARMOPS_"))
+}
+
 /// Gives `command` the environment of this process without its `SWARMOPS_*` variables, then
 /// `env`; and pipes for its output.
 fn with_env(command: &mut Command, env: &[(&str, &str)]) {
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("SWARMOPS_") {
-            command.env_remove(name);
-        }
+    for name in swarmops_vars() {
+        command.env_remove(name);
     }
     command
         .envs(env.iter().copied())
@@ -497,19 +509,5 @@ impl Store {
             }
         }
         count
-    }
-}
-
-/// Copies directory `from` to `to`, files and subdirectories, without syncing anything.
-pub fn copy_dir(from: &Path, to: &Path) {
-    fs::create_dir_all(to).expect("make a directory");
-    for entry in fs::read_dir(from).expect("read a directory") {
-        let entry = entry.expect("a directory entry");
-        let target = to.join(entry.file_name());
-        if entry.file_type().expect("its type").is_dir() {
-            copy_dir(&entry.path(), &target);
-        } else {
-            fs::copy(entry.path(), target).expect("copy a file");
-        }
     }
 }
