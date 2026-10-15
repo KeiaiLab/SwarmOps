@@ -35,11 +35,11 @@
 //! handle opened before it, a reader's snapshot's included: [`Index::truncate_to`] says which
 //! lookups then fail.
 
-use std::io;
 use std::num::NonZero;
 use std::panic;
 use std::sync::Arc;
 use std::thread;
+use std::{fmt, io};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
@@ -602,6 +602,18 @@ impl Index {
             self.dhs.path(),
             self.ids.path(),
         ]
+    }
+}
+
+impl fmt::Debug for Index {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Index")
+            .field("sorted_dir", &self.sorted_dir)
+            .field("len", &self.len)
+            .field("parents_len", &self.parents_len)
+            .field("views", &self.views)
+            .field("sync_threads", &self.sync_threads)
+            .finish_non_exhaustive()
     }
 }
 

@@ -12,7 +12,8 @@
 //!
 //! - `put_flush/<threads>`: `put_batch` on a pool of 1, 8 or 32 threads
 //!   ([`FsObjectStore::set_parallelism`]), then `flush`, whose directory fsyncs run on the same
-//!   pool: what a commit's object writes cost.
+//!   pool (at 1 thread, one after another on the calling thread): what a commit's object
+//!   writes cost.
 //! - `put_only/<threads>`: `put_batch` alone: per object a temp file written and `sync_all`ed,
 //!   then linked into place.
 //! - `flush_only`: `flush` alone, after an untimed `put_batch`, on a pool of 32 threads: one
