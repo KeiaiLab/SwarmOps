@@ -13,8 +13,12 @@
 //! [`ContentInput::File`], which the client reads and sends as bytes, and [`InitReq::path`],
 //! because `init` runs on the client and is not a [`StoreOps`] method.
 //!
-//! Not in M1 yet: `ContentInput::Blob` and `CatReq.range` (M2), `idempotency_key` and
-//! `replayed` on `commit` (M4, with land), and `RepoInfo.workspaces` (M5).
+//! Not in M1 yet:
+//! - M2: `ContentInput::Blob`, `CatReq.range`, `LsReq.depth`, the `size` of each `TreeEntryOut`,
+//!   and `LogReq.paths` and `LogReq.first_parent`;
+//! - M4 (with land): `idempotency_key` and `replayed` on `commit`;
+//! - M4/M7: `lander`, `land_key`, `cr` and `annotations` on `ChangesetDetail` (`show`);
+//! - M5: `RepoInfo.workspaces`.
 
 use std::collections::BTreeMap;
 
