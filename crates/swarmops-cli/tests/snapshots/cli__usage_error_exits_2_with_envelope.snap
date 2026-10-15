@@ -1,0 +1,339 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "swarmops",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "'swarmops' requires a subcommand but one was not provided [subcommands: init, info, whoami, schema, commit, cat, ls, show, log, verify, ref, help]",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops [OPTIONS] <COMMAND>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "frobnicate",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "swarmops",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "unrecognized subcommand 'frobnicate'",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops [OPTIONS] <COMMAND>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "ref",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "swarmops",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "'swarmops ref' requires a subcommand but one was not provided [subcommands: list, set, delete, help]",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops ref [OPTIONS] <COMMAND>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "commit",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the following required arguments were not provided: --message <MESSAGE> --changes <FILE>",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops commit --message <MESSAGE> --changes <FILE>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--reop x info",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "swarmops",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "unexpected argument '--reop' found",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "tip: a similar argument exists: '--repo'\nUsage: swarmops --repo <STORE> <COMMAND>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "info --frob",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "repo_info",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "unexpected argument '--frob' found",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops info [OPTIONS]\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "ref set main abc",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "ref_set",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the following required arguments were not provided: <--expect <REV>|--create>",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops ref set <--expect <REV>|--create> <NAME> <REV>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "ref set main abc --expect x --create",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "ref_set",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the argument '--expect <REV>' cannot be used with '--create'",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops ref set <--expect <REV>|--create> <NAME> <REV>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "log -n many",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "log",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "invalid value 'many' for '--limit <N>': invalid digit found in string",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops log [OPTIONS] [REV]\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--pretty=maybe info",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "swarmops",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "invalid value 'maybe' for '--pretty[=<BOOL>]' [possible values: true, false]",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops [OPTIONS] <COMMAND>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "swarmops",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "a value is required for '--repo <STORE>' but none was supplied",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops [OPTIONS] <COMMAND>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "cat main",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "read_file",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "\"main\" names no file: cat takes <rev>:<path>",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "target": "main"
+        },
+        "hint": "swarmops ls main"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "schema NoSuchType",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "schema",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the schema has no type \"NoSuchType\"",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "name": "NoSuchType",
+          "types": [
+            "Attribution",
+            "ChangeInput",
+            "ChangeOp",
+            "ChangeOut",
+            "ChangesetDetail",
+            "ChangesetSummary",
+            "CommitReq",
+            "CommitResp",
+            "ContentEncoding",
+            "ContentInput",
+            "EntryKindOut",
+            "Envelope",
+            "ErrorCode",
+            "FileContent",
+            "FileKind",
+            "Identity",
+            "IdentityInfo",
+            "InfoReq",
+            "InitReq",
+            "LogPage",
+            "LogReq",
+            "Meta",
+            "ModeInput",
+            "OpError",
+            "ReadFileReq",
+            "ReadTreeReq",
+            "RefDeleteReq",
+            "RefListReq",
+            "RefListResp",
+            "RefOut",
+            "RefSetReq",
+            "RefSetResp",
+            "RepoInfo",
+            "Rev",
+            "ShowReq",
+            "SignatureOut",
+            "Signatures",
+            "TreeEntryOut",
+            "TreeListing",
+            "VerifyReport",
+            "VerifyReq"
+          ]
+        },
+        "hint": "swarmops schema"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

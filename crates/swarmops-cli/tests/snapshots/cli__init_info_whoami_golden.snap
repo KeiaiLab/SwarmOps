@@ -1,0 +1,277 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "init [tmp]/acme-store --name acme",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id:acme]",
+        "name": "acme",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/acme-store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store info",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_info",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "info",
+    "env": {
+      "SWARMOPS_REPO": "[tmp]/acme-store"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_info",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id:acme]",
+        "name": "acme",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/acme-store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "info --repo [tmp]/store",
+    "env": {
+      "SWARMOPS_REPO": "[tmp]/acme-store"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_info",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "init [tmp]/store",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "repo_init",
+      "api": 1,
+      "error": {
+        "code": "E_EXISTS",
+        "message": "a store exists at [tmp]/store already",
+        "retryable": false,
+        "exit": 1,
+        "details": {},
+        "hint": "swarmops --repo [tmp]/store info"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "whoami",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "whoami",
+      "api": 1,
+      "result": {
+        "auth": "anonymous"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--as agent/worker-17 whoami",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "whoami",
+      "api": 1,
+      "result": {
+        "agent": "agent/worker-17",
+        "auth": "trust"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "whoami",
+    "env": {
+      "SWARMOPS_AGENT": "human/purple",
+      "SWARMOPS_RUN_ID": "run-7"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "whoami",
+      "api": 1,
+      "result": {
+        "agent": "human/purple",
+        "run_id": "run-7",
+        "auth": "trust"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "whoami --as agent/worker-17",
+    "env": {
+      "SWARMOPS_AGENT": "human/purple",
+      "SWARMOPS_RUN_ID": "run-7"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "whoami",
+      "api": 1,
+      "result": {
+        "agent": "agent/worker-17",
+        "run_id": "run-7",
+        "auth": "trust"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--as 'Not An Agent' whoami",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "whoami",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "--as: invalid agent name \"Not An Agent\": expected <family>/<instance> of at most 255 bytes",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "source": "--as"
+        },
+        "hint": "agent names look like agent/worker-17: family [a-z0-9-]+, instance [A-Za-z0-9._-]+ not starting with '.'"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "whoami",
+    "env": {
+      "SWARMOPS_AGENT": "nobody"
+    },
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "whoami",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "SWARMOPS_AGENT: invalid agent name \"nobody\": expected <family>/<instance> of at most 255 bytes",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "source": "SWARMOPS_AGENT"
+        },
+        "hint": "agent names look like agent/worker-17: family [a-z0-9-]+, instance [A-Za-z0-9._-]+ not starting with '.'"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

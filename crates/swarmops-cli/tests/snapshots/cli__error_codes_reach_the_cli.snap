@@ -1,0 +1,512 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c1 --changes [tmp]/c1.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[id1]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c2 --changes [tmp]/c2.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "init [tmp]/store",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "repo_init",
+      "api": 1,
+      "error": {
+        "code": "E_EXISTS",
+        "message": "a store exists at [tmp]/store already",
+        "retryable": false,
+        "exit": 1,
+        "details": {},
+        "hint": "swarmops --repo [tmp]/store info"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/missing info",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "repo_info",
+      "api": 1,
+      "error": {
+        "code": "E_NOT_A_REPO",
+        "message": "[tmp]/missing is not a store: no FORMAT file",
+        "retryable": false,
+        "exit": 6,
+        "details": {},
+        "hint": "swarmops init [tmp]/missing"
+      },
+      "meta": {
+        "repo": "[tmp]/missing",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store commit -m x --changes [tmp]/empty.json",
+    "exit": 5,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_IDENTITY_REQUIRED",
+        "message": "this operation changes the store, so it needs the caller's identity",
+        "retryable": false,
+        "exit": 5,
+        "details": {},
+        "hint": "pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 show release/none",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "show",
+      "api": 1,
+      "error": {
+        "code": "E_REV_NOT_FOUND",
+        "message": "release/none: not found",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "rev": "release/none"
+        },
+        "hint": "swarmops ref list"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 cat main:src/none.rs",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "read_file",
+      "api": 1,
+      "error": {
+        "code": "E_PATH_NOT_FOUND",
+        "message": "nothing is at \"src/none.rs\" in main",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "path": "src/none.rs",
+          "rev": "main"
+        },
+        "hint": "swarmops ls main:src"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 cat main:src",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "read_file",
+      "api": 1,
+      "error": {
+        "code": "E_IS_DIR",
+        "message": "\"src\" is a directory at main",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "path": "src",
+          "rev": "main"
+        },
+        "hint": "swarmops ls main:src"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m x --changes [tmp]/too-large.json",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_TOO_LARGE",
+        "message": "change 0 (\"huge.bin\"): the content is 536870913 bytes, more than the 536870912 a put may hold",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "file": "[tmp]/huge.bin",
+          "index": 0,
+          "limit": 536870912,
+          "path": "huge.bin",
+          "size": 536870913
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m x --changes [tmp]/empty.json",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_EMPTY_COMMIT",
+        "message": "the change list changes nothing",
+        "retryable": false,
+        "exit": 1,
+        "details": {},
+        "hint": "pass --allow-empty to record a changeset that changes nothing"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m x --changes [tmp]/conflict.json",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_TYPE_CONFLICT",
+        "message": "src/lib.rs/x: a file and a directory conflict there",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "path": "src/lib.rs/x"
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --create",
+    "exit": 4,
+    "stdout": {
+      "ok": false,
+      "op": "ref_set",
+      "api": 1,
+      "error": {
+        "code": "E_CAS_MISMATCH",
+        "message": "ref main exists already: it points at [c1]",
+        "retryable": true,
+        "exit": 4,
+        "details": {
+          "actual": "[c1]",
+          "name": "main"
+        },
+        "hint": "swarmops show [c1]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set feature/x main --create",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ref_set",
+      "api": 1,
+      "error": {
+        "code": "E_REF_NAME_INVALID",
+        "message": "invalid ref name \"feature/x\"",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "name": "feature/x"
+        },
+        "hint": "a ref name is main or release/<name>, the name of letters, digits, '.', '_' and '-', not starting with '.'"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 show 'not a rev'",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "show",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "\"not a rev\" is not a revision",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "rev": "not a rev"
+        },
+        "hint": "a revision is main, release/<name>, a changeset id or 12 or more of its first hex digits, then optionally ~N for the N-th first parent"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 log -n 0",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "log",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "limit must be at least 1",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "limit": 0
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m x --changes [tmp]/not-json.json",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the changes in \"[tmp]/not-json.json\" are not a JSON array of changes: invalid type: map, expected a sequence at line 1 column 0",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "changes": "[tmp]/not-json.json"
+        },
+        "hint": "the changes are an array such as [{\"path\": \"a.txt\", \"op\": \"put\", \"content\": {\"inline\": \"hi\"}}]; swarmops schema ChangeInput gives the rest"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "init /mnt/swarmops-cli-test/store",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "repo_init",
+      "api": 1,
+      "error": {
+        "code": "E_UNSUPPORTED_FS",
+        "message": "store path /mnt/swarmops-cli-test/store is not on a native Linux filesystem",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "path": "/mnt/swarmops-cli-test/store"
+        },
+        "hint": "put the store on a native Linux filesystem, such as under ~/.local/state/swarmops/repos/; /mnt/* holds Windows drives under WSL"
+      },
+      "meta": {
+        "repo": "/mnt/swarmops-cli-test/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store verify",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "verify",
+      "api": 1,
+      "error": {
+        "code": "E_STORE_CORRUPT",
+        "message": "verify found a problem: object [id3] is missing; changeset [c1] references it",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "changesets_checked": 2,
+          "objects_checked": 8,
+          "problems": [
+            "object [id3] is missing; changeset [c1] references it"
+          ]
+        },
+        "hint": "swarmops verify --deep"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

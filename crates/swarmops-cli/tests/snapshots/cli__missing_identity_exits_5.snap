@@ -1,0 +1,145 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[id1]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store commit -m x --changes [tmp]/changes.json",
+    "exit": 5,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_IDENTITY_REQUIRED",
+        "message": "this operation changes the store, so it needs the caller's identity",
+        "retryable": false,
+        "exit": 5,
+        "details": {},
+        "hint": "pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store commit -m x --changes [tmp]/changes.json",
+    "env": {
+      "SWARMOPS_AGENT": ""
+    },
+    "exit": 5,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_IDENTITY_REQUIRED",
+        "message": "this operation changes the store, so it needs the caller's identity",
+        "retryable": false,
+        "exit": 5,
+        "details": {},
+        "hint": "pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ref set main abc --create",
+    "exit": 5,
+    "stdout": {
+      "ok": false,
+      "op": "ref_set",
+      "api": 1,
+      "error": {
+        "code": "E_IDENTITY_REQUIRED",
+        "message": "this operation changes the store, so it needs the caller's identity",
+        "retryable": false,
+        "exit": 5,
+        "details": {},
+        "hint": "pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ref delete main --expect abc",
+    "exit": 5,
+    "stdout": {
+      "ok": false,
+      "op": "ref_delete",
+      "api": 1,
+      "error": {
+        "code": "E_IDENTITY_REQUIRED",
+        "message": "this operation changes the store, so it needs the caller's identity",
+        "retryable": false,
+        "exit": 5,
+        "details": {},
+        "hint": "pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store info",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_info",
+      "api": 1,
+      "result": {
+        "repo_id": "[id1]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]
