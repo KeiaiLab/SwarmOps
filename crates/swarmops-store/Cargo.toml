@@ -38,3 +38,7 @@ harness = false
 [[bench]]
 name = "fsync_fanout"
 harness = false
+
+[[bench]]
+name = "read_snapshot"
+harness = false

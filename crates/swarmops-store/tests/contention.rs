@@ -26,6 +26,13 @@
 //! chain intact, one frame per transaction, and the seqs contiguous in journal order), prints
 //! what an uncontended transaction costs, and asserts last that no child met `Busy`.
 //!
+//! The 0-`Busy` assertion assumes a disk no more than about a third slower than this host's:
+//! with the kernel-queue lock a waiter can lose a few hundred releases in a row (docs/perf.md,
+//! "M1 store fixes (7c)": up to 283–359 transactions, 5.2–8.9 s on a slow disk), and a third
+//! more per transaction takes the longest wait past the 10 s timeout. `.config/nextest.toml`
+//! runs this test and the CLI-level one (`swarmops-cli`'s `tests/contention.rs`) one after
+//! the other, so that neither slows the other's.
+//!
 //! Nothing in it waits forever, whatever the lock does. A child gives up at its
 //! [`MAX_BUSY_IN_A_ROW`]th `Busy` in a row, and past [`CHILD_DEADLINE`]; the parent fails the
 //! test as soon as a child fails, and waits for the children only until [`PARENT_DEADLINE`];
