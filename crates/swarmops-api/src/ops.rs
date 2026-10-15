@@ -1,12 +1,11 @@
 //! Operation requests and responses, and [`StoreOps`], the boundary every store implements
 //! (operations spec §0–§1, §7).
 //!
-//! Requests and the inputs inside them reject unknown fields, so a misspelled field fails loudly
-//! instead of changing what an operation does; responses ignore unknown fields, so a client
-//! keeps working against a newer store. Absent options are omitted, never written as null. Ids
-//! are lowercase hex. Apart from where a store lives ([`InitReq::path`], [`RepoInfo::path`]), no
-//! type names a filesystem location; [`ContentInput::File`] is resolved to bytes on the client
-//! before a request reaches the store.
+//! Requests and responses alike ignore fields they do not know: the operations spec (§0) forbids
+//! `deny_unknown_fields`, so stores and clients of different versions keep working together.
+//! Absent options are omitted, never written as null. Ids are lowercase hex. Apart from where a
+//! store lives ([`InitReq::path`], [`RepoInfo::path`]), no type names a filesystem location;
+//! [`ContentInput::File`] is resolved to bytes on the client before a request reaches the store.
 
 use std::collections::BTreeMap;
 
@@ -33,7 +32,6 @@ fn default_log_limit() -> usize {
 
 /// `init`: create a store.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct InitReq {
     /// The directory to create the store in.
     pub path: String,
@@ -76,9 +74,10 @@ pub struct WhoamiResp {
 
 /// `commit`: record a changeset from an explicit change list. It moves no ref.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CommitReq {
-    /// The changeset to commit on top of; omitted for a root commit.
+    /// The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,
+    /// the current head of `main` is used if `main` exists, and otherwise the commit is a root
+    /// commit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<Rev>,
     /// The commit message.
@@ -92,7 +91,6 @@ pub struct CommitReq {
 
 /// One change of a commit.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ChangeInput {
     /// The repository path: `/`-separated, relative to the root.
     pub path: String,
@@ -163,7 +161,6 @@ pub struct CommitResp {
 
 /// `cat`: read one file at a revision, without a checkout.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct CatReq {
     /// The revision to read at.
     pub rev: Rev,
@@ -218,7 +215,6 @@ pub enum EntryKindOut {
 
 /// `ls`: list one directory at a revision, without a checkout.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LsReq {
     /// The revision to read at.
     pub rev: Rev,
@@ -247,7 +243,6 @@ pub struct TreeEntryOut {
 
 /// `show`: one changeset in full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct ShowReq {
     /// The changeset to show.
     pub rev: Rev,
@@ -309,7 +304,6 @@ pub struct ChangeOut {
 
 /// `log`: history along first parents.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct LogReq {
     /// Where to start; `main` when omitted.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -361,7 +355,6 @@ pub struct RefOut {
 
 /// `ref set`: move a ref, or create one, by compare-and-swap.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RefSetReq {
     /// The ref: `main` or `release/<name>`.
     pub name: String,
@@ -393,7 +386,6 @@ pub struct RefSetResp {
 
 /// `ref delete`: remove a ref by compare-and-swap.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct RefDeleteReq {
     /// The ref.
     pub name: String,

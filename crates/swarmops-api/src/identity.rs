@@ -11,7 +11,6 @@ const MAX_AGENT_LEN: usize = 255;
 /// The caller of a mutation: an agent name `<family>/<instance>` (`agent/worker-17`,
 /// `human/purple`) and an optional run id. M1 trusts the name as claimed.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct Identity {
     /// `<family>/<instance>`: a family of `[a-z0-9-]+` and an instance of `[A-Za-z0-9._-]+`.
     pub agent: String,

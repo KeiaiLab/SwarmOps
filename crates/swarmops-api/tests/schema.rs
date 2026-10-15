@@ -2,6 +2,7 @@
 //! envelope has the spec's shape, and requests and responses keep their wire forms.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Debug;
 
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -13,7 +14,7 @@ use swarmops_api::{
     VerifyResp, WhoamiResp, schema_for_all,
 };
 
-/// Requests and the input types inside them: unknown fields are rejected.
+/// Requests and the input types inside them.
 const REQUESTS: &[&str] = &[
     "CatReq",
     "ChangeInput",
@@ -27,7 +28,7 @@ const REQUESTS: &[&str] = &[
     "ShowReq",
 ];
 
-/// Responses and the output types inside them: unknown fields are ignored.
+/// Responses and the output types inside them.
 const RESPONSES: &[&str] = &[
     "ChangeOut",
     "ChangesetDetail",
@@ -81,14 +82,9 @@ fn every_request_and_response_has_a_json_schema() {
         );
         assert_eq!(schema["title"], name.as_str(), "{name}");
     }
-    for name in REQUESTS {
-        assert_eq!(all[*name]["type"], "object", "{name}");
-        assert_eq!(
-            all[*name]["additionalProperties"], false,
-            "{name} must reject unknown fields"
-        );
-    }
-    for name in RESPONSES {
+    // The operations spec (§0) forbids `deny_unknown_fields`: requests and responses alike accept
+    // fields they do not know.
+    for name in REQUESTS.iter().chain(RESPONSES) {
         assert_eq!(all[*name]["type"], "object", "{name}");
         assert!(
             all[*name].get("additionalProperties").is_none(),
@@ -276,43 +272,39 @@ fn with_unknown_field(mut value: Value) -> Value {
     value
 }
 
-fn assert_rejects_unknown_fields<T: DeserializeOwned>(name: &str, minimal: Value) {
-    if let Err(e) = serde_json::from_value::<T>(minimal.clone()) {
-        panic!("{name}: the minimal form must parse: {e}");
-    }
-    match serde_json::from_value::<T>(with_unknown_field(minimal)) {
-        Ok(_) => panic!("{name} accepted an unknown field"),
-        Err(e) => assert!(
-            e.to_string().contains("unknown field `zz_unknown`"),
-            "{name}: {e}"
-        ),
-    }
-}
-
-fn assert_ignores_unknown_fields<T: DeserializeOwned>(name: &str, minimal: Value) {
-    if let Err(e) = serde_json::from_value::<T>(with_unknown_field(minimal)) {
-        panic!("{name} must ignore unknown fields: {e}");
-    }
+/// `minimal` must parse, and parse to the same value with an extra unknown field.
+fn assert_ignores_unknown_fields<T: DeserializeOwned + PartialEq + Debug>(
+    name: &str,
+    minimal: Value,
+) {
+    let plain: T = serde_json::from_value(minimal.clone())
+        .unwrap_or_else(|e| panic!("{name}: the minimal form must parse: {e}"));
+    let extended: T = serde_json::from_value(with_unknown_field(minimal))
+        .unwrap_or_else(|e| panic!("{name} must ignore unknown fields: {e}"));
+    assert_eq!(extended, plain, "{name}");
 }
 
 #[test]
-fn requests_reject_unknown_fields_and_responses_ignore_them() {
-    assert_rejects_unknown_fields::<InitReq>("InitReq", json!({"path": "/srv/s", "name": "acme"}));
-    assert_rejects_unknown_fields::<CommitReq>("CommitReq", json!({"message": "m", "changes": []}));
-    assert_rejects_unknown_fields::<ChangeInput>(
+fn requests_and_responses_ignore_unknown_fields() {
+    assert_ignores_unknown_fields::<InitReq>("InitReq", json!({"path": "/srv/s", "name": "acme"}));
+    assert_ignores_unknown_fields::<CommitReq>(
+        "CommitReq",
+        json!({"message": "m", "changes": [{"path": "a", "op": "delete", "zz_nested": 1}]}),
+    );
+    assert_ignores_unknown_fields::<ChangeInput>(
         "ChangeInput",
         json!({"path": "a", "op": "delete"}),
     );
-    assert_rejects_unknown_fields::<CatReq>("CatReq", json!({"rev": "main", "path": "a"}));
-    assert_rejects_unknown_fields::<LsReq>("LsReq", json!({"rev": "main"}));
-    assert_rejects_unknown_fields::<ShowReq>("ShowReq", json!({"rev": "main"}));
-    assert_rejects_unknown_fields::<LogReq>("LogReq", json!({}));
-    assert_rejects_unknown_fields::<RefSetReq>("RefSetReq", json!({"name": "main", "new": "c9f1"}));
-    assert_rejects_unknown_fields::<RefDeleteReq>(
+    assert_ignores_unknown_fields::<CatReq>("CatReq", json!({"rev": "main", "path": "a"}));
+    assert_ignores_unknown_fields::<LsReq>("LsReq", json!({"rev": "main"}));
+    assert_ignores_unknown_fields::<ShowReq>("ShowReq", json!({"rev": "main"}));
+    assert_ignores_unknown_fields::<LogReq>("LogReq", json!({}));
+    assert_ignores_unknown_fields::<RefSetReq>("RefSetReq", json!({"name": "main", "new": "c9f1"}));
+    assert_ignores_unknown_fields::<RefDeleteReq>(
         "RefDeleteReq",
         json!({"name": "main", "expected_old": "c9f1"}),
     );
-    assert_rejects_unknown_fields::<Identity>("Identity", json!({"agent": "human/purple"}));
+    assert_ignores_unknown_fields::<Identity>("Identity", json!({"agent": "human/purple"}));
 
     let signature = json!({"name": "human/purple", "email": "purple@human.swarmops.local", "secs": 0, "offset_secs": 0});
     assert_ignores_unknown_fields::<RepoInfo>(
