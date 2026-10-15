@@ -280,6 +280,83 @@ fn changeset_rejects_unsorted_delta_and_metadata() {
     assert_eq!(cs.encode().unwrap_err(), CodecError::BadKind(3));
 }
 
+/// `varint len | bytes` as the layout writes a string; every string used with it
+/// here is shorter than 128 bytes, so the varint is a single byte.
+fn len_prefixed(s: &str) -> Vec<u8> {
+    let mut out = vec![u8::try_from(s.len()).unwrap()];
+    out.extend_from_slice(s.as_bytes());
+    out
+}
+
+/// Replaces the single occurrence of `from` in `bytes` with `to`. Panics when `from`
+/// is absent or ambiguous, so a drifting layout cannot turn a test into a no-op.
+fn splice_once(bytes: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
+    let mut hits = bytes
+        .windows(from.len())
+        .enumerate()
+        .filter_map(|(at, window)| (window == from).then_some(at));
+    let at = hits.next().expect("pattern present in the encoding");
+    assert!(hits.next().is_none(), "pattern is unique in the encoding");
+    [&bytes[..at], to, &bytes[at + from.len()..]].concat()
+}
+
+#[test]
+fn changeset_rejects_delete_with_renamed_from() {
+    let mut cs = minimal_changeset();
+    cs.delta = vec![DeltaEntry {
+        path: RepoPath::new("old.txt").unwrap(),
+        op: DeltaOp::Delete,
+        renamed_from: None,
+    }];
+    // Control: the plain delete is canonical and round-trips.
+    let valid = cs.encode().unwrap();
+    assert_eq!(Changeset::decode(&valid).unwrap(), cs);
+
+    // Encoder: a deleted path has no content to have been renamed from.
+    cs.delta[0].renamed_from = Some(RepoPath::new("was.txt").unwrap());
+    assert_eq!(cs.encode().unwrap_err(), CodecError::BadRename);
+
+    // Decoder: the same entry as raw bytes. The layout is `len|path | op | has_rename |
+    // [len|from]`, so `old.txt, Delete, no rename` becomes `old.txt, Delete, from was.txt`.
+    let path = len_prefixed("old.txt");
+    let plain = [path.as_slice(), &[1, 0]].concat();
+    let renamed = [path.as_slice(), &[1, 1], &len_prefixed("was.txt")].concat();
+    let tampered = splice_once(&valid, &plain, &renamed);
+    assert_eq!(
+        Changeset::decode(&tampered).unwrap_err(),
+        CodecError::BadRename
+    );
+}
+
+#[test]
+fn changeset_rejects_rename_from_self() {
+    let path = RepoPath::new("a.rs").unwrap();
+    let mut cs = minimal_changeset();
+    cs.delta = vec![DeltaEntry {
+        path: path.clone(),
+        op: DeltaOp::Put {
+            kind: EntryKind::File,
+            id: blob_id(b"x"),
+        },
+        renamed_from: Some(RepoPath::new("b.rs").unwrap()),
+    }];
+    // Control: a rename from a different path is canonical and round-trips.
+    let valid = cs.encode().unwrap();
+    assert_eq!(Changeset::decode(&valid).unwrap(), cs);
+
+    // Encoder: a path cannot be renamed from itself.
+    cs.delta[0].renamed_from = Some(path);
+    assert_eq!(cs.encode().unwrap_err(), CodecError::BadRename);
+
+    // Decoder: point the rename source ("b.rs", the same length as "a.rs") at the
+    // entry's own path.
+    let tampered = splice_once(&valid, b"b.rs", b"a.rs");
+    assert_eq!(
+        Changeset::decode(&tampered).unwrap_err(),
+        CodecError::BadRename
+    );
+}
+
 #[test]
 fn decode_truncated_inputs_error_without_panic() {
     let bytes = full_changeset().encode().unwrap();
@@ -362,10 +439,17 @@ fn arb_delta() -> impl Strategy<Value = Vec<DeltaEntry>> {
     .prop_map(|v| {
         let mut delta: Vec<DeltaEntry> = v
             .into_iter()
-            .map(|(path, op, renamed_from)| DeltaEntry {
-                path,
-                op,
-                renamed_from,
+            .map(|(path, op, from)| {
+                // Canonical renames only: a `Put`, and never from its own path.
+                let renamed_from = match op {
+                    DeltaOp::Put { .. } => from.filter(|source| *source != path),
+                    DeltaOp::Delete => None,
+                };
+                DeltaEntry {
+                    path,
+                    op,
+                    renamed_from,
+                }
             })
             .collect();
         delta.sort_by(|a, b| a.path.as_str().as_bytes().cmp(b.path.as_str().as_bytes()));

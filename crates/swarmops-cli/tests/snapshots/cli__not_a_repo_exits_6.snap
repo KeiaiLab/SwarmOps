@@ -1,0 +1,148 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "info",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "repo_info",
+      "api": 1,
+      "error": {
+        "code": "E_NOT_A_REPO",
+        "message": "no store named: neither --repo nor SWARMOPS_REPO gives one",
+        "retryable": false,
+        "exit": 6,
+        "details": {},
+        "hint": "pass --repo <store> or set SWARMOPS_REPO; swarmops init <dir> creates a store"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/missing info",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "repo_info",
+      "api": 1,
+      "error": {
+        "code": "E_NOT_A_REPO",
+        "message": "[tmp]/missing is not a store: no FORMAT file",
+        "retryable": false,
+        "exit": 6,
+        "details": {},
+        "hint": "swarmops init [tmp]/missing"
+      },
+      "meta": {
+        "repo": "[tmp]/missing",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp] log",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "log",
+      "api": 1,
+      "error": {
+        "code": "E_NOT_A_REPO",
+        "message": "[tmp] is not a store: no FORMAT file",
+        "retryable": false,
+        "exit": 6,
+        "details": {},
+        "hint": "swarmops init [tmp]"
+      },
+      "meta": {
+        "repo": "[tmp]",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/file cat main:x",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "read_file",
+      "api": 1,
+      "error": {
+        "code": "E_NOT_A_REPO",
+        "message": "[tmp]/file is not a directory, so it holds no store",
+        "retryable": false,
+        "exit": 6,
+        "details": {},
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/file",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "show main",
+    "env": {
+      "SWARMOPS_REPO": "[tmp]/missing"
+    },
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "show",
+      "api": 1,
+      "error": {
+        "code": "E_NOT_A_REPO",
+        "message": "[tmp]/missing is not a store: no FORMAT file",
+        "retryable": false,
+        "exit": 6,
+        "details": {},
+        "hint": "swarmops init [tmp]/missing"
+      },
+      "meta": {
+        "repo": "[tmp]/missing",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo '' info",
+    "env": {
+      "SWARMOPS_REPO": "[tmp]/missing"
+    },
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "repo_info",
+      "api": 1,
+      "error": {
+        "code": "E_NOT_A_REPO",
+        "message": "no store named: --repo is empty",
+        "retryable": false,
+        "exit": 6,
+        "details": {},
+        "hint": "pass --repo <store> or set SWARMOPS_REPO; swarmops init <dir> creates a store"
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

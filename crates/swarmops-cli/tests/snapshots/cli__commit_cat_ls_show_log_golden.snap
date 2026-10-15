@@ -1,0 +1,723 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store --name acme",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "acme",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m 'first commit\n\nwith a body' --changes [tmp]/changes.json",
+    "env": {
+      "SWARMOPS_RUN_ID": "run-1"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[root1]",
+        "files_changed": 6,
+        "blobs_written": 6
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m second --changes -",
+    "stdin": [
+      {
+        "content": {
+          "inline": "# acme\n\nversion 2\n"
+        },
+        "op": "put",
+        "path": "README.md"
+      },
+      {
+        "op": "delete",
+        "path": "notes.txt"
+      }
+    ],
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[root2]",
+        "files_changed": 2,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "old": "[c1]",
+        "new": "[c2]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main:README.md",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_file",
+      "api": 1,
+      "result": {
+        "blob": "[id1]",
+        "size": 18,
+        "kind": "file",
+        "encoding": "utf8",
+        "content": "# acme\n\nversion 2\n",
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat [c1:12]:logo.bin",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_file",
+      "api": 1,
+      "result": {
+        "blob": "[id2]",
+        "size": 4,
+        "kind": "file",
+        "encoding": "base64",
+        "content": "AAEC/w==",
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1:12]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main~1:notes.txt",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_file",
+      "api": 1,
+      "result": {
+        "blob": "[id3]",
+        "size": 19,
+        "kind": "file",
+        "encoding": "utf8",
+        "content": "kept on the client\n",
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main~1": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main:latest",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_file",
+      "api": 1,
+      "result": {
+        "blob": "[id4]",
+        "size": 9,
+        "kind": "symlink",
+        "encoding": "utf8",
+        "content": "README.md",
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main:src/main.rs --max-bytes 4",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_file",
+      "api": 1,
+      "result": {
+        "blob": "[id5]",
+        "size": 13,
+        "kind": "file",
+        "encoding": "utf8",
+        "content": "fn m",
+        "truncated": true
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main:no:such:file",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "read_file",
+      "api": 1,
+      "error": {
+        "code": "E_PATH_NOT_FOUND",
+        "message": "nothing is at \"no:such:file\" in main",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "path": "no:such:file",
+          "rev": "main"
+        },
+        "hint": "swarmops ls main"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "README.md",
+            "kind": "file",
+            "id": "[id1]"
+          },
+          {
+            "name": "bin",
+            "kind": "dir",
+            "id": "[id6]"
+          },
+          {
+            "name": "latest",
+            "kind": "symlink",
+            "id": "[id4]"
+          },
+          {
+            "name": "logo.bin",
+            "kind": "file",
+            "id": "[id2]"
+          },
+          {
+            "name": "src",
+            "kind": "dir",
+            "id": "[id7]"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main:",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "README.md",
+            "kind": "file",
+            "id": "[id1]"
+          },
+          {
+            "name": "bin",
+            "kind": "dir",
+            "id": "[id6]"
+          },
+          {
+            "name": "latest",
+            "kind": "symlink",
+            "id": "[id4]"
+          },
+          {
+            "name": "logo.bin",
+            "kind": "file",
+            "id": "[id2]"
+          },
+          {
+            "name": "src",
+            "kind": "dir",
+            "id": "[id7]"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main:bin",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "run",
+            "kind": "exec",
+            "id": "[id8]"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main:bin/",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "run",
+            "kind": "exec",
+            "id": "[id8]"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main --limit 2",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "README.md",
+            "kind": "file",
+            "id": "[id1]"
+          },
+          {
+            "name": "bin",
+            "kind": "dir",
+            "id": "[id6]"
+          }
+        ],
+        "truncated": true,
+        "cursor": "bin"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main --limit 2 --cursor bin",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "latest",
+            "kind": "symlink",
+            "id": "[id4]"
+          },
+          {
+            "name": "logo.bin",
+            "kind": "file",
+            "id": "[id2]"
+          }
+        ],
+        "truncated": true,
+        "cursor": "logo.bin"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store show main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "show",
+      "api": 1,
+      "result": {
+        "id": "[c2]",
+        "seq": 1,
+        "parents": [
+          "[c1]"
+        ],
+        "root": "[root2]",
+        "author": {
+          "agent": "agent/worker-17"
+        },
+        "created_at": "[created_at]",
+        "message": "second",
+        "changes": [
+          {
+            "path": "README.md",
+            "op": "put",
+            "kind": "file",
+            "blob": "[id1]"
+          },
+          {
+            "path": "notes.txt",
+            "op": "delete"
+          }
+        ],
+        "files_changed": 2,
+        "changes_truncated": false,
+        "metadata": {
+          "agent": "agent/worker-17"
+        },
+        "signatures": {
+          "author": {
+            "name": "agent/worker-17",
+            "email": "worker-17@claude-code.swarmops.local",
+            "secs": "[secs]",
+            "offset_secs": 0
+          },
+          "committer": {
+            "name": "agent/worker-17",
+            "email": "worker-17@claude-code.swarmops.local",
+            "secs": "[secs]",
+            "offset_secs": 0
+          }
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store show [c1:12] --max-changes 2",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "show",
+      "api": 1,
+      "result": {
+        "id": "[c1]",
+        "seq": 0,
+        "parents": [],
+        "root": "[root1]",
+        "author": {
+          "agent": "agent/worker-17",
+          "run_id": "run-1"
+        },
+        "created_at": "[created_at]",
+        "message": "first commit\n\nwith a body",
+        "changes": [
+          {
+            "path": "README.md",
+            "op": "put",
+            "kind": "file",
+            "blob": "[id9]"
+          },
+          {
+            "path": "bin/run",
+            "op": "put",
+            "kind": "exec",
+            "blob": "[id8]"
+          }
+        ],
+        "files_changed": 6,
+        "changes_truncated": true,
+        "metadata": {
+          "agent": "agent/worker-17",
+          "run_id": "run-1"
+        },
+        "signatures": {
+          "author": {
+            "name": "agent/worker-17",
+            "email": "worker-17@claude-code.swarmops.local",
+            "secs": "[secs]",
+            "offset_secs": 0
+          },
+          "committer": {
+            "name": "agent/worker-17",
+            "email": "worker-17@claude-code.swarmops.local",
+            "secs": "[secs]",
+            "offset_secs": 0
+          }
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1:12]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store log",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "log",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "id": "[c2]",
+            "parents": [
+              "[c1]"
+            ],
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "second"
+          },
+          {
+            "id": "[c1]",
+            "parents": [],
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "first commit"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store log -n 1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "log",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "id": "[c2]",
+            "parents": [
+              "[c1]"
+            ],
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "second"
+          }
+        ],
+        "truncated": true,
+        "cursor": "[c2]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store log --cursor [c2]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "log",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "id": "[c1]",
+            "parents": [],
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "first commit"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

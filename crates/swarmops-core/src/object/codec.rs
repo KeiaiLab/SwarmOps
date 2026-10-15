@@ -1,8 +1,9 @@
-//! Shared decoding error and a bounds-checked reader.
+//! Shared decoding error, and the codec's reads on the bounds-checked cursor.
 
 use thiserror::Error;
 
 use super::varint;
+use crate::bytes;
 use crate::error::PathError;
 
 /// Why bytes are not a canonical object.
@@ -53,19 +54,20 @@ pub enum CodecError {
     /// `negative_zero` was set with a non-zero `offset_secs`.
     #[error("signature has the -0000 flag with a non-zero offset")]
     BadSignature,
+    /// A `Delete` entry carries `renamed_from`, or `renamed_from` equals the entry's own path.
+    #[error("delete cannot carry renamed_from, and renamed_from cannot equal path")]
+    BadRename,
 }
 
-/// A cursor over an immutable buffer; every read is bounds-checked first.
-pub(crate) struct Reader<'a> {
-    buf: &'a [u8],
-    pos: usize,
+/// The cursor the codec decodes with: a read past the end is [`CodecError::Truncated`].
+pub(crate) type Reader<'a> = bytes::Reader<'a, CodecError>;
+
+/// A cursor at the start of `buf`.
+pub(crate) fn reader(buf: &[u8]) -> Reader<'_> {
+    Reader::new(buf, |_| CodecError::Truncated)
 }
 
 impl<'a> Reader<'a> {
-    pub(crate) fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-
     pub(crate) fn magic(&mut self, want: [u8; 4], version: u8) -> Result<(), CodecError> {
         if self.bytes(4)? != want {
             return Err(CodecError::Magic);
@@ -77,34 +79,17 @@ impl<'a> Reader<'a> {
         Ok(())
     }
 
-    pub(crate) fn u8(&mut self) -> Result<u8, CodecError> {
-        let b = *self.buf.get(self.pos).ok_or(CodecError::Truncated)?;
-        self.pos += 1;
-        Ok(b)
-    }
-
-    pub(crate) fn bytes(&mut self, n: usize) -> Result<&'a [u8], CodecError> {
-        let end = self.pos.checked_add(n).ok_or(CodecError::Truncated)?;
-        let s = self.buf.get(self.pos..end).ok_or(CodecError::Truncated)?;
-        self.pos = end;
-        Ok(s)
-    }
-
-    pub(crate) fn array32(&mut self) -> Result<[u8; 32], CodecError> {
-        let s = self.bytes(32)?;
-        let mut out = [0u8; 32];
-        out.copy_from_slice(s);
-        Ok(out)
-    }
-
     pub(crate) fn varint(&mut self) -> Result<u64, CodecError> {
-        varint::read(self.buf, &mut self.pos)
+        let mut len = 0;
+        let value = varint::read(self.rest(), &mut len)?;
+        self.bytes(len)?;
+        Ok(value)
     }
 
     /// A varint count that must fit in `usize` and be no larger than the bytes left.
     pub(crate) fn count(&mut self) -> Result<usize, CodecError> {
         let n = usize::try_from(self.varint()?).map_err(|_| CodecError::Truncated)?;
-        if n > self.buf.len() - self.pos {
+        if n > self.rest().len() {
             return Err(CodecError::Truncated);
         }
         Ok(n)
@@ -120,16 +105,6 @@ impl<'a> Reader<'a> {
         String::from_utf8(s.to_vec()).map_err(|_| CodecError::Utf8)
     }
 
-    pub(crate) fn i64le(&mut self) -> Result<i64, CodecError> {
-        let s = self.bytes(8)?;
-        Ok(i64::from_le_bytes(s.try_into().expect("8 bytes")))
-    }
-
-    pub(crate) fn i32le(&mut self) -> Result<i32, CodecError> {
-        let s = self.bytes(4)?;
-        Ok(i32::from_le_bytes(s.try_into().expect("4 bytes")))
-    }
-
     pub(crate) fn flag(&mut self) -> Result<bool, CodecError> {
         match self.u8()? {
             0 => Ok(false),
@@ -139,7 +114,7 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn finish(self) -> Result<(), CodecError> {
-        if self.pos == self.buf.len() {
+        if self.rest().is_empty() {
             Ok(())
         } else {
             Err(CodecError::TrailingBytes)

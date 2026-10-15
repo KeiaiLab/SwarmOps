@@ -1,0 +1,28 @@
+[package]
+name = "swarmops-ops"
+description = "SwarmOps operations: LocalOps, the StoreOps implementation over a local store, with identity and content resolution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The test hooks: the store's (`SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`), and
+# `SWARMOPS_TEST_NOW`, the time `LocalOps` signs changesets at. Off unless asked for.
+test-hooks = ["swarmops-repo/test-hooks", "swarmops-store/test-hooks"]
+
+[dependencies]
+swarmops-api = { path = "../swarmops-api", version = "0.1.0" }
+swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
+swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+base64.workspace = true
+camino.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -93,10 +93,20 @@ impl<'a> Arbitrary<'a> for DeltaOp {
 
 impl<'a> Arbitrary<'a> for DeltaEntry {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+        let path = RepoPath::arbitrary(u)?;
+        let op = DeltaOp::arbitrary(u)?;
+        // Drawn for every entry so existing fuzz inputs keep decoding to the same
+        // shapes, then dropped where the canonical rules forbid a rename: a `Delete`
+        // has none, and a `Put` never renames from its own path.
+        let from = Option::<RepoPath>::arbitrary(u)?;
+        let renamed_from = match op {
+            DeltaOp::Put { .. } => from.filter(|source| *source != path),
+            DeltaOp::Delete => None,
+        };
         Ok(Self {
-            path: RepoPath::arbitrary(u)?,
-            op: DeltaOp::arbitrary(u)?,
-            renamed_from: Option::<RepoPath>::arbitrary(u)?,
+            path,
+            op,
+            renamed_from,
         })
     }
 }

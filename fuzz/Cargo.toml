@@ -7,10 +7,20 @@ edition = "2024"
 [package.metadata]
 cargo-fuzz = true
 
+[lib]
+# Helpers shared by the journal targets.
+path = "src/lib.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 libfuzzer-sys = "0.4.13"
 arbitrary = { version = "1.5.0", features = ["derive"] }
+crc32fast = "1.5.2"
 swarmops-core = { path = "../crates/swarmops-core", features = ["arbitrary"] }
+swarmops-store = { path = "../crates/swarmops-store" }
+tempfile = "3.27.0"
 
 [[bin]]
 name = "codec_roundtrip"
@@ -26,5 +36,20 @@ test = false
 doc = false
 bench = false
 
-# Own workspace: nightly-only, excluded from the root `just check`.
+[[bin]]
+name = "frame_decode"
+path = "fuzz_targets/frame_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "journal_recovery"
+path = "fuzz_targets/journal_recovery.rs"
+test = false
+doc = false
+bench = false
+
+# Own workspace: `just fuzz` builds and runs it with nightly; `just check` (and
+# scripts/check.sh) formats and lints it with stable.
 [workspace]

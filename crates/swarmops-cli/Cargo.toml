@@ -1,0 +1,41 @@
+[package]
+name = "swarmops-cli"
+description = "SwarmOps CLI: the swarmops binary, one JSON envelope per command with a fixed exit code"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "swarmops"
+path = "src/main.rs"
+
+[features]
+# A `swarmops` that honors the test hooks (`swarmops-ops/test-hooks` turns on all of them):
+# for the crash tests, which require it, never for a release.
+test-hooks = ["swarmops-ops/test-hooks"]
+
+# The crash tests drive the test hooks: without the feature, `cargo test` skips them.
+[[test]]
+name = "crash"
+required-features = ["test-hooks"]
+
+[dependencies]
+swarmops-api = { path = "../swarmops-api", version = "0.1.0" }
+swarmops-ops = { path = "../swarmops-ops", version = "0.1.0" }
+camino.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
+swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+assert_cmd.workspace = true
+insta.workspace = true
+tempfile.workspace = true

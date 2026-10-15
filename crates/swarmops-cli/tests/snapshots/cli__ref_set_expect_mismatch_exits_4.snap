@@ -1,0 +1,322 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[id1]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c1 --changes [tmp]/c1.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c2 --changes [tmp]/c2.json --parent [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[id3]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c2]",
+    "exit": 4,
+    "stdout": {
+      "ok": false,
+      "op": "ref_set",
+      "api": 1,
+      "error": {
+        "code": "E_CAS_MISMATCH",
+        "message": "ref main moved to [c1]: commit your change on top of it (--parent [c1]), then retry with --expect [c1]; re-apply your edits to the content at [c1] rather than re-sending your old files",
+        "retryable": true,
+        "exit": 4,
+        "details": {
+          "actual": "[c1]",
+          "name": "main"
+        },
+        "hint": "swarmops show [c1]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "old": "[c1]",
+        "new": "[c2]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "old": "[c1]",
+        "new": "[c2]",
+        "already_applied": true
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "exit": 4,
+    "stdout": {
+      "ok": false,
+      "op": "ref_set",
+      "api": 1,
+      "error": {
+        "code": "E_CAS_MISMATCH",
+        "message": "ref main exists already and points at [c2]: commit your change on top of it (--parent [c2]), then retry with --expect [c2]; re-apply your edits to the content at [c2] rather than re-sending your old files",
+        "retryable": true,
+        "exit": 4,
+        "details": {
+          "actual": "[c2]",
+          "name": "main"
+        },
+        "hint": "swarmops show [c2]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set release/1.0 main~1 --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "release/1.0",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main~1": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ref list",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_list",
+      "api": 1,
+      "result": {
+        "refs": [
+          {
+            "name": "main",
+            "target": "[c2]",
+            "version": 2
+          },
+          {
+            "name": "release/1.0",
+            "target": "[c1]",
+            "version": 1
+          }
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref delete release/1.0 --expect [c2]",
+    "exit": 4,
+    "stdout": {
+      "ok": false,
+      "op": "ref_delete",
+      "api": 1,
+      "error": {
+        "code": "E_CAS_MISMATCH",
+        "message": "ref release/1.0 now points at [c1]; re-check before deleting",
+        "retryable": true,
+        "exit": 4,
+        "details": {
+          "actual": "[c1]",
+          "name": "release/1.0"
+        },
+        "hint": "swarmops show [c1]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref delete release/1.0 --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_delete",
+      "api": 1,
+      "result": {
+        "name": "release/1.0",
+        "old": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref delete release/1.0 --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_delete",
+      "api": 1,
+      "result": {
+        "name": "release/1.0",
+        "old": "[c1]",
+        "already_applied": true
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  }
+]

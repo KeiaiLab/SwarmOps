@@ -1,6 +1,8 @@
 //! One write-ahead-log entry (storage-core spec §1 layout "SWCS").
 
-use super::codec::{CodecError, Reader, check_strictly_sorted, put_count, put_len_prefixed};
+use super::codec::{
+    CodecError, Reader, check_strictly_sorted, put_count, put_len_prefixed, reader,
+};
 use super::tree::EntryKind;
 use crate::id::{BlobId, ChangesetId, ObjectId, ObjectKind, TreeId, hash_object};
 use crate::path::RepoPath;
@@ -44,7 +46,8 @@ pub struct DeltaEntry {
     pub path: RepoPath,
     /// What happened.
     pub op: DeltaOp,
-    /// For a detected rename, where the content came from.
+    /// For a detected rename, where the content came from. Only a `Put` can carry
+    /// one, and it is never the entry's own `path`.
     pub renamed_from: Option<RepoPath>,
 }
 
@@ -89,8 +92,8 @@ impl Signature {
         let sig = Self {
             name: r.len_prefixed()?.to_vec(),
             email: r.len_prefixed()?.to_vec(),
-            secs: r.i64le()?,
-            offset_secs: r.i32le()?,
+            secs: r.i64_le()?,
+            offset_secs: r.i32_le()?,
             negative_zero: r.flag()?,
         };
         sig.validate()?;
@@ -104,6 +107,11 @@ impl DeltaEntry {
             && *kind == EntryKind::Dir
         {
             return Err(CodecError::BadKind(EntryKind::Dir.as_u8()));
+        }
+        if let Some(from) = &self.renamed_from
+            && (matches!(self.op, DeltaOp::Delete) || *from == self.path)
+        {
+            return Err(CodecError::BadRename);
         }
         Ok(())
     }
@@ -132,7 +140,7 @@ impl DeltaEntry {
         let op = match r.u8()? {
             0 => DeltaOp::Put {
                 kind: EntryKind::from_u8(r.u8()?)?,
-                id: BlobId(ObjectId(r.array32()?)),
+                id: BlobId(ObjectId(r.array()?)),
             },
             1 => DeltaOp::Delete,
             b => return Err(CodecError::BadOp(b)),
@@ -154,7 +162,8 @@ impl DeltaEntry {
 
 impl Changeset {
     /// Checks the invariants the layout cannot express: sorted unique delta
-    /// paths, leaf-only puts, sorted unique metadata keys, consistent signatures.
+    /// paths, leaf-only puts, renames only on puts and never from the entry's own
+    /// path, sorted unique metadata keys, consistent signatures.
     pub fn validate(&self) -> Result<(), CodecError> {
         for d in &self.delta {
             d.validate()?;
@@ -206,14 +215,14 @@ impl Changeset {
 
     /// Parses canonical bytes.
     pub fn decode(buf: &[u8]) -> Result<Self, CodecError> {
-        let mut r = Reader::new(buf);
+        let mut r = reader(buf);
         r.magic(*MAGIC, VERSION)?;
         let np = r.count()?;
         let mut parents = Vec::with_capacity(np.min(16));
         for _ in 0..np {
-            parents.push(ChangesetId(ObjectId(r.array32()?)));
+            parents.push(ChangesetId(ObjectId(r.array()?)));
         }
-        let root = TreeId(ObjectId(r.array32()?));
+        let root = TreeId(ObjectId(r.array()?));
         let m = r.count()?;
         let mut delta = Vec::with_capacity(m.min(1024));
         for _ in 0..m {

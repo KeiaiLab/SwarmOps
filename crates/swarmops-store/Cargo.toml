@@ -1,6 +1,6 @@
 [package]
 name = "swarmops-store"
-description = "SwarmOps store: loose object files, SQLite metadata, fsck and gc"
+description = "SwarmOps store: loose object files, metadata, fsck and gc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,12 +10,41 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The crash tests' hooks, `SWARMOPS_TEST_CRASH_AT` and `SWARMOPS_TEST_FS_CALLS`, which
+# `CrashAtFs::from_env` reads. Off unless asked for, so that every other build (a release build
+# included) ignores them; the workspace's gates turn it on with `--all-features`.
+test-hooks = []
+
 [dependencies]
+swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+camino.workspace = true
+crc32fast.workspace = true
+rayon.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-tempfile.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "fsync_latency"
+harness = false
+
+[[bench]]
+name = "put_batch"
+harness = false
+
+[[bench]]
+name = "index_lookup"
+harness = false
+
+[[bench]]
+name = "fsync_fanout"
+harness = false
+
+[[bench]]
+name = "read_snapshot"
 harness = false
