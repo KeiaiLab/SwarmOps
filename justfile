@@ -8,14 +8,15 @@ default: check
 # needs a C++ compiler (`c++`). `--all-features` turns on `test-hooks`, the hooks the crash
 # tests drive (`SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_NOW`); the
 # release run of `test_hooks` after it is built without the feature, as `cargo build
-# --release` is, and checks that it ignores them.
+# --release` is, and checks that it ignores them. That test exists only without the feature,
+# so `--no-tests=fail` fails a build that turns it on all the same.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
     cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo nextest run --workspace --all-features --no-tests=warn
-    cargo nextest run --release -p swarmops-cli --test test_hooks
+    cargo nextest run --release -p swarmops-cli --test test_hooks --no-tests=fail
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
     cargo deny check
 

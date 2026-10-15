@@ -1049,7 +1049,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_IO_TRANSIENT",
-          "description": "The filesystem failed once a write had gone far enough that it may have committed\n(`details.may_have_committed`): the same operation, run again, is safe and settles it.",
+          "description": "The filesystem failed once a write had gone far enough that it may have committed\n(`details.may_have_committed`). Running the same operation again is safe and settles it,\nbut a `commit` run again signs at its own time: if the first did commit, the second may\nrecord another changeset while the first stays unreferenced (M4's idempotency key closes\nthis).",
           "type": "string"
         },
         {
@@ -1305,7 +1305,7 @@ expression: s.redact(&all)
       "description": "`log`: a page of changesets, newest first, following first parents.",
       "properties": {
         "cursor": {
-          "description": "When `truncated`: the last entry's id; pass it as `cursor` to continue.",
+          "description": "When `truncated`: where the next page continues. Opaque: pass it back as given, as the\nnext request's `cursor`.",
           "type": [
             "string",
             "null"
@@ -2009,7 +2009,7 @@ expression: s.redact(&all)
       "description": "`read_tree` (CLI `ls`): a page of a directory's entries, in the tree's order (by name bytes).",
       "properties": {
         "cursor": {
-          "description": "When `truncated`: the last entry's name; pass it as `cursor` to get the next page.",
+          "description": "When `truncated`: where the next page starts. Opaque: pass it back as given, as the next\nrequest's `cursor`.",
           "type": [
             "string",
             "null"

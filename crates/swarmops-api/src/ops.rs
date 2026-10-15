@@ -290,7 +290,8 @@ pub struct TreeListing {
     pub entries: Vec<TreeEntryOut>,
     /// Whether more entries follow this page.
     pub truncated: bool,
-    /// When `truncated`: the last entry's name; pass it as `cursor` to get the next page.
+    /// When `truncated`: where the next page starts. Opaque: pass it back as given, as the next
+    /// request's `cursor`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
@@ -425,7 +426,8 @@ pub struct LogPage {
     pub entries: Vec<ChangesetSummary>,
     /// Whether older history follows this page.
     pub truncated: bool,
-    /// When `truncated`: the last entry's id; pass it as `cursor` to continue.
+    /// When `truncated`: where the next page continues. Opaque: pass it back as given, as the
+    /// next request's `cursor`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
 }
