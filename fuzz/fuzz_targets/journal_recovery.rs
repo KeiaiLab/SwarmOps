@@ -12,18 +12,19 @@
 //! correct CRC appended. Each case runs in a fresh `tempfile::tempdir()`. A typed error is
 //! `JournalCorrupt`, or `Io` with `InvalidData`, `UnexpectedEof` or `InvalidInput`. A torn
 //! tail is an unlisted frame cut short or failing its CRC, or unlisted bytes that are zero to
-//! the end of `journal.log`. The writer and the readers differ on one point: a reader takes no
-//! lock and may race an append, so it also stops silently at a last listed frame cut short or
-//! missing, which recovery, with the files quiescent, reports as damage.
+//! the end of `journal.log`. Readers measure `journal.off` before `journal.log`, so every frame
+//! listed in their snapshot is whole in the `journal.log` they read: for them, as for recovery,
+//! a listed frame cut short, missing or failing its CRC is damage.
 //!
 //! - (a) `open`, `frame_count` and `ckpt` succeed; `tail_frames_from` (from the checkpoint and
 //!   from 0), `frames_from(0, 64)`, `frames_after(0, 64)` and `frames_from(0, usize::MAX)` return
 //!   `Ok` or a typed error, before recovery and after it. A frame they return is the canonical
 //!   encoding of its records at its offset (so its CRC matches), a listed one at its entry;
 //!   frames returned together abut, readers agree where they overlap, and a reader stops early
-//!   only at a torn tail, or at a last listed frame cut short, or before a listed frame that
-//!   starts where it stops. If every listed frame read, `tail_frames_from(0)` returns exactly
-//!   what the model says, before recovery and after it.
+//!   only at a torn tail, never before a listed frame. When `journal.off`'s entries are sound,
+//!   readers from the start return exactly what the model says, before recovery and after it:
+//!   the listed frames (and for `tail_frames_from(0)` the unlisted whole ones after them), or
+//!   `JournalCorrupt` at the first listed frame that is not whole.
 //! - (b) `truncate_torn_tail` does exactly what a model of recovery says: `JournalCorrupt` at
 //!   the model's offset with no file changed, or `Ok` with the model's cut, `journal.log` the
 //!   prefix up to it, and `journal.off` the whole entries it held, then one per frame listed.
@@ -122,18 +123,26 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
     // With sound entries, the model says what the readers from the start return; a reader
     // races appends, so it must not fail at a last listed frame cut short.
     let listed = listed_frames(&before);
-    let from_start = listed
-        .as_ref()
-        .map(|listed| read_from_start(&before, listed));
-    if let (Some(listed), Some(want)) = (&listed, &from_start) {
-        let first = |skip: usize| listed.iter().skip(skip).take(LIMIT).cloned().collect();
-        agrees(
-            "frames_from(0, usize::MAX)",
-            &seen.listed,
-            &Ok(listed.clone()),
-        );
-        agrees("frames_from(0, 64)", &seen.first, &Ok(first(0)));
-        agrees("frames_after(0, 64)", &seen.after_first, &Ok(first(1)));
+    let from_start = match &listed {
+        Some(Ok(listed)) => Some(read_from_start(&before, listed)),
+        Some(Err(damaged)) => Some(Err(*damaged)),
+        None => None,
+    };
+    match &listed {
+        Some(Ok(listed)) => {
+            let first = |skip: usize| listed.iter().skip(skip).take(LIMIT).cloned().collect();
+            agrees(
+                "frames_from(0, usize::MAX)",
+                &seen.listed,
+                &Ok(listed.clone()),
+            );
+            agrees("frames_from(0, 64)", &seen.first, &Ok(first(0)));
+            agrees("frames_after(0, 64)", &seen.after_first, &Ok(first(1)));
+        }
+        Some(Err(damaged)) => agrees("frames_from(0, usize::MAX)", &seen.listed, &Err(*damaged)),
+        None => {}
+    }
+    if let Some(want) = &from_start {
         agrees("tail_frames_from(0)", &seen.from_start, want);
     }
 
@@ -267,10 +276,12 @@ impl Recovery {
 }
 
 /// The listed frames as readers must return them, by the model, if `journal.off`'s entries are
-/// sound: frame 0 at 0, and each listed frame whole where its entry says, the next starting
-/// where it ends. Only the last may be cut short or missing: a reader stops before it silently,
-/// as an append racing it would leave it. `None` if the entries are not sound.
-fn listed_frames(files: &Files) -> Option<Vec<Frame>> {
+/// sound: frame 0 at 0, each listed frame where the one before it ends. A reader measures
+/// `journal.off` before `journal.log`, so every frame listed then is whole in the `journal.log`
+/// it reads: `Ok` with them all, or `Err` with the start of the first that is not (cut short,
+/// missing, failing its CRC or not decoding), where frames_from and tail_frames_from fail with
+/// `JournalCorrupt`. `None` if the entries are not sound up to there.
+fn listed_frames(files: &Files) -> Option<Result<Vec<Frame>, u64>> {
     let entries = files.entries();
     let mut frames = Vec::new();
     let mut next = 0;
@@ -287,23 +298,18 @@ fn listed_frames(files: &Files) -> Option<Vec<Frame>> {
                 });
                 next = entry + to_u64(size);
             }
-            Model::Short if seq + 1 == to_u64(entries.len()) => break,
-            _ => return None,
+            _ => return Some(Err(entry)),
         }
     }
-    Some(frames)
+    Some(Ok(frames))
 }
 
-/// What `tail_frames_from(0)` returns, by the model, given `listed`, the listed frames from
-/// [`listed_frames`]: they, then the unlisted whole frames up to the end or a torn tail; or
-/// `Err(offset)` for `JournalCorrupt` at an unlisted frame no writer produces. If the last
-/// listed frame is cut short or missing, the reader stops before it.
+/// What `tail_frames_from(0)` returns, by the model, given `listed`, every listed frame, whole,
+/// from [`listed_frames`]: they, then the unlisted whole frames up to the end or a torn tail;
+/// or `Err(offset)` for `JournalCorrupt` at an unlisted frame no writer produces.
 fn read_from_start(files: &Files, listed: &[Frame]) -> Result<Vec<Frame>, u64> {
     let log_len = to_u64(files.log.len());
     let mut frames = listed.to_vec();
-    if files.entries().len() > listed.len() {
-        return Ok(frames);
-    }
     let mut at = listed.last().map_or(0, |frame| {
         frame.offset + to_u64(frame_bytes(&frame.records).len())
     });
@@ -443,10 +449,9 @@ fn same_frames(a: &[Frame], b: &[Frame]) -> bool {
 /// The frames start at `from` and abut, each the canonical encoding of its records, a listed
 /// one at its entry; their seqs count up from `from`'s place in `journal.off` (or from the
 /// listed count, if `from` is where the last listed frame ends). They stop at the end of
-/// `journal.log` or at a torn tail: a frame cut short (unlisted, or the last listed), an
-/// unlisted frame failing its CRC, or unlisted zeros to the end of the file. Stopping before a
-/// listed frame, they stop where its entry says it starts: an append racing the reader leaves
-/// that, a zeroed or stale entry does not.
+/// `journal.log` or at a torn tail (an unlisted frame cut short or failing its CRC, or unlisted
+/// zeros to the end of the file), never before a listed frame: the reader measured
+/// `journal.off` first, so every listed frame is whole in what it read.
 fn tail_run(
     what: &str,
     got: Result<Vec<Frame>, StoreError>,
@@ -480,30 +485,34 @@ fn tail_run(
         }
         at += canonical_size(what, frame, files);
     }
-    if let Some(next) = frames.last().map(|frame| frame.seq + 1)
-        && let Some(&entry) = entries.get(to_usize(next))
-    {
-        assert_eq!(
-            entry, at,
-            "{what}: stopped at {at}, before listed frame {next}, which its entry puts at {entry}"
+    // Every listed frame from `from` on was whole when the reader measured journal.log, so it
+    // never stops before one.
+    if let Some(next) = frames.last().map(|frame| frame.seq + 1) {
+        assert!(
+            next >= listed,
+            "{what}: stopped at {at}, before listed frame {next} of {listed}"
         );
     }
-    // An unlisted first frame takes the listed count as its seq, where the last listed ends.
-    if let Some(first) = frames.first()
-        && entries.get(to_usize(first.seq)).is_none()
-    {
-        assert_eq!(
-            first.seq, listed,
-            "{what}: seq {} is past the listed frames",
-            first.seq
-        );
+    // An unlisted first frame takes the listed count as its seq, and with none read the read
+    // started there too: where the last listed frame ends (0 with none listed).
+    let unlisted_first = frames
+        .first()
+        .is_none_or(|first| entries.get(to_usize(first.seq)).is_none());
+    if unlisted_first {
+        if let Some(first) = frames.first() {
+            assert_eq!(
+                first.seq, listed,
+                "{what}: seq {} is past the listed frames",
+                first.seq
+            );
+        }
         let listed_end = entries
             .last()
             .map_or(Some(0), |&last| files.frame_end(last));
         assert_eq!(
             listed_end,
             Some(from),
-            "{what}: seq {listed} for a frame not after the listed ones"
+            "{what}: read nothing listed from {from}, which is not where the listed frames end"
         );
     }
     assert!(
@@ -514,8 +523,8 @@ fn tail_run(
         let next = frames.last().map(|frame| frame.seq + 1);
         match files.frame_at(at) {
             Model::Short => assert!(
-                next.is_none_or(|seq| seq + 1 >= listed),
-                "{what}: stopped at listed frame {next:?} of {listed}, cut short but not the last"
+                next.is_none_or(|seq| seq >= listed),
+                "{what}: stopped at listed frame {next:?} of {listed}, which is cut short"
             ),
             Model::BadCrc => assert!(
                 next.is_none_or(|seq| seq >= listed),
@@ -535,8 +544,7 @@ fn tail_run(
 /// error. The frames are the listed ones from seq `first` on, each at its entry and the
 /// canonical encoding of its records; they abut, the first starts where the header of the frame
 /// listed before it says that one ends, and the next entry (if one is listed) is where they end.
-/// There are at most `limit` of them, and fewer than are listed only if the last listed frame is
-/// cut short.
+/// There are as many as are listed from `first` on, up to `limit`.
 fn listed_run(
     what: &str,
     got: Result<Vec<Frame>, StoreError>,
@@ -583,19 +591,13 @@ fn listed_run(
         end = Some(entry + canonical_size(what, frame, files));
     }
     let next = first + to_u64(frames.len());
-    if to_u64(frames.len()) < wanted {
-        assert_eq!(
-            next + 1,
-            listed,
-            "{what}: stopped at listed frame {next} of {listed}, not the last"
-        );
-        let entry = entries[to_usize(next)];
-        assert_eq!(
-            files.frame_at(entry),
-            Model::Short,
-            "{what}: stopped at the last listed frame, which is not cut short"
-        );
-    } else if let (Some(end), Some(&entry)) = (end, entries.get(to_usize(next))) {
+    assert_eq!(
+        to_u64(frames.len()),
+        wanted,
+        "{what}: {} frames, not the {wanted} listed and asked for",
+        frames.len()
+    );
+    if let (Some(end), Some(&entry)) = (end, entries.get(to_usize(next))) {
         assert_eq!(
             entry, end,
             "{what}: the next listed frame does not start where these end"

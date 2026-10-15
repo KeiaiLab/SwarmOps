@@ -1267,7 +1267,14 @@ fn assert_fresh_meta(root: &Utf8Path) {
     let (fs, calls) = RecordingFs::new();
     let reader = MetaStore::open_with_fs(root, Arc::new(fs)).unwrap();
     assert_eq!(reader.read().unwrap().count_changesets().unwrap(), 0);
-    assert_eq!(calls(), ["read main"], "a reader writes nothing");
+    // It measures the journal past the checkpoint (journal.off first) before and after
+    // reading the ref files.
+    let snapshot = ["file_len journal.off", "file_len journal.log"];
+    assert_eq!(
+        calls(),
+        [&snapshot[..], &["read main"], &snapshot].concat(),
+        "a reader writes nothing"
+    );
 }
 
 #[test]
@@ -1740,6 +1747,9 @@ fn write_and_commit_make_the_documented_fs_calls() {
     let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
     assert_eq!(calls(), CREATE_CALLS);
     let tail_check = ["file_len journal.log", "file_len journal.off"];
+    // A reader's snapshot of the journal, journal.off measured first: the write's replay
+    // reads the frames past the checkpoint so.
+    let snapshot = ["file_len journal.off", "file_len journal.log"];
     let frame = ["append_durable journal.log", "append_durable journal.off"];
     let record = [
         "append parents.log",
@@ -1758,7 +1768,7 @@ fn write_and_commit_make_the_documented_fs_calls() {
     ];
 
     let mut write = store.write().unwrap();
-    assert_eq!(calls(), tail_check);
+    assert_eq!(calls(), [&tail_check[..], &snapshot].concat());
     write.insert_changeset(cs(1, &[])).unwrap();
     assert_eq!(calls(), Vec::<String>::new(), "queueing touches nothing");
     write.commit().unwrap();
@@ -1769,7 +1779,10 @@ fn write_and_commit_make_the_documented_fs_calls() {
     let mut write = store.write().unwrap();
     write.insert_changeset(cs(2, &[1])).unwrap();
     write.cas_ref("main", None, Some(id(2)), ACTOR).unwrap();
-    assert_eq!(calls(), [&tail_check[..], &["read main"]].concat());
+    assert_eq!(
+        calls(),
+        [&tail_check[..], &snapshot, &["read main"]].concat()
+    );
     write.commit().unwrap();
     let replace_main = ["read main", "atomic_replace main"];
     assert_eq!(calls(), [&frame[..], &record, &replace_main].concat());
@@ -1786,24 +1799,27 @@ fn write_and_commit_make_the_documented_fs_calls() {
     ];
     assert_eq!(
         calls(),
-        [&tail_check[..], &replay, &frame, &create].concat()
+        [&tail_check[..], &snapshot, &replay, &frame, &create].concat()
     );
     cas(&store, "release/v1", Some(1), None);
     let delete = ["read v1", "remove v1", "fsync_dir release"];
     let replay_and_cas = ["read main", "read v1", "read v1"];
     assert_eq!(
         calls(),
-        [&tail_check[..], &replay_and_cas, &frame, &delete].concat()
+        [&tail_check[..], &snapshot, &replay_and_cas, &frame, &delete].concat()
     );
 
-    // Readers write nothing: they read the ref files, the rest through their own handles.
+    // Readers write nothing: they measure the journal (journal.off first) before and after
+    // reading the ref files, and read the rest through their own handles. Here every frame is
+    // past the checkpoint, so the reflog and the journal cursor read no frames from the
+    // journal: the snapshot holds them all.
     let read = store.read().unwrap();
     read.changeset(id(2)).unwrap();
     read.list_refs().unwrap();
     read.reflog("main", 10).unwrap();
     read.journal_after(None, 10).unwrap();
     drop(read);
-    assert_eq!(calls(), ["read main"]);
+    assert_eq!(calls(), [&snapshot[..], &["read main"], &snapshot].concat());
 
     // Frames 4..=30, then the 32nd frame past the checkpoint: it syncs and checkpoints.
     for n in 3..30 {
@@ -1813,14 +1829,14 @@ fn write_and_commit_make_the_documented_fs_calls() {
     assert!(insert(&store, &[cs(30, &[])]).checkpointed);
     assert_eq!(
         calls(),
-        [&tail_check[..], &replay, &frame, &record, &sync].concat()
+        [&tail_check[..], &snapshot, &replay, &frame, &record, &sync].concat()
     );
 
     // A flush with nothing past the checkpoint; then with one frame past it.
     store.flush().unwrap();
-    assert_eq!(calls(), tail_check);
+    assert_eq!(calls(), [&tail_check[..], &snapshot].concat());
     insert(&store, &[cs(31, &[])]);
     calls();
     store.flush().unwrap();
-    assert_eq!(calls(), [&tail_check[..], &sync].concat());
+    assert_eq!(calls(), [&tail_check[..], &snapshot, &sync].concat());
 }

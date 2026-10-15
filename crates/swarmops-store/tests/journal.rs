@@ -162,15 +162,32 @@ fn assert_corrupt_at<T: Debug>(got: Result<T, StoreError>, offset: u64, what: &s
     }
 }
 
-/// [`RealFs`] that records each call as `"<method> <file name>"`.
+/// [`RealFs`] that records each call as `"<method> <file name>"`, and may run a hook once,
+/// right before the call it names goes ahead: a writer racing the caller.
 struct RecordingFs {
     calls: Arc<Mutex<Vec<String>>>,
+    hook: Mutex<Option<Hook>>,
 }
+
+/// A call as [`RecordingFs`] records it, and what runs right before it goes ahead.
+type Hook = (String, Box<dyn FnOnce() + Send>);
 
 impl RecordingFs {
     fn record(&self, method: &str, path: &Path) {
         let name = path.file_name().unwrap().to_string_lossy();
-        self.calls.lock().unwrap().push(format!("{method} {name}"));
+        let call = format!("{method} {name}");
+        let hook = {
+            let mut hook = self.hook.lock().unwrap();
+            if hook.as_ref().is_some_and(|(at, _)| *at == call) {
+                hook.take()
+            } else {
+                None
+            }
+        };
+        self.calls.lock().unwrap().push(call);
+        if let Some((_, run)) = hook {
+            run();
+        }
     }
 }
 
@@ -249,9 +266,15 @@ impl FsOps for RecordingFs {
 /// Another handle on the journal whose FsOps calls are recorded, and a function that
 /// returns the calls made since it last ran.
 fn recording_journal(layout: &Layout) -> (Journal, impl Fn() -> Vec<String>) {
+    racing_journal(layout, None)
+}
+
+/// [`recording_journal`], running `hook` once right before the call it names goes ahead.
+fn racing_journal(layout: &Layout, hook: Option<Hook>) -> (Journal, impl Fn() -> Vec<String>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let fs = RecordingFs {
         calls: Arc::clone(&calls),
+        hook: Mutex::new(hook),
     };
     let journal = Journal::open(layout, Arc::new(fs)).unwrap();
     (journal, move || std::mem::take(&mut *calls.lock().unwrap()))
@@ -813,11 +836,10 @@ fn truncate_torn_tail_lists_a_whole_frame_that_lost_its_entry() {
 
 #[test]
 fn a_listed_frame_cut_short_is_journal_corrupt() {
-    // A listed frame's bytes were synced before its entry was appended, so under the lock,
-    // with no writer appending, journal.log ending inside one is a filesystem losing a
-    // committed frame, never a torn write: recovery cuts nothing and reports it. A reader
-    // takes no lock and measures journal.log before journal.off, so an append racing it looks
-    // the same: readers stop there silently and return the frames before it.
+    // A listed frame's bytes were synced before its entry was appended, so journal.log
+    // ending inside one is a filesystem losing a committed frame, never a torn write.
+    // Recovery cuts nothing and reports it; readers, which measure journal.off before
+    // journal.log, report it too.
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
     let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
@@ -835,14 +857,15 @@ fn a_listed_frame_cut_short_is_journal_corrupt() {
     );
     assert_eq!(offsets_on_disk(&layout), [0, 84], "no entry was dropped");
     let reader = reopen(&layout);
+    assert_corrupt_at(reader.tail_frames_from(0), 84, "tail_frames_from(0)");
+    assert_corrupt_at(reader.tail_frames_from(84), 84, "tail_frames_from(84)");
+    assert_corrupt_at(reader.frames_from(0, 10), 84, "frames_from");
+    assert_corrupt_at(reader.frames_after(0, 10), 84, "frames_after");
     assert_eq!(
-        reader.tail_frames_from(0).unwrap(),
+        reader.frames_from(0, 1).unwrap(),
         slice::from_ref(&first),
-        "readers stop silently"
+        "frame 0 still reads"
     );
-    assert_eq!(reader.tail_frames_from(84).unwrap(), Vec::<Frame>::new());
-    assert_eq!(reader.frames_from(0, 10).unwrap(), slice::from_ref(&first));
-    assert_eq!(reader.frames_after(0, 10).unwrap(), Vec::<Frame>::new());
 
     // Damage before the frame changes nothing: frame 0 failing its CRC, journal.log ending 2
     // bytes into frame 1 (found by `fuzz/fuzz_targets/journal_recovery.rs`).
@@ -876,9 +899,8 @@ fn a_listed_frame_cut_short_is_journal_corrupt() {
 
 #[test]
 fn a_log_ending_at_the_last_listed_frames_start_is_journal_corrupt() {
-    // journal.off lists frame 1, but journal.log ends where it starts: under the lock the
-    // committed frame is missing as a whole. A reader sees the same while an append races it
-    // (the frame's entry is there, its bytes past the length it read), so it stops silently.
+    // journal.off lists frame 1, but journal.log ends where it starts: the committed frame
+    // is missing as a whole, for recovery and for readers alike.
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
     let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
@@ -891,24 +913,98 @@ fn a_log_ending_at_the_last_listed_frames_start_is_journal_corrupt() {
     assert_eq!(offsets_on_disk(&layout), [0, 84], "no entry was dropped");
     let reader = reopen(&layout);
     assert_eq!(reader.frame_count().unwrap(), 2);
-    assert_eq!(
-        reader.tail_frames_from(0).unwrap(),
-        slice::from_ref(&first),
-        "readers stop silently"
+    assert_corrupt_at(reader.tail_frames_from(0), 84, "tail_frames_from(0)");
+    assert_corrupt_at(
+        reader.tail_frames_from(84),
+        84,
+        "tail_frames_from(84), the end",
     );
-    assert_eq!(reader.tail_frames_from(84).unwrap(), Vec::<Frame>::new());
-    assert_eq!(reader.frames_from(0, 10).unwrap(), slice::from_ref(&first));
-    assert_eq!(reader.frames_after(0, 10).unwrap(), Vec::<Frame>::new());
+    assert_corrupt_at(reader.frames_from(0, 10), 84, "frames_from");
+    assert_corrupt_at(reader.frames_after(0, 10), 84, "frames_after");
+    assert_eq!(reader.frames_from(0, 1).unwrap(), [first]);
 
     // The only listed frame missing: an empty journal.log under journal.off = [0].
     set_len(layout.journal_off(), 8);
     set_len(layout.journal_log(), 0);
     assert_corrupt_at(journal.truncate_torn_tail(), 0, "frame 0 is missing");
     assert_eq!(offsets_on_disk(&layout), [0], "no entry was dropped");
-    assert_eq!(
-        reopen(&layout).tail_frames_from(0).unwrap(),
-        Vec::<Frame>::new()
+    assert_corrupt_at(
+        reopen(&layout).tail_frames_from(0),
+        0,
+        "tail_frames_from(0)",
     );
+}
+
+#[test]
+fn readers_measure_off_before_log() {
+    // A frame listed in a snapshot of journal.off was synced before its entry was written,
+    // so it is whole in any journal.log measured after: readers measure journal.off first,
+    // and never again once journal.log is measured.
+    let order = ["file_len journal.off", "file_len journal.log"];
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    let (reader, calls) = recording_journal(&layout);
+    reader.tail_frames_from(0).unwrap();
+    assert_eq!(calls(), order, "tail_frames_from(0)");
+    reader.tail_frames_from(257).unwrap();
+    assert_eq!(calls(), order, "tail_frames_from at the end");
+    reader.frames_from(0, 10).unwrap();
+    assert_eq!(calls(), order, "frames_from");
+    reader.frames_after(0, 10).unwrap();
+    assert_eq!(calls(), order, "frames_after");
+
+    // A writer that appends a whole frame and its entry between the two measurements: to the
+    // reader that frame is whole and not listed yet.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    let racing_at = |call: &str| -> Hook {
+        let (log, off) = (layout.journal_log(), layout.journal_off());
+        let frame = frame_bytes(&[&[1, 0][..], &encoded(&compacted(2))].concat());
+        let append = move || {
+            append_bytes(&log, &frame);
+            append_bytes(&off, &84_u64.to_le_bytes());
+        };
+        (call.to_owned(), Box::new(append))
+    };
+    let racing = || racing_at("file_len journal.log");
+    let raced = Frame {
+        seq: 1,
+        offset: 84,
+        records: vec![compacted(2)],
+    };
+    let (reader, calls) = racing_journal(&layout, Some(racing()));
+    assert_eq!(
+        reader.tail_frames_from(0).unwrap(),
+        [first.clone(), raced.clone()],
+        "tail_frames_from includes the frame, unlisted when it measured journal.off"
+    );
+    assert_eq!(calls(), order);
+
+    set_len(layout.journal_log(), 84);
+    set_len(layout.journal_off(), 8);
+    let (reader, calls) = racing_journal(&layout, Some(racing()));
+    assert_eq!(
+        reader.frames_from(0, 10).unwrap(),
+        slice::from_ref(&first),
+        "frames_from returns the frames listed when it measured journal.off"
+    );
+    assert_eq!(calls(), order);
+    assert_eq!(
+        reader.frames_from(0, 10).unwrap(),
+        [first.clone(), raced.clone()]
+    );
+
+    // A writer that appends just before journal.off is measured: the reader sees the frame
+    // listed and whole. One that measured journal.log first would find it listed and missing.
+    set_len(layout.journal_log(), 84);
+    set_len(layout.journal_off(), 8);
+    let (reader, _) = racing_journal(&layout, Some(racing_at("file_len journal.off")));
+    assert_eq!(reader.tail_frames_from(0).unwrap(), [first, raced]);
 }
 
 #[test]
