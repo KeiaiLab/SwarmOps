@@ -8,7 +8,8 @@
 //! of `~N` suffixes, each walking `N` first parents back (`main~2`, `main~1~1`).
 
 use swarmops_core::{
-    Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Tree, TreeEntry, TreeId,
+    BlobId, Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Tree, TreeEntry,
+    TreeId,
 };
 use swarmops_store::{ChangesetMeta, MetaRead, ObjectStore, StoreError};
 
@@ -64,14 +65,14 @@ impl<O: ObjectStore> Repo<O> {
         Ok(id)
     }
 
-    /// The kind and bytes of the file at `path` in changeset `cs`'s tree; `None` if no file
-    /// is there (nothing, or a directory). [`RepoError::NotFound`] if the store does not hold
-    /// `cs`.
+    /// The kind, the blob id and the bytes of the file at `path` in changeset `cs`'s tree;
+    /// `None` if no file is there (nothing, or a directory). [`RepoError::NotFound`] if the
+    /// store does not hold `cs`.
     pub fn read_blob_at(
         &self,
         cs: ChangesetId,
         path: &RepoPath,
-    ) -> Result<Option<(EntryKind, Vec<u8>)>, RepoError> {
+    ) -> Result<Option<(EntryKind, BlobId, Vec<u8>)>, RepoError> {
         let root = self.root_of(cs)?;
         let components: Vec<&str> = path.components().collect();
         let (&name, dirs) = components.split_last().expect("a path has a component");
@@ -82,7 +83,7 @@ impl<O: ObjectStore> Repo<O> {
         match find(&tree, name) {
             Some(entry) if entry.kind != EntryKind::Dir => {
                 let content = repo::object(&self.objects, entry.id, ObjectKind::Blob)?;
-                Ok(Some((entry.kind, content)))
+                Ok(Some((entry.kind, BlobId(entry.id), content)))
             }
             _ => Ok(None),
         }

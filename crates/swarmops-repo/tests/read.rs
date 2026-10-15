@@ -132,20 +132,15 @@ fn read_blob_at_and_list_tree_without_checkout() {
         ],
     );
 
-    // Each file with its kind and bytes, read from the objects alone.
+    // Each file with its kind, its blob's id and its bytes, read from the objects alone.
     let read = |p: &str| repo.read_blob_at(id, &path(p)).unwrap();
-    assert_eq!(
-        read("README.md"),
-        Some((EntryKind::File, b"# demo\n".to_vec()))
-    );
-    assert_eq!(read("bin/run"), Some((EntryKind::Exec, script.to_vec())));
-    assert_eq!(
-        read("bin/link"),
-        Some((EntryKind::Symlink, b"run".to_vec()))
-    );
+    let file = |kind: EntryKind, content: &[u8]| Some((kind, blob(content), content.to_vec()));
+    assert_eq!(read("README.md"), file(EntryKind::File, b"# demo\n"));
+    assert_eq!(read("bin/run"), file(EntryKind::Exec, script));
+    assert_eq!(read("bin/link"), file(EntryKind::Symlink, b"run"));
     assert_eq!(
         read("src/lib.rs"),
-        Some((EntryKind::File, b"pub fn f() {}\n".to_vec()))
+        file(EntryKind::File, b"pub fn f() {}\n")
     );
     assert_eq!(read("bin"), None, "a directory is no file");
 

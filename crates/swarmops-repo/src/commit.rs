@@ -96,6 +96,9 @@ pub struct CommitOutcome {
     pub id: ChangesetId,
     /// Its root tree.
     pub root: TreeId,
+    /// How many paths the changeset changes: the length of its delta, which leaves out the
+    /// puts of what a path held already.
+    pub files_changed: usize,
     /// How many blobs this call wrote that the store did not hold yet.
     pub blobs_written: usize,
     /// How many trees this call wrote that the store did not hold yet.
@@ -137,6 +140,7 @@ impl<O: ObjectStore> Repo<O> {
         if delta.is_empty() && !allow_empty {
             return Err(RepoError::EmptyChanges);
         }
+        let files_changed = delta.len();
         let Encoded {
             root,
             changed: trees,
@@ -192,6 +196,7 @@ impl<O: ObjectStore> Repo<O> {
         Ok(CommitOutcome {
             id,
             root,
+            files_changed,
             blobs_written,
             trees_written,
             insert,

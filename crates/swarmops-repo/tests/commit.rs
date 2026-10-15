@@ -157,7 +157,7 @@ fn names(entries: &[(&str, EntryKind)]) -> Vec<(String, EntryKind)> {
 fn content(repo: &LocalRepo, id: ChangesetId, p: &str) -> Option<Vec<u8>> {
     repo.read_blob_at(id, &path(p))
         .unwrap()
-        .map(|(_, bytes)| bytes)
+        .map(|(_, _, bytes)| bytes)
 }
 
 fn entry(name: &str, kind: EntryKind, id: ObjectId) -> TreeEntry {
@@ -218,6 +218,7 @@ fn root_commit_from_change_list_builds_trees_and_delta() {
         ],
     );
     assert_eq!((out.blobs_written, out.trees_written), (3, 3));
+    assert_eq!(out.files_changed, 3);
     assert_eq!(out.insert, InsertOutcome::Inserted { seq: 0 });
     assert_eq!(out.warnings, Vec::<String>::new());
 
@@ -438,6 +439,7 @@ fn allow_empty_commits_a_changeset_with_the_parent_root() {
     assert_ne!(out.id, base.id);
     assert_eq!(out.root, base.root);
     assert_eq!((out.blobs_written, out.trees_written), (0, 0));
+    assert_eq!(out.files_changed, 0);
     assert_eq!(out.insert, InsertOutcome::Inserted { seq: 1 });
     let stored = repo.changeset(out.id).unwrap().unwrap();
     assert_eq!(stored.changeset.parents, [base.id]);
@@ -742,6 +744,11 @@ fn commit_is_idempotent_for_identical_request() {
         "nothing new to write"
     );
     assert_eq!(again.warnings, Vec::<String>::new());
+    assert_eq!(
+        (first.files_changed, again.files_changed),
+        (2, 2),
+        "a replay counts its delta too"
+    );
     assert_eq!(object_files(&root), objects);
     assert_eq!(journal_frames(&root), frames, "no new transaction");
     assert_eq!(repo.info().unwrap().changesets, 2);
@@ -862,8 +869,12 @@ fn commit_records_only_what_changes() {
         "one blob for both new files (the script's is stored already), and the root"
     );
     assert_eq!(
+        out.files_changed, 3,
+        "four changes, but the put of what same.txt holds already is not one"
+    );
+    assert_eq!(
         repo.read_blob_at(out.id, &path("tool")).unwrap(),
-        Some((EntryKind::Exec, script.to_vec()))
+        Some((EntryKind::Exec, blob(script), script.to_vec()))
     );
 }
 

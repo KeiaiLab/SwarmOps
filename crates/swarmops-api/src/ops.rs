@@ -127,7 +127,8 @@ pub struct ChangeInput {
     pub path: String,
     /// Whether to write the path or remove it.
     pub op: ChangeOp,
-    /// The new content; a `put` needs it, a `delete` takes none.
+    /// The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`
+    /// takes none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentInput>,
     /// The kind of entry a `put` writes; `file` when omitted.
@@ -211,10 +212,12 @@ pub struct FileContent {
     pub size: u64,
     /// The file's kind.
     pub kind: FileKind,
-    /// How `content` encodes the bytes it returns.
+    /// How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they
+    /// are not.
     pub encoding: ContentEncoding,
-    /// The bytes returned: the whole blob, or at most `max_bytes` from its start when
-    /// `truncated`.
+    /// The bytes returned: the whole blob, or the start of it when `truncated`. A cut keeps text
+    /// as text: it falls where a character starts, so text may stop up to 3 bytes short of
+    /// `max_bytes`, while bytes that are not text stop at exactly `max_bytes`.
     pub content: String,
     /// Whether `content` stops before the end of the blob.
     pub truncated: bool,
@@ -309,7 +312,7 @@ pub struct ShowReq {
 }
 
 /// `show`: a changeset's header, changes and metadata. Byte strings are decoded as UTF-8, with
-/// invalid bytes replaced.
+/// invalid bytes replaced, except metadata values (see `metadata`).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct ChangesetDetail {
     /// The changeset's id.
@@ -333,7 +336,9 @@ pub struct ChangesetDetail {
     pub files_changed: u64,
     /// Whether `changes` stops before the changeset's last change.
     pub changes_truncated: bool,
-    /// SwarmOps metadata, such as `agent` and `run_id`.
+    /// SwarmOps metadata, such as `agent` and `run_id`. A value that is not UTF-8 is given in
+    /// standard, padded base64, under its key with `:b64` appended. A commit refuses a key that
+    /// ends in `:b64`, so `k:b64` is always the base64 of `k`'s value, which is not UTF-8.
     pub metadata: BTreeMap<String, String>,
     /// The git author and committer signatures, kept for git fidelity.
     pub signatures: Signatures,
@@ -342,7 +347,8 @@ pub struct ChangesetDetail {
 /// Whom a changeset is attributed to (operations spec §5).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct Attribution {
-    /// The agent that wrote it: the changeset's `agent` metadata.
+    /// The agent that wrote it: the changeset's `agent` metadata, or `unknown/unknown` for a
+    /// changeset that records none.
     pub agent: String,
     /// The run it was written in: the changeset's `run_id` metadata, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -424,7 +430,7 @@ pub struct ChangesetSummary {
     pub id: String,
     /// The parents' ids, mainline parent first.
     pub parents: Vec<String>,
-    /// The agent that wrote it.
+    /// The agent that wrote it, as `show` gives `author.agent`.
     pub author_agent: String,
     /// When it was recorded: the committer signature's time, in Unix milliseconds.
     pub created_at: u64,
@@ -485,6 +491,10 @@ pub struct RefSetResp {
     pub new: Option<String>,
     /// The ref was already in the requested state, so nothing changed and a replay is safe.
     pub already_applied: bool,
+    /// Problems found after the move became durable, such as failed housekeeping; the move
+    /// itself succeeded. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// `ref delete`: remove a ref by compare-and-swap.
@@ -527,6 +537,12 @@ pub trait StoreOps {
     fn repo_info(&self, req: InfoReq) -> Result<RepoInfo, OpError>;
 
     /// Records a changeset from an explicit change list; moves no ref (CLI `commit`).
+    ///
+    /// [`ContentInput::File`] names a file on the caller's machine, so it is resolved on the
+    /// client: a store that runs in the caller's process reads the file there, and a store that
+    /// serves these operations over a wire must refuse such content rather than read a path its
+    /// caller names (M10 adds the client-side pass that turns it into bytes before a request
+    /// leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
 
     /// Reads one file at a revision (CLI `cat`).
