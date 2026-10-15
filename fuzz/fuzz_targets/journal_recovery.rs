@@ -514,6 +514,18 @@ fn tail_run(
             Some(from),
             "{what}: read nothing listed from {from}, which is not where the listed frames end"
         );
+        // And the last listed frame starts where the one listed before it ends (frame 0 at 0):
+        // a zeroed entry there does not.
+        if let Some((&last, before)) = entries.split_last() {
+            let previous_end = before
+                .last()
+                .map_or(Some(0), |&previous| files.frame_end(previous));
+            assert_eq!(
+                previous_end,
+                Some(last),
+                "{what}: the last listed frame, at {last}, does not start where the one before it ends"
+            );
+        }
     }
     assert!(
         at <= to_u64(files.log.len()),

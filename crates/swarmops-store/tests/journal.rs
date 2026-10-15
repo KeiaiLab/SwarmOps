@@ -1041,6 +1041,20 @@ fn a_zeroed_entry_is_journal_corrupt_for_readers_too() {
             "{what}: nothing changed"
         );
     }
+
+    // Read from where frame 0 ends, 19: every entry is below it, so no listed frame starts
+    // at or after it, and the read must start where the last listed frame ends. That frame
+    // must also start where the one listed before it ends, which a zeroed entry does not.
+    for entries in [&[0, 0][..], &[0, 19, 0, 0], &[0, 0, 0, 0]] {
+        let what = format!("journal.off {entries:?}, read from 19");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[compacted(1)]).unwrap(); // bytes 0..19
+        journal.append_frame(&[compacted(2)]).unwrap(); // bytes 19..38
+        let off: Vec<u8> = entries.iter().flat_map(|e: &u64| e.to_le_bytes()).collect();
+        fs::write(layout.journal_off(), off).unwrap();
+        assert_corrupt_at(reopen(&layout).tail_frames_from(19), 0, &what);
+    }
 }
 
 #[test]

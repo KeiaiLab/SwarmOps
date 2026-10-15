@@ -241,23 +241,26 @@ impl Journal {
     pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
         let listed = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
         let first = self.first_at_or_after(offset, listed)?;
-        // Where each listed frame from `first` on starts, and where the last listed one does.
+        // Where each listed frame from `first` on starts; with none from there on, where the
+        // last listed frame and the one before it start.
         let entries = self.entries(first, listed - first)?;
-        let last_start = match entries.last() {
-            Some(&start) => Some(start),
-            None => listed
-                .checked_sub(1)
-                .map(|last| self.entry(last))
-                .transpose()?,
+        let listed_end_of = match (entries.is_empty(), listed.checked_sub(1)) {
+            (true, Some(last)) => Some((self.entry_before(last)?, self.entry(last)?)),
+            _ => None,
         };
         // Only now journal.log, which holds whole every frame listed above.
         let log_len = self.fs.file_len(self.log_path.as_std_path())?;
         if offset > log_len {
             return Err(StoreError::JournalCorrupt { offset });
         }
-        let is_boundary = match (entries.first(), last_start) {
+        let is_boundary = match (entries.first(), listed_end_of) {
             (Some(&start), _) => start == offset,
-            (None, Some(last)) => self.frame_end(last, log_len)? == Some(offset),
+            // Past every listed frame: `offset` must be where the last one ends, and that one
+            // must start where the frame listed before it ends (a zeroed entry does not).
+            (None, Some((previous, last))) => {
+                self.check_starts_after(previous, last, log_len)?;
+                self.frame_end(last, log_len)? == Some(offset)
+            }
             (None, None) => offset == 0,
         };
         if !is_boundary {
