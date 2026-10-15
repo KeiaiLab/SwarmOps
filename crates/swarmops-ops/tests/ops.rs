@@ -179,6 +179,14 @@ fn expect_err<T: Debug>(result: Result<T, OpError>, code: ErrorCode) -> OpError 
                 !error.message.is_empty() && !error.message.contains(['\n', '\r']),
                 "the message is one line: {error:?}"
             );
+            assert!(
+                !error
+                    .hint
+                    .as_deref()
+                    .unwrap_or_default()
+                    .contains(['\n', '\r']),
+                "the hint is one line: {error:?}"
+            );
             error
         }
     }
@@ -793,10 +801,8 @@ fn ref_set_create_update_mismatch_and_already_applied() {
         ErrorCode::CasMismatch,
     );
     assert_eq!(err.details["actual"], json!(c1));
-    assert_eq!(
-        err.hint,
-        Some(format!("swarmops ref set main {c2} --expect {c1}"))
-    );
+    assert!(err.message.contains("exists"), "{err:?}");
+    assert_eq!(err.hint, Some(format!("swarmops show {c1}")));
 
     // Move with the target last seen, then replay the move.
     let moved = ops
@@ -814,6 +820,14 @@ fn ref_set_create_update_mismatch_and_already_applied() {
     );
     assert_eq!((err.exit, err.retryable), (4, true));
     assert_eq!(err.details["actual"], json!(c2));
+    assert_eq!(
+        err.message,
+        format!(
+            "ref main moved to {c2}: commit your change on top of it (--parent {c2}), then \
+             retry with --expect {c2}"
+        )
+    );
+    assert_eq!(err.hint, Some(format!("swarmops show {c2}")));
     // Both revisions resolve: a unique prefix and a ref name.
     let moved = ops
         .ref_set(&who, set("main", &c3[..12], Some("main"), false))
@@ -865,9 +879,10 @@ fn delete_refs_by_compare_and_swap(ops: &LocalOps, who: &Identity, [c1, c3]: [&s
     let err = expect_err(delete("main", c1), ErrorCode::CasMismatch);
     assert_eq!(err.details["actual"], json!(c3));
     assert_eq!(
-        err.hint,
-        Some(format!("swarmops ref delete main --expect {c3}"))
+        err.message,
+        format!("ref main now points at {c3}; re-check before deleting")
     );
+    assert_eq!(err.hint, Some(format!("swarmops show {c3}")));
     assert_eq!(delete("main", c3).unwrap(), deleted("main", c3, false));
     let refs = ops.ref_list(RefListReq {}).unwrap().refs;
     assert!(refs.is_empty(), "{refs:?}");
@@ -891,9 +906,104 @@ fn delete_refs_by_compare_and_swap(ops: &LocalOps, who: &Identity, [c1, c3]: [&s
         ErrorCode::CasMismatch,
     );
     assert_eq!(err.details["actual"], Value::Null);
+    assert_eq!(err.hint.as_deref(), Some("swarmops ref list"));
+}
+
+#[test]
+fn cas_mismatch_hints_never_overwrite_the_winner() {
+    let (_dir, _root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+    let c3 = commit(&ops, Some(&c2), vec![text("f", "3")]);
+    ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+    // The winner moves main on; then each kind of loser comes along.
+    ops.ref_set(&who, set("main", &c2, Some(&c1), false))
+        .unwrap();
+    let delete = |name: &str, expected: &str| RefDeleteReq {
+        name: name.to_owned(),
+        expected_old: expected.into(),
+    };
+    let lost = [
+        (ops.ref_set(&who, set("main", &c3, None, true)), Some(&c2)),
+        (
+            ops.ref_set(&who, set("main", &c3, Some(&c1), false)),
+            Some(&c2),
+        ),
+        (ops.ref_delete(&who, delete("main", &c1)), Some(&c2)),
+        (
+            ops.ref_set(&who, set("release/1", &c3, Some(&c1), false)),
+            None,
+        ),
+    ];
+    for (result, actual) in lost {
+        let err = expect_err(result, ErrorCode::CasMismatch);
+        assert_eq!(err.details["actual"], json!(actual), "{err:?}");
+        // The hint only reads: running it cannot undo the winner's move.
+        let hint = err.hint.clone().unwrap();
+        let reads = match actual {
+            Some(actual) => hint == format!("swarmops show {actual}"),
+            None => hint == "swarmops ref list",
+        };
+        assert!(reads, "{err:?}");
+        for forbidden in ["--expect", "--create", "ref set", "ref delete"] {
+            assert!(!hint.contains(forbidden), "{err:?}");
+        }
+    }
     assert_eq!(
-        err.hint,
-        Some(format!("swarmops ref set main {c1} --create"))
+        ops.repo_info(InfoReq {}).unwrap().main.as_deref(),
+        Some(c2.as_str())
+    );
+}
+
+#[test]
+fn hints_quote_what_they_interpolate() {
+    let (dir, root, ops) = new_store();
+    let c = commit(
+        &ops,
+        None,
+        vec![
+            text("my dir/f", "1"),
+            text("odd\nname/f", "2"),
+            text("it's/f", "3"),
+        ],
+    );
+    let hint_of = |result: Result<FileContent, OpError>, code: ErrorCode| {
+        expect_err(result, code).hint.unwrap()
+    };
+    // A word with characters a shell would split or expand comes in single quotes; a line
+    // break in it is escaped, so the hint stays one line.
+    let is_dir = |path: &str| hint_of(ops.read_file(cat(&c, path)), ErrorCode::IsDir);
+    assert_eq!(is_dir("my dir"), format!("swarmops ls '{c}:my dir'"));
+    assert_eq!(is_dir("odd\nname"), format!("swarmops ls '{c}:odd\\nname'"));
+    assert_eq!(is_dir("it's"), format!("swarmops ls '{c}:it'\\''s'"));
+    let missing = hint_of(
+        ops.read_file(cat(&c, "my dir/no file")),
+        ErrorCode::PathNotFound,
+    );
+    assert_eq!(missing, format!("swarmops ls '{c}:my dir'"));
+    let not_a_dir = expect_err(
+        ops.read_tree(ls(&c, Some("my dir/f"))),
+        ErrorCode::PathNotFound,
+    );
+    assert_eq!(not_a_dir.hint, Some(format!("swarmops cat '{c}:my dir/f'")));
+    // A plain word stays as it is.
+    assert_eq!(
+        expect_err(ops.read_file(cat(&c, "nope")), ErrorCode::PathNotFound).hint,
+        Some(format!("swarmops ls {c}"))
+    );
+
+    // Store paths too.
+    let spaced = utf8(dir.path().join("my store"));
+    let (_spaced_ops, _) = LocalOps::init(&spaced, "spaced").unwrap();
+    let err = expect_err(LocalOps::init(&spaced, "spaced"), ErrorCode::ExistsAlready);
+    assert_eq!(err.hint, Some(format!("swarmops --repo '{spaced}' info")));
+    let nowhere = utf8(dir.path().join("no store"));
+    let err = expect_err(LocalOps::open(&nowhere), ErrorCode::NotARepo);
+    assert_eq!(err.hint, Some(format!("swarmops init '{nowhere}'")));
+    assert_eq!(
+        expect_err(LocalOps::init(&root, "acme"), ErrorCode::ExistsAlready).hint,
+        Some(format!("swarmops --repo {root} info"))
     );
 }
 
@@ -1166,11 +1276,13 @@ fn read_errors_map_to_codes() {
     let err = expect_err(ops.read_tree(ls(&c, Some("file"))), ErrorCode::PathNotFound);
     assert_eq!(err.hint, Some(format!("swarmops cat {c}:file")));
     expect_err(ops.read_tree(ls(&c, Some("nope"))), ErrorCode::PathNotFound);
-    // An empty path is the root.
-    assert_eq!(
-        ops.read_tree(ls(&c, Some(""))).unwrap(),
-        ops.read_tree(ls(&c, None)).unwrap()
-    );
+    // An empty path is the root, and one trailing `/` is taken (`ls main:dir/`); two are not.
+    let listing = |path: Option<&str>| ops.read_tree(ls(&c, path)).unwrap();
+    assert_eq!(listing(Some("")), listing(None));
+    assert_eq!(listing(Some("/")), listing(None));
+    assert_eq!(listing(Some("dir/")), listing(Some("dir")));
+    let err = expect_err(ops.read_tree(ls(&c, Some("dir//"))), ErrorCode::InvalidArg);
+    assert_eq!(err.details["path"], "dir//");
 
     // Limits start at 1.
     let zero_ls = ReadTreeReq {

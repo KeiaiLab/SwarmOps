@@ -23,7 +23,7 @@ use swarmops_core::{
 use swarmops_repo::{CasResult, CommitRequest, LocalRepo, RepoError, StoredChangeset};
 
 use crate::content;
-use crate::error::{During, details, error, one_line, op, repo_error};
+use crate::error::{During, details, error, hint, one_line, op, repo_error, shell_word};
 
 /// The agent a changeset is attributed to when its metadata names none.
 const UNKNOWN_AGENT: &str = "unknown/unknown";
@@ -51,9 +51,9 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
 ///   fewer); otherwise exactly `max_bytes` bytes, in base64. A directory there is `E_IS_DIR`,
 ///   nothing there `E_PATH_NOT_FOUND`.
-/// - `read_tree` lists a directory (the root for an omitted or empty path) in name order, a page
-///   of at most `limit` entries after the `cursor` name; a file or nothing at the path is
-///   `E_PATH_NOT_FOUND`.
+/// - `read_tree` lists a directory (the root for an omitted or empty path; one trailing `/` is
+///   taken) in name order, a page of at most `limit` entries after the `cursor` name; a file or
+///   nothing at the path is `E_PATH_NOT_FOUND`.
 /// - `show` attributes the changeset by its `agent` and `run_id` metadata (`unknown/unknown`
 ///   when it records no agent); `created_at` is the committer's time in milliseconds (0 before
 ///   1970); a metadata value that is not UTF-8 is given in base64 under its key with `:b64`
@@ -70,9 +70,10 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///
 /// # Errors
 ///
-/// Every error's message is one line (control characters in it are escaped), and its hint,
-/// where there is an obvious next step, is a command. Repository failures map to codes as
-/// follows, `details` keys in braces:
+/// Every error's message and hint is one line (control characters in it are escaped), and the
+/// hint, where there is an obvious next step, is a command, each word a shell would split or
+/// expand in single quotes. Repository failures map to codes as follows, `details` keys in
+/// braces:
 ///
 /// - `E_REV_NOT_FOUND` `{rev}`: `NotFound`, and the store's `UnknownRefTarget`. The hint is
 ///   `swarmops ref list` for a ref name, `swarmops log` for an id or a `~N` walk.
@@ -103,7 +104,9 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///
 /// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
 /// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does
-/// not exist), whose hint is the move that would succeed now; `E_TOO_LARGE`
+/// not exist), whose message gives the retry (commit on `actual`, then expect it) and whose hint
+/// only reads, `swarmops show <actual>` or `swarmops ref list`, so that an agent that runs it
+/// cannot undo the move that won; `E_TOO_LARGE`
 /// `{index, path, size, limit}` for a put over 512 MiB; and `E_INVALID_ARG` for limits, cursors
 /// and requests that break their own rules.
 pub struct LocalOps {
@@ -223,7 +226,10 @@ impl LocalOps {
                 format!("{path:?} is a file at {rev}, not a directory"),
             )
             .with_details(rev_and_path(rev, path))
-            .with_hint(format!("swarmops cat {rev}:{path}")),
+            .with_hint(hint(format!(
+                "swarmops cat {}",
+                shell_word(&format!("{rev}:{path}"))
+            ))),
             Some(Err(e)) => e,
             _ => path_not_found(rev, path),
         }
@@ -323,7 +329,10 @@ impl StoreOps for LocalOps {
                     format!("{path:?} is a directory at {rev}"),
                 )
                 .with_details(rev_and_path(&rev, &path))
-                .with_hint(format!("swarmops ls {rev}:{path}")),
+                .with_hint(hint(format!(
+                    "swarmops ls {}",
+                    shell_word(&format!("{rev}:{path}"))
+                ))),
                 None => path_not_found(&rev, &path),
             });
         };
@@ -350,9 +359,15 @@ impl StoreOps for LocalOps {
         } = req;
         at_least_one("limit", limit)?;
         let cs = self.resolve(&rev)?;
-        let dir = match path.as_deref() {
-            None | Some("") => None,
-            Some(path) => Some(content::repo_path(path)?),
+        // One trailing `/` is taken (`ls main:src/`); an error names the path as given.
+        let given = path
+            .as_deref()
+            .map(|path| (path, path.strip_suffix('/').unwrap_or(path)));
+        let dir = match given {
+            None | Some((_, "")) => None,
+            Some((path, trimmed)) => {
+                Some(RepoPath::new(trimmed).or_else(|_| content::repo_path(path))?)
+            }
         };
         let Some(entries) = self.repo.list_tree(cs, dir.as_ref()).map_err(op)? else {
             return Err(self.no_directory(cs, &rev, dir.as_ref()));
@@ -479,11 +494,20 @@ impl StoreOps for LocalOps {
             CasResult::Applied { .. } => false,
             CasResult::Mismatch { actual } if actual == Some(new) => true,
             CasResult::Mismatch { actual } => {
-                let hint = match actual {
-                    Some(actual) => format!("swarmops ref set {name} {new} --expect {actual}"),
-                    None => format!("swarmops ref set {name} {new} --create"),
+                let message = match (expected, actual) {
+                    (Some(_), Some(actual)) => format!(
+                        "ref {name} moved to {actual}: commit your change on top of it \
+                         (--parent {actual}), then retry with --expect {actual}"
+                    ),
+                    (None, Some(actual)) => {
+                        format!("ref {name} exists already: it points at {actual}")
+                    }
+                    (Some(expected), None) => {
+                        format!("ref {name} does not exist, so it does not point at {expected}")
+                    }
+                    (None, None) => format!("ref {name} does not exist"),
                 };
-                return Err(cas_mismatch(&name, expected, actual, hint));
+                return Err(cas_mismatch(&name, actual, message));
             }
         };
         Ok(RefSetResp {
@@ -509,8 +533,9 @@ impl StoreOps for LocalOps {
             CasResult::Mismatch {
                 actual: Some(actual),
             } => {
-                let hint = format!("swarmops ref delete {name} --expect {actual}");
-                return Err(cas_mismatch(&name, Some(expected), Some(actual), hint));
+                let message =
+                    format!("ref {name} now points at {actual}; re-check before deleting");
+                return Err(cas_mismatch(&name, Some(actual), message));
             }
         };
         Ok(RefSetResp {
@@ -543,37 +568,30 @@ fn rev_and_path(rev: &Rev, path: &str) -> Map<String, Value> {
 /// Nothing at `path` in the changeset `rev` named; the hint lists the directory it would be in.
 fn path_not_found(rev: &Rev, path: &str) -> OpError {
     let listing = match path.rsplit_once('/') {
-        Some((dir, _)) => format!("swarmops ls {rev}:{dir}"),
-        None => format!("swarmops ls {rev}"),
+        Some((dir, _)) => shell_word(&format!("{rev}:{dir}")),
+        None => shell_word(rev.as_str()),
     };
     error(
         ErrorCode::PathNotFound,
         format!("nothing is at {path:?} in {rev}"),
     )
     .with_details(rev_and_path(rev, path))
-    .with_hint(listing)
+    .with_hint(hint(format!("swarmops ls {listing}")))
 }
 
-/// A ref move refused because ref `name` names `actual` (`None`: it does not exist), not
-/// `expected` (`None`: the move was to create it); `hint` is the move that would succeed now.
-fn cas_mismatch(
-    name: &str,
-    expected: Option<ChangesetId>,
-    actual: Option<ChangesetId>,
-    hint: String,
-) -> OpError {
-    let message = match (expected, actual) {
-        (None, Some(actual)) => format!("ref {name} exists already: it names {actual}"),
-        (Some(expected), Some(actual)) => format!("ref {name} names {actual}, not {expected}"),
-        (Some(expected), None) => {
-            format!("ref {name} does not exist, so it does not name {expected}")
-        }
-        (None, None) => format!("ref {name} does not exist"),
+/// A ref move refused because ref `name` names `actual` (`None`: it does not exist), not what
+/// the move expected; `message` says so and how to retry. The hint only reads (what the ref
+/// names now, or the refs when it is gone), so that an agent that runs it cannot undo the move
+/// that won.
+fn cas_mismatch(name: &str, actual: Option<ChangesetId>, message: String) -> OpError {
+    let next = match actual {
+        Some(actual) => format!("swarmops show {actual}"),
+        None => "swarmops ref list".to_owned(),
     };
     let actual = actual.map_or(Value::Null, |id| id.to_string().into());
     error(ErrorCode::CasMismatch, message)
         .with_details(details([("name", name.into()), ("actual", actual)]))
-        .with_hint(hint)
+        .with_hint(next)
 }
 
 /// `E_INVALID_ARG` unless `value`, the request's `field`, is at least 1.

@@ -37,10 +37,10 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
     match e {
         RepoError::Store(e) => store_error(e, message, during),
         RepoError::NotFound(rev) => {
-            let hint = rev_hint(&rev);
+            let next = rev_hint(&rev);
             error(ErrorCode::RevNotFound, message)
                 .with_details(details([("rev", rev.into())]))
-                .with_hint(hint)
+                .with_hint(next)
         }
         RepoError::Ambiguous(rev) => error(ErrorCode::AmbiguousId, message)
             .with_details(details([("rev", rev.into())]))
@@ -56,7 +56,10 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
                 ErrorCode::ExistsAlready,
                 format!("a store exists at {at} already"),
             )
-            .with_hint(format!("swarmops --repo {at} info")),
+            .with_hint(hint(format!(
+                "swarmops --repo {} info",
+                shell_word(at.as_str())
+            ))),
             During::Open(_) | During::Op => error(ErrorCode::ExistsAlready, message),
         },
         RepoError::UnknownParent(id) => error(ErrorCode::UnknownParent, message)
@@ -175,7 +178,7 @@ fn not_a_repo(at: &Utf8Path, what: String) -> OpError {
     if Layout::new(at).format_file().exists() {
         error
     } else {
-        error.with_hint(format!("swarmops init {at}"))
+        error.with_hint(hint(format!("swarmops init {}", shell_word(at.as_str()))))
     }
 }
 
@@ -192,9 +195,28 @@ fn ref_name_invalid(name: String, message: String) -> OpError {
 /// history for an id, the refs for a ref name.
 fn rev_hint(rev: &str) -> String {
     match rev.split_once('~') {
-        Some((base, _)) => format!("swarmops log {base}"),
+        Some((base, _)) => hint(format!("swarmops log {}", shell_word(base))),
         None if rev.bytes().all(|b| b.is_ascii_hexdigit()) => "swarmops log".to_owned(),
         None => "swarmops ref list".to_owned(),
+    }
+}
+
+/// A hint, made one line as messages are.
+pub(crate) fn hint(text: impl Into<String>) -> String {
+    one_line(text.into())
+}
+
+/// `word` as one shell word in a hint: as it is when it is made of `[A-Za-z0-9_./:@-]` only,
+/// else in single quotes, each `'` in it written `'\''`.
+pub(crate) fn shell_word(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_./:@-".contains(&b));
+    if plain {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
     }
 }
 
@@ -373,6 +395,17 @@ mod tests {
             error.details["path"], "odd\nname",
             "details keep the path as it is"
         );
+    }
+
+    #[test]
+    fn shell_words_are_quoted_unless_plain() {
+        assert_eq!(shell_word("main:src/lib.rs"), "main:src/lib.rs");
+        assert_eq!(shell_word("a@b-c_d.e"), "a@b-c_d.e");
+        assert_eq!(shell_word("my dir"), "'my dir'");
+        assert_eq!(shell_word("main~1:src"), "'main~1:src'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word(""), "''");
+        assert_eq!(hint(format!("ls {}", shell_word("a\nb"))), r"ls 'a\nb'");
     }
 
     #[test]
