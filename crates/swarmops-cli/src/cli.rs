@@ -19,8 +19,9 @@ const EXPECT_HELP: &str = "The changeset the ref holds now: a full id, not a ref
 /// `ref set --expect`'s long help.
 const SET_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
 
-Prefer a full changeset id over a ref name: a ref-name expectation cannot be resolved once the \
-ref has moved or is gone.
+Give the full changeset id you last saw: a ref name is resolved when the command runs, so it \
+always matches the current target and cannot detect that someone moved the ref in between (a \
+deleted ref errors instead).
 
 After E_CAS_MISMATCH, re-apply your edits to the content at the error's `actual` and commit \
 with --parent <actual>, then retry with --expect <actual>. Do not re-send your old whole-file \
@@ -29,8 +30,9 @@ puts: M1 has no merge, so they would revert the winner's edits to shared files."
 /// `ref delete --expect`'s long help.
 const DELETE_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
 
-Prefer a full changeset id over a ref name: a ref-name expectation cannot be resolved once the \
-ref has moved or is gone.
+Give the full changeset id you last saw: a ref name is resolved when the command runs, so it \
+always matches the current target and cannot detect that someone moved the ref in between (a \
+deleted ref errors instead).
 
 After E_CAS_MISMATCH, the ref holds the error's `actual`, which someone else moved it to: look \
 at it (swarmops show <actual>) before you delete it with --expect <actual>.";
