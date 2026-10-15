@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
 license = "Apache-2.0"
-repository = "https://github.com/keiailab/swarmops"
+repository = "https://github.com/KeiaiLab/SwarmOps"
 
 [workspace.dependencies]
 blake3 = "1.8.7"
