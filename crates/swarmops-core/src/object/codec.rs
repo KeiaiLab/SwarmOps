@@ -53,6 +53,9 @@ pub enum CodecError {
     /// `negative_zero` was set with a non-zero `offset_secs`.
     #[error("signature has the -0000 flag with a non-zero offset")]
     BadSignature,
+    /// A `Delete` entry carries `renamed_from`, or `renamed_from` equals the entry's own path.
+    #[error("delete cannot carry renamed_from, and renamed_from cannot equal path")]
+    BadRename,
 }
 
 /// A cursor over an immutable buffer; every read is bounds-checked first.

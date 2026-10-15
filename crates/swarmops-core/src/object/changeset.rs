@@ -44,7 +44,8 @@ pub struct DeltaEntry {
     pub path: RepoPath,
     /// What happened.
     pub op: DeltaOp,
-    /// For a detected rename, where the content came from.
+    /// For a detected rename, where the content came from. Only a `Put` can carry
+    /// one, and it is never the entry's own `path`.
     pub renamed_from: Option<RepoPath>,
 }
 
@@ -105,6 +106,11 @@ impl DeltaEntry {
         {
             return Err(CodecError::BadKind(EntryKind::Dir.as_u8()));
         }
+        if let Some(from) = &self.renamed_from
+            && (matches!(self.op, DeltaOp::Delete) || *from == self.path)
+        {
+            return Err(CodecError::BadRename);
+        }
         Ok(())
     }
 
@@ -154,7 +160,8 @@ impl DeltaEntry {
 
 impl Changeset {
     /// Checks the invariants the layout cannot express: sorted unique delta
-    /// paths, leaf-only puts, sorted unique metadata keys, consistent signatures.
+    /// paths, leaf-only puts, renames only on puts and never from the entry's own
+    /// path, sorted unique metadata keys, consistent signatures.
     pub fn validate(&self) -> Result<(), CodecError> {
         for d in &self.delta {
             d.validate()?;
