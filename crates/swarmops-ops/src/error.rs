@@ -207,8 +207,9 @@ pub(crate) fn hint(text: impl Into<String>) -> String {
 }
 
 /// `word` as one shell word in a hint: as it is when it is made of `[A-Za-z0-9_./:@-]` only,
-/// else in single quotes, each `'` in it written `'\''`.
-pub(crate) fn shell_word(word: &str) -> String {
+/// else in single quotes, each `'` in it written `'\''`. A hint is made one line afterwards, its
+/// control characters escaped.
+pub fn shell_word(word: &str) -> String {
     let plain = !word.is_empty()
         && word
             .bytes()
