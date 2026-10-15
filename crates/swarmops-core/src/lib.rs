@@ -5,8 +5,12 @@
 
 pub mod error;
 pub mod id;
+pub mod object;
 pub mod path;
 
 pub use error::{IdError, PathError};
 pub use id::{BlobId, ChangesetId, ObjectId, ObjectKind, TreeId, hash_object};
+pub use object::{
+    Changeset, CodecError, DeltaEntry, DeltaOp, EntryKind, Signature, Tree, TreeEntry,
+};
 pub use path::RepoPath;
