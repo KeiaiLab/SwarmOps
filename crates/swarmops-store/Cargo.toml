@@ -1,0 +1,15 @@
+[package]
+name = "swarmops-store"
+description = "SwarmOps store: loose object files, SQLite metadata, fsck and gc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]

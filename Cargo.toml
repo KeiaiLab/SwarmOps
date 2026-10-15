@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/keiailab/swarmops"
+
+[workspace.dependencies]
+blake3 = "1.8.7"
+thiserror = "2.0.21"
+hex = "0.4"
+proptest = "1.12.0"
+arbitrary = { version = "1.5.0", features = ["derive"] }
+criterion = "0.8.2"
+tempfile = "3.27.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+# Noisy pedantic lints that fight product names and API docs; everything else in pedantic stays on.
+doc_markdown = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
