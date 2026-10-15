@@ -23,7 +23,8 @@ use proptest::prelude::Rng;
 use proptest::test_runner::{RngAlgorithm, TestRng};
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 use swarmops_store::{
-    CRASH_AT_ENV, FsObjectStore, FsOps, Layout, LinkOutcome, ObjectStore, RealFs, StoreError,
+    CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsObjectStore, FsOps, Layout, LinkOutcome, ObjectStore,
+    RealFs, StoreError,
 };
 use tempfile::TempDir;
 
@@ -37,7 +38,15 @@ const SIGABRT: i32 = 6;
 
 /// Set only in the child that `crash_at_fs_aborts_child_at_call_k` spawns: the store root.
 const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_CRASH_CHILD_ROOT";
+
+/// Set only in the children that `fs_calls_hook_reports_how_many_calls_a_process_made`
+/// spawns: the store root.
+const COUNT_CHILD_ROOT: &str = "SWARMOPS_TEST_COUNT_CHILD_ROOT";
 const CRASH_PAYLOAD: &[u8] = b"this put must never become visible";
+
+/// Set only in the children of `open_default_under_crash_at_puts_one_object_at_a_time`: the
+/// store root.
+const ONE_AT_A_TIME_ROOT: &str = "SWARMOPS_TEST_ONE_AT_A_TIME_ROOT";
 
 /// A fresh, empty store root and its layout; the directory lives as long as the `TempDir`.
 fn new_root() -> (TempDir, Layout) {
@@ -815,6 +824,58 @@ fn list_returns_every_stored_object_in_id_order() {
     assert_eq!(store.list().unwrap(), ids);
 }
 
+/// The batch the children of `open_default_under_crash_at_puts_one_object_at_a_time` put.
+fn one_at_a_time_batch() -> Vec<(ObjectKind, Vec<u8>)> {
+    (0..64)
+        .map(|i| (ObjectKind::Blob, format!("one at a time {i}").into_bytes()))
+        .collect()
+}
+
+#[test]
+fn open_default_under_crash_at_puts_one_object_at_a_time() {
+    const TEST: &str = "open_default_under_crash_at_puts_one_object_at_a_time";
+    if let Some(root) = std::env::var_os(ONE_AT_A_TIME_ROOT) {
+        let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");
+        let store = FsObjectStore::open_default(Layout::new(root));
+        let outcome = store.put_batch(one_at_a_time_batch());
+        panic!("the crash hook did not fire: put_batch returned {outcome:?}");
+    }
+    // With its fan-out dir in place, a new object's put makes five FsOps calls: exists,
+    // create_dir_all objects/tmp, exists of the fan-out dir, write_durable_temp,
+    // link_noclobber. One object at a time, call 5 × 20 + 3 comes in the middle of the 21st
+    // object's put, after 20 whole ones: the first 20, in every run.
+    let whole = 20;
+    let want: BTreeSet<ObjectId> = one_at_a_time_batch()[..whole]
+        .iter()
+        .map(|(kind, payload)| hash_object(*kind, payload))
+        .collect();
+    for run in 0..2 {
+        let (_root, layout) = new_root();
+        fs::create_dir_all(layout.objects_tmp()).unwrap();
+        for byte in 0..=u8::MAX {
+            fs::create_dir_all(layout.objects_dir().join(format!("{byte:02x}"))).unwrap();
+        }
+        let child = Command::new(std::env::current_exe().expect("test binary path"))
+            .args(["--exact", TEST, "--nocapture"])
+            .env(ONE_AT_A_TIME_ROOT, layout.root())
+            .env(CRASH_AT_ENV, (5 * whole + 3).to_string())
+            .output()
+            .expect("spawn the child");
+        assert_eq!(
+            child.status.signal(),
+            Some(SIGABRT),
+            "run {run}: {:?}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr),
+        );
+        let stored: BTreeSet<ObjectId> = real_store(&layout).list().unwrap().into_iter().collect();
+        assert_eq!(
+            stored, want,
+            "run {run}: the first {whole} objects, and only they"
+        );
+    }
+}
+
 #[test]
 fn crash_at_fs_aborts_child_at_call_k() {
     if let Some(root) = std::env::var_os(CRASH_CHILD_ROOT) {
@@ -850,4 +911,77 @@ fn crash_at_fs_aborts_child_at_call_k() {
         Vec::<PathBuf>::new(),
         "no object file is visible after the crash"
     );
+}
+
+/// A [`CrashAtFs`] counts every call, and with a report file writes the count there when it
+/// is dropped.
+#[test]
+fn crash_at_fs_counts_its_calls_and_reports_them_when_dropped() {
+    let (_root, layout) = new_root();
+    let report = layout.root().join("calls").into_std_path_buf();
+    let fs = CrashAtFs::new(RealFs, 0).reporting_calls_to(report.clone());
+    let dir = layout.root().join("d").into_std_path_buf();
+    fs.create_dir_all(&dir).unwrap();
+    assert!(fs.exists(&dir).unwrap());
+    assert_eq!(fs.read(&dir.join("none")).unwrap(), None);
+    assert_eq!(fs.calls(), 3);
+    assert!(!report.exists(), "the count is written when it is dropped");
+    drop(fs);
+    assert_eq!(fs::read_to_string(&report).unwrap(), "3");
+}
+
+/// `SWARMOPS_TEST_FS_CALLS=<file>`: the object store `open_default` gives counts the calls of
+/// the process and writes how many it made to the file when it is dropped, a crash test's dry
+/// run; with `SWARMOPS_TEST_CRASH_AT=<k>` set too, it aborts at call k and writes nothing.
+#[test]
+fn fs_calls_hook_reports_how_many_calls_a_process_made() {
+    if let Some(root) = std::env::var_os(COUNT_CHILD_ROOT) {
+        let root = Utf8PathBuf::from_path_buf(root.into()).expect("UTF-8 store root");
+        let mut store = FsObjectStore::open_default(Layout::new(root));
+        // One directory fsync at a time, in path order: the k-th call is the same call.
+        store.set_parallelism(1);
+        store.put(ObjectKind::Blob, CRASH_PAYLOAD).unwrap();
+        store.flush().unwrap();
+        return;
+    }
+    // The same put and flush in this process, counted.
+    let (_root, layout) = new_root();
+    let counted = Arc::new(CrashAtFs::new(RealFs, 0));
+    let mut store = FsObjectStore::open(layout, Box::new(Arc::clone(&counted)));
+    store.set_parallelism(1);
+    store.put(ObjectKind::Blob, CRASH_PAYLOAD).unwrap();
+    store.flush().unwrap();
+    let calls = counted.calls();
+    assert!(calls > 3, "a put makes several calls: {calls}");
+
+    for crash_at in [None, Some(calls)] {
+        let (_root, layout) = new_root();
+        let report = layout.root().join("calls").into_std_path_buf();
+        let mut child = Command::new(std::env::current_exe().expect("test binary path"));
+        child
+            .args([
+                "--exact",
+                "fs_calls_hook_reports_how_many_calls_a_process_made",
+                "--nocapture",
+            ])
+            .env(COUNT_CHILD_ROOT, layout.root())
+            .env(FS_CALLS_ENV, &report)
+            .env_remove(CRASH_AT_ENV);
+        if let Some(k) = crash_at {
+            child.env(CRASH_AT_ENV, k.to_string());
+        }
+        let output = child.output().expect("spawn the child");
+        let shown = format!(
+            "{:?}\n--- child stderr ---\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        if crash_at.is_some() {
+            assert_eq!(output.status.signal(), Some(SIGABRT), "{shown}");
+            assert!(!report.exists(), "a run that crashes reports nothing");
+        } else {
+            assert!(output.status.success(), "{shown}");
+            assert_eq!(fs::read_to_string(&report).unwrap(), calls.to_string());
+        }
+    }
 }

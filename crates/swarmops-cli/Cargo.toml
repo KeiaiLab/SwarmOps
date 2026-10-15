@@ -24,6 +24,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 assert_cmd.workspace = true
 insta.workspace = true

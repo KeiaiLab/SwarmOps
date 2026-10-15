@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 
 use crate::error::StoreError;
-use crate::fs_ops::{CrashAtFs, FsOps, RealFs, crash_at_from_env};
+use crate::fs_ops::{CrashAtFs, FsOps, RealFs};
 use crate::layout::Layout;
 
 const MAGIC: [u8; 4] = *b"SOB1";
@@ -50,7 +50,8 @@ pub trait ObjectStore: Send + Sync {
     /// Whether an object file for `id` exists (not verified).
     fn contains(&self, id: ObjectId) -> Result<bool, StoreError>;
 
-    /// Makes every object put since the last flush durable.
+    /// Makes every object put since the last flush durable. An implementation may wait on a
+    /// thread pool meanwhile, as [`FsObjectStore`]'s does: see there what that rules out.
     fn flush(&self) -> Result<(), StoreError>;
 
     /// The id of every object stored, in ascending order. Reads no object, so it verifies
@@ -62,6 +63,13 @@ pub trait ObjectStore: Send + Sync {
 ///
 /// Needs no lock between processes: no write ever replaces a file, and writers racing
 /// on one id produce identical bytes.
+///
+/// `put_batch` and `flush` run their work on a rayon pool: the store's own once
+/// [`FsObjectStore::set_parallelism`] is called, else rayon's global pool. `flush` holds a
+/// lock of the store while it waits for its fsyncs on that pool, and a pool thread that waits
+/// may run other tasks of the pool meanwhile. So never call `flush` (or anything that
+/// flushes, such as a commit) from a task on that same pool: if such a task flushed the same
+/// store while another flush waited, the two would deadlock.
 pub struct FsObjectStore {
     layout: Layout,
     fs: Box<dyn FsOps>,
@@ -90,14 +98,20 @@ impl FsObjectStore {
         }
     }
 
-    /// [`FsObjectStore::open`] on the real filesystem, wrapped in a [`CrashAtFs`] when
-    /// `SWARMOPS_TEST_CRASH_AT=<k>` is set (see [`crate::CRASH_AT_ENV`]).
+    /// [`FsObjectStore::open`] on the real filesystem, wrapped in a [`CrashAtFs`] when a test
+    /// hook asks for one ([`CrashAtFs::from_env`]: `SWARMOPS_TEST_CRASH_AT=<k>`,
+    /// `SWARMOPS_TEST_FS_CALLS=<file>`). Under either hook the store runs with parallelism 1
+    /// ([`FsObjectStore::set_parallelism`]): `put_batch` then writes one object at a time and
+    /// `flush` fsyncs one directory at a time, so that call k is the same call in every run.
     pub fn open_default(layout: Layout) -> Self {
-        let fs: Box<dyn FsOps> = match crash_at_from_env() {
-            Some(k) => Box::new(CrashAtFs::new(RealFs, k)),
-            None => Box::new(RealFs),
-        };
-        Self::open(layout, fs)
+        match CrashAtFs::from_env() {
+            Some(fs) => {
+                let mut store = Self::open(layout, Box::new(fs));
+                store.set_parallelism(1);
+                store
+            }
+            None => Self::open(layout, Box::new(RealFs)),
+        }
     }
 
     /// Runs [`ObjectStore::put_batch`], and the directory fsyncs of [`ObjectStore::flush`], on
@@ -257,6 +271,9 @@ impl ObjectStore for FsObjectStore {
     /// Fsyncs every touched directory (see [`FsObjectStore::set_parallelism`] for how many at
     /// once), all of them even when some fail. The ones that fail stay touched, so that a
     /// later flush retries them, and the error of the first of those in path order comes back.
+    ///
+    /// It holds the store's flush lock until the last fsync is done, waiting on the store's
+    /// pool: do not call it from a task on that pool (see [`FsObjectStore`]).
     fn flush(&self) -> Result<(), StoreError> {
         // `()` carries no state that a panicking holder could have left inconsistent.
         let _flushing = self

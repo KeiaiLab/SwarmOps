@@ -12,12 +12,15 @@
 //!
 //! [`Index::create`] lays the files out, empty, when the store is created, and nothing else
 //! creates or removes one, so a missing file is [`StoreError::IndexCorrupt`]. A record's
-//! number, its rec, is its position in the columns and its `seq`. The files only grow, by
+//! number, its rec, is its position in the columns and its `seq`. The files grow by
 //! [`Index::append`], which writes `parents.log`, `par.col`, `gen.col`, `dh.col` and
 //! `ids.col`, in that order, with plain appends; [`Index::sync`] then makes them durable,
-//! once for many appends. Lookups binary-search a sorted view's key column, then scan the
-//! records past the view, the unsorted tail, read from `ids.col` (or `dh.col`) with one
-//! `read_at`; [`Index::compact`] merges the tail into the views.
+//! once for many appends. They shrink only at the end, when a writer cuts what a crash left
+//! of a record ([`Index::repair_tail`]) or, after a failed sync, the records past the
+//! checkpoint, never below what the sorted views cover ([`Index::truncate_to`]). Lookups
+//! binary-search a sorted view's key column, then scan the records past the view, the unsorted
+//! tail, read from `ids.col` (or `dh.col`) with one `read_at`; [`Index::compact`] merges the
+//! tail into the views.
 //!
 //! # Crashes and concurrency
 //!
@@ -28,7 +31,9 @@
 //! [`Index::repair_tail`] cuts the rest off. A crash in the middle of a compaction's renames
 //! leaves the sorted views out of step; each view still covers the records it covers, or is
 //! read as empty, so lookups stay right, and [`Index::repair_tail`] runs the compaction
-//! again.
+//! again. The one cut of whole records, after a failed sync, can take records from under a
+//! handle opened before it, a reader's snapshot's included: [`Index::truncate_to`] says which
+//! lookups then fail.
 
 use std::fs::File;
 use std::io;
@@ -256,7 +261,9 @@ impl Index {
     /// order [`Index::append`] writes the files, and the first error stops them. With more,
     /// up to that many threads make them at once, each taking its share of the files in write
     /// order and stopping at its first error (one file each at 5); once every thread is done,
-    /// the error of the first file in write order that failed comes back. ext4 commits
+    /// the error of the first file in write order that failed comes back. A share whose thread
+    /// cannot be spawned (the process is out of threads) is synced on the calling thread
+    /// instead, so that a commit never fails, or panics, for want of a thread. ext4 commits
     /// concurrent fsyncs together: five at once cost about two (docs/perf.md).
     pub fn sync(&self) -> Result<(), StoreError> {
         let files = self.write_order();
@@ -273,13 +280,20 @@ impl Index {
         let results: Vec<io::Result<()>> = thread::scope(|scope| {
             let syncs: Vec<_> = files
                 .chunks(files.len().div_ceil(threads))
-                .map(|share| scope.spawn(move || sync_all(share)))
+                .map(|share| {
+                    thread::Builder::new()
+                        .spawn_scoped(scope, move || sync_all(share))
+                        .map_err(|_| share)
+                })
                 .collect();
             syncs
                 .into_iter()
-                .map(|sync| {
-                    sync.join()
-                        .unwrap_or_else(|panic| panic::resume_unwind(panic))
+                .map(|sync| match sync {
+                    Ok(sync) => sync
+                        .join()
+                        .unwrap_or_else(|panic| panic::resume_unwind(panic)),
+                    // No thread for this share: sync it here, in its place in write order.
+                    Err(share) => sync_all(share),
                 })
                 .collect()
         });
@@ -418,6 +432,56 @@ impl Index {
             self.rebuild_views()?;
         }
         Ok(dropped)
+    }
+
+    /// Cuts the index back to its first `records` records, or to as many as the sorted views
+    /// cover if that is more, and returns how many it keeps; a handle that counts no more
+    /// than that cuts nothing. What a writer whose [`Index::sync`] failed calls, holding
+    /// [`crate::MetaLock`] (see [`crate::meta`]): pages whose writeback failed may be lost
+    /// even though a later sync succeeds, so the records past the checkpoint are cut, and
+    /// replay appends them again from the journal. The views' records were synced before the
+    /// views were written, and a view must not cover records the columns lack.
+    ///
+    /// The files are cut in the reverse of the write order, `ids.col` first, each cut synced
+    /// ([`FsOps::truncate`]), so that a crash in the middle leaves a torn tail for
+    /// [`Index::repair_tail`] to cut the rest of; this handle counts only the records kept
+    /// from before the first cut.
+    ///
+    /// Another handle that counted records cut, opened before the cut (a reader's snapshot,
+    /// verify), then fails with an I/O error (`UnexpectedEof`), never with wrong data: on
+    /// [`Index::get`] of a record cut, on every [`Index::find`] that its sorted view misses (the
+    /// scan of the tail reads past the new end), and on every [`Index::find_prefix`] and
+    /// [`Index::find_delta_hash`]. A [`crate::MetaStore::read`] whose handle opened before the
+    /// cut fails the same way while it builds its snapshot. A handle opened after the cut, and
+    /// so a new snapshot, reads the index as cut, the journal's frames over it.
+    pub fn truncate_to(&mut self, records: u64) -> Result<u64, StoreError> {
+        let keep = records.max(self.views.covered());
+        if keep >= self.len {
+            return Ok(self.len);
+        }
+        // The parents of the records kept end where the last one's par.col entry says.
+        let parents_len = match keep.checked_sub(1) {
+            Some(last) => ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(last)?)).end(),
+            None => 0,
+        };
+        (self.len, self.parents_len) = (keep, parents_len);
+        let cuts = [
+            (&self.ids.path, self.ids.byte_len()?, keep * 32),
+            (&self.dhs.path, self.dhs.byte_len()?, keep * 32),
+            (&self.gens.path, self.gens.byte_len()?, keep * 8),
+            (&self.pars.path, self.pars.byte_len()?, keep * 8),
+            (
+                &self.parents_path,
+                self.parents.metadata()?.len(),
+                parents_len,
+            ),
+        ];
+        for (path, len, cut) in cuts {
+            if len > cut {
+                self.fs.truncate(path.as_std_path(), cut)?;
+            }
+        }
+        Ok(keep)
     }
 
     /// Reopens the sorted views (another handle may have compacted since this one opened

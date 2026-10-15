@@ -43,7 +43,8 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `commit` builds on `parent`, or, when it is omitted, on `main`'s head if `main` exists and
 ///   on nothing otherwise (a root changeset). The changeset is the caller's: author and
 ///   committer are both the agent name with the email `<instance>@<family>.swarmops.local` at
-///   the current time, UTC; its metadata holds `agent` and, when the caller has one, `run_id`.
+///   the current time, UTC (or at [`NOW_ENV`]'s, a test hook); its metadata holds `agent` and,
+///   when the caller has one, `run_id`.
 ///   `files_changed` counts the changeset's delta, which leaves out puts of what a path holds
 ///   already. The change list follows [`crate::content`]'s rules. `file` content is read here,
 ///   in the caller's process: `LocalOps` runs on the client. A server that exposes
@@ -624,21 +625,40 @@ fn at_least_one(field: &str, value: usize) -> Result<(), OpError> {
     Ok(())
 }
 
+/// Test hook: with `SWARMOPS_TEST_NOW=<unix seconds>` set to an integer, [`LocalOps`] signs the
+/// changesets it commits at that time instead of the clock's. The same commit made twice is then
+/// the same changeset, whenever it runs: a crash test's runs write the same objects, and so make
+/// the same filesystem calls, which the store's own test hooks count and crash at
+/// (`swarmops_store::CRASH_AT_ENV`, `swarmops_store::FS_CALLS_ENV`). Unset, or not an integer:
+/// the clock's time.
+pub const NOW_ENV: &str = "SWARMOPS_TEST_NOW";
+
 /// The signature of a changeset that `who` records now: the agent name, the email
-/// `<instance>@<family>.swarmops.local`, the current time in UTC.
+/// `<instance>@<family>.swarmops.local`, the current time in UTC ([`signing_time`]).
 fn native_signature(who: &Identity) -> Signature {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |since| {
-            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
-        });
     Signature {
         name: who.agent().as_bytes().to_vec(),
         email: format!("{}@{}.swarmops.local", who.instance(), who.family()).into_bytes(),
-        secs,
+        secs: signing_time(),
         offset_secs: 0,
         negative_zero: false,
     }
+}
+
+/// Now, in Unix seconds: [`NOW_ENV`]'s seconds if it is set to an integer (a test hook), else
+/// the clock's.
+fn signing_time() -> i64 {
+    if let Some(secs) = std::env::var(NOW_ENV)
+        .ok()
+        .and_then(|secs| secs.parse().ok())
+    {
+        return secs;
+    }
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Whom a changeset's `metadata` attributes it to.

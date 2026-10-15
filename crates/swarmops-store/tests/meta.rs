@@ -23,8 +23,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
 use swarmops_store::{
     CRASH_AT_ENV, CasResult, ChangesetMeta, CommitInfo, CrashAtFs, Frame, FsOps, Index,
-    InsertOutcome, Journal, JournalEntry, Layout, LinkOutcome, MetaLock, MetaStore, RealFs, Record,
-    RefMoveEntry, RefState, StoreError,
+    InsertOutcome, Journal, JournalEntry, Layout, LinkOutcome, MetaLock, MetaRead, MetaStore,
+    RealFs, Record, RefMoveEntry, RefState, StoreError,
 };
 use tempfile::TempDir;
 
@@ -48,6 +48,11 @@ const REPORT: &str = "meta-child: ";
 const ACTOR: &str = "test/1";
 
 const SIGABRT: i32 = 6;
+
+/// Set only in the child of `a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer`,
+/// which runs with no thread to spare: the store root.
+#[cfg(target_os = "linux")]
+const NO_THREADS_ROOT: &str = "SWARMOPS_TEST_META_NO_THREADS_ROOT";
 
 /// Set only in the children of `crash_at_any_create_call_leaves_a_store_open_or_create_takes`:
 /// the store root.
@@ -837,8 +842,9 @@ fn run_children(test: &str, root: &Utf8Path) -> Vec<Output> {
     let exe = std::env::current_exe().unwrap();
     let children: Vec<_> = (0..CHILDREN)
         .map(|number| {
+            // `--include-ignored`: the test may be one the slow suite runs.
             Command::new(&exe)
-                .args(["--exact", test, "--nocapture"])
+                .args(["--exact", test, "--include-ignored", "--nocapture"])
                 .env(CHILD_ROOT, root)
                 .env(CHILD_NUMBER, number.to_string())
                 .stdout(Stdio::piped())
@@ -892,7 +898,12 @@ fn insert_child(root: &Utf8Path, child: u64) {
     println!("{REPORT}done");
 }
 
+/// Eight processes, each making 50 write transactions of its own chain at once: every insert
+/// persists, seqs are contiguous, a frame per write. 400 fsync'd transactions: the slow suite
+/// runs it; the default gate's acceptance test for concurrent writers is the CLI's
+/// `eight_processes_commit_concurrently_all_persist`, through the binary.
 #[test]
+#[ignore = "slow, 8-20 s: 400 fsync'd transactions; just check-slow runs it"]
 fn multi_process_inserts_all_persist() {
     if let Some((root, child)) = child_env() {
         insert_child(&root, child);
@@ -1206,6 +1217,222 @@ fn an_empty_write_reports_its_housekeeping_errors_plainly() {
     assert_eq!((index.sorted_count(), index.tail_len()), (1100, 0));
     assert_eq!(compacted_frames(&store), [1]);
     assert_eq!(ckpt(&root), log_len(&root));
+}
+
+/// A store on a [`RecordingFs`], and what makes its calls fail. Its write transactions sync
+/// the index one file after another, in write order (parallelism 1), so that a failure lands at
+/// the same point of the same call sequence in every run.
+fn failing_store(root: &Utf8Path) -> (MetaStore, Failing) {
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let mut store = MetaStore::create_with_fs(root, Arc::new(fs)).unwrap();
+    store.set_parallelism(1);
+    (store, fail)
+}
+
+/// Changeset `n` of a chain: a root for 0, else on `n - 1`.
+fn chained(n: u64) -> ChangesetMeta {
+    match n.checked_sub(1) {
+        Some(parent) => cs(n, &[parent]),
+        None => cs(n, &[]),
+    }
+}
+
+/// [`chained`]`(n)` as the store holds it: at seq `n`, generation `n + 1`.
+fn chained_stored(n: u64) -> ChangesetMeta {
+    ChangesetMeta {
+        seq: n,
+        generation: n + 1,
+        ..chained(n)
+    }
+}
+
+/// The lengths of the index columns and `parents.log` at `root`.
+fn chained_lens(root: &Utf8Path) -> [(&'static str, u64); 5] {
+    let meta = Layout::new(root).meta_dir();
+    [
+        "idx/ids.col",
+        "idx/dh.col",
+        "idx/gen.col",
+        "idx/par.col",
+        "parents.log",
+    ]
+    .map(|file| (file, file_len(meta.join(file))))
+}
+
+/// What [`chained_lens`] gives for `records` records of [`chained`]: 32 bytes of
+/// `parents.log` for each but the root.
+fn chained_want(records: u64) -> [(&'static str, u64); 5] {
+    [
+        ("idx/ids.col", records * 32),
+        ("idx/dh.col", records * 32),
+        ("idx/gen.col", records * 8),
+        ("idx/par.col", records * 8),
+        ("parents.log", records.saturating_sub(1) * 32),
+    ]
+}
+
+/// A failed index sync may have lost pages whose writeback failed, and a later sync can
+/// succeed without saying so (Linux reports a writeback error once): so the writer cuts the
+/// index back to the records the checkpoint has passed, and the next write's replay appends
+/// the others again from the journal, to be synced afresh.
+#[test]
+fn a_failed_index_sync_cuts_the_index_back_to_the_checkpoint() {
+    let (_dir, root) = new_root();
+    let (store, fail) = failing_store(&root);
+    // Frames 0..=31: the 32nd checkpoints the first 32 records.
+    for n in 0..32 {
+        insert(&store, &[chained(n)]);
+    }
+    let checkpoint = ckpt(&root);
+    assert_eq!(checkpoint, log_len(&root), "the 32nd frame checkpointed");
+    // Frames 32..=62 past the checkpoint, then the 32nd past it, whose sync fails at ids.col,
+    // the last of the five files it syncs.
+    for n in 32..63 {
+        insert(&store, &[chained(n)]);
+    }
+    fail.set("sync_data ids.col");
+    let mut write = store.write().unwrap();
+    write.insert_changeset(chained(63)).unwrap();
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 63,
+            source,
+        }) => assert!(matches!(*source, StoreError::Io(_)), "{source:?}"),
+        other => panic!("expected PostCommit at frame 63, got {other:?}"),
+    }
+    fail.clear();
+
+    // The index holds the 32 records the checkpoint passed, and nothing after them.
+    assert_eq!(chained_lens(&root), chained_want(32));
+    assert_eq!(index(&root).len(), 32);
+    assert_eq!(ckpt(&root), checkpoint, "the checkpoint did not move");
+    // Readers find every changeset all the same: those past the checkpoint in the journal.
+    let read = store.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), 64);
+    for n in [0, 31, 32, 63] {
+        assert_eq!(
+            read.changeset(id(n)).unwrap(),
+            Some(chained_stored(n)),
+            "{n}"
+        );
+    }
+    drop(read);
+
+    // The next write appends the 32 records again, syncs them and checkpoints.
+    assert!(store.write().unwrap().commit().unwrap().checkpointed);
+    assert_eq!(chained_lens(&root), chained_want(64));
+    let index = index(&root);
+    for n in 0..64 {
+        assert_eq!(index.get(n).unwrap(), chained_stored(n), "{n}");
+    }
+    assert_eq!(ckpt(&root), log_len(&root));
+}
+
+/// The cut never goes below what the sorted views cover: they would cover records the
+/// columns lack, and no handle would open the index. A compaction syncs the records it
+/// covers before it writes the views, so those are durable even past the checkpoint (here
+/// the compaction's own checkpoint failed).
+#[test]
+fn a_failed_index_sync_never_cuts_what_the_sorted_views_cover() {
+    let (_dir, root) = new_root();
+    let (store, fail) = failing_store(&root);
+    fail.set("atomic_replace journal.ckpt");
+    let mut write = store.write().unwrap();
+    for n in 0..1100 {
+        write.insert_changeset(cs(n, &[])).unwrap();
+    }
+    match write.commit() {
+        Err(StoreError::PostCommit { frame_seq: 0, .. }) => {}
+        other => panic!("expected PostCommit at frame 0, got {other:?}"),
+    }
+    fail.clear();
+    assert_eq!((ckpt(&root), index(&root).sorted_count()), (0, 1100));
+
+    // A changeset past the views, then a flush whose sync fails.
+    insert(&store, &[cs(1100, &[])]);
+    fail.set("sync_data ids.col");
+    match store.flush() {
+        Err(StoreError::Io(_)) => {}
+        other => panic!("flush: expected a plain Io error, got {other:?}"),
+    }
+    fail.clear();
+    let cut = index(&root);
+    assert_eq!((cut.len(), cut.sorted_count()), (1100, 1100));
+
+    store.flush().unwrap();
+    let index = index(&root);
+    assert_eq!(index.len(), 1101);
+    assert_eq!(index.find(id(1100)).unwrap(), Some(1100));
+    assert_eq!(ckpt(&root), log_len(&root));
+}
+
+/// A write that takes the tail past the compaction threshold syncs the index before it
+/// compacts: a failed sync cuts the index back to the checkpoint, as at any sync point, and
+/// nothing is compacted; the next write appends the records again and compacts them.
+#[test]
+fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
+    let (_dir, root) = new_root();
+    let (store, fail) = failing_store(&root);
+    for n in 0..32 {
+        insert(&store, &[cs(n, &[])]); // frames 0..=31, checkpointed
+    }
+    fail.set("sync_data ids.col");
+    let mut write = store.write().unwrap();
+    for n in 32..1100 {
+        write.insert_changeset(cs(n, &[])).unwrap();
+    }
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 32,
+            source,
+        }) => assert!(matches!(*source, StoreError::Io(_)), "{source:?}"),
+        other => panic!("expected PostCommit at frame 32, got {other:?}"),
+    }
+    fail.clear();
+    let cut = index(&root);
+    assert_eq!((cut.len(), cut.sorted_count()), (32, 0));
+    assert_eq!(compacted_frames(&store), [], "nothing was compacted");
+
+    assert!(store.write().unwrap().commit().unwrap().checkpointed);
+    let index = index(&root);
+    let counts = (index.len(), index.sorted_count(), index.tail_len());
+    assert_eq!(counts, (1100, 1100, 0));
+    assert_eq!(compacted_frames(&store), [33]);
+    assert_eq!(ckpt(&root), log_len(&root));
+}
+
+/// When the cut fails too, the error says so beside the sync's: the next writer finds the
+/// records whole and keeps them, and syncs them again before it checkpoints.
+#[test]
+fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
+    let (_dir, root) = new_root();
+    let (store, fail) = failing_store(&root);
+    for n in 0..31 {
+        insert(&store, &[chained(n)]);
+    }
+    fail.set("sync_data ids.col");
+    fail.also("truncate ids.col");
+    let mut write = store.write().unwrap();
+    write.insert_changeset(chained(31)).unwrap();
+    let message = match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 31,
+            source,
+        }) => source.to_string(),
+        other => panic!("expected PostCommit at frame 31, got {other:?}"),
+    };
+    for injected in ["injected: sync_data ids.col", "injected: truncate ids.col"] {
+        assert!(message.contains(injected), "{message}");
+    }
+    fail.clear();
+    assert_eq!(chained_lens(&root), chained_want(32), "nothing was cut");
+    assert!(store.write().unwrap().commit().unwrap().checkpointed);
+    assert_eq!(ckpt(&root), log_len(&root));
+    let index = index(&root);
+    for n in 0..32 {
+        assert_eq!(index.get(n).unwrap(), chained_stored(n), "{n}");
+    }
 }
 
 #[track_caller]
@@ -1585,7 +1812,14 @@ fn write_times_out_as_busy() {
         "gave up after {waited:?}"
     );
     drop(held);
-    impatient.write().unwrap().commit().unwrap();
+    // A fresh handle with the default timeout: the abandoned wait lets the lock go as soon as
+    // it gets it, but a 100 ms timeout need not cover a helper thread scheduled late.
+    MetaStore::open(&root)
+        .unwrap()
+        .write()
+        .unwrap()
+        .commit()
+        .unwrap();
 }
 
 #[test]
@@ -1622,29 +1856,492 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
     assert_eq!(moves, [(Some(id(1)), Some(id(2))), (None, Some(id(1)))]);
 }
 
+/// How many changesets [`snapshots_stay_consistent_across_a_compaction`] seeds its store with,
+/// compacted at once, so that the sorted views a snapshot holds are not empty.
+const SEEDS: u64 = 1100;
+
+/// The number of seed changeset `i`.
+fn seed(i: u64) -> u64 {
+    1_000_000 + i
+}
+
+/// The lookups of [`snapshots_stay_consistent_across_a_compaction`] on snapshot `read`, taken
+/// with main at version `n`: main names changeset `n`, the snapshot holds exactly the seeds and
+/// changesets 1..=`n`, and changesets 1, `n / 2` and `n` (in the tail) and every 64th seed (in
+/// the sorted views) are found by id, by a 16-digit prefix and by delta hash. Returns `n`.
+#[track_caller]
+fn assert_whole_snapshot(read: &MetaRead<'_>) -> u64 {
+    let main = read.get_ref("main").unwrap().expect("main exists");
+    let n = main.version;
+    assert_eq!(main.target, id(n), "{main:?}");
+    assert_eq!(
+        read.count_changesets().unwrap(),
+        SEEDS + n,
+        "one changeset per move"
+    );
+    let moved = [1, n.div_ceil(2), n].map(|k| (k, SEEDS + k - 1));
+    let seeds = (0..SEEDS).step_by(64).map(|i| (seed(i), i));
+    for (k, seq) in moved.into_iter().chain(seeds) {
+        let found = read.changeset(id(k)).unwrap();
+        assert_eq!(found, Some(stored(k, &[], seq, 1)), "{k} at {n}");
+        let prefix = &id(k).to_string()[..16];
+        assert_eq!(read.resolve_prefix(prefix).unwrap(), [id(k)], "{k} at {n}");
+        assert_eq!(
+            read.by_delta_hash(&delta(k)).unwrap(),
+            [id(k)],
+            "{k} at {n}"
+        );
+    }
+    assert_eq!(
+        read.changeset(id(n + 1)).unwrap(),
+        None,
+        "nothing after {n}"
+    );
+    n
+}
+
+/// Readers take snapshots throughout 1,100 commits (each inserts changeset n and moves main to
+/// it) on a store seeded with 1,100 changesets compacted into the sorted views; the 1,025th
+/// commit takes the tail past the threshold, and compacts it and the views into new views.
+/// Every snapshot is whole ([`assert_whole_snapshot`]); some may land in the middle of the
+/// compaction, though nothing here makes sure one does. And each reader holds the snapshot it
+/// took right before that compaction (the writer waits until every reader holds one), and once
+/// the compaction is done runs the same lookups on it, with the same answers: a snapshot keeps
+/// its own handles on the view files the compaction renames new ones over.
+#[test]
+fn snapshots_stay_consistent_across_a_compaction() {
+    const MOVES: u64 = 1100;
+    // The commit whose changeset makes the tail one longer than the threshold.
+    const COMPACTS: u64 = Index::COMPACT_THRESHOLD + 1;
+    let (_dir, root) = new_root();
+    let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    let seeds: Vec<ChangesetMeta> = (0..SEEDS).map(|i| cs(seed(i), &[])).collect();
+    assert!(insert(&store, &seeds).checkpointed, "the seeds compact");
+    assert_eq!(index(&root).sorted_count(), SEEDS);
+    let done = AtomicBool::new(false);
+    let compacted = AtomicBool::new(false);
+    // Whether each reader holds a snapshot from right before the compaction.
+    let holding: [AtomicBool; 4] = Default::default();
+    thread::scope(|scope| {
+        let readers: Vec<_> = holding
+            .iter()
+            .map(|holds| {
+                let (root, done, compacted) = (&root, &done, &compacted);
+                scope.spawn(move || {
+                    // A handle of its own, as a reader in another process has.
+                    let store = MetaStore::open(root).unwrap();
+                    let mut before = None;
+                    let mut read_again = false;
+                    let mut last = 0;
+                    loop {
+                        let finished = done.load(Ordering::Acquire);
+                        let read = store.read().unwrap();
+                        if read.get_ref("main").unwrap().is_some() {
+                            last = assert_whole_snapshot(&read);
+                            if last == COMPACTS - 1 && before.is_none() {
+                                before = Some(read);
+                                holds.store(true, Ordering::Release);
+                            }
+                        }
+                        if let Some(before) = &before
+                            && !read_again
+                            && compacted.load(Ordering::Acquire)
+                        {
+                            assert_eq!(assert_whole_snapshot(before), COMPACTS - 1);
+                            read_again = true;
+                        }
+                        if finished {
+                            return (read_again, last);
+                        }
+                    }
+                })
+            })
+            .collect();
+        {
+            // Stops the readers however the writes end.
+            let _stop = SetOnDrop(&done);
+            for n in 1..=MOVES {
+                if n == COMPACTS {
+                    let deadline = Instant::now() + Duration::from_secs(60);
+                    while holding.iter().any(|holds| !holds.load(Ordering::Acquire)) {
+                        assert!(Instant::now() < deadline, "the readers fell behind");
+                        thread::sleep(Duration::from_millis(1));
+                    }
+                }
+                let expected = (n > 1).then(|| id(n - 1));
+                let mut write = store.write().unwrap();
+                write.insert_changeset(cs(n, &[])).unwrap();
+                write.cas_ref("main", expected, Some(id(n)), ACTOR).unwrap();
+                let info = write.commit().unwrap();
+                if n == COMPACTS {
+                    assert!(info.checkpointed, "the compacting commit checkpoints");
+                    compacted.store(true, Ordering::Release);
+                }
+            }
+        }
+        for reader in readers {
+            let (read_again, last) = reader.join().unwrap();
+            assert!(
+                read_again,
+                "the snapshot from before the compaction, read after it"
+            );
+            assert_eq!(last, MOVES, "the last snapshot holds every commit");
+        }
+    });
+    // The seeds' write is frame 0 and its Compacted frame 1; commit n is frame n + 1, and the
+    // compaction's Compacted frame follows commit 1,025's.
+    assert_eq!(compacted_frames(&store), [1, COMPACTS + 2]);
+    assert!(index(&root).sorted_count() >= SEEDS + COMPACTS);
+}
+
+/// A ref deleted in a frame past the checkpoint that no writer materialized (a writer died
+/// right after its commit point): its file is still there, but snapshots have it gone, and the
+/// next write removes the file.
+#[test]
+fn a_snapshot_drops_a_ref_whose_delete_is_not_materialized() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    cas(&store, "main", None, Some(1));
+    cas(&store, "release/v1", None, Some(1));
+    let frame = append_unmaterialized(
+        &root,
+        &[ref_move("release/v1", Some(1), None, "crashed/1", 7)],
+    );
+    assert_eq!(ref_file(&root, "release/v1"), Some(ref_content(1, 1)));
+
+    let read = store.read().unwrap();
+    assert_eq!(read.get_ref("release/v1").unwrap(), None);
+    let main = ("main".to_owned(), ref_state(1, 1));
+    assert_eq!(read.list_refs().unwrap(), std::slice::from_ref(&main));
+    let deleted = RefMoveEntry {
+        seq: frame.seq,
+        old: Some(id(1)),
+        new: None,
+        actor: "crashed/1".into(),
+        ts: 7,
+    };
+    assert_eq!(read.reflog("release/v1", 1).unwrap(), [deleted]);
+    drop(read);
+    // The files alone, as verify reads them, still show it.
+    let files: Vec<String> = store
+        .ref_files()
+        .unwrap()
+        .into_iter()
+        .map(|file| file.name)
+        .collect();
+    assert_eq!(files, ["main", "release/v1"]);
+
+    store.write().unwrap().commit().unwrap();
+    assert_eq!(ref_file(&root, "release/v1"), None);
+    let read = store.read().unwrap();
+    assert_eq!(read.list_refs().unwrap(), [main]);
+    drop(read);
+    // Created again, it starts over at version 1.
+    cas(&store, "release/v1", None, Some(1));
+    assert_eq!(
+        store.read().unwrap().get_ref("release/v1").unwrap(),
+        Some(ref_state(1, 1))
+    );
+}
+
+/// The moves of ref `name` that `read`'s reflog lists, newest first, at most `limit`: (frame
+/// seq, old, new).
+fn reflog_moves(read: &MetaRead<'_>, name: &str, limit: usize) -> Vec<Move> {
+    read.reflog(name, limit)
+        .unwrap()
+        .into_iter()
+        .map(|entry| (entry.seq, entry.old, entry.new))
+        .collect()
+}
+
+/// A ref move as [`reflog_moves`] lists it.
+type Move = (u64, Option<ChangesetId>, Option<ChangesetId>);
+
+/// `reflog` reads the frames before the checkpoint 256 at a time, newest first: over 600
+/// frames, it finds every move of a ref, in order, across the batches and the frames past the
+/// checkpoint; stops at its limit in the middle of a batch; and walks back to the first frame
+/// for a ref moved only there.
+#[test]
+fn reflog_walks_back_past_256_frames() {
+    let (_dir, root) = new_root();
+    let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    insert(&store, &[cs(1, &[]), cs(2, &[])]); // frame 0
+    cas(&store, "release/old", None, Some(1)); // frame 1, its only move
+    // Frames 2..=601: every third moves main between changesets 1 and 2, the others
+    // release/busy.
+    let mut main_moves = Vec::new();
+    let (mut main, mut busy) = (None, None);
+    for seq in 2..=601 {
+        let (name, at) = if seq % 3 == 0 {
+            ("main", &mut main)
+        } else {
+            ("release/busy", &mut busy)
+        };
+        let new = if *at == Some(1) { 2 } else { 1 };
+        cas(&store, name, *at, Some(new));
+        if name == "main" {
+            main_moves.push((seq, at.map(id), Some(id(new))));
+        }
+        *at = Some(new);
+    }
+    main_moves.reverse();
+    let checkpoint = ckpt(&root);
+    let past = frames(&root)
+        .iter()
+        .filter(|frame| frame.offset >= checkpoint)
+        .count();
+    assert!((1..32).contains(&past), "{past} frames past the checkpoint");
+
+    let read = store.read().unwrap();
+    assert_eq!(reflog_moves(&read, "main", usize::MAX), main_moves);
+    assert_eq!(reflog_moves(&read, "main", 150), main_moves[..150]);
+    let old = [(1, None, Some(id(1)))];
+    assert_eq!(reflog_moves(&read, "release/old", 10), old);
+    assert_eq!(read.reflog("release/busy", usize::MAX).unwrap().len(), 400);
+    drop(read);
+    // With no frame past the checkpoint, the walk starts at the end of the journal.
+    store.flush().unwrap();
+    let read = store.read().unwrap();
+    assert_eq!(reflog_moves(&read, "main", usize::MAX), main_moves);
+    assert_eq!(reflog_moves(&read, "release/old", 10), old);
+}
+
+/// Set only in the children of `crash_at_any_replay_call_recovers_to_the_journal`: the store
+/// root.
+const REPLAY_CRASH_ROOT: &str = "SWARMOPS_TEST_META_REPLAY_CRASH_ROOT";
+
+/// Lays out at `root` a store whose journal holds three frames past the checkpoint that no
+/// writer materialized, as a power loss can leave the index short of several frames' records:
+/// changesets 2..=4 on changeset 1, main moved from 1 to 4, release/new created and
+/// release/old deleted. Everything before them is materialized and checkpointed.
+fn unreplayed_store(root: &Utf8Path) {
+    let store = MetaStore::create_with_fs(root, Arc::new(FastFs)).unwrap();
+    insert(&store, &[cs(1, &[])]);
+    cas(&store, "main", None, Some(1));
+    cas(&store, "release/old", None, Some(1));
+    store.flush().unwrap();
+    let frames = [
+        vec![
+            changeset_record(&cs(2, &[1]), 2),
+            changeset_record(&cs(3, &[2]), 3),
+        ],
+        vec![
+            changeset_record(&cs(4, &[3]), 4),
+            ref_move("main", Some(1), Some(4), "crashed/1", 7),
+        ],
+        vec![
+            ref_move("release/new", None, Some(2), "crashed/1", 8),
+            ref_move("release/old", Some(1), None, "crashed/1", 9),
+        ],
+    ];
+    for records in &frames {
+        append_unmaterialized(root, records);
+    }
+}
+
+/// Asserts that `read` shows what [`unreplayed_store`]'s journal holds.
+#[track_caller]
+fn assert_replayed(read: &MetaRead<'_>, what: &str) {
+    assert_eq!(read.count_changesets().unwrap(), 4, "{what}");
+    for n in 1..=4 {
+        let parents: Vec<u64> = (n - 1..n).filter(|&parent| parent > 0).collect();
+        let want = stored(n, &parents, n - 1, n);
+        assert_eq!(read.changeset(id(n)).unwrap(), Some(want), "{what}: {n}");
+    }
+    let refs = [
+        ("main".to_owned(), ref_state(4, 2)),
+        ("release/new".to_owned(), ref_state(2, 1)),
+    ];
+    assert_eq!(read.list_refs().unwrap(), refs, "{what}");
+}
+
+/// Copies directory `from` to `to`, files and subdirectories, without syncing anything.
+fn copy_dir(from: &Path, to: &Path) {
+    fs::create_dir_all(to).unwrap();
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &target);
+        } else {
+            fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+/// A crash at any FsOps call of a write's replay (the index appends of three frames, the ref
+/// files they move) leaves a store whose snapshots show the journal's state, and the next
+/// write finishes the replay: every record once, in journal order, and each ref file as its
+/// last move leaves it.
+#[test]
+fn crash_at_any_replay_call_recovers_to_the_journal() {
+    if let Ok(root) = std::env::var(REPLAY_CRASH_ROOT) {
+        let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
+        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, k));
+        let mut store = MetaStore::open_with_fs(Utf8Path::new(&root), fs).unwrap();
+        // One file at a time, in write order, as the dry run: call k is the same call.
+        store.set_parallelism(1);
+        store.write().unwrap().commit().unwrap();
+        return;
+    }
+    let (_template_dir, template) = new_root();
+    unreplayed_store(&template);
+
+    // A dry run counts the calls: the tail check and the snapshot of the journal, then the
+    // replay's.
+    let (_dry_dir, dry) = new_root();
+    copy_dir(template.as_std_path(), dry.as_std_path());
+    let (fs, calls) = RecordingFs::new();
+    let mut store = MetaStore::open_with_fs(&dry, Arc::new(fs)).unwrap();
+    store.set_parallelism(1);
+    store.write().unwrap().commit().unwrap();
+    let dry_calls = calls();
+    for call in ["append ids.col", "atomic_replace main", "remove old"] {
+        assert!(dry_calls.iter().any(|c| c == call), "{call}: {dry_calls:?}");
+    }
+    let total = u64::try_from(dry_calls.len()).unwrap();
+
+    for k in 1..=total + 1 {
+        let (_dir, root) = new_root();
+        copy_dir(template.as_std_path(), root.as_std_path());
+        let child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "crash_at_any_replay_call_recovers_to_the_journal",
+                "--nocapture",
+            ])
+            .env(REPLAY_CRASH_ROOT, &root)
+            .env(CRASH_AT_ENV, k.to_string())
+            .output()
+            .unwrap();
+        let ended_as_expected = if k <= total {
+            child.status.signal() == Some(SIGABRT)
+        } else {
+            child.status.success()
+        };
+        assert!(
+            ended_as_expected,
+            "k={k}: {:?}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr)
+        );
+
+        let store = MetaStore::open(&root).unwrap();
+        assert_replayed(&store.read().unwrap(), &format!("k={k}, after the crash"));
+        store.write().unwrap().commit().unwrap();
+        assert_replayed(&store.read().unwrap(), &format!("k={k}, replayed"));
+        let index = index(&root);
+        assert_eq!(index.len(), 4, "k={k}: each record once");
+        for n in 1..=4 {
+            assert_eq!(index.find(id(n)).unwrap(), Some(n - 1), "k={k}: {n}");
+        }
+        assert_eq!(ref_file(&root, "main"), Some(ref_content(4, 2)), "k={k}");
+        let new = ref_file(&root, "release/new");
+        assert_eq!(new, Some(ref_content(2, 1)), "k={k}");
+        assert_eq!(ref_file(&root, "release/old"), None, "k={k}");
+    }
+}
+
+/// [`RealFs`] without a single flush to stable storage: for tests whose subject is what the
+/// files hold and what snapshots show, which a skipped fsync does not change, and that make
+/// too many transactions to pay for their fsyncs.
+struct FastFs;
+
+impl FsOps for FastFs {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        RealFs.create_dir_all(p)
+    }
+
+    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
+        temp.write_all(bytes)?;
+        let (_file, path) = temp.keep().map_err(|e| e.error)?;
+        Ok(path)
+    }
+
+    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+        RealFs.link_noclobber(from, to)
+    }
+
+    fn fsync_dir(&self, _p: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+        RealFs.read(p)
+    }
+
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        RealFs.exists(p)
+    }
+
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        RealFs.remove(p)
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        RealFs.append(path, bytes)
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        RealFs.file_len(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        OpenOptions::new().write(true).open(path)?.set_len(len)
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        let dir = path.parent().expect("a file in a directory");
+        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
+        temp.write_all(bytes)?;
+        temp.persist(path).map_err(|e| e.error)?;
+        Ok(())
+    }
+
+    fn sync_data(&self, _path: &Path) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        RealFs.append(path, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        fs::rename(from, to)
+    }
+}
+
 /// A hook for [`RecordingFs`]: the name of the file whose first `read` runs it, and what it
 /// runs.
 type Hook = (&'static str, Box<dyn FnOnce() + Send>);
 
-/// Which call a [`RecordingFs`] fails, while set: the call as it records it,
+/// Which calls a [`RecordingFs`] fails, while set: each call as it records it,
 /// `"<method> <file name>"`. Clones share the setting.
 #[derive(Clone, Default)]
-struct Failing(Arc<Mutex<Option<&'static str>>>);
+struct Failing(Arc<Mutex<Vec<&'static str>>>);
 
 impl Failing {
+    /// Fails `call`, and no other.
     fn set(&self, call: &'static str) {
-        *self.0.lock().unwrap() = Some(call);
+        *self.0.lock().unwrap() = vec![call];
+    }
+
+    /// Fails `call` too.
+    fn also(&self, call: &'static str) {
+        self.0.lock().unwrap().push(call);
     }
 
     fn clear(&self) {
-        *self.0.lock().unwrap() = None;
+        self.0.lock().unwrap().clear();
     }
 
-    /// An injected error if `call` is the failing call; the call then does nothing.
+    /// An injected error if `call` is a failing call; the call then does nothing.
     fn check(&self, call: &str) -> io::Result<()> {
-        match *self.0.lock().unwrap() {
-            Some(failing) if failing == call => Err(io::Error::other(format!("injected: {call}"))),
-            _ => Ok(()),
+        if self.0.lock().unwrap().contains(&call) {
+            Err(io::Error::other(format!("injected: {call}")))
+        } else {
+            Ok(())
         }
     }
 }
@@ -1881,6 +2578,52 @@ fn write_and_commit_make_the_documented_fs_calls() {
     calls();
     store.flush().unwrap();
     assert_eq!(calls(), [&tail_check[..], &snapshot, &sync].concat());
+}
+
+/// The child of [`a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer`]: 32
+/// transactions at the default parallelism, the last of which syncs the index after its commit
+/// point, while RLIMIT_NPROC leaves no thread to spawn.
+#[cfg(target_os = "linux")]
+fn commit_with_no_thread_to_spare(root: &Utf8Path) {
+    if thread::Builder::new().spawn(|| ()).is_ok() {
+        // The limit does not bind (root, say): nothing to check here.
+        println!("{REPORT}threads can be spawned");
+        return;
+    }
+    let store = MetaStore::create(root).unwrap();
+    for n in 0..31 {
+        insert(&store, &[cs(n, &[])]);
+    }
+    assert!(insert(&store, &[cs(31, &[])]).checkpointed);
+    assert_eq!(ckpt(root), log_len(root));
+    println!("{REPORT}checkpointed");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer() {
+    const TEST: &str = "a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer";
+    if let Some(root) = std::env::var_os(NO_THREADS_ROOT) {
+        let root = Utf8PathBuf::from_path_buf(root.into()).unwrap();
+        commit_with_no_thread_to_spare(&root);
+        return;
+    }
+    let (_dir, root) = new_root();
+    // `ulimit -u 1`: this user's processes and threads are past the limit, so the child can
+    // spawn no thread (the test harness then runs the test on its main thread).
+    let child = Command::new("bash")
+        .arg("-c")
+        .arg("ulimit -u 1 && exec \"$0\" \"$@\"")
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", TEST, "--nocapture"])
+        .env(NO_THREADS_ROOT, &root)
+        .output()
+        .unwrap();
+    let report = report(0, &child);
+    assert!(
+        report == "checkpointed" || report == "threads can be spawned",
+        "{report}"
+    );
 }
 
 /// The five index syncs, sorted.
