@@ -20,10 +20,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use swarmops_api::{
     Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetSummary, CommitReq, ContentEncoding,
-    ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_LS_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES,
-    EntryKindOut, ErrorCode, FileContent, FileKind, Identity, IdentityInfo, InfoReq, LogPage,
-    LogReq, ModeInput, OpError, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefOut,
-    RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, StoreOps, TreeEntryOut, VerifyReq,
+    ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES,
+    DEFAULT_READ_TREE_LIMIT, EntryKindOut, ErrorCode, FileContent, FileKind, Identity,
+    IdentityInfo, InfoReq, LogPage, LogReq, ModeInput, OpError, ReadFileReq, ReadTreeReq,
+    RefDeleteReq, RefListReq, RefOut, RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, StoreOps,
+    TreeEntryOut, VerifyReq,
 };
 use swarmops_core::{
     ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
@@ -104,7 +105,7 @@ fn ls(rev: &str, path: Option<&str>) -> ReadTreeReq {
     ReadTreeReq {
         rev: rev.into(),
         path: path.map(str::to_owned),
-        limit: DEFAULT_LS_LIMIT,
+        limit: DEFAULT_READ_TREE_LIMIT,
         cursor: None,
     }
 }

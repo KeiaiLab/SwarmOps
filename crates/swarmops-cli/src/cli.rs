@@ -5,7 +5,9 @@ use std::ffi::OsString;
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
-use swarmops_api::{DEFAULT_LOG_LIMIT, DEFAULT_LS_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES};
+use swarmops_api::{
+    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT,
+};
 
 /// The envelope's `op` for a command line that names no operation.
 pub const NO_OP: &str = "swarmops";
@@ -136,7 +138,7 @@ pub enum Command {
         #[arg(value_name = "REV[:PATH]")]
         target: String,
         /// The most entries to list.
-        #[arg(long, value_name = "N", default_value_t = DEFAULT_LS_LIMIT)]
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_READ_TREE_LIMIT)]
         limit: usize,
         /// Resume after this entry name: the previous page's cursor.
         #[arg(long)]

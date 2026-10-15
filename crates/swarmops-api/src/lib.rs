@@ -18,11 +18,11 @@ pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
     Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq,
-    CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_LS_LIMIT,
-    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, EntryKindOut, FileContent, FileKind, IdentityInfo,
-    InfoReq, InitReq, LogPage, LogReq, ModeInput, ReadFileReq, ReadTreeReq, RefDeleteReq,
-    RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut,
-    Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyReport, VerifyReq,
+    CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, FileContent, FileKind,
+    IdentityInfo, InfoReq, InitReq, LogPage, LogReq, ModeInput, ReadFileReq, ReadTreeReq,
+    RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq,
+    SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyReport, VerifyReq,
 };
 pub use rev::Rev;
 

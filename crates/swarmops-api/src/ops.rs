@@ -15,8 +15,8 @@
 //! because `init` runs on the client and is not a [`StoreOps`] method.
 //!
 //! Not in M1 yet:
-//! - M2: `ContentInput::Blob`, `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each `TreeEntryOut`,
-//!   and `LogReq.paths` and `LogReq.first_parent`;
+//! - M2: `ContentInput::Blob`, `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each
+//!   `TreeEntryOut`, and `LogReq.paths` and `LogReq.first_parent`;
 //! - M4 (with land): `idempotency_key` and `replayed` on `commit`;
 //! - M4/M7: `lander`, `land_key`, `cr` and `annotations` on `ChangesetDetail` (`show`);
 //! - M5: `RepoInfo.workspaces`.
@@ -39,7 +39,7 @@ pub const DEFAULT_LOG_LIMIT: usize = 50;
 
 /// The default [`ReadTreeReq::limit`]: 500 entries. An entry prints in about 100 bytes besides
 /// its name, so a default page stays under the 64 KiB target for names of up to about 30 bytes.
-pub const DEFAULT_LS_LIMIT: usize = 500;
+pub const DEFAULT_READ_TREE_LIMIT: usize = 500;
 
 /// The default [`ShowReq::max_changes`]: 400 changes. A change prints in about 110 bytes
 /// besides its path, so a default page stays under the 64 KiB target for paths of up to about
@@ -54,8 +54,8 @@ fn default_log_limit() -> usize {
     DEFAULT_LOG_LIMIT
 }
 
-fn default_ls_limit() -> usize {
-    DEFAULT_LS_LIMIT
+fn default_read_tree_limit() -> usize {
+    DEFAULT_READ_TREE_LIMIT
 }
 
 fn default_max_changes() -> usize {
@@ -274,7 +274,7 @@ pub struct ReadTreeReq {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// The most entries to return: at least 1 (0 is `E_INVALID_ARG`).
-    #[serde(default = "default_ls_limit")]
+    #[serde(default = "default_read_tree_limit")]
     #[schemars(range(min = 1))]
     pub limit: usize,
     /// Resume a listing: the previous page's `cursor`; this page starts after that entry name.
