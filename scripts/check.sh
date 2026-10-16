@@ -24,5 +24,5 @@ else
     exit 1
   }
 fi
-RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
 cargo deny --locked check

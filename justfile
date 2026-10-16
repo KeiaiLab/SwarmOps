@@ -22,7 +22,7 @@ check:
     cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo nextest run --locked --workspace --all-features --no-tests=warn
     cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks --no-tests=fail
-    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
     cargo deny --locked check
 
 # The test hooks are on (`--all-features`), as in `just check`.
