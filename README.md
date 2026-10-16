@@ -116,8 +116,8 @@ as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref
 `inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
 definitions it refers to written in place. Its result is the envelope the CLI prints for that
 request, as `structuredContent` and as text, and a failed operation sets `isError`, with the
-envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 to clients that
-open with `initialize`.
+envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
+to clients that open with `initialize`.
 
 Register it with Claude Code:
 
@@ -132,20 +132,40 @@ or give a project a `.mcp.json`:
   "mcpServers": {
     "swarmops": {
       "command": "swarmops",
-      "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme", "--as", "agent/worker-1"]
+      "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
+      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT}"}
     }
   }
 }
 ```
 
+A project's `.mcp.json` is shared by every agent that opens the project, so it takes each
+agent's identity from that agent's own `SWARMOPS_AGENT`, which Claude Code expands into the
+server's environment, rather than giving all of them one `--as`.
+
 The store and the identity are the server's, as they are a command's: `--repo`, else
-`SWARMOPS_REPO`, and `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID` (so the `env` of a
-`.mcp.json` entry can set them instead). No call can name another identity: every commit and
-ref move is recorded for the server's agent, and without one they fail with
-`E_IDENTITY_REQUIRED`. The client starts the server as its own user, so the server reads
-`{"file": "<path>"}` content as the CLI does, a relative path from its working directory: give
-absolute paths, the store's too. It opens the store for each call, and so sees what other
-agents commit meanwhile.
+`SWARMOPS_REPO`, and `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`. No call can name
+another identity: every commit and ref move is recorded for the server's agent, and without one
+they fail with `E_IDENTITY_REQUIRED`. The client starts the server as its own user, so the
+server reads `{"file": "<path>"}` content as the CLI does, a relative path from its working
+directory: give absolute paths, the store's too. It opens the store for each call, and so sees
+what other agents commit meanwhile.
+
+Two rules matter more to an agent than to a person at the CLI:
+
+- `ref_set` and `ref_delete` take `expected_old` as the full changeset id the ref held when the
+  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name or a relative
+  revision such as `main~1` is resolved when the call runs, so it always matches and the
+  compare-and-swap protects nothing: the server refuses one with `E_INVALID_ARG`. The CLI's
+  `--expect` still takes any revision, and its help says why not to.
+- Clients cut long tool results (Claude Code at 25,000 tokens by default), and each result holds
+  its envelope twice, so an agent should ask for little: `max_bytes` of 32 KiB or less for
+  `read_file`, a `limit` of 100 or less for `read_tree` and `log`, paging on with the `cursor` a
+  result returns, and `max_changes` of 100 or less for `show`. The tools' descriptions say so;
+  the operations' own defaults stay as they are.
+
+A command line `swarmops mcp` refuses starts no server: its envelope goes to stderr, never to
+stdout, which belongs to the protocol.
 
 ## Development
 

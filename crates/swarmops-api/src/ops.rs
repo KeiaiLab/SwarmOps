@@ -477,8 +477,11 @@ pub struct RefSetReq {
     pub name: String,
     /// The revision to point it at.
     pub new: Rev,
-    /// To move an existing ref: the target the caller last saw; if the ref holds another, the
-    /// move fails with `E_CAS_MISMATCH`. Give this or `create`, not both.
+    /// To move an existing ref: the target the caller last saw, by its full changeset id; if the
+    /// ref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative
+    /// revision is resolved when the move runs, so it always matches and the compare-and-swap
+    /// protects nothing: `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's `--expect`
+    /// help warns against it. Give this or `create`, not both.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_old: Option<Rev>,
     /// To create the ref; if it exists already, the move fails with `E_CAS_MISMATCH`. Give this
@@ -511,8 +514,11 @@ pub struct RefSetResp {
 pub struct RefDeleteReq {
     /// The ref.
     pub name: String,
-    /// The target the caller last saw; if the ref holds another, the delete fails with
-    /// `E_CAS_MISMATCH`.
+    /// The target the caller last saw, by its full changeset id; if the ref holds another, the
+    /// delete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is resolved when
+    /// the delete runs, so it always matches and the compare-and-swap protects nothing:
+    /// `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's `--expect` help warns
+    /// against it.
     pub expected_old: Rev,
 }
 

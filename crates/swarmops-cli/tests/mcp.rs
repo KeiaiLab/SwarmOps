@@ -41,6 +41,16 @@ const LATEST: &str = "2026-07-28";
 /// The revision before it, 2025-11-25: a session that `initialize` opens.
 const PREVIOUS: &str = "2025-11-25";
 
+/// The earliest revision `initialize` still serves: 2025-06-18, the first with
+/// `structuredContent` and `outputSchema`.
+const EARLIEST: &str = "2025-06-18";
+
+/// The id of an error that answers a message whose id could not be read.
+const NULL: Value = Value::Null;
+
+/// A command line that runs `swarmops mcp`: its arguments, and the variables it sets.
+type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
+
 /// The tools, one per `StoreOps` operation, in the order `tools/list` gives them, each with
 /// the request type its arguments are.
 const TOOLS: [(&str, &str); 10] = [
@@ -130,15 +140,25 @@ fn mcp_initialize_lists_every_operation_as_a_tool() {
     );
     server.finish_clean();
 
-    // A client that asks for a version the handshake does not serve gets 2025-11-25, to
-    // accept or refuse; so does one that asks for 2026-07-28, which has no handshake.
-    for asked in ["2024-11-05", LATEST] {
+    // The handshake serves 2025-06-18 too, as asked, with the same tools and results. A
+    // client that asks for a version it does not serve gets 2025-11-25, to accept or refuse:
+    // 2025-03-26 and older, and 2026-07-28, which has no handshake.
+    for (asked, answered) in [
+        (EARLIEST, EARLIEST),
+        ("2025-03-26", PREVIOUS),
+        ("2024-11-05", PREVIOUS),
+        (LATEST, PREVIOUS),
+    ] {
         let mut server = Server::start(&["--repo", store.path()], &[]);
         let init = server.result(
             "initialize",
             json!({"protocolVersion": asked, "capabilities": {}, "clientInfo": client_info()}),
         );
-        assert_eq!(init["protocolVersion"], PREVIOUS, "asked {asked}: {init}");
+        assert_eq!(init["protocolVersion"], answered, "asked {asked}: {init}");
+        let listed = server.result("tools/list", json!({}));
+        assert_eq!(listed, previous, "asked {asked}");
+        let info = server.ok("repo_info", json!({}));
+        assert_eq!(info["result"]["changesets"], 0, "asked {asked}");
         server.finish_clean();
     }
 }
@@ -348,9 +368,10 @@ fn mcp_mutation_without_identity_is_e_identity_required() {
         ),
         (
             "ref_delete",
-            json!({"name": "main", "expected_old": "main"}),
+            json!({"name": "main", "expected_old": "0".repeat(64)}),
         ),
     ];
+    // Each call is well formed, so the missing identity is what refuses it.
     for (tool, arguments) in mutations {
         let refused = server.err(tool, arguments, "E_IDENTITY_REQUIRED");
         assert_eq!(refused["error"]["exit"], 5, "{refused}");
@@ -391,13 +412,26 @@ fn mcp_mutation_without_identity_is_e_identity_required() {
         json!({"agent": "human/purple", "run_id": "run-9"})
     );
     server.finish_clean();
+    // --as wins over SWARMOPS_AGENT, as it does for the CLI; the run is still the variable's.
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &env);
+    server.initialize();
+    let id = server.ok("commit", commit.clone())["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let shown = server.ok("show", json!({"rev": id}));
+    assert_eq!(
+        shown["result"]["author"],
+        json!({"agent": AGENT, "run_id": "run-9"})
+    );
+    server.finish_clean();
 
     // An agent name that breaks the grammar refuses every mutation, said of where it came from.
     let mut server = Server::start(&["--repo", store.path(), "--as", "Not An Agent"], &[]);
     server.initialize();
     let bad = server.err("commit", commit, "E_INVALID_ARG");
     assert_eq!(bad["error"]["details"]["source"], "--as", "{bad}");
-    assert_eq!(server.ok("repo_info", json!({}))["result"]["changesets"], 1);
+    assert_eq!(server.ok("repo_info", json!({}))["result"]["changesets"], 2);
     server.finish_clean();
 }
 
@@ -592,12 +626,12 @@ fn mcp_calls_do_not_share_resolution() {
     assert_eq!(show["meta"]["resolved"], json!({&c1[..12]: c1}));
     let stale = server.err(
         "ref_set",
-        json!({"name": "main", "new": "main~1", "expected_old": &c1[..12]}),
+        json!({"name": "main", "new": "main~1", "expected_old": c1}),
         "E_CAS_MISMATCH",
     );
     assert_eq!(
         stale["meta"]["resolved"],
-        json!({"main~1": c1, &c1[..12]: c1})
+        json!({"main~1": c1, c1.as_str(): c1})
     );
     let info = server.ok("repo_info", json!({}));
     assert_eq!(info["meta"]["resolved"], json!({}), "resolves nothing");
@@ -606,6 +640,201 @@ fn mcp_calls_do_not_share_resolution() {
     let refs = server.ok("ref_list", json!({}));
     assert_eq!(refs["meta"]["resolved"], json!({}));
     server.finish_clean();
+}
+
+/// A ref move through the server is a compare-and-swap only when it names what it expects: an
+/// `expected_old` that is not a full changeset id (a ref name, a relative revision, an id
+/// prefix) is resolved when the call runs, so it would always match; the server refuses it with
+/// `E_INVALID_ARG` and moves nothing. With the full id the caller last read, a stale
+/// expectation is `E_CAS_MISMATCH`, and the same move again finds its work done. The CLI keeps
+/// taking any revision for `--expect`.
+#[test]
+fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let first = json!({"message": "c1", "changes": [{"path": "c1", "op": "put",
+                                                    "content": {"inline": "c1"}}]});
+    let c1 = server.ok("commit", first)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": c1, "create": true}),
+    );
+    // Agent A builds c3 on c1 while agent B lands c2.
+    let c2 = commit_on(&mut server, "c2", &c1);
+    let c3 = commit_on(&mut server, "c3", &c1);
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": c2, "expected_old": c1}),
+    );
+    vague_expectations_are_refused(&mut server, &c2, &c3);
+    concrete_expectations_compare_and_swap(&mut server, &c1, &c2, &c3);
+    server.finish_clean();
+
+    // The CLI still takes a ref name for --expect, which its help warns against.
+    store
+        .run_as(AGENT, &["ref", "set", "release/b", &c1, "--create"], &[])
+        .ok();
+    let deleted = store.run_as(
+        AGENT,
+        &["ref", "delete", "release/b", "--expect", "release/b"],
+        &[],
+    );
+    assert_eq!(deleted.ok()["old"], c1.as_str());
+}
+
+/// A changeset committed through `server` on `parent`, putting a file named `name`; its id.
+fn commit_on(server: &mut Server, name: &str, parent: &str) -> String {
+    let arguments = json!({
+        "message": name,
+        "parent": parent,
+        "changes": [{"path": name, "op": "put", "content": {"inline": name}}],
+    });
+    server.ok("commit", arguments)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+/// The refs, as `ref_list` gives them through `server`.
+fn refs_of(server: &mut Server) -> Value {
+    server.ok("ref_list", json!({}))["result"]["refs"].take()
+}
+
+/// With main at `c2`: agent A's move to `c3` expecting "main" would drop c2, a lost update; a
+/// move to main~1 expecting "main" would move main again at every call; an id's prefix or an
+/// id with ~N is resolved when the call runs too. Each is refused, nothing is resolved, and
+/// main stays at `c2`.
+fn vague_expectations_are_refused(server: &mut Server, c2: &str, c3: &str) {
+    let held = json!([{"name": "main", "target": c2, "version": 2}]);
+    let refused = [
+        (
+            "ref_set",
+            json!({"name": "main", "new": c3, "expected_old": "main"}),
+        ),
+        (
+            "ref_set",
+            json!({"name": "main", "new": "main~1", "expected_old": "main"}),
+        ),
+        (
+            "ref_set",
+            json!({"name": "main", "new": "main~1", "expected_old": "main"}),
+        ),
+        (
+            "ref_set",
+            json!({"name": "main", "new": c3, "expected_old": &c2[..12]}),
+        ),
+        (
+            "ref_set",
+            json!({"name": "main", "new": c3, "expected_old": format!("{c2}~0")}),
+        ),
+        (
+            "ref_delete",
+            json!({"name": "main", "expected_old": "main"}),
+        ),
+        (
+            "ref_delete",
+            json!({"name": "main", "expected_old": &c2[..12]}),
+        ),
+    ];
+    for (tool, arguments) in refused {
+        let refused = server.err(tool, arguments.clone(), "E_INVALID_ARG");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("full changeset id") && message.contains("compare-and-swap"),
+            "{message}"
+        );
+        assert_eq!(
+            refused["error"]["details"],
+            json!({"name": "main", "expected_old": arguments["expected_old"]}),
+            "{refused}"
+        );
+        assert_eq!(refused["error"]["hint"], "swarmops ref list", "{refused}");
+        assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
+        assert_eq!(refs_of(server), held, "{tool} {arguments}");
+    }
+}
+
+/// With main at `c2` and `c3` built on `c1`: the full id main holds moves it, and the same move
+/// again finds its work done; a stale full id is `E_CAS_MISMATCH`; a relative `new` is safe with
+/// a concrete expectation; a delete by full id deletes, and again finds the ref gone.
+fn concrete_expectations_compare_and_swap(server: &mut Server, c1: &str, c2: &str, c3: &str) {
+    let c4 = commit_on(server, "c4", c2);
+    let set = json!({"name": "main", "new": c4, "expected_old": c2});
+    let moved = server.ok("ref_set", set.clone());
+    assert_eq!(moved["result"]["already_applied"], false);
+    let again = server.ok("ref_set", set);
+    assert_eq!(again["result"]["already_applied"], true);
+    let stale = server.err(
+        "ref_set",
+        json!({"name": "main", "new": c3, "expected_old": c2}),
+        "E_CAS_MISMATCH",
+    );
+    assert_eq!(
+        stale["error"]["details"],
+        json!({"name": "main", "actual": c4})
+    );
+    assert_eq!(
+        refs_of(server),
+        json!([{"name": "main", "target": c4, "version": 3}])
+    );
+    let back = json!({"name": "main", "new": "main~1", "expected_old": c4});
+    server.ok("ref_set", back.clone());
+    server.err("ref_set", back, "E_CAS_MISMATCH");
+    assert_eq!(
+        refs_of(server),
+        json!([{"name": "main", "target": c2, "version": 4}])
+    );
+    server.ok(
+        "ref_set",
+        json!({"name": "release/a", "new": c1, "create": true}),
+    );
+    let delete = json!({"name": "release/a", "expected_old": c1});
+    let deleted = server.ok("ref_delete", delete.clone());
+    assert_eq!(deleted["result"]["already_applied"], false);
+    let gone = server.ok("ref_delete", delete);
+    assert_eq!(gone["result"]["already_applied"], true);
+}
+
+/// A command line that `swarmops mcp` refuses starts no server, and its envelope goes to
+/// stderr, since stdout belongs to the protocol; the exit code is the error's. Every other
+/// command still prints such an envelope on stdout.
+#[test]
+fn mcp_startup_failures_go_to_stderr() {
+    let cases: [Startup<'_>; 3] = [
+        (&["mcp", "--no-such-flag"], &[]),
+        (&["mcp", "extra"], &[]),
+        (&["mcp"], &[("SWARMOPS_FORMAT", "yaml")]),
+    ];
+    for (args, env) in cases {
+        let output = support::swarmops(args, env)
+            .output()
+            .expect("run swarmops mcp");
+        assert!(
+            output.stdout.is_empty(),
+            "{args:?} {env:?}: nothing on stdout, not {:?}",
+            String::from_utf8_lossy(&output.stdout)
+        );
+        assert_eq!(output.status.code(), Some(2), "{args:?} {env:?}");
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let envelope: Value = serde_json::from_str(stderr.trim_end())
+            .unwrap_or_else(|e| panic!("one envelope on stderr ({e}): {stderr}"));
+        assert_eq!(
+            (&envelope["op"], &envelope["error"]["code"]),
+            (&json!("mcp"), &json!("E_INVALID_ARG")),
+            "{stderr}"
+        );
+    }
+    let output = support::swarmops(&["info", "--no-such-flag"], &[])
+        .output()
+        .expect("run swarmops info");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    assert_eq!(output.status.code(), Some(2));
+    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(envelope["error"]["code"], "E_INVALID_ARG");
 }
 
 /// What is not a valid request gets a JSON-RPC error, and the server serves on: malformed
@@ -617,66 +846,8 @@ fn mcp_rejects_unknown_methods_and_bad_json() {
     let store = Store::init();
     let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
 
-    server.send_line(b"this is not json");
-    let parse = server.reply_error(None, PARSE_ERROR);
-    assert!(parse.get("id").is_none(), "no id to answer: {parse}");
-    server.send_line(b"{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"ping\"");
-    server.reply_error(None, PARSE_ERROR);
-    server.send_line(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xff\"}");
-    server.reply_error(None, PARSE_ERROR);
-    server.send(&json!([{"jsonrpc": "2.0", "id": 1, "method": "ping"}]));
-    server.reply_error(None, INVALID_REQUEST);
-    server.send(&json!("ping"));
-    server.reply_error(None, INVALID_REQUEST);
-    server.send(&json!({"jsonrpc": "2.0", "id": 2}));
-    server.reply_error(Some(&json!(2)), INVALID_REQUEST);
-    server.send(&json!({"jsonrpc": "1.0", "id": 3, "method": "ping"}));
-    server.reply_error(Some(&json!(3)), INVALID_REQUEST);
-    server.send(&json!({"id": "four", "method": "ping"}));
-    server.reply_error(Some(&json!("four")), INVALID_REQUEST);
-    server.send(&json!({"jsonrpc": "2.0", "id": null, "method": "ping"}));
-    server.reply_error(None, INVALID_REQUEST);
-    server.send(&json!({"jsonrpc": "2.0", "id": 5, "method": "ping", "params": [1]}));
-    server.reply_error(Some(&json!(5)), INVALID_PARAMS);
-
-    // Before initialize, a ping is answered, but a request that names no version in _meta
-    // has no rules to go by.
-    assert_eq!(server.result("ping", json!({})), json!({}));
-    let early = server.error("tools/list", json!({}), INVALID_PARAMS);
-    assert!(
-        early["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("io.modelcontextprotocol/protocolVersion"),
-        "{early}"
-    );
-    // The latest revision's requests: a version it does not serve, a _meta without the client
-    // capabilities that revision requires, a method that revision does not have.
-    let future = json!({
-        "io.modelcontextprotocol/protocolVersion": "2099-01-01",
-        "io.modelcontextprotocol/clientCapabilities": {},
-    });
-    let unsupported = server.error(
-        "tools/list",
-        json!({"_meta": future}),
-        UNSUPPORTED_PROTOCOL_VERSION,
-    );
-    assert_eq!(
-        unsupported["error"]["data"],
-        json!({"supported": [LATEST], "requested": "2099-01-01"})
-    );
-    let no_capabilities = json!({"io.modelcontextprotocol/protocolVersion": LATEST});
-    server.error(
-        "tools/list",
-        json!({"_meta": no_capabilities}),
-        INVALID_PARAMS,
-    );
-    server.error("ping", json!({"_meta": latest_meta()}), METHOD_NOT_FOUND);
-    server.error(
-        "frobnicate",
-        json!({"_meta": latest_meta()}),
-        METHOD_NOT_FOUND,
-    );
+    malformed_messages_are_refused(&mut server);
+    requests_before_initialize_are_refused(&mut server);
 
     // Notifications, known or not, and responses from the client get no answer.
     server.send(&json!({"jsonrpc": "2.0", "method": "notifications/frobnicated"}));
@@ -689,6 +860,15 @@ fn mcp_rejects_unknown_methods_and_bad_json() {
     server.send_line(b"   ");
 
     server.initialize();
+    // In the session, a request that names its revision in _meta is the session's.
+    let claimed = json!({"_meta": {"io.modelcontextprotocol/protocolVersion": PREVIOUS}});
+    assert_eq!(
+        server.result("tools/list", claimed)["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
     server.error("frobnicate", json!({}), METHOD_NOT_FOUND);
     let unknown = server.error(
         "tools/call",
@@ -725,6 +905,111 @@ fn mcp_rejects_unknown_methods_and_bad_json() {
     );
 }
 
+/// Messages that are not valid requests, sent to `server`: unreadable lines, batches and other
+/// values that are not one object, ids that are not strings or integers (answered with a null
+/// id, as JSON-RPC 2.0 has it), objects without the 2.0 shape, and params that are not an
+/// object.
+fn malformed_messages_are_refused(server: &mut Server) {
+    server.send_line(b"this is not json");
+    server.reply_error(&NULL, PARSE_ERROR);
+    server.send_line(b"{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"ping\"");
+    server.reply_error(&NULL, PARSE_ERROR);
+    server.send_line(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xff\"}");
+    server.reply_error(&NULL, PARSE_ERROR);
+    server.send(&json!([{"jsonrpc": "2.0", "id": 1, "method": "ping"}]));
+    server.reply_error(&NULL, INVALID_REQUEST);
+    server.send(&json!("ping"));
+    server.reply_error(&NULL, INVALID_REQUEST);
+    // An id is a string or an integer.
+    for id in [
+        json!(null),
+        json!(1.5),
+        json!(2.0),
+        json!({}),
+        json!([1]),
+        json!(true),
+    ] {
+        server.send(&json!({"jsonrpc": "2.0", "id": id, "method": "ping"}));
+        server.reply_error(&NULL, INVALID_REQUEST);
+    }
+    assert_eq!(
+        server.request_with_id(&json!(-7), "ping")["result"],
+        json!({})
+    );
+    assert_eq!(
+        server.request_with_id(&json!("x"), "ping")["result"],
+        json!({})
+    );
+    server.send(&json!({"jsonrpc": "2.0", "id": 2}));
+    server.reply_error(&json!(2), INVALID_REQUEST);
+    server.send(&json!({"jsonrpc": "1.0", "id": 3, "method": "ping"}));
+    server.reply_error(&json!(3), INVALID_REQUEST);
+    server.send(&json!({"id": "four", "method": "ping"}));
+    server.reply_error(&json!("four"), INVALID_REQUEST);
+    server.send(&json!({"jsonrpc": "2.0", "id": 5, "method": "ping", "params": [1]}));
+    server.reply_error(&json!(5), INVALID_PARAMS);
+}
+
+/// Requests that `server`, with no session open, cannot serve: a ping is answered, but a request
+/// that names no version in `_meta` has no rules to go by, one that names a revision with a
+/// handshake is told to send `initialize` first, and the latest revision's requests are
+/// refused for a version not served, a `_meta` without the client's capabilities, or a method
+/// that revision does not have.
+fn requests_before_initialize_are_refused(server: &mut Server) {
+    assert_eq!(server.result("ping", json!({})), json!({}));
+    for version in [PREVIOUS, EARLIEST] {
+        let meta = json!({
+            "io.modelcontextprotocol/protocolVersion": version,
+            "io.modelcontextprotocol/clientCapabilities": {},
+        });
+        for method in ["tools/list", "ping"] {
+            let early = server.error(method, json!({"_meta": meta}), UNSUPPORTED_PROTOCOL_VERSION);
+            assert_eq!(
+                early["error"]["data"],
+                json!({"supported": [LATEST], "requested": version}),
+                "{early}"
+            );
+            let message = early["error"]["message"].as_str().unwrap();
+            assert!(message.contains("initialize"), "{message}");
+        }
+    }
+    let early = server.error("tools/list", json!({}), INVALID_PARAMS);
+    assert!(
+        early["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("io.modelcontextprotocol/protocolVersion"),
+        "{early}"
+    );
+    // The latest revision's requests: a version it does not serve, a _meta without the client
+    // capabilities that revision requires, a method that revision does not have.
+    let future = json!({
+        "io.modelcontextprotocol/protocolVersion": "2099-01-01",
+        "io.modelcontextprotocol/clientCapabilities": {},
+    });
+    let unsupported = server.error(
+        "tools/list",
+        json!({"_meta": future}),
+        UNSUPPORTED_PROTOCOL_VERSION,
+    );
+    assert_eq!(
+        unsupported["error"]["data"],
+        json!({"supported": [LATEST], "requested": "2099-01-01"})
+    );
+    let no_capabilities = json!({"io.modelcontextprotocol/protocolVersion": LATEST});
+    server.error(
+        "tools/list",
+        json!({"_meta": no_capabilities}),
+        INVALID_PARAMS,
+    );
+    server.error("ping", json!({"_meta": latest_meta()}), METHOD_NOT_FOUND);
+    server.error(
+        "frobnicate",
+        json!({"_meta": latest_meta()}),
+        METHOD_NOT_FOUND,
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // The client end.
 // ---------------------------------------------------------------------------------------------
@@ -737,6 +1022,8 @@ struct Server {
     stdin: Option<ChildStdin>,
     /// The lines the server writes on stdout, as a thread reads them.
     stdout: Receiver<String>,
+    /// The thread that reads stdout to its end, line by line, into [`Server::stdout`].
+    stdout_reader: Option<JoinHandle<()>>,
     /// The thread that reads stderr to its end.
     stderr: Option<JoinHandle<Vec<u8>>>,
     /// The id of the last request sent.
@@ -767,7 +1054,7 @@ impl Server {
         let mut child = command.spawn().expect("start swarmops mcp");
         let stdout = child.stdout.take().expect("a piped stdout");
         let (lines, stdout_lines) = mpsc::channel();
-        thread::spawn(move || {
+        let stdout_reader = thread::spawn(move || {
             for line in BufReader::new(stdout).lines() {
                 let Ok(line) = line else { break };
                 if lines.send(line).is_err() {
@@ -785,6 +1072,7 @@ impl Server {
             stdin: child.stdin.take(),
             child,
             stdout: stdout_lines,
+            stdout_reader: Some(stdout_reader),
             stderr: Some(stderr),
             last_id: 0,
         }
@@ -832,12 +1120,21 @@ impl Server {
         reply
     }
 
-    /// The next reply, which must be an error with `code`, answering request `id` (`None`: a
-    /// message whose id could not be read, answered without one).
-    fn reply_error(&mut self, id: Option<&Value>, code: i64) -> Value {
+    /// The next reply, which must be an error with `code`, answering request `id` ([`NULL`]:
+    /// a message whose id could not be read).
+    fn reply_error(&mut self, id: &Value, code: i64) -> Value {
         let reply = self.reply();
         assert_eq!(reply["error"]["code"], code, "{reply}");
-        assert_eq!(reply.get("id"), id, "{reply}");
+        assert_eq!(reply.get("id"), Some(id), "{reply}");
+        reply
+    }
+
+    /// Sends request `method` without params under `id`, which the reply must carry: the
+    /// reply.
+    fn request_with_id(&mut self, id: &Value, method: &str) -> Value {
+        self.send(&json!({"jsonrpc": "2.0", "id": id, "method": method}));
+        let reply = self.reply();
+        assert_eq!(reply["id"], *id, "{reply}");
         reply
     }
 
@@ -936,6 +1233,10 @@ impl Server {
         };
         let stderr = self.stderr.take().expect("finished once");
         let stderr = String::from_utf8_lossy(&stderr.join().expect("read stderr")).into_owned();
+        // The server has exited, so its stdout is at its end: once the reader has read every
+        // line it wrote, nothing it wrote can be missed.
+        let reader = self.stdout_reader.take().expect("finished once");
+        reader.join().expect("read stdout");
         let rest: Vec<String> = self.stdout.try_iter().collect();
         assert!(
             rest.is_empty(),

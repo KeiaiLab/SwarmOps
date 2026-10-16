@@ -178,8 +178,9 @@ pub enum Command {
     /// ref_delete, commit, verify), each taking the operation's request as its arguments and
     /// returning the envelope the other commands print. The store and the identity are the
     /// server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28,
-    /// and 2025-11-25 to clients that open with initialize. Prints no envelope: stdout carries
-    /// the protocol until stdin ends.
+    /// and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope:
+    /// stdout carries the protocol until stdin ends, and a command line it refuses has its
+    /// envelope on stderr.
     Mcp,
 }
 
@@ -226,6 +227,18 @@ pub enum Parsed {
         /// The global flags, as far as they could be read.
         global: Global,
     },
+}
+
+impl Parsed {
+    /// Whether the line runs `swarmops mcp`, as far as it could be read: a command to run, or a
+    /// usage error in its arguments. Its stdout belongs to the protocol.
+    pub fn runs_mcp(&self) -> bool {
+        match self {
+            Parsed::Run(_, op) => *op == "mcp",
+            Parsed::Usage { path, .. } => path.first().is_some_and(|name| name == "mcp"),
+            Parsed::Text(_) => false,
+        }
+    }
 }
 
 /// Reads the command line `args`, the program's name first.
@@ -455,6 +468,21 @@ mod tests {
         }
         assert!(matches!(parse(&args(&["--version"])), Parsed::Text(_)));
         assert!(matches!(parse(&args(&["help", "log"])), Parsed::Text(_)));
+    }
+
+    #[test]
+    fn a_line_that_runs_mcp_is_known_as_one() {
+        for line in [
+            &["mcp"][..],
+            &["--repo", "s", "mcp"],
+            &["mcp", "--frob"],
+            &["mcp", "x"],
+        ] {
+            assert!(parse(&args(line)).runs_mcp(), "{line:?}");
+        }
+        for line in [&["info"][..], &["mcp", "--help"], &["frobnicate"], &[]] {
+            assert!(!parse(&args(line)).runs_mcp(), "{line:?}");
+        }
     }
 
     #[test]

@@ -11,9 +11,11 @@
 //!   stderr.
 //! - stdout carries the envelope, or with `--human` its text rendering, and nothing else;
 //!   diagnostics go to stderr, and there are none by default.
-//! - `mcp` is the one command that prints no envelope: it serves the operations over MCP on
-//!   stdin and stdout until stdin ends, exiting 0 (see [`mcp`]). A command line it cannot run
-//!   is still an envelope, as for any command.
+//! - `mcp` is the one command that prints no envelope on stdout: it serves the operations over
+//!   MCP on stdin and stdout until stdin ends, exiting 0 (see [`mcp`]). Its stdout belongs to
+//!   the protocol, so what it would print before it serves (the envelope of a command line it
+//!   refuses, or of a panic) goes to stderr instead, with the same exit code. A panic while the
+//!   line itself is read comes before anything knows the line runs `mcp`.
 //!
 //! The envelope's `op` is the operation's library name (`cat` is `read_file`), or `swarmops`
 //! for a command line that names no operation.
@@ -50,11 +52,22 @@ fn main() -> ExitCode {
 }
 
 /// What the command line asks for, done: the envelope to print, or nothing more for help or
-/// the version, which clap has printed.
+/// the version, which clap has printed. For a line that runs `mcp`, the envelope has gone to
+/// stderr ([`on_stderr`]).
 fn respond(started: Instant, terminal: bool) -> Printed {
     let args: Vec<OsString> = std::env::args_os().collect();
+    let parsed = cli::parse(&args);
+    if parsed.runs_mcp() {
+        on_stderr(answer(parsed, started, terminal))
+    } else {
+        answer(parsed, started, terminal)
+    }
+}
+
+/// What `parsed` asks for, done: [`respond`] before it says where the envelope goes.
+fn answer(parsed: Parsed, started: Instant, terminal: bool) -> Printed {
     let env = |name: &str| std::env::var_os(name);
-    match cli::parse(&args) {
+    match parsed {
         Parsed::Text(text) => {
             // Text for a person, not an envelope, so a write that fails is not reported.
             let _ = text.print();
@@ -91,6 +104,20 @@ fn respond(started: Instant, terminal: bool) -> Printed {
                 commands::failed(op, error, format, started)
             }
         },
+    }
+}
+
+/// `printed`, with what it holds for stdout written to stderr instead: what `swarmops mcp` prints
+/// before it serves, since its stdout belongs to the protocol. The exit code stays the same.
+fn on_stderr(printed: Printed) -> Printed {
+    let Printed { stdout, exit } = printed;
+    if !stdout.is_empty() {
+        // The exit code says the command failed even if this write does not reach anyone.
+        let _ = io::stderr().write_all(stdout.as_bytes());
+    }
+    Printed {
+        stdout: String::new(),
+        exit,
     }
 }
 

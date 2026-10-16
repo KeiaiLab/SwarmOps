@@ -37,7 +37,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Reads one file at a revision, without a checkout: UTF-8 text, or base64, at most max_bytes of it.",
+      "description": "Reads one file at a revision, without a checkout, as UTF-8 text or base64; pass max_bytes of 32768 or less (less for a binary file), since clients cut long tool results and this one holds the content twice.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout.",
@@ -75,7 +75,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Lists one directory at a revision, without a checkout, a page of entries at a time.",
+      "description": "Lists one directory at a revision, without a checkout, a page of entries at a time; pass a limit of 100 or less and page on with the cursor, since clients cut long tool results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime.",
@@ -122,7 +122,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "One changeset in full: its parents, author, message, changes and signatures.",
+      "description": "One changeset in full: its parents, author, message, changes and signatures; pass max_changes of 100 or less, since clients cut long tool results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`show`: one changeset in full.",
@@ -155,7 +155,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "History along first parents, newest first, a page at a time; from main unless rev says otherwise.",
+      "description": "History along first parents, newest first, from main unless rev says otherwise; pass a limit of 100 or less and page on with the cursor, since clients cut long tool results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`log`: history along first parents, a page at a time.",
@@ -217,7 +217,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Moves a ref, or creates one, by compare-and-swap: give expected_old, the target you last saw, or create.",
+      "description": "Moves a ref, or creates one, by compare-and-swap: give create, or expected_old, the full 64-hex changeset id the ref held when you read it; a ref name or a relative revision is refused, since it would always match.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of\n`expected_old` and `create`; both or neither is `E_INVALID_ARG`.",
@@ -237,7 +237,7 @@ expression: listed
                 "type": "null"
               }
             ],
-            "description": "To move an existing ref: the target the caller last saw; if the ref holds another, the\nmove fails with `E_CAS_MISMATCH`. Give this or `create`, not both."
+            "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative\nrevision is resolved when the move runs, so it always matches and the compare-and-swap\nprotects nothing: `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's `--expect`\nhelp warns against it. Give this or `create`, not both."
           },
           "name": {
             "description": "The ref: `main` or `release/<name>`.",
@@ -265,13 +265,13 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Removes a ref by compare-and-swap, if it still points at expected_old.",
+      "description": "Removes a ref by compare-and-swap, if it still holds expected_old, the full 64-hex changeset id it held when you read it; a ref name or a relative revision is refused, since it would always match.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`ref delete`: remove a ref by compare-and-swap.",
         "properties": {
           "expected_old": {
-            "description": "The target the caller last saw; if the ref holds another, the delete fails with\n`E_CAS_MISMATCH`. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is resolved when\nthe delete runs, so it always matches and the compare-and-swap protects nothing:\n`swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's `--expect` help warns\nagainst it. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
             "type": "string"
           },
           "name": {

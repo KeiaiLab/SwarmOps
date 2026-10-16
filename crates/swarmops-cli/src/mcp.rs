@@ -10,7 +10,7 @@
 //! error that stops the server, and the panic hook's report of a bug; nothing else. The server
 //! exits 0 when stdin ends, and 1 if reading stdin or writing stdout fails.
 //!
-//! It serves two revisions of the protocol, each the way its clients open:
+//! It serves the protocol's revisions each the way its clients open:
 //!
 //! - [`LATEST`], 2026-07-28, which has no handshake: a request whose `params._meta` names
 //!   `io.modelcontextprotocol/protocolVersion` 2026-07-28 or later is served on its own, by that
@@ -20,11 +20,14 @@
 //!   `_meta["io.modelcontextprotocol/serverInfo"]`, and the results of `server/discover` and
 //!   `tools/list` say how long a client may keep them (`ttlMs`, an hour; `cacheScope:
 //!   "public"`): they change only with the binary.
-//! - [`PREVIOUS`], 2025-11-25, the last revision with a handshake: `initialize` opens a session
-//!   that lasts as long as the process, and answers with 2025-11-25 whatever version the client
-//!   asks for (one that cannot speak it disconnects). From then on, a request that names no
-//!   version of 2026-07-28 or later in `_meta` is served by 2025-11-25's rules: `tools/list`
-//!   and `tools/call`, and `ping`, which is also answered before `initialize`.
+//! - The revisions with a handshake ([`HANDSHAKE`]): `initialize` opens a session that lasts as
+//!   long as the process, at the version the client asks for when it is 2025-11-25 ([`PREVIOUS`])
+//!   or 2025-06-18, the first with `structuredContent` and `outputSchema`, and else at 2025-11-25,
+//!   which a client that cannot speak it refuses. Both get the same tools and results. From then
+//!   on, a request that names no version of 2026-07-28 or later in `_meta` is served by the
+//!   session's rules: `tools/list` and `tools/call`, and `ping`, which is also answered before
+//!   `initialize`. Before it, a request that names a version with a handshake in `_meta` is
+//!   told to send `initialize` (`-32022`).
 //!
 //! Notifications get no answer, `notifications/initialized` included; a
 //! `notifications/cancelled` finds nothing to cancel, since a request is answered before the
@@ -32,16 +35,18 @@
 //!
 //! # Errors
 //!
-//! A message that is not a request the server can serve gets a JSON-RPC error:
+//! A message that is not a request the server can serve gets a JSON-RPC error. One whose id
+//! cannot be read is answered with `"id": null`, as JSON-RPC 2.0 has it; a request's id is a
+//! string or an integer.
 //!
 //! | Code | Name | For |
 //! |---|---|---|
-//! | `-32700` | Parse error | a line that is not JSON, or not UTF-8; answered without an `id` |
-//! | `-32600` | Invalid Request | a batch, or anything else that is not one object; an object whose `jsonrpc` is not `"2.0"`, whose `id` is not a string or a number (answered without an `id`), or that has neither a string `method` nor a response's `result` or `error` |
+//! | `-32700` | Parse error | a line that is not JSON, or not UTF-8 |
+//! | `-32600` | Invalid Request | a batch, or anything else that is not one object; an object whose `jsonrpc` is not `"2.0"`, whose `id` is not a string or an integer (null, a fraction, an object, an array, a boolean), or that has neither a string `method` nor a response's `result` or `error` |
 //! | `-32601` | Method not found | a method its revision does not have (`ping` in 2026-07-28, `initialize` in a request that names 2026-07-28) |
 //! | `-32602` | Invalid params | `params`, or a `params._meta`, that is not an object, or a protocol version in it that is not a string; before `initialize`, a request that names no version in `_meta` (but `ping`), and a `server/discover` that names none at any time; a 2026-07-28 `_meta` without the client's capabilities; an `initialize` without the client's `protocolVersion`; a `tools/call` without a known tool's name, or with `arguments` that are not an object; a `tools/list` cursor (there is one page) |
 //! | `-32603` | Internal error | a panic outside an operation (a bug) |
-//! | `-32022` | Unsupported protocol version | a `_meta` version from 2026-07-28 on that is not 2026-07-28; `data` gives the `supported` versions and the `requested` one |
+//! | `-32022` | Unsupported protocol version | a `_meta` version from 2026-07-28 on that is not 2026-07-28; before `initialize`, a `_meta` version with a handshake; `data` gives the `supported` versions (2026-07-28: the ones a request may name) and the `requested` one |
 //!
 //! An operation that fails is not a protocol error: it is a tool result, below.
 //!
@@ -57,24 +62,35 @@
 //! reaches beyond the store (`openWorldHint: false`).
 //!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
-//! does not know is ignored, and arguments that do not fit the type are `E_INVALID_ARG`. A
-//! mutation then needs the server's identity, and last the store is opened and the operation
-//! runs; a `verify` that finds problems is `E_STORE_CORRUPT`, as `swarmops verify` is, and a
-//! panic in the operation is `E_INTERNAL`. The tool result holds the envelope the CLI prints
-//! for the same request, as its `structuredContent` and as the text of its one content block,
-//! and `isError` is true exactly when the envelope's `ok` is false.
+//! does not know is ignored, and arguments that do not fit the type are `E_INVALID_ARG`, as is
+//! a request that breaks this server's one rule of its own ([`Refuse`]): a `ref_set` or a
+//! `ref_delete` must name what it expects the ref to hold by its full changeset id, since a ref
+//! name or a relative revision resolves when the call runs and so defeats the compare-and-swap
+//! (the CLI takes any revision for `--expect`, and its help warns why not to). A mutation then
+//! needs the server's identity, and last the store is opened and the operation runs; a
+//! `verify` that finds problems is `E_STORE_CORRUPT`, as `swarmops verify` is, and a panic in
+//! the operation is `E_INTERNAL`. The tool result holds the envelope the CLI prints for the
+//! same request, as its `structuredContent` and as the text of its one content block, and
+//! `isError` is true exactly when the envelope's `ok` is false.
+//!
+//! Clients cut long tool results (Claude Code at 25,000 tokens by default), and a result holds
+//! its envelope twice, so the descriptions and [`INSTRUCTIONS`] ask the model for small reads
+//! (`max_bytes` of 32 KiB or less, `limit` and `max_changes` of 100 or less, paging with the
+//! `cursor`); the API's defaults stay as the operations spec gives them.
 //!
 //! # The store and the identity
 //!
 //! Both are the server's, never a call's. The store is `--repo`, else `SWARMOPS_REPO`, opened
 //! anew for each call, so that a call sees what other processes committed; a store that is not
 //! there is each call's `E_NOT_A_REPO`, and the server serves on. The identity is `--as`, else
-//! `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`; a mutation without one is `E_IDENTITY_REQUIRED`.
-//! The client starts the server as its own user, in its own trust domain, so `{"file": <path>}`
-//! content is read here, as the CLI reads it, a relative path from the server's working
-//! directory. The output flags (`--json`, `--human`, `--pretty`) do not apply. A command line
-//! the CLI refuses (a usage error, a `SWARMOPS_FORMAT` that is neither `json` nor `human`)
-//! starts no server: it prints its envelope and exits with its code, as any command does.
+//! `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI; a mutation without one is
+//! `E_IDENTITY_REQUIRED`. The client starts the server as its own user, in its own trust
+//! domain, so `{"file": <path>}` content is read here, as the CLI reads it, a relative path from
+//! the server's working directory. The output flags (`--json`, `--human`, `--pretty`) do not
+//! apply. A command line that the CLI refuses (a usage error, a `SWARMOPS_FORMAT` that is
+//! neither `json` nor `human`), and a panic before the server serves, start no server: their
+//! envelope goes to stderr, never to stdout, which belongs to the protocol, and the process
+//! exits with its code.
 
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -83,7 +99,10 @@ use std::time::Instant;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
-use swarmops_api::{Envelope, ErrorCode, Identity, OpError, StoreOps, VerifyReq, schema_for_all};
+use swarmops_api::{
+    CommitReq, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError, ReadFileReq, ReadTreeReq,
+    RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq, StoreOps, VerifyReq, schema_for_all,
+};
 
 use crate::cli::Global;
 use crate::commands::{self, Ctx, Used};
@@ -94,8 +113,13 @@ use crate::output::{self, Format, Printed};
 pub const LATEST: &str = "2026-07-28";
 
 /// The revision before it, the last with a handshake: served to clients that open with
-/// `initialize`.
+/// `initialize`, also to those that ask for a version the handshake does not serve.
 pub const PREVIOUS: &str = "2025-11-25";
+
+/// The revisions with a handshake that `initialize` serves, newest first: [`PREVIOUS`], and
+/// 2025-06-18, the first with `structuredContent` and `outputSchema`. Both get the same tools
+/// and results; 2025-03-26 and older are not served.
+pub const HANDSHAKE: [&str; 2] = [PREVIOUS, "2025-06-18"];
 
 /// The `_meta` key under which a 2026-07-28 request names its protocol version.
 const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
@@ -129,15 +153,23 @@ const SERVER: Implementation = Implementation {
 /// What the server tells a client's model about using it.
 const INSTRUCTIONS: &str = "SwarmOps is source control for coding-agent swarms: many agents commit \
 to one store at once. Each tool is one store operation, and its result is the SwarmOps envelope \
-{ok, op, api, result | error, meta}, as structuredContent and as JSON text. A failed operation \
-sets isError and gives error {code, message, retryable, exit, details, hint}: retryable says \
-whether the same call can succeed again, and a hint is often a swarmops command, whose operation \
-is the tool of the same name (ref list is ref_list, cat read_file, ls read_tree, info repo_info). \
-A revision is main, release/<name>, a changeset id or 12 or more of its first hex digits, then \
-optionally ~N for the N-th first parent. commit records a changeset and moves no ref; ref_set \
-moves a ref by compare-and-swap, and after E_CAS_MISMATCH you commit your change again on top of \
-details.actual, re-applying your edits to the content there, then retry with expected_old set to \
-it. Every change is recorded for the agent the server runs as.";
+{ok, op, api, result | error, meta}, as structuredContent and again as JSON text. A failed \
+operation sets isError and gives error {code, message, retryable, exit, details, hint}: \
+retryable says whether the same call can succeed again, and a hint is often a swarmops command, \
+whose operation is the tool of the same name (ref list is ref_list, cat read_file, ls \
+read_tree, info repo_info). A revision is main, release/<name>, a changeset id or 12 or more of \
+its first hex digits, then optionally ~N for the N-th first parent. commit records a changeset \
+and moves no ref. ref_set and ref_delete change a ref by compare-and-swap, so their \
+expected_old is the full 64-hex changeset id the ref held when you read it (from ref_list, \
+show, log or a commit's result): a ref name or a relative revision is resolved when the call \
+runs, always matches and defeats the compare-and-swap, so the server refuses it. After \
+E_CAS_MISMATCH, commit your change again on top of details.actual, re-applying your edits to \
+the content there, then retry with expected_old set to it. Clients cut long tool results \
+(Claude Code at 25,000 tokens by default) and each result carries its envelope twice, so ask \
+for little: max_bytes of 32768 or less for read_file (less for a binary file, which comes back \
+in base64), a limit of 100 or less for read_tree and log, paging on with the cursor a result \
+returns, and max_changes of 100 or less for show. Every change is recorded for the agent the \
+server runs as.";
 
 /// The tools, in the order `tools/list` gives them.
 static TOOLS: [Spec; 10] = [
@@ -155,8 +187,9 @@ static TOOLS: [Spec; 10] = [
         name: "read_file",
         request: "ReadFileReq",
         title: "Read a file",
-        description: "Reads one file at a revision, without a checkout: UTF-8 text, or base64, \
-                      at most max_bytes of it.",
+        description: "Reads one file at a revision, without a checkout, as UTF-8 text or \
+                      base64; pass max_bytes of 32768 or less (less for a binary file), since \
+                      clients cut long tool results and this one holds the content twice.",
         effect: Effect::Reads,
     },
     Spec {
@@ -165,7 +198,8 @@ static TOOLS: [Spec; 10] = [
         request: "ReadTreeReq",
         title: "List a directory",
         description: "Lists one directory at a revision, without a checkout, a page of entries \
-                      at a time.",
+                      at a time; pass a limit of 100 or less and page on with the cursor, since \
+                      clients cut long tool results.",
         effect: Effect::Reads,
     },
     Spec {
@@ -174,7 +208,8 @@ static TOOLS: [Spec; 10] = [
         request: "ShowReq",
         title: "Show a changeset",
         description: "One changeset in full: its parents, author, message, changes and \
-                      signatures.",
+                      signatures; pass max_changes of 100 or less, since clients cut long tool \
+                      results.",
         effect: Effect::Reads,
     },
     Spec {
@@ -182,8 +217,9 @@ static TOOLS: [Spec; 10] = [
         name: "log",
         request: "LogReq",
         title: "List history",
-        description: "History along first parents, newest first, a page at a time; from main \
-                      unless rev says otherwise.",
+        description: "History along first parents, newest first, from main unless rev says \
+                      otherwise; pass a limit of 100 or less and page on with the cursor, since \
+                      clients cut long tool results.",
         effect: Effect::Reads,
     },
     Spec {
@@ -199,8 +235,9 @@ static TOOLS: [Spec; 10] = [
         name: "ref_set",
         request: "RefSetReq",
         title: "Move a ref",
-        description: "Moves a ref, or creates one, by compare-and-swap: give expected_old, the \
-                      target you last saw, or create.",
+        description: "Moves a ref, or creates one, by compare-and-swap: give create, or \
+                      expected_old, the full 64-hex changeset id the ref held when you read it; a \
+                      ref name or a relative revision is refused, since it would always match.",
         effect: Effect::Moves,
     },
     Spec {
@@ -208,7 +245,9 @@ static TOOLS: [Spec; 10] = [
         name: "ref_delete",
         request: "RefDeleteReq",
         title: "Delete a ref",
-        description: "Removes a ref by compare-and-swap, if it still points at expected_old.",
+        description: "Removes a ref by compare-and-swap, if it still holds expected_old, the \
+                      full 64-hex changeset id it held when you read it; a ref name or a \
+                      relative revision is refused, since it would always match.",
         effect: Effect::Moves,
     },
     Spec {
@@ -256,17 +295,29 @@ struct Server<'a> {
     env: Env<'a>,
     /// The tools, as `tools/list` gives them.
     tools: Vec<ToolDef>,
-    /// Whether `initialize` has opened a 2025-11-25 session.
-    in_session: bool,
+    /// The revision of the session `initialize` opened, one of [`HANDSHAKE`]; `None` before
+    /// it.
+    session: Option<&'static str>,
 }
 
-/// The revision whose rules a request is served by.
+/// The rules a request is served by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Era {
-    /// 2026-07-28: the request names it in `_meta`.
+    /// 2026-07-28's: the request names that version in `_meta`.
     Latest,
-    /// 2025-11-25: the request names no version of 2026-07-28 or later.
+    /// The session's: the request names no version of 2026-07-28 or later.
     Previous,
+}
+
+/// What a request's `params._meta` says of its protocol version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Claim {
+    /// Nothing: the request is the session's.
+    None,
+    /// A revision with a handshake (before 2026-07-28), which only a session serves.
+    Handshake(String),
+    /// 2026-07-28, with the client's capabilities.
+    Latest,
 }
 
 /// How to answer request `id`, served by `era`'s rules.
@@ -293,7 +344,7 @@ impl<'a> Server<'a> {
             global,
             env,
             tools,
-            in_session: false,
+            session: None,
         }
     }
 
@@ -334,12 +385,13 @@ impl<'a> Server<'a> {
         };
         let id = match message.remove("id") {
             None => None,
-            Some(id @ (Value::String(_) | Value::Number(_))) => Some(id),
+            Some(id @ Value::String(_)) => Some(id),
+            Some(Value::Number(n)) if n.is_i64() || n.is_u64() => Some(Value::Number(n)),
             Some(_) => {
                 return Some(error(
                     None,
                     INVALID_REQUEST,
-                    "Invalid Request: an id is a string or a number",
+                    "Invalid Request: an id is a string or an integer",
                 ));
             }
         };
@@ -401,22 +453,41 @@ impl<'a> Server<'a> {
 
     /// The answer to request `id`, of `method` with `params`.
     fn request(&mut self, id: &Value, method: &str, params: Map<String, Value>) -> String {
-        let era = match era(&params) {
-            Ok(era) => era,
+        let claim = match claim(&params) {
+            Ok(claim) => claim,
             Err(rejected) => return rejected.answer(id),
         };
-        let reply = Reply { id, era };
-        match (era, method) {
-            (Era::Latest, "server/discover") => reply.result(Discovered {
-                supported_versions: [LATEST],
-                capabilities: Capabilities { tools: Empty {} },
-                instructions: INSTRUCTIONS,
-                ttl_ms: TTL_MS,
-                cache_scope: "public",
-            }),
-            (Era::Previous, "initialize") => self.initialize(reply, &params),
-            (Era::Previous, "ping") => reply.result(Empty {}),
-            (Era::Previous, "server/discover") => error(
+        if claim == Claim::Latest {
+            let reply = Reply {
+                id,
+                era: Era::Latest,
+            };
+            return match method {
+                "server/discover" => reply.result(Discovered {
+                    supported_versions: [LATEST],
+                    capabilities: Capabilities { tools: Empty {} },
+                    instructions: INSTRUCTIONS,
+                    ttl_ms: TTL_MS,
+                    cache_scope: "public",
+                }),
+                "tools/list" => self.list_tools(reply, &params),
+                "tools/call" => self.call_tool(reply, params),
+                _ => not_found(id, method),
+            };
+        }
+        if method == "initialize" {
+            return self.initialize(id, &params);
+        }
+        if let (Claim::Handshake(requested), None) = (claim, self.session) {
+            return Rejected::Handshake(requested).answer(id);
+        }
+        let reply = Reply {
+            id,
+            era: Era::Previous,
+        };
+        match method {
+            "ping" => reply.result(Empty {}),
+            "server/discover" => error(
                 Some(id),
                 INVALID_PARAMS,
                 format!(
@@ -424,7 +495,7 @@ impl<'a> Server<'a> {
                      version in params._meta ({VERSION_KEY})"
                 ),
             ),
-            (Era::Previous, "tools/list" | "tools/call") if !self.in_session => error(
+            "tools/list" | "tools/call" if self.session.is_none() => error(
                 Some(id),
                 INVALID_PARAMS,
                 format!(
@@ -432,28 +503,33 @@ impl<'a> Server<'a> {
                      ({VERSION_KEY}), and no initialize has opened a session"
                 ),
             ),
-            (_, "tools/list") => self.list_tools(reply, &params),
-            (_, "tools/call") => self.call_tool(reply, params),
-            _ => error(
-                Some(id),
-                METHOD_NOT_FOUND,
-                format!("Method not found: {method}"),
-            ),
+            "tools/list" => self.list_tools(reply, &params),
+            "tools/call" => self.call_tool(reply, params),
+            _ => not_found(id, method),
         }
     }
 
-    /// `initialize`: opens the 2025-11-25 session, whatever version the client asked for.
-    fn initialize(&mut self, reply: Reply<'_>, params: &Map<String, Value>) -> String {
-        if !params.get("protocolVersion").is_some_and(Value::is_string) {
+    /// `initialize`: opens a session at the version the client asks for when it is one of
+    /// [`HANDSHAKE`], else at [`PREVIOUS`].
+    fn initialize(&mut self, id: &Value, params: &Map<String, Value>) -> String {
+        let Some(asked) = params.get("protocolVersion").and_then(Value::as_str) else {
             return error(
-                Some(reply.id),
+                Some(id),
                 INVALID_PARAMS,
                 "Invalid params: initialize names the protocolVersion the client speaks",
             );
-        }
-        self.in_session = true;
+        };
+        let version = HANDSHAKE
+            .into_iter()
+            .find(|version| *version == asked)
+            .unwrap_or(PREVIOUS);
+        self.session = Some(version);
+        let reply = Reply {
+            id,
+            era: Era::Previous,
+        };
         reply.result(Initialized {
-            protocol_version: PREVIOUS,
+            protocol_version: version,
             capabilities: Capabilities { tools: Empty {} },
             server_info: SERVER,
             instructions: INSTRUCTIONS,
@@ -511,43 +587,30 @@ impl<'a> Server<'a> {
             server: self,
             spec,
             reply,
+            arguments,
         };
-        match spec.tool {
-            Tool::RepoInfo => call.read(arguments, |ops, req| ops.repo_info(req)),
-            Tool::ReadFile => call.read(arguments, |ops, req| ops.read_file(req)),
-            Tool::ReadTree => call.read(arguments, |ops, req| ops.read_tree(req)),
-            Tool::Show => call.read(arguments, |ops, req| ops.show(req)),
-            Tool::Log => call.read(arguments, |ops, req| ops.log(req)),
-            Tool::RefList => call.read(arguments, |ops, req| ops.ref_list(req)),
-            Tool::RefSet => call.mutate(arguments, |ops, who, req| ops.ref_set(who, req)),
-            Tool::RefDelete => call.mutate(arguments, |ops, who, req| ops.ref_delete(who, req)),
-            Tool::Commit => call.mutate(arguments, |ops, who, req| ops.commit(who, req)),
-            Tool::Verify => call.read(arguments, |ops, req: VerifyReq| {
-                let deep = req.deep;
-                ops.verify(req)
-                    .and_then(|report| commands::clean(report, deep))
-            }),
-        }
+        operate(spec.tool, call)
     }
 }
 
-/// The era of a request with `params`: 2026-07-28's when its `_meta` names that version or a
-/// later one, else 2025-11-25's. A version of 2026-07-28 or later that is not 2026-07-28, and a
-/// 2026-07-28 `_meta` without the client's capabilities, are refused.
-fn era(params: &Map<String, Value>) -> Result<Era, Rejected> {
+/// What the `_meta` of a request with `params` claims: no version, a version with a handshake
+/// (before 2026-07-28), or 2026-07-28 with the client's capabilities. A version of 2026-07-28
+/// or later that is not 2026-07-28, and a 2026-07-28 `_meta` without the client's
+/// capabilities, are refused.
+fn claim(params: &Map<String, Value>) -> Result<Claim, Rejected> {
     let meta = match params.get("_meta") {
-        None => return Ok(Era::Previous),
+        None => return Ok(Claim::None),
         Some(Value::Object(meta)) => meta,
         Some(_) => return Err(Rejected::params("params._meta is an object")),
     };
     let version = match meta.get(VERSION_KEY) {
-        None => return Ok(Era::Previous),
+        None => return Ok(Claim::None),
         Some(Value::String(version)) => version,
         Some(_) => return Err(Rejected::params(&format!("{VERSION_KEY} is a string"))),
     };
     // Revisions are dates, so they sort as strings.
     if version.as_str() < LATEST {
-        return Ok(Era::Previous);
+        return Ok(Claim::Handshake(version.clone()));
     }
     if version != LATEST {
         return Err(Rejected::Version(version.clone()));
@@ -557,7 +620,7 @@ fn era(params: &Map<String, Value>) -> Result<Era, Rejected> {
             "a {LATEST} request carries {CAPABILITIES_KEY} in params._meta"
         )));
     }
-    Ok(Era::Latest)
+    Ok(Claim::Latest)
 }
 
 /// A request refused before its method is looked at.
@@ -566,6 +629,8 @@ enum Rejected {
     Params(String),
     /// It names a version from 2026-07-28 on that is not served.
     Version(String),
+    /// Before any session, it names a version with a handshake, which only a session serves.
+    Handshake(String),
 }
 
 impl Rejected {
@@ -581,8 +646,20 @@ impl Rejected {
                 Some(id),
                 UNSUPPORTED_PROTOCOL_VERSION,
                 &format!(
-                    "Unsupported protocol version: {requested}; this server serves {LATEST}, \
-                     and {PREVIOUS} through initialize"
+                    "Unsupported protocol version: {requested}; this server serves {LATEST} in \
+                     params._meta, and {} through initialize",
+                    HANDSHAKE.join(" and ")
+                ),
+                Some(json!({"supported": [LATEST], "requested": requested})),
+            ),
+            Rejected::Handshake(requested) => error_with(
+                Some(id),
+                UNSUPPORTED_PROTOCOL_VERSION,
+                &format!(
+                    "Unsupported protocol version: {requested} has a handshake, so send \
+                     initialize first (this server serves {} that way), or name {LATEST} in \
+                     params._meta",
+                    HANDSHAKE.join(" and ")
                 ),
                 Some(json!({"supported": [LATEST], "requested": requested})),
             ),
@@ -590,35 +667,89 @@ impl Rejected {
     }
 }
 
-/// One `tools/call` of the tool `spec`, answered as `reply`.
-#[derive(Clone, Copy)]
+/// How a tool runs its operation: as a read, or as a mutation, which acts as the server's
+/// identity. [`operate`] ties each tool to the [`StoreOps`] method it stands for through it.
+trait Operate {
+    /// What running the tool gives.
+    type Done;
+
+    /// Runs a read: the request `R`, then `call` on the store.
+    fn read<R: Refuse, T: Serialize>(
+        self,
+        call: impl FnOnce(&dyn StoreOps, R) -> Result<T, OpError>,
+    ) -> Self::Done;
+
+    /// Runs a mutation: the request `R`, then `call` on the store as the server's identity.
+    fn mutate<R: Refuse, T: Serialize>(
+        self,
+        call: impl FnOnce(&dyn StoreOps, &Identity, R) -> Result<T, OpError>,
+    ) -> Self::Done;
+}
+
+/// Runs `tool`'s operation as `how` runs operations: the one place where a tool meets the
+/// [`StoreOps`] method it stands for, and so the request type it reads, which the method's
+/// signature fixes.
+fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
+    match tool {
+        Tool::RepoInfo => how.read(|ops, req| ops.repo_info(req)),
+        Tool::ReadFile => how.read(|ops, req| ops.read_file(req)),
+        Tool::ReadTree => how.read(|ops, req| ops.read_tree(req)),
+        Tool::Show => how.read(|ops, req| ops.show(req)),
+        Tool::Log => how.read(|ops, req| ops.log(req)),
+        Tool::RefList => how.read(|ops, req| ops.ref_list(req)),
+        Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
+        Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
+        Tool::Commit => how.mutate(|ops, who, req| ops.commit(who, req)),
+        Tool::Verify => how.read(|ops, req: VerifyReq| {
+            let deep = req.deep;
+            ops.verify(req)
+                .and_then(|report| commands::clean(report, deep))
+        }),
+    }
+}
+
+/// One `tools/call` of the tool `spec` on `arguments`, answered as `reply`.
 struct Call<'s, 'a> {
     server: &'s Server<'a>,
     spec: &'static Spec,
     reply: Reply<'s>,
+    arguments: Value,
 }
 
-impl Call<'_, '_> {
-    /// Runs a read: `arguments` as its request `R`, then `call` on the store.
-    fn read<R: DeserializeOwned, T: Serialize>(
+impl Operate for Call<'_, '_> {
+    type Done = String;
+
+    /// The arguments as the request, then `call` on the store.
+    fn read<R: Refuse, T: Serialize>(
         self,
-        arguments: Value,
         call: impl FnOnce(&dyn StoreOps, R) -> Result<T, OpError>,
     ) -> String {
-        let spec = self.spec;
-        self.run(|| request_of(spec, arguments), call)
+        let Call {
+            server,
+            spec,
+            reply,
+            arguments,
+        } = self;
+        run(server, spec, reply, || request_of(spec, arguments), call)
     }
 
-    /// Runs a mutation: `arguments` as its request `R`, then the server's identity, then `call`
-    /// on the store as that identity.
-    fn mutate<R: DeserializeOwned, T: Serialize>(
+    /// The arguments as the request, then the server's identity, then `call` on the store as
+    /// that identity.
+    fn mutate<R: Refuse, T: Serialize>(
         self,
-        arguments: Value,
         call: impl FnOnce(&dyn StoreOps, &Identity, R) -> Result<T, OpError>,
     ) -> String {
-        let spec = self.spec;
-        let (agent, env) = (self.server.global.agent.as_deref(), self.server.env);
-        self.run(
+        let Call {
+            server,
+            spec,
+            reply,
+            arguments,
+        } = self;
+        let (agent, env) = (server.global.agent.as_deref(), server.env);
+        run(
+            server,
+            spec,
+            reply,
             || {
                 let req = request_of(spec, arguments)?;
                 Ok((context::mutator(agent, env)?, req))
@@ -626,40 +757,43 @@ impl Call<'_, '_> {
             |ops, (who, req)| call(ops, &who, req),
         )
     }
+}
 
-    /// Runs the tool as a command runs ([`Ctx::envelope_on_store`]): `prepare` builds its
-    /// input, then `call` runs on the store, opened; a panic in either is `E_INTERNAL`. The tool
-    /// result that holds the envelope.
-    fn run<P, T: Serialize>(
-        self,
-        prepare: impl FnOnce() -> Result<P, OpError>,
-        call: impl FnOnce(&dyn StoreOps, P) -> Result<T, OpError>,
-    ) -> String {
-        let ctx = Ctx {
-            global: self.server.global,
-            env: self.server.env,
-            format: Format::Json { pretty: false },
-            started: Instant::now(),
-            used: Used::default(),
-        };
-        let op = self.spec.name;
-        match panic::catch_unwind(AssertUnwindSafe(|| {
-            ctx.envelope_on_store(op, prepare, call)
-        })) {
-            Ok(envelope) => self.reply.tool_result(&envelope),
-            Err(payload) => {
-                let bug = commands::panicked(&*payload);
-                let envelope = commands::failed_envelope(op, bug, &ctx.used, ctx.started);
-                self.reply.tool_result(&envelope)
-            }
+/// Runs tool `spec` for `server` as a command runs ([`Ctx::envelope_on_store`]): `prepare`
+/// builds its input, then `call` runs on the store, opened; a panic in either is `E_INTERNAL`.
+/// The tool result that holds the envelope, answered as `reply`.
+fn run<P, T: Serialize>(
+    server: &Server<'_>,
+    spec: &Spec,
+    reply: Reply<'_>,
+    prepare: impl FnOnce() -> Result<P, OpError>,
+    call: impl FnOnce(&dyn StoreOps, P) -> Result<T, OpError>,
+) -> String {
+    let ctx = Ctx {
+        global: server.global,
+        env: server.env,
+        format: Format::Json { pretty: false },
+        started: Instant::now(),
+        used: Used::default(),
+    };
+    let op = spec.name;
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        ctx.envelope_on_store(op, prepare, call)
+    })) {
+        Ok(envelope) => reply.tool_result(&envelope),
+        Err(payload) => {
+            let bug = commands::panicked(&*payload);
+            let envelope = commands::failed_envelope(op, bug, &ctx.used, ctx.started);
+            reply.tool_result(&envelope)
         }
     }
 }
 
 /// The request `arguments` stand for, of tool `spec`'s type: `E_INVALID_ARG` when they do not
-/// fit it. Fields the type does not know are ignored, as the API's types always ignore them.
-fn request_of<R: DeserializeOwned>(spec: &Spec, arguments: Value) -> Result<R, OpError> {
-    serde_json::from_value(arguments).map_err(|e| {
+/// fit it, or break a rule of this server's ([`Refuse`]). Fields the type does not know are
+/// ignored, as the API's types always ignore them.
+fn request_of<R: Refuse>(spec: &Spec, arguments: Value) -> Result<R, OpError> {
+    let req: R = serde_json::from_value(arguments).map_err(|e| {
         OpError::new(
             ErrorCode::InvalidArg,
             output::printable(&format!("the arguments are not a {}: {e}", spec.request)),
@@ -668,7 +802,74 @@ fn request_of<R: DeserializeOwned>(spec: &Spec, arguments: Value) -> Result<R, O
             "the {} tool's inputSchema gives its arguments, as swarmops schema {} does",
             spec.name, spec.request
         ))
-    })
+    })?;
+    req.refuse()?;
+    Ok(req)
+}
+
+/// This server's own rules for a request, which its type cannot say: a request type with one
+/// refuses what breaks it, the others nothing.
+trait Refuse: DeserializeOwned {
+    /// `E_INVALID_ARG` for a request that breaks the rule.
+    fn refuse(&self) -> Result<(), OpError> {
+        Ok(())
+    }
+}
+
+impl Refuse for InfoReq {}
+impl Refuse for ReadFileReq {}
+impl Refuse for ReadTreeReq {}
+impl Refuse for ShowReq {}
+impl Refuse for LogReq {}
+impl Refuse for RefListReq {}
+impl Refuse for CommitReq {}
+impl Refuse for VerifyReq {}
+
+/// A move names the target it expects by its full id ([`concrete_expectation`]), unless it
+/// creates the ref.
+impl Refuse for RefSetReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        match &self.expected_old {
+            Some(expected) => concrete_expectation(&self.name, expected),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A delete names the target it expects by its full id ([`concrete_expectation`]).
+impl Refuse for RefDeleteReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        concrete_expectation(&self.name, &self.expected_old)
+    }
+}
+
+/// `E_INVALID_ARG` unless `expected`, the target a move or a delete of ref `name` expects, is a
+/// full changeset id: 64 hex digits, as the resolver takes them. Anything else (a ref name, a
+/// relative revision, an id's prefix) is resolved when the call runs, against the store as it
+/// is then, so it always matches what the ref holds and the compare-and-swap protects nothing:
+/// a move computed on a stale read would silently drop what another agent moved the ref to, and
+/// the same call made twice would move the ref twice. The CLI takes any revision for
+/// `--expect`, whose help warns of this; an agent through this server gets the rule enforced.
+fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
+    let rev = expected.as_str();
+    if rev.len() == 64 && rev.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    Err(OpError::new(
+        ErrorCode::InvalidArg,
+        output::printable(&format!(
+            "expected_old {rev:?} is not a full changeset id, which a compare-and-swap needs: a \
+             ref name or a relative revision is resolved when the call runs, so it always \
+             matches what ref {name} holds then and the compare-and-swap protects nothing; pass \
+             the 64-hex id the ref held when you read it, from ref_list, show, log or a \
+             commit's result"
+        )),
+    )
+    .with_details(Map::from_iter([
+        ("name".to_owned(), Value::from(name)),
+        ("expected_old".to_owned(), Value::from(rev)),
+    ]))
+    .with_hint("swarmops ref list"))
 }
 
 impl Reply<'_> {
@@ -793,16 +994,25 @@ fn response<R: Serialize>(id: &Value, result: R) -> String {
 }
 
 /// The error response with `code` and `message` to request `id` (`None`: a message whose id
-/// could not be read), as one line.
+/// could not be read, answered with a null id), as one line.
 fn error(id: Option<&Value>, code: i64, message: impl AsRef<str>) -> String {
     error_with(id, code, message.as_ref(), None)
+}
+
+/// `Method not found` for request `id` of `method`.
+fn not_found(id: &Value, method: &str) -> String {
+    error(
+        Some(id),
+        METHOD_NOT_FOUND,
+        format!("Method not found: {method}"),
+    )
 }
 
 /// [`error`] with `data`.
 fn error_with(id: Option<&Value>, code: i64, message: &str, data: Option<Value>) -> String {
     let response = ErrorResponse {
         jsonrpc: "2.0",
-        id,
+        id: id.unwrap_or(&Value::Null),
         error: RpcError {
             code,
             message: output::printable(message),
@@ -849,7 +1059,8 @@ enum Effect {
     /// another changeset signed at its own time.
     Adds,
     /// It moves or deletes a ref by compare-and-swap, changing what the ref names; run again
-    /// with the same arguments, it finds the ref as it asked and changes nothing more.
+    /// with the same arguments, it finds the ref as it asked (`already_applied`) or not as it
+    /// expected (`E_CAS_MISMATCH`), and changes nothing more.
     Moves,
 }
 
@@ -859,6 +1070,13 @@ impl Effect {
         let (read_only, destructive, idempotent) = match self {
             Effect::Reads => (true, false, true),
             Effect::Adds => (false, false, false),
+            // idempotentHint rests on concrete_expectation: the server refuses an expected_old
+            // that is not a full id, so the same move again compares against the same changeset
+            // and finds its work done (already_applied) or the ref elsewhere (E_CAS_MISMATCH).
+            // A ref name would match anew at every call and move the ref again. The one repeated
+            // move that still records something moves a ref to the changeset it holds already
+            // (new names expected_old's): the store records that no-op move each time, the
+            // ref's version counting up while its target stays.
             Effect::Moves => (false, true, true),
         };
         json!({
@@ -882,8 +1100,8 @@ struct Response<'a, R> {
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
     jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<&'a Value>,
+    /// The request's id, or null when it could not be read.
+    id: &'a Value,
     error: RpcError,
 }
 
@@ -994,13 +1212,191 @@ struct TextContent<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
     use std::ffi::OsString;
 
     use camino::Utf8Path;
-    use swarmops_api::{ChangeInput, ChangeOp, CommitReq, ContentInput, RefSetReq, ShowReq};
+    use swarmops_api::{
+        ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput, FileContent, LogPage,
+        RefListResp, RefSetResp, RepoInfo, TreeListing, VerifyReport,
+    };
     use swarmops_ops::LocalOps;
 
     use super::*;
+
+    /// Each operation's request type has exactly one tool, and each tool runs exactly the
+    /// `StoreOps` method of its name, on the request type it advertises: a new operation, or a
+    /// tool wired to the wrong one, fails here.
+    #[test]
+    fn the_tools_are_the_store_operations() {
+        // `init` runs on the client and is no `StoreOps` operation, so it has no tool.
+        let all = schema_for_all();
+        let requests: Vec<&str> = all
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|name| name.ends_with("Req") && *name != "InitReq")
+            .collect();
+        let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
+        advertised.sort_unstable();
+        assert_eq!(
+            advertised, requests,
+            "one tool per operation's request type"
+        );
+
+        for spec in &TOOLS {
+            let called = RefCell::new(Vec::new());
+            operate(spec.tool, Probe { called: &called });
+            assert_eq!(
+                called.into_inner(),
+                [(spec.name, spec.request)],
+                "the {} tool",
+                spec.name
+            );
+        }
+        let names: BTreeSet<&str> = TOOLS.iter().map(|spec| spec.name).collect();
+        assert_eq!(names.len(), TOOLS.len(), "two tools share a name");
+    }
+
+    /// Runs a tool's operation on a [`Recorder`], with a request read from [`sample`].
+    struct Probe<'a> {
+        called: &'a RefCell<Vec<(&'static str, &'static str)>>,
+    }
+
+    /// Arguments that every operation's request type reads: each takes the fields it knows,
+    /// these fill the ones it needs, and it ignores the rest.
+    fn sample() -> Value {
+        json!({
+            "rev": "main",
+            "path": "a",
+            "name": "main",
+            "new": "main",
+            "expected_old": "0".repeat(64),
+            "message": "m",
+            "changes": [],
+        })
+    }
+
+    impl Operate for Probe<'_> {
+        type Done = ();
+
+        fn read<R: Refuse, T: Serialize>(
+            self,
+            call: impl FnOnce(&dyn StoreOps, R) -> Result<T, OpError>,
+        ) {
+            let req = serde_json::from_value(sample()).expect("every request reads the sample");
+            let _ = call(&Recorder(self.called), req);
+        }
+
+        fn mutate<R: Refuse, T: Serialize>(
+            self,
+            call: impl FnOnce(&dyn StoreOps, &Identity, R) -> Result<T, OpError>,
+        ) {
+            let req = serde_json::from_value(sample()).expect("every request reads the sample");
+            let who = Identity::parse("test/probe").unwrap();
+            let _ = call(&Recorder(self.called), &who, req);
+        }
+    }
+
+    /// A store that records which operation was called, by its name and the type of request
+    /// it took (which its signature fixes), and fails it.
+    struct Recorder<'a>(&'a RefCell<Vec<(&'static str, &'static str)>>);
+
+    impl Recorder<'_> {
+        fn called<T>(&self, op: &'static str, request: &'static str) -> Result<T, OpError> {
+            self.0.borrow_mut().push((op, request));
+            Err(OpError::new(ErrorCode::Internal, "a probe"))
+        }
+    }
+
+    impl StoreOps for Recorder<'_> {
+        fn repo_info(&self, _: InfoReq) -> Result<RepoInfo, OpError> {
+            self.called("repo_info", "InfoReq")
+        }
+
+        fn commit(&self, _: &Identity, _: CommitReq) -> Result<CommitResp, OpError> {
+            self.called("commit", "CommitReq")
+        }
+
+        fn read_file(&self, _: ReadFileReq) -> Result<FileContent, OpError> {
+            self.called("read_file", "ReadFileReq")
+        }
+
+        fn read_tree(&self, _: ReadTreeReq) -> Result<TreeListing, OpError> {
+            self.called("read_tree", "ReadTreeReq")
+        }
+
+        fn show(&self, _: ShowReq) -> Result<ChangesetDetail, OpError> {
+            self.called("show", "ShowReq")
+        }
+
+        fn log(&self, _: LogReq) -> Result<LogPage, OpError> {
+            self.called("log", "LogReq")
+        }
+
+        fn ref_list(&self, _: RefListReq) -> Result<RefListResp, OpError> {
+            self.called("ref_list", "RefListReq")
+        }
+
+        fn ref_set(&self, _: &Identity, _: RefSetReq) -> Result<RefSetResp, OpError> {
+            self.called("ref_set", "RefSetReq")
+        }
+
+        fn ref_delete(&self, _: &Identity, _: RefDeleteReq) -> Result<RefSetResp, OpError> {
+            self.called("ref_delete", "RefDeleteReq")
+        }
+
+        fn verify(&self, _: VerifyReq) -> Result<VerifyReport, OpError> {
+            self.called("verify", "VerifyReq")
+        }
+    }
+
+    /// A move's `expected_old` must be 64 hex digits, of either case as the resolver takes
+    /// them; anything else is resolved when the move runs, and is refused.
+    #[test]
+    fn an_expected_target_must_be_a_full_id() {
+        let id = "0123456789abcdef".repeat(4);
+        assert!(concrete_expectation("main", &Rev::from(id.as_str())).is_ok());
+        assert!(concrete_expectation("main", &Rev::from(id.to_uppercase())).is_ok());
+        for refused in [
+            "main".to_owned(),
+            "release/1.0".to_owned(),
+            "main~1".to_owned(),
+            id[..12].to_owned(),
+            id[..63].to_owned(),
+            format!("{id}0"),
+            format!("{id}~1"),
+            format!("{}g", &id[..63]),
+            String::new(),
+        ] {
+            let error = concrete_expectation("release/1.0", &Rev::from(refused.as_str()))
+                .expect_err(&refused);
+            assert_eq!((error.code.as_str(), error.exit), ("E_INVALID_ARG", 2));
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"name": "release/1.0", "expected_old": refused})
+            );
+            assert!(!error.message.contains('\n'), "{}", error.message);
+        }
+        // The request types that carry one check it, and a create carries none.
+        let set = |expected: Option<&str>| RefSetReq {
+            name: "main".to_owned(),
+            new: "main".into(),
+            expected_old: expected.map(Rev::from),
+            create: expected.is_none(),
+        };
+        assert!(set(None).refuse().is_ok());
+        assert!(set(Some(&id)).refuse().is_ok());
+        assert!(set(Some("main")).refuse().is_err());
+        let delete = |expected: &str| RefDeleteReq {
+            name: "main".to_owned(),
+            expected_old: expected.into(),
+        };
+        assert!(delete(&id).refuse().is_ok());
+        assert!(delete("main~1").refuse().is_err());
+    }
 
     /// A panic in a tool's operation is that call's `E_INTERNAL` envelope, with the store the
     /// server names and what the operation resolved before it panicked, as a command's is.
@@ -1039,15 +1435,15 @@ mod tests {
         let env = |_: &str| -> Option<OsString> { None };
         let server = Server::new(&global, &env);
         let id = json!(7);
-        let call = Call {
-            server: &server,
-            spec: TOOLS.iter().find(|spec| spec.name == "show").unwrap(),
-            reply: Reply {
-                id: &id,
-                era: Era::Previous,
-            },
+        let reply = Reply {
+            id: &id,
+            era: Era::Previous,
         };
-        let answer = call.run(
+        let spec = TOOLS.iter().find(|spec| spec.name == "show").unwrap();
+        let answer = run(
+            &server,
+            spec,
+            reply,
             || Ok(()),
             |ops, ()| -> Result<(), OpError> {
                 let rev = "main".into();
@@ -1133,29 +1529,27 @@ mod tests {
     }
 
     #[test]
-    fn a_request_names_its_era() {
+    fn a_request_claims_its_version() {
         let meta = |meta: Value| {
             let mut params = Map::new();
             params.insert("_meta".to_owned(), meta);
             params
         };
-        let capabilities = json!({});
-        assert_eq!(era(&Map::new()).ok(), Some(Era::Previous));
-        assert_eq!(era(&meta(json!({"other": 1}))).ok(), Some(Era::Previous));
+        assert_eq!(claim(&Map::new()).ok(), Some(Claim::None));
+        assert_eq!(claim(&meta(json!({"other": 1}))).ok(), Some(Claim::None));
+        for version in HANDSHAKE.into_iter().chain(["2024-11-05"]) {
+            assert_eq!(
+                claim(&meta(json!({VERSION_KEY: version}))).ok(),
+                Some(Claim::Handshake(version.to_owned())),
+                "an earlier version is the session's, or wants one"
+            );
+        }
         assert_eq!(
-            era(&meta(json!({VERSION_KEY: PREVIOUS}))).ok(),
-            Some(Era::Previous),
-            "an earlier version is the session's"
-        );
-        assert_eq!(
-            era(&meta(
-                json!({VERSION_KEY: LATEST, CAPABILITIES_KEY: capabilities})
-            ))
-            .ok(),
-            Some(Era::Latest)
+            claim(&meta(json!({VERSION_KEY: LATEST, CAPABILITIES_KEY: {}}))).ok(),
+            Some(Claim::Latest)
         );
         assert!(matches!(
-            era(&meta(json!({VERSION_KEY: "2027-01-01", CAPABILITIES_KEY: {}}))),
+            claim(&meta(json!({VERSION_KEY: "2027-01-01", CAPABILITIES_KEY: {}}))),
             Err(Rejected::Version(version)) if version == "2027-01-01"
         ));
         for refused in [
@@ -1165,7 +1559,7 @@ mod tests {
             json!("not an object"),
         ] {
             assert!(
-                matches!(era(&meta(refused.clone())), Err(Rejected::Params(_))),
+                matches!(claim(&meta(refused.clone())), Err(Rejected::Params(_))),
                 "{refused}"
             );
         }
