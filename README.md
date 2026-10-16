@@ -140,3 +140,7 @@ need the hooks. Every other build, `cargo build --release` included, ignores the
 - `docs/superpowers/specs/2026-10-15-swarmops-review-model-design.md`: change requests, their
   classification and approvals, and the landing gate (after M1).
 - `docs/superpowers/plans/`: the milestone plans; `docs/perf.md`: the measurements.
+
+## License
+
+SwarmOps is released under the [MIT License](LICENSE).
