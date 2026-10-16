@@ -28,13 +28,14 @@
 //! writer appends or compacts. A crash in the middle of an append leaves the record's first
 //! files written and the rest not. Every handle counts only the records that all five files
 //! hold whole (`ids.col`, written last, is the one that lags behind), and, past
-//! `journal.ckpt`, only those the journal vouches for: appended without a sync, they are what
-//! a power loss may leave with their bytes lost, zeros in their place. [`Index::repair_tail`]
-//! cuts the rest off. A crash in the middle of a compaction's renames leaves the sorted views
-//! out of step; each view still covers the records it covers, or is read as empty, so lookups
-//! stay right, and [`Index::repair_tail`] runs the compaction again. The one cut of whole
-//! records, after a failed sync, can take records from under a handle opened before it, a
-//! reader's snapshot's included: [`Index::truncate_to`] says which lookups then fail.
+//! `journal.ckpt` and the sorted views, only those the journal vouches for: appended without
+//! a sync, they are what a power loss may leave with their bytes lost, zeros in their place.
+//! [`Index::repair_tail`] cuts the rest off. A crash in the middle of a compaction's renames
+//! leaves the sorted views out of step; each view still covers the records it covers, or is
+//! read as empty, so lookups stay right, and [`Index::repair_tail`] runs the compaction again.
+//! The one cut of whole records, after a failed sync, can take records from under a handle
+//! opened before it, a reader's snapshot's included: [`Index::truncate_to`] says which lookups
+//! then fail.
 
 use std::num::NonZero;
 use std::panic;
@@ -145,12 +146,12 @@ impl Index {
     /// sorted views' lengths; and when the files hold records past what the views cover, the
     /// journal's frames past its checkpoint (and, only if the index holds none of their
     /// changesets, the frames before it back to its last changeset), and the records past the
-    /// checkpoint, which the journal must vouch for to be counted (the journal's changesets
-    /// past the checkpoint, in order, field by field). It repairs nothing, since a writer may
-    /// be appending or compacting meanwhile: records that some files lack, or that the journal
-    /// does not vouch for, are not counted, and a view that a compaction is renaming (or
-    /// crashed renaming) counts as covering what it covers, or nothing. A writer repairs with
-    /// [`Index::repair_tail`].
+    /// checkpoint and the views, which the journal must vouch for to be counted (the journal's
+    /// changesets past the checkpoint, in order, field by field). It repairs nothing, since a
+    /// writer may be appending or compacting meanwhile: records that some files lack, or that
+    /// the journal does not vouch for, are not counted, and a view that a compaction is
+    /// renaming (or crashed renaming) counts as covering what it covers, or nothing. A writer
+    /// repairs with [`Index::repair_tail`].
     pub fn open(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Index, StoreError> {
         let mut index = Self::handle(layout, fs)?;
         let lens = index.lens()?;
