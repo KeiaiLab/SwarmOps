@@ -1578,6 +1578,85 @@ fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
     }
 }
 
+/// A snapshot measures the index files, then reads the frames past the checkpoint, which vouch
+/// for the records past it; a writer may cut those records in between: a flush whose index sync
+/// fails ([`Index::truncate_to`]), or the first write after a power loss, which cuts the records
+/// the journal does not vouch for and then fails to replay them. No cut takes a record the
+/// checkpoint passed, and the snapshot counts every one of those, the changesets past the
+/// checkpoint coming from the frames, numbered after them. (Looking for where the records past
+/// the checkpoint start, the index used to meet the cut and count one record fewer: the last
+/// changeset before the checkpoint went missing, and every seq past it was one short.)
+#[test]
+fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_checkpoint_passed() {
+    for power_loss in [false, true] {
+        let what = if power_loss {
+            "the repair after a power loss"
+        } else {
+            "a failed index sync"
+        };
+        let (_dir, root) = new_root();
+        let (writer, fail) = failing_store(&root);
+        for n in 0..3 {
+            insert(&writer, &[chained(n)]);
+        }
+        writer.flush().unwrap(); // the checkpoint past records 0..=2
+        for n in 3..5 {
+            insert(&writer, &[chained(n)]); // records 3 and 4, past the checkpoint
+        }
+        assert_eq!(chained_lens(&root), chained_want(5), "{what}");
+        if power_loss {
+            // Records 3 and 4 kept their length and lost their bytes, zeros in their place.
+            let meta = Layout::new(&root).meta_dir();
+            for ((file, len), (_, kept)) in chained_lens(&root).into_iter().zip(chained_want(3)) {
+                let path = meta.join(file);
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[usize::try_from(kept).unwrap()..usize::try_from(len).unwrap()].fill(0);
+                fs::write(&path, bytes).unwrap();
+            }
+            fail.set("append parents.log"); // the replay's first append
+        } else {
+            fail.set("sync_data ids.col");
+        }
+        // The reader's first FsOps call measures journal.off, to read the frames past the
+        // checkpoint, once it has measured the index files: right then, the writer cuts them.
+        let (fs, _calls) = RecordingFs::new();
+        let fs = fs.with_hook((
+            "file_len journal.off".to_owned(),
+            When::Before,
+            Box::new(move || {
+                let cut = if power_loss {
+                    writer.write().map(drop)
+                } else {
+                    writer.flush()
+                };
+                assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+            }),
+        ));
+        let reader = MetaStore::open_with_fs(&root, Arc::new(fs)).unwrap();
+
+        let read = reader.read().unwrap();
+        assert_eq!(chained_lens(&root), chained_want(3), "{what}: cut");
+        assert_eq!(read.count_changesets().unwrap(), 5, "{what}");
+        for n in 0..5 {
+            let got = read.changeset(id(n)).unwrap();
+            assert_eq!(got, Some(chained_stored(n)), "{what}: changeset {n}");
+        }
+        drop(read);
+
+        // The next write appends the records cut again, from the journal.
+        MetaStore::open(&root).unwrap().flush().unwrap();
+        assert_eq!(chained_lens(&root), chained_want(5), "{what}: replayed");
+        let index = index(&root);
+        for n in 0..5 {
+            assert_eq!(
+                index.get(n).unwrap(),
+                chained_stored(n),
+                "{what}: record {n}"
+            );
+        }
+    }
+}
+
 /// How many frames `journal.off` at `root` lists.
 fn listed(root: &Utf8Path) -> u64 {
     file_len(Layout::new(root).journal_off()) / 8

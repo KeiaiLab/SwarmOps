@@ -509,7 +509,11 @@ impl Index {
     /// scan of the tail reads past the new end), and on every [`Index::find_prefix`] and
     /// [`Index::find_delta_hash`]. A [`crate::MetaStore::read`] whose handle opened before the
     /// cut fails the same way while it builds its snapshot. A handle opened after the cut, and
-    /// so a new snapshot, reads the index as cut, the journal's frames over it.
+    /// so a new snapshot, reads the index as cut, the journal's frames over it. A handle that
+    /// opens while the cut is made, its files measured before it and read after, counts every
+    /// record the checkpoint passed, which the cut keeps, and of the others only those it still
+    /// finds whole that the journal vouches for, or fails as one opened before the cut does:
+    /// it never counts fewer.
     pub fn truncate_to(&mut self, records: u64) -> Result<u64, StoreError> {
         let keep = records.max(self.views.covered());
         if keep >= self.len {
@@ -713,6 +717,12 @@ impl Index {
     /// records, that record's place says where; only otherwise is the journal read back from the
     /// checkpoint to its last changeset, on `journal` or on a handle of its own (not through
     /// this index's [`FsOps`]), and a damaged frame there counts every record.
+    ///
+    /// A writer may cut records past the checkpoint after `records` were measured (a failed
+    /// sync's [`Index::truncate_to`], or a repair after a power loss), but never one before it:
+    /// where those records start is looked for in what `ids.col` holds then ([`held_entries`]),
+    /// so a cut never makes the count fall short of the records the checkpoint passed, and
+    /// records cut vouch for nothing.
     fn vouched_with(
         &self,
         records: u64,
@@ -734,10 +744,10 @@ impl Index {
         if let Some(first) = self.first_past_by_id(&past, records)? {
             return self.vouched_from(first, records, &past, parents_file_len);
         }
-        // None of them among its last records: none is materialized yet, or a power loss zeroed
-        // their ids. The last changeset before the checkpoint says where they start, which the
-        // index holds among its last `past + 1` records (it holds no more than `past` past the
-        // checkpoint).
+        // None of them among its last records: none is materialized yet, a power loss zeroed
+        // their ids, or a writer has cut them since. The last changeset before the checkpoint
+        // says where they start, which the index holds among its last `past + 1` records (it
+        // holds no more than `past` past the checkpoint), and which no cut takes.
         let opened;
         let journal = match journal {
             Some(journal) => journal,
@@ -761,9 +771,7 @@ impl Index {
             None => 0,
             Some(last) => {
                 let from = records.saturating_sub(to_u64(past.len()) + 1);
-                let Some(window) = read_or_cut(&self.ids, from, records)? else {
-                    return Ok(records.min(from));
-                };
+                let window = held_entries(&self.ids, from, records)?;
                 let at = window
                     .as_chunks::<32>()
                     .0
@@ -781,15 +789,14 @@ impl Index {
     }
 
     /// Where the records past the checkpoint start, if the index holds one of `past`, the
-    /// changesets past it, among its last `past` records: that record's rec less its place
-    /// among them. `None` if it holds none of them there: none is materialized yet (a reader
-    /// that came between a writer's frame and its materialization, or a writer that crashed
-    /// there), or a power loss zeroed their ids.
+    /// changesets past it, among its last `past` records, as far as `ids.col` holds them now
+    /// ([`held_entries`]): that record's rec less its place among them. `None` if it holds none
+    /// of them there: none is materialized yet (a reader that came between a writer's frame and
+    /// its materialization, or a writer that crashed there), a power loss zeroed their ids, or
+    /// a writer has cut them since `records` were measured.
     fn first_past_by_id(&self, past: &[&Record], records: u64) -> Result<Option<u64>, StoreError> {
         let from = records.saturating_sub(to_u64(past.len()));
-        let Some(window) = read_or_cut(&self.ids, from, records)? else {
-            return Ok(None);
-        };
+        let window = held_entries(&self.ids, from, records)?;
         let window = window.as_chunks::<32>().0;
         for (place, record) in past.iter().enumerate() {
             let Record::Changeset { id, .. } = record else {
@@ -921,6 +928,25 @@ fn read_or_cut<const W: usize>(
         Ok(bytes) => Ok(Some(bytes)),
         Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
         Err(e) => Err(e),
+    }
+}
+
+/// The entries `[from, to)` of `column` that it holds: all of them, or, if the file is shorter
+/// now than when it was measured, those before its end, measured again (one more `fstat` and
+/// `read_at`). A writer cuts only records past the checkpoint, at the end (a failed sync's
+/// [`Index::truncate_to`], or a repair after a power loss), so the records the checkpoint passed
+/// are all still there. A file cut again in between is an I/O error (`UnexpectedEof`).
+fn held_entries<const W: usize>(
+    column: &AppendOnlyColumn<W>,
+    from: u64,
+    to: u64,
+) -> Result<Vec<u8>, StoreError> {
+    match column.entries(from, to) {
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+            let held = AppendOnlyColumn::<W>::whole(column.len()?).min(to);
+            column.entries(from.min(held), held)
+        }
+        read => read,
     }
 }
 
