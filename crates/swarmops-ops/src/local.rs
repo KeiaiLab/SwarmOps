@@ -19,7 +19,7 @@ use swarmops_api::{
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, RepoPath, Signature, TreeEntry,
 };
-use swarmops_repo::{CasResult, CommitRequest, LocalRepo, RepoError, StoredChangeset};
+use swarmops_repo::{CasOutcome, CasResult, CommitRequest, LocalRepo, RepoError, StoredChangeset};
 
 use crate::content;
 use crate::error::{During, details, error, hint, one_line, op, repo_error, shell_word};
@@ -73,8 +73,11 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   first parent of the changeset it names, which must be a full id the store holds; a page
 ///   is `truncated` when older history follows its last entry.
 /// - `ref_set` and `ref_delete` move a ref by compare-and-swap, recorded for the caller's agent.
-///   A move that finds the ref as it asks already (at `new` for `ref_set`; gone, or never there,
-///   for `ref_delete`) is a replay: `already_applied`, with the response the move gave.
+///   A move that finds the ref as it asks already (at `new` for `ref_set`, whatever it expected;
+///   gone, or never there, for `ref_delete`) is a replay: `already_applied`, with the response
+///   the move gave, and nothing is written, no journal frame and no new version of the ref. So a
+///   `ref_set` whose `new` is the target it expects never moves the ref: it is a replay where
+///   the ref holds that target, and a mismatch where it holds another.
 /// - `verify` checks the store and lists each problem as one line.
 ///
 /// Limits of 0 (`limit`, `max_changes`) are `E_INVALID_ARG`.
@@ -529,11 +532,26 @@ impl StoreOps for Recording<'_> {
             Some(rev) => Some(self.resolve(rev)?),
             None => None,
         };
-        let outcome = self
-            .ops
-            .repo
-            .cas_ref(&name, expected, Some(new), who.agent())
-            .map_err(op)?;
+        let outcome = if expected == Some(new) {
+            // A move to the target it expects moves nothing: the ref holds it (a replay) or does
+            // not (a mismatch). Either way nothing is written, where the store would record a
+            // no-op move, its version counting up.
+            let current = self.ops.repo.get_ref(&name).map_err(op)?;
+            CasOutcome {
+                result: CasResult::Mismatch {
+                    actual: current.map(|state| state.target),
+                },
+                warnings: Vec::new(),
+            }
+        } else {
+            // A ref that holds `new` already, whatever `expected` says, is a mismatch whose actual
+            // target is `new`: the compare-and-swap writes nothing, and the match below reads it
+            // as a replay.
+            self.ops
+                .repo
+                .cas_ref(&name, expected, Some(new), who.agent())
+                .map_err(op)?
+        };
         let replay = match outcome.result {
             CasResult::Applied { .. } => false,
             CasResult::Mismatch { actual } if actual == Some(new) => true,

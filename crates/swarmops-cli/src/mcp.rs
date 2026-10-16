@@ -36,7 +36,8 @@
 //! # Errors
 //!
 //! A message that is not a request the server can serve gets a JSON-RPC error. One whose id
-//! cannot be read is answered with `"id": null`, as JSON-RPC 2.0 has it; a request's id is a
+//! cannot be read is answered without an `id`, as MCP allows (its schema types an error's `id`
+//! as an optional string or integer, so a null one would not validate); a request's id is a
 //! string or an integer.
 //!
 //! | Code | Name | For |
@@ -994,7 +995,7 @@ fn response<R: Serialize>(id: &Value, result: R) -> String {
 }
 
 /// The error response with `code` and `message` to request `id` (`None`: a message whose id
-/// could not be read, answered with a null id), as one line.
+/// could not be read, answered without one), as one line.
 fn error(id: Option<&Value>, code: i64, message: impl AsRef<str>) -> String {
     error_with(id, code, message.as_ref(), None)
 }
@@ -1012,7 +1013,7 @@ fn not_found(id: &Value, method: &str) -> String {
 fn error_with(id: Option<&Value>, code: i64, message: &str, data: Option<Value>) -> String {
     let response = ErrorResponse {
         jsonrpc: "2.0",
-        id: id.unwrap_or(&Value::Null),
+        id,
         error: RpcError {
             code,
             message: output::printable(message),
@@ -1072,11 +1073,8 @@ impl Effect {
             Effect::Adds => (false, false, false),
             // idempotentHint rests on concrete_expectation: the server refuses an expected_old
             // that is not a full id, so the same move again compares against the same changeset
-            // and finds its work done (already_applied) or the ref elsewhere (E_CAS_MISMATCH).
-            // A ref name would match anew at every call and move the ref again. The one repeated
-            // move that still records something moves a ref to the changeset it holds already
-            // (new names expected_old's): the store records that no-op move each time, the
-            // ref's version counting up while its target stays.
+            // and finds its work done (already_applied, nothing written) or the ref elsewhere
+            // (E_CAS_MISMATCH). A ref name would match anew at every call and move the ref again.
             Effect::Moves => (false, true, true),
         };
         json!({
@@ -1100,8 +1098,9 @@ struct Response<'a, R> {
 #[derive(Serialize)]
 struct ErrorResponse<'a> {
     jsonrpc: &'static str,
-    /// The request's id, or null when it could not be read.
-    id: &'a Value,
+    /// The request's id; omitted when it could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<&'a Value>,
     error: RpcError,
 }
 

@@ -45,9 +45,6 @@ const PREVIOUS: &str = "2025-11-25";
 /// `structuredContent` and `outputSchema`.
 const EARLIEST: &str = "2025-06-18";
 
-/// The id of an error that answers a message whose id could not be read.
-const NULL: Value = Value::Null;
-
 /// A command line that runs `swarmops mcp`: its arguments, and the variables it sets.
 type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 
@@ -759,8 +756,9 @@ fn vague_expectations_are_refused(server: &mut Server, c2: &str, c3: &str) {
 }
 
 /// With main at `c2` and `c3` built on `c1`: the full id main holds moves it, and the same move
-/// again finds its work done; a stale full id is `E_CAS_MISMATCH`; a relative `new` is safe with
-/// a concrete expectation; a delete by full id deletes, and again finds the ref gone.
+/// again finds its work done, as does a move to the target main holds; a stale full id is
+/// `E_CAS_MISMATCH`; a relative `new` is safe with a concrete expectation; a delete by full id
+/// deletes, and again finds the ref gone.
 fn concrete_expectations_compare_and_swap(server: &mut Server, c1: &str, c2: &str, c3: &str) {
     let c4 = commit_on(server, "c4", c2);
     let set = json!({"name": "main", "new": c4, "expected_old": c2});
@@ -768,6 +766,18 @@ fn concrete_expectations_compare_and_swap(server: &mut Server, c1: &str, c2: &st
     assert_eq!(moved["result"]["already_applied"], false);
     let again = server.ok("ref_set", set);
     assert_eq!(again["result"]["already_applied"], true);
+    // A move to the target it expects, which main holds, is a replay too, whatever it says: the
+    // version below has not moved since.
+    for _ in 0..2 {
+        let still = server.ok(
+            "ref_set",
+            json!({"name": "main", "new": c4, "expected_old": c4}),
+        );
+        assert_eq!(
+            still["result"],
+            json!({"name": "main", "old": c4, "new": c4, "already_applied": true})
+        );
+    }
     let stale = server.err(
         "ref_set",
         json!({"name": "main", "new": c3, "expected_old": c2}),
@@ -906,20 +916,20 @@ fn mcp_rejects_unknown_methods_and_bad_json() {
 }
 
 /// Messages that are not valid requests, sent to `server`: unreadable lines, batches and other
-/// values that are not one object, ids that are not strings or integers (answered with a null
-/// id, as JSON-RPC 2.0 has it), objects without the 2.0 shape, and params that are not an
-/// object.
+/// values that are not one object, ids that are not strings or integers (each answered without
+/// an id, which MCP allows for an id that could not be read and its schema types as an optional
+/// string or integer), objects without the 2.0 shape, and params that are not an object.
 fn malformed_messages_are_refused(server: &mut Server) {
     server.send_line(b"this is not json");
-    server.reply_error(&NULL, PARSE_ERROR);
+    server.reply_error(None, PARSE_ERROR);
     server.send_line(b"{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"ping\"");
-    server.reply_error(&NULL, PARSE_ERROR);
+    server.reply_error(None, PARSE_ERROR);
     server.send_line(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xff\"}");
-    server.reply_error(&NULL, PARSE_ERROR);
+    server.reply_error(None, PARSE_ERROR);
     server.send(&json!([{"jsonrpc": "2.0", "id": 1, "method": "ping"}]));
-    server.reply_error(&NULL, INVALID_REQUEST);
+    server.reply_error(None, INVALID_REQUEST);
     server.send(&json!("ping"));
-    server.reply_error(&NULL, INVALID_REQUEST);
+    server.reply_error(None, INVALID_REQUEST);
     // An id is a string or an integer.
     for id in [
         json!(null),
@@ -930,7 +940,7 @@ fn malformed_messages_are_refused(server: &mut Server) {
         json!(true),
     ] {
         server.send(&json!({"jsonrpc": "2.0", "id": id, "method": "ping"}));
-        server.reply_error(&NULL, INVALID_REQUEST);
+        server.reply_error(None, INVALID_REQUEST);
     }
     assert_eq!(
         server.request_with_id(&json!(-7), "ping")["result"],
@@ -941,13 +951,13 @@ fn malformed_messages_are_refused(server: &mut Server) {
         json!({})
     );
     server.send(&json!({"jsonrpc": "2.0", "id": 2}));
-    server.reply_error(&json!(2), INVALID_REQUEST);
+    server.reply_error(Some(&json!(2)), INVALID_REQUEST);
     server.send(&json!({"jsonrpc": "1.0", "id": 3, "method": "ping"}));
-    server.reply_error(&json!(3), INVALID_REQUEST);
+    server.reply_error(Some(&json!(3)), INVALID_REQUEST);
     server.send(&json!({"id": "four", "method": "ping"}));
-    server.reply_error(&json!("four"), INVALID_REQUEST);
+    server.reply_error(Some(&json!("four")), INVALID_REQUEST);
     server.send(&json!({"jsonrpc": "2.0", "id": 5, "method": "ping", "params": [1]}));
-    server.reply_error(&json!(5), INVALID_PARAMS);
+    server.reply_error(Some(&json!(5)), INVALID_PARAMS);
 }
 
 /// Requests that `server`, with no session open, cannot serve: a ping is answered, but a request
@@ -1120,12 +1130,12 @@ impl Server {
         reply
     }
 
-    /// The next reply, which must be an error with `code`, answering request `id` ([`NULL`]:
-    /// a message whose id could not be read).
-    fn reply_error(&mut self, id: &Value, code: i64) -> Value {
+    /// The next reply, which must be an error with `code`, answering request `id` (`None`: a
+    /// message whose id could not be read, answered without one).
+    fn reply_error(&mut self, id: Option<&Value>, code: i64) -> Value {
         let reply = self.reply();
         assert_eq!(reply["error"]["code"], code, "{reply}");
-        assert_eq!(reply.get("id"), Some(id), "{reply}");
+        assert_eq!(reply.get("id"), id, "{reply}");
         reply
     }
 
