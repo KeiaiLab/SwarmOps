@@ -886,6 +886,27 @@ fn render(
                 Col("fresh_p99_us", "fresh p99"),
             ],
         );
+        // Every kind's ratio, so that a verdict quotes them all, not the kind it likes best.
+        let ratios = report::ratios(
+            records,
+            "w3",
+            &size_name(n),
+            "native",
+            &[
+                Col("get_p50_us", "get"),
+                Col("prefix_p50_us", "prefix"),
+                Col("delta_p50_us", "delta"),
+                Col("miss_p50_us", "miss"),
+                Col("fresh_p50_us", "fresh"),
+            ],
+        );
+        if !ratios.is_empty() {
+            let _ = writeln!(
+                out,
+                "\nThe native store's p50 over each engine's, by kind ({} changesets; above 1, the native store is slower):\n\n{ratios}",
+                size_name(n)
+            );
+        }
     }
     let largest = size_name(*plan.sizes.iter().max().expect("sizes"));
     section(

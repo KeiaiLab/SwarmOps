@@ -219,11 +219,63 @@ pub fn sync_table(syncs: &[PerCommit]) -> String {
     out
 }
 
+/// How many times `base`'s median each other engine's median is, column by column, on
+/// `workload`'s `variant`: one row per engine, with the row's range. For a latency, above 1
+/// means that `base` is slower. Empty if `base` has no record there.
+pub fn ratios(
+    records: &[Record],
+    workload: &str,
+    variant: &str,
+    base: &str,
+    cols: &[Col],
+) -> String {
+    let selected = select(records, workload, variant);
+    let median = |engine: &str, key: &str| {
+        let mut values: Vec<f64> = selected
+            .iter()
+            .filter(|r| r.engine == engine)
+            .filter_map(|r| r.values.get(key).copied())
+            .collect();
+        median_range(&mut values).0
+    };
+    if !selected.iter().any(|r| r.engine == base) {
+        return String::new();
+    }
+    let mut out = String::new();
+    let _ = write!(out, "| {base} ÷ |");
+    for c in cols {
+        let _ = write!(out, " {} |", c.1);
+    }
+    let _ = writeln!(out, " range |");
+    let _ = writeln!(out, "|---|{}---|", "---|".repeat(cols.len()));
+    for engine in engines(&selected).into_iter().filter(|e| e != base) {
+        let row: Vec<f64> = cols
+            .iter()
+            .map(|c| median(base, c.0) / median(&engine, c.0))
+            .collect();
+        let _ = write!(out, "| {engine} |");
+        for ratio in &row {
+            let _ = write!(out, " {}× |", num(*ratio));
+        }
+        let finite: Vec<f64> = row.into_iter().filter(|r| r.is_finite()).collect();
+        let lo = finite.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = finite.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        if finite.is_empty() {
+            let _ = writeln!(out, " – |");
+        } else {
+            let _ = writeln!(out, " {}–{}× |", num(lo), num(hi));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::sync_table;
+    use super::{Col, ratios, sync_table};
+    use crate::measure::Env;
+    use crate::workloads::Record;
     use crate::workloads::sync::PerCommit;
 
     fn count(engine: &str, run: usize, fsync: f64, wal: f64) -> PerCommit {
@@ -260,5 +312,53 @@ mod tests {
                 "| b | 2.00 | 0.00 | 0.00 | 2.00 | 12.0 | 100 | 3 | fsync db-wal 2.00 |",
             ]
         );
+    }
+
+    fn lookups(engine: &str, variant: &str, run: usize, get: f64, prefix: f64) -> Record {
+        Record {
+            workload: "w3",
+            variant: variant.to_owned(),
+            engine: engine.to_owned(),
+            run,
+            env: Env {
+                load_start: 1.0,
+                load_min: 1.0,
+                load_max: 1.0,
+                load_end: 1.0,
+                probe_start_ms: 4.0,
+                probe_end_ms: 4.0,
+            },
+            values: BTreeMap::from([
+                ("get_p50_us".to_owned(), get),
+                ("prefix_p50_us".to_owned(), prefix),
+            ]),
+        }
+    }
+
+    #[test]
+    fn ratios_divide_the_base_engines_median_by_each_others_per_column() {
+        let records = [
+            lookups("native", "1M", 1, 10.0, 18.0),
+            lookups("sqlite", "1M", 1, 2.0, 2.0),
+            lookups("redb", "1M", 1, 1.0, 0.5),
+            lookups("native", "1M", 2, 12.0, 20.0),
+            lookups("sqlite", "1M", 2, 2.2, 2.5),
+            lookups("native", "1M", 3, 11.0, 19.0),
+            lookups("sqlite", "1M", 3, 2.4, 2.4),
+            // Another size: not part of the 1M table.
+            lookups("sqlite", "100k", 1, 0.001, 0.001),
+        ];
+        let cols = [Col("get_p50_us", "get"), Col("prefix_p50_us", "prefix")];
+        let table = ratios(&records, "w3", "1M", "native", &cols);
+        assert_eq!(
+            table.lines().collect::<Vec<_>>(),
+            [
+                "| native ÷ | get | prefix | range |",
+                "|---|---|---|---|",
+                "| sqlite | 5.00× | 7.92× | 5.00–7.92× |",
+                "| redb | 11.0× | 38.0× | 11.0–38.0× |",
+            ]
+        );
+        assert_eq!(ratios(&records, "w3", "1M", "lmdb", &cols), "");
     }
 }
