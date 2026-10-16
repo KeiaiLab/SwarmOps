@@ -1065,6 +1065,7 @@ dependencies = [
  "camino",
  "clap",
  "insta",
+ "rayon",
  "serde",
  "serde_json",
  "swarmops-api",
