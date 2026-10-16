@@ -1,6 +1,6 @@
 # What is too slow for every push, weekly and on demand: `just check-ci-slow` (the ignored slow
 # tests, crash sweeps included, without the 32-process contention measurements) and a 60-second
-# fuzz smoke of every fuzz target on nightly. Hardened as ci.yml is.
+# fuzz smoke of every fuzz target on nightly. Hardened and pinned to ubuntu-24.04 as ci.yml is.
 name: Scheduled
 
 on:
@@ -22,13 +22,15 @@ defaults:
 jobs:
   slow:
     name: just check-ci-slow
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 45
     env:
       CARGO_TERM_COLOR: always
-      NEXTEST_PROFILE: ci
+      # The ci profile with a 20-minute kill for a hung test (.config/nextest.toml); its JUnit
+      # report is target/nextest/ci-slow/junit.xml.
+      NEXTEST_PROFILE: ci-slow
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -54,14 +56,14 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-slow
-          path: target/nextest/ci/junit.xml
+          path: target/nextest/ci-slow/junit.xml
           if-no-files-found: ignore
           overwrite: true
           retention-days: 14
 
   fuzz:
     name: fuzz smoke
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 30
@@ -82,7 +84,8 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo +nightly install --locked cargo-fuzz@0.13.2
       # Every target runs even when one fails; `cargo fuzz list` reads fuzz/Cargo.toml, so a
-      # target added there joins the smoke.
+      # target added there joins the smoke. The recipe's `-timeout=30` fails an input that runs
+      # for more than 30 s, so a hang ends long before the job's timeout and its input is uploaded.
       - name: Run every fuzz target for 60 seconds
         run: |
           targets=$(cargo +nightly fuzz list)

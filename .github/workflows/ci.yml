@@ -4,7 +4,8 @@
 # Hardening: every action is pinned to a full commit SHA (its version in the trailing comment;
 # Dependabot updates both), the token has no permissions unless a job asks for one,
 # `actions/checkout` keeps no credentials, and no workflow uses `pull_request_target`. The
-# `zizmor` job audits all of that on every run.
+# `zizmor` job audits all of that on every run. Jobs run on ubuntu-24.04, not ubuntu-latest,
+# which moves to a new Ubuntu in November 2026: changing the image is a commit, not a surprise.
 name: CI
 
 on:
@@ -27,15 +28,15 @@ defaults:
 jobs:
   check:
     name: just check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     # The default is 360 minutes: a hung test would spend them all from the plan's budget.
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
-      # `just check`'s workspace run uses .config/nextest.toml's `ci` profile: no fail-fast,
-      # no retries, a JUnit report in target/nextest/ci/.
+      # `just check`'s workspace run uses .config/nextest.toml's `ci` profile: no fail-fast, no
+      # retries, a hung test killed after 10 minutes, a JUnit report in target/nextest/ci/.
       NEXTEST_PROFILE: ci
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -74,7 +75,7 @@ jobs:
 
   zizmor:
     name: zizmor
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     timeout-minutes: 10
@@ -101,7 +102,7 @@ jobs:
     name: tests-pass
     if: always()
     needs: [check, zizmor]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions: {}
     timeout-minutes: 5
     steps:
