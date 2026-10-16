@@ -19,9 +19,13 @@ path = "src/main.rs"
 # for the crash tests, which require it, never for a release.
 test-hooks = ["swarmops-ops/test-hooks"]
 
-# The crash tests drive the test hooks: without the feature, `cargo test` skips them.
+# The crash and fault tests drive the test hooks: without the feature, `cargo test` skips them.
 [[test]]
 name = "crash"
+required-features = ["test-hooks"]
+
+[[test]]
+name = "faults"
 required-features = ["test-hooks"]
 
 [dependencies]

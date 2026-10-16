@@ -129,6 +129,27 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
     }
 }
 
+/// The error of an `init` that made the store at `at`, whole and durable, but then failed with
+/// `e` to read it back for its report: `e`, saying that the store is there
+/// (`details.created: true`, and a hint to read it), so that a client that retries does not
+/// find out only from `E_EXISTS`.
+pub(crate) fn created_but_unread(at: &Utf8Path, e: OpError) -> OpError {
+    let mut details = e.details;
+    details.insert("created".to_owned(), true.into());
+    OpError {
+        message: one_line(format!(
+            "the store at {at} is made, but reading it back failed: {}",
+            e.message
+        )),
+        details,
+        hint: Some(hint(format!(
+            "swarmops --repo {} info",
+            shell_word(at.as_str())
+        ))),
+        ..e
+    }
+}
+
 /// An error of `code` with `message`, its control characters escaped so that it is one line.
 pub(crate) fn error(code: ErrorCode, message: impl Into<String>) -> OpError {
     OpError::new(code, one_line(message.into()))
@@ -387,6 +408,25 @@ mod tests {
         );
         let hint = error.hint.unwrap_or_default();
         assert!(hint.contains("same command"), "{hint}");
+    }
+
+    /// An `init` that made the store whole but failed to read it back for its report says
+    /// so: the read's code, `details.created: true`, and a hint to read the store.
+    #[test]
+    fn an_init_that_made_the_store_says_so_when_reading_it_back_fails() {
+        let read = error(ErrorCode::Io, "i/o error: Input/output error (os error 5)");
+        let error = created_but_unread(Utf8Path::new(AT), read);
+        assert_eq!((error.code.as_str(), error.exit), ("E_IO", 1));
+        assert_eq!(error.details["created"], true);
+        assert!(
+            error
+                .message
+                .starts_with(&format!("the store at {AT} is made")),
+            "{}",
+            error.message
+        );
+        let hint = format!("swarmops --repo {AT} info");
+        assert_eq!(error.hint.as_deref(), Some(hint.as_str()));
     }
 
     #[test]

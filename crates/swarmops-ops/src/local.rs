@@ -141,11 +141,14 @@ impl fmt::Debug for LocalOps {
 impl LocalOps {
     /// Creates a store at `path` for a repository named `name`, creating the directory if it is
     /// missing, and opens it (CLI `init`). `E_EXISTS` if a store is there already,
-    /// `E_UNSUPPORTED_FS` for a path under `/mnt/`.
+    /// `E_UNSUPPORTED_FS` for a path under `/mnt/`. A store made whole whose reading back for
+    /// the report fails is that read's error, saying the store is made (`details.created`).
     pub fn init(path: &Utf8Path, name: &str) -> Result<(LocalOps, RepoInfo), OpError> {
         let repo = LocalRepo::create(path, name).map_err(|e| repo_error(e, During::Init(path)))?;
         let ops = Self::with_repo(repo, path);
-        let info = ops.repo_info(InfoReq {})?;
+        let info = ops
+            .repo_info(InfoReq {})
+            .map_err(|e| crate::error::created_but_unread(path, e))?;
         Ok((ops, info))
     }
 

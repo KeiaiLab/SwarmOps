@@ -47,7 +47,10 @@
 //! 5. It writes `REPO` atomically, with a new repository id (see above).
 //! 6. Last, it links `FORMAT` into place without replacing anything, from a temp file in
 //!    `objects/tmp/` that is synced first (so `FORMAT` is never seen half written), and syncs
-//!    the store root.
+//!    the store root. If that sync fails, it takes `FORMAT` back (removed, the removal synced)
+//!    and fails: Linux reports a failed writeback once, so no later sync could tell whether the
+//!    name reached the disk, and the next create completes the store. If even that fails, the
+//!    process aborts, as a crash between the link and the sync would leave it.
 //!
 //! A crash before the link leaves no `FORMAT`: open refuses the directory, and the next create
 //! picks up where the crashed one stopped. Two creates of one store at once are not supported.
@@ -215,7 +218,10 @@ impl LocalRepo {
         if fs.link_noclobber(&temp, format_file.as_std_path())? == LinkOutcome::AlreadyExists {
             return Err(RepoError::Exists);
         }
-        fs.fsync_dir(root.as_std_path())?;
+        if let Err(e) = fs.fsync_dir(root.as_std_path()) {
+            take_format_back(&*fs, &root, &e);
+            return Err(e.into());
+        }
         Ok(Self::assemble(layout, fs, meta, identity, one_thread))
     }
 
@@ -355,6 +361,27 @@ fn ref_error(e: StoreError) -> RepoError {
         StoreError::RefName(name) => RepoError::RefName(name),
         StoreError::UnknownRefTarget(id) => RepoError::NotFound(id.to_string()),
         other => other.into(),
+    }
+}
+
+/// What a create does when the sync of the store root that makes `FORMAT`'s name durable fails
+/// with `e`: `FORMAT` makes the store complete for every reader at once, but Linux reports a
+/// failed writeback once, so no later sync could tell whether its name reached the disk. So it
+/// is removed again, the removal synced, and the create fails: the store is not complete, and
+/// the next create makes it so (storage spec §2). If that fails too, the process aborts
+/// ([`std::process::abort`]), saying why on stderr, as a crash between the link and the sync
+/// would leave it: the next `open` finds a store or none, and `create` finishes it.
+fn take_format_back(fs: &dyn FsOps, root: &Utf8Path, e: &io::Error) {
+    let format = Layout::new(root).format_file();
+    let undone = fs
+        .remove(format.as_std_path())
+        .and_then(|()| fs.fsync_dir(root.as_std_path()));
+    if let Err(undo) = undone {
+        eprintln!(
+            "swarmops: fatal: syncing {root} after linking {format} failed ({e}), and \
+             {format} could not be taken back ({undo}): aborting, as a crash there would"
+        );
+        std::process::abort();
     }
 }
 
