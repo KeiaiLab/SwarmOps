@@ -104,7 +104,7 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
 | Command | What it does |
 | --- | --- |
 | `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash sweeps, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
-| `just check-ci-slow` | The ignored tests without the 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does. |
+| `just check-ci-slow` | Every ignored test except `regenerate_golden` and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |
 | `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. |
@@ -124,6 +124,21 @@ pull request to `stable`. The one check to look at is `tests-pass`: it passes on
 it depends on passed. A weekly scheduled workflow runs `just check-ci-slow` and a 60-second fuzz
 smoke of every target. Dependabot proposes grouped, weekly updates for Cargo and GitHub Actions,
 after a cooldown; review them like any other change.
+
+- **Hung tests are killed and named.** The `ci` nextest profile ends a test after 10 minutes and
+  the weekly `ci-slow` profile after 20; either way the test appears as a failure in the JUnit
+  report the run uploads, and a hanging fuzz input stops after 30 seconds with its reproducer
+  uploaded.
+- **Tool versions are bumped by hand.** `just`, `cargo-nextest` and `cargo-deny` are pinned in
+  the installer step of both workflows, each to a release at least 7 days old. Dependabot cannot
+  bump them; move them in a `ci:` commit when the local tools move.
+- **A new RustSec advisory turns every push red** through `cargo deny check`, on purpose. Update
+  the affected crate; if no fixed release exists and the advisory cannot affect SwarmOps, add an
+  `ignore` entry with the advisory id and the reason to `[advisories]` in `deny.toml`, in a
+  commit of its own.
+- **A semver-incompatible release of a crate both lockfiles share** changes a requirement in
+  `Cargo.toml`, so its Dependabot pull request fails until
+  `cargo update --manifest-path fuzz/Cargo.toml -p <crate>` is pushed to it.
 
 The repository is private on GitHub's Free plan, which offers no branch protection or rulesets
 for it, so nothing stops a push that would fail. The rule is still the rule: land on `stable`
