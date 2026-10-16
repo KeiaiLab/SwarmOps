@@ -5,9 +5,9 @@
 //! The input is read three ways:
 //! 1. as records back to back, through `Record::decode`;
 //! 2. as `journal.log` itself, nothing listed in `journal.off`: `tail_frames_from(0)` returns the
-//!    whole frames from offset 0 up to a torn tail (a frame cut short, one failing its CRC, or
-//!    zeros to the end of the file), or `JournalCorrupt` at the first frame no writer produces
-//!    (an empty payload, or one that matches its CRC but does not decode);
+//!    whole frames from offset 0 up to a torn tail (a frame cut short, one failing its CRC, or a
+//!    header whose length reads 0, which never reached the disk), or `JournalCorrupt` at the
+//!    first frame no writer produces (one that matches its CRC but does not decode);
 //! 3. as one frame's payload, behind a header with its length and CRC so that the CRC never
 //!    stands in the way: the frame reads, unlisted and listed, exactly when the payload is a
 //!    record count of at least 1 followed by exactly that many records. An empty payload makes
@@ -20,7 +20,7 @@ use std::fs;
 use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
-use swarmops_fuzz::{Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_filled};
+use swarmops_fuzz::{Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_length};
 use swarmops_store::{Frame, Journal, Layout, RealFs, Record, StoreError};
 
 fuzz_target!(|data: &[u8]| {
@@ -110,8 +110,8 @@ fn records_back_to_back(data: &[u8]) {
 }
 
 /// What a reader must return for `log` when `journal.off` lists nothing: the whole frames from
-/// offset 0, numbered from 0, up to a torn tail (a frame cut short, one failing its CRC, or
-/// zeros to the end); or `Err(offset)` for `JournalCorrupt` at the first frame that no writer
+/// offset 0, numbered from 0, up to a torn tail (a frame cut short, one failing its CRC, or a
+/// header of length 0); or `Err(offset)` for `JournalCorrupt` at the first frame that no writer
 /// produces.
 fn unlisted_frames(log: &[u8]) -> Result<Vec<Frame>, u64> {
     let mut frames = Vec::new();
@@ -128,7 +128,7 @@ fn unlisted_frames(log: &[u8]) -> Result<Vec<Frame>, u64> {
                 at += size;
             }
             Model::Short | Model::BadCrc => break,
-            Model::Invalid if zero_filled(&log[at..]) => break,
+            Model::Invalid if zero_length(&log[at..]) => break,
             Model::Invalid => return Err(to_u64(at)),
         }
     }

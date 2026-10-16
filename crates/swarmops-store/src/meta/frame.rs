@@ -220,7 +220,10 @@ pub(crate) enum Parsed {
     Short,
     /// The frame is all there, but its payload does not match its CRC.
     BadCrc,
-    /// An empty payload, or one that matches its CRC but does not decode: never a torn write.
+    /// A header announcing an empty payload (a length of 0), or a payload that matches its
+    /// CRC but does not decode. Listed, either is damage. Unlisted, the second is a frame a
+    /// writer wrote, and the first a header that never reached the disk, a torn write (see
+    /// [`crate::Journal::truncate_torn_tail`]).
     Invalid,
 }
 

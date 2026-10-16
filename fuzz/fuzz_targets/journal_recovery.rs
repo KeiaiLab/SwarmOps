@@ -11,10 +11,11 @@
 //! garbage, zeros (blocks a filesystem exposed zero-filled after a crash) or a frame with a
 //! correct CRC appended. Each case runs in a fresh `tempfile::tempdir()`. A typed error is
 //! `JournalCorrupt`, or `Io` with `InvalidData`, `UnexpectedEof` or `InvalidInput`. A torn
-//! tail is an unlisted frame cut short or failing its CRC, or unlisted bytes that are zero to
-//! the end of `journal.log`. Readers measure `journal.off` before `journal.log`, so every frame
-//! listed in their snapshot is whole in the `journal.log` they read: for them, as for recovery,
-//! a listed frame cut short, missing or failing its CRC is damage.
+//! tail is an unlisted frame cut short, failing its CRC, or whose length reads 0 (a header that
+//! never reached the disk, whatever follows it: zeros to the end of `journal.log` among them).
+//! Readers measure `journal.off` before `journal.log`, so every frame listed in their snapshot
+//! is whole in the `journal.log` they read: for them, as for recovery, a listed frame cut
+//! short, missing or failing its CRC is damage.
 //!
 //! - (a) `open`, `frame_count` and `ckpt` succeed; `tail_frames_from` (from the checkpoint and
 //!   from 0), `frames_from(0, 64)`, `frames_after(0, 64)` and `frames_from(0, usize::MAX)` return
@@ -53,7 +54,7 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_fuzz::{
-    ENTRY_LEN, HEADER_LEN, Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_filled,
+    ENTRY_LEN, HEADER_LEN, Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_length,
 };
 use swarmops_store::{Frame, FsOps, Journal, Layout, LinkOutcome, RealFs, Record, StoreError};
 
@@ -303,7 +304,7 @@ impl Recovery {
                     entries.push(at);
                     at += to_u64(size);
                 }
-                Model::Invalid if !zero_filled(&files.log[to_usize(at)..]) => {
+                Model::Invalid if !zero_length(&files.log[to_usize(at)..]) => {
                     return Recovery::Corrupt { offset: at };
                 }
                 Model::Short | Model::BadCrc | Model::Invalid => {
@@ -385,7 +386,7 @@ fn read_from_start(files: &Files, listed: &[Frame]) -> Result<Vec<Frame>, u64> {
                 });
                 at += to_u64(size);
             }
-            Model::Invalid if !zero_filled(&files.log[to_usize(at)..]) => return Err(at),
+            Model::Invalid if !zero_length(&files.log[to_usize(at)..]) => return Err(at),
             Model::Short | Model::BadCrc | Model::Invalid => break,
         }
     }
@@ -510,8 +511,8 @@ fn same_frames(a: &[Frame], b: &[Frame]) -> bool {
 /// The frames start at `from` and abut, each the canonical encoding of its records, a listed
 /// one at its entry; their seqs count up from `from`'s place in `journal.off` (or from the
 /// listed count, if `from` is where the last listed frame ends). They stop at the end of
-/// `journal.log` or at a torn tail (an unlisted frame cut short or failing its CRC, or unlisted
-/// zeros to the end of the file), never before a listed frame: the reader measured
+/// `journal.log` or at a torn tail (an unlisted frame cut short, failing its CRC, or whose length
+/// reads 0), never before a listed frame: the reader measured
 /// `journal.off` first, so every listed frame is whole in what it read.
 fn tail_run(
     what: &str,
@@ -570,9 +571,9 @@ fn tail_run(
                 next.is_none_or(|seq| seq >= listed),
                 "{what}: stopped at listed frame {next:?} of {listed}, which fails its CRC"
             ),
-            Model::Invalid if zero_filled(&files.log[to_usize(at)..]) => assert!(
+            Model::Invalid if zero_length(&files.log[to_usize(at)..]) => assert!(
                 next.is_none_or(|seq| seq >= listed),
-                "{what}: stopped at listed frame {next:?} of {listed}, which is zeros"
+                "{what}: stopped at listed frame {next:?} of {listed}, whose length reads 0"
             ),
             other => panic!("{what}: stopped at {at}, at a frame that reads as {other:?}"),
         }

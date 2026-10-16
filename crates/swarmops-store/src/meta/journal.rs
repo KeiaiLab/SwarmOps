@@ -258,11 +258,12 @@ impl Journal {
     /// entry puts it) is [`StoreError::JournalCorrupt`]. Whole frames after the listed ones
     /// are included: an append racing the read, which lists them later, or a crash between a
     /// frame's two appends. The read stops silently at a torn tail: an unlisted frame cut
-    /// short (an append in progress looks the same) or failing its CRC, or unlisted bytes
-    /// that are zero to the end of the file. Anything else, an `offset` that is not a frame
-    /// boundary included, is [`StoreError::JournalCorrupt`]; a `journal.off` that holds fewer
-    /// entries when they are read than it did when measured (a writer dropped entries that were
-    /// never genuine) is reported at `offset`.
+    /// short (an append in progress looks the same), failing its CRC, or whose length reads 0
+    /// (zeros to the end of the file among them; see [`Journal::truncate_torn_tail`]). Anything
+    /// else, an `offset` that is not a frame boundary included, is
+    /// [`StoreError::JournalCorrupt`]; a `journal.off` that holds fewer entries when they are
+    /// read than it did when measured (a writer dropped entries that were never genuine) is
+    /// reported at `offset`.
     pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
         let listed = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
         // journal.off cut since it was measured: entries of the snapshot are gone.
@@ -353,9 +354,12 @@ impl Journal {
     /// Brings the journal to a clean end after a crash, and returns where `journal.log`
     /// was cut, if it was:
     ///
-    /// - an unlisted frame at the end that is cut short or fails its CRC is a torn write,
-    ///   and so are unlisted bytes that are zero to the end of the file (blocks a filesystem
-    ///   exposed zero-filled after a crash): `journal.log` is cut where they start;
+    /// - an unlisted frame at the end that is cut short, fails its CRC or has a length of 0 is a
+    ///   torn write: `journal.log` is cut where it starts. No writer writes a length of 0, and
+    ///   an append's sync makes its header durable, so a length of 0 is a header that never
+    ///   reached the disk: unlisted bytes that are zero to the end of the file (blocks a
+    ///   filesystem exposed zero-filled after a crash), or the first sector of an append that a
+    ///   power loss lost while it kept a later one;
     /// - whole frames that `journal.off` does not list (a crash between a frame's two
     ///   appends) are committed: `journal.log` is synced, then their entries are appended;
     /// - before it cuts `journal.log` or lists a frame, it checks every listed frame: each
@@ -370,9 +374,8 @@ impl Journal {
     ///   before it ends; a last listed frame that is cut short, missing (`journal.log` ends
     ///   where it starts), fails its CRC or does not decode (a listed frame's bytes were
     ///   durable before it was listed, so its loss is a filesystem's, never a torn write); a
-    ///   listed frame that fails the check before a cut or a listing; an unlisted empty payload
-    ///   (unless only zeros follow it), or an unlisted frame that matches its CRC but does not
-    ///   decode (a newer version may have written it).
+    ///   listed frame that fails the check before a cut or a listing; an unlisted frame that
+    ///   matches its CRC but does not decode (a newer version may have written it).
     ///
     /// Only the last listed frame, the headers of the two frames before it, and what follows
     /// are read, unless there is something to cut or list: then every listed frame is.
@@ -669,14 +672,20 @@ fn may_be_torn(parsed: &Parsed, seq: u64, listed: u64, rest: &[u8]) -> bool {
 
 /// Whether unlisted bytes that do not parse as a whole frame are a torn tail: a frame cut
 /// short by the end of the file (the append a crash tore, or one still in progress), one
-/// that fails its CRC, or zeros all the way to the end of the file, which a filesystem may
-/// expose after a crash in place of blocks it never wrote. No frame starts with `len == 0`,
-/// so zeros hold nothing a writer committed. `rest` runs from where the frame would start to
-/// the end of `journal.log`.
+/// that fails its CRC, or one whose length reads 0. No writer writes a frame of length 0, and
+/// the sync an append ends with makes its header durable: a length of 0 is a header that never
+/// reached the disk, so its frame never reached its commit point and nothing a writer committed
+/// lies after it. Zeros a filesystem exposes after a crash in place of blocks it never wrote
+/// (to the end of the file) read so, and so does the first sector of an append that a power
+/// loss lost while it kept a later one (bytes that are not zero after the header). A frame that
+/// matches its CRC but does not decode is no torn write: a writer wrote it, a newer version
+/// perhaps. `rest` runs from where the frame would start to the end of `journal.log`.
 fn is_torn_unlisted(parsed: &Parsed, rest: &[u8]) -> bool {
     match parsed {
         Parsed::Short | Parsed::BadCrc => true,
-        Parsed::Invalid => !rest.is_empty() && rest.iter().all(|&byte| byte == 0),
+        // With its header whole: a length of 0, or a payload that matches its CRC and does not
+        // decode.
+        Parsed::Invalid => rest.starts_with(&[0; 4]),
         Parsed::Whole { .. } => false,
     }
 }

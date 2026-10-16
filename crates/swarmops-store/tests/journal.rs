@@ -579,22 +579,70 @@ fn zero_filled_tail_is_torn_and_cut() {
         );
     }
 
-    // A non-zero byte anywhere keeps the rules for frames: zeros, then a 1, make a whole
-    // header announcing an empty payload (from 7 zeros on), which no writer produces.
-    for zeros in [7, 8, 100] {
+    // A byte that is not zero after them changes nothing: from 4 zeros on, the header's
+    // length reads 0, which no writer writes, so the header never reached the disk (see
+    // `a_frame_header_that_never_reached_the_disk_is_a_torn_tail`).
+    for zeros in [4, 7, 8, 100] {
         let what = format!("{zeros} zero bytes, then a 1");
         let (_root, layout) = new_root();
         let journal = new_journal(&layout);
-        journal.append_frame(&[root_changeset()]).unwrap();
+        let first = journal.append_frame(&[root_changeset()]).unwrap();
         let mut tail = vec![0; zeros];
         tail.push(1);
         append_bytes(layout.journal_log(), &tail);
-        assert_corrupt_at(reopen(&layout).tail_frames_from(0), 84, &what);
-        assert_corrupt_at(journal.truncate_torn_tail(), 84, &what);
         assert_eq!(
-            file_len(layout.journal_log()),
-            84 + u64::try_from(tail.len()).unwrap(),
-            "{what}: nothing was cut"
+            reopen(&layout).tail_frames_from(0).unwrap(),
+            [first],
+            "{what}"
+        );
+        assert_eq!(journal.truncate_torn_tail().unwrap(), Some(84), "{what}");
+        assert_eq!(file_len(layout.journal_log()), 84, "{what}: cut");
+    }
+}
+
+#[test]
+fn a_frame_header_that_never_reached_the_disk_is_a_torn_tail() {
+    // A frame is written, then synced. A power loss in between may keep a later sector of the
+    // write and lose the first, zeros there: the header's length reads 0 (with its CRC lost
+    // too, or not), and bytes that are not zero follow. No writer writes a frame of length 0,
+    // and a sync that completed would have made the header durable: the frame never reached its
+    // commit point. Readers stop there, and recovery cuts it, as any torn tail.
+    let payload = [
+        [2, 0].as_slice(),
+        &encoded(&child_changeset()),
+        &encoded(&main_created()),
+    ]
+    .concat();
+    let second = frame_bytes(&payload); // 173 bytes
+    for lost in [4, 6, 8, 20] {
+        let what = format!("the first {lost} bytes of frame 1 lost");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+        let mut torn = second.clone();
+        torn[..lost].fill(0);
+        append_bytes(layout.journal_log(), &torn);
+
+        let reader = reopen(&layout);
+        assert_eq!(
+            reader.tail_frames_from(0).unwrap(),
+            slice::from_ref(&first),
+            "{what}"
+        );
+        assert_eq!(
+            reader.tail_frames_from(84).unwrap(),
+            Vec::<Frame>::new(),
+            "{what}"
+        );
+        assert_eq!(journal.truncate_torn_tail().unwrap(), Some(84), "{what}");
+        assert_eq!(file_len(layout.journal_log()), 84, "{what}: cut");
+        assert_eq!(offsets_on_disk(&layout), [0], "{what}");
+        let next = journal.append_frame(&[compacted(1)]).unwrap();
+        assert_eq!(next.offset, 84, "{what}: the next frame lands at the cut");
+        assert_eq!(
+            reopen(&layout).tail_frames_from(0).unwrap(),
+            [first, next],
+            "{what}"
         );
     }
 }
@@ -630,14 +678,11 @@ fn crc_mismatch_is_journal_corrupt_not_panic() {
 
 #[test]
 fn frames_no_writer_produces_are_journal_corrupt_not_torn() {
-    // An empty payload has CRC 0, so its frame is 8 zero bytes: at the very end of
-    // journal.log it reads as a zero-filled tail (`zero_filled_tail_is_torn_and_cut`), and
-    // a byte that is not zero after it keeps it a frame here.
+    // Frames whose payload matches its CRC and does not decode: a writer wrote them (a newer
+    // version, say), so they are damage, not a torn tail. (A header announcing an empty
+    // payload is no such frame unless it is listed: unlisted, its length of 0 says it never
+    // reached the disk, `a_frame_header_that_never_reached_the_disk_is_a_torn_tail`.)
     let cases = [
-        (
-            "an empty payload, then a byte",
-            [frame_bytes(&[]), vec![0xee]].concat(),
-        ),
         ("zero records", frame_bytes(&[0, 0])),
         ("an unknown record kind", frame_bytes(&[1, 0, 3])),
         (
@@ -671,6 +716,21 @@ fn frames_no_writer_produces_are_journal_corrupt_not_torn() {
             "{what}"
         );
     }
+
+    // Listed, a header announcing an empty payload is damage too: a listed frame was durable.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap();
+    journal.append_frame(&[compacted(1)]).unwrap(); // bytes 84..103
+    append_bytes(
+        layout.journal_log(),
+        &[frame_bytes(&[]), vec![0xee]].concat(),
+    );
+    append_bytes(layout.journal_off(), &103_u64.to_le_bytes());
+    let what = "a listed empty payload";
+    assert_corrupt_at(reopen(&layout).frames_after(0, 10), 103, what);
+    assert_corrupt_at(reopen(&layout).tail_frames_from(0), 103, what);
+    assert_corrupt_at(journal.truncate_torn_tail(), 103, what);
 }
 
 #[test]
@@ -1097,8 +1157,8 @@ fn trailing_zeroed_entries_are_dropped_like_a_partial_entry() {
     );
     assert_eq!(offsets_on_disk(&layout), [0, 84, 0], "nothing was dropped");
 
-    // Zeros in journal.log stay a torn tail only up to its end: followed by data they are
-    // still JournalCorrupt, and nothing is cut.
+    // Zeros in journal.log, then data: the zeros make a header of length 0, a torn tail
+    // whatever follows it, and it is cut.
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
     journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
@@ -1106,8 +1166,12 @@ fn trailing_zeroed_entries_are_dropped_like_a_partial_entry() {
         layout.journal_log(),
         &[[0; 16].as_slice(), b"data"].concat(),
     );
-    assert_corrupt_at(journal.truncate_torn_tail(), 84, "zeros, then data");
-    assert_eq!(file_len(layout.journal_log()), 104, "nothing was cut");
+    assert_eq!(
+        journal.truncate_torn_tail().unwrap(),
+        Some(84),
+        "zeros, then data"
+    );
+    assert_eq!(file_len(layout.journal_log()), 84, "cut");
 }
 
 #[test]
