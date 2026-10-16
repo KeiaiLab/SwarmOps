@@ -222,6 +222,9 @@ pub enum Parsed {
     Usage {
         /// clap's error.
         error: clap::Error,
+        /// The name the line invokes the program by, which clap's usage lines give: the file
+        /// name of its first word, `so` or `swarmops`. `None` leaves clap's own, `swarmops`.
+        bin: Option<String>,
         /// The subcommands named, outermost first, as far as they could be read.
         path: Vec<String>,
         /// The global flags, as far as they could be read.
@@ -243,8 +246,10 @@ impl Parsed {
 
 /// Reads the command line `args`, the program's name first.
 pub fn parse(args: &[OsString]) -> Parsed {
-    let parsed = command()
-        .try_get_matches_from(args)
+    // Parsing gives `grammar` the name the line invokes the program by, for its usage lines.
+    let mut grammar = command();
+    let parsed = grammar
+        .try_get_matches_from_mut(args)
         .and_then(|matches| Ok((Cli::from_arg_matches(&matches)?, path(&matches))));
     match parsed {
         Ok((mut cli, path)) => {
@@ -273,6 +278,7 @@ pub fn parse(args: &[OsString]) -> Parsed {
             settle_format(&mut global, args);
             Parsed::Usage {
                 error,
+                bin: grammar.get_bin_name().map(str::to_owned),
                 path,
                 global,
             }
@@ -305,9 +311,13 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
 }
 
 /// The usage line of the subcommand `path` names, or of the deepest part of it that names
-/// one: `Usage: swarmops <path> …`.
-pub fn usage(path: &[String]) -> String {
+/// one, with the program named `bin` as clap's own usage lines name it (see [`Parsed::Usage`]):
+/// `Usage: so <path> …`.
+pub fn usage(bin: Option<&str>, path: &[String]) -> String {
     let mut at = command();
+    if let Some(bin) = bin {
+        at.set_bin_name(bin);
+    }
     at.build();
     for name in path {
         match at.find_subcommand(name) {
@@ -468,6 +478,19 @@ mod tests {
         }
         assert!(matches!(parse(&args(&["--version"])), Parsed::Text(_)));
         assert!(matches!(parse(&args(&["help", "log"])), Parsed::Text(_)));
+        // The name the program was invoked by: the file name of the line's first word.
+        for (first, name) in [
+            ("swarmops", "swarmops"),
+            ("so", "so"),
+            ("/usr/bin/so", "so"),
+        ] {
+            let mut line = args(&["log", "-n", "many"]);
+            line[0] = first.into();
+            let Parsed::Usage { bin, .. } = parse(&line) else {
+                panic!("{first}: a usage error");
+            };
+            assert_eq!(bin.as_deref(), Some(name), "{first}");
+        }
     }
 
     #[test]
@@ -488,11 +511,18 @@ mod tests {
     #[test]
     fn usage_lines_name_the_subcommand() {
         assert_eq!(
-            usage(&["log".to_owned()]),
+            usage(None, &["log".to_owned()]),
             "Usage: swarmops log [OPTIONS] [REV]"
         );
-        assert!(usage(&[]).starts_with("Usage: swarmops [OPTIONS] <COMMAND>"));
-        let set = usage(&["ref".to_owned(), "set".to_owned(), "x".to_owned()]);
+        assert!(usage(None, &[]).starts_with("Usage: swarmops [OPTIONS] <COMMAND>"));
+        let set = usage(None, &["ref".to_owned(), "set".to_owned(), "x".to_owned()]);
         assert!(set.starts_with("Usage: swarmops ref set "), "{set}");
+        // The program by the name the line invoked it by.
+        assert_eq!(
+            usage(Some("so"), &["log".to_owned()]),
+            "Usage: so log [OPTIONS] [REV]"
+        );
+        let set = usage(Some("so"), &["ref".to_owned(), "set".to_owned()]);
+        assert!(set.starts_with("Usage: so ref set "), "{set}");
     }
 }

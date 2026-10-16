@@ -1,7 +1,8 @@
-//! A `swarmops` built without the `test-hooks` feature ignores the test hooks (storage spec §8):
-//! `SWARMOPS_TEST_CRASH_AT=<k>`, which aborts a build with the feature at its k-th filesystem
-//! call, `SWARMOPS_TEST_FS_CALLS=<file>`, which has it write how many calls it made, and
-//! `SWARMOPS_TEST_NOW=<unix seconds>`, which fixes the time it signs changesets at.
+//! A build without the `test-hooks` feature ignores the test hooks (storage spec §8), by either
+//! name of the binary, `swarmops` or `so`: `SWARMOPS_TEST_CRASH_AT=<k>`, which aborts a build
+//! with the feature at its k-th filesystem call, `SWARMOPS_TEST_FS_CALLS=<file>`, which has it
+//! write how many calls it made, and `SWARMOPS_TEST_NOW=<unix seconds>`, which fixes the time it
+//! signs changesets at.
 //!
 //! The test exists only in a build without the feature, as `cargo build --release` is. `just
 //! check` and `scripts/check.sh` run it in a release build and require it to run
@@ -15,7 +16,7 @@ mod support;
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use support::{Store, agent, run};
+use support::{BIN, SO, Store, agent, run_bin};
 use swarmops_ops::NOW_ENV;
 use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV};
 
@@ -24,43 +25,42 @@ const NOW: u64 = 1_000_000_000;
 
 #[test]
 fn a_build_without_the_feature_ignores_the_test_hooks() {
-    // SWARMOPS_TEST_CRASH_AT=1 would abort init at its first filesystem call.
-    let store = Store::empty();
-    let init = run(&["init", store.path()], &[(CRASH_AT_ENV, "1")]);
-    assert_eq!(
-        init.ok()["changesets"],
-        0,
-        "the crash hook is ignored: {init}"
-    );
+    for bin in [BIN, SO] {
+        // SWARMOPS_TEST_CRASH_AT=1 would abort init at its first filesystem call.
+        let store = Store::empty();
+        let init = run_bin(bin, &["init", store.path()], &[(CRASH_AT_ENV, "1")], "");
+        assert_eq!(
+            init.ok()["changesets"],
+            0,
+            "{bin}: the crash hook is ignored: {init}"
+        );
 
-    // SWARMOPS_TEST_FS_CALLS and SWARMOPS_TEST_NOW, on a commit.
-    let calls = store.tmp().join("fs-calls");
-    let now = NOW.to_string();
-    let env = [
-        (FS_CALLS_ENV, calls.to_str().unwrap()),
-        (NOW_ENV, now.as_str()),
-    ];
-    let changes = store.changes("hooks", "hooks.txt", "the test hooks\n");
-    let before = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-    let commit = store.run_as(
-        &agent(0),
-        &["commit", "-m", "hooks", "--changes", &changes],
-        &env,
-    );
-    let id = commit.ok()["changeset"].as_str().unwrap().to_owned();
-    let secs = store.show(&id)["signatures"]["committer"]["secs"]
-        .as_u64()
-        .unwrap();
-    assert!(
-        !calls.exists(),
-        "the call-count hook is ignored: nothing written"
-    );
-    assert!(
-        secs >= before,
-        "signed at the clock's time, not SWARMOPS_TEST_NOW's: {secs} < {before}"
-    );
-    store.assert_clean("after the commit");
+        // SWARMOPS_TEST_FS_CALLS and SWARMOPS_TEST_NOW, on a commit.
+        let calls = store.tmp().join("fs-calls");
+        let now = NOW.to_string();
+        let env = [
+            (FS_CALLS_ENV, calls.to_str().unwrap()),
+            (NOW_ENV, now.as_str()),
+        ];
+        let changes = store.changes("hooks", "hooks.txt", "the test hooks\n");
+        let before = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let commit = ["commit", "-m", "hooks", "--changes", &changes];
+        let commit = run_bin(bin, &store.args(&agent(0), &commit), &env, "");
+        let id = commit.ok()["changeset"].as_str().unwrap().to_owned();
+        let secs = store.show(&id)["signatures"]["committer"]["secs"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            !calls.exists(),
+            "{bin}: the call-count hook is ignored: nothing written"
+        );
+        assert!(
+            secs >= before,
+            "{bin}: signed at the clock's time, not SWARMOPS_TEST_NOW's: {secs} < {before}"
+        );
+        store.assert_clean(&format!("{bin}: after the commit"));
+    }
 }

@@ -12,30 +12,38 @@ engine and the `swarmops` command line. The design is in `docs/superpowers/specs
 Rust 1.99 (`rust-toolchain.toml` pins it), on Linux:
 
 ```sh
-cargo build --release     # target/release/swarmops
+cargo build --release                               # target/release/swarmops and target/release/so
+cargo install --path crates/swarmops-cli --locked   # both, into ~/.cargo/bin
 ```
+
+`so` is the short form of `swarmops`: the same program by a shorter name. `cargo install`
+installs every binary of the crate, so both (add `--bin swarmops` for the long name alone, if
+the name `so` is taken).
 
 A store must live on a native Linux filesystem: a path under `/mnt/` (where WSL mounts Windows
 drives) is refused with `E_UNSUPPORTED_FS`.
 
 ## Usage
 
+The examples use `so`, the short form; every command runs the same by either name. The hints in
+the envelopes give their commands as `swarmops …`.
+
 ```sh
 export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme   # or --repo <store> on each command
 export SWARMOPS_AGENT=agent/worker-1                 # or --as <family>/<instance>
 
-swarmops init "$SWARMOPS_REPO" --name acme
+so init "$SWARMOPS_REPO" --name acme
 cat > changes.json <<'EOF'
 [{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() {}\n"}},
  {"path": "run.sh", "op": "put", "content": {"file": "./run.sh"}, "mode": "exec"}]
 EOF
-swarmops commit -m "first" --changes changes.json     # result.changeset: the new id
-swarmops ref set main <id> --create                    # later: ref set main <new> --expect <old>
-swarmops cat main:src/lib.rs
-swarmops ls main:src
-swarmops show main
-swarmops log -n 20
-swarmops verify --deep
+so commit -m "first" --changes changes.json     # result.changeset: the new id
+so ref set main <id> --create                   # later: ref set main <new> --expect <old>
+so cat main:src/lib.rs
+so ls main:src
+so show main
+so log -n 20
+so verify --deep
 ```
 
 | Command | What it does |
@@ -124,7 +132,7 @@ to clients that open with `initialize`.
 Register it with Claude Code:
 
 ```sh
-claude mcp add swarmops -- swarmops mcp --repo <store> --as <agent>
+claude mcp add swarmops -- so mcp --repo <store> --as <agent>
 ```
 
 or give a project a `.mcp.json`:
@@ -133,7 +141,7 @@ or give a project a `.mcp.json`:
 {
   "mcpServers": {
     "swarmops": {
-      "command": "swarmops",
+      "command": "so",
       "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
       "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT}"}
     }

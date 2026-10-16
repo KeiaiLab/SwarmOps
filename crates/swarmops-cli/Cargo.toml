@@ -1,6 +1,6 @@
 [package]
 name = "swarmops-cli"
-description = "SwarmOps CLI: the swarmops binary, one JSON envelope per command with a fixed exit code"
+description = "SwarmOps CLI: the swarmops binary and so, its short form, one JSON envelope per command with a fixed exit code"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,13 +11,19 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# The program is the library (src/lib.rs); each binary only runs it.
 [[bin]]
 name = "swarmops"
 path = "src/main.rs"
 
+# `so`, the short form of `swarmops`: `cargo install` installs both.
+[[bin]]
+name = "so"
+path = "src/bin/so.rs"
+
 [features]
-# A `swarmops` that honors the test hooks (`swarmops-ops/test-hooks` turns on all of them):
-# for the crash tests, which require it, never for a release.
+# A `swarmops` and `so` that honor the test hooks (`swarmops-ops/test-hooks` turns on all of
+# them): for the crash tests, which require it, never for a release.
 test-hooks = ["swarmops-ops/test-hooks"]
 
 # The crash tests drive the test hooks: without the feature, `cargo test` skips them.

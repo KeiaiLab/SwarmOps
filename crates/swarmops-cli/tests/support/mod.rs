@@ -1,6 +1,7 @@
-//! Running the real `swarmops` binary (`CARGO_BIN_EXE_swarmops`) from the multi-process and
-//! crash tests: one run to its end, children that race behind a start barrier, and a store in a
-//! temp dir of its own with the commands the tests run on it.
+//! Running the real `swarmops` binary (`CARGO_BIN_EXE_swarmops`, or by its short name `so`,
+//! `CARGO_BIN_EXE_so`) from the multi-process and crash tests: one run to its end, children that
+//! race behind a start barrier, and a store in a temp dir of its own with the commands the tests
+//! run on it.
 //!
 //! Every child runs with none of the developer's `SWARMOPS_*` variables, only those the test
 //! sets, and its envelope is checked against the contract before a test reads it: stdout holds
@@ -35,6 +36,9 @@ use tempfile::TempDir;
 /// The binary under test.
 pub const BIN: &str = env!("CARGO_BIN_EXE_swarmops");
 
+/// The binary under test by its short name, `so`: the same program.
+pub const SO: &str = env!("CARGO_BIN_EXE_so");
+
 /// The signal `std::process::abort` raises: how a `SWARMOPS_TEST_CRASH_AT` crash ends.
 const SIGABRT: i32 = 6;
 
@@ -56,7 +60,12 @@ pub fn agent(n: usize) -> String {
 /// The binary with `args`, `env` set, and none of the other `SWARMOPS_*` variables of this
 /// process's environment.
 pub fn swarmops<S: AsRef<str>>(args: &[S], env: &[(&str, &str)]) -> Command {
-    let mut command = Command::new(BIN);
+    named(BIN, args, env)
+}
+
+/// [`swarmops`] by the name `bin`: [`BIN`] or [`SO`].
+fn named<S: AsRef<str>>(bin: &str, args: &[S], env: &[(&str, &str)]) -> Command {
+    let mut command = Command::new(bin);
     command.args(args.iter().map(AsRef::as_ref));
     with_env(&mut command, env);
     command
@@ -93,6 +102,21 @@ pub fn run<S: AsRef<str>>(args: &[S], env: &[(&str, &str)]) -> Run {
 pub fn run_within<S: AsRef<str>>(args: &[S], env: &[(&str, &str)], timeout: Duration) -> Run {
     let child = swarmops(args, env).spawn().expect("run swarmops");
     Running::start(args, child).finish(Instant::now() + timeout)
+}
+
+/// Runs the binary by the name `bin` ([`BIN`] or [`SO`]) with `args` and `env` to its end,
+/// within [`RUN_TIMEOUT`], `input` all that it reads on stdin.
+pub fn run_bin<S: AsRef<str>>(bin: &str, args: &[S], env: &[(&str, &str)], input: &str) -> Run {
+    let mut child = named(bin, args, env)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("run swarmops");
+    let mut stdin = child.stdin.take().expect("a piped stdin");
+    let mut running = Running::start(args, child);
+    // A child that exits before it reads all of its input shows that in its run.
+    let _ = stdin.write_all(input.as_bytes());
+    drop(stdin);
+    running.finish(Instant::now() + RUN_TIMEOUT)
 }
 
 /// The threads that read a child's stdout and stderr to their ends.
