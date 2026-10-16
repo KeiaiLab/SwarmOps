@@ -1,7 +1,8 @@
 //! The sync calls per commit of each engine, counted with the tracer (`crate::trace`): a child
 //! process (`__sync`) creates a store, commits 32 untraced W1 transactions, then waits; the
 //! tracer attaches and the child commits `n` more and exits. Run for two `n`, the difference
-//! per transaction is what one commit costs, without the open, the warm-up and the close.
+//! per transaction is what one commit costs, without the open, the warm-up and the close. The
+//! pair runs once per run of the plan, as every measurement does.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -17,6 +18,8 @@ use crate::trace::{self, Counts};
 #[derive(Debug, Clone, Serialize)]
 pub struct PerCommit {
     pub engine: String,
+    /// The run of the plan it was counted in (1, 2, …).
+    pub run: usize,
     pub txns: (u64, u64),
     pub syscalls: f64,
     pub written_bytes: f64,
@@ -78,8 +81,10 @@ fn traced(engine: &dyn Engine, base: &Path, txns: u64, exe: &Path) -> Result<Cou
     Ok(counts)
 }
 
+/// Run `run`'s count for `engine`.
 pub fn per_commit(
     engine: &dyn Engine,
+    run: usize,
     base: &Path,
     txns: (u64, u64),
     exe: &Path,
@@ -104,6 +109,7 @@ pub fn per_commit(
     };
     Ok(PerCommit {
         engine: engine.name().to_owned(),
+        run,
         txns,
         syscalls: diff(short.syscalls, long.syscalls),
         written_bytes: diff(short.written_bytes, long.written_bytes),

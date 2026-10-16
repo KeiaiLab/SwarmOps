@@ -6,6 +6,7 @@ use std::fmt::Write;
 
 use crate::measure::median_range;
 use crate::workloads::Record;
+use crate::workloads::sync::PerCommit;
 
 /// One column: a value's key and its header.
 pub struct Col(pub &'static str, pub &'static str);
@@ -161,4 +162,103 @@ pub fn detail(records: &[Record], workload: &str, variant: &str, cols: &[Col]) -
         );
     }
     out
+}
+
+/// The sync calls per commit: one row per engine, each cell the median `[min–max]` over its
+/// runs (one count per engine and run in `syncs`), and the calls by file, most first, of the
+/// files whose median is at least 0.01 per commit.
+pub fn sync_table(syncs: &[PerCommit]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "| engine | fsync | fdatasync | sync_file_range | all syncs | syscalls | bytes written | runs | sync calls by file (per commit, ≥ 0.01) |\n|---|---|---|---|---|---|---|---|---|"
+    );
+    let mut engines: Vec<&str> = Vec::new();
+    for s in syncs {
+        if !engines.contains(&s.engine.as_str()) {
+            engines.push(&s.engine);
+        }
+    }
+    for engine in engines {
+        let runs: Vec<&PerCommit> = syncs.iter().filter(|s| s.engine == engine).collect();
+        let col =
+            |f: &dyn Fn(&PerCommit) -> f64| cell(&runs.iter().map(|s| f(s)).collect::<Vec<_>>());
+        let by_name = |k: &str| col(&|s| s.by_name.get(k).copied().unwrap_or(0.0));
+        let mut files: Vec<&String> = runs.iter().flat_map(|s| s.syncs_by_target.keys()).collect();
+        files.sort_unstable();
+        files.dedup();
+        let mut files: Vec<(f64, &String, Vec<f64>)> = files
+            .into_iter()
+            .map(|file| {
+                let values: Vec<f64> = runs
+                    .iter()
+                    .map(|s| s.syncs_by_target.get(file).copied().unwrap_or(0.0))
+                    .collect();
+                (median_range(&mut values.clone()).0, file, values)
+            })
+            .filter(|(median, _, _)| *median >= 0.01)
+            .collect();
+        files.sort_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(b.1)));
+        let files: Vec<String> = files
+            .iter()
+            .map(|(_, file, values)| format!("{file} {}", cell(values)))
+            .collect();
+        let _ = writeln!(
+            out,
+            "| {engine} | {} | {} | {} | {} | {} | {} | {} | {} |",
+            by_name("fsync"),
+            by_name("fdatasync"),
+            by_name("sync_file_range"),
+            col(&PerCommit::syncs),
+            col(&|s| s.syscalls),
+            col(&|s| s.written_bytes),
+            runs.len(),
+            files.join("; ")
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::sync_table;
+    use crate::workloads::sync::PerCommit;
+
+    fn count(engine: &str, run: usize, fsync: f64, wal: f64) -> PerCommit {
+        PerCommit {
+            engine: engine.to_owned(),
+            run,
+            txns: (64, 1_088),
+            syscalls: 10.0 + fsync,
+            written_bytes: 100.0,
+            by_name: BTreeMap::from([("fsync".to_owned(), fsync)]),
+            syncs_by_target: BTreeMap::from([
+                ("fsync db-wal".to_owned(), wal),
+                ("fsync rare".to_owned(), 0.001),
+            ]),
+        }
+    }
+
+    #[test]
+    fn the_sync_table_gives_each_engine_the_median_and_range_of_its_runs() {
+        let syncs = [
+            count("a", 1, 1.0, 1.0),
+            count("b", 1, 2.0, 2.0),
+            count("a", 2, 1.2, 1.2),
+            count("b", 2, 2.0, 2.0),
+            count("a", 3, 1.1, 1.1),
+            count("b", 3, 2.0, 2.0),
+        ];
+        let table = sync_table(&syncs);
+        let rows: Vec<&str> = table.lines().skip(2).collect();
+        assert_eq!(
+            rows,
+            [
+                "| a | 1.10 [1.00–1.20] | 0.00 | 0.00 | 1.10 [1.00–1.20] | 11.1 [11.0–11.2] | 100 | 3 | fsync db-wal 1.10 [1.00–1.20] |",
+                "| b | 2.00 | 0.00 | 0.00 | 2.00 | 12.0 | 100 | 3 | fsync db-wal 2.00 |",
+            ]
+        );
+    }
 }

@@ -44,20 +44,20 @@ SQLite's schema mirrors the native index: rows in seq order (the rowid), a uniqu
 
 ## Workloads
 
-- **sync**: the sync calls per commit, by file, counted with ptrace by a small tracer in `src/trace.rs` (safe Rust through `nix`; `strace` is not installed on the measuring host). Two traced runs of different lengths; the difference per transaction, so batched work is averaged in and the open and close drop out.
+- **sync**: the sync calls per commit, by file, counted with ptrace by a small tracer in `src/trace.rs` (safe Rust through `nix`; `strace` is not installed on the measuring host). Two traced runs of different lengths; the difference per transaction, so batched work is averaged in and the open and close drop out. The pair runs once per run.
 - **breakdown**: where a native commit's time goes: 1,024 W1 commits per run after the warm-up (so that one compaction falls among them), every filesystem call timed by a timing `FsOps` around `RealFs` (the store's public `MetaStore::create_with_fs`). A kind of call counts for the time its calls cover, overlaps once: the index sync's five `sync_data`s run at once, and the commit waits for them as for one. The journal appends (`append_durable`) and the ref file's replacement (`atomic_replace`) are done step by step, with `RealFs`'s calls in `RealFs`'s order, so that each sync is timed on its own: the `fdatasync` of `journal.log`, that of `journal.off`, the ref temp file's `fsync`, the `refs/` directory's `fsync`.
 - **W1**: one writer, 10,000 transactions back to back after a warm-up: commits/s, p50/p99/max, and the closed store's bytes per transaction.
 - **W2**: 32 writers × 1,000 transactions, `main` compared against its value inside each transaction: throughput, p50/p99/max (a `Busy` retry included), `Busy` and failures, sled's conflict reruns, and the spread of the writers' total times (fairness).
 - **W3**: lookups on bulk-loaded stores of 100,000 and 1,000,000 changesets, warm: by id, by a 6-byte id prefix, by delta hash (the secondary index), a miss, all on one open snapshot; and by id in a fresh read transaction each.
 - **W4**: a fresh process opening the 1M store and looking up one changeset; and recovery after a writer process is killed with SIGKILL mid-loop: the next process's open plus first write, with every acknowledged commit checked present.
-- **W5**: the bulk-loaded stores' size on disk, settled and closed, and how much of it is the engine's log (the native journal, SQLite's WAL, fjall's journals).
+- **W5**: the bulk-loaded stores' size on disk, settled and closed, and how much of it is the engine's log (the native journal, SQLite's WAL, fjall's journals). Each store is built once per run; the first build is the store W3, W4 and W6 read, the others are deleted once measured.
 - **W6**: a reader's lookup latency (a fresh read transaction each) idle and while a writer commits W1's transaction continuously; reader and writer are two threads of one process, for every engine.
 
 ## Method
 
 - Stores live in fresh temporary directories under `$SWARMOPS_BENCH_DIR`, or `~/.local/state/swarmops-bench` (the native filesystem, as the store's own benches use; a path under `/mnt` is refused). Data is seeded and deterministic: real BLAKE3 ids, in chains.
 - Every measurement records the 1-minute load average at its start, its range during (sampled every 2 s) and at its end, and a raw `fdatasync` probe (the median of 40 appends of 120 B, each `sync_data`'d) at its start and end; the tables print them beside every number.
-- Each measurement runs 3 times (`--runs`), the engines in a rotated order each run; the tables give the median and `[min–max]` over the runs, and a per-run table under each.
+- Each measurement runs 3 times (`--runs`), the sync count and W5's builds included, the engines in a rotated order each run; the tables give the median and `[min–max]` over the runs, and a per-run table under each.
 - Warm-up: W1 commits 200 untimed transactions first; W3 makes one untimed pass of every lookup kind; W6 warms the reader before timing it.
 - Numbers taken on a busy host are provisional: the disk is shared, and every engine here waits on it.
 
