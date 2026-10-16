@@ -17,8 +17,8 @@ cargo install --path crates/swarmops-cli --locked   # both, into ~/.cargo/bin
 ```
 
 `so` is the short form of `swarmops`: the same program by a shorter name. `cargo install`
-installs every binary of the crate, so both (add `--bin swarmops` for the long name alone, if
-the name `so` is taken).
+installs every binary of the crate: both names (add `--bin swarmops` for the long name alone,
+if the name `so` is taken).
 
 A store must live on a native Linux filesystem: a path under `/mnt/` (where WSL mounts Windows
 drives) is refused with `E_UNSUPPORTED_FS`.
@@ -141,7 +141,7 @@ or give a project a `.mcp.json`:
 {
   "mcpServers": {
     "swarmops": {
-      "command": "so",
+      "command": "swarmops",
       "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
       "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT}"}
     }
@@ -151,7 +151,9 @@ or give a project a `.mcp.json`:
 
 A project's `.mcp.json` is shared by every agent that opens the project, so it takes each
 agent's identity from that agent's own `SWARMOPS_AGENT`, which Claude Code expands into the
-server's environment, rather than giving all of them one `--as`.
+server's environment, rather than giving all of them one `--as`. For the same reason it runs
+`swarmops`, not `so`: on some machine the short name may be missing (`--bin swarmops` installs
+the long one alone) or belong to another program.
 
 The store and the identity are the server's, as they are a command's: `--repo`, else
 `SWARMOPS_REPO`, and `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`. No call can name

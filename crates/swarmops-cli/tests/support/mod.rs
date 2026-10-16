@@ -107,16 +107,31 @@ pub fn run_within<S: AsRef<str>>(args: &[S], env: &[(&str, &str)], timeout: Dura
 /// Runs the binary by the name `bin` ([`BIN`] or [`SO`]) with `args` and `env` to its end,
 /// within [`RUN_TIMEOUT`], `input` all that it reads on stdin.
 pub fn run_bin<S: AsRef<str>>(bin: &str, args: &[S], env: &[(&str, &str)], input: &str) -> Run {
+    run_bin_within(bin, args, env, input, RUN_TIMEOUT)
+}
+
+/// [`run_bin`] within `timeout`: a child still running then is killed and fails the test. The
+/// input is written from a thread of its own ([`feed`]) while the deadline runs, so a child that
+/// leaves it unread cannot hold the test past its deadline, however much of it there is.
+pub fn run_bin_within<S: AsRef<str>>(
+    bin: &str,
+    args: &[S],
+    env: &[(&str, &str)],
+    input: &str,
+    timeout: Duration,
+) -> Run {
     let mut child = named(bin, args, env)
         .stdin(Stdio::piped())
         .spawn()
         .expect("run swarmops");
-    let mut stdin = child.stdin.take().expect("a piped stdin");
+    let stdin = child.stdin.take().expect("a piped stdin");
     let mut running = Running::start(args, child);
-    // A child that exits before it reads all of its input shows that in its run.
-    let _ = stdin.write_all(input.as_bytes());
-    drop(stdin);
-    running.finish(Instant::now() + RUN_TIMEOUT)
+    let feeding = feed(stdin, input);
+    let run = running.finish(Instant::now() + timeout);
+    // The child is reaped, so the write is over. Past the deadline, `finish` fails the test
+    // before this, and the thread ends by itself: the killed child's end of the pipe is closed.
+    feeding.join().expect("write a child's stdin");
+    run
 }
 
 /// The threads that read a child's stdout and stderr to their ends.
@@ -187,6 +202,16 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
         let mut bytes = Vec::new();
         let _ = pipe.read_to_end(&mut bytes);
         bytes
+    })
+}
+
+/// A thread that writes `input` to `pipe`, a child's stdin, then closes it. The write ends once
+/// the child has read all of it, or once the child has ended, which closes its end of the pipe.
+fn feed(mut pipe: ChildStdin, input: &str) -> JoinHandle<()> {
+    let input = input.to_owned();
+    thread::spawn(move || {
+        // A child that exits before it reads all of its input shows that in its run.
+        let _ = pipe.write_all(input.as_bytes());
     })
 }
 
