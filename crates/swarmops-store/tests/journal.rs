@@ -30,6 +30,7 @@ use swarmops_store::{
 };
 
 use crate::support::child::{SIGABRT, run, this_test};
+use crate::support::faults::{FsyncModelFs, checked};
 use crate::support::fs::{Hook, RecordingFs, When};
 use crate::support::{append_bytes, file_len, new_root, real_fs, set_len};
 
@@ -1504,12 +1505,12 @@ fn real_fs_appends_truncates_and_replaces_durably() {
 }
 
 /// One writer transaction in a child process, through a `CrashAtFs` that aborts on its
-/// k-th FsOps call: check the tail, append a frame, advance the checkpoint.
+/// k-th FsOps call, under the order checker: check the tail, append a frame, advance the
+/// checkpoint.
 fn crash_child(root: OsString) {
     let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
     let layout = Layout::new(Utf8PathBuf::from_path_buf(root.into()).unwrap());
-    let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, k));
-    let journal = Journal::open(&layout, fs).unwrap();
+    let journal = Journal::open(&layout, checked(CrashAtFs::new(RealFs, k))).unwrap();
     journal.truncate_torn_tail().unwrap();
     journal.append_frame(&[compacted(7)]).unwrap();
     journal.set_ckpt(journal.len()).unwrap();
@@ -1651,6 +1652,59 @@ fn crash_while_recovery_lists_a_frame_recovers_to_whole_frames() {
         assert_eq!(journal.tail_frames_from(0).unwrap(), want, "k={k}");
         assert_eq!(offsets_on_disk(&layout), offsets, "k={k}");
     }
+}
+
+/// The Linux fsync-failure model ([`FsyncModelFs`]) keeps lost what a failed sync lost: the
+/// bytes are in the file (the page cache) for every reader, but not durable, and a later sync
+/// that succeeds does not make them so: it makes the file's length durable, and bytes written
+/// after them, the lost ones reading as what the disk held before (zeros past its end). A cut
+/// below them ends the loss. What it says is durable is what its image holds.
+#[test]
+fn the_fsync_failure_model_keeps_lost_bytes_lost() {
+    let (_root, layout) = new_root();
+    fs::create_dir_all(layout.meta_dir()).unwrap();
+    let path = layout.journal_log().into_std_path_buf();
+    // The model's sync-class calls: 1 the first append, 2 the second (it fails), 3 a sync, 4 the
+    // third append, 5 the cut, 6 the last append.
+    let model = FsyncModelFs::new().failing(|call| call.n == 2);
+    model.append_durable(&path, b"durable ").unwrap();
+    let failed = model.append_durable(&path, b"lost").unwrap_err();
+    assert!(failed.to_string().contains("injected"), "{failed}");
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        b"durable lost",
+        "every reader sees it"
+    );
+    assert_eq!(model.durable(&path).unwrap(), b"durable ");
+    model.sync_data(&path).unwrap();
+    assert_eq!(
+        model.durable(&path).unwrap(),
+        b"durable \0\0\0\0",
+        "a later sync makes the length durable, not the lost bytes: zeros reach the disk there"
+    );
+    assert!(model.is_durable(&path, 0, 8));
+    assert!(!model.is_durable(&path, 8, 12));
+    model.append_durable(&path, b" after").unwrap();
+    assert_eq!(model.durable(&path).unwrap(), b"durable \0\0\0\0 after");
+    assert!(model.is_durable(&path, 12, 18) && !model.is_durable(&path, 0, 18));
+    model.truncate(&path, 8).unwrap();
+    model.append_durable(&path, b"again").unwrap();
+    assert_eq!(
+        model.durable(&path).unwrap(),
+        b"durable again",
+        "the cut ended the loss"
+    );
+    assert!(model.is_durable(&path, 0, 13));
+    assert_eq!(model.failed().len(), 1);
+    assert_eq!(model.syncs(), 6);
+
+    let image = tempfile::tempdir().unwrap();
+    let image_root = image.path().join("store");
+    model.write_durable_image(layout.root().as_std_path(), &image_root);
+    assert_eq!(
+        fs::read(image_root.join("meta/journal.log")).unwrap(),
+        b"durable again"
+    );
 }
 
 #[test]

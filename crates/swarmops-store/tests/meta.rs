@@ -28,6 +28,7 @@ use swarmops_store::{
 use tempfile::TempDir;
 
 use crate::support::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
+use crate::support::faults::checked;
 use crate::support::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
 use crate::support::temp_dir as new_root;
 use crate::support::{append_bytes, file_len};
@@ -57,6 +58,11 @@ const NO_THREADS_ROOT: &str = "SWARMOPS_TEST_META_NO_THREADS_ROOT";
 /// Set only in the children of `crash_at_any_create_call_leaves_a_store_open_or_create_takes`:
 /// the store root.
 const CREATE_CRASH_ROOT: &str = "SWARMOPS_TEST_META_CREATE_CRASH_ROOT";
+
+/// Set only in the children of `the_test_hooks_build_the_filesystem_they_name`: a directory of
+/// their own.
+#[cfg(feature = "test-hooks")]
+const HOOKS_ROOT: &str = "SWARMOPS_TEST_META_HOOKS_ROOT";
 
 /// The FsOps calls of `MetaStore::create`, in order: the journal, `journal.ckpt` and the index
 /// (its columns, `parents.log` and its four view files) staged in `meta.tmp/meta/`, then
@@ -92,8 +98,19 @@ const CREATE_CALLS: [&str; 24] = [
 /// A fresh store; its directory lives as long as the `TempDir`.
 fn new_store() -> (TempDir, Utf8PathBuf, MetaStore) {
     let (dir, root) = new_root();
-    let store = MetaStore::create(&root).unwrap();
+    let store = create_checked(&root).unwrap();
     (dir, root, store)
+}
+
+/// [`MetaStore::create`], the store's writes checked against its ordering rules
+/// ([`checked`]): every test here runs under the order checker, but where it says otherwise.
+fn create_checked(root: &Utf8Path) -> Result<MetaStore, StoreError> {
+    MetaStore::create_with_fs(root, checked(RealFs))
+}
+
+/// [`MetaStore::open`], the store's writes checked against its ordering rules ([`checked`]).
+fn open_checked(root: &Utf8Path) -> Result<MetaStore, StoreError> {
+    MetaStore::open_with_fs(root, checked(RealFs))
 }
 
 /// The id of changeset `n`: a real hash, so the ids look like a store's.
@@ -287,7 +304,7 @@ fn insert_then_get_roundtrips_meta_and_generation() {
         stored(2, &[1], 1, 2),
         stored(3, &[2, 1], 2, 3),
     ];
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     for store in [&store, &reopened] {
         let read = store.read().unwrap();
         for meta in &want {
@@ -557,7 +574,7 @@ fn resolve_prefix_unique_and_ambiguous() {
 #[test]
 fn journal_after_returns_global_order() {
     let (_dir, root, first) = new_store();
-    let second = MetaStore::open(&root).unwrap(); // another handle, as another process has
+    let second = open_checked(&root).unwrap(); // another handle, as another process has
     let before = unix_now();
     insert(&first, &[cs(1, &[])]); // frame 0
     insert(&second, &[cs(2, &[1])]); // frame 1
@@ -665,7 +682,7 @@ fn drop_without_commit_discards() {
     assert_eq!(log_len(&root), 0);
     assert_eq!(ref_file(&root, "main"), None);
     // The lock went with it: another writer gets it at once.
-    let impatient = MetaStore::open(&root)
+    let impatient = open_checked(&root)
         .unwrap()
         .with_lock_timeout(Duration::ZERO);
     insert(&impatient, &[cs(1, &[])]);
@@ -719,7 +736,7 @@ fn reader_sees_frames_past_ckpt() {
     store.flush().unwrap();
     assert_eq!(ckpt(&root), log_len(&root));
 
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
     assert_eq!(read.changeset(id(2)).unwrap(), Some(stored(2, &[1], 1, 2)));
     assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(2, 1)));
@@ -757,7 +774,7 @@ fn torn_tail_recovered_on_next_write() {
         frames[1].offset, clean,
         "the new frame starts where the torn one did"
     );
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
     assert_eq!(read.changeset(id(2)).unwrap(), Some(stored(2, &[1], 1, 2)));
     assert_eq!(read.count_changesets().unwrap(), 2);
@@ -867,7 +884,7 @@ fn child_changeset(child: u64, j: u64) -> u64 {
 /// A child of `multi_process_inserts_all_persist`: [`PER_CHILD`] write transactions, each
 /// inserting the next changeset of its own chain off changeset 0.
 fn insert_child(root: &Utf8Path, child: u64) {
-    let store = MetaStore::open(root).unwrap();
+    let store = open_checked(root).unwrap();
     wait_for_go(root);
     let mut parent = 0;
     for j in 0..PER_CHILD {
@@ -898,7 +915,7 @@ fn multi_process_inserts_all_persist() {
         assert_eq!(report(number, output), "done");
     }
 
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
     let total = 1 + CHILDREN * PER_CHILD;
     assert_eq!(read.count_changesets().unwrap(), total);
@@ -930,7 +947,7 @@ fn multi_process_inserts_all_persist() {
 /// A child of `multi_process_cas_exactly_one_wins`: one try at moving main from changeset 0
 /// to its own changeset.
 fn cas_child(root: &Utf8Path, child: u64) {
-    let store = MetaStore::open(root).unwrap();
+    let store = open_checked(root).unwrap();
     wait_for_go(root);
     let mut write = store.write().unwrap();
     let actor = format!("agent/{child}");
@@ -983,7 +1000,7 @@ fn multi_process_cas_exactly_one_wins() {
         }
     }
 
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
     let main = RefState { target, version: 2 };
     assert_eq!(read.get_ref("main").unwrap(), Some(main));
@@ -1116,7 +1133,7 @@ fn errors_after_the_commit_point_say_the_transaction_committed() {
         let (_dir, root) = new_root();
         let (fs, _calls) = RecordingFs::new();
         let fail = fs.failing();
-        let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+        let store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
         for n in 0..31 {
             insert(&store, &[cs(n, &[])]); // frames 0..=30
         }
@@ -1171,7 +1188,7 @@ fn an_empty_write_reports_its_housekeeping_errors_plainly() {
     let (_dir, root) = new_root();
     let (fs, _calls) = RecordingFs::new();
     let fail = fs.failing();
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
     // The compaction cannot write the sorted views.
     fail.set("append ids.key.tmp");
     let mut write = store.write().unwrap();
@@ -1201,10 +1218,22 @@ fn an_empty_write_reports_its_housekeeping_errors_plainly() {
     assert_eq!(ckpt(&root), log_len(&root));
 }
 
-/// A store on a [`RecordingFs`], and what makes its calls fail. Its write transactions sync
-/// the index one file after another, in write order (parallelism 1), so that a failure lands at
-/// the same point of the same call sequence in every run.
+/// A store on a [`RecordingFs`], under the order checker, and what makes its calls fail. Its
+/// write transactions sync the index one file after another, in write order (parallelism 1), so
+/// that a failure lands at the same point of the same call sequence in every run.
 fn failing_store(root: &Utf8Path) -> (MetaStore, Failing) {
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let mut store = MetaStore::create_with_fs(root, checked(fs)).unwrap();
+    store.set_parallelism(1);
+    (store, fail)
+}
+
+/// [`failing_store`] without the order checker: for the one test that pins a hazard the
+/// checker rightly refuses (R3: a checkpoint past index records a failed sync may have lost,
+/// once cutting them back failed too), which storage spec §3 documents as open until the next
+/// successful sync.
+fn unchecked_failing_store(root: &Utf8Path) -> (MetaStore, Failing) {
     let (fs, _calls) = RecordingFs::new();
     let fail = fs.failing();
     let mut store = MetaStore::create_with_fs(root, Arc::new(fs)).unwrap();
@@ -1389,7 +1418,7 @@ fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
 #[test]
 fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
     let (_dir, root) = new_root();
-    let (store, fail) = failing_store(&root);
+    let (store, fail) = unchecked_failing_store(&root);
     for n in 0..31 {
         insert(&store, &[chained(n)]);
     }
@@ -1632,7 +1661,7 @@ fn assert_fresh_meta(root: &Utf8Path) {
     }
     assert!(!root.join("meta.tmp").exists(), "the staging is gone");
     let (fs, calls) = RecordingFs::new();
-    let reader = MetaStore::open_with_fs(root, Arc::new(fs)).unwrap();
+    let reader = MetaStore::open_with_fs(root, checked(fs)).unwrap();
     assert_eq!(reader.read().unwrap().count_changesets().unwrap(), 0);
     // It measures the journal past the checkpoint (journal.off first) before and after
     // reading the ref files.
@@ -1644,11 +1673,91 @@ fn assert_fresh_meta(root: &Utf8Path) {
     );
 }
 
+/// The child of [`the_test_hooks_build_the_filesystem_they_name`]: makes, through the
+/// filesystem the hooks ask for, the calls the hook in its environment acts on, and reports
+/// what each returned.
+#[cfg(feature = "test-hooks")]
+fn hooks_child(dir: &Utf8Path) {
+    let hooked = swarmops_store::HookedFs::from_env().expect("a hook is set");
+    println!("{REPORT}counts calls: {}", hooked.counts_calls());
+    let fs = hooked.into_fs();
+    let meta = Layout::new(dir).meta_dir().into_std_path_buf();
+    std::fs::create_dir_all(&meta).unwrap();
+    let (log, off) = (meta.join("journal.log"), meta.join("journal.off"));
+    if std::env::var_os(swarmops_store::FAIL_AT_ENV).is_some() {
+        // Calls 1 to 4: a read, an append, a read, a sync.
+        let outcomes = [
+            fs.file_len(&log).map(drop),
+            fs.append(&log, b"x").map(drop),
+            fs.file_len(&log).map(drop),
+            fs.sync_data(&log),
+        ];
+        let errnos: Vec<String> = outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                Ok(()) => "ok".to_owned(),
+                Err(e) => e
+                    .raw_os_error()
+                    .map_or("?".to_owned(), |errno| errno.to_string()),
+            })
+            .collect();
+        println!("{REPORT}calls: {}", errnos.join(" "));
+    } else {
+        // Written, never synced, then listed: R1 refuses it.
+        let at = fs.append(&log, b"\x01\0\0\0crc!x").unwrap();
+        fs.append_durable(&off, &at.to_le_bytes()).unwrap();
+        println!("{REPORT}listed an unsynced frame");
+    }
+}
+
+/// The test hooks reach a whole process through its environment ([`HookedFs::from_env`],
+/// which the stores open on): `SWARMOPS_TEST_ORDER_CHECK=1` checks the writes, and a call that
+/// breaks a rule panics, naming it, while counting no calls (the stores keep their
+/// parallelism); `SWARMOPS_TEST_FAIL_AT=2:persistent:enospc` fails call 2 with ENOSPC, and every
+/// mutating call after it, reads aside.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn the_test_hooks_build_the_filesystem_they_name() {
+    const TEST: &str = "the_test_hooks_build_the_filesystem_they_name";
+    if let Some(dir) = std::env::var_os(HOOKS_ROOT) {
+        hooks_child(&Utf8PathBuf::from_path_buf(dir.into()).unwrap());
+        return;
+    }
+    let (_dir, root) = new_root();
+    let checked = run(this_test(TEST)
+        .env(HOOKS_ROOT, &root)
+        .env(swarmops_store::ORDER_CHECK_ENV, "1"));
+    let stderr = String::from_utf8_lossy(&checked.stderr);
+    assert!(
+        !checked.status.success() && stderr.contains("order check: R1 violated by append_durable"),
+        "{:?}\n{stderr}",
+        checked.status
+    );
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("counts calls: false"), "{stdout}");
+
+    let (_dir, root) = new_root();
+    let failing = run(this_test(TEST)
+        .env(HOOKS_ROOT, &root)
+        .env(swarmops_store::FAIL_AT_ENV, "2:persistent:enospc"));
+    assert!(failing.status.success(), "{:?}", failing.status);
+    let stdout = String::from_utf8_lossy(&failing.stdout);
+    let reported: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix(REPORT))
+        .collect();
+    assert_eq!(
+        reported,
+        ["counts calls: true", "calls: ok 28 ok 28"],
+        "{stdout}"
+    );
+}
+
 #[test]
 fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
     if let Ok(root) = std::env::var(CREATE_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, k));
+        let fs = checked(CrashAtFs::new(RealFs, k));
         MetaStore::create_with_fs(Utf8Path::new(&root), fs).unwrap();
         return;
     }
@@ -1674,11 +1783,8 @@ fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
         // The rename into place is the last call: a crash at any call leaves no meta/, so
         // open refuses and the next create cleans up and succeeds.
         if k <= calls {
-            assert_format(
-                MetaStore::open(&root),
-                &format!("open after a crash at {k}"),
-            );
-            MetaStore::create(&root).unwrap();
+            assert_format(open_checked(&root), &format!("open after a crash at {k}"));
+            create_checked(&root).unwrap();
         }
         assert_fresh_meta(&root);
     }
@@ -1693,8 +1799,8 @@ fn create_starts_over_from_what_a_crashed_create_left() {
     fs::create_dir_all(&staged).unwrap();
     fs::write(staged.join(".tmpA1b2C3"), b"half a checkpoint").unwrap();
     fs::write(staged.join("journal.log"), b"not a frame").unwrap();
-    assert_format(MetaStore::open(&root), "a staged meta/ is no store");
-    MetaStore::create(&root).unwrap();
+    assert_format(open_checked(&root), "a staged meta/ is no store");
+    create_checked(&root).unwrap();
     assert_fresh_meta(&root);
     assert!(!Layout::new(&root).meta_path(".tmpA1b2C3").exists());
 }
@@ -1702,12 +1808,12 @@ fn create_starts_over_from_what_a_crashed_create_left() {
 #[test]
 fn create_lays_out_meta_and_open_requires_it() {
     let (_dir, root) = new_root();
-    assert_format(MetaStore::open(&root), "open before create");
-    let store = MetaStore::create(&root).unwrap();
+    assert_format(open_checked(&root), "open before create");
+    let store = create_checked(&root).unwrap();
     assert_fresh_meta(&root);
-    assert_format(MetaStore::create(&root), "a second create");
+    assert_format(create_checked(&root), "a second create");
 
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     for store in [&store, &reopened] {
         let read = store.read().unwrap();
         assert_eq!(read.count_changesets().unwrap(), 0);
@@ -1904,7 +2010,7 @@ fn snapshots_stay_consistent_while_a_writer_commits() {
 fn write_times_out_as_busy() {
     let (_dir, root, store) = new_store();
     let held = store.write().unwrap();
-    let impatient = MetaStore::open(&root)
+    let impatient = open_checked(&root)
         .unwrap()
         .with_lock_timeout(Duration::from_millis(100));
     let started = Instant::now();
@@ -1917,7 +2023,7 @@ fn write_times_out_as_busy() {
     drop(held);
     // A fresh handle with the default timeout: the abandoned wait lets the lock go as soon as
     // it gets it, but a 100 ms timeout need not cover a helper thread scheduled late.
-    MetaStore::open(&root)
+    open_checked(&root)
         .unwrap()
         .write()
         .unwrap()
@@ -1938,7 +2044,7 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
         "read main".to_owned(),
         When::Before,
         Box::new(move || {
-            let writer = MetaStore::open(&writer_root).unwrap();
+            let writer = open_checked(&writer_root).unwrap();
             let mut write = writer.write().unwrap();
             write.insert_changeset(cs(2, &[1])).unwrap();
             write
@@ -1947,7 +2053,7 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
             write.commit().unwrap();
         }),
     ));
-    let reader = MetaStore::open_with_fs(&root, Arc::new(fs)).unwrap();
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
 
     let read = reader.read().unwrap();
     assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(2, 2)));
@@ -2021,7 +2127,7 @@ fn snapshots_stay_consistent_across_a_compaction() {
     // The commit whose changeset makes the tail one longer than the threshold.
     const COMPACTS: u64 = Index::COMPACT_THRESHOLD + 1;
     let (_dir, root) = new_root();
-    let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(FastFs)).unwrap();
     let seeds: Vec<ChangesetMeta> = (0..SEEDS).map(|i| cs(seed(i), &[])).collect();
     assert!(insert(&store, &seeds).checkpointed, "the seeds compact");
     assert_eq!(index(&root).sorted_count(), SEEDS);
@@ -2036,7 +2142,7 @@ fn snapshots_stay_consistent_across_a_compaction() {
                 let (root, done, compacted) = (&root, &done, &compacted);
                 scope.spawn(move || {
                     // A handle of its own, as a reader in another process has.
-                    let store = MetaStore::open(root).unwrap();
+                    let store = open_checked(root).unwrap();
                     let mut before = None;
                     let mut read_again = false;
                     let mut last = 0;
@@ -2171,7 +2277,7 @@ type Move = (u64, Option<ChangesetId>, Option<ChangesetId>);
 #[test]
 fn reflog_walks_back_past_256_frames() {
     let (_dir, root) = new_root();
-    let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(FastFs)).unwrap();
     insert(&store, &[cs(1, &[]), cs(2, &[])]); // frame 0
     cas(&store, "release/old", None, Some(1)); // frame 1, its only move
     // Frames 2..=601: every third moves main between changesets 1 and 2, the others
@@ -2222,7 +2328,7 @@ const REPLAY_CRASH_ROOT: &str = "SWARMOPS_TEST_META_REPLAY_CRASH_ROOT";
 /// changesets 2..=4 on changeset 1, main moved from 1 to 4, release/new created and
 /// release/old deleted. Everything before them is materialized and checkpointed.
 fn unreplayed_store(root: &Utf8Path) {
-    let store = MetaStore::create_with_fs(root, Arc::new(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(root, checked(FastFs)).unwrap();
     insert(&store, &[cs(1, &[])]);
     cas(&store, "main", None, Some(1));
     cas(&store, "release/old", None, Some(1));
@@ -2270,7 +2376,7 @@ fn assert_replayed(read: &MetaRead<'_>, what: &str) {
 fn crash_at_any_replay_call_recovers_to_the_journal() {
     if let Ok(root) = std::env::var(REPLAY_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, k));
+        let fs = checked(CrashAtFs::new(RealFs, k));
         let mut store = MetaStore::open_with_fs(Utf8Path::new(&root), fs).unwrap();
         // One file at a time, in write order, as the dry run: call k is the same call.
         store.set_parallelism(1);
@@ -2285,7 +2391,7 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
     let (_dry_dir, dry) = new_root();
     copy_dir(template.as_std_path(), dry.as_std_path());
     let (fs, calls) = RecordingFs::new();
-    let mut store = MetaStore::open_with_fs(&dry, Arc::new(fs)).unwrap();
+    let mut store = MetaStore::open_with_fs(&dry, checked(fs)).unwrap();
     store.set_parallelism(1);
     store.write().unwrap().commit().unwrap();
     let dry_calls = calls();
@@ -2314,7 +2420,7 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
             String::from_utf8_lossy(&child.stderr)
         );
 
-        let store = MetaStore::open(&root).unwrap();
+        let store = open_checked(&root).unwrap();
         assert_replayed(&store.read().unwrap(), &format!("k={k}, after the crash"));
         store.write().unwrap().commit().unwrap();
         assert_replayed(&store.read().unwrap(), &format!("k={k}, replayed"));
@@ -2334,7 +2440,7 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
 fn write_and_commit_make_the_documented_fs_calls() {
     let (_dir, root) = new_root();
     let (fs, calls) = RecordingFs::new();
-    let mut store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let mut store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
     // One thread: the index's five syncs go one after another, in write order, as crash
     // sweeps that count calls need them.
     store.set_parallelism(1);
@@ -2445,7 +2551,7 @@ fn commit_with_no_thread_to_spare(root: &Utf8Path) {
         return;
     }
     let (fs, calls) = RecordingFs::new();
-    let store = MetaStore::create_with_fs(root, Arc::new(fs)).unwrap();
+    let store = MetaStore::create_with_fs(root, checked(fs)).unwrap();
     for n in 0..31 {
         insert(&store, &[cs(n, &[])]);
     }
@@ -2519,7 +2625,7 @@ fn the_index_syncs_its_five_files_at_once_and_the_checkpoint_waits_for_them() {
     let (fs, calls) = RecordingFs::new();
     let (syncs, fail) = (fs.syncs(), fs.failing());
     // The default parallelism: 5.
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
     for n in 0..31 {
         insert(&store, &[cs(n, &[])]); // frames 0..=30
     }

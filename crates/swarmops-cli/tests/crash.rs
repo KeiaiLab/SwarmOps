@@ -11,6 +11,9 @@
 //!   the same calls in the same order, and call k is the same call in every run. A dry run with
 //!   `SWARMOPS_TEST_FS_CALLS=<file>` counts a command's calls first (twice, in two seconds of
 //!   the clock, for the commit), and the sweep crashes the command at every one of them.
+//! - Every run is checked against the store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`,
+//!   which the test support sets for every run): a write that breaks one panics, and the run
+//!   ends in `E_INTERNAL` instead of at its crash point.
 //! - Every test ends with `verify --deep` through the binary, and reads its `problems`.
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
@@ -304,6 +307,78 @@ fn kill9_during_commit_store_verifies_and_next_commit_succeeds() {
     assert!(
         crashes.iter().any(|crash| crash.leftovers > 0),
         "some crash left a temp file in objects/tmp, which verify passed over"
+    );
+}
+
+/// Runs `args(store)` as `agent(1)` on a copy of `template` without a crash, counting its
+/// calls (N), then on a fresh copy for each k of 1..=N + 1, its k-th call aborting it: each run
+/// must end at its crash point (or, past N, finish), not in the order check's `E_INTERNAL`; the
+/// store must then verify clean, and take a commit (its recovery checked too) that verifies
+/// clean. `what` names the command in messages. Returns N.
+fn sweep_checked(template: &Store, what: &str, args: impl Fn(&Store) -> Vec<String> + Sync) -> u64 {
+    let dry = Store::copy_of(template);
+    let file = calls_file(&dry);
+    let dry_args = args(&dry);
+    let dry_args: Vec<&str> = dry_args.iter().map(String::as_str).collect();
+    let run = dry.run_as(
+        &agent(1),
+        &dry_args,
+        &[(FS_CALLS_ENV, file.to_str().unwrap())],
+    );
+    run.ok();
+    let calls = reported_calls(&file);
+    sweep(1..=calls + 1, |k| {
+        let store = Store::copy_of(template);
+        let crash_at = k.to_string();
+        let args = args(&store);
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let run = store.run_as(&agent(1), &args, &[(CRASH_AT_ENV, &crash_at)]);
+        if k <= calls {
+            assert!(run.aborted(), "{what}, k={k} of {calls}: {run}");
+        } else {
+            run.ok();
+        }
+        store.assert_clean(&format!("{what}, k={k}: after the crash"));
+        store.commit(
+            &agent(2),
+            "after.txt",
+            &format!("after {what} k={k}\n"),
+            None,
+        );
+        store.assert_clean(&format!("{what}, k={k}: after the next commit"));
+    });
+    calls
+}
+
+/// Every crash sweep runs under the order checker (`swarmops_store::OrderCheckFs`, rules R1 to
+/// R7): the test support sets `SWARMOPS_TEST_ORDER_CHECK=1` for every run of the binary, the
+/// store's and the repository's sweeps wrap their filesystem in it, so a write that breaks a rule
+/// panics in the run crashed at any call, in the command that recovers from the crash, or in a
+/// dry run. This sweep, in the default gate, crashes a root commit on a fresh store and a ref
+/// move on top of it at each of their calls; the slow sweeps (`kill9_during_*`) do the same for
+/// `init` and for a commit that syncs the index and moves the checkpoint.
+#[test]
+fn order_check_rules_hold_in_every_crash_sweep() {
+    let template = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let commit = |store: &Store| {
+        let changes = store.changes_of("crash", &CRASH_PUTS);
+        ["commit", "-m", "checked", "--changes", &changes]
+            .map(str::to_owned)
+            .to_vec()
+    };
+    let calls = sweep_checked(&template, "a root commit", commit);
+    assert!(calls > 20, "a commit makes dozens of calls: {calls}");
+
+    let id = template.commit(&agent(0), "base.txt", "the base\n", None);
+    let create = |_: &Store| {
+        ["ref", "set", "main", &id, "--create"]
+            .map(str::to_owned)
+            .to_vec()
+    };
+    let calls = sweep_checked(&template, "a ref move", create);
+    assert!(
+        calls > 5,
+        "a ref move writes its frame and its file: {calls}"
     );
 }
 

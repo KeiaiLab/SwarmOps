@@ -11,8 +11,9 @@ repository.workspace = true
 workspace = true
 
 [features]
-# The test hooks: the store's (`SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`), and
-# `SWARMOPS_TEST_NOW`, the time `LocalOps` signs changesets at. Off unless asked for.
+# The test hooks: the store's (`SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`,
+# `SWARMOPS_TEST_FAIL_AT`, `SWARMOPS_TEST_ORDER_CHECK`), and `SWARMOPS_TEST_NOW`, the time
+# `LocalOps` signs changesets at. Off unless asked for.
 test-hooks = ["swarmops-repo/test-hooks", "swarmops-store/test-hooks"]
 
 [dependencies]

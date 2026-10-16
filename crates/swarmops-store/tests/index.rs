@@ -28,6 +28,7 @@ use tempfile::TempDir;
 
 use crate::support::child::{SIGABRT, run, this_test};
 use crate::support::common::{mix, percentile};
+use crate::support::faults::checked;
 use crate::support::fs::{FastFs, RecordingFs};
 use crate::support::new_root as bare_root;
 use crate::support::{append_bytes, file_len, real_fs, set_len};
@@ -1293,11 +1294,11 @@ fn crash_metas() -> Vec<ChangesetMeta> {
 }
 
 /// One writer's work in a child process, through a `CrashAtFs` that aborts on its k-th
-/// FsOps call: repair, append three records, sync, compact.
+/// FsOps call, under the order checker: repair, append three records, sync, compact.
 fn crash_child(root: OsString) {
     let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
     let layout = Layout::new(Utf8PathBuf::from_path_buf(root.into()).unwrap());
-    let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(FastFs, k));
+    let fs = checked(CrashAtFs::new(FastFs, k));
     let mut index = Index::open(&layout, fs).unwrap();
     index.repair_tail().unwrap();
     for meta in &crash_metas()[5..] {
