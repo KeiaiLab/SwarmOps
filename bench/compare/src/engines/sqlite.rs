@@ -3,6 +3,12 @@
 //! connection, one connection per session. Everything else is SQLite's default (2 MB page
 //! cache, no mmap, autocheckpoint at 1,000 pages).
 //!
+//! Opening (or creating) a store makes its first connection, and the first session gets that
+//! connection: closing it would close the store's last connection, which checkpoints the WAL
+//! into the database (syncing both) and deletes it, and the session's own connection would then
+//! start a new WAL. W4 times the open and the first lookup or write, so neither may pay for
+//! that.
+//!
 //! `synchronous=FULL`: in WAL mode every commit syncs the WAL before it returns (this build of
 //! SQLite has no `HAVE_FDATASYNC`, so the sync is an `fsync`). `synchronous=NORMAL`, the
 //! reference line, syncs only at checkpoints: a commit survives a process crash, not a power
@@ -12,6 +18,7 @@
 //! an index by delta hash, the refs, and a reflog row per ref move (as the M0 SQLite schema had).
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use rusqlite::{Connection, ErrorCode, OptionalExtension, TransactionBehavior, params};
@@ -76,12 +83,10 @@ impl Engine for Sqlite {
     }
 
     fn create(&self, dir: &Path) -> Result<Box<dyn Db>> {
-        let db = SqliteDb {
-            path: dir.join("db.sqlite"),
-            synchronous: self.synchronous,
-        };
-        db.connect()?.execute_batch(SCHEMA)?;
-        Ok(Box::new(db))
+        let path = dir.join("db.sqlite");
+        let first = connect(&path, self.synchronous)?;
+        first.execute_batch(SCHEMA)?;
+        Ok(Box::new(SqliteDb::new(path, self.synchronous, first)))
     }
 
     fn open(&self, dir: &Path) -> Result<Box<dyn Db>> {
@@ -89,14 +94,10 @@ impl Engine for Sqlite {
         if !path.exists() {
             return Err(other(format!("{} is missing", path.display())));
         }
-        let db = SqliteDb {
-            path,
-            synchronous: self.synchronous,
-        };
-        // Open one connection now, as the other engines open their files, so that open time
-        // counts it.
-        drop(db.connect()?);
-        Ok(Box::new(db))
+        // The first connection now, as the other engines open their files, so that the open's
+        // time counts it (and, after a crash, the WAL's recovery); the first session gets it.
+        let first = connect(&path, self.synchronous)?;
+        Ok(Box::new(SqliteDb::new(path, self.synchronous, first)))
     }
 }
 
@@ -112,24 +113,49 @@ impl From<rusqlite::Error> for Error {
 struct SqliteDb {
     path: PathBuf,
     synchronous: &'static str,
+    /// The connection the open or the create made, until the first session takes it.
+    first: Mutex<Option<Connection>>,
+}
+
+/// A connection to the database at `path`, in WAL mode at `synchronous`. The first one after
+/// a crash recovers the WAL (it rebuilds the wal-index from it).
+fn connect(path: &Path, synchronous: &str) -> Result<Connection> {
+    let conn = Connection::open(path)?;
+    conn.busy_timeout(Duration::from_secs(10))?;
+    let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        return Err(other(format!("journal_mode is {mode}, not wal")));
+    }
+    conn.pragma_update(None, "synchronous", synchronous)?;
+    Ok(conn)
 }
 
 impl SqliteDb {
-    fn connect(&self) -> Result<Connection> {
-        let conn = Connection::open(&self.path)?;
-        conn.busy_timeout(Duration::from_secs(10))?;
-        let mode: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
-        if !mode.eq_ignore_ascii_case("wal") {
-            return Err(other(format!("journal_mode is {mode}, not wal")));
+    fn new(path: PathBuf, synchronous: &'static str, first: Connection) -> SqliteDb {
+        SqliteDb {
+            path,
+            synchronous,
+            first: Mutex::new(Some(first)),
         }
-        conn.pragma_update(None, "synchronous", self.synchronous)?;
-        Ok(conn)
+    }
+
+    fn connect(&self) -> Result<Connection> {
+        connect(&self.path, self.synchronous)
     }
 }
 
 impl Db for SqliteDb {
     fn session(&self) -> Result<Box<dyn Session + '_>> {
-        Ok(Box::new(SqliteSession(self.connect()?)))
+        let first = self
+            .first
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
+        let conn = match first {
+            Some(conn) => conn,
+            None => self.connect()?,
+        };
+        Ok(Box::new(SqliteSession(conn)))
     }
 
     fn settle(&self) -> Result<()> {
@@ -284,5 +310,82 @@ impl Snapshot for SqliteSnapshot<'_> {
             .prepare_cached("SELECT id FROM changesets WHERE delta_hash = ?1 ORDER BY seq")?;
         let rows = stmt.query_map([&dh[..]], |r| r.get::<_, Vec<u8>>(0))?;
         rows.map(|r| to_id(&r?)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::Sqlite;
+    use crate::data::{chain, changeset, id};
+    use crate::engines::{Engine, Main};
+
+    /// The files a writer killed after `n` acknowledged commits leaves: the database and the
+    /// WAL holding its commits, copied while its connection is open (so nothing checkpointed
+    /// them or deleted the WAL), and no wal-index, which the next open rebuilds.
+    fn killed_writer_store(n: u64) -> tempfile::TempDir {
+        let writer = tempfile::tempdir().expect("a temp dir");
+        let left = tempfile::tempdir().expect("a temp dir");
+        let db = Sqlite::FULL.create(writer.path()).expect("create");
+        let mut session = db.session().expect("a session");
+        let mut main = None;
+        for k in 0..n {
+            let cs = changeset(chain::W4_WRITER, k, None);
+            session
+                .commit(&cs, Main::Expect(main), "test")
+                .expect("commit");
+            main = Some(cs.id);
+        }
+        for file in ["db.sqlite", "db.sqlite-wal"] {
+            fs::copy(writer.path().join(file), left.path().join(file)).expect("copy");
+        }
+        left
+    }
+
+    #[test]
+    fn open_leaves_a_killed_writers_wal_to_the_first_session() {
+        let store = killed_writer_store(8);
+        let wal = store.path().join("db.sqlite-wal");
+        let left = fs::metadata(&wal).expect("the WAL").len();
+        assert!(left > 0, "the killed writer's commits are in its WAL");
+
+        let db = Sqlite::FULL.open(store.path()).expect("open");
+        // Closing a store's last connection checkpoints the WAL into the database (with its
+        // syncs) and deletes it: W4 would time that as the open after a kill.
+        assert_eq!(
+            fs::metadata(&wal).map(|m| m.len()).ok(),
+            Some(left),
+            "the open checkpointed or deleted the WAL the killed writer left"
+        );
+
+        let mut session = db.session().expect("a session");
+        let last = id(chain::W4_WRITER, 7);
+        let cs = changeset(chain::W4_RECOVER, 0, Some(last));
+        session
+            .commit(&cs, Main::Current { guess: None }, "test")
+            .expect("commit");
+        // The first session's commit went into that WAL, on the connection the open made.
+        assert!(
+            fs::metadata(&wal).expect("the WAL").len() > left,
+            "the first commit did not append to the WAL the open recovered"
+        );
+        assert_eq!(session.get(&last).expect("get"), Some(8));
+        assert_eq!(session.get(&cs.id).expect("get"), Some(9));
+    }
+
+    #[test]
+    fn the_sessions_after_the_first_connect_anew() {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let db = Sqlite::FULL.create(dir.path()).expect("create");
+        let (mut first, mut second) = (db.session().expect("one"), db.session().expect("two"));
+        let cs = changeset(chain::W1, 0, None);
+        first
+            .commit(&cs, Main::Expect(None), "test")
+            .expect("commit");
+        assert_eq!(second.get(&cs.id).expect("get"), Some(1));
+        drop((first, second));
+        let mut third = db.session().expect("three");
+        assert_eq!(third.get(&cs.id).expect("get"), Some(1));
     }
 }

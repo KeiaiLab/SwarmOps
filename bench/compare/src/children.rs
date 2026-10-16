@@ -3,12 +3,12 @@
 
 use std::fs::File;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::data::{chain, changeset, id, parse_id};
+use crate::data::{Id, chain, changeset, id, parse_id};
 use crate::engines::{Engine, Main, Result, by_name, other};
 use crate::workloads::w4::{Opened, Recovered};
 use crate::workloads::writer_loop;
@@ -77,21 +77,31 @@ fn w2_writer(args: &[String]) -> Result<()> {
 fn open(args: &[String]) -> Result<()> {
     let engine = engine(arg(args, 1)?)?;
     let target = hex_id(arg(args, 3)?)?;
+    let opened = timed_open(&*engine, arg(args, 2)?.as_ref(), &target)?;
+    println!("{}", serde_json::to_string(&opened).map_err(other)?);
+    Ok(())
+}
+
+/// Opens the store in `dir` and looks `target` up, timing the open and the lookup. The session
+/// and the store are closed after both are timed: closing is part of neither (closing SQLite's
+/// last connection checkpoints the WAL and deletes it).
+fn timed_open(engine: &dyn Engine, dir: &Path, target: &Id) -> Result<Opened> {
     let started = Instant::now();
-    let db = engine.open(arg(args, 2)?.as_ref())?;
+    let db = engine.open(dir)?;
     let open = started.elapsed();
     let started = Instant::now();
-    let found = db.session()?.get(&target)?;
+    let mut session = db.session()?;
+    let found = session.get(target)?;
     let first = started.elapsed();
+    drop(session);
+    drop(db);
     if found.is_none() {
         return Err(other("the changeset is missing"));
     }
-    let opened = Opened {
+    Ok(Opened {
         open_us: us(open),
         first_us: us(first),
-    };
-    println!("{}", serde_json::to_string(&opened).map_err(other)?);
-    Ok(())
+    })
 }
 
 /// `__writer <engine> <dir> <chain> <root>`: commits until killed, printing `acked <n>` after
@@ -165,4 +175,94 @@ fn traced_writer(args: &[String]) -> Result<()> {
     drop(db);
     println!("done");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::timed_open;
+    use crate::data::{Changeset, Id};
+    use crate::engines::{Committed, Db, Engine, Main, Result, Session, Snapshot, other};
+
+    /// How long closing a [`SlowClose`] session takes: far longer than its lookup.
+    const CLOSE: Duration = Duration::from_millis(300);
+
+    /// An engine whose sessions take [`CLOSE`] to close, as closing SQLite's last connection
+    /// checkpoints the WAL and deletes it.
+    struct SlowClose;
+
+    struct SlowCloseDb;
+
+    struct SlowCloseSession;
+
+    impl Engine for SlowClose {
+        fn name(&self) -> &'static str {
+            "slow-close"
+        }
+
+        fn multi_process(&self) -> bool {
+            false
+        }
+
+        fn durability(&self) -> &'static str {
+            "none"
+        }
+
+        fn create(&self, _: &Path) -> Result<Box<dyn Db>> {
+            Ok(Box::new(SlowCloseDb))
+        }
+
+        fn open(&self, _: &Path) -> Result<Box<dyn Db>> {
+            Ok(Box::new(SlowCloseDb))
+        }
+    }
+
+    impl Db for SlowCloseDb {
+        fn session(&self) -> Result<Box<dyn Session + '_>> {
+            Ok(Box::new(SlowCloseSession))
+        }
+
+        fn settle(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Drop for SlowCloseSession {
+        fn drop(&mut self) {
+            thread::sleep(CLOSE);
+        }
+    }
+
+    impl Session for SlowCloseSession {
+        fn commit(&mut self, _: &Changeset, _: Main, _: &str) -> Result<Committed> {
+            Err(other("not used"))
+        }
+
+        fn load(&mut self, _: &[Changeset]) -> Result<()> {
+            Err(other("not used"))
+        }
+
+        fn get(&mut self, _: &Id) -> Result<Option<u64>> {
+            Ok(Some(1))
+        }
+
+        fn snapshot(&mut self) -> Result<Box<dyn Snapshot + '_>> {
+            Err(other("not used"))
+        }
+    }
+
+    #[test]
+    fn the_first_lookup_is_timed_without_closing_its_session() {
+        let opened = timed_open(&SlowClose, Path::new("unused"), &[0; 32]).expect("open");
+        let close_us = u64::try_from(CLOSE.as_micros()).expect("fits");
+        assert!(
+            opened.open_us + opened.first_us < close_us,
+            "the open and the first lookup took {} + {} µs: the session's close was timed",
+            opened.open_us,
+            opened.first_us
+        );
+    }
 }
