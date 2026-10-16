@@ -4,6 +4,8 @@
 //! - [`LocalOps`] implements [`StoreOps`](swarmops_api::StoreOps) over a store on the local
 //!   filesystem. It resolves each request's revisions, turns requests into repository calls and
 //!   their results into responses, and maps every failure to the operations spec's error codes.
+//!   [`LocalOps::recording`] runs a request's operations so that what they resolve is recorded
+//!   in that request's [`Resolved`] alone.
 //! - [`identity`] works out who the caller is, from `--as` or the environment, and refuses a
 //!   mutation without an identity.
 //! - [`content`] checks a commit's change list and turns its contents into bytes, reading
@@ -18,4 +20,4 @@ pub mod identity;
 mod local;
 
 pub use error::shell_word;
-pub use local::{LocalOps, NOW_ENV};
+pub use local::{LocalOps, NOW_ENV, Recording, Resolved};

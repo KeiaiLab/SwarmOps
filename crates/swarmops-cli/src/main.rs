@@ -11,6 +11,9 @@
 //!   stderr.
 //! - stdout carries the envelope, or with `--human` its text rendering, and nothing else;
 //!   diagnostics go to stderr, and there are none by default.
+//! - `mcp` is the one command that prints no envelope: it serves the operations over MCP on
+//!   stdin and stdout until stdin ends, exiting 0 (see [`mcp`]). A command line it cannot run
+//!   is still an envelope, as for any command.
 //!
 //! The envelope's `op` is the operation's library name (`cat` is `read_file`), or `swarmops`
 //! for a command line that names no operation.
@@ -18,6 +21,7 @@
 mod cli;
 mod commands;
 mod context;
+mod mcp;
 mod output;
 
 use std::ffi::OsString;
@@ -25,8 +29,6 @@ use std::io::{self, IsTerminal as _, Write as _};
 use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
 use std::time::Instant;
-
-use swarmops_api::{ErrorCode, OpError};
 
 use crate::cli::Parsed;
 use crate::commands::{Ctx, Used};
@@ -103,18 +105,7 @@ fn guarded(
     run: impl FnOnce() -> Printed,
 ) -> Printed {
     panic::catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|payload| {
-        let message = payload
-            .downcast_ref::<&str>()
-            .map(|message| (*message).to_owned())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "a panic without a message".to_owned());
-        let error = OpError::new(
-            ErrorCode::Internal,
-            format!(
-                "swarmops panicked, a bug (stderr has where): {}",
-                output::printable(&message)
-            ),
-        );
+        let error = commands::panicked(&*payload);
         match used {
             Some(used) => commands::failed_after(op, error, used, format, started),
             None => commands::failed(op, error, format, started),
@@ -150,7 +141,7 @@ mod tests {
     use camino::Utf8Path;
     use serde_json::{Value, json};
     use swarmops_api::{
-        ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, ShowReq, StoreOps,
+        ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, OpError, ShowReq, StoreOps,
     };
     use swarmops_ops::LocalOps;
 

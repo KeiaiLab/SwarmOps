@@ -172,6 +172,15 @@ pub enum Command {
         #[arg(long)]
         deep: bool,
     },
+    /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
+    ///
+    /// One tool per operation (repo_info, read_file, read_tree, show, log, ref_list, ref_set,
+    /// ref_delete, commit, verify), each taking the operation's request as its arguments and
+    /// returning the envelope the other commands print. The store and the identity are the
+    /// server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28,
+    /// and 2025-11-25 to clients that open with initialize. Prints no envelope: stdout carries
+    /// the protocol until stdin ends.
+    Mcp,
 }
 
 /// `ref`'s operations.
@@ -277,6 +286,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
         ["verify"] => "verify",
+        ["mcp"] => "mcp",
         _ => return None,
     })
 }
@@ -380,10 +390,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 13);
+        assert_eq!(ops.len(), 14);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 13, "two subcommands name one op");
+        assert_eq!(ops.len(), 14, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
     }
 

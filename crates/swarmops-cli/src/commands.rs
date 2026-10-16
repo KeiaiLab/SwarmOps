@@ -9,9 +9,9 @@
 //! The envelope's `meta`: `repo` is the store as the user named it (for `init`, its
 //! directory), omitted when the command uses no store (`whoami`, `schema`) or none was named;
 //! `elapsed_ms` spans the whole command but its printing: reading the command line, opening
-//! the store and the operation; `resolved` is every revision the operation resolved, as
-//! `LocalOps::take_resolved` reports them, also when it failed; `auth` is the store's
-//! authentication mode, `trust` in M1.
+//! the store and the operation; `resolved` is every revision the operation resolved, as the
+//! command's own `Resolved` records them (`LocalOps::recording`), also when it failed; `auth` is
+//! the store's authentication mode, `trust` in M1.
 //!
 //! A panic's envelope has the same `repo` and `resolved` (see [`Used`]), or neither when it
 //! came before a store was named.
@@ -19,6 +19,7 @@
 //! `whoami` prints `IdentityInfo` as the API writes it: for a caller without an identity,
 //! `{"auth":"anonymous"}`, with `agent` omitted rather than null.
 
+use std::any::Any;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -36,10 +37,11 @@ use swarmops_api::{
     VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
-use swarmops_ops::{LocalOps, shell_word};
+use swarmops_ops::{LocalOps, Resolved, shell_word};
 
 use crate::cli::{self, Command, Global, RefCommand};
 use crate::context::{self, Env};
+use crate::mcp;
 use crate::output::{self, Format, Printed};
 
 /// The hint of a failed deep `verify`, which leaves nothing to re-check.
@@ -60,28 +62,22 @@ pub struct Ctx<'a> {
     pub used: Used,
 }
 
-/// What a command has used so far: the store the user named, and the store once opened. It
-/// lives outside the code that can panic, so that a panic's envelope can report what the
-/// command's own would: `meta.repo` and `meta.resolved`.
+/// What a command has used so far: the store the user named, and the revisions its operation
+/// resolved. It lives outside the code that can panic, so that a panic's envelope can report
+/// what the command's own would: `meta.repo` and `meta.resolved`.
 #[derive(Default)]
 pub struct Used {
     /// The store as the user named it.
     repo: RefCell<Option<String>>,
-    /// The store, once opened.
-    store: RefCell<Option<LocalOps>>,
+    /// What the command's operation resolved: its request's record, and no other's.
+    resolved: Resolved,
 }
 
 impl Used {
-    /// `meta.repo` and `meta.resolved` as far as the command got: the store named, and what the
-    /// opened store resolved since this was last asked.
+    /// `meta.repo` and `meta.resolved` as far as the command got: the store named, and what its
+    /// operation resolved since this was last asked.
     pub fn meta(&self) -> (Option<String>, BTreeMap<String, String>) {
-        let resolved = self
-            .store
-            .borrow()
-            .as_ref()
-            .map(LocalOps::take_resolved)
-            .unwrap_or_default();
-        (self.repo.borrow().clone(), resolved)
+        (self.repo.borrow().clone(), self.resolved.take())
     }
 }
 
@@ -178,6 +174,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             || Ok(VerifyReq { deep }),
             |ops, req| ops.verify(req).and_then(|report| clean(report, deep)),
         ),
+        Command::Mcp => mcp::serve(ctx.global, ctx.env),
     }
 }
 
@@ -227,6 +224,17 @@ impl Ctx<'_> {
         prepare: impl FnOnce() -> Result<P, OpError>,
         call: impl FnOnce(&dyn StoreOps, P) -> Result<T, OpError>,
     ) -> Printed {
+        output::render(&self.envelope_on_store(op, prepare, call), self.format)
+    }
+
+    /// [`Ctx::on_store`]'s envelope, before it is printed: what `swarmops mcp` returns as a
+    /// tool's result.
+    pub fn envelope_on_store<P, T>(
+        &self,
+        op: &str,
+        prepare: impl FnOnce() -> Result<P, OpError>,
+        call: impl FnOnce(&dyn StoreOps, P) -> Result<T, OpError>,
+    ) -> Envelope<T> {
         let named = context::store_named(self.global.repo.as_deref(), self.env);
         if let Ok(Some(store)) = &named {
             self.used.repo.replace(Some(store.clone()));
@@ -235,17 +243,11 @@ impl Ctx<'_> {
             let input = prepare()?;
             let store =
                 named.ok_or_else(|| context::no_store_named(self.global.repo.as_deref()))?;
-            self.used
-                .store
-                .replace(Some(LocalOps::open(Utf8Path::new(&store))?));
-            let opened = self.used.store.borrow();
-            call(
-                opened.as_ref().expect("the store was opened just now"),
-                input,
-            )
+            let ops = LocalOps::open(Utf8Path::new(&store))?;
+            call(&ops.recording(&self.used.resolved), input)
         });
         let (repo, resolved) = self.used.meta();
-        self.finish(op, repo, resolved, result)
+        envelope(op, repo, resolved, result, self.started)
     }
 
     /// `op`'s envelope for `result`, with `meta` from `repo`, `resolved` and the clock.
@@ -256,13 +258,17 @@ impl Ctx<'_> {
         resolved: BTreeMap<String, String>,
         result: Result<T, OpError>,
     ) -> Printed {
-        envelope(op, repo, resolved, result, self.format, self.started)
+        output::render(
+            &envelope(op, repo, resolved, result, self.started),
+            self.format,
+        )
     }
 }
 
 /// The envelope of `op` failing with `error` before it could use a store.
 pub fn failed(op: &str, error: OpError, format: Format, started: Instant) -> Printed {
-    envelope::<()>(op, None, BTreeMap::new(), Err(error), format, started)
+    let envelope = envelope::<()>(op, None, BTreeMap::new(), Err(error), started);
+    output::render(&envelope, format)
 }
 
 /// The envelope of `op` failing with `error` after it used what `used` holds, which `meta`
@@ -274,8 +280,30 @@ pub fn failed_after(
     format: Format,
     started: Instant,
 ) -> Printed {
+    output::render(&failed_envelope(op, error, used, started), format)
+}
+
+/// [`failed_after`]'s envelope, before it is printed.
+pub fn failed_envelope(op: &str, error: OpError, used: &Used, started: Instant) -> Envelope<()> {
     let (repo, resolved) = used.meta();
-    envelope::<()>(op, repo, resolved, Err(error), format, started)
+    envelope(op, repo, resolved, Err(error), started)
+}
+
+/// The error a panic with `payload` stands for: `E_INTERNAL`, a bug, with the panic's message
+/// in one line (the panic hook has printed where it happened on stderr).
+pub fn panicked(payload: &(dyn Any + Send)) -> OpError {
+    let message = payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "a panic without a message".to_owned());
+    OpError::new(
+        ErrorCode::Internal,
+        format!(
+            "swarmops panicked, a bug (stderr has where): {}",
+            output::printable(&message)
+        ),
+    )
 }
 
 /// The envelope of a command line clap refused: `E_INVALID_ARG` (exit 2) with clap's message
@@ -311,25 +339,25 @@ pub fn usage(error: &clap::Error, path: &[String], format: Format, started: Inst
     )
 }
 
-fn envelope<T: Serialize>(
+/// `op`'s envelope for `result`, its `meta` from `repo`, `resolved` and the time since
+/// `started`.
+fn envelope<T>(
     op: &str,
     repo: Option<String>,
     resolved: BTreeMap<String, String>,
     result: Result<T, OpError>,
-    format: Format,
     started: Instant,
-) -> Printed {
+) -> Envelope<T> {
     let meta = Meta {
         repo,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         resolved,
         auth: AUTH_TRUST.to_owned(),
     };
-    let envelope = match result {
+    match result {
         Ok(result) => Envelope::ok(op, result, meta),
         Err(error) => Envelope::err(op, error, meta),
-    };
-    output::render(&envelope, format)
+    }
 }
 
 /// `init`: a store in `dir` for a repository named `name`, by default the directory's name.
@@ -451,7 +479,7 @@ fn file_target(target: &str) -> Result<(&str, &str), OpError> {
 /// `E_STORE_CORRUPT` (exit 1) with the whole report in `details`. The hint is a deep
 /// verify after a structural one, which finds damaged bytes too, and after a deep one the
 /// restore that remains.
-fn clean(report: VerifyReport, deep: bool) -> Result<VerifyReport, OpError> {
+pub(crate) fn clean(report: VerifyReport, deep: bool) -> Result<VerifyReport, OpError> {
     let Some(first) = report.problems.first() else {
         return Ok(report);
     };
