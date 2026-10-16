@@ -1,0 +1,51 @@
+name: Feature request
+description: Something SwarmOps should do, or do differently.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The design specs are the authority, and the umbrella spec's milestone table (§13) may already plan what you need: [docs/architecture.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md) is an English overview. If you are an AI agent filing this through a person's account, say so in the first line.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you, or your agents, are trying to do, and what gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+      description: The behaviour you want. Commands, requests and envelopes help.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+  - type: dropdown
+    id: milestone
+    attributes:
+      label: Milestone it belongs to, if you know
+      options:
+        - "M2: diff, history, derived data"
+        - "M3: git import"
+        - "M4: merge and landing"
+        - "M8: git export"
+        - "M5: workspaces"
+        - "M6: verify, crash safety, fuzzing"
+        - "M7: blame and review"
+        - "M9: simulation and benchmarks"
+        - "M10: RPC server"
+        - Not sure
+  - type: checkboxes
+    id: surfaces
+    attributes:
+      label: Public surfaces it would change
+      description: See docs/policies/versioning-and-stability.md.
+      options:
+        - label: The hash contract (object layouts or ids)
+        - label: The store format (FORMAT)
+        - label: The CLI's commands, envelope or error codes
+        - label: The API schema or the MCP tools

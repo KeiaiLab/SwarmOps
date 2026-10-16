@@ -1,2 +1,3 @@
-/fuzz/target
-/fuzz/artifacts
+# cargo-fuzz output, relative to fuzz/ (the corpus in fuzz/corpus/ is tracked).
+/target/
+/artifacts/
