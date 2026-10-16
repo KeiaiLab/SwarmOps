@@ -511,9 +511,9 @@ impl Index {
     /// cut fails the same way while it builds its snapshot. A handle opened after the cut, and
     /// so a new snapshot, reads the index as cut, the journal's frames over it. A handle that
     /// opens while the cut is made, its files measured before it and read after, counts every
-    /// record the checkpoint passed, which the cut keeps, and of the others only those it still
-    /// finds whole that the journal vouches for, or fails as one opened before the cut does:
-    /// it never counts fewer.
+    /// record the checkpoint passed or the sorted views cover, which the cut keeps, and of the
+    /// others only those it still finds whole that the journal vouches for, or fails as one
+    /// opened before the cut does: it never counts fewer.
     pub fn truncate_to(&mut self, records: u64) -> Result<u64, StoreError> {
         let keep = records.max(self.views.covered());
         if keep >= self.len {
@@ -701,28 +701,28 @@ impl Index {
 
     /// How many of the first `records` records, those the five files hold by their lengths,
     /// `frames`, the journal's frames past its checkpoint, vouch for: every one before the
-    /// checkpoint (synced before it moved past them), and of the ones past it the run that are
-    /// the changesets of `frames`, in order and field by field, each one's parents where the
-    /// record before it leaves off in `parents.log` (`parents_file_len` long). The records past
-    /// the checkpoint were appended without a sync: a power loss can keep a file's length and
-    /// lose their bytes (zeros in their place), or lose the first sector they lie in and keep a
-    /// later one. The first such record, and every one after it, holds nothing the journal
-    /// vouches for: no handle counts them, a reader's snapshot reads their changesets from the
-    /// journal, and [`Index::repair_tail`] cuts them for replay to append the journal's in
-    /// their place.
+    /// checkpoint (synced before it moved past them) or that the sorted views cover (synced
+    /// before the views were written), and of the others the run that are the changesets of
+    /// `frames`, in order and field by field, each one's parents where the record before it
+    /// leaves off in `parents.log` (`parents_file_len` long). The records past the checkpoint
+    /// were appended without a sync: a power loss can keep a file's length and lose their bytes
+    /// (zeros in their place), or lose the first sector they lie in and keep a later one. The
+    /// first such record, and every one after it, holds nothing the journal vouches for: no
+    /// handle counts them, a reader's snapshot reads their changesets from the journal, and
+    /// [`Index::repair_tail`] cuts them for replay to append the journal's in their place.
     ///
-    /// Records the sorted views cover were synced before the views were written: with no
-    /// record past them, nothing is read. The records past the checkpoint start after the last
-    /// changeset before it. Where the index holds one of the changesets past it among its last
-    /// records, that record's place says where; only otherwise is the journal read back from the
-    /// checkpoint to its last changeset, on `journal` or on a handle of its own (not through
-    /// this index's [`FsOps`]), and a damaged frame there counts every record.
+    /// With no record past the sorted views, nothing is read. The records past the checkpoint
+    /// start after the last changeset before it. Where the index holds one of the changesets
+    /// past it among its last records, that record's place says where; only otherwise is the
+    /// journal read back from the checkpoint to its last changeset, on `journal` or on a handle
+    /// of its own (not through this index's [`FsOps`]), and a damaged frame there counts every
+    /// record.
     ///
     /// A writer may cut records past the checkpoint after `records` were measured (a failed
-    /// sync's [`Index::truncate_to`], or a repair after a power loss), but never one before it:
-    /// where those records start is looked for in what `ids.col` holds then ([`held_entries`]),
-    /// so a cut never makes the count fall short of the records the checkpoint passed, and
-    /// records cut vouch for nothing.
+    /// sync's [`Index::truncate_to`], or a repair after a power loss), but never one before it,
+    /// nor one the sorted views cover: where those records start is looked for in what
+    /// `ids.col` holds then ([`held_entries`]), so a cut never makes the count fall short of the
+    /// records the checkpoint passed or the views cover, and records cut vouch for nothing.
     fn vouched_with(
         &self,
         records: u64,
@@ -741,8 +741,15 @@ impl Index {
         let Some(first_frame) = frames.first().filter(|_| !past.is_empty()) else {
             return Ok(records); // no changeset past the checkpoint: no record past it either
         };
+        // The records the sorted views cover count, whatever a writer has cut past them since
+        // `records` were measured: they may lie past the checkpoint (a compaction's checkpoint
+        // failed after it, or moved after the checkpoint was read), and no cut takes them.
+        let count_from = |first: u64| -> Result<u64, StoreError> {
+            let vouched = self.vouched_from(first, records, &past, parents_file_len)?;
+            Ok(vouched.max(self.views.covered()))
+        };
         if let Some(first) = self.first_past_by_id(&past, records)? {
-            return self.vouched_from(first, records, &past, parents_file_len);
+            return count_from(first);
         }
         // None of them among its last records: none is materialized yet, a power loss zeroed
         // their ids, or a writer has cut them since. The last changeset before the checkpoint
@@ -785,7 +792,7 @@ impl Index {
                 }
             }
         };
-        self.vouched_from(first, records, &past, parents_file_len)
+        count_from(first)
     }
 
     /// Where the records past the checkpoint start, if the index holds one of `past`, the

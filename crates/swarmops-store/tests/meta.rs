@@ -1657,6 +1657,97 @@ fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_chec
     }
 }
 
+/// The sorted views can cover records past the checkpoint: a compaction syncs the records it
+/// covers before it writes the views, and the checkpoint that follows it may fail (here), or a
+/// snapshot may read the checkpoint just before a writer moves it. No cut takes those records
+/// ([`Index::truncate_to`] and [`Index::repair_tail`] keep them), and a snapshot whose index a
+/// writer cuts as it opens counts every one of them too. (The index used to count only the
+/// records the checkpoint passed when it met the cut, fewer than the views cover, and the
+/// snapshot failed as if the index were damaged: `IndexCorrupt`, over files that are whole.)
+#[test]
+fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_sorted_views_cover() {
+    for power_loss in [false, true] {
+        let what = if power_loss {
+            "the repair after a power loss"
+        } else {
+            "a failed index sync"
+        };
+        let (_dir, root) = new_root();
+        let (writer, fail) = failing_store(&root);
+        for n in 0..3 {
+            insert(&writer, &[cs(n, &[])]);
+        }
+        writer.flush().unwrap(); // the checkpoint past records 0..=2
+        // Records 3..=1102 in one frame, past the compaction threshold: compacted, and the
+        // checkpoint after the compaction fails.
+        fail.set("atomic_replace journal.ckpt");
+        let mut write = writer.write().unwrap();
+        for n in 3..1103 {
+            write.insert_changeset(cs(n, &[])).unwrap();
+        }
+        match write.commit() {
+            Err(StoreError::PostCommit { frame_seq: 3, .. }) => {}
+            other => panic!("{what}: expected PostCommit at frame 3, got {other:?}"),
+        }
+        fail.clear();
+        let views = index(&root);
+        assert_eq!((views.len(), views.sorted_count()), (1103, 1103), "{what}");
+        let covered = chained_lens(&root);
+        for n in 1103..1105 {
+            insert(&writer, &[cs(n, &[])]); // records 1103 and 1104, past the views
+        }
+        if power_loss {
+            // Records 1103 and 1104 kept their length and lost their bytes, zeros in their place.
+            let meta = Layout::new(&root).meta_dir();
+            for ((file, len), (_, kept)) in chained_lens(&root).into_iter().zip(covered) {
+                let path = meta.join(file);
+                let mut bytes = fs::read(&path).unwrap();
+                bytes[usize::try_from(kept).unwrap()..usize::try_from(len).unwrap()].fill(0);
+                fs::write(&path, bytes).unwrap();
+            }
+            fail.set("append parents.log"); // the replay's first append
+        } else {
+            fail.set("sync_data ids.col");
+        }
+        // The reader's first FsOps call measures journal.off, to read the frames past the
+        // checkpoint, once it has measured the index files: right then, the writer cuts the
+        // records past the views.
+        let (fs, _calls) = RecordingFs::new();
+        let fs = fs.with_hook((
+            "file_len journal.off".to_owned(),
+            When::Before,
+            Box::new(move || {
+                let cut = if power_loss {
+                    writer.write().map(drop)
+                } else {
+                    writer.flush()
+                };
+                assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+            }),
+        ));
+        let reader = MetaStore::open_with_fs(&root, Arc::new(fs)).unwrap();
+
+        let read = reader.read().unwrap();
+        assert_eq!(chained_lens(&root), covered, "{what}: cut");
+        assert_eq!(read.count_changesets().unwrap(), 1105, "{what}");
+        for n in [0, 2, 3, 1102, 1103, 1104] {
+            let got = read.changeset(id(n)).unwrap();
+            assert_eq!(got, Some(stored(n, &[], n, 1)), "{what}: changeset {n}");
+        }
+        drop(read);
+
+        // The next write appends the records cut again, from the journal.
+        MetaStore::open(&root).unwrap().flush().unwrap();
+        let index = index(&root);
+        let counts = (index.len(), index.sorted_count());
+        assert_eq!(counts, (1105, 1103), "{what}: replayed");
+        for n in [1103, 1104] {
+            let got = index.get(n).unwrap();
+            assert_eq!(got, stored(n, &[], n, 1), "{what}: record {n}");
+        }
+    }
+}
+
 /// How many frames `journal.off` at `root` lists.
 fn listed(root: &Utf8Path) -> u64 {
     file_len(Layout::new(root).journal_off()) / 8
