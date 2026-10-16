@@ -9,9 +9,10 @@
 //!   `eio` on any other call, fails it before it does anything.
 //! - A sweep fails each call of a dry run in turn (k = 1..=N, N counted with
 //!   `SWARMOPS_TEST_FS_CALLS`), each run on a store of its own; commits sign at a fixed time
-//!   (`SWARMOPS_TEST_NOW`), so that call k is the same call in every run. Every run is checked
-//!   against the store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`, set by the test
-//!   support).
+//!   (`SWARMOPS_TEST_NOW`), so that call k is the same call in every run. The runner, the dry
+//!   runs and the commit template are the crash sweeps' too (`support::sweep`). Every run is
+//!   checked against the store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`, set by the
+//!   test support).
 //! - The oracle: a run that succeeds committed, and its change is visible and verifies clean
 //!   once the fault clears; a run that fails either committed nothing or says that it did (a
 //!   failure after the commit point is a warning in a successful response, and an `init` that
@@ -25,33 +26,10 @@
 
 mod support;
 
-use std::fs;
-use std::ops::RangeInclusive;
-use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread;
-
 use serde_json::Value;
+use support::sweep::{commit_template, dry_commit, dry_init, init_again, sweep, swept_commit};
 use support::{Run, Store, agent, run};
-use swarmops_ops::NOW_ENV;
-use swarmops_store::{FAIL_AT_ENV, FS_CALLS_ENV};
-
-/// How many runs of a sweep go at once, each with a store of its own.
-const AT_ONCE: usize = 8;
-
-/// The time the sweeps sign at: November 2023, in Unix seconds.
-const NOW: u64 = 1_700_000_000;
-
-/// How many frames lie past the checkpoint in the commit sweep's template: the swept commit's
-/// frame is the 32nd, so it also syncs the index and moves the checkpoint.
-const TEMPLATE_FRAMES: u64 = 31;
-
-/// The commit the sweep fails: files in new nested directories on main.
-const SWEPT_PUTS: [(&str, &str); 3] = [
-    ("src/lib.rs", "pub fn f() {}\n"),
-    ("src/bin/tool.rs", "fn main() {}\n"),
-    ("docs/notes.md", "# notes\n"),
-];
+use swarmops_store::FAIL_AT_ENV;
 
 /// The failure modes and errnos the commit sweep runs each call with.
 const FAILURES: [&str; 4] = [
@@ -69,29 +47,6 @@ const INIT_FAILURES: [&str; 3] = ["once:eio", "once:enospc", "persistent:eio"];
 /// What the documented aborts say on stderr: a failed journal append whose cut failed too; a
 /// failed sync of the store root after `init` linked `FORMAT`, whose taking back failed too.
 const ABORTS: [&str; 2] = ["could not be cut back off it", "could not be taken back"];
-
-/// Runs `run(k)` for every k of `ks`, [`AT_ONCE`] at a time, each on a thread of its own.
-fn sweep(ks: RangeInclusive<u64>, run: impl Fn(u64) + Sync) {
-    let ks: Vec<u64> = ks.collect();
-    let run = &run;
-    for batch in ks.chunks(AT_ONCE) {
-        thread::scope(|scope| {
-            let runs: Vec<_> = batch.iter().map(|&k| scope.spawn(move || run(k))).collect();
-            for handle in runs {
-                handle
-                    .join()
-                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
-            }
-        });
-    }
-}
-
-/// The number a dry run wrote to `file`: how many filesystem calls it made.
-fn reported_calls(file: &Path) -> u64 {
-    let text = fs::read_to_string(file)
-        .unwrap_or_else(|e| panic!("{}: no call count ({e})", file.display()));
-    text.trim().parse().unwrap()
-}
 
 /// How a run with an injected failure ended.
 #[derive(Debug)]
@@ -124,36 +79,6 @@ fn ended(run: &Run) -> Ended {
         assert_eq!(error["retryable"], true, "{run}");
     }
     Ended::Failed(error)
-}
-
-/// A store for the commit sweep: main at a first changeset, then changesets on it, until
-/// [`TEMPLATE_FRAMES`] frames lie past the checkpoint; every command on it, and on its copies,
-/// signs at [`NOW`].
-fn commit_template() -> Store {
-    let store = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
-    let first = store.commit(&agent(0), "README.md", "# error sweep\n", None);
-    let create = store.run_as(&agent(0), &["ref", "set", "main", &first, "--create"], &[]);
-    create.ok();
-    for n in 2..TEMPLATE_FRAMES {
-        store.commit(
-            &agent(0),
-            &format!("history/{n}.txt"),
-            &format!("{n}\n"),
-            None,
-        );
-    }
-    assert_eq!(store.checkpoint(), 0);
-    store
-}
-
-/// Runs the swept commit on `store`, with `env` set.
-fn swept_commit(store: &Store, env: &[(&str, &str)]) -> Run {
-    let changes = store.changes_of("swept", &SWEPT_PUTS);
-    store.run_as(
-        &agent(1),
-        &["commit", "-m", "swept", "--changes", &changes],
-        env,
-    )
 }
 
 /// One run of the commit sweep: the swept commit on a copy of `template`, failing as `failure`
@@ -190,36 +115,27 @@ fn commit_failing_at(template: &Store, k: u64, failure: &str, changeset: &str) -
 /// One run of the init sweep: `init` on a fresh path, failing as `failure` says from call `k`.
 /// Then, the fault cleared: a store is there, whole, exactly when the run succeeded or said it
 /// made one (`details.created`; either after the documented abort); without one, a second `init`
-/// makes it, and with one, says `E_EXISTS`. Either way the store opens and verifies clean.
+/// makes it, and with one, says `E_EXISTS`. Either way the store is fresh, and verifies clean
+/// ([`init_again`]).
 fn init_failing_at(k: u64, failure: &str) -> Ended {
     let store = Store::empty();
     let what = format!("init, call {k} failing {failure}");
     let fail_at = format!("{k}:{failure}");
     let init = run(&["init", store.path()], &[(FAIL_AT_ENV, fail_at.as_str())]);
     let ended = ended(&init);
-    let info = store.read(&["info"]);
-    let whole = info.exit() == 0;
+    let whole = init_again(&store, &what);
     match &ended {
         Ended::Succeeded(result) => {
-            assert!(whole, "{what}: it succeeded, but {info}");
+            assert!(whole, "{what}: it succeeded, but left no store: {init}");
             assert_eq!(result["changesets"], 0, "{what}: a fresh store");
         }
         Ended::Failed(error) => assert_eq!(
             whole,
             error["details"]["created"] == true,
-            "{what}: the store is there exactly when the error says it was made: {init}\n{info}"
+            "{what}: the store is there exactly when the error says it was made: {init}"
         ),
         Ended::Aborted => {}
     }
-    if whole {
-        run(&["init", store.path()], &[]).err("E_EXISTS");
-    } else {
-        info.err("E_NOT_A_REPO");
-        run(&["init", store.path()], &[]).ok();
-    }
-    let info = store.info();
-    assert_eq!(info["name"], "store", "{what}");
-    store.assert_clean(&what);
     ended
 }
 
@@ -227,40 +143,37 @@ fn init_failing_at(k: u64, failure: &str) -> Ended {
 /// checkpoint is reported honestly (Review Focus 3): each call of a dry run fails in turn, once
 /// and persistently, with `EIO` and with `ENOSPC` ([`FAILURES`], [`INIT_FAILURES`]). A success
 /// committed, visibly and cleanly; a failure committed nothing or says it did; the store always
-/// opens again; no run panics, and none aborts but as documented ([`ABORTS`]).
+/// opens again; no run panics, and none aborts but as documented ([`ABORTS`]). The dry run of
+/// the commit asserts that it moves the checkpoint, so that the sweep fails the index sync and
+/// the checkpoint's move too.
 #[test]
 #[ignore = "slow, ~3 min: ~1,300 failed runs of init and commit; just check-slow runs it"]
 fn fail_at_every_call_reports_honestly() {
     let template = commit_template();
-    let dry = Store::copy_of(&template);
-    let file = dry.tmp().join("fs-calls");
-    let result = swept_commit(&dry, &[(FS_CALLS_ENV, file.to_str().unwrap())]).ok();
-    let changeset = result["changeset"].as_str().unwrap().to_owned();
-    let calls = reported_calls(&file);
-    assert!(calls > 30, "a commit makes dozens of calls: {calls}");
+    let dry = dry_commit(&template);
     for failure in FAILURES {
-        sweep(1..=calls, |k| {
-            commit_failing_at(&template, k, failure, &changeset);
+        sweep(1..=dry.calls, |k| {
+            commit_failing_at(&template, k, failure, &dry.changeset);
         });
     }
 
-    let empty = Store::empty();
-    let file = empty.tmp().join("fs-calls");
-    run(
-        &["init", empty.path()],
-        &[(FS_CALLS_ENV, file.to_str().unwrap())],
-    )
-    .ok();
-    let calls = reported_calls(&file);
-    assert!(
-        calls > 256,
-        "init makes 256 fan-out directories alone: {calls}"
-    );
+    let calls = dry_init();
     for failure in INIT_FAILURES {
         sweep(1..=calls, |k| {
             init_failing_at(k, failure);
         });
     }
+}
+
+/// The commit sweeps' dry run, in the default gate: the swept commit, on a copy of the
+/// template, moves the checkpoint ([`dry_commit`] asserts it), so the commit sweeps of the slow
+/// suite ([`fail_at_every_call_reports_honestly`], and `crash.rs`'s
+/// `kill9_during_commit_store_verifies_and_next_commit_succeeds`) fail and crash the index sync
+/// and the checkpoint's move too. A change to the checkpoint's batching or to the template fails
+/// here at once, not in the slow suite alone.
+#[test]
+fn the_commit_sweeps_reach_the_index_sync_and_the_checkpoint() {
+    dry_commit(&commit_template());
 }
 
 /// `init` failing once with `EIO` at each of its last calls: the sync of the store root that
@@ -271,31 +184,19 @@ fn fail_at_every_call_reports_honestly() {
 /// every call.
 #[test]
 fn an_init_failing_at_its_last_calls_reports_honestly() {
-    let empty = Store::empty();
-    let file = empty.tmp().join("fs-calls");
-    run(
-        &["init", empty.path()],
-        &[(FS_CALLS_ENV, file.to_str().unwrap())],
-    )
-    .ok();
-    let calls = reported_calls(&file);
-    let (created, taken_back) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    sweep(calls - 7..=calls, |k| {
-        if let Ended::Failed(error) = init_failing_at(k, "once:eio") {
-            let counter = if error["details"]["created"] == true {
-                &created
-            } else {
-                &taken_back
-            };
-            counter.fetch_add(1, Ordering::Relaxed);
+    let calls = dry_init();
+    let created = sweep(calls - 7..=calls, |k| {
+        match init_failing_at(k, "once:eio") {
+            Ended::Failed(error) => Some(error["details"]["created"] == true),
+            Ended::Succeeded(_) | Ended::Aborted => None,
         }
     });
     assert!(
-        created.load(Ordering::Relaxed) > 0,
+        created.contains(&Some(true)),
         "a read after the store was made failed"
     );
     assert!(
-        taken_back.load(Ordering::Relaxed) > 0,
+        created.contains(&Some(false)),
         "the root's sync after FORMAT failed"
     );
 }

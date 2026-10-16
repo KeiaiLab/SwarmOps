@@ -11,13 +11,15 @@
 //! exit code. Every child has a deadline ([`RUN_TIMEOUT`] unless a test gives another): one still
 //! running then is killed and fails the test with what it printed. A child is reaped however
 //! the test ends: its handle kills and waits for it when it is dropped, a panic's unwinding
-//! included.
+//! included. What the crash and error sweeps share (their runner, dry runs and commit template)
+//! is in [`sweep`].
 
 #![allow(dead_code)] // Each test binary uses the part it needs.
 
 /// The store's `FsOps` doubles, for the tests that run a store in this process.
 #[path = "../../../swarmops-store/tests/support/fs.rs"]
 pub mod doubles;
+pub mod sweep;
 
 use std::ffi::OsString;
 use std::fs;
