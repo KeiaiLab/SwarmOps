@@ -1,0 +1,51 @@
+# Weekly, grouped updates: one pull request per entry, and only to releases at least 7 days old
+# (the cooldown), so that a broken or compromised release has time to be caught first.
+# Security updates are not delayed.
+#
+# The fuzz workspace builds swarmops-core and swarmops-store as path dependencies, so the crates
+# they share (blake3, zstd, camino, ...) are locked twice, in Cargo.lock and in fuzz/Cargo.lock,
+# and `just check` builds both workspaces `--locked`. `increase-if-necessary` leaves a requirement
+# as it is while it allows the new release, so a pull request for / changes Cargo.lock alone and
+# fuzz/Cargo.lock stays valid; the /fuzz entry (`allow: all`, the shared crates being indirect
+# dependencies there) brings fuzz/Cargo.lock up to date in its own pull request. A
+# semver-incompatible release does change a requirement in Cargo.toml: that pull request fails
+# the gate until `cargo update --manifest-path fuzz/Cargo.toml -p <crate>` is pushed to it.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    versioning-strategy: increase-if-necessary
+    groups:
+      cargo:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: cargo
+    directory: /fuzz
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    versioning-strategy: increase-if-necessary
+    allow:
+      - dependency-type: all
+    groups:
+      fuzz:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"

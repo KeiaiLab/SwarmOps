@@ -1,0 +1,111 @@
+# What is too slow for every push, weekly and on demand: `just check-ci-slow` (the ignored slow
+# tests, crash sweeps included, without the 32-process contention measurements) and a 60-second
+# fuzz smoke of every fuzz target on nightly. Hardened and pinned to ubuntu-24.04 as ci.yml is.
+name: Scheduled
+
+on:
+  schedule:
+    # Mondays at 03:17 UTC: not on the hour, the busiest time, when GitHub delays scheduled runs.
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: scheduled-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  slow:
+    name: just check-ci-slow
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      # The ci profile with a 20-minute kill for a hung test (.config/nextest.toml); its JUnit
+      # report is target/nextest/ci-slow/junit.xml.
+      NEXTEST_PROFILE: ci-slow
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: just@1.58.0,cargo-nextest@0.9.146
+          fallback: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The cache CI's `check` job saves on its pushes; restored here, never saved.
+          shared-key: check
+          workspaces: |
+            . -> target
+            fuzz -> target
+          cache-bin: false
+          save-if: false
+      - run: just check-ci-slow
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-slow
+          path: target/nextest/ci-slow/junit.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
+
+  fuzz:
+    name: fuzz smoke
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install nightly
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: just@1.58.0
+          fallback: none
+      # install-action has no checksummed cargo-fuzz, so the pinned release is built from
+      # crates.io with its own lockfile.
+      - name: Install cargo-fuzz
+        run: cargo +nightly install --locked cargo-fuzz@0.13.2
+      # Every target runs even when one fails; `cargo fuzz list` reads fuzz/Cargo.toml, so a
+      # target added there joins the smoke. The recipe's `-timeout=30` fails an input that runs
+      # for more than 30 s, so a hang ends long before the job's timeout and its input is uploaded.
+      - name: Run every fuzz target for 60 seconds
+        run: |
+          targets=$(cargo +nightly fuzz list)
+          [ -n "$targets" ] || { echo "::error::cargo fuzz list found no target"; exit 1; }
+          failed=()
+          for target in $targets; do
+            echo "::group::just fuzz $target"
+            just fuzz "$target" || failed+=("$target")
+            echo "::endgroup::"
+          done
+          if [ "${#failed[@]}" -gt 0 ]; then
+            echo "::error::fuzz targets that failed: ${failed[*]}"
+            exit 1
+          fi
+      - name: Upload the crash inputs
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 30

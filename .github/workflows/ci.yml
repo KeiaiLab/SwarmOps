@@ -1,0 +1,114 @@
+# The gate: `just check`, the same recipe every session runs, on a hosted runner. `tests-pass`
+# is the one check to require: it fails unless every other job here succeeded.
+#
+# Hardening: every action is pinned to a full commit SHA (its version in the trailing comment;
+# Dependabot updates both), the token has no permissions unless a job asks for one,
+# `actions/checkout` keeps no credentials, and no workflow uses `pull_request_target`. The
+# `zizmor` job audits all of that on every run. Jobs run on ubuntu-24.04, not ubuntu-latest,
+# which moves to a new Ubuntu in November 2026: changing the image is a commit, not a surprise.
+name: CI
+
+on:
+  push:
+    branches: [stable, "feat/**"]
+  pull_request:
+    branches: [stable]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  check:
+    name: just check
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    # The default is 360 minutes: a hung test would spend them all from the plan's budget.
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      # `just check`'s workspace run uses .config/nextest.toml's `ci` profile: no fail-fast, no
+      # retries, a hung test killed after 10 minutes, a JUnit report in target/nextest/ci/.
+      NEXTEST_PROFILE: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: just@1.58.0,cargo-nextest@0.9.146,cargo-deny@0.20.2
+          # Only the action's checksummed release binaries, never a cargo-binstall fallback.
+          fallback: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The scheduled slow suite restores this cache under the same key.
+          shared-key: check
+          workspaces: |
+            . -> target
+            fuzz -> target
+          # The tools come from install-action, not from a cache.
+          cache-bin: false
+          # A pull request's cache could serve only that pull request again.
+          save-if: ${{ github.event_name != 'pull_request' }}
+          # The dependencies a failing run built are as good as a passing run's.
+          cache-on-failure: true
+      - run: just check
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-check
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
+
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Audits the workflows and dependabot.yml, online audits included (impostor commits,
+      # known-vulnerable actions) with the job's read-only token. The findings go to the log:
+      # code scanning is not available to a private repository on this plan. The image is the
+      # zizmor release the action pins as `latest`, by digest (1.30.1 at v0.6.4).
+      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+        with:
+          advanced-security: false
+      # gitoxide's `check-blocking`: a job added to this workflow must be one that `tests-pass`
+      # needs, or it would never block anything.
+      - name: tests-pass needs every other job
+        run: |
+          diff -u \
+            <(yq '.jobs | keys.[]' .github/workflows/ci.yml | sort) \
+            <({ yq '.jobs.tests-pass.needs.[]' .github/workflows/ci.yml; echo tests-pass; } | sort)
+
+  tests-pass:
+    name: tests-pass
+    if: always()
+    needs: [check, zizmor]
+    runs-on: ubuntu-24.04
+    permissions: {}
+    timeout-minutes: 5
+    steps:
+      - name: Every needed job succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<<"$NEEDS"
+          jq -e 'all(.[]; .result == "success")' <<<"$NEEDS" >/dev/null

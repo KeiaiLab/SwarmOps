@@ -10,3 +10,30 @@ contention = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(contention)'
 test-group = 'contention'
+
+# CI's profile: ci.yml sets `NEXTEST_PROFILE=ci` for `just check`, whose workspace run then uses
+# it (its one-test release run asks for the default profile). Every test runs even after one
+# fails, none is retried, and the run's JUnit report is target/nextest/ci/junit.xml. A test
+# still running after 10 minutes is killed and reported as timed out, the JUnit report naming
+# it: the longest regular test takes about 10 s on this host and under 2 minutes even with the
+# host badly overloaded, so only a hang gets there, and the job's 30-minute timeout would leave
+# no report at all. The default profile's settings and overrides (the contention group above)
+# apply to it as well.
+[profile.ci]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 10 }
+
+[profile.ci.junit]
+path = "junit.xml"
+
+# The weekly slow suite's profile (scheduled.yml runs `just check-ci-slow` with
+# `NEXTEST_PROFILE=ci-slow`): the ci profile, with a test killed after 20 minutes instead. Its
+# longest tests (the two crash sweeps, `compaction_preserves_lookups_proptest` at 2,000 cases)
+# take 20-60 s on this host and under 2 minutes on two of its CPUs with the host overloaded;
+# 20 minutes leave room for a slower runner and for longer sweeps, and stay well inside the
+# job's 45-minute timeout, so the report is written. Its JUnit report is
+# target/nextest/ci-slow/junit.xml.
+[profile.ci-slow]
+inherits = "ci"
+slow-timeout = { period = "60s", terminate-after = 20 }
