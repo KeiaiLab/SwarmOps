@@ -10,3 +10,15 @@ contention = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'binary(contention)'
 test-group = 'contention'
+
+# CI's profile: the workflows set `NEXTEST_PROFILE=ci` for the `just` recipes they run, whose
+# test runs then use it (except `just check`'s one-test release run, which asks for the default
+# profile). Every test runs even after one fails, none is retried, and the run's JUnit report
+# is target/nextest/ci/junit.xml. The default profile's settings and overrides (the contention
+# group above) apply to it as well.
+[profile.ci]
+fail-fast = false
+retries = 0
+
+[profile.ci.junit]
+path = "junit.xml"

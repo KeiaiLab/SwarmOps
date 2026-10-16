@@ -1,5 +1,7 @@
 # SwarmOps
 
+[![CI](https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml/badge.svg?branch=stable)](https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml?query=branch%3Astable)
+
 Source control for coding-agent swarms, in Rust: many agents commit to one store at once, every
 command answers with one JSON envelope and a fixed exit code, and a crash at any point of a
 write leaves a store that verifies clean. This is milestone M1: the native store, the repository

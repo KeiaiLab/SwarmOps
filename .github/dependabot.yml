@@ -1,0 +1,29 @@
+# Weekly, grouped updates: one pull request per ecosystem, and only to releases at least 7 days
+# old (the cooldown), so that a broken or compromised release has time to be caught first.
+# Security updates are not delayed.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /fuzz
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      cargo:
+        patterns: ["*"]
+    commit-message:
+      prefix: "chore(deps)"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
