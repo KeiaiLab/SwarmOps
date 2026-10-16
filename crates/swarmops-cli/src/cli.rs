@@ -172,6 +172,16 @@ pub enum Command {
         #[arg(long)]
         deep: bool,
     },
+    /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
+    ///
+    /// One tool per operation (repo_info, read_file, read_tree, show, log, ref_list, ref_set,
+    /// ref_delete, commit, verify), each taking the operation's request as its arguments and
+    /// returning the envelope the other commands print. The store and the identity are the
+    /// server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28,
+    /// and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope:
+    /// stdout carries the protocol until stdin ends, and a command line it refuses has its
+    /// envelope on stderr.
+    Mcp,
 }
 
 /// `ref`'s operations.
@@ -217,6 +227,18 @@ pub enum Parsed {
         /// The global flags, as far as they could be read.
         global: Global,
     },
+}
+
+impl Parsed {
+    /// Whether the line runs `swarmops mcp`, as far as it could be read: a command to run, or a
+    /// usage error in its arguments. Its stdout belongs to the protocol.
+    pub fn runs_mcp(&self) -> bool {
+        match self {
+            Parsed::Run(_, op) => *op == "mcp",
+            Parsed::Usage { path, .. } => path.first().is_some_and(|name| name == "mcp"),
+            Parsed::Text(_) => false,
+        }
+    }
 }
 
 /// Reads the command line `args`, the program's name first.
@@ -277,6 +299,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
         ["verify"] => "verify",
+        ["mcp"] => "mcp",
         _ => return None,
     })
 }
@@ -380,10 +403,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 13);
+        assert_eq!(ops.len(), 14);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 13, "two subcommands name one op");
+        assert_eq!(ops.len(), 14, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
     }
 
@@ -445,6 +468,21 @@ mod tests {
         }
         assert!(matches!(parse(&args(&["--version"])), Parsed::Text(_)));
         assert!(matches!(parse(&args(&["help", "log"])), Parsed::Text(_)));
+    }
+
+    #[test]
+    fn a_line_that_runs_mcp_is_known_as_one() {
+        for line in [
+            &["mcp"][..],
+            &["--repo", "s", "mcp"],
+            &["mcp", "--frob"],
+            &["mcp", "x"],
+        ] {
+            assert!(parse(&args(line)).runs_mcp(), "{line:?}");
+        }
+        for line in [&["info"][..], &["mcp", "--help"], &["frobnicate"], &[]] {
+            assert!(!parse(&args(line)).runs_mcp(), "{line:?}");
+        }
     }
 
     #[test]

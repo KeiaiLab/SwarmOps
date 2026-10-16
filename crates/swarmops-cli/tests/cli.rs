@@ -331,6 +331,53 @@ fn ref_set_expect_mismatch_exits_4() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// A `ref set` to what the ref holds already is a replay whatever it expects: `already_applied`,
+/// and nothing is written, the journal as long as before and the ref's version where it was.
+/// That covers the same move made again (its `--expect` stale by then) and a move to the
+/// target it expects. A matching `--expect` with another target still moves the ref.
+#[test]
+fn a_move_to_the_current_target_is_a_replay() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "a", "c1");
+    let c2 = s.commit(&store, Some(&c1), "b.txt", "b", "c2");
+    let journal = Layout::new(Utf8PathBuf::from(&store)).journal_log();
+    let set = |s: &mut Session, args: &[&str]| {
+        let mut all = vec!["--repo", &store, "--as", AGENT, "ref", "set"];
+        all.extend_from_slice(args);
+        s.run(&all)
+    };
+    let version = |s: &mut Session| {
+        let list = s.run(&["--repo", &store, "ref", "list"]);
+        list["result"]["refs"][0]["version"].clone()
+    };
+
+    set(&mut s, &["main", &c1, "--create"]);
+    let moved = set(&mut s, &["main", &c2, "--expect", &c1]);
+    assert_eq!(moved["result"]["already_applied"], false);
+    assert_eq!(version(&mut s), 2);
+    let written = fs::metadata(&journal).unwrap().len();
+    for expect in [&c1, &c1, &c2, &c2] {
+        let replay = set(&mut s, &["main", &c2, "--expect", expect]);
+        assert_eq!(
+            replay["result"],
+            json!({"name": "main", "old": expect, "new": c2, "already_applied": true}),
+            "--expect {expect}"
+        );
+        assert_eq!(version(&mut s), 2, "--expect {expect}");
+        assert_eq!(
+            fs::metadata(&journal).unwrap().len(),
+            written,
+            "nothing written"
+        );
+    }
+    let back = set(&mut s, &["main", &c1, "--expect", &c2]);
+    assert_eq!(back["result"]["already_applied"], false);
+    assert_eq!(version(&mut s), 3);
+    assert!(fs::metadata(&journal).unwrap().len() > written);
+}
+
 #[test]
 fn missing_identity_exits_5() {
     let mut s = Session::new();

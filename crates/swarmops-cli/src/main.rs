@@ -11,6 +11,11 @@
 //!   stderr.
 //! - stdout carries the envelope, or with `--human` its text rendering, and nothing else;
 //!   diagnostics go to stderr, and there are none by default.
+//! - `mcp` is the one command that prints no envelope on stdout: it serves the operations over
+//!   MCP on stdin and stdout until stdin ends, exiting 0 (see [`mcp`]). Its stdout belongs to
+//!   the protocol, so what it would print before it serves (the envelope of a command line it
+//!   refuses, or of a panic) goes to stderr instead, with the same exit code. A panic while the
+//!   line itself is read comes before anything knows the line runs `mcp`.
 //!
 //! The envelope's `op` is the operation's library name (`cat` is `read_file`), or `swarmops`
 //! for a command line that names no operation.
@@ -18,6 +23,7 @@
 mod cli;
 mod commands;
 mod context;
+mod mcp;
 mod output;
 
 use std::ffi::OsString;
@@ -25,8 +31,6 @@ use std::io::{self, IsTerminal as _, Write as _};
 use std::panic::{self, AssertUnwindSafe};
 use std::process::ExitCode;
 use std::time::Instant;
-
-use swarmops_api::{ErrorCode, OpError};
 
 use crate::cli::Parsed;
 use crate::commands::{Ctx, Used};
@@ -48,11 +52,22 @@ fn main() -> ExitCode {
 }
 
 /// What the command line asks for, done: the envelope to print, or nothing more for help or
-/// the version, which clap has printed.
+/// the version, which clap has printed. For a line that runs `mcp`, the envelope has gone to
+/// stderr ([`on_stderr`]).
 fn respond(started: Instant, terminal: bool) -> Printed {
     let args: Vec<OsString> = std::env::args_os().collect();
+    let parsed = cli::parse(&args);
+    if parsed.runs_mcp() {
+        on_stderr(answer(parsed, started, terminal))
+    } else {
+        answer(parsed, started, terminal)
+    }
+}
+
+/// What `parsed` asks for, done: [`respond`] before it says where the envelope goes.
+fn answer(parsed: Parsed, started: Instant, terminal: bool) -> Printed {
     let env = |name: &str| std::env::var_os(name);
-    match cli::parse(&args) {
+    match parsed {
         Parsed::Text(text) => {
             // Text for a person, not an envelope, so a write that fails is not reported.
             let _ = text.print();
@@ -92,6 +107,20 @@ fn respond(started: Instant, terminal: bool) -> Printed {
     }
 }
 
+/// `printed`, with what it holds for stdout written to stderr instead: what `swarmops mcp` prints
+/// before it serves, since its stdout belongs to the protocol. The exit code stays the same.
+fn on_stderr(printed: Printed) -> Printed {
+    let Printed { stdout, exit } = printed;
+    if !stdout.is_empty() {
+        // The exit code says the command failed even if this write does not reach anyone.
+        let _ = io::stderr().write_all(stdout.as_bytes());
+    }
+    Printed {
+        stdout: String::new(),
+        exit,
+    }
+}
+
 /// Runs `run`, which prints operation `op`'s envelope, and turns a panic in it into an
 /// `E_INTERNAL` envelope (exit 1) with the panic's message, and the `meta.repo` and
 /// `meta.resolved` of what the command had `used` (none before there is a command).
@@ -103,18 +132,7 @@ fn guarded(
     run: impl FnOnce() -> Printed,
 ) -> Printed {
     panic::catch_unwind(AssertUnwindSafe(run)).unwrap_or_else(|payload| {
-        let message = payload
-            .downcast_ref::<&str>()
-            .map(|message| (*message).to_owned())
-            .or_else(|| payload.downcast_ref::<String>().cloned())
-            .unwrap_or_else(|| "a panic without a message".to_owned());
-        let error = OpError::new(
-            ErrorCode::Internal,
-            format!(
-                "swarmops panicked, a bug (stderr has where): {}",
-                output::printable(&message)
-            ),
-        );
+        let error = commands::panicked(&*payload);
         match used {
             Some(used) => commands::failed_after(op, error, used, format, started),
             None => commands::failed(op, error, format, started),
@@ -150,7 +168,7 @@ mod tests {
     use camino::Utf8Path;
     use serde_json::{Value, json};
     use swarmops_api::{
-        ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, ShowReq, StoreOps,
+        ChangeInput, ChangeOp, CommitReq, ContentInput, Identity, OpError, ShowReq, StoreOps,
     };
     use swarmops_ops::LocalOps;
 

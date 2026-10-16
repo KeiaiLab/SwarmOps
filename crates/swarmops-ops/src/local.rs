@@ -2,9 +2,9 @@
 //! local filesystem through `swarmops-repo` (operations spec §1, §7). Its documentation says
 //! what each operation does and how failures map to error codes.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Mutex, PoisonError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -19,7 +19,7 @@ use swarmops_api::{
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, RepoPath, Signature, TreeEntry,
 };
-use swarmops_repo::{CasResult, CommitRequest, LocalRepo, RepoError, StoredChangeset};
+use swarmops_repo::{CasOutcome, CasResult, CommitRequest, LocalRepo, RepoError, StoredChangeset};
 
 use crate::content;
 use crate::error::{During, details, error, hint, one_line, op, repo_error, shell_word};
@@ -34,9 +34,12 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///
 /// Each revision a request names is resolved once, by the repository's grammar (`main`,
 /// `release/<name>`, a full changeset id or a unique prefix of 12 or more of its hex digits,
-/// then any `~N` suffixes), and the operation works on the changeset it named. What each
-/// revision named is kept for [`LocalOps::take_resolved`], which the CLI reports as
-/// `meta.resolved`; so is `main` when an operation used it by default.
+/// then any `~N` suffixes), and the operation works on the changeset it named. A request made
+/// through [`LocalOps::recording`] records what each revision named, and `main` when an
+/// operation used it by default, in the [`Resolved`] of that request alone, which the CLI and
+/// the MCP server report as `meta.resolved`: requests that share a `LocalOps`, from one thread
+/// or from several, never see each other's. An operation called on `LocalOps` itself records
+/// nothing.
 ///
 /// # Operations
 ///
@@ -50,7 +53,9 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   in the caller's process: `LocalOps` runs on the client. A server that exposes
 ///   [`StoreOps`] over a wire must refuse [`ContentInput::File`](swarmops_api::ContentInput)
 ///   instead of reading a path its caller names (M10 adds the client-side pass that turns such
-///   content into bytes before a request leaves the client). A metadata key may not end in
+///   content into bytes before a request leaves the client); `swarmops mcp` is no such server,
+///   since its caller starts it, as its own user, to serve that caller alone over stdio, and it
+///   reads such content as the CLI does. A metadata key may not end in
 ///   `:b64`, which `show` reserves (`E_INVALID_ARG`).
 /// - `read_file` returns at most `max_bytes` bytes from the file's start: UTF-8 text when they
 ///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
@@ -68,8 +73,11 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   first parent of the changeset it names, which must be a full id the store holds; a page
 ///   is `truncated` when older history follows its last entry.
 /// - `ref_set` and `ref_delete` move a ref by compare-and-swap, recorded for the caller's agent.
-///   A move that finds the ref as it asks already (at `new` for `ref_set`; gone, or never there,
-///   for `ref_delete`) is a replay: `already_applied`, with the response the move gave.
+///   A move that finds the ref as it asks already (at `new` for `ref_set`, whatever it expected;
+///   gone, or never there, for `ref_delete`) is a replay: `already_applied`, with the response
+///   the move gave, and nothing is written, no journal frame and no new version of the ref. So a
+///   `ref_set` whose `new` is the target it expects never moves the ref: it is a replay where
+///   the ref holds that target, and a mismatch where it holds another.
 /// - `verify` checks the store and lists each problem as one line.
 ///
 /// Limits of 0 (`limit`, `max_changes`) are `E_INVALID_ARG`.
@@ -126,8 +134,6 @@ pub struct LocalOps {
     repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.
     store_path: Utf8PathBuf,
-    /// What each revision resolved since the last [`LocalOps::take_resolved`] named.
-    resolved: Mutex<BTreeMap<String, String>>,
 }
 
 impl fmt::Debug for LocalOps {
@@ -161,47 +167,20 @@ impl LocalOps {
         &self.store_path
     }
 
-    /// The revisions resolved since the last call, each as given and the full changeset id it
-    /// named: what the CLI reports as `meta.resolved`. Taking them empties the record, so one
-    /// handle can serve several commands.
-    pub fn take_resolved(&self) -> BTreeMap<String, String> {
-        std::mem::take(&mut *self.resolved.lock().unwrap_or_else(PoisonError::into_inner))
+    /// The operations of one request: each revision they resolve is recorded in `resolved`,
+    /// and in no other request's.
+    pub fn recording<'a>(&'a self, resolved: &'a Resolved) -> Recording<'a> {
+        Recording {
+            ops: self,
+            resolved,
+        }
     }
 
     fn with_repo(repo: LocalRepo, path: &Utf8Path) -> LocalOps {
         LocalOps {
             repo,
             store_path: path.to_owned(),
-            resolved: Mutex::default(),
         }
-    }
-
-    /// The changeset `rev` names, recorded for [`LocalOps::take_resolved`].
-    fn resolve(&self, rev: &Rev) -> Result<ChangesetId, OpError> {
-        let id = self.repo.resolve(rev.as_str()).map_err(op)?;
-        self.record(rev.as_str(), id);
-        Ok(id)
-    }
-
-    /// What `main` names, if it exists, recorded as resolved: what an operation uses when its
-    /// request names no revision.
-    fn main_head(&self) -> Result<Option<ChangesetId>, OpError> {
-        let head = self
-            .repo
-            .get_ref("main")
-            .map_err(op)?
-            .map(|state| state.target);
-        if let Some(id) = head {
-            self.record("main", id);
-        }
-        Ok(head)
-    }
-
-    fn record(&self, rev: &str, id: ChangesetId) {
-        self.resolved
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(rev.to_owned(), id.to_string());
     }
 
     /// Changeset `id`, which a revision has just named.
@@ -272,9 +251,62 @@ impl LocalOps {
     }
 }
 
-impl StoreOps for LocalOps {
+/// The revisions one request resolved: each as given, and the full changeset id it named. The
+/// CLI and the MCP server report it as `meta.resolved`.
+///
+/// Each request has its own: [`LocalOps::recording`] records into it what that request's
+/// operations resolve, and nothing else does, so that what one request resolved never shows in
+/// another's, also when the two share a `LocalOps` across threads.
+#[derive(Debug, Default)]
+pub struct Resolved(RefCell<BTreeMap<String, String>>);
+
+impl Resolved {
+    /// What has been recorded, each revision as given and the id it named; taking it empties
+    /// the record.
+    pub fn take(&self) -> BTreeMap<String, String> {
+        self.0.take()
+    }
+
+    fn record(&self, rev: &str, id: ChangesetId) {
+        self.0.borrow_mut().insert(rev.to_owned(), id.to_string());
+    }
+}
+
+/// [`LocalOps`]'s operations as one request: [`StoreOps`], recording each revision they resolve
+/// in the request's [`Resolved`] ([`LocalOps::recording`]).
+#[derive(Debug, Clone, Copy)]
+pub struct Recording<'a> {
+    ops: &'a LocalOps,
+    resolved: &'a Resolved,
+}
+
+impl Recording<'_> {
+    /// The changeset `rev` names, recorded as resolved.
+    fn resolve(&self, rev: &Rev) -> Result<ChangesetId, OpError> {
+        let id = self.ops.repo.resolve(rev.as_str()).map_err(op)?;
+        self.resolved.record(rev.as_str(), id);
+        Ok(id)
+    }
+
+    /// What `main` names, if it exists, recorded as resolved: what an operation uses when its
+    /// request names no revision.
+    fn main_head(&self) -> Result<Option<ChangesetId>, OpError> {
+        let head = self
+            .ops
+            .repo
+            .get_ref("main")
+            .map_err(op)?
+            .map(|state| state.target);
+        if let Some(id) = head {
+            self.resolved.record("main", id);
+        }
+        Ok(head)
+    }
+}
+
+impl StoreOps for Recording<'_> {
     fn repo_info(&self, _req: InfoReq) -> Result<RepoInfo, OpError> {
-        let info = self.repo.info().map_err(op)?;
+        let info = self.ops.repo.info().map_err(op)?;
         Ok(RepoInfo {
             repo_id: info.repo_id,
             name: info.name,
@@ -304,6 +336,7 @@ impl StoreOps for LocalOps {
         }
         content::check_metadata(&metadata)?;
         let outcome = self
+            .ops
             .repo
             .commit(CommitRequest {
                 parents: parent.into_iter().collect(),
@@ -333,9 +366,10 @@ impl StoreOps for LocalOps {
         } = req;
         let cs = self.resolve(&rev)?;
         let repo_path = content::repo_path(&path)?;
-        let Some((kind, blob, bytes)) = self.repo.read_blob_at(cs, &repo_path).map_err(op)? else {
+        let Some((kind, blob, bytes)) = self.ops.repo.read_blob_at(cs, &repo_path).map_err(op)?
+        else {
             // No file is there: what is, if anything, can only be a directory.
-            return Err(match self.entry(cs, &repo_path)? {
+            return Err(match self.ops.entry(cs, &repo_path)? {
                 Some(_) => error(
                     ErrorCode::IsDir,
                     format!("{path:?} is a directory at {rev}"),
@@ -381,8 +415,8 @@ impl StoreOps for LocalOps {
                 Some(RepoPath::new(trimmed).or_else(|_| content::repo_path(path))?)
             }
         };
-        let Some(entries) = self.repo.list_tree(cs, dir.as_ref()).map_err(op)? else {
-            return Err(self.no_directory(cs, &rev, dir.as_ref()));
+        let Some(entries) = self.ops.repo.list_tree(cs, dir.as_ref()).map_err(op)? else {
+            return Err(self.ops.no_directory(cs, &rev, dir.as_ref()));
         };
         let start = cursor.as_deref().map_or(0, |after| {
             entries.partition_point(|entry| entry.name.as_bytes() <= after.as_bytes())
@@ -405,7 +439,7 @@ impl StoreOps for LocalOps {
         at_least_one("max_changes", max_changes)?;
         let StoredChangeset {
             id, seq, changeset, ..
-        } = self.stored(self.resolve(&rev)?)?;
+        } = self.ops.stored(self.resolve(&rev)?)?;
         Ok(ChangesetDetail {
             id: id.to_string(),
             seq,
@@ -438,7 +472,7 @@ impl StoreOps for LocalOps {
         let LogReq { rev, limit, cursor } = req;
         at_least_one("limit", limit)?;
         let from = match cursor {
-            Some(cursor) => match self.after_cursor(&cursor)? {
+            Some(cursor) => match self.ops.after_cursor(&cursor)? {
                 Some(parent) => parent,
                 None => {
                     return Ok(LogPage {
@@ -450,7 +484,7 @@ impl StoreOps for LocalOps {
             },
             None => self.resolve(&rev.unwrap_or_else(|| Rev::from("main")))?,
         };
-        let changesets = self.repo.log_first_parent(from, limit).map_err(op)?;
+        let changesets = self.ops.repo.log_first_parent(from, limit).map_err(op)?;
         // A full page whose last changeset has a parent has older history after it.
         let last = changesets
             .last()
@@ -463,7 +497,7 @@ impl StoreOps for LocalOps {
     }
 
     fn ref_list(&self, _req: RefListReq) -> Result<RefListResp, OpError> {
-        let refs = self.repo.list_refs().map_err(op)?;
+        let refs = self.ops.repo.list_refs().map_err(op)?;
         Ok(RefListResp {
             refs: refs
                 .into_iter()
@@ -498,10 +532,26 @@ impl StoreOps for LocalOps {
             Some(rev) => Some(self.resolve(rev)?),
             None => None,
         };
-        let outcome = self
-            .repo
-            .cas_ref(&name, expected, Some(new), who.agent())
-            .map_err(op)?;
+        let outcome = if expected == Some(new) {
+            // A move to the target it expects moves nothing: the ref holds it (a replay) or does
+            // not (a mismatch). Either way nothing is written, where the store would record a
+            // no-op move, its version counting up.
+            let current = self.ops.repo.get_ref(&name).map_err(op)?;
+            CasOutcome {
+                result: CasResult::Mismatch {
+                    actual: current.map(|state| state.target),
+                },
+                warnings: Vec::new(),
+            }
+        } else {
+            // A ref that holds `new` already, whatever `expected` says, is a mismatch whose actual
+            // target is `new`: the compare-and-swap writes nothing, and the match below reads it
+            // as a replay.
+            self.ops
+                .repo
+                .cas_ref(&name, expected, Some(new), who.agent())
+                .map_err(op)?
+        };
         let replay = match outcome.result {
             CasResult::Applied { .. } => false,
             CasResult::Mismatch { actual } if actual == Some(new) => true,
@@ -535,6 +585,7 @@ impl StoreOps for LocalOps {
         let RefDeleteReq { name, expected_old } = req;
         let expected = self.resolve(&expected_old)?;
         let outcome = self
+            .ops
             .repo
             .cas_ref(&name, Some(expected), None, who.agent())
             .map_err(op)?;
@@ -560,7 +611,7 @@ impl StoreOps for LocalOps {
     }
 
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {
-        let report = self.repo.verify(req.deep).map_err(op)?;
+        let report = self.ops.repo.verify(req.deep).map_err(op)?;
         Ok(VerifyReport {
             objects_checked: report.objects_checked,
             changesets_checked: report.changesets_checked,
@@ -570,6 +621,50 @@ impl StoreOps for LocalOps {
                 .map(|problem| one_line(problem.to_string()))
                 .collect(),
         })
+    }
+}
+
+/// Each operation as a request of its own, whose resolved revisions go unrecorded: to report
+/// them, call it through [`LocalOps::recording`].
+impl StoreOps for LocalOps {
+    fn repo_info(&self, req: InfoReq) -> Result<RepoInfo, OpError> {
+        self.recording(&Resolved::default()).repo_info(req)
+    }
+
+    fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError> {
+        self.recording(&Resolved::default()).commit(who, req)
+    }
+
+    fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError> {
+        self.recording(&Resolved::default()).read_file(req)
+    }
+
+    fn read_tree(&self, req: ReadTreeReq) -> Result<TreeListing, OpError> {
+        self.recording(&Resolved::default()).read_tree(req)
+    }
+
+    fn show(&self, req: ShowReq) -> Result<ChangesetDetail, OpError> {
+        self.recording(&Resolved::default()).show(req)
+    }
+
+    fn log(&self, req: LogReq) -> Result<LogPage, OpError> {
+        self.recording(&Resolved::default()).log(req)
+    }
+
+    fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError> {
+        self.recording(&Resolved::default()).ref_list(req)
+    }
+
+    fn ref_set(&self, who: &Identity, req: RefSetReq) -> Result<RefSetResp, OpError> {
+        self.recording(&Resolved::default()).ref_set(who, req)
+    }
+
+    fn ref_delete(&self, who: &Identity, req: RefDeleteReq) -> Result<RefSetResp, OpError> {
+        self.recording(&Resolved::default()).ref_delete(who, req)
+    }
+
+    fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {
+        self.recording(&Resolved::default()).verify(req)
     }
 }
 

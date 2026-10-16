@@ -29,10 +29,10 @@ use swarmops_api::{
 use swarmops_core::{
     ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
 };
-use swarmops_ops::LocalOps;
 use swarmops_ops::identity::{
     AGENT_ENV, RUN_ID_ENV, identity_info, require_identity, resolve_identity_from,
 };
+use swarmops_ops::{LocalOps, Resolved};
 use swarmops_repo::{Change, CommitRequest, LocalRepo};
 use swarmops_store::{ChangesetMeta, Layout, MetaStore};
 use tempfile::TempDir;
@@ -1098,37 +1098,54 @@ fn resolve_errors_map_to_codes() {
 #[test]
 fn resolved_revisions_are_reported_once() {
     let (_dir, _root, ops) = new_store();
-    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let resolved = Resolved::default();
+    let request = ops.recording(&resolved);
+    let c1 = request
+        .commit(&agent(), commit_req(None, vec![text("f", "1")]))
+        .unwrap()
+        .changeset;
     // A root commit resolves nothing.
-    assert_eq!(ops.take_resolved(), BTreeMap::new());
-    ops.ref_set(&agent(), set("main", &c1[..12], None, true))
+    assert_eq!(resolved.take(), BTreeMap::new());
+    request
+        .ref_set(&agent(), set("main", &c1[..12], None, true))
         .unwrap();
     assert_eq!(
-        ops.take_resolved(),
+        resolved.take(),
         BTreeMap::from([(c1[..12].to_owned(), c1.clone())])
     );
-    ops.read_file(cat("main", "f")).unwrap();
+    request.read_file(cat("main", "f")).unwrap();
     assert_eq!(
-        ops.take_resolved(),
+        resolved.take(),
         BTreeMap::from([("main".to_owned(), c1.clone())])
     );
-    assert!(ops.take_resolved().is_empty(), "taking empties it");
+    assert!(resolved.take().is_empty(), "taking empties it");
 
     // A commit with no parent, and a log with no revision, resolve `main`.
-    let c2 = commit(&ops, None, vec![text("f", "2")]);
+    let c2 = request
+        .commit(&agent(), commit_req(None, vec![text("f", "2")]))
+        .unwrap()
+        .changeset;
     assert_eq!(
-        ops.take_resolved(),
+        resolved.take(),
         BTreeMap::from([("main".to_owned(), c1.clone())])
     );
-    ops.log(log_req(None)).unwrap();
-    ops.show(show(&format!("{c2}~1"))).unwrap();
+    request.log(log_req(None)).unwrap();
+    request.show(show(&format!("{c2}~1"))).unwrap();
     assert_eq!(
-        ops.take_resolved(),
+        resolved.take(),
         BTreeMap::from([
             ("main".to_owned(), c1.clone()),
             (format!("{c2}~1"), c1.clone()),
         ])
     );
+
+    // Each request records into its own record only, and an operation called on `LocalOps`
+    // itself into none.
+    let other = Resolved::default();
+    ops.recording(&other).show(show(&c2)).unwrap();
+    ops.read_file(cat("main", "f")).unwrap();
+    assert_eq!(other.take(), BTreeMap::from([(c2.clone(), c2.clone())]));
+    assert!(resolved.take().is_empty());
 }
 
 #[test]

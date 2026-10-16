@@ -51,6 +51,7 @@ swarmops verify --deep
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
+| `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([below](#mcp)). |
 
 A revision is `main`, `release/<name>`, a changeset id or a unique prefix of 12 or more of its
 hex digits, then any number of `~N` (the N-th first parent). A change list is a JSON array of
@@ -71,8 +72,9 @@ moved each ref); without one, a mutation fails with `E_IDENTITY_REQUIRED` (exit 
 ### Output and exit codes
 
 Every command prints exactly one JSON envelope on stdout (only `--help` and `--version` print
-plain text): pretty on a terminal, compact otherwise (`--pretty[=BOOL]` decides), or a short
-text rendering with `--human` or `SWARMOPS_FORMAT=human`.
+plain text, and `mcp` speaks MCP there instead): pretty on a terminal, compact otherwise
+(`--pretty[=BOOL]` decides), or a short text rendering with `--human` or
+`SWARMOPS_FORMAT=human`.
 
 ```json
 {"ok":true,"op":"read_file","api":1,"result":{"blob":"f5f5…","size":14,"kind":"file","encoding":"utf8","content":"pub fn f() {}\n","truncated":false},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":0,"resolved":{"main":"014c…"},"auth":"trust"}}
@@ -106,6 +108,66 @@ how far it is materialized in `journal.ckpt`) that is its source of truth, the c
 built from it (`idx/`, `parents.log`, `sorted/`), one file per ref (`refs/`), and the lock that
 serializes writers (`lock`). Every object is durable before any metadata names it, and a write
 commits when its journal frame is durable, so the next write repairs whatever a crash cut short.
+
+## MCP
+
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
+agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
+as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
+`ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
+`inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
+definitions it refers to written in place. Its result is the envelope the CLI prints for that
+request, as `structuredContent` and as text, and a failed operation sets `isError`, with the
+envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
+to clients that open with `initialize`.
+
+Register it with Claude Code:
+
+```sh
+claude mcp add swarmops -- swarmops mcp --repo <store> --as <agent>
+```
+
+or give a project a `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "swarmops": {
+      "command": "swarmops",
+      "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
+      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT}"}
+    }
+  }
+}
+```
+
+A project's `.mcp.json` is shared by every agent that opens the project, so it takes each
+agent's identity from that agent's own `SWARMOPS_AGENT`, which Claude Code expands into the
+server's environment, rather than giving all of them one `--as`.
+
+The store and the identity are the server's, as they are a command's: `--repo`, else
+`SWARMOPS_REPO`, and `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`. No call can name
+another identity: every commit and ref move is recorded for the server's agent, and without one
+they fail with `E_IDENTITY_REQUIRED`. The client starts the server as its own user, so the
+server reads `{"file": "<path>"}` content as the CLI does, a relative path from its working
+directory: give absolute paths, the store's too. It opens the store for each call, and so sees
+what other agents commit meanwhile.
+
+Two rules matter more to an agent than to a person at the CLI:
+
+- `ref_set` and `ref_delete` take `expected_old` as the full changeset id the ref held when the
+  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name or a relative
+  revision such as `main~1` is resolved when the call runs, so it always matches and the
+  compare-and-swap protects nothing: the server refuses one with `E_INVALID_ARG`. The CLI's
+  `--expect` still takes any revision, and its help says why not to.
+- Clients cut long tool results (Claude Code at 25,000 tokens by default), and each result holds
+  its envelope twice, so an agent should ask for little: `max_bytes` of 32 KiB or less for
+  `read_file`, a `limit` of 100 or less for `read_tree` and `log`, paging on with the `cursor` a
+  result returns, and `max_changes` of 100 or less for `show`. The tools' descriptions say so;
+  the operations' own defaults stay as they are.
+
+A command line `swarmops mcp` refuses starts no server: its envelope goes to stderr, never to
+stdout, which belongs to the protocol.
 
 ## Development
 
