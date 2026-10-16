@@ -141,6 +141,22 @@ need the hooks. Every other build, `cargo build --release` included, ignores the
   classification and approvals, and the landing gate (after M1).
 - `docs/superpowers/plans/`: the milestone plans; `docs/perf.md`: the measurements.
 
+## Project
+
+- [CHANGELOG.md](CHANGELOG.md): what has changed; nothing is released yet.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how changes are made, the tests' rules, and how AI
+  assistance is attributed. [AGENTS.md](AGENTS.md) holds the rules every coding agent here
+  follows.
+- [SECURITY.md](SECURITY.md): how to report a vulnerability privately, and what counts as one.
+- [docs/architecture.md](docs/architecture.md): the design in English, as an overview of the
+  Korean specs.
+- [docs/known-limitations.md](docs/known-limitations.md): what M1 leaves open, and which
+  milestone takes each item.
+- [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md): what
+  stays compatible. [docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md):
+  the Rust version and the platforms SwarmOps supports.
+- [RELEASE.md](RELEASE.md): the release checklist.
+
 ## License
 
 SwarmOps is released under the [MIT License](LICENSE).

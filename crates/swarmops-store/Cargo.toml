@@ -1,11 +1,12 @@
 [package]
 name = "swarmops-store"
-description = "SwarmOps store: loose object files, metadata, fsck and gc"
+description = "SwarmOps store: loose object files and the native metadata store (journal, changeset index, refs)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true

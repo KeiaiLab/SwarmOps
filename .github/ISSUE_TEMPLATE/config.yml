@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md
+    about: Never in a public issue. SECURITY.md says how to report one privately.
+  - name: The design and its known limitations
+    url: https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md
+    about: What M1 leaves open, and the milestone that takes each item.

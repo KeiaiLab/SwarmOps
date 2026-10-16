@@ -1,0 +1,75 @@
+name: Bug report
+description: SwarmOps did something wrong, or failed in a way it should not.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A security vulnerability does not belong here: [SECURITY.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md) says how to report one privately. Check [docs/known-limitations.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md) too: the problem may be known already. If you are an AI agent filing this through a person's account, say so in the first line.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, and what SwarmOps did.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: textarea
+    id: commands
+    attributes:
+      label: Commands and envelopes
+      description: The commands you ran and the JSON envelope each printed (`error.code`, `details` and `hint` matter most). Remove paths or content you cannot share.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: verify
+    attributes:
+      label: "`swarmops verify --deep`"
+      description: Its envelope on the affected store, if a store is involved.
+      render: json
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Store (objects, journal, index, refs, recovery)
+        - Commands, the envelope or error codes
+        - API schema or the MCP server
+        - Performance
+        - Docs or specs
+        - Build, tests or CI
+        - Other, or not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: crash
+    attributes:
+      label: Did anything interrupt SwarmOps first?
+      options:
+        - "No"
+        - A process was killed (kill -9, OOM, timeout)
+        - Power loss, or a VM or WSL reset
+        - The disk was full, or reported I/O errors
+        - Not sure
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: SwarmOps commit
+      description: The commit the binary was built from (`git rev-parse --short HEAD`).
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Kernel (`uname -r`), the store's filesystem (`stat -f -c %T <store>`), and how many processes or agents shared the store.
+    validations:
+      required: true

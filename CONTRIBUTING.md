@@ -1,0 +1,176 @@
+# Contributing to SwarmOps
+
+SwarmOps is pre-release: nothing is published yet, and most of its code is written by coding
+agents working for a human maintainer. This page is how changes get made, for people and agents
+alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here expands on it.
+
+## Before you change anything
+
+- **The specs are the authority.** `docs/superpowers/specs/2026-10-15-swarmops-design.md` and
+  its three sub-specs decide how SwarmOps behaves (they are in Korean;
+  [docs/architecture.md](docs/architecture.md) is an English overview). A change that changes
+  behaviour updates the spec paragraph that owns it in the same change. If the code and a spec
+  disagree, one of them is a bug: say which, and fix it.
+- **The hash contract never changes in place.** The canonical byte layouts and the hash recipe
+  in the storage-core spec (§1) define every object id. A new layout gets a new kind/version
+  header; the golden vectors in `crates/swarmops-core/tests/golden/` are regenerated only on
+  purpose (`SWARMOPS_REGEN_GOLDEN=1`), and only together with such a header. A change to the
+  on-disk layout of `FORMAT 1` (journal frames, records, index and ref files) needs a `FORMAT`
+  bump. [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md)
+  lists every public surface and how each one changes.
+- **Work from a plan.** Each milestone has a plan in `docs/superpowers/plans/` with its tasks and
+  acceptance tests, and cites the spec sections it implements. Small fixes need no plan.
+- **Check what is already known.** [docs/known-limitations.md](docs/known-limitations.md) lists
+  what M1 leaves open and the milestone that is meant to close each item.
+
+## Setup
+
+Linux only ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)).
+Install Rust with rustup; `rust-toolchain.toml` selects Rust 1.99.0 with rustfmt and clippy.
+Then the tools the gates use:
+
+```sh
+cargo install --locked just cargo-nextest cargo-deny
+cargo install --locked cargo-insta     # to review snapshot changes
+cargo install --locked cargo-fuzz      # only for fuzzing, which also needs a nightly toolchain
+```
+
+`just check` lints the fuzz crate too, and on a cold cache that compiles libFuzzer's C++
+sources, so it needs a C++ compiler (`c++`).
+
+## Branches and landing
+
+- `stable` is the trunk and the default branch. Work happens on branches; `stable` receives
+  only merges and fast-forwards.
+- Work on a `feat/<topic>` branch cut from `stable`, and land it with a merge or a fast-forward
+  onto `stable`, either through a pull request to `stable` or locally, then push.
+- A milestone with several tasks gets an integration branch (for example
+  `feat/m1-5-hardening`); each task works on its own branch (`feat/m1-5-t4`), usually in a git
+  worktree under `.worktrees/` (git-ignored), and merges into the integration branch, which lands
+  on `stable` after a final review.
+- Merge commits say what they bring and from where: `merge: <what> (<branch>)`. Delete a branch
+  once it has landed (`git branch -d`).
+
+## The definition of done: `just check`
+
+A change is done when `just check` passes on it. It runs, in order:
+
+1. `cargo fmt --check`, for the workspace and for the fuzz crate;
+2. `cargo clippy -D warnings`, for the workspace (every target, every feature) and for the fuzz
+   crate;
+3. the test suite with `cargo nextest`, every feature on (`--all-features` turns on the test
+   hooks the crash tests drive);
+4. the `test_hooks` test in a release build without the feature, which proves that such a build
+   ignores the test hooks (`--no-tests=fail`: it fails if the test does not run);
+5. `cargo doc` with `RUSTDOCFLAGS="-D warnings"`;
+6. `cargo deny check`: advisories, licenses, bans and sources.
+
+Every cargo build, test, clippy and doc step uses `--locked`, so `Cargo.lock` (committed, like
+`fuzz/Cargo.lock`) is exactly what is built. `scripts/check.sh` runs the same steps on a machine
+without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is denied and
+`pedantic` warns (so fails under `-D warnings`), apart from five noisy lints the workspace
+`Cargo.toml` allows.
+
+## Tests
+
+- **Tests never need the network.** Tests that read real repositories on this host run only when
+  `SWARMOPS_HOST_REPOS=1`.
+- **Test-only code stays out of release builds.** Test doubles live in test code or behind the
+  `test-hooks` cargo feature (the store's `CrashAtFs` still compiles without it; M1.5 moves it
+  behind the feature), and a release build honours no test hook. The hooks are
+  environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT`,
+  `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_NOW`), read only under
+  `#[cfg(feature = "test-hooks")]`. A test that needs them is marked
+  `required-features = ["test-hooks"]` or `#[cfg(feature = "test-hooks")]`, so that a plain
+  `cargo test` skips it. Step 4 of `just check` keeps this honest.
+- **Crash tests are deterministic.** A crash sweep aborts the process at its k-th filesystem
+  call (`SWARMOPS_TEST_CRASH_AT=k`) for every k a dry run counted (`SWARMOPS_TEST_FS_CALLS`). It
+  runs both stores at parallelism 1 and pins the signing time (`SWARMOPS_TEST_NOW`), so that call
+  k is the same call in every run.
+- **Child processes have deadlines.** A test that runs processes uses the test support's runner,
+  which gives each child a deadline and kills and reaps it on failure, so a hang fails the test
+  instead of stalling the gate.
+- **Slow tests are ignored by default** with a reason that names their cost
+  (`#[ignore = "slow, ~20 s: ~90 crashed commits"]`), and run in the slow suite below.
+- **Snapshots are contracts.** The insta snapshots in `crates/swarmops-cli/tests/snapshots/`
+  pin the CLI's output; `cli__schema_snapshot.snap` pins the JSON Schema of every request and
+  response type, and the MCP server's tool list has a snapshot of its own. A snapshot changes only
+  with an intended contract change: review the diff (`cargo insta review`), and say what changed
+  in the commit and in `CHANGELOG.md`. Likewise, tests that pin a sequence of filesystem calls
+  change only where behaviour changes, and the change names each one.
+
+## The slow suite, measurements and fuzzing
+
+| Command | What it does |
+| --- | --- |
+| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash sweeps, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
+| `just check-ci-slow` | The ignored tests without the 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does. |
+| `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
+| `just bench` | The criterion benches. |
+| `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. |
+
+Run `just check-slow` before landing a change to the store's write, recovery or locking paths.
+Run `just perf` only in a quiet window (nothing else heavy on the disk), and record what it
+prints in `docs/perf.md`, with the host's load, when a decision rests on it: a
+`--durability fast` flag, for one, may exist only if `docs/perf.md` records a measurement that
+justifies it. The fuzz crate (`fuzz/`) is a cargo workspace of its own with a tracked corpus
+(`fuzz/corpus/<target>/`); crashes land in `fuzz/artifacts/` (git-ignored), and a crash found
+there belongs in a regression test.
+
+## Continuous integration
+
+GitHub Actions runs `just check` on every push to `stable` and to `feat/**` branches and on every
+pull request to `stable`. The one check to look at is `tests-pass`: it passes only when every job
+it depends on passed. A weekly scheduled workflow runs `just check-ci-slow` and a 60-second fuzz
+smoke of every target. Dependabot proposes grouped, weekly updates for Cargo and GitHub Actions,
+after a cooldown; review them like any other change.
+
+The repository is private on GitHub's Free plan, which offers no branch protection or rulesets
+for it, so nothing stops a push that would fail. The rule is still the rule: land on `stable`
+only what passed `just check` locally and has `tests-pass` green for the same commit. When the
+plan allows it, `tests-pass` becomes the one required check.
+
+## Commits
+
+- Subjects say what the change does: `<type>(<scope>): <what>`, with types such as `feat`,
+  `fix`, `perf`, `test`, `refactor`, `docs`, `ci` and `chore`, and scopes such as `core`,
+  `store`, `repo`, `api`, `ops`, `cli` or `spec`. For example:
+  `fix(store): sync journal.log before recovery lists a frame`.
+- One logical change per commit; every commit passes `just check`.
+- A user-visible change (commands, flags, the envelope, error codes, the schema, the store
+  format, durability) adds a line under **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
+
+## AI assistance and attribution
+
+SwarmOps is built mostly by coding agents, and it is built for them, so attribution is part of
+the project's own discipline:
+
+1. **Every tool-assisted commit names its model** in a `Co-Authored-By:` trailer, with the model's
+   exact name and version, for example:
+
+   ```text
+   ```
+
+   A commit made by a subagent names that subagent's model, not the orchestrator's. When several
+   models contributed to one commit, it carries one trailer for each. Never drop or rewrite
+   another model's trailer, and keep them all when commits are squashed.
+2. **A person is responsible for every change.** The git author is the person the agent works
+   for; they answer for the change, whoever typed it.
+3. **Agents identify themselves.** An agent that writes an issue, a pull request, a review or a
+   comment through a person's account says, at the start, that it is an agent and which model it
+   is. It never presents itself as a person or as another agent.
+4. **The same bar for everyone.** tool-assisted changes pass the same gate and the same review as
+   any other; the trailer records who wrote a change, not that it is good.
+
+SwarmOps applies the same idea to its own users: every mutation carries the caller's identity
+(`<family>/<instance>`, such as `agent/worker-17`), and the changeset records it.
+
+## Reporting problems
+
+Bugs and feature requests go to GitHub issues, through the templates. A security vulnerability
+does not: [SECURITY.md](SECURITY.md) says how to report one privately.
+
+## License
+
+SwarmOps is released under the [MIT License](LICENSE). Contributions are accepted under the same
+license.

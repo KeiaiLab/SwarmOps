@@ -8,6 +8,8 @@ edition = "2024"
 rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/KeiaiLab/SwarmOps"
+# No crate goes to crates.io before a release policy has been exercised (RELEASE.md).
+publish = false
 
 [workspace.dependencies]
 blake3 = "1.8.7"
