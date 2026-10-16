@@ -78,8 +78,10 @@ left).
 ## Reads and response sizes
 
 - **`cat` reads the whole blob.** `read_file` loads all of it even when `max_bytes` asks for
-  less; ranged reads (`range`, `--lines`) come later. *Target: M2. Found: M1 Task 4b; final
-  review, question 6.*
+  less; ranged reads (`range`, `--lines`) come later. An MCP agent, which the server's guidance
+  asks to pass a `max_bytes` of 32 KiB or less, can therefore read only the first 32 KiB of a
+  larger file: `ReadFileReq` has no offset. *Target: M2. Found: M1 Task 4b; final review,
+  question 6; the offset gap by the M1.5 Task 5 review.*
 - **`ls` of a wide directory decodes its whole tree.** Paging limits what is returned, not what
   is read; size and depth (`ReadTreeReq.depth`, each entry's `size`) come later, and the default
   page sizes are measured again then, because `size` makes every entry longer. *Target: M2.
@@ -155,10 +157,11 @@ left).
 
 ## Serving requests
 
-- **`meta.resolved` is shared by a handle's requests.** `LocalOps` records the revisions it
-  resolves on the handle, so concurrent requests on one handle can mix their entries. The CLI
-  makes one request per process; the MCP server needs per-request resolution. *Target: M1.5,
-  Task 5. Found: M1 Task 4b.*
+- **A usage error placed before `mcp` is printed on stdout.** `swarmops --frob mcp` fails
+  while the command line is parsed, before any server starts, and its `E_INVALID_ARG` envelope
+  goes to stdout with exit code 2; a usage error on a line that parses as `mcp` goes to stderr.
+  No protocol bytes are ever interleaved, because no server starts. *Unscheduled. Found: M1.5
+  Task 5 review.*
 - **`{"file": "<path>"}` content is read by whoever serves the request.** That is the caller
   for the CLI and the stdio MCP server; a network server must refuse such content, and a client
   must turn it into bytes before the request leaves. *Target: M10. Found: M1 Task 4b.*

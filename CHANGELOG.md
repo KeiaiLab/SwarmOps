@@ -64,4 +64,24 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   in 21 ms.
 - The MIT License ([LICENSE](LICENSE)), for every crate.
 
+#### M1.5: hardening and opening (2026-10-16)
+
+- CI on GitHub Actions: `ci.yml` runs `just check` (the same gate as locally, `--locked`
+  everywhere) and zizmor behind one `tests-pass` check; `scheduled.yml` runs the slow suite and
+  a fuzz smoke weekly; Dependabot keeps both lockfiles valid; the nextest `ci` and `ci-slow`
+  profiles kill hung tests.
+- The project policies and the documentation set: [CONTRIBUTING.md](CONTRIBUTING.md),
+  [SECURITY.md](SECURITY.md), [RELEASE.md](RELEASE.md), `AGENTS.md`, `docs/architecture.md`,
+  `docs/known-limitations.md`, `docs/policies/`, the issue and pull request templates, and this
+  changelog.
+- `swarmops mcp`: a stdio MCP server over `StoreOps`, one tool per operation with the request
+  type's JSON Schema as its `inputSchema`, and the CLI's envelope as the result
+  (`structuredContent` plus a text block; `isError` on failure). MCP 2026-07-28 per request,
+  and 2025-11-25 or 2025-06-18 after `initialize`. Each call resolves its revisions on its own
+  (`meta.resolved` is no longer shared by a handle's requests), a mutation without an identity
+  is refused, and `expected_old` of `ref_set` and `ref_delete` must be a full changeset id
+  through MCP.
+- `ref set` to the target a ref already holds is a replay: `already_applied: true` and nothing
+  written, in the CLI and through MCP.
+
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable

@@ -156,18 +156,21 @@ what other agents commit meanwhile.
 Two rules matter more to an agent than to a person at the CLI:
 
 - `ref_set` and `ref_delete` take `expected_old` as the full changeset id the ref held when the
-  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name or a relative
-  revision such as `main~1` is resolved when the call runs, so it always matches and the
-  compare-and-swap protects nothing: the server refuses one with `E_INVALID_ARG`. The CLI's
-  `--expect` still takes any revision, and its help says why not to.
+  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name, a relative
+  revision such as `main~1` or an id prefix is read from the store when the call runs instead
+  of pinning what the agent saw, so the compare-and-swap protects nothing: the server refuses
+  one with `E_INVALID_ARG`. The CLI's `--expect` still takes any revision, and its help says why
+  not to.
 - Clients cut long tool results (Claude Code at 25,000 tokens by default), and each result holds
   its envelope twice, so an agent should ask for little: `max_bytes` of 32 KiB or less for
   `read_file`, a `limit` of 100 or less for `read_tree` and `log`, paging on with the `cursor` a
   result returns, and `max_changes` of 100 or less for `show`. The tools' descriptions say so;
   the operations' own defaults stay as they are.
 
-A command line `swarmops mcp` refuses starts no server: its envelope goes to stderr, never to
-stdout, which belongs to the protocol.
+A command line that parses as `swarmops mcp` but is refused starts no server, and its envelope
+goes to stderr, not to stdout, which belongs to the protocol. A usage error before the word
+`mcp` (`swarmops --frob mcp`) is an ordinary command error, printed on stdout with exit code 2,
+and starts no server either.
 
 ## Development
 
