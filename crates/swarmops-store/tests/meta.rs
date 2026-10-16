@@ -1089,6 +1089,92 @@ fn replay_appends_the_records_a_power_loss_took() {
     }
 }
 
+#[test]
+fn index_records_a_power_loss_zero_filled_are_not_counted_and_replay_replaces_them() {
+    // The index files are appended to without a sync until the checkpoint moves: a power loss
+    // can keep a file's length and lose its last records' bytes, zeros in their place. The
+    // journal does not vouch for such records: no handle counts them (a snapshot reads their
+    // changesets from the frames past the checkpoint), and the next writer cuts them and
+    // replays the journal's records in their place. The records the checkpoint passed, synced
+    // before it moved, stay as they are; parents.log above all, which a zeroed par.col entry
+    // must not cut. With the checkpoint at 0, and past the first 32 frames.
+    let files = [
+        ("parents.log", 32),
+        ("idx/par.col", 8),
+        ("idx/gen.col", 8),
+        ("idx/dh.col", 32),
+        ("idx/ids.col", 32),
+    ];
+    for checkpointed in [0, 32] {
+        let (_template_dir, template) = new_root();
+        let store = MetaStore::create(&template).unwrap();
+        // A chain: changeset n's parent is n - 1, its generation n + 1.
+        let chain = |n: u64| {
+            stored(
+                n,
+                &n.checked_sub(1).into_iter().collect::<Vec<_>>(),
+                n,
+                n + 1,
+            )
+        };
+        for n in 0..checkpointed + 3 {
+            insert(
+                &store,
+                &[ChangesetMeta {
+                    seq: 0,
+                    generation: 0,
+                    ..chain(n)
+                }],
+            );
+        }
+        assert_eq!(
+            ckpt(&template) > 0,
+            checkpointed > 0,
+            "the checkpoint moved"
+        );
+        let all = checkpointed + 3;
+        for lost in files.iter().map(|file| vec![*file]).chain([files.to_vec()]) {
+            let what = format!("checkpoint past {checkpointed} records, zeros in {lost:?}");
+            let (_dir, root) = new_root();
+            copy_dir(template.as_std_path(), root.as_std_path());
+            let meta = Layout::new(&root).meta_dir();
+            for (file, width) in &lost {
+                // The last three records' bytes (each has one parent, but a first root).
+                let path = meta.join(file);
+                let mut bytes = fs::read(&path).unwrap();
+                let len = bytes.len();
+                bytes[len.saturating_sub(3 * width)..].fill(0);
+                fs::write(&path, bytes).unwrap();
+            }
+            // Record 0, a root, has no parents, and its par.col entry is 0: zeros in par.col
+            // and parents.log leave it as it was.
+            let parents_only = lost
+                .iter()
+                .all(|(file, _)| matches!(*file, "idx/par.col" | "parents.log"));
+            let kept = checkpointed + u64::from(checkpointed == 0 && parents_only);
+            let store = MetaStore::open(&root).unwrap();
+            assert_eq!(index(&root).len(), kept, "{what}: not counted");
+            let read = store.read().unwrap();
+            assert_eq!(read.count_changesets().unwrap(), all, "{what}");
+            for n in 0..all {
+                assert_eq!(
+                    read.changeset(id(n)).unwrap(),
+                    Some(chain(n)),
+                    "{what}: {n}"
+                );
+            }
+            drop(read);
+
+            store.write().unwrap().commit().unwrap();
+            let index = index(&root);
+            assert_eq!(index.len(), all, "{what}: replayed");
+            for n in 0..all {
+                assert_eq!(index.get(n).unwrap(), chain(n), "{what}: record {n}");
+            }
+        }
+    }
+}
+
 #[track_caller]
 fn assert_journal_corrupt(got: Result<(), StoreError>, offset: u64) {
     match got {

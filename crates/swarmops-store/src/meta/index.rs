@@ -27,13 +27,14 @@
 //! Writers hold [`crate::MetaLock`]; readers take no lock and may open the index while a
 //! writer appends or compacts. A crash in the middle of an append leaves the record's first
 //! files written and the rest not. Every handle counts only the records that all five files
-//! hold whole (`ids.col`, written last, is the one that lags behind), and
-//! [`Index::repair_tail`] cuts the rest off. A crash in the middle of a compaction's renames
-//! leaves the sorted views out of step; each view still covers the records it covers, or is
-//! read as empty, so lookups stay right, and [`Index::repair_tail`] runs the compaction
-//! again. The one cut of whole records, after a failed sync, can take records from under a
-//! handle opened before it, a reader's snapshot's included: [`Index::truncate_to`] says which
-//! lookups then fail.
+//! hold whole (`ids.col`, written last, is the one that lags behind), and, past
+//! `journal.ckpt`, only those the journal vouches for: appended without a sync, they are what
+//! a power loss may leave with their bytes lost, zeros in their place. [`Index::repair_tail`]
+//! cuts the rest off. A crash in the middle of a compaction's renames leaves the sorted views
+//! out of step; each view still covers the records it covers, or is read as empty, so lookups
+//! stay right, and [`Index::repair_tail`] runs the compaction again. The one cut of whole
+//! records, after a failed sync, can take records from under a handle opened before it, a
+//! reader's snapshot's included: [`Index::truncate_to`] says which lookups then fail.
 
 use std::num::NonZero;
 use std::panic;
@@ -45,11 +46,13 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
 
 use super::column::AppendOnlyColumn;
+use super::frame::Record;
+use super::journal::Journal;
 use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
 use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views};
 use super::to_u64;
 use crate::error::{StoreError, invalid_input};
-use crate::fs_ops::FsOps;
+use crate::fs_ops::{FsOps, RealFs};
 use crate::layout::Layout;
 
 /// One changeset as the index holds it.
@@ -99,6 +102,9 @@ pub struct Index {
     /// How many threads [`Index::sync`] syncs the five files from: see
     /// [`Index::set_parallelism`].
     sync_threads: usize,
+    /// The store's paths: the journal past its checkpoint vouches for the records past it
+    /// ([`Index::open`]).
+    layout: Layout,
 }
 
 impl Index {
@@ -136,10 +142,14 @@ impl Index {
     /// Creates nothing, since lock-free readers open it: a store has every index file from
     /// [`Index::create`], so a missing one is [`StoreError::IndexCorrupt`]. Otherwise it only
     /// reads, without a lock: the files' lengths, the last record's `par.col` entry, and the
-    /// sorted views' lengths. It repairs nothing, since a writer may be appending or
-    /// compacting meanwhile: records that some files lack are not counted, and a view that a
-    /// compaction is renaming (or crashed renaming) counts as covering what it covers, or
-    /// nothing. A writer repairs with [`Index::repair_tail`].
+    /// sorted views' lengths; and when the files hold records past what the views cover, the
+    /// journal's frames past its checkpoint, back from there to its last changeset, and the
+    /// records past the checkpoint, which the journal must vouch for to be counted (the
+    /// journal's changesets past the checkpoint, in order, field by field). It repairs nothing,
+    /// since a writer may be appending or compacting meanwhile: records that some files lack,
+    /// or that the journal does not vouch for, are not counted, and a view that a compaction is
+    /// renaming (or crashed renaming) counts as covering what it covers, or nothing. A writer
+    /// repairs with [`Index::repair_tail`].
     pub fn open(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Index, StoreError> {
         let sorted_dir = layout.meta_path("sorted");
         // The views before the columns: a compaction covers records that were whole when it
@@ -158,6 +168,7 @@ impl Index {
             parents_len: 0,
             views,
             sync_threads: 1,
+            layout: layout.clone(),
         };
         let whole = index.whole()?;
         (index.len, index.parents_len) = (whole.records, whole.parents_len);
@@ -410,11 +421,14 @@ impl Index {
     ///
     /// - A crash in the middle of an append leaves the record in some files and not in
     ///   others (`ids.col` is written last, `parents.log` first; with power lost before a
-    ///   sync, any of them can lag). Every column is cut to the records that all five files
-    ///   hold whole, and `parents.log` to the end of the last such record's parents (its
-    ///   `par.col` entry says where). The records cut, counted as slots of the longest
-    ///   column, are returned: their journal frames lie past `journal.ckpt`, since the
-    ///   checkpoint moves only after [`Index::sync`], so replay appends them again.
+    ///   sync, any of them can lag). A power loss can also keep a file's length and lose the
+    ///   bytes of records past `journal.ckpt` (zeros in their place, or in the first sector of
+    ///   them only), which the journal then does not vouch for. Every column is cut to the
+    ///   records that all five files hold whole and the journal vouches for, and `parents.log`
+    ///   to the end of the last such record's parents (its `par.col` entry says where). The
+    ///   records cut, counted as slots of the longest column, are returned: their journal
+    ///   frames lie past `journal.ckpt`, since the checkpoint moves only after
+    ///   [`Index::sync`], so replay appends them again.
     /// - A crash in the middle of a compaction's renames leaves the views out of step: the
     ///   compaction is run again.
     ///
@@ -548,20 +562,23 @@ impl Index {
         Ok((whole, dropped.into_iter().max().unwrap_or(0)))
     }
 
-    /// What the files hold whole now, judged from their lengths (one `fstat` each) and the
-    /// `par.col` entry of the last record that all four columns hold.
+    /// What the files hold whole now, judged from their lengths (one `fstat` each), the
+    /// journal past its checkpoint ([`Index::vouched`]), and the `par.col` entry of the last
+    /// record left.
     fn whole(&self) -> Result<Whole, StoreError> {
         // ids.col first: append writes it last, so with no power lost a record it holds is
-        // whole in the files read after it. The minimum covers a power loss as well.
+        // whole in the files read after it. The minimum covers a power loss as well, as far as
+        // lengths go; the journal vouches for the bytes.
         let ids = self.ids.len()?;
         let dhs = self.dhs.len()?;
         let gens = self.gens.len()?;
         let pars = self.pars.len()?;
         let parents = self.parents.len()?;
-        let mut records = AppendOnlyColumn::<32>::whole(ids)
+        let records = AppendOnlyColumn::<32>::whole(ids)
             .min(AppendOnlyColumn::<32>::whole(dhs))
             .min(AppendOnlyColumn::<8>::whole(gens))
             .min(AppendOnlyColumn::<8>::whole(pars));
+        let mut records = self.vouched(records)?;
         let parents_len = loop {
             let Some(last) = records.checked_sub(1) else {
                 break 0;
@@ -582,6 +599,131 @@ impl Index {
             parents_len,
             lens: [parents, pars, gens, dhs, ids],
         })
+    }
+
+    /// How many of the first `records` records, those the five files hold by their lengths,
+    /// the journal vouches for: every one before the checkpoint (synced before it moved past
+    /// them), and of the ones past it the run that are the journal's changesets past it, in
+    /// order and field by field, each one's parents where the record before it leaves off in
+    /// `parents.log`. The records past the checkpoint were appended without a sync: a power
+    /// loss can keep a file's length and lose their bytes (zeros in their place), or lose the
+    /// first sector they lie in and keep a later one. The first such record, and every one after
+    /// it, holds nothing the journal vouches for: no handle counts them, a reader's snapshot
+    /// reads their changesets from the journal, and [`Index::repair_tail`] cuts them for replay
+    /// to append the journal's in their place.
+    ///
+    /// The journal's files are read on handles of their own, not through this index's
+    /// [`FsOps`]: the frames past the checkpoint, and the frames before it back to the last that
+    /// holds a changeset. Records the sorted views cover were synced before the views were
+    /// written: with no record past them, nothing is read. With no journal to read (an index on
+    /// its own), a checkpoint that does not read, or a journal that is damaged, every record is
+    /// counted: that damage is the journal's, which verify reports.
+    fn vouched(&self, records: u64) -> Result<u64, StoreError> {
+        if records <= self.views.covered() {
+            return Ok(records);
+        }
+        let journal = match Journal::open(&self.layout, Arc::new(RealFs)) {
+            Ok(journal) => journal,
+            Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => return Ok(records),
+            Err(e) => return Err(e),
+        };
+        let Ok(ckpt) = journal.ckpt() else {
+            return Ok(records);
+        };
+        match self.vouched_by(&journal, ckpt, records) {
+            Err(StoreError::JournalCorrupt { .. }) => Ok(records),
+            vouched => vouched,
+        }
+    }
+
+    /// [`Index::vouched`] by `journal`, its checkpoint at `ckpt`.
+    fn vouched_by(&self, journal: &Journal, ckpt: u64, records: u64) -> Result<u64, StoreError> {
+        let frames = journal.tail_frames_from(ckpt)?;
+        let past: Vec<&Record> = frames
+            .iter()
+            .flat_map(|frame| &frame.records)
+            .filter(|record| matches!(record, Record::Changeset { .. }))
+            .collect();
+        let Some(first_frame) = frames.first().filter(|_| !past.is_empty()) else {
+            return Ok(records); // no changeset past the checkpoint: no record past it either
+        };
+        // The records past the checkpoint come after the last changeset before it, which the
+        // index holds among its last `past + 1` records: it holds no more than `past` past it.
+        let first = match last_changeset_before(journal, first_frame.seq)? {
+            None => 0,
+            Some(last) => {
+                let from = records.saturating_sub(to_u64(past.len()) + 1);
+                let Some(window) = read_or_cut(&self.ids, from, records)? else {
+                    return Ok(records.min(from));
+                };
+                let at = window
+                    .as_chunks::<32>()
+                    .0
+                    .iter()
+                    .position(|id| *id == last.0.0);
+                match at {
+                    Some(at) => from + to_u64(at) + 1,
+                    // The index lacks records the checkpoint passed: damage, which verify
+                    // reports against the journal.
+                    None => return Ok(records),
+                }
+            }
+        };
+        self.vouched_from(first, records, &past)
+    }
+
+    /// `first` plus how many of the records from `first` up to `records` are `past`, the
+    /// changesets past the checkpoint, in order: id, generation, delta hash, and parents, which
+    /// start where the record before leaves off in `parents.log`.
+    fn vouched_from(&self, first: u64, records: u64, past: &[&Record]) -> Result<u64, StoreError> {
+        let end = records.min(first + to_u64(past.len()));
+        let columns = (
+            read_or_cut(&self.ids, first, end)?,
+            read_or_cut(&self.gens, first, end)?,
+            read_or_cut(&self.dhs, first, end)?,
+            read_or_cut(&self.pars, first, end)?,
+        );
+        let (Some(ids), Some(gens), Some(dhs), Some(pars)) = columns else {
+            return Ok(first);
+        };
+        let parents_len = self.parents.len()?;
+        let mut next = match first.checked_sub(1) {
+            Some(before) => {
+                ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(before)?)).end()
+            }
+            None => 0,
+        };
+        let (ids, gens) = (ids.as_chunks::<32>().0, gens.as_chunks::<8>().0);
+        let (dhs, pars) = (dhs.as_chunks::<32>().0, pars.as_chunks::<8>().0);
+        for (i, record) in past.iter().take(ids.len()).enumerate() {
+            let Record::Changeset {
+                id,
+                generation,
+                delta_hash,
+                parents: want_parents,
+            } = record
+            else {
+                unreachable!("only changesets are past the checkpoint here");
+            };
+            let at = ParentsAt::from_entry(u64::from_le_bytes(pars[i]));
+            let fields = ids[i] == id.0.0
+                && u64::from_le_bytes(gens[i]) == *generation
+                && dhs[i] == *delta_hash
+                && at.offset == next
+                && usize::from(at.count) == want_parents.len();
+            let vouched = fields
+                && at.end() <= parents_len
+                && match parents::read(&self.parents, at, parents_len) {
+                    Ok(parents) => parents == *want_parents,
+                    Err(StoreError::IndexCorrupt { .. }) => false,
+                    Err(e) => return Err(e),
+                };
+            if !vouched {
+                return Ok(first + to_u64(i));
+            }
+            next = at.end();
+        }
+        Ok(end)
     }
 
     /// Whether the files end exactly where this handle's records do.
@@ -615,6 +757,42 @@ impl fmt::Debug for Index {
             .field("sync_threads", &self.sync_threads)
             .finish_non_exhaustive()
     }
+}
+
+/// The entries `[from, to)` of `column`; `None` if the file is shorter now than when it was
+/// measured (a writer cut what it found torn): records that are gone vouch for nothing.
+fn read_or_cut<const W: usize>(
+    column: &AppendOnlyColumn<W>,
+    from: u64,
+    to: u64,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    match column.entries(from, to) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The id of the last changeset in the frames before frame `seq`, read back from it a batch
+/// at a time (one frame, then twice as many each time, up to 256); `None` if none holds one.
+fn last_changeset_before(journal: &Journal, seq: u64) -> Result<Option<ChangesetId>, StoreError> {
+    let (mut end, mut batch) = (seq, 1);
+    while end > 0 {
+        let start = end.saturating_sub(batch);
+        let count = usize::try_from(end - start).expect("a batch fits in usize");
+        let frames = journal.frames_from(start, count)?;
+        let last = frames.iter().rev().find_map(|frame| {
+            frame.records.iter().rev().find_map(|record| match record {
+                Record::Changeset { id, .. } => Some(*id),
+                Record::RefMove { .. } | Record::Compacted { .. } => None,
+            })
+        });
+        if last.is_some() {
+            return Ok(last);
+        }
+        (end, batch) = (start, (batch * 2).min(256));
+    }
+    Ok(None)
 }
 
 /// What the files hold whole.

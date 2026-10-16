@@ -3,10 +3,11 @@
 //! memory for a reader, which may not write.
 //!
 //! The index holds a prefix of the journal's changesets, in journal order: records are
-//! appended frame by frame, and what a crash or a power loss takes from the index files is
-//! always a suffix. So replay finds how many of the changesets past the checkpoint the index
-//! holds with a binary search (one lookup when it holds them all, the usual case) and appends
-//! the rest.
+//! appended frame by frame, what a crash takes from the index files is a suffix, and past the
+//! checkpoint an index handle counts only the records the journal vouches for, so that what a
+//! power loss leaves there with its bytes lost is a suffix too ([`Index::open`]). So replay
+//! finds how many of the changesets past the checkpoint the index holds with a binary search
+//! (one lookup when it holds them all, the usual case) and appends the rest.
 //!
 //! Every frame past the checkpoint but the last is materialized: a writer appends its frame
 //! only after replaying all the others. Each ref those frames move ends at the target of its
