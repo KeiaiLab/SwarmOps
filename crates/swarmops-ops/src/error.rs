@@ -123,11 +123,9 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         StoreError::DuplicateParent(id) => error(ErrorCode::InvalidArg, message)
             .with_details(details([("parent", id.to_string().into())])),
         StoreError::PostCommit { .. } => error(ErrorCode::Internal, message),
-        StoreError::Undecided { .. } => error(ErrorCode::IoTransient, message)
-            .with_details(details([("may_have_committed", true.into())]))
-            .with_hint(
-                "run the same command again: that is safe whether or not this one committed",
-            ),
+        StoreError::NotCommitted { .. } => error(ErrorCode::IoTransient, message)
+            .with_details(details([("committed", false.into())]))
+            .with_hint("run the same command again: nothing of this one was committed"),
     }
 }
 
@@ -363,25 +361,27 @@ mod tests {
             source: Box::new(StoreError::Busy),
         };
         maps(store(post), op, ErrorCode::Internal);
-        let undecided = StoreError::Undecided {
-            source: Box::new(StoreError::Io(io::Error::other("boom"))),
+        let not_committed = StoreError::NotCommitted {
+            source: io::Error::other("boom"),
         };
-        maps(store(undecided), op, ErrorCode::IoTransient);
+        maps(store(not_committed), op, ErrorCode::IoTransient);
     }
 
+    /// A journal append that failed and was cut back off the journal committed nothing:
+    /// `E_IO_TRANSIENT`, retryable, `committed: false`, with a hint to run it again.
     #[test]
-    fn an_undecided_write_is_retryable_and_may_have_committed() {
-        let undecided = StoreError::Undecided {
-            source: Box::new(StoreError::Io(io::Error::other("listing it failed"))),
+    fn a_write_cut_back_off_the_journal_is_retryable_and_not_committed() {
+        let not_committed = StoreError::NotCommitted {
+            source: io::Error::other("the fdatasync failed"),
         };
-        let error = repo_error(RepoError::Store(undecided), During::Op);
+        let error = repo_error(RepoError::Store(not_committed), During::Op);
         assert_eq!(
             (error.code.as_str(), error.exit, error.retryable),
             ("E_IO_TRANSIENT", 4, true)
         );
-        assert_eq!(error.details["may_have_committed"], true);
+        assert_eq!(error.details["committed"], false);
         assert!(
-            error.message.contains("may have committed"),
+            error.message.contains("did not commit"),
             "{}",
             error.message
         );

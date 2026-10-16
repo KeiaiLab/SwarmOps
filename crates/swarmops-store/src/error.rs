@@ -79,9 +79,10 @@ pub enum StoreError {
         seq: u64,
     },
     /// A write transaction committed: its frame is durable at `frame_seq`. But a step after its
-    /// commit point failed: materializing the frame (index records, ref files), a compaction,
-    /// the index sync or the checkpoint. The next [`crate::MetaStore::write`] repairs what is
-    /// missing. Retrying the same transaction is safe: an insert finds the changeset
+    /// commit point failed: listing the frame in `journal.off`, materializing it (index
+    /// records, ref files), a compaction, the index sync or the checkpoint. The next
+    /// [`crate::MetaStore::write`] repairs what is missing (it lists the frame, then replays).
+    /// Retrying the same transaction is safe: an insert finds the changeset
     /// ([`crate::InsertOutcome::AlreadyPresent`]), and a ref move finds the ref at the caller's
     /// own target ([`crate::CasResult::Mismatch`], with that target as `actual`).
     #[error("the transaction committed at frame {frame_seq}, but a step after it failed: {source}")]
@@ -91,18 +92,17 @@ pub enum StoreError {
         /// The step's error.
         source: Box<StoreError>,
     },
-    /// A write transaction's journal append failed once its frame was whole in `journal.log`:
-    /// the frame was written and its sync failed, or it was durable and listing it in
-    /// `journal.off` failed. So the transaction may have committed: the next
-    /// [`crate::MetaStore::write`] settles it, listing the frame (or cutting it, should a crash
-    /// take back what the failed sync never made durable) and replaying what it lists. Retrying
-    /// the same transaction is safe: an insert finds the changeset if it committed
-    /// ([`crate::InsertOutcome::AlreadyPresent`]), and a ref move finds the ref at the caller's
-    /// own target ([`crate::CasResult::Mismatch`], with that target as `actual`). Retryable.
-    #[error("the transaction may have committed: {source}")]
-    Undecided {
-        /// What failed: the sync of `journal.log`, or the append to `journal.off`.
-        source: Box<StoreError>,
+    /// A write transaction's journal append failed, and the writer, still holding
+    /// `meta/lock`, cut what the append left back off `journal.log` and synced that cut: the
+    /// transaction did not commit, and no later writer can list its frame. Retrying it is safe:
+    /// nothing of it is in the store. Retryable.
+    #[error(
+        "the transaction did not commit: appending its journal frame failed, and the frame was \
+         cut back off the journal: {source}"
+    )]
+    NotCommitted {
+        /// The append's error: of the write, or of the fdatasync after it.
+        source: io::Error,
     },
 }
 

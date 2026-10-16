@@ -10,6 +10,14 @@
 //! whole and durable before it was listed, and damage to a listed frame is reported as
 //! [`StoreError::JournalCorrupt`], never cut away.
 //!
+//! An append that fails leaves nothing a later sync could make look durable (storage spec §2
+//! rule 3): Linux reports a failed writeback once, to the fdatasync that meets it, and may drop
+//! the pages it could not write, so a later fdatasync can succeed without them. A frame whose
+//! append fails is cut back off `journal.log`, under the lock, before the error returns
+//! ([`StoreError::NotCommitted`]; the process aborts if even the cut fails), and an entry whose
+//! append fails is cut back off `journal.off` ([`StoreError::PostCommit`]: its frame is durable
+//! and committed, and the next tail check lists it afresh).
+//!
 //! Writers hold [`crate::MetaLock`]; the journal itself takes no lock. Writes go through
 //! [`FsOps`]. Reads take no lock: they measure `journal.off` before `journal.log` (with
 //! [`FsOps::file_len`]) and never measure `journal.off` again after. A frame listed in that
@@ -119,12 +127,22 @@ impl Journal {
     /// never lands after a torn one. Records the layout cannot hold are refused with
     /// `InvalidInput` before anything is written.
     ///
-    /// An error once the frame is whole in `journal.log` is [`StoreError::Undecided`]: the
-    /// frame was written and its sync failed, or it was durable and its entry could not be
-    /// appended to `journal.off`. The transaction may then have committed, as after a crash
-    /// between the two appends: the next tail check settles it, listing the frame (or cutting
-    /// it, if a crash took back what was never synced). Any other error leaves no whole frame,
-    /// at most a torn one that the next tail check cuts: the transaction did not commit.
+    /// When the first append fails, in its write or in its fdatasync, what reached
+    /// `journal.log` of the frame is cut back off it first (the file truncated to where the
+    /// frame starts, the cut synced), and the error is [`StoreError::NotCommitted`]: the
+    /// transaction did not commit. Linux reports a failed writeback once, to the fdatasync that
+    /// meets it, and may drop the pages it could not write: a frame left in the file after its
+    /// sync failed could be listed by a later writer whose sync succeeds without it, and lost to
+    /// a power loss after that. When even the cut fails, nothing here can keep a later write of
+    /// this process from listing the frame: the process aborts ([`std::process::abort`]), saying
+    /// why on stderr.
+    ///
+    /// When the second append fails, the frame being durable, the error is
+    /// [`StoreError::PostCommit`] at the frame's seq: the transaction committed, and the next
+    /// tail check lists the frame. What reached `journal.off` of the entry is cut back off it
+    /// first: an entry whose sync failed must not stay listed while later entries are made
+    /// durable after it, a hole a power loss would leave among the listed frames. A cut that
+    /// fails too is reported beside the append's error.
     pub fn append_frame(&self, records: &[Record]) -> Result<Frame, StoreError> {
         let bytes = encode_frame(records)?;
         let mut tail = self.tail();
@@ -133,21 +151,22 @@ impl Journal {
             (*tail, _) = self.check_tail()?;
         }
         tail.checked = false; // a failed append can leave part of a frame or an entry behind
-        let frame_end = tail.len + to_u64(bytes.len());
-        let offset = self
-            .fs
-            .append_durable(self.log_path.as_std_path(), &bytes)
-            .map_err(|e| self.log_append_error(e, frame_end))?;
-        // The frame is whole and durable: whatever fails now, the next tail check lists it.
-        let entry_at = self
-            .fs
-            .append_durable(self.off_path.as_std_path(), &offset.to_le_bytes())
-            .map_err(|e| {
-                undecided(
-                    "the frame is in journal.log, but listing it in journal.off failed",
-                    &e,
-                )
-            })?;
+        let offset = match self.fs.append_durable(self.log_path.as_std_path(), &bytes) {
+            Ok(offset) => offset,
+            Err(e) => return Err(self.cut_failed_frame(tail.len, e)),
+        };
+        // The commit point: the frame is whole and durable.
+        let entry = offset.to_le_bytes();
+        let entry_at = match self.fs.append_durable(self.off_path.as_std_path(), &entry) {
+            Ok(entry_at) => entry_at,
+            Err(e) => {
+                let source = self.cut_failed_entries(tail.frames, &e);
+                return Err(StoreError::PostCommit {
+                    frame_seq: tail.frames,
+                    source: Box::new(source.into()),
+                });
+            }
+        };
         let seq = entry_at / ENTRY_LEN;
         *tail = Tail {
             len: offset + to_u64(bytes.len()),
@@ -432,17 +451,44 @@ impl Journal {
         Ok(())
     }
 
-    /// What [`Journal::append_frame`] returns when the append of its frame to `journal.log`
-    /// fails with `e`, the frame ending at `frame_end` had it been written whole: if
-    /// `journal.log` reaches that far, the frame was written and its sync failed, so the next
-    /// tail check syncs and lists it ([`StoreError::Undecided`]; so too if the length cannot be
-    /// read). If not, the frame is torn or was never written, and the error is `e` itself.
-    fn log_append_error(&self, e: io::Error, frame_end: u64) -> StoreError {
-        match self.log.metadata() {
-            Ok(meta) if meta.len() < frame_end => e.into(),
-            _ => undecided(
-                "the frame is written whole in journal.log, but its append failed",
-                &e,
+    /// What [`Journal::append_frame`] returns when the append of its frame to `journal.log`,
+    /// which ended at `start`, fails with `e`: [`StoreError::NotCommitted`], once the file is
+    /// cut back to `start` and the cut synced, unless it still ends there (nothing of the frame
+    /// reached it: measured on this handle's own descriptor, with no [`FsOps`] call). If the cut
+    /// fails, the process aborts: see [`Journal::append_frame`].
+    fn cut_failed_frame(&self, start: u64, e: io::Error) -> StoreError {
+        let untouched = matches!(self.log.metadata(), Ok(meta) if meta.len() == start);
+        if !untouched && let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), start) {
+            eprintln!(
+                "swarmops: fatal: appending a frame to {} failed ({e}), and the frame could not \
+                 be cut back off it ({cut}): aborting, so that no later write of this process \
+                 lists a frame that may not be on disk",
+                self.log_path
+            );
+            std::process::abort();
+        }
+        StoreError::NotCommitted { source: e }
+    }
+
+    /// The error of a failed append `e` to `journal.off`, which held `listed` entries before
+    /// it, once whatever of the entry reached the file is cut back off it and the cut synced
+    /// (unless the file still ends there, measured on this handle's own descriptor): an entry
+    /// whose sync failed must not stay listed while later entries are made durable after it. A
+    /// cut that fails too is told beside `e`.
+    fn cut_failed_entries(&self, listed: u64, e: &io::Error) -> io::Error {
+        let end = listed * ENTRY_LEN;
+        let untouched = matches!(self.off.metadata(), Ok(meta) if meta.len() == end);
+        let cut = if untouched {
+            Ok(())
+        } else {
+            self.fs.truncate(self.off_path.as_std_path(), end)
+        };
+        let what = format!("listing a frame in journal.off failed: {e}");
+        match cut {
+            Ok(()) => io::Error::new(e.kind(), what),
+            Err(cut) => io::Error::new(
+                e.kind(),
+                format!("{what}; cutting back what reached journal.off failed too: {cut}"),
             ),
         }
     }
@@ -533,9 +579,11 @@ impl Journal {
             // may still be only in the page cache: a listed frame must be durable.
             self.fs.sync_data(self.log_path.as_std_path())?;
         }
-        for offset in &unlisted {
-            self.fs
-                .append_durable(self.off_path.as_std_path(), &offset.to_le_bytes())?;
+        for (at, offset) in (listed..).zip(&unlisted) {
+            let entry = offset.to_le_bytes();
+            if let Err(e) = self.fs.append_durable(self.off_path.as_std_path(), &entry) {
+                return Err(self.cut_failed_entries(at, &e).into());
+            }
         }
         if let Some(cut) = cut {
             self.fs.truncate(self.log_path.as_std_path(), cut)?;
@@ -646,15 +694,6 @@ impl Journal {
             }
         }
         Ok(low)
-    }
-}
-
-/// [`StoreError::Undecided`] for `e`, which failed an append once its frame was whole in
-/// `journal.log`, as `what` says.
-fn undecided(what: &str, e: &io::Error) -> StoreError {
-    let source = io::Error::new(e.kind(), format!("{what}: {e}"));
-    StoreError::Undecided {
-        source: Box::new(source.into()),
     }
 }
 

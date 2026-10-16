@@ -25,13 +25,15 @@
 //! synced afresh. A snapshot taken before the cut can then fail with an I/O error on lookups
 //! that read cut records or scan the index's tail (as [`Index::truncate_to`] lists); a new one
 //! reads right.
-//! An error from the append itself once the frame is whole in the journal (its sync, or its
-//! listing in `journal.off`, failed) is [`StoreError::Undecided`]: the transaction may or may
-//! not have committed, and the next [`MetaStore::write`] settles it (it lists or cuts what the
-//! journal holds, then replays). Any other error from the append leaves no whole frame: the
-//! transaction did not commit. A caller that retries after `PostCommit` or `Undecided` must look
-//! again first: an insert is idempotent ([`InsertOutcome::AlreadyPresent`]), and a ref move
-//! compares against the ref as it is then.
+//! An error from the append itself says it as definitely (storage spec §2 rule 3): a failed
+//! append of the frame to `journal.log`, its write or its fdatasync, is
+//! [`StoreError::NotCommitted`], the frame cut back off the journal under the lock before the
+//! error returns (or the process aborted, should the cut fail too), so that the transaction did
+//! not commit and no later writer can list its frame; a failed listing of the durable frame in
+//! `journal.off` is [`StoreError::PostCommit`], since the frame is the commit point. A caller
+//! that retries after `PostCommit` must look again first: an insert is idempotent
+//! ([`InsertOutcome::AlreadyPresent`]), and a ref move compares against the ref as it is then.
+//! After `NotCommitted` nothing of the transaction is in the store.
 //!
 //! A compaction appends a `Compacted` record, in a frame of its own, as an advisory marker: a
 //! compaction that [`Index::repair_tail`] finishes after a crash appends none, so nothing may
@@ -623,11 +625,10 @@ impl MetaWrite<'_> {
     /// though its housekeeping may still compact (appending a `Compacted` frame) or
     /// checkpoint.
     ///
-    /// Once the frame is appended, every error is [`StoreError::PostCommit`]: the transaction
-    /// committed. An append that fails once the frame is whole in the journal is
-    /// [`StoreError::Undecided`]: the transaction may have committed, and the next write settles
-    /// it. Any other error means it did not commit. With nothing queued, errors are the
-    /// housekeeping's own.
+    /// Once the frame is durable in `journal.log`, every error is [`StoreError::PostCommit`]:
+    /// the transaction committed. A failed append of the frame is [`StoreError::NotCommitted`],
+    /// the frame cut back off the journal; any other error before it means the transaction did
+    /// not commit either. With nothing queued, errors are the housekeeping's own.
     pub fn commit(self) -> Result<CommitInfo, StoreError> {
         self.finish(false)
     }

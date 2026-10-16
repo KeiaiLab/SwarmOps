@@ -1707,6 +1707,106 @@ fn the_fsync_failure_model_keeps_lost_bytes_lost() {
     );
 }
 
+/// One run of the fsync-failure sweep on `layout`, every call through `fs`: the journal
+/// created, then five transactions, each a tail check (as every writer's starts) and a frame of
+/// one record (`Compacted` with the transaction's number), the checkpoint moved after the third.
+/// Returns the records of each frame acknowledged: appended, or committed with a failure after
+/// its commit point ([`StoreError::PostCommit`]). A transaction whose tail check or append failed
+/// otherwise acknowledged nothing. `None` if the journal could not be created: nothing ran.
+fn fsync_failure_run(layout: &Layout, fs: Arc<dyn FsOps>) -> Option<Vec<Vec<Record>>> {
+    let journal = Journal::create(layout, fs).ok()?;
+    let mut acked = Vec::new();
+    for n in 0..5 {
+        if journal.truncate_torn_tail().is_err() {
+            continue;
+        }
+        let records = vec![compacted(n)];
+        match journal.append_frame(&records) {
+            Ok(_) | Err(StoreError::PostCommit { .. }) => acked.push(records),
+            Err(_) => {}
+        }
+        if n == 2 {
+            let _ = journal.set_ckpt(journal.len());
+        }
+    }
+    Some(acked)
+}
+
+/// Each frame `journal.off` at `layout` lists, as the range of `journal.log` it takes, by its
+/// header: what a reader without a crash takes as committed.
+fn listed_frames(layout: &Layout) -> Vec<(u64, u64)> {
+    let log = fs::read(layout.journal_log()).unwrap();
+    offsets_on_disk(layout)
+        .into_iter()
+        .map(|start| {
+            let at = usize::try_from(start).unwrap();
+            let len = u32::from_le_bytes(log[at..at + 4].try_into().unwrap());
+            (start, start + 8 + u64::from(len))
+        })
+        .collect()
+}
+
+/// Linux's fsync-failure semantics, modelled ([`FsyncModelFs`]): a sync that fails leaves the
+/// bytes it should have made durable not durable for good, and a later sync succeeds without
+/// them, Linux having reported the failed writeback once. With the k-th sync-class call of five
+/// transactions failing, for every k:
+///
+/// - every frame `journal.off` lists is durable in `journal.log`: a frame whose fdatasync failed
+///   is never listed after a later sync succeeds (the fsyncgate pattern);
+/// - the journal a power loss would leave (the model's durable image) recovers, without
+///   damage, to exactly the acknowledged frames in order: none of them is lost, and none is
+///   there that was not acknowledged.
+#[test]
+fn fsync_failure_semantics_never_list_a_frame_not_on_disk() {
+    let (_root, layout) = new_root();
+    let dry = Arc::new(FsyncModelFs::new());
+    let all = fsync_failure_run(&layout, Arc::clone(&dry) as Arc<dyn FsOps>).unwrap();
+    assert_eq!(
+        all.len(),
+        5,
+        "without a failure every frame is acknowledged"
+    );
+    let syncs = dry.syncs();
+    assert!(
+        syncs >= 14,
+        "create, five frames of two syncs, a checkpoint: {syncs}"
+    );
+    for k in 1..=syncs {
+        let (_root, layout) = new_root();
+        let model = Arc::new(FsyncModelFs::failing_sync(k));
+        let Some(acked) = fsync_failure_run(&layout, Arc::clone(&model) as Arc<dyn FsOps>) else {
+            continue; // the journal's creation failed: no frame to judge
+        };
+        let failed = model.failed();
+        let log = layout.journal_log().into_std_path_buf();
+        for (start, end) in listed_frames(&layout) {
+            assert!(
+                model.is_durable(&log, start, end),
+                "k={k}, {failed:?} failed: the frame at {start}..{end} is listed, but a power \
+                 loss would take it"
+            );
+        }
+        let image_dir = tempfile::tempdir().unwrap();
+        let image =
+            Layout::new(Utf8PathBuf::from_path_buf(image_dir.path().join("store")).unwrap());
+        model.write_durable_image(layout.root().as_std_path(), image.root().as_std_path());
+        let journal = Journal::open(&image, real_fs()).unwrap();
+        if let Err(e) = journal.truncate_torn_tail() {
+            panic!("k={k}, {failed:?} failed: the journal a power loss leaves is damaged: {e}");
+        }
+        let recovered: Vec<Vec<Record>> = journal
+            .tail_frames_from(0)
+            .unwrap()
+            .into_iter()
+            .map(|frame| frame.records)
+            .collect();
+        assert_eq!(
+            recovered, acked,
+            "k={k}, {failed:?} failed: after a power loss, the acknowledged frames"
+        );
+    }
+}
+
 #[test]
 fn lock_times_out_as_busy() {
     let (_root, layout) = new_root();

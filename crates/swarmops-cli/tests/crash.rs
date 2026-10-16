@@ -457,13 +457,14 @@ fn set_read_only(path: &Path, read_only: bool) {
     fs::set_permissions(path, permissions).unwrap();
 }
 
-/// A commit, then a ref move, whose journal frame reaches `journal.log` but whose listing in
-/// `journal.off` fails (the file made read-only): each exits 4 with `E_IO_TRANSIENT`,
-/// retryable, saying that it may have committed, and readers see it already. Run again once
-/// `journal.off` takes writes, the same command finds it done: the same changeset, which the
-/// store holds once, and the move already applied. The store verifies clean.
+/// A commit, then a ref move, whose journal frame is durable in `journal.log` but whose listing
+/// in `journal.off` fails (the file made read-only) has committed: the frame is its commit point.
+/// Each exits 0 with a warning that names `journal.off`, and readers see it already; while
+/// `journal.off` refuses writes, the next write fails, unable to list the frame. Once
+/// `journal.off` takes writes, the same commit run again finds its changeset (the store holds it
+/// once), the same move finds it applied, and the store verifies clean.
 #[test]
-fn an_undecided_write_is_retryable_and_running_it_again_settles_it() {
+fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
     let store = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
     let off = store.layout().journal_off().into_std_path_buf();
     set_read_only(&off, true);
@@ -472,34 +473,44 @@ fn an_undecided_write_is_retryable_and_running_it_again_settles_it() {
         eprintln!("skipped: journal.off takes writes despite its mode (running as root?)");
         return;
     }
-    let undecided = |run: &Run| {
-        let error = run.err("E_IO_TRANSIENT");
-        assert_eq!(run.exit(), 4, "{run}");
-        assert_eq!(error["retryable"], true, "{run}");
-        assert_eq!(error["details"]["may_have_committed"], true, "{run}");
-        let hint = error["hint"].as_str().unwrap_or_default();
-        assert!(hint.contains("same command"), "{run}");
+    let committed_with_a_warning = |run: &Run| {
+        let result = run.ok();
+        let warnings = result["warnings"].as_array().cloned().unwrap_or_default();
+        assert_eq!(warnings.len(), 1, "{run}");
+        let warning = warnings[0].as_str().unwrap();
+        assert!(
+            warning.contains("is committed") && warning.contains("journal.off"),
+            "{run}"
+        );
+        result
     };
 
-    let changes = store.changes("undecided", "undecided.txt", "may have committed\n");
-    let commit = ["commit", "-m", "undecided", "--changes", changes.as_str()];
-    undecided(&store.run_as(&agent(0), &commit, &[]));
+    let changes = store.changes("listing", "listing.txt", "committed all the same\n");
+    let commit = ["commit", "-m", "listing", "--changes", changes.as_str()];
+    let first = committed_with_a_warning(&store.run_as(&agent(0), &commit, &[]));
+    let id = first["changeset"].as_str().unwrap().to_owned();
     assert_eq!(store.info()["changesets"], 1, "readers see its frame");
+    let other = store.changes("other", "other.txt", "another change\n");
+    let blocked = ["commit", "-m", "other", "--changes", other.as_str()];
+    store.run_as(&agent(0), &blocked, &[]).err("E_IO");
     set_read_only(&off, false);
     let again = store.run_as(&agent(0), &commit, &[]).ok();
+    assert_eq!(again["changeset"], id.as_str(), "{again}");
     assert_eq!(
         again["blobs_written"], 0,
         "the first run wrote them: {again}"
     );
-    let id = again["changeset"].as_str().unwrap().to_owned();
+    assert!(again.get("warnings").is_none(), "{again}");
     assert_eq!(store.info()["changesets"], 1, "one changeset, found again");
 
     set_read_only(&off, true);
     let create = ["ref", "set", "main", id.as_str(), "--create"];
-    undecided(&store.run_as(&agent(0), &create, &[]));
+    let moved = committed_with_a_warning(&store.run_as(&agent(0), &create, &[]));
+    assert_eq!(moved["already_applied"], false, "{moved}");
+    assert_eq!(store.info()["main"], id.as_str(), "readers see the move");
     set_read_only(&off, false);
     let again = store.run_as(&agent(0), &create, &[]).ok();
     assert_eq!(again["already_applied"], true, "{again}");
     assert_eq!(store.info()["main"], id.as_str());
-    store.assert_clean("after the undecided writes");
+    store.assert_clean("after the listings that failed");
 }
