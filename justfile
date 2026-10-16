@@ -58,6 +58,16 @@ perf:
     [ "$status" -eq 0 ] || echo "perf: a step failed; target/perf/ has the full output" >&2
     exit "$status"
 
+# The native metadata store against SQLite, redb, fjall and sled on SwarmOps' own workloads:
+# bench/compare, a cargo workspace of its own that `just check` neither builds nor lints
+# (SwarmOps depends on none of these databases). `--quick` is a smoke run at small sizes, under
+# 2 minutes once built. The full run (the plan's sizes) waits on the disk for about two hours
+# at 4 ms per fdatasync, so give it a quiet host; `--w1-txns N --w2-txns N` scale it down. The
+# report goes to stdout, every raw value to bench/compare/target/results/; docs/perf.md
+# records it.
+bench-compare *args:
+    cargo run --release --locked --manifest-path bench/compare/Cargo.toml -- {{args}}
+
 # Needs a nightly toolchain: `rustup toolchain install nightly`. Targets: codec_roundtrip, tree_decode, frame_decode, journal_recovery.
 fuzz target="codec_roundtrip":
     cd fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time=60

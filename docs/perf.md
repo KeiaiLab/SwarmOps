@@ -587,3 +587,212 @@ Head `a4da77d` (every M1 task merged), `just perf` (store-level contention → C
 | `read_snapshot` (`read()` + `changeset(id)`, p50) | 10k: 47.7 µs (ckpt at end) / 67.4 µs (31 frames past); 100k: 53.8 / 75.0 µs; p99 ≤ 126 µs; `journal.off` search 4.0–5.2 µs |
 
 Decisions confirmed on this run: the kernel-queue lock keeps `Busy` at 0 with every longest wait under 1.2 s, so `lock_timeout` stays at 10 s (FIFO hand-off remains an M6 experiment); parallel `Index::sync` and parallel flush directory fsyncs hold their 7c gains; 32-thread `put_batch` scales 13.8× (15.5× with a busy writer), so a `--durability fast` flag is not justified by this data. The CLI harness now writes each change list to a file (7b fix round); the 21 ms uncontended commit matches the earlier stdin-based harness within noise.
+
+## M1.5 — native store vs embedded databases (2026-10-16, provisional)
+
+`bench/compare/` measures the native metadata store (`swarmops_store::MetaStore`, through its public API) against SQLite, redb, fjall and sled on SwarmOps' own workloads (M1.5 Task 8): `just bench-compare`, or `just bench-compare --quick` for a smoke run of every workload at small sizes (99 s here once built, at load 29–47; the brief asks for under 2 minutes). It is a cargo workspace of its own, like `fuzz/`: `publish = false`, outside the root workspace, never built by `just check`. **SwarmOps depends on none of these databases**; they exist only in that harness, to measure the store the project chose to build instead. Its README gives the method in full.
+
+**Every number in this section is provisional.** It was taken on the shared 32-core host while other agents built, tested and mutation-tested other worktrees, at the load and raw `fdatasync` latency printed beside it (M0 measured 4.1 ms for that `fdatasync` on a quiet disk). Heavy runs on the host were serialized by a lock, so no other benchmark ran beside these, but builds and test suites did. The controller re-runs `just bench-compare` at the plan's sizes in a quiet window before these numbers are published, and replaces the tables.
+
+### Engines, durability and method
+
+Every engine runs the same transaction on the same seeded data, in the layout a competent user of it would choose, with its defaults apart from durability. W1's transaction (which W2, W4 and W6 reuse) checks that the changeset is new, looks up its parent and computes its generation, stores it under its 32-byte id numbered in insertion order, indexes it by its 32-byte delta hash, moves `main` to it by compare-and-swap and records the move, and commits durably. The native store records the move in its journal frame; the others write a reflog row, as the M0 SQLite schema did. SQLite's schema mirrors the native index (rows in seq order, a unique index by id, an index by delta hash); redb, fjall and sled keep `changesets`, `by_delta_hash`, `refs`, `reflog` and `meta` (the counters).
+
+| engine | version (exact pin) | a commit is durable when | syncs per commit, traced | processes per store |
+|---|---|---|---|---|
+| `native` | `swarmops-store` 0.1.0, this tree | its journal frame, then the frame's `journal.off` entry, are `fdatasync`'d, and the moved ref's file is replaced (temp file `fsync`'d, renamed, `refs/` `fsync`'d); the index and the checkpoint are synced every 32 frames | 4.23 | many |
+| `sqlite` | `rusqlite` 0.40.2 (2026-08-08), SQLite 3.53.2 bundled | WAL, `synchronous=FULL`: the WAL `fsync`'d at every commit; `BEGIN IMMEDIATE`, `busy_timeout` 10 s | 1.02 | many |
+| `sqlite-normal` | the same | WAL, `synchronous=NORMAL`: synced at checkpoints only, **not power-loss durable** | 0.018 | many |
+| `redb` | `redb` 4.3.0 (2026-09-15) | `Durability::Immediate`: one `fdatasync` | 1.00 | one (threads) |
+| `fjall` | `fjall` 3.1.12 (2026-10-03), `lsm-tree` 3.1.10 | single-writer transactions with `PersistMode::SyncAll`: the journal `fsync`'d | 1.00 | one (threads) |
+| `sled` | `sled` 0.34.7 (2021-09-12), the last stable release; unmaintained since, its 1.0 rewrite still in alpha | `Db::flush` after every transaction: `sync_file_range`, which writes no metadata and does not flush the disk's cache, **weaker than the others** | 2.26 `sync_file_range` | one (threads) |
+
+Every version was released at least 7 days before the harness was written, and so was every crate in its `Cargo.lock`, except `zstd` 0.14.2, which `swarmops-store` itself pins. sled builds cleanly on Rust 1.99, so it is measured, as a reference.
+
+- **Equalized durability.** Every engine but two makes each commit durable before it returns: the native store, SQLite at `synchronous=FULL`, redb at `Durability::Immediate` and fjall at `PersistMode::SyncAll`. SQLite at `synchronous=NORMAL` syncs only at checkpoints, so a commit survives a process crash but not a power loss. sled's `flush` syncs with `sync_file_range`, which writes no metadata and does not flush the disk's cache. Those two are reference lines, never contenders.
+- **Multi-process access.** Only the native store and SQLite let several processes open one store. redb, fjall and sled lock the database to one process, so W2 runs them on threads, and runs the native store and SQLite on threads too, which measures what the asymmetry is worth.
+- **fjall's settled state.** fjall writes a memtable to a table file only once it holds 64 MiB, and drops a journal only when every keyspace has flushed past it. The small keyspaces (`meta`, `refs`, `reflog`) never fill a memtable, so a bulk-loaded store keeps every journal until 512 MiB of them force a flush (216 of the 1M store's 385 MiB). The `fjall` rows settle as the other engines do, by moving the log into the main structure as SQLite's checkpoint does: the journal is synced, then every keyspace's memtable is flushed into table files (`rotate_memtable_and_wait`, public but doc-hidden), and fjall deletes the journals no keyspace needs. The active journal stays: fjall rotates it only once it passes 64 MB at a flush, and every open replays it whole, flushed or not. So the flush shrinks the 1M store (W5) and leaves its open time (W4) as it was; a 100k store keeps its whole journal beside the new tables. The `fjall-unflushed` rows (W3–W5 only) show the store as the load left it.
+- **Method.** Same host and filesystem as M0 (ext4 `data=ordered` on WSL2's virtual disk), stores in fresh directories under `~/.local/state/swarmops-bench`, warm page cache. Seeded, deterministic data with real BLAKE3 ids, in chains. Warm-up before timing (W1 200 transactions; W3 one untimed pass of every lookup kind; W6 one of the reader's). Each measurement runs 3 times, the engines in a rotated order; every cell is the median over the runs with `[min–max]`. Beside every row: the 1-minute load at the start of each run (and its range, sampled every 2 s) and a raw `fdatasync` probe (the median of 40 appends of 120 B, each `sync_data`'d) at the start and end of each run. No network.
+- **Scale of this run.** One hold of the host's lock for heavy runs, 25 minutes (05:53–06:18 UTC): the write workloads first (the sync count, the breakdown, W1, W2), then the seeded ones (W3–W6). A raw `fdatasync` probe taken once the lock was held (7.6 ms) set W1 to 1,000 timed transactions (the plan's 10,000 is a tenth) and W2 to 32 writers × 50 (the plan's × 1,000 is a twentieth), so that the hold stayed within an hour; W3–W6 ran at the plan's sizes (100k and 1M changesets, 20,000 lookups of each kind, 5 opens and 3 kills per run, 10 s of W6 writer). The disk then sped up to M0's 4 ms and the hold took 25 minutes. The plan's sizes stay the harness's default for the quiet-window re-run.
+
+### Sync calls per commit: durability, checked
+
+`strace` and `perf` are not installed on this host, so the harness counts system calls with a ptrace tracer of its own (`bench/compare/src/trace.rs`: about 230 lines of safe Rust over `nix`'s ptrace calls, x86_64 Linux only). A child process creates a store, commits 32 untraced W1 transactions and waits on its stdin. The tracer seizes every thread, follows the threads they create, and counts every system call while the child makes n more commits, closes the store and exits, naming each sync call's file through `/proc/<pid>/fd`. It runs twice, with n = 64 and n = 1,088; the difference over 1,024 is the cost of one commit, with the batched work averaged in (the native index sync every 32 frames and a compaction every 1,024 records, SQLite's checkpoint every 1,000 WAL pages) and the open, the warm-up and the close cancelled out. Per commit, counted at the start of the run (load 27.8 falling to 14.8; raw `fdatasync` 7.9 ms):
+
+| engine | fsync | fdatasync | sync_file_range | all syncs | syscalls | bytes written | sync calls by file (≥ 0.01) |
+|---|---|---|---|---|---|---|---|
+| native | 2.07 | 2.17 | 0.00 | 4.23 | 157 | 470 | `fdatasync meta/journal.log` 1.00; `fdatasync meta/journal.off` 1.00; `fsync meta/refs/` 1.00; `fsync meta/refs/.tmp*` 1.00; `fdatasync meta/idx/dh.col` 0.032; `fdatasync meta/idx/gen.col` 0.032; `fdatasync meta/idx/ids.col` 0.032; `fdatasync meta/idx/par.col` 0.032; `fdatasync meta/parents.log` 0.032; `fsync meta/` 0.031; `fsync meta/.tmp*` 0.031 |
+| sqlite | 1.02 | 0.00 | 0.00 | 1.02 | 18.8 | 24,039 | `fsync db.sqlite-wal` 1.01 |
+| sqlite-normal | 0.018 | 0.00 | 0.00 | 0.018 | 17.8 | 24,039 | `fsync db.sqlite-wal` 0.012 |
+| redb | 0.00 | 1.00 | 0.00 | 1.00 | 15.1 | 49,752 | `fdatasync db.redb` 1.00 |
+| fjall | 1.00 | 0.00 | 0.00 | 1.00 | 2.01 | 494 | `fsync fjall/#.jnl` 1.00 |
+| sled | 0.003 | 0.00 | 2.26 | 2.26 | 29.8 | 1,047 | `sync_file_range sled/db` 2.26 |
+
+- **Every durable contender makes one sync per commit**: SQLite an `fsync` of its WAL (1.02 with its checkpoints averaged in; this SQLite build has no `fdatasync`), redb one `fdatasync`, fjall one `fsync` of its journal.
+- **The native store makes 4.23**, as storage-core §3 specifies ("2 journal syncs per transaction, + 2 per moved ref"; every W1 transaction moves `main`): the frame's `fdatasync` (the commit point), the `journal.off` entry's, the ref file's temp-file `fsync` and the `fsync` of `refs/`, plus the batched index sync (5 files every 32 frames: 0.16), the checkpoint's replacement (2 every 32 frames: 0.06) and the compaction's syncs (every 1,024 records, under the table's 0.01 cut-off).
+- **Not durable as the others are:** sled's 2.26 `sync_file_range` calls per commit write neither the file's metadata nor the disk's cache, and SQLite at `NORMAL` syncs only at its checkpoints (0.018 per commit).
+- The native store writes the fewest bytes per commit (470, against SQLite's 24,039 in whole WAL pages and redb's 49,752 in copy-on-write pages) and makes the most system calls (157: the lock file and the index's nine files are opened in every transaction, and the ref file gets a temp file of its own). Neither matters beside its syncs (below).
+
+### Where a native commit's time goes: the journal syncs
+
+`breakdown` runs W1's transaction on a native store whose filesystem is `RealFs` with every call timed (through the store's public `MetaStore::create_with_fs`): 1,024 commits per run after a 200-commit warm-up, so that one compaction falls among them, 3 runs. `RealFs::append_durable` (the journal's append + `fdatasync`) and `atomic_replace` of a ref file (temp file, `fsync`, rename, directory `fsync`) are done step by step with `RealFs`'s calls in `RealFs`'s order, so that each sync is timed on its own; a kind of call counts for the time its calls cover, overlaps once (the index sync's five `sync_data`s run at once). Means per commit, so the parts add up. Load 14.8/12.9/13.1 (12.2–14.8) during the runs, raw `fdatasync` 7.5–8.5 ms.
+
+| part of the commit | calls per commit | ms per commit | share of the commit |
+|---|---|---|---|
+| ref file: fsync of the temp file | 1.00 | 8.20 [7.59–8.23] | 24.1 [24.0–24.5] % |
+| fdatasync of journal.log (the commit point) | 1.00 | 8.08 [7.50–8.20] | 24.0 [23.8–24.1] % |
+| fdatasync of journal.off | 1.00 | 7.86 [7.54–8.13] | 23.8 [23.5–23.9] % |
+| ref file: fsync of refs/ | 1.00 | 7.75 [7.39–7.99] | 23.4 [23.1–23.4] % |
+| checkpoint replace (every 32 frames) | 0.032 | 0.510 [0.481–0.529] | 1.52 [1.52–1.55] % |
+| rest: lock, index open and lookups, encoding (outside filesystem calls) | – | 0.372 [0.364–0.372] | 1.11 [1.09–1.15] % |
+| index sync, 5 files (every 32 frames) | 0.166 | 0.323 [0.319–0.331] | 0.987 [0.933–1.02] % |
+| ref file: rename over refs/main | 1.00 | 0.106 [0.102–0.108] | 0.322 [0.310–0.322] % |
+| index appends, 5 files (no sync) | 5.00 | 0.081 [0.077–0.081] | 0.241 [0.236–0.243] % |
+| ref file: temp file created + written | 1.00 | 0.064 [0.062–0.067] | 0.196 [0.191–0.198] % |
+| compaction (every 1,024 records) | 0.016 | 0.059 [0.057–0.062] | 0.181 [0.175–0.182] % |
+| journal appends: open + write, 2 files (no sync) | 4.00 | 0.057 [0.056–0.058] | 0.170 [0.170–0.176] % |
+| ref file reads | 2.97 | 0.025 [0.024–0.026] | 0.077 [0.074–0.077] % |
+| file length checks | 4.00 | 0.011 [0.010–0.011] | 0.032 [0.031–0.034] % |
+| **the whole commit** | | 33.5 [31.6–34.2] | 100 % |
+
+- **95 % of a native commit is its four syncs, about a quarter each**: `journal.log`'s `fdatasync` 24.0 % [23.8–24.1], `journal.off`'s 23.8 % [23.5–23.9], the ref temp file's `fsync` 24.1 % and the `fsync` of `refs/` 23.4 %, each about one raw `fdatasync` (7.5–8.5 ms in these runs). The batched work takes 2.7 % (the checkpoint 1.5 %, the index sync 1.0 %, the compaction 0.2 %), and everything else (the lock, opening the index, the lookups, the encoding, the appends) about 2 %.
+- **The second journal sync is a quarter of a commit, not a half.** An independent code review suggested that the `fdatasync` of `journal.off` may be droppable. Without it, a W1 commit would take about 25.5 ms instead of 33.5 ms: 1.3× the commits/s. The ref file's replacement costs as much as both journal syncs together (47.5 %), although storage-core §2 rule 3 calls the ref files, like the index, a projection of the journal that replay restores from the frames past the checkpoint, and the index's syncs are batched every 32 frames. A commit with one sync, where the other engines are, needs both gone. Whether either can go is a durability question for the spec (what a reader and the tail check may trust after a power loss), which this measurement does not settle; it prices the options.
+
+### W1: one writer, durable commits
+
+W1's transaction back to back, 1,000 timed commits after 200 untimed (a tenth of the plan's 10,000: see the run's scale above). Bytes per transaction: the closed store's allocated size over the 1,200 commits.
+
+| engine | commits/s | p50 ms | p99 ms | max ms | bytes/txn on disk | load at start (range) | raw fdatasync |
+|---|---|---|---|---|---|---|---|
+| native | 29.9 [29.6–31.2] | 31.5 [30.4–33.1] | 62.4 [60.8–63.4] | 167 [154–188] | 437 | 12.2/13.8/13.3 (11.6–14.4) | 7.6–8.3 ms |
+| sqlite | 135 [129–161] | 7.93 [6.82–8.31] | 16.6 [12.4–17.0] | 22.3 [19.2–26.5] | 311 [311–314] | 12.8/15.1/13.4 (12.8–15.1) | 7.0–8.5 ms |
+| sqlite-normal | 5,978 [5,366–6,114] | 0.028 [0.028–0.029] | 0.333 [0.238–0.342] | 20.5 [20.1–23.6] | 314 [311–314] | 14.6/14.4/13.6 (13.6–14.6) | 7.4–8.5 ms |
+| redb | 218 [158–231] | 4.07 [3.94–5.44] | 9.41 [8.76–16.7] | 14.5 [11.4–18.4] | 457 | 14.6/14.4/13.6 (13.1–15.4) | 7.6–16.1 ms |
+| fjall | 144 [138–158] | 7.40 [7.05–7.83] | 11.6 [9.53–13.6] | 18.1 [15.3–19.7] | 573 | 15.8/14.2/13.1 (13.1–15.8) | 7.3–16.1 ms |
+| sled | 1,442 [1,370–1,622] | 0.612 [0.552–0.664] | 1.56 [1.41–2.91] | 5.17 [4.67–7.35] | 1,072 | 15.1/13.8/13.3 (13.3–15.1) | 7.4–8.2 ms |
+
+**Verdict: the native store loses, with 4.5–7.3× fewer commits/s than the durable engines** (29.9 against SQLite's 135, fjall's 144 and redb's 218). Its p50 of 31.5 ms is four raw `fdatasync`s (7.6–8.3 ms): the frame per transaction with two journal `fdatasync`s, plus the ref file's atomic replacement with two more, where every other durable engine makes one sync per commit. redb's commit costs about half of one raw append + `fdatasync` (4.1 against about 7.6 ms), most likely because redb rewrites pages inside a file that does not grow at every commit, so its `fdatasync` has no new file size to log, while every native sync follows an append or a newly created file. sled (1,442/s) and SQLite at `NORMAL` (5,978/s) return before the commit is on the disk. On disk, the native store takes 437 bytes per transaction, between SQLite (311) and redb (457).
+
+### W2: 32 writers
+
+32 writers × 50 transactions each (a twentieth of the plan's 1,000: see the run's scale above), every writer moving `main` with a compare-and-swap against its value inside the transaction. Processes for the native store and SQLite, threads for the others; the native store and SQLite on threads as well. Latency includes `Busy` retries (a writer that gets `Busy` after the 10 s timeout tries again); spread is the slowest writer's total time over the fastest's. No writer failed, and sled reran no transaction.
+
+| engine | mode | txns/s | p50 ms | p99 ms | max ms | Busy | failed | spread | load at start (range) | raw fdatasync |
+|---|---|---|---|---|---|---|---|---|---|---|
+| native | processes | 31.1 [26.9–59.3] | 1,049 [578–1,190] | 1,196 [694–1,823] | 1,240 [707–2,094] | 0.00 | 0.00 | 1.12 [1.11–1.17] | 13.2/17.6/13.3 (12.4–17.6) | 3.9–8.4 ms |
+| sqlite | processes | 137 [42.8–247] | 6.75 [2.52–29.5] | 5,269 [3,139–10,596] | 11,354 [6,343–18,028] | 5.00 [0.00–15.0] | 0.00 | 29.7 [26.1–59.8] | 16.6/26.0/12.9 (12.3–35.4) | 4.0–14.4 ms |
+| sqlite-normal | processes | 657 [657–739] | 0.027 [0.025–0.035] | 831 [633–831] | 2,433 [2,133–2,433] | 0.00 | 0.00 | 218 [111–370] | 31.8/21.1/13.6 (13.1–31.8) | 3.9–8.6 ms |
+| native | threads | 53.1 [30.6–59.2] | 594 [580–1,046] | 1,238 [677–1,805] | 1,286 [694–1,876] | 0.00 | 0.00 | 1.12 [1.11–1.12] | 13.2/15.3/12.8 (12.8–16.6) | 3.9–8.4 ms |
+| sqlite | threads | 128 [83.5–239] | 7.17 [2.62–9.03] | 5,667 [3,244–8,299] | 12,154 [6,544–17,077] | 6.00 [0.00–7.00] | 0.00 | 27.2 [18.7–30.2] | 34.6/22.9/12.3 (12.3–34.6) | 3.9–14.3 ms |
+| sqlite-normal | threads | 716 [685–872] | 0.029 [0.027–0.034] | 631 [330–931] | 2,233 [1,832–2,334] | 0.00 | 0.00 | 197 [162–276] | 31.8/20.3/13.1 (13.1–31.8) | 4.0–8.6 ms |
+| redb | threads | 213 [202–414] | 4.20 [2.13–4.44] | 2,945 [1,808–3,157] | 5,676 [3,435–6,684] | 0.00 | 0.00 | 12.5 [11.1–18.3] | 30.8/20.3/13.1 (13.1–30.8) | 3.9–8.5 ms |
+| fjall | threads | 148 [142–391] | 7.54 [2.38–7.69] | 4,662 [1,865–4,881] | 10,162 [3,626–10,559] | 0.00 | 0.00 | 33.5 [19.0–33.9] | 28.7/18.9/13.3 (13.3–28.7) | 3.9–8.8 ms |
+| sled | threads | 1,953 [1,896–1,999] | 17.9 [17.7–18.4] | 28.7 [27.7–28.9] | 35.8 [33.3–41.4] | 0.00 | 0.00 | 1.13 [1.11–1.19] | 26.0/17.6/13.3 (13.3–26.0) | 4.0–8.0 ms |
+
+**Verdict: the native store loses on throughput and wins on fairness.**
+
+- **Throughput.** Every engine serializes its writers, and none batches several commits into one sync, so W2 runs at W1's pace: the native store at 26.9–59.3 transactions/s, about four raw `fdatasync`s a commit, against SQLite's 42.8–247 and redb's 202–414. The ranges are the disk's: the raw `fdatasync` probe fell from about 8 ms in runs 1–2 to 4 ms in run 3, and every engine's throughput about doubled with it (the native store's from 27–31 to 59/s).
+- **Fairness.** The native store's writers wait in the kernel's flock queue (`MetaLock`, M1 Task 7c): spread 1.11–1.17 in all six runs, no `Busy`, and the longest wait 0.69–2.1 s, one to two rotations of the 31 other writers (p50 1,049 ms ≈ 31 × 33.5 ms). SQLite's busy handler polls, with sleeps that grow to 100 ms: spread 18.7–59.9, p99 3.1–10.6 s, longest waits 6.3–18.0 s, and up to 15 `SQLITE_BUSY` per run after the 10 s timeout, on processes and threads alike. redb's and fjall's in-process writer locks (a condition variable in redb, a mutex in fjall), neither first-come-first-served: spread 11–34, longest waits 3.4–10.6 s. sled's transactions are short and fair (spread 1.13), at a durability the others do not have.
+- **The asymmetry.** The native store runs the same on threads as on processes (spread 1.11–1.12 either way; every acquire flocks a file description of its own, so threads queue as processes do), and so does SQLite. redb, fjall and sled would need a server process in front of them to take SwarmOps' 32 agent processes.
+
+### W3: lookups, warm
+
+Bulk-loaded stores of 100,000 and 1,000,000 changesets (one chain, in transactions of 50,000, then settled and closed), opened in the measuring process; 20,000 lookups of each kind, after one untimed pass of every kind. On one open snapshot: by id (`get`), by the first 6 bytes of the id (`prefix`), by delta hash through the secondary index (`delta`), and an id the store does not hold (`miss`, what every insert asks first); and by id in a fresh read transaction each (`fresh`, what a CLI command pays). Every answer is checked. µs:
+
+| engine | size | get p50 | get p99 | prefix p50 | prefix p99 | delta p50 | delta p99 | miss p50 | fresh p50 | fresh p99 | load at start (range) | raw fdatasync |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| native | 100k | 10.8 [10.7–10.8] | 33.3 [31.8–34.0] | 10.4 [9.69–13.4] | 26.4 [26.3–42.2] | 11.8 [11.5–12.1] | 42.1 [25.8–46.9] | 7.26 [6.95–7.36] | 54.3 [52.0–68.6] | 176 [161–213] | 10.8/10.8/10.9 (10.8–10.9) | 3.9–4.0 ms |
+| sqlite | 100k | 3.22 [3.01–3.67] | 10.8 [7.06–11.4] | 1.39 [1.36–1.50] | 4.35 [4.29–4.96] | 3.30 [2.88–3.71] | 8.44 [7.19–12.7] | 1.33 [1.14–1.43] | 4.63 [4.47–4.97] | 11.7 [10.6–19.0] | 10.9/10.6/10.9 (10.4–10.9) | 3.8–4.1 ms |
+| redb | 100k | 0.441 [0.401–0.932] | 1.83 [1.21–2.35] | 0.531 [0.491–0.651] | 1.24 [0.762–1.87] | 0.752 [0.662–0.772] | 2.25 [2.01–2.67] | 0.390 [0.341–0.511] | 0.961 [0.852–1.00] | 2.79 [1.88–2.91] | 10.9/10.6/10.9 (10.6–10.9) | 3.9–4.0 ms |
+| fjall | 100k | 1.02 [0.801–1.34] | 3.00 [2.25–5.78] | 4.25 [3.21–5.83] | 10.9 [7.88–19.8] | 4.61 [4.41–6.16] | 14.2 [13.2–25.7] | 18.2 [17.9–18.9] | 1.25 [1.04–1.56] | 4.21 [3.31–4.74] | 11.0/10.6/10.9 (10.6–11.0) | 3.9–4.0 ms |
+| fjall-unflushed | 100k | 0.862 [0.551–1.10] | 3.32 [1.00–3.40] | 1.11 [1.07–1.53] | 2.88 [2.65–5.12] | 1.37 [1.29–1.75] | 4.29 [3.82–6.82] | 0.772 [0.691–1.04] | 0.852 [0.762–0.941] | 3.05 [1.80–3.60] | 11.0/10.6/10.9 (10.6–11.0) | 3.8–3.9 ms |
+| sled | 100k | 1.07 [0.982–1.26] | 5.09 [4.49–5.11] | 2.14 [2.09–2.28] | 7.55 [7.16–8.17] | 2.49 [2.38–2.84] | 10.5 [9.68–11.4] | 1.19 [0.942–1.42] | 1.28 [1.18–1.73] | 6.12 [5.40–9.54] | 11.0/10.6/10.9 (10.6–11.0) | 3.9–4.1 ms |
+| native | 1M | 15.4 [14.0–15.6] | 60.4 [32.3–67.3] | 18.0 [17.6–18.2] | 71.9 [65.7–80.2] | 16.5 [16.4–16.5] | 60.6 [58.4–70.0] | 10.5 [10.3–10.6] | 64.9 [61.1–67.1] | 237 [199–241] | 10.4/9.6/9.5 (9.2–10.4) | 4.0–4.6 ms |
+| sqlite | 1M | 4.55 [4.48–5.83] | 15.9 [14.8–31.1] | 2.38 [2.32–2.77] | 8.31 [7.54–10.6] | 4.95 [4.49–5.27] | 15.5 [15.5–17.8] | 2.58 [1.93–2.61] | 6.34 [5.60–7.09] | 25.3 [13.4–25.3] | 10.0/9.8/9.3 (9.3–10.0) | 3.9–4.1 ms |
+| redb | 1M | 1.51 [1.03–1.69] | 3.68 [1.90–6.08] | 1.56 [1.18–1.60] | 4.44 [3.62–4.64] | 1.54 [1.36–1.65] | 3.84 [2.69–4.99] | 1.28 [1.13–1.47] | 1.76 [1.45–2.56] | 8.04 [3.99–8.35] | 10.0/9.8/9.2 (9.2–10.0) | 3.9–4.3 ms |
+| fjall | 1M | 20.6 [18.6–21.2] | 370 [349–375] | 58.2 [55.7–59.1] | 253 [252–255] | 49.9 [47.5–52.1] | 224 [219–240] | 70.2 [63.8–71.8] | 22.0 [21.8–23.8] | 357 [348–503] | 10.0/9.8/9.2 (9.0–10.3) | 3.9–4.1 ms |
+| fjall-unflushed | 1M | 17.5 [16.8–20.6] | 344 [335–400] | 49.0 [48.1–51.3] | 205 [191–231] | 48.0 [46.8–48.5] | 201 [196–203] | 69.5 [67.4–71.9] | 23.2 [22.1–23.8] | 402 [363–432] | 10.3/10.0/10.1 (9.5–10.3) | 3.8–4.3 ms |
+| sled | 1M | 2.33 [2.15–2.45] | 15.6 [12.9–16.3] | 3.56 [3.34–3.95] | 19.3 [19.1–20.2] | 3.59 [3.25–3.74] | 25.4 [21.0–27.1] | 2.76 [2.25–2.95] | 2.24 [2.03–2.78] | 15.3 [11.5–22.9] | 10.2/9.8/9.5 (9.5–10.2) | 3.9–4.2 ms |
+
+**Verdict: the native store loses on lookups, 3–4× against SQLite and about 10× against redb, and beats fjall at 1M on every kind but the fresh snapshot.** At 1M a native `get` takes 15.4 µs p50, against redb's 1.51, sled's 2.33 and SQLite's 4.55 (fjall 20.6). A prefix lookup takes 18.0 µs and a delta-hash lookup 16.5 µs, against redb's 1.56 and 1.54 and SQLite's 2.38 and 4.95 (fjall 58.2 and 49.9); a fresh snapshot and lookup 64.9 µs, against redb's 1.76 and SQLite's 6.34. At 100k the native store is the slowest at every kind (`get` 10.8 µs, fresh 54.3).
+
+- **Why.** A native lookup binary-searches a sorted view's key file with one `pread` per probe (about 20 at 1M), then reads the record's columns with four more. It keeps no cache of its own, nor maps the files (`unsafe` is forbidden), where redb and sled answer from a 1 GB in-process cache and SQLite from its page cache. And a native snapshot opens the index's nine files and reads the checkpoint, the journal tail and the ref files each time, because readers take no lock and share nothing with writers (the lock-free reader).
+- **What the columnar index buys.** A prefix or delta-hash lookup costs about what a point lookup does (each kind has its sorted view), and a miss less. Going from 100k to 1M adds about 40 %, about three more probes. fjall's lookups grow 20× over the same step, past the native store's: its 32 MiB block cache holds a sixth of its 1M tables (192 MiB).
+- Every native lookup stays under 72 µs p99, 0.24 ms with a fresh snapshot, four times inside the spec's 1 ms read target. The gap matters to a long-lived process that takes many snapshots, not to a CLI command that takes one or two.
+
+### W4: opening a 1M store, and recovery after a kill
+
+Open: a fresh process opens the 1M store (warm: the files are in the page cache) and looks one changeset up, 5 times per run. Recovery: a writer process commits W1's transaction in a loop on the 1M store and is killed with SIGKILL 0.1–1 s after its first acknowledged commit (a seeded draw), most likely inside a commit; a fresh process then opens the store and commits one transaction (where most engines repair what the kill left), 3 kills per run. A killed process loses nothing the kernel holds, so this is recovery from a process crash, not from a power loss. Every acknowledged commit was present after every kill, on every engine. ms:
+
+| engine | open ms | first lookup ms | open + lookup ms | process ms | after a kill: open ms | first write ms | open + write ms | worst ms | load at start (range) | raw fdatasync |
+|---|---|---|---|---|---|---|---|---|---|---|
+| native | 0.035 [0.031–0.036] | 0.102 [0.095–0.121] | 0.138 [0.126–0.156] | 1.21 [1.05–1.23] | 0.032 [0.031–0.034] | 25.4 [24.4–261] | 25.5 [24.4–261] | 190 [25.0–310] | 9.3/9.8/9.7/9.7/10.0/10.2 (9.3–10.2) | 3.8–4.2 ms |
+| sqlite | 0.460 [0.428–0.614] | 0.251 [0.218–0.276] | 0.679 [0.678–0.890] | 2.13 [1.83–2.52] | 15.1 [11.3–17.2] | 8.55 [8.07–9.18] | 23.7 [19.5–26.4] | 24.9 [22.6–28.4] | 9.1/9.6/9.7/9.7/10.4/10.2 (9.1–10.4) | 3.8–4.3 ms |
+| redb | 1.82 [1.68–1.99] | 0.049 [0.035–0.052] | 1.88 [1.71–2.04] | 9.84 [9.19–11.1] | 318 [283–325] | 1.99 [1.94–2.82] | 320 [285–327] | 330 [292–337] | 9.1/9.6/9.8/9.7/10.4/10.0 (9.1–10.4) | 3.9–5.9 ms |
+| fjall | 549 [546–588] | 0.065 [0.065–0.080] | 549 [546–588] | 612 [609–653] | 554 [542–572] | 4.07 [3.93–5.42] | 558 [546–577] | 574 [560–579] | 9.1/9.6/9.8/9.9/10.1/9.7 (9.1–10.1) | 3.8–4.2 ms |
+| fjall-unflushed | 552 [539–554] | 0.060 [0.051–0.070] | 552 [539–554] | 618 [606–620] | 539 [520–558] | 4.15 [4.00–5.90] | 543 [524–564] | 556 [535–581] | 9.1/9.6/9.5/9.7/9.8/10.0 (9.1–10.3) | 3.9–4.1 ms |
+| sled | 167 [161–167] | 0.088 [0.082–0.097] | 167 [161–167] | 237 [229–239] | 192 [182–216] | 1.26 [0.993–1.40] | 196 [183–220] | 208 [197–237] | 9.6/9.8/9.7/9.9/9.6/10.3 (9.6–10.3) | 3.9–4.3 ms |
+
+**Verdict: the native store opens fastest by far, and recovers as fast as SQLite.**
+
+- **Open.** 0.14 ms to open the 1M store and answer a first lookup, against SQLite's 0.68 ms, redb's 1.88 ms, sled's 167 ms and fjall's 549 ms. The native open reads nothing; the first snapshot reads the checkpoint, the index's files and at most 31 frames past the checkpoint, because the index is synced and the checkpoint moved every 32 frames (the batched index sync). fjall replays its active journal (43 MB here) into its memtables at every open, flushed or not: the unflushed store, with 216 MiB of journals, opens no slower (552 ms).
+- **Recovery.** 25.5 ms for the next process's open and first write, against SQLite's 23.7 (its open rebuilds the WAL's index from the WAL), sled's 196, redb's 320 (without quick-repair, its default, an open after a crash walks the database to rebuild the allocator state) and fjall's 558 (its journal replay). The native first write is one ordinary commit: its four syncs, with the tail repair and the replay of at most 31 frames costing next to nothing. In 3 of the 9 native kills that write took 190–310 ms, most likely kills that left a torn or unlisted frame: before it cuts or lists one, the next writer checks every listed frame (storage-core §2 rule 3; `check_listed_chain`), and at 1M that reads the whole 101 MiB journal. The check grows with the journal, and only a crash's repair pays for it.
+
+### W5: size on disk
+
+The bulk-loaded stores, settled (native: `flush`; SQLite: `wal_checkpoint(TRUNCATE)`; redb: nothing to do; fjall: memtables flushed, `fjall-unflushed`: the journal synced only; sled: `flush`) and closed; allocated bytes, as `du` counts them, over one build: two builds of the 100k stores three hours apart (at load 221 and 12) came out the same to a 4 KiB block for the native store and SQLite, to the byte for redb and `fjall-unflushed`, and 0.66 % apart for sled. Log: the native journal (`journal.{log,off,ckpt}`), SQLite's WAL, fjall's journals; redb has none, and sled's log is its data file.
+
+| engine | size | MiB | bytes/record | of which log MiB | apparent MiB | files | load s | load at start (range) | raw fdatasync |
+|---|---|---|---|---|---|---|---|---|---|
+| native | 100k | 28.5 | 298 | 10.1 | 28.4 | 14.0 | 3.98 | 12.5 (11.9–12.5) | 4.5–4.8 ms |
+| sqlite | 100k | 19.5 | 205 | 0.00 | 19.5 | 1.00 | 1.08 | 11.1 (11.1–11.1) | 4.0–4.1 ms |
+| redb | 100k | 39.9 | 418 | 0.00 | 64.3 | 1.00 | 0.562 | 11.3 (11.3–11.3) | 4.0–4.1 ms |
+| fjall | 100k | 40.9 | 429 | 21.6 | 83.3 | 32.0 | 1.62 | 11.0 (11.0–11.2) | 4.0–4.1 ms |
+| fjall-unflushed | 100k | 21.6 | 227 | 21.6 | 64.0 | 24.0 | 1.20 | 10.7 (10.7–10.7) | 4.0–4.0 ms |
+| sled | 100k | 64.6 | 678 | 0.00 | 64.6 | 2.00 | 2.91 | 11.1 (10.7–11.1) | 4.0–4.0 ms |
+| native | 1M | 284 | 298 | 101 | 284 | 14.0 | 43.0 | 11.9 (11.1–11.9) | 4.1–4.4 ms |
+| sqlite | 1M | 197 | 206 | 0.00 | 197 | 1.00 | 21.3 | 11.1 (10.8–11.3) | 4.1–4.3 ms |
+| redb | 1M | 460 | 483 | 0.00 | 514 | 1.00 | 14.2 | 11.2 (10.9–11.2) | 3.9–4.1 ms |
+| fjall | 1M | 235 | 247 | 43.1 | 256 | 35.0 | 19.7 | 11.2 (10.5–11.2) | 4.1–4.2 ms |
+| fjall-unflushed | 1M | 385 | 403 | 216 | 406 | 31.0 | 20.0 | 10.7 (10.4–11.1) | 3.9–4.1 ms |
+| sled | 1M | 541 | 568 | 0.00 | 541 | 2.00 | 51.1 | 10.7 (10.3–11.1) | 4.1–4.2 ms |
+
+**Verdict: the native store sits in the middle: 284 MiB for 1M changesets, 298 bytes each, against SQLite's 197 MiB (206 bytes), fjall's 235 after its flush (247), redb's 460 (483) and sled's 541 (568).** A third of it is the journal (101 MiB), which the native store keeps whole as the record of truth, the index being a projection of it that replay can rebuild (storage-core §2). The rest is the columnar index, which stores each id and each delta hash twice more, in its column and in its sorted view: 112 bytes of columns and parents and 80 of sorted views per record, the same per record at 100k. SQLite's B-trees hold each key once per index; redb's copy-on-write file keeps free pages (514 MiB apparent, 460 allocated); fjall's active journal is a fifth of its flushed 1M store, and at 100k all of its journal stays beside the new tables (40.9 MiB, against 21.6 MiB unflushed, all journal).
+
+### W6: a reader while a writer commits
+
+On a copy of the 100k store: a reader looks a changeset up by id in a fresh read transaction each time, 20,000 times idle, then for 10 s while a writer commits W1's transaction back to back. Reader and writer are two threads of one process, each with a session of its own (SQLite: two connections), for every engine. µs:
+
+| engine | idle p50 | idle p99 | busy p50 | busy p99 | busy p99.9 | busy max | writer commits/s | load at start (range) | raw fdatasync |
+|---|---|---|---|---|---|---|---|---|---|
+| native | 53.8 [53.8–58.2] | 186 [175–193] | 90.8 [90.0–93.6] | 322 [321–341] | 1,335 [1,321–1,559] | 6,715 [6,566–8,140] | 60.5 [60.2–60.8] | 10.6/10.9/11.1 (10.6–11.3) | 4.1–4.2 ms |
+| sqlite | 5.30 [4.75–5.53] | 14.4 [10.8–16.0] | 3.51 [3.48–3.59] | 17.1 [16.4–20.7] | 129 [128–133] | 943 [890–1,657] | 345 [314–346] | 10.8/11.2/11.0 (10.6–11.5) | 3.9–4.1 ms |
+| sqlite-normal | 4.93 [4.67–5.16] | 17.2 [13.4–18.5] | 5.59 [5.46–5.61] | 61.0 [55.7–62.9] | 177 [167–190] | 1,095 [952–2,504] | 4,089 [4,063–4,145] | 11.1/10.6/11.0 (10.6–11.1) | 3.9–4.2 ms |
+| redb | 1.39 [1.07–1.47] | 3.78 [2.83–4.15] | 1.28 [1.22–1.33] | 3.83 [3.75–3.93] | 44.3 [38.7–48.8] | 1,358 [749–2,479] | 447 [442–449] | 10.9/11.0/10.7 (10.4–11.2) | 3.8–4.4 ms |
+| fjall | 1.15 [1.12–1.23] | 3.82 [3.69–3.94] | 0.982 [0.922–0.991] | 3.69 [3.60–3.73] | 27.4 [25.7–28.0] | 1,013 [393–1,580] | 240 [229–243] | 11.1/11.1/10.4 (10.4–11.5) | 3.9–4.3 ms |
+| sled | 1.61 [0.701–1.61] | 8.19 [2.60–8.21] | 1.66 [1.62–1.74] | 11.7 [10.9–13.1] | 165 [161–168] | 1,973 [946–4,459] | 1,587 [1,543–1,612] | 11.5/11.3/11.1 (10.7–11.7) | 3.9–4.3 ms |
+
+**Verdict: the native reader is never blocked, and stays the slowest.** Idle, a fresh snapshot and lookup takes 53.8 µs p50 (SQLite 5.30, redb 1.39, fjall 1.15, sled 1.61). Beside the writer's 60 commits/s it takes 90.8 µs p50, 322 µs p99, 1.3 ms p99.9 and 6.7 ms at worst. Readers take no lock, so the writer never stalls them; what the writer adds is work per snapshot: the frames past the checkpoint (up to 31) are read and overlaid on every snapshot, and the ref files and the frames are read again when a commit lands meanwhile. The other engines' readers keep their idle p50 beside their writers (SQLite's WAL readers 3.51 µs, redb's 1.28, fjall's 0.98, sled's 1.66), with worst cases of 0.9–2.0 ms.
+
+### The verdicts in one place
+
+Provisional, at the loads and raw `fdatasync` latencies in the tables above (load 9–35, `fdatasync` 3.8–16 ms).
+
+| workload | the native store against the best durable alternative | the design choice behind it |
+|---|---|---|
+| W1, one writer | **loses**: 29.9 commits/s against redb's 218 (7.3×) and SQLite's 135 (4.5×) | a frame per transaction with two `fdatasync`s, plus the moved ref's file replaced with two more syncs: 4.23 syncs per commit where the others make one |
+| W2, 32 writers | **loses throughput** (27–59/s against redb's 202–414), **wins fairness**: spread 1.11–1.17 against 11–60, no `Busy` against SQLite's up to 15, longest wait ≤ 2.1 s against 3.4–18 s | the same four syncs; the flock writer lock's kernel queue |
+| W3, lookups | **loses**: `get` 15.4 µs at 1M against redb's 1.51 (10×) and SQLite's 4.55 (3.4×), a fresh snapshot 64.9 µs against 1.76; beats fjall at 1M but for the fresh snapshot | the columnar index read with one `pread` per probe and no cache; lock-free readers that open the index for every snapshot |
+| W4, open and recovery | **wins the open**: 0.14 ms against SQLite's 0.68 (5×) and fjall's 549; **ties recovery**: 25.5 ms against SQLite's 23.7 | the batched index sync and a checkpoint every 32 frames bound what an open or a recovery replays |
+| W5, size | **middle**: 284 MiB for 1M against SQLite's 197 (1.44×), ahead of redb's 460 and sled's 541 | the journal kept whole beside a columnar index that stores each key twice more |
+| W6, a reader beside a writer | **never blocked, slowest**: 90.8 µs p50 against fjall's 0.98 and redb's 1.28 | lock-free readers that read files for every snapshot and overlay the frames past the checkpoint |
+
+**The journal syncs.** Of a native W1 commit (33.5 ms here), the `fdatasync` of `journal.log` takes 24.0 % and that of `journal.off` 23.8 %; the ref file's temp-file `fsync` and directory `fsync` take 24.1 % and 23.4 %.
+
+### What would change the picture
+
+- **Fewer syncs per commit.** 95 % of a native commit is its four syncs, and the storage-core spec's own target is two per transaction (§3.1, principle 7). Making the ref files durable at the batched checkpoint, as the index already is, would take 47.5 % off a commit; dropping the `fdatasync` of `journal.off`, as the code review suggests, 23.8 %. Both would leave one sync per commit, where SQLite, redb and fjall are. Each touches what a reader and the next writer's tail check may trust after a power loss, so each is a spec decision; these shares are what it would buy.
+- **Group commit.** No engine here puts several writers' commits under one sync, so W2 runs at W1's pace everywhere. With 32 writers that is where the next factor lies, for the native store as for the others.
+- **The disk.** Every durable engine here waits on `fdatasync`; the ratios follow the number of syncs per commit for as long as a sync costs more than the rest of a commit (95 % of it here). redb's commit costs about half of a raw append + `fdatasync` (4.1 against about 7.6 ms), most likely because its `fdatasync` has no new file size to log, while every native sync follows an append or a new file; journal files preallocated in place would test that.
+- **A long-lived reader.** A server process (M10) could keep the index's files open and cache the sorted views' upper levels, closing most of W3's and W6's gap; mapping the files is ruled out while `unsafe` is forbidden. A CLI command, which takes one or two snapshots, pays 0.1–0.3 ms.
+- **This run's scale and host.** W1 and W2 ran at a tenth and a twentieth of the plan, on a host shared with other agents' builds and tests. The controller's quiet-window `just bench-compare` at the plan's sizes replaces these tables.

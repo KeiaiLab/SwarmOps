@@ -1,0 +1,41 @@
+[package]
+name = "swarmops-bench-compare"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "MIT"
+description = "Measures SwarmOps' native metadata store against embedded databases; SwarmOps depends on none of them"
+
+# Every version is pinned exactly; each, and each one in Cargo.lock, was released at least 7
+# days before the harness was written, except zstd 0.14.2, which swarmops-store itself pins.
+[dependencies]
+swarmops-core = { path = "../../crates/swarmops-core" }
+swarmops-store = { path = "../../crates/swarmops-store" }
+camino = "=1.2.6"
+tempfile = "=3.27.0"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+rusqlite = { version = "=0.40.2", features = ["bundled"] }
+redb = "=4.3.0"
+fjall = "=3.1.12"
+sled = "=0.34.7"
+nix = { version = "=0.31.3", features = ["ptrace", "process", "signal"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# The root workspace's lints, plus casts of counts to f64 for rates (a measurement's counts
+# stay far below 2^52).
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+doc_markdown = "allow"
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+cast_precision_loss = "allow"
+
+# Own workspace, outside the product: `just bench-compare` builds and runs it optimized;
+# `just check` neither builds nor lints it.
+[workspace]
