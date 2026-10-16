@@ -613,9 +613,10 @@ impl Index {
     /// to append the journal's in their place.
     ///
     /// The journal's files are read on handles of their own, not through this index's
-    /// [`FsOps`]: the frames past the checkpoint, and the frames before it back to the last that
-    /// holds a changeset. Records the sorted views cover were synced before the views were
-    /// written: with no record past them, nothing is read. With no journal to read (an index on
+    /// [`FsOps`]: the frames past the checkpoint; and, only if the index holds none of their
+    /// changesets, the frames before it back to the last that holds one. Records the sorted
+    /// views cover were synced before the views were written: with no record past them, nothing
+    /// is read. With no journal to read (an index on
     /// its own), a checkpoint that does not read, or a journal that is damaged, every record is
     /// counted: that damage is the journal's, which verify reports.
     fn vouched(&self, records: u64) -> Result<u64, StoreError> {
@@ -647,8 +648,13 @@ impl Index {
         let Some(first_frame) = frames.first().filter(|_| !past.is_empty()) else {
             return Ok(records); // no changeset past the checkpoint: no record past it either
         };
-        // The records past the checkpoint come after the last changeset before it, which the
-        // index holds among its last `past + 1` records: it holds no more than `past` past it.
+        // The records past the checkpoint come after the last changeset before it. Where the
+        // index holds one of the changesets past it, that record's place says where; otherwise
+        // the last changeset before the checkpoint does, which the index holds among its last
+        // `past + 1` records (it holds no more than `past` past the checkpoint).
+        if let Some(first) = self.first_past_by_id(&past, records)? {
+            return self.vouched_from(first, records, &past);
+        }
         let first = match last_changeset_before(journal, first_frame.seq)? {
             None => 0,
             Some(last) => {
@@ -670,6 +676,28 @@ impl Index {
             }
         };
         self.vouched_from(first, records, &past)
+    }
+
+    /// Where the records past the checkpoint start, if the index holds one of `past`, the
+    /// changesets past it, among its last `past` records: that record's rec less its place
+    /// among them. `None` if it holds none of them there: none is materialized yet (a reader
+    /// that came between a writer's frame and its materialization, or a writer that crashed
+    /// there), or a power loss zeroed their ids.
+    fn first_past_by_id(&self, past: &[&Record], records: u64) -> Result<Option<u64>, StoreError> {
+        let from = records.saturating_sub(to_u64(past.len()));
+        let Some(window) = read_or_cut(&self.ids, from, records)? else {
+            return Ok(None);
+        };
+        let window = window.as_chunks::<32>().0;
+        for (place, record) in past.iter().enumerate() {
+            let Record::Changeset { id, .. } = record else {
+                unreachable!("only changesets are past the checkpoint here");
+            };
+            if let Some(at) = window.iter().position(|probe| *probe == id.0.0) {
+                return Ok((from + to_u64(at)).checked_sub(to_u64(place)));
+            }
+        }
+        Ok(None)
     }
 
     /// `first` plus how many of the records from `first` up to `records` are `past`, the

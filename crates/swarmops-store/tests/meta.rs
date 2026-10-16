@@ -1175,6 +1175,43 @@ fn index_records_a_power_loss_zero_filled_are_not_counted_and_replay_replaces_th
     }
 }
 
+#[test]
+fn the_index_finds_its_records_past_the_checkpoint_without_the_frames_before_it() {
+    // The records past the checkpoint start after the last changeset before it. When the index
+    // holds one of the changesets past the checkpoint, that record's place says where they
+    // start, and no frame before the checkpoint is read: a long run of ref moves there costs a
+    // snapshot or a write nothing. Shown with a ref-move frame well before the checkpoint
+    // damaged, which a walk back to the last changeset would have to read.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]); // frame 0
+    cas(&store, "main", None, Some(0)); // frame 1
+    for _ in 0..40 {
+        cas(&store, "main", Some(0), Some(0)); // frames 2..=41: ref moves, no changeset
+    }
+    store.flush().unwrap(); // the checkpoint past frame 41
+    insert(&store, &[cs(1, &[0])]); // frames 42 and 43, records 1 and 2, past the checkpoint
+    insert(&store, &[cs(2, &[1])]);
+    let layout = Layout::new(&root);
+    let frame_10 = u64::from_le_bytes(
+        fs::read(layout.journal_off()).unwrap()[80..88]
+            .try_into()
+            .unwrap(),
+    );
+    let mut log = fs::read(layout.journal_log()).unwrap();
+    log[usize::try_from(frame_10).unwrap() + 12] ^= 0x01; // a payload byte: its CRC fails
+    fs::write(layout.journal_log(), log).unwrap();
+    // And a power loss zeroed record 2's generation, which the journal must not vouch for.
+    let generations = layout.meta_path("idx/gen.col");
+    let mut column = fs::read(&generations).unwrap();
+    column[16..24].fill(0);
+    fs::write(&generations, column).unwrap();
+
+    assert_eq!(index(&root).len(), 2, "record 2 is not counted");
+    let read = store.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), 3);
+    assert_eq!(read.changeset(id(2)).unwrap(), Some(stored(2, &[1], 2, 3)));
+}
+
 #[track_caller]
 fn assert_journal_corrupt(got: Result<(), StoreError>, offset: u64) {
     match got {
