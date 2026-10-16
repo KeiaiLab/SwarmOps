@@ -1212,6 +1212,44 @@ fn the_index_finds_its_records_past_the_checkpoint_without_the_frames_before_it(
     assert_eq!(read.changeset(id(2)).unwrap(), Some(stored(2, &[1], 2, 3)));
 }
 
+#[test]
+fn snapshots_and_writes_vouch_for_the_index_with_the_frames_they_read() {
+    // A snapshot reads the frames past the checkpoint for its overlay, and a write transaction
+    // for its replay: the index counts its records past the checkpoint by those same frames,
+    // without a read of the journal of its own, so that vouching costs a snapshot or a write
+    // no more journal reads than it made before. Shown with journal.log replaced at its path,
+    // once the store has opened it, by a copy whose frame past the checkpoint fails its CRC:
+    // the store's handles still read the original, and only a read that opens the journal
+    // again meets the damage (and, the journal damaged, counts every record as it stands).
+    // A power loss zeroed the generation of record 1, which the journal does not vouch for.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]); // frame 0 (bytes 0..84), record 0
+    insert(&store, &[cs(1, &[0])]); // frame 1 (bytes 84..200), record 1
+    assert_eq!(ckpt(&root), 0, "both frames past the checkpoint");
+    let layout = Layout::new(&root);
+    let generations = layout.meta_path("idx/gen.col");
+    let mut column = fs::read(&generations).unwrap();
+    column[8..16].fill(0);
+    fs::write(&generations, column).unwrap();
+
+    let store = MetaStore::open(&root).unwrap();
+    let mut damaged = fs::read(layout.journal_log()).unwrap();
+    damaged[84 + 12] ^= 0x01; // a payload byte of frame 1: its CRC fails
+    let copy = layout.meta_path("journal.log.damaged");
+    fs::write(&copy, damaged).unwrap();
+    fs::rename(&copy, layout.journal_log()).unwrap();
+
+    let read = store.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), 2);
+    assert_eq!(read.changeset(id(1)).unwrap(), Some(stored(1, &[0], 1, 2)));
+    drop(read);
+    // The write cuts record 1 and replays the journal's in its place.
+    drop(store.write().unwrap());
+    let column = fs::read(&generations).unwrap();
+    assert_eq!(column.len(), 16, "two records");
+    assert_eq!(column[8..16], 2_u64.to_le_bytes(), "record 1 replayed");
+}
+
 #[track_caller]
 fn assert_journal_corrupt(got: Result<(), StoreError>, offset: u64) {
     match got {

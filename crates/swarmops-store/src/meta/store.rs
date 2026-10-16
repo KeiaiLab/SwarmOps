@@ -40,9 +40,10 @@
 //! # A snapshot
 //!
 //! [`MetaStore::read`] takes no lock and writes nothing. It reads `journal.ckpt`, opens the
-//! index, reads the frames past the checkpoint and every ref file, and reads those frames
-//! again: if new ones have appeared, a ref file may already show one of them, so it reads the
-//! files and the frames again. The frames past the checkpoint (usually 0 to 31, and more only
+//! index, reads the frames past the checkpoint (which vouch for the index's records past it,
+//! as [`Index::open`] says) and every ref file, and reads those frames again: if new ones
+//! have appeared, a ref file may already show one of them, so it reads the files and the
+//! frames again. The frames past the checkpoint (usually 0 to 31, and more only
 //! after a crash) then apply on top in memory: their changesets the index handle does not
 //! count, and their ref moves the ref files do not show yet.
 
@@ -263,9 +264,12 @@ impl MetaStore {
     pub fn read(&self) -> Result<MetaRead<'_>, StoreError> {
         let ckpt = self.journal.ckpt()?;
         // The index after the checkpoint: everything before the checkpoint was in the index
-        // files before the checkpoint moved past it.
-        let index = Index::open(&self.layout, Arc::clone(&self.fs))?;
-        let mut frames = self.journal.tail_frames_from(ckpt)?;
+        // files before the checkpoint moved past it. The frames past it, read once the index
+        // files are measured, vouch for the index's records past it.
+        let (index, mut frames) =
+            Index::open_with_past(&self.layout, Arc::clone(&self.fs), || {
+                self.journal.tail_frames_from(ckpt)
+            })?;
         let files = loop {
             let files = refs::read_all(&self.layout, &*self.fs)?;
             // A writer replaces ref files only after its frame is whole in the journal, so
@@ -293,10 +297,15 @@ impl MetaStore {
     pub fn write(&self) -> Result<MetaWrite<'_>, StoreError> {
         let lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
         self.journal.truncate_torn_tail()?;
-        let mut index = Index::open(&self.layout, Arc::clone(&self.fs))?;
+        let ckpt = self.journal.ckpt()?;
+        // The frames past the checkpoint vouch for the index's records past it, and are
+        // replayed.
+        let (mut index, frames) =
+            Index::open_with_past(&self.layout, Arc::clone(&self.fs), || {
+                self.journal.tail_frames_from(ckpt)
+            })?;
         index.set_parallelism(self.parallelism);
-        index.repair_tail()?;
-        let frames = self.journal.tail_frames_from(self.journal.ckpt()?)?;
+        index.repair_tail_with(&frames)?;
         replay::replay(&mut index, &self.layout, &*self.fs, &frames)?;
         // The index holds every changeset of the journal now, those of the frames past the
         // checkpoint last.
