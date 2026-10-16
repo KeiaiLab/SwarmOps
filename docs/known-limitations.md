@@ -166,7 +166,7 @@ left).
 ## Git import and export
 
 - **`created_at` cannot show a time before 1970.** A changeset keeps its signatures' times as
-  signed seconds, as git does (storage spec §1, §7), but the API's `created_at` in `show` and
+  signed seconds (storage spec §1, §7), but the API's `created_at` in `show` and
   `log`, unsigned milliseconds derived from the committer's time, reports 0 for any time before
   1970. Whether the git import keeps such commits as they are or refuses them unless asked to be
   lossy is M3's choice. *Target: M3. Found: M1 Task 4a.*

@@ -24,10 +24,9 @@ to the weakest:
    `api` 1; the `E_*` error codes, each with its fixed exit code (0, 1, 2, 4, 5, 6; 3 is
    reserved for conflicts) and its `retryable` flag; the commands, their flags and the grammar
    of their arguments, such as revisions and change lists (operations spec §0, §1); and the
-   environment
-   variables `SWARMOPS_REPO` (operations spec §1, umbrella §4), `SWARMOPS_FORMAT` (operations
-   spec §0), `SWARMOPS_AGENT` (operations spec §5) and `SWARMOPS_RUN_ID`, which no spec names
-   yet: only the README and the CLI's crate documentation describe it.
+   environment variables `SWARMOPS_REPO` (operations spec §1, umbrella §4), `SWARMOPS_FORMAT`
+   (operations spec §0), `SWARMOPS_AGENT` (operations spec §5) and `SWARMOPS_RUN_ID`, which no
+   spec names yet (the README, `docs/architecture.md` and the crate documentation describe it).
 4. **The API schema.** The JSON Schema of every request and response type that
    `swarmops schema` prints (`schema_for_all` in `swarmops-api`), and the `StoreOps` operations
    it describes.
