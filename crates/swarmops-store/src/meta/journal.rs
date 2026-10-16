@@ -15,7 +15,9 @@
 //! [`FsOps::file_len`]) and never measure `journal.off` again after. A frame listed in that
 //! snapshot was synced before its entry was written, so it is whole in the `journal.log`
 //! measured after it, and damage to it is [`StoreError::JournalCorrupt`] for readers too;
-//! they skip only an unlisted torn tail (or an append still in progress) silently. They read
+//! they skip only an unlisted torn tail (or an append still in progress) silently, and drop,
+//! as recovery does, the zeroed entries at the end of `journal.off` that a power loss leaves of
+//! an entry never synced (no frame but the first starts at 0). They read
 //! with `read_at` on read-only handles, except that `journal.ckpt`, which
 //! [`Journal::set_ckpt`] replaces by rename, is read by path.
 
@@ -184,8 +186,16 @@ impl Journal {
     /// where the previous frame ends, and a `journal.off` that holds fewer entries when they
     /// are read than it did when measured (a writer dropped entries that were never genuine):
     /// that is reported at the first wanted frame's start, or 0 if its entry is gone too.
+    /// Zeroed entries at the end of `journal.off` list nothing and are dropped first, as
+    /// recovery drops them (see [`Journal::tail_frames_from`]).
     pub fn frames_from(&self, first: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
-        let listed = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
+        let listed = self.listed().map_err(|e| match e {
+            // journal.off cut since it was measured: entries of the snapshot are gone.
+            StoreError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                StoreError::JournalCorrupt { offset: 0 }
+            }
+            e => e,
+        })?;
         let wanted = u64::try_from(limit)
             .unwrap_or(u64::MAX)
             .min(listed.saturating_sub(first));
@@ -249,7 +259,10 @@ impl Journal {
     /// listed frame's start, or the end of the last listed frame. The listed frame just before
     /// the read (the last listed one, if the read starts past them all) must start where the
     /// one listed before it ends (frame 0 at 0), as recovery checks it too: a zeroed or stale
-    /// entry there is [`StoreError::JournalCorrupt`].
+    /// entry there is [`StoreError::JournalCorrupt`]. Zeroed entries at the end of
+    /// `journal.off`, past frame 0, are not listings: a power loss between an entry's append
+    /// and its sync may keep the file's length and lose the bytes. They are dropped first, as
+    /// recovery drops them, and the frames they would list read as whole frames not listed yet.
     ///
     /// `journal.off` is measured, and the entries read, before `journal.log`: every frame
     /// listed then was whole and durable before its entry was written, so it is whole in
@@ -265,7 +278,6 @@ impl Journal {
     /// read than it did when measured (a writer dropped entries that were never genuine) is
     /// reported at `offset`.
     pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
-        let listed = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
         // journal.off cut since it was measured: entries of the snapshot are gone.
         let gone = |e: StoreError| match e {
             StoreError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
@@ -273,6 +285,7 @@ impl Journal {
             }
             e => e,
         };
+        let listed = self.listed().map_err(gone)?;
         let first = self.first_at_or_after(offset, listed).map_err(gone)?;
         // Where each listed frame from `first` on starts, and where the listed frame just
         // before the read and the one before that start.
@@ -571,6 +584,20 @@ impl Journal {
             next = end;
         }
         Ok(())
+    }
+
+    /// How many frames `journal.off` lists, as a reader counts them: its whole entries,
+    /// measured with [`FsOps::file_len`], less the zeroed ones at its end past frame 0, which
+    /// recovery drops too. No frame but the first starts at 0: a zeroed entry there is what a
+    /// power loss leaves of an entry appended and never synced (the file's length kept, its
+    /// bytes lost), and the frame it would list reads as one whole frame not listed yet. One
+    /// `read_at` of the last entry, and one more per zeroed entry.
+    fn listed(&self) -> Result<u64, StoreError> {
+        let mut listed = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
+        while listed > 1 && self.entry(listed - 1)? == 0 {
+            listed -= 1;
+        }
+        Ok(listed)
     }
 
     /// Where the frame listed before frame `seq` starts; `None` for frame 0.

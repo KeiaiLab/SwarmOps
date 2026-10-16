@@ -344,7 +344,7 @@ fn unsound_entry(files: &Files, entries: &[u64]) -> Option<u64> {
 /// missing, failing its CRC or not decoding), where frames_from and tail_frames_from fail with
 /// `JournalCorrupt`. `None` if the entries are not sound up to there.
 fn listed_frames(files: &Files) -> Option<Result<Vec<Frame>, u64>> {
-    let entries = files.entries();
+    let entries = files.listed();
     let mut frames = Vec::new();
     let mut next = 0;
     for (seq, &entry) in (0..).zip(&entries) {
@@ -527,7 +527,7 @@ fn tail_run(
             return got;
         }
     };
-    let entries = files.entries();
+    let entries = files.listed();
     let listed = to_u64(entries.len());
     let mut at = from;
     for (i, frame) in frames.iter().enumerate() {
@@ -586,7 +586,7 @@ fn tail_run(
 /// 0) and ending at `from`, or at 0 with none before it; past every listed frame, where the
 /// last one ends, it too starting where the one before it ends. `frames` are what it read.
 fn read_started_where_it_may(what: &str, frames: &[Frame], from: u64, files: &Files) {
-    let entries = files.entries();
+    let entries = files.listed();
     let listed = to_u64(entries.len());
     // A read that starts at a listed frame checked the frame listed just before it: that one
     // starts where its own predecessor ends (frame 0 at 0) and ends where the read starts. With
@@ -672,7 +672,7 @@ fn listed_run(
             return got;
         }
     };
-    let entries = files.entries();
+    let entries = files.listed();
     let listed = to_u64(entries.len());
     let wanted = listed.saturating_sub(first).min(to_u64(limit));
     assert!(
@@ -835,6 +835,17 @@ impl Files {
             .iter()
             .map(|entry| u64::from_le_bytes(*entry))
             .collect()
+    }
+
+    /// The entries readers count as listings: [`Files::entries`], less the zeroed ones at the
+    /// end past frame 0, which readers drop as recovery does (no frame but the first starts at
+    /// 0: a power loss leaves them of entries appended and never synced).
+    fn listed(&self) -> Vec<u64> {
+        let mut entries = self.entries();
+        while entries.len() > 1 && entries.last() == Some(&0) {
+            entries.pop();
+        }
+        entries
     }
 
     /// How the frame at `offset` reads; past the end of `journal.log` it is cut short.
