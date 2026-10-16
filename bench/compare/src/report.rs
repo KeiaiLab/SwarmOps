@@ -1,6 +1,7 @@
 //! Markdown tables of the records: per workload, one summary row per engine (the median over
 //! its runs, `[min–max]` beside it, and the load and probe of those runs), and one detail row
-//! per run.
+//! per run; the sync calls per commit, likewise over their runs; and one engine's medians over
+//! each other engine's, column by column.
 
 use std::fmt::Write;
 
