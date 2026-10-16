@@ -291,7 +291,9 @@ impl MetaStore {
     /// Starts a write transaction: takes [`MetaLock`] (waiting as
     /// [`MetaStore::with_lock_timeout`] says), repairs the journal's and the index's tails,
     /// and replays the frames past the checkpoint into the index and the ref files. The
-    /// checkpoint itself moves only at the batched sync points of [`MetaWrite::commit`].
+    /// checkpoint itself moves only at the batched sync points of [`MetaWrite::commit`]. If the
+    /// journal's tail check cannot sync the whole frames `journal.off` does not list yet, nor
+    /// write them afresh, the error is [`StoreError::NotCommitted`] (storage spec §2 rule 3 (c)).
     pub fn write(&self) -> Result<MetaWrite<'_>, StoreError> {
         let lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
         self.journal.truncate_torn_tail()?;

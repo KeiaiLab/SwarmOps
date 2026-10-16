@@ -16,7 +16,9 @@
 //! append fails is cut back off `journal.log`, under the lock, before the error returns
 //! ([`StoreError::NotCommitted`]; the process aborts if even the cut fails), and an entry whose
 //! append fails is cut back off `journal.off` ([`StoreError::PostCommit`]: its frame is durable
-//! and committed, and the next tail check lists it afresh).
+//! and committed, and the next tail check lists it afresh). When the tail check's sync of the
+//! frames it is about to list fails, it writes them afresh (cut back off, appended again and
+//! synced) and lists them then; if that append fails, they are cut back off too.
 //!
 //! Writers hold [`crate::MetaLock`]; the journal itself takes no lock. Writes go through
 //! [`FsOps`]. Reads take no lock: they measure `journal.off` before `journal.log` (with
@@ -493,6 +495,44 @@ impl Journal {
         }
     }
 
+    /// What the tail check does when the sync that would make the whole frames `journal.off`
+    /// does not list yet durable (`frames`, from offset `from` to the end of the last of them)
+    /// fails with `e`. Linux reports a failed writeback once, to the sync that meets it, and may
+    /// drop the pages it could not write: no later sync can vouch for those frames, and one
+    /// that succeeds would let them be listed while they are not on disk. Nor may they simply
+    /// be cut: one may be a committed frame whose listing failed ([`StoreError::PostCommit`]),
+    /// durable since its own sync, or frames whose entries a power loss zeroed. So they are
+    /// written afresh, from the bytes the tail check read: `journal.log` is cut back to `from`
+    /// (the cut synced) and they are appended again and synced, at the offsets they had, and
+    /// the tail check lists them then. If that append fails, they are cut back off as a failed
+    /// frame append is, and the error is [`StoreError::NotCommitted`]: the writer's own
+    /// transaction did not commit. A cut that fails aborts the process, saying why on stderr.
+    fn write_afresh(&self, from: u64, frames: &[u8], e: &io::Error) -> Result<(), StoreError> {
+        if let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), from) {
+            eprintln!(
+                "swarmops: fatal: syncing the frames of {} that journal.off does not list yet \
+                 failed ({e}), and they could not be cut back off it to be written afresh \
+                 ({cut}): aborting, so that no later write of this process lists a frame that \
+                 may not be on disk",
+                self.log_path
+            );
+            std::process::abort();
+        }
+        match self.fs.append_durable(self.log_path.as_std_path(), frames) {
+            Ok(_) => Ok(()),
+            Err(again) => {
+                let again = io::Error::new(
+                    again.kind(),
+                    format!(
+                        "syncing the frames journal.off does not list yet failed ({e}), and so \
+                         did writing them afresh: {again}"
+                    ),
+                );
+                Err(self.cut_failed_frame(from, again))
+            }
+        }
+    }
+
     fn tail(&self) -> MutexGuard<'_, Tail> {
         // `checked` is cleared before every write that could leave the tail stale, so the
         // value a panicking holder leaves behind is still safe to use.
@@ -547,6 +587,7 @@ impl Journal {
                 _ => return Err(StoreError::JournalCorrupt { offset: start }),
             }
         }
+        let unlisted_at = at;
         let mut unlisted = Vec::new();
         let mut cut = None;
         while at < buf.len() {
@@ -574,10 +615,13 @@ impl Journal {
             self.fs
                 .truncate(self.off_path.as_std_path(), listed * ENTRY_LEN)?;
         }
-        if !unlisted.is_empty() {
+        if let Some(&from) = unlisted.first() {
             // Their writer may have died after its write and before its sync, so their bytes
-            // may still be only in the page cache: a listed frame must be durable.
-            self.fs.sync_data(self.log_path.as_std_path())?;
+            // may still be only in the page cache: a listed frame must be durable. If the sync
+            // fails, no later one can vouch for them: they are written afresh.
+            if let Err(e) = self.fs.sync_data(self.log_path.as_std_path()) {
+                self.write_afresh(from, &buf[unlisted_at..at], &e)?;
+            }
         }
         for (at, offset) in (listed..).zip(&unlisted) {
             let entry = offset.to_le_bytes();

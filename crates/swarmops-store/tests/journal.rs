@@ -19,6 +19,7 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::slice;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1805,6 +1806,115 @@ fn fsync_failure_semantics_never_list_a_frame_not_on_disk() {
             "k={k}, {failed:?} failed: after a power loss, the acknowledged frames"
         );
     }
+}
+
+/// The records of each frame the journal that a power loss would leave at `layout` recovers
+/// to (the model's durable image, its tail checked as the next writer checks it), in order.
+#[track_caller]
+fn recovered_after_a_power_loss(layout: &Layout, model: &FsyncModelFs) -> Vec<Vec<Record>> {
+    let image_dir = tempfile::tempdir().unwrap();
+    let image = Layout::new(Utf8PathBuf::from_path_buf(image_dir.path().join("store")).unwrap());
+    model.write_durable_image(layout.root().as_std_path(), image.root().as_std_path());
+    let journal = Journal::open(&image, real_fs()).unwrap();
+    if let Err(e) = journal.truncate_torn_tail() {
+        panic!("the journal a power loss leaves is damaged: {e}");
+    }
+    let frames = journal.tail_frames_from(0).unwrap();
+    frames.into_iter().map(|frame| frame.records).collect()
+}
+
+/// Every frame `journal.off` at `layout` lists is durable, as `model` says.
+#[track_caller]
+fn assert_listed_frames_durable(layout: &Layout, model: &FsyncModelFs) {
+    let log = layout.journal_log().into_std_path_buf();
+    for (start, end) in listed_frames(layout) {
+        assert!(
+            model.is_durable(&log, start, end),
+            "the frame at {start}..{end} is listed, but a power loss would take it"
+        );
+    }
+}
+
+/// A tail check whose sync of `journal.log` fails, before it lists the whole frames that
+/// `journal.off` does not list yet, writes those frames afresh (cut back off the journal,
+/// appended again and synced) and lists them then: Linux reports a failed writeback once, so no
+/// later sync could vouch for them, and the next tail check's sync, succeeding without them,
+/// would list a frame that is not on disk (the fsyncgate pattern, through the tail check). Under
+/// the Linux fsync-failure model ([`FsyncModelFs`]) and the order checker (R1), its first sync
+/// of `journal.log` failing:
+///
+/// - a frame a crashed writer wrote and never synced is listed only once it is durable;
+/// - a frame that is durable but not listed (its listing failed after its sync: committed, with
+///   a warning, [`StoreError::PostCommit`]) is never cut: it is listed, and survives a power
+///   loss with the frames before it.
+#[test]
+fn a_tail_check_whose_sync_fails_never_lists_a_frame_not_on_disk() {
+    // The first sync_data of journal.log fails, and with `off_listing` the append_durable of
+    // journal.off that lists frame 1 (the third: the empty one of create, frame 0's, frame 1's).
+    let model = |off_listing: bool| {
+        let (log_syncs, off_appends) = (AtomicU64::new(0), AtomicU64::new(0));
+        Arc::new(FsyncModelFs::new().failing(move |call| {
+            let nth = |count: &AtomicU64| count.fetch_add(1, Ordering::SeqCst) + 1;
+            match (
+                call.method,
+                call.path.file_name().and_then(|name| name.to_str()),
+            ) {
+                ("sync_data", Some("journal.log")) => nth(&log_syncs) == 1,
+                ("append_durable", Some("journal.off")) => off_listing && nth(&off_appends) == 3,
+                _ => false,
+            }
+        }))
+    };
+
+    // A crashed writer's frame: whole in journal.log, never synced, not listed.
+    let (_root, layout) = new_root();
+    let model_fs = model(false);
+    let journal = Journal::create(&layout, checked(Arc::clone(&model_fs))).unwrap();
+    journal.append_frame(&[compacted(0)]).unwrap();
+    let log = layout.journal_log().into_std_path_buf();
+    let frame = frame_bytes(&[&[1, 0][..], &encoded(&compacted(1))].concat());
+    model_fs.append(&log, &frame).unwrap();
+    let first = journal.truncate_torn_tail(); // its sync fails
+    journal.truncate_torn_tail().unwrap();
+    assert_eq!(offsets_on_disk(&layout).len(), 2, "frame 1 is listed");
+    assert_listed_frames_durable(&layout, &model_fs);
+    assert_eq!(
+        recovered_after_a_power_loss(&layout, &model_fs),
+        [[compacted(0)], [compacted(1)]],
+        "the frame listed survives a power loss"
+    );
+    assert_eq!(model_fs.failed().len(), 1, "{:?}", model_fs.failed());
+    assert_eq!(
+        first.unwrap(),
+        None,
+        "the tail check wrote the frame afresh"
+    );
+
+    // A frame committed with a warning: durable in journal.log, its listing failed.
+    let (_root, layout) = new_root();
+    let model_fs = model(true);
+    let journal = Journal::create(&layout, checked(Arc::clone(&model_fs))).unwrap();
+    journal.append_frame(&[compacted(0)]).unwrap();
+    match journal.append_frame(&[compacted(1)]) {
+        Err(StoreError::PostCommit { frame_seq: 1, .. }) => {}
+        other => panic!("expected PostCommit at frame 1, got {other:?}"),
+    }
+    assert_eq!(offsets_on_disk(&layout).len(), 1, "frame 1 is not listed");
+    let first = journal.truncate_torn_tail(); // its sync fails
+    journal.truncate_torn_tail().unwrap();
+    assert_eq!(offsets_on_disk(&layout).len(), 2, "frame 1 is listed");
+    assert_listed_frames_durable(&layout, &model_fs);
+    assert_eq!(
+        recovered_after_a_power_loss(&layout, &model_fs),
+        [[compacted(0)], [compacted(1)]],
+        "the frame committed with a warning survives"
+    );
+    assert_eq!(model_fs.failed().len(), 2, "{:?}", model_fs.failed());
+    assert_eq!(
+        first.unwrap(),
+        None,
+        "the tail check wrote the frame afresh"
+    );
 }
 
 #[test]

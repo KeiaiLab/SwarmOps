@@ -94,11 +94,14 @@ pub enum StoreError {
     },
     /// A write transaction's journal append failed, and the writer, still holding
     /// `meta/lock`, cut what the append left back off `journal.log` and synced that cut: the
-    /// transaction did not commit, and no later writer can list its frame. Retrying it is safe:
-    /// nothing of it is in the store. Retryable.
+    /// transaction did not commit, and no later writer can list what the append wrote. The
+    /// append is the transaction's own frame's, or, when the sync of the tail check that opens
+    /// a write fails, its writing afresh of the frames `journal.off` did not list yet (those
+    /// frames are cut back off with it). Retrying the transaction is safe: nothing of it is in
+    /// the store. Retryable.
     #[error(
-        "the transaction did not commit: appending its journal frame failed, and the frame was \
-         cut back off the journal: {source}"
+        "the transaction did not commit: a journal append failed, and what it wrote was cut \
+         back off the journal: {source}"
     )]
     NotCommitted {
         /// The append's error: of the write, or of the fdatasync after it.
