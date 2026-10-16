@@ -23,8 +23,11 @@ to the weakest:
    `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}`, with
    `api` 1; the `E_*` error codes, each with its fixed exit code (0, 1, 2, 4, 5, 6; 3 is
    reserved for conflicts) and its `retryable` flag; the commands, their flags and the grammar
-   of their arguments (revisions, change lists); and the environment variables `SWARMOPS_REPO`,
-   `SWARMOPS_AGENT`, `SWARMOPS_RUN_ID` and `SWARMOPS_FORMAT` (operations spec §0, §1).
+   of their arguments, such as revisions and change lists (operations spec §0, §1); and the
+   environment
+   variables `SWARMOPS_REPO` (operations spec §1, umbrella §4), `SWARMOPS_FORMAT` (operations
+   spec §0), `SWARMOPS_AGENT` (operations spec §5) and `SWARMOPS_RUN_ID`, which no spec names
+   yet: only the README and the CLI's crate documentation describe it.
 4. **The API schema.** The JSON Schema of every request and response type that
    `swarmops schema` prints (`schema_for_all` in `swarmops-api`), and the `StoreOps` operations
    it describes.
@@ -73,9 +76,10 @@ No compatibility is promised for:
   old ones. Objects already stored keep their bytes and their ids.
 - **A new store layout** bumps `FORMAT`. The first new journal record kind, for instance, makes
   the store `swarmops-store 2` (storage-core spec §3): an older binary then refuses to open it
-  rather than misread it, because there is no rule for skipping unknown records. FORMAT 2 is
-  planned for M6, with a checksum on each `journal.off` entry and a frame header that carries
-  the frame's sequence number and the previous frame's CRC.
+  rather than misread it, because there is no rule for skipping unknown records. The next
+  `FORMAT` (planned as 2, M6) adds a checksum to each `journal.off` entry and a frame header
+  that carries the frame's sequence number and the previous frame's CRC; whichever version
+  first changes the layout takes the next number.
 - **A contract change** shows up in a snapshot: `cli__schema_snapshot.snap` holds the schema of
   every type and the MCP server's tool list has a snapshot of its own, so the gate fails until
   the snapshot is updated in the same commit. That commit says that it changes the contract, and

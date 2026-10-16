@@ -49,9 +49,9 @@ swarmops-cli     api, ops            (its tests also use core, repo and store)
 ```
 
 `fuzz/` is a cargo workspace of its own, with four cargo-fuzz targets over the codec and the
-journal. The specs plan three more crates: `swarmops-git` (git import and export, M3 and M8),
-`swarmops-merge` (tree diff and three-way merge, M4) and `swarmops-sim` (the simulation
-harness, M9).
+journal. The specs plan three more crates: `swarmops-merge` (its tree diff serves M2's `diff`,
+and its three-way merge M4's landing), `swarmops-git` (git import and export, M3 and M8) and
+`swarmops-sim` (the simulation harness, M9).
 
 Two rules shape the layers (umbrella §1, AGENTS.md):
 
@@ -89,8 +89,8 @@ index keeps it for the landing and review rules to come.
 
 An id is `blake3("swarmops:<kind>:v1\0" ++ u64le(payload_len) ++ payload)`: 32 bytes, printed as
 64 lowercase hex digits (input may use either case), and on the command line any unique prefix
-of 12 digits or more. The kind is not part of the id; distinct types (`BlobId`, `TreeId`,
-`ChangesetId`) keep ids apart in the code.
+of 12 digits or more. The id does not encode the kind (as in git), though the kind's domain
+string is hashed; distinct types (`BlobId`, `TreeId`, `ChangesetId`) keep ids apart in the code.
 
 These layouts and this recipe are **the hash contract**: they never change in place, and a new
 layout gets a new kind/version header. The golden vectors in
@@ -160,13 +160,24 @@ fan-out directory appeared. Object writes take no lock and repeating one changes
    When more than 1,024 index records sit past the sorted views, a compaction merges them into
    the views after the sync, before the checkpoint moves.
 
-A failure after the commit point leaves the transaction committed and durable; it is reported
-as a warning, and the next write repairs the rest. A failure before the frame is whole leaves
-nothing committed: the next writer cuts what is left. Storage §3 says exactly what a failure in
-between, after the frame is whole but before its sync or listing completes, reports; the API
-turns it into the retryable `E_IO_TRANSIENT`, whose `details` say what is known about whether
-the transaction committed. M1.5 hardens this path against Linux's fsync failure semantics
-([known-limitations.md](known-limitations.md), "Durability").
+What a failure means depends on which side of the commit point it falls (storage §2 rule 3,
+§3):
+
+- **Before it**: a failed `journal.log` append or `fdatasync` leaves nothing committed. The
+  writer, still holding the lock, cuts the journal back to where the frame began (`ftruncate`,
+  then `fdatasync`) and returns the retryable `E_IO_TRANSIENT` with `details.committed = false`:
+  the transaction definitely did not commit, and running the same command again is safe. The
+  frame is cut, not left for a later writer to sync and list, because Linux reports a failed
+  writeback only once and may drop the unwritten pages: a later sync could succeed although the
+  frame never reached the disk. If the cut itself fails, the process aborts rather than go on
+  with a journal tail it cannot vouch for. A crash in the middle of the append leaves at most a
+  torn frame, which the next writer cuts; a crash after the whole frame was written but before
+  its `fdatasync` returned leaves a frame that the next writer syncs and lists, so that
+  transaction did commit, though no one was told.
+- **After it**: any failure once the `fdatasync` has returned (listing the frame in
+  `journal.off`, materializing it, syncing the index, moving the checkpoint) leaves the
+  transaction committed and durable. It is reported as a warning beside the result, and the
+  next write repairs what is missing.
 
 **A ref move** is a compare-and-swap under the same lock (storage §3): the ref's current target,
 after replay, is compared with the expected one. On a mismatch nothing is recorded and the
@@ -245,10 +256,11 @@ What an agent sees (operations §4):
   wins each round; the others get `E_CAS_MISMATCH` and `details.actual`.
 - A read by changeset id is immutable, lock-free and cacheable. A ref named in a request is
   resolved once, and the envelope's `meta.resolved` says what it named.
-- A reader may see a frame before its `fdatasync` has completed. Until M10, a power loss can
-  therefore take back state that a reader returned. A mutation that names such state (a parent,
-  a ref's expected or new target) is checked against the store as it is, and fails rather than
-  build on what was taken back.
+- A reader may see a frame before its `fdatasync` has completed. Until M10, a power loss, or a
+  failed sync of that frame (which the writer then cuts back), can therefore take back state
+  that a reader returned. A mutation that names such state (a parent, a ref's expected or new
+  target) is checked against the store as it is, and fails rather than build on what was taken
+  back.
 - M1 has no merge: an agent that loses a ref race and commits its change again on top of the
   winner's can overwrite the winner's edits to the same files. Merging and landing arrive in
   M4.

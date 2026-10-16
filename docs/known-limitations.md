@@ -4,8 +4,10 @@ What SwarmOps does not do yet, or does less well than it should, as of M1, and t
 meant to change it. The items come from M1's reviews: the carry-overs its tasks handed to later
 milestones, the deferred minors that are still open, and the rulings of the final review, which
 left 14 questions to the maintainer (the table at the end lists all 14). Each entry says where
-it was found. Code-level minors that change nothing a user or an agent can see (naming, comments,
-micro-optimizations, test labels) are not listed.
+it was found; those pointers (an M1 task, a review, the 2026-10-16 comparison) refer to the
+maintainer's local records, which are not in the repository. Code-level minors that change
+nothing a user or an agent can see (naming, comments, micro-optimizations, test labels) are not
+listed.
 
 Targets are milestones of the umbrella spec (§13): M2 diff, history and derived data · M3 git
 import · M4 merge and landing · M8 git export · M5 workspaces · M6 verify, crash safety and
@@ -19,13 +21,6 @@ left).
 
 ## Durability
 
-- **A failed `journal.log` sync can still be listed later.** When the `fdatasync` of a whole
-  frame fails, the writer reports `E_IO_TRANSIENT` (it may have committed), and the next writer
-  syncs the frame and lists it. Linux reports a writeback error only once and may have dropped
-  the pages, so that later sync can succeed although the frame never reached the disk; after a
-  power loss, the store then reports `E_STORE_CORRUPT`. *Target: M1.5, Task 2, which cuts the
-  frame under the lock and reports a definite "not committed" (first ledgered for M6). Found:
-  M1 final review.*
 - **The crash model is a process crash.** The sweeps abort the process at a chosen filesystem
   call, which leaves the kernel's page cache intact; a power loss, which can lose, tear or
   reorder unsynced writes, is not modelled yet. *Target: M1.5, Task 3 (power-loss images).*
@@ -74,8 +69,9 @@ left).
   see `E_STORE_CORRUPT` once; reading again succeeds. *Unscheduled (document or retry once).
   Found: M1 final review.*
 - **Readers may return state that is not durable yet.** A reader sees a frame before its
-  `fdatasync` completes, so until M10 a power loss can take back state a reader returned
-  (operations spec §4 says what agents may rely on). Strict read-committed reads, limited to
+  `fdatasync` completes, so until M10 a power loss, or a failed sync of that frame (which the
+  writer then cuts back), can take back state a reader returned (operations spec §4 says what
+  agents may rely on). Strict read-committed reads, limited to
   frames already listed in `journal.off`, come if remote readers need them. *Target: M10.
   Found: M1 Task 2c; final review, question 2.*
 
@@ -103,10 +99,9 @@ left).
   winner's can overwrite the winner's edits to the same files: M1 has no three-way merge.
   *Target: M4 (merge and landing). Found: M1 Task 4b.*
 - **A retried commit can record a second changeset.** A commit signs at its own time, so when
-  a commit's outcome is unknown (its process died, or the store answered that it may have
-  committed) and it is run again, a first attempt that did commit stays as an unreferenced
-  changeset beside the second. An idempotency key (`commit --key`) closes this. *Target: M4.
-  Found: M1 final fix pass.*
+  a commit's outcome is unknown (its process died before it answered) and it is run again, a
+  first attempt that did commit stays as an unreferenced changeset beside the second. An
+  idempotency key (`commit --key`) closes this. *Target: M4. Found: M1 final fix pass.*
 - **No second root commit.** Once `main` exists, an omitted parent means `main`'s head, so the
   API cannot make a root commit. *Target: M3 (`commit_raw`, which git import needs). Found: M1
   Task 4a; final review, question 12.*
@@ -147,12 +142,12 @@ left).
 - **Crafted `journal.off` entries can cut a frame.** Entries crafted to agree with each other,
   around an embedded valid frame, can make recovery cut a whole committed frame; that is outside
   the crash model, and `verify`, which walks every listed frame, reports it. A checksum on each
-  entry is a format change: FORMAT 2, together with a frame header that carries the frame's
-  sequence number and the previous frame's CRC. *Target: M6. Found: M1 fuzzing; final review,
-  question 7.*
+  entry is a format change: the next `FORMAT` (planned as 2, M6), together with a frame header
+  that carries the frame's sequence number and the previous frame's CRC. *Target: M6. Found: M1
+  fuzzing; final review, question 7.*
 - **A zeroed `journal.off` entry deep in the chain** (three or more links before the end) is
   outside the crash model: recovery checks the last two links, and `verify` finds the rest.
-  *Target: M6 (FORMAT 2 checksums). Found: M1 fuzzing review.*
+  *Target: M6 (the next `FORMAT`'s checksums). Found: M1 fuzzing review.*
 - **Metadata keys written below the API.** `show` can lose an entry for a changeset that holds
   both a key `x` and `x:b64`; the API refuses the `:b64` suffix on commit, so only a writer below
   it can do this, which the git import will be. It must run the same check. *Target: M3. Found:
@@ -170,9 +165,11 @@ left).
 
 ## Git import and export
 
-- **Changeset times start at 1970.** A changeset's `created_at` is unsigned Unix milliseconds,
-  so a git commit dated before 1970 will be refused unless the import is told to be lossy (the
-  time clamped to 0, the changeset marked `git.lossy`). *Target: M3. Found: M1 Task 4a.*
+- **`created_at` cannot show a time before 1970.** A changeset keeps its signatures' times as
+  signed seconds, as git does (storage spec §1, §7), but the API's `created_at` in `show` and
+  `log`, unsigned milliseconds derived from the committer's time, reports 0 for any time before
+  1970. Whether the git import keeps such commits as they are or refuses them unless asked to be
+  lossy is M3's choice. *Target: M3. Found: M1 Task 4a.*
 - **No batch insertion yet.** One transaction can hold up to 65,535 records, but the index has no
   batch append and `insert_changesets_batch` does not exist yet (storage spec §3.1). *Target: M3.
   Found: M1 Task 2b.*
@@ -247,7 +244,7 @@ each ruling is tracked above:
 | 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2, "Full fsync is slow" |
 | 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | M6, "Recovery after a crash walks all of `journal.off`", "No repair tool" |
 | 6 | `read_file` reads the whole blob | ranged reads | M2, "`cat` reads the whole blob" |
-| 7 | Crafted `journal.off` entries | a per-entry checksum, FORMAT 2 | M6, "Crafted `journal.off` entries" |
+| 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | M6, "Crafted `journal.off` entries" |
 | 8 | `objects/tmp` leftovers | `gc` | M6, "Temp files of crashed writes" |
 | 9 | Wide directories in `ls` | size and depth | M2, "`ls` of a wide directory" |
 | 10 | Parked helper threads | the daemon | M10, "An abandoned lock wait" |

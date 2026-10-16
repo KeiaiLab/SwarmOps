@@ -103,7 +103,7 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
 
 | Command | What it does |
 | --- | --- |
-| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test: the crash sweeps, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
+| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash sweeps, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
 | `just check-ci-slow` | The ignored tests without the 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |

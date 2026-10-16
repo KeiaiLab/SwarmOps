@@ -60,5 +60,5 @@ Some tests read Linux's `/proc/locks`.
 Every measurement in [docs/perf.md](../perf.md) was taken on one host: WSL2 (kernel
 5.15.153.1), ext4 (`data=ordered`) on the virtual disk, an AMD Ryzen 9 7950X3D (16 cores, 32
 threads) and 106 GiB of RAM, where one `fsync` takes about 4 ms. Other disks will give other
-numbers. CI runs on GitHub's hosted `ubuntu-latest` runners: they check correctness, and
-nothing records or compares their timings.
+numbers. CI runs on GitHub's hosted `ubuntu-24.04` runners: they check correctness, and nothing
+records or compares their timings.
