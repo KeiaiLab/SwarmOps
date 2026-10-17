@@ -115,9 +115,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   write whose tail check can neither sync nor write afresh the frames `journal.off` does not
   list yet. In `swarmops-store`, `StoreError::Undecided` and `CrashAtFs::from_env` are removed,
   and `HookedFs::from_env` replaces the latter.
-- The schema describes `E_IO_TRANSIENT` by the journal append that failed: the store cut what
-  the append wrote back off the journal, so nothing was committed, and running the same
-  operation again is safe.
+- The schema describes `E_IO_TRANSIENT` by the journal append that failed (other failures before
+  the commit point stay `E_IO`): the store cut what the append wrote back off the journal, so
+  nothing was committed, and running the same operation again is safe.
 - `init` takes `FORMAT` back (and syncs its removal) when the sync of the store's root after it
   fails, so that no store looks complete whose completion mark may not be durable; when it made
   the store but reading it back fails, the error says so with `details.created: true`.
@@ -133,12 +133,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   counted (they gave wrong counts and seqs, or `E_STORE_CORRUPT`); and a snapshot that opens
   while a writer cuts the index counts every record the checkpoint passed or the sorted views
   cover.
-- When a power loss has zeroed index records past the checkpoint and the journal is also
-  damaged or missing, so that it cannot vouch for them, reads and writes fail with
-  `E_STORE_CORRUPT` (`IndexCorrupt`) and nothing is cut; before, the store counted the zeroed
-  records, and the next write cut `parents.log`.
-- `Journal::frame_count` drops the zeroed entries at the end of `journal.off`, as the readers
-  and recovery do; it counted them.
+- Where the journal cannot vouch for the index's records past the checkpoint (no journal, a
+  damaged one, or a `journal.ckpt` that does not hold a u64le — damage verify reports), the
+  index counts them by their lengths and now checks their `par.col` entries against the layout
+  (each record's parents start where the previous record's end): a zeroed entry, which a power
+  loss leaves, is `IndexCorrupt` (`E_STORE_CORRUPT`) and nothing is cut. Before, the next write
+  cut `parents.log` at the zeroed entry and replayed over the parents of checkpointed records.
+  `Index::open` returns any other error reading `journal.ckpt` instead of counting by length.
+- `Journal::frame_count` drops the zeroed entries at the end of `journal.off` that readers and
+  recovery drop; a reader's frame count after such a power loss was one too high until the next
+  writer ran (the frames it read were right).
 - `bench/compare/` (`just bench-compare`, `--quick` for a smoke run): the native metadata
   store, through its public API, against SQLite, redb, fjall and sled on SwarmOps' own
   workloads, in a cargo workspace of its own that `just check` never builds; SwarmOps depends on

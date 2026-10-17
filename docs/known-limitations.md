@@ -154,6 +154,11 @@ left).
   restoring the store is the only remedy. The index can be rebuilt from the journal in
   principle (`fsck --rebuild-index`). *Target: M6 (fsck). Found: M1 Tasks 2b, 2c and 3; final
   review, question 5.*
+- **A zero-filled index tail over a damaged journal wedges the store.** A store whose
+  journal is damaged before the checkpoint, or whose `journal.ckpt` is malformed, and whose
+  index records past the checkpoint a power loss zeroed opens with `IndexCorrupt`
+  (`E_STORE_CORRUPT`) on every read and write; no writer repairs it. *Target: M6 (fsck).
+  Found: M1.5 minors (Task 3 review N1).*
 - **Temp files of crashed writes stay.** `objects/tmp/` keeps what interrupted object writes left
   there. *Target: M6 (`gc`). Found: M1 final review, question 8.*
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
