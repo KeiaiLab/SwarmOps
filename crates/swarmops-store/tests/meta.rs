@@ -1126,7 +1126,7 @@ fn index_records_a_power_loss_zero_filled_are_not_counted_and_replay_replaces_th
     ];
     for checkpointed in [0, 32] {
         let (_template_dir, template) = new_root();
-        let store = MetaStore::create(&template).unwrap();
+        let store = create_checked(&template).unwrap();
         // A chain: changeset n's parent is n - 1, its generation n + 1.
         let chain = |n: u64| {
             stored(
@@ -1171,7 +1171,7 @@ fn index_records_a_power_loss_zero_filled_are_not_counted_and_replay_replaces_th
                 .iter()
                 .all(|(file, _)| matches!(*file, "idx/par.col" | "parents.log"));
             let kept = checkpointed + u64::from(checkpointed == 0 && parents_only);
-            let store = MetaStore::open(&root).unwrap();
+            let store = open_checked(&root).unwrap();
             assert_eq!(index(&root).len(), kept, "{what}: not counted");
             let read = store.read().unwrap();
             assert_eq!(read.count_changesets().unwrap(), all, "{what}");
@@ -1251,7 +1251,7 @@ fn snapshots_and_writes_vouch_for_the_index_with_the_frames_they_read() {
     column[8..16].fill(0);
     fs::write(&generations, column).unwrap();
 
-    let store = MetaStore::open(&root).unwrap();
+    let store = open_checked(&root).unwrap();
     let mut damaged = fs::read(layout.journal_log()).unwrap();
     damaged[84 + 12] ^= 0x01; // a payload byte of frame 1: its CRC fails
     let copy = layout.meta_path("journal.log.damaged");
@@ -1267,6 +1267,117 @@ fn snapshots_and_writes_vouch_for_the_index_with_the_frames_they_read() {
     let column = fs::read(&generations).unwrap();
     assert_eq!(column.len(), 16, "two records");
     assert_eq!(column[8..16], 2_u64.to_le_bytes(), "record 1 replayed");
+}
+
+#[test]
+fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_unreadable_one() {
+    // Past the checkpoint the journal vouches for the index's records: a power loss zeroed
+    // record 1's generation, so it is not counted. A checkpoint that does not hold a u64le is
+    // damage, which verify reports: with nothing to vouch with, an index open counts the
+    // records by their lengths. One that does not read at all is an I/O error, which the open
+    // returns rather than count by length.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    insert(&store, &[cs(1, &[0])]);
+    assert_eq!(ckpt(&root), 0, "both records past the checkpoint");
+    let layout = Layout::new(&root);
+    let generations = layout.meta_path("idx/gen.col");
+    let mut column = fs::read(&generations).unwrap();
+    column[8..16].fill(0);
+    fs::write(&generations, column).unwrap();
+    assert_eq!(index(&root).len(), 1, "record 1 is not vouched for");
+
+    fs::write(layout.journal_ckpt(), b"bad").unwrap();
+    assert_eq!(
+        index(&root).len(),
+        2,
+        "a malformed checkpoint: counted by length"
+    );
+
+    fs::remove_file(layout.journal_ckpt()).unwrap();
+    fs::create_dir(layout.journal_ckpt()).unwrap(); // a read of it fails with EISDIR
+    match Index::open(&layout, Arc::new(RealFs)) {
+        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::IsADirectory, "{e}"),
+        other => panic!("an unreadable checkpoint: expected its I/O error, got {other:?}"),
+    }
+}
+
+#[test]
+fn counting_by_length_never_lets_a_zeroed_par_col_entry_end_parents_log() {
+    // A record's parents start in parents.log where the record before it leaves off (one with
+    // no parents points at the next one's start). A power loss can zero the index's records
+    // past the checkpoint, and where the journal cannot vouch for them (it is damaged, which
+    // verify reports), the index counts its records by their lengths. A zeroed par.col entry
+    // says "no parents, at offset 0": taken for the last record's, it would end parents.log
+    // before the parents of the records before it, and a writer would cut them there and
+    // replay over them. Records out of that layout are IndexCorrupt instead: snapshots and
+    // writes fail, and nothing is cut.
+    //
+    // A chain 0 <- 1 <- 2 <- 3. The checkpoint past frames 0 to 2 (records 0 and 1, then a ref
+    // move), records 2 and 3 past it, a power loss zeroing their ids and par.col entries: with
+    // none of the changesets past the checkpoint among the index's last records, it walks the
+    // journal back from the checkpoint to its last changeset, and meets frame 2 damaged.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]); // frame 0, record 0
+    insert(&store, &[cs(1, &[0])]); // frame 1, record 1
+    cas(&store, "main", None, Some(1)); // frame 2
+    store.flush().unwrap();
+    insert(&store, &[cs(2, &[1])]); // frame 3, record 2
+    insert(&store, &[cs(3, &[2])]); // frame 4, record 3
+    let layout = Layout::new(&root);
+    let frame_2 = usize::try_from(frames(&root)[2].offset).unwrap();
+    let mut log = fs::read(layout.journal_log()).unwrap();
+    log[frame_2 + 12] ^= 0x01; // a payload byte: its CRC fails
+    fs::write(layout.journal_log(), log).unwrap();
+    let meta = layout.meta_dir();
+    let zero_from = |file: &str, at: usize| {
+        let mut bytes = fs::read(meta.join(file)).unwrap();
+        bytes[at..].fill(0);
+        fs::write(meta.join(file), bytes).unwrap();
+    };
+    zero_from("idx/ids.col", 2 * 32);
+    zero_from("idx/par.col", 2 * 8);
+    let files = [
+        "parents.log",
+        "idx/par.col",
+        "idx/gen.col",
+        "idx/dh.col",
+        "idx/ids.col",
+    ];
+    let read_files = || files.map(|file| fs::read(meta.join(file)).unwrap());
+    let before = read_files();
+
+    let read = store.read().map(|read| read.count_changesets());
+    let wrote = store.write().map(drop);
+    assert!(read_files() == before, "the index files are as they were");
+    assert!(
+        matches!(read, Err(StoreError::IndexCorrupt { .. })),
+        "a snapshot: {read:?}"
+    );
+    assert!(
+        matches!(wrote, Err(StoreError::IndexCorrupt { .. })),
+        "a write: {wrote:?}"
+    );
+
+    // The same where the checkpoint does not read (an index open, as verify makes one): a
+    // chain of four past the checkpoint, the last two par.col entries zeroed.
+    let (_dir, root, store) = new_store();
+    for n in 0..4 {
+        insert(
+            &store,
+            &[cs(n, &n.checked_sub(1).into_iter().collect::<Vec<_>>())],
+        );
+    }
+    let layout = Layout::new(&root);
+    let pars = layout.meta_path("idx/par.col");
+    let mut column = fs::read(&pars).unwrap();
+    column[2 * 8..].fill(0);
+    fs::write(&pars, column).unwrap();
+    fs::write(layout.journal_ckpt(), b"bad").unwrap();
+    match Index::open(&layout, Arc::new(RealFs)) {
+        Err(StoreError::IndexCorrupt { .. }) => {}
+        other => panic!("a malformed checkpoint: expected IndexCorrupt, got {other:?}"),
+    }
 }
 
 #[track_caller]
@@ -1663,7 +1774,7 @@ fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_chec
                 assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
             }),
         ));
-        let reader = MetaStore::open_with_fs(&root, Arc::new(fs)).unwrap();
+        let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
 
         let read = reader.read().unwrap();
         assert_eq!(chained_lens(&root), chained_want(3), "{what}: cut");
@@ -1675,7 +1786,7 @@ fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_chec
         drop(read);
 
         // The next write appends the records cut again, from the journal.
-        MetaStore::open(&root).unwrap().flush().unwrap();
+        open_checked(&root).unwrap().flush().unwrap();
         assert_eq!(chained_lens(&root), chained_want(5), "{what}: replayed");
         let index = index(&root);
         for n in 0..5 {
@@ -1756,7 +1867,7 @@ fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_sort
                 assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
             }),
         ));
-        let reader = MetaStore::open_with_fs(&root, Arc::new(fs)).unwrap();
+        let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
 
         let read = reader.read().unwrap();
         assert_eq!(chained_lens(&root), covered, "{what}: cut");
@@ -1768,7 +1879,7 @@ fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_sort
         drop(read);
 
         // The next write appends the records cut again, from the journal.
-        MetaStore::open(&root).unwrap().flush().unwrap();
+        open_checked(&root).unwrap().flush().unwrap();
         let index = index(&root);
         let counts = (index.len(), index.sorted_count());
         assert_eq!(counts, (1105, 1103), "{what}: replayed");

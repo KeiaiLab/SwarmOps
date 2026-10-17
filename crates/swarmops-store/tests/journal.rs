@@ -1059,7 +1059,7 @@ fn zeroed_entries_at_the_end_of_journal_off_are_dropped_by_readers_too() {
     // and lose the entry's bytes: an entry pointing at 0, which no frame but the first starts
     // at. Recovery drops such entries at the end as it drops a partial entry; readers drop them
     // too, and read the frame such an entry would list as a whole frame not listed yet, as
-    // they read one whose entry was never appended.
+    // they read one whose entry was never appended. `frame_count` counts what they list.
     for unlisted in [false, true] {
         let what = if unlisted {
             "with frame 2 in journal.log"
@@ -1089,6 +1089,11 @@ fn zeroed_entries_at_the_end_of_journal_off_are_dropped_by_readers_too() {
             &[(0, 0), (1, 84)]
         };
         let reader = reopen(&layout);
+        assert_eq!(
+            reader.frame_count().unwrap(),
+            2,
+            "{what}: the listed frames"
+        );
         assert_eq!(starts(reader.tail_frames_from(0).unwrap()), all, "{what}");
         assert_eq!(
             starts(reader.tail_frames_from(84).unwrap()),
@@ -1114,6 +1119,8 @@ fn zeroed_entries_at_the_end_of_journal_off_are_dropped_by_readers_too() {
             "{what}: dropped, then listed"
         );
         assert_eq!(starts(reader.frames_from(0, 10).unwrap()), all, "{what}");
+        let count = u64::try_from(all.len()).unwrap();
+        assert_eq!(reader.frame_count().unwrap(), count, "{what}: all listed");
     }
 
     // More than one, the last listed frame then frame 0 or frame 1, and a read from where
@@ -1139,6 +1146,11 @@ fn zeroed_entries_at_the_end_of_journal_off_are_dropped_by_readers_too() {
         assert_eq!(
             reopen(&layout).frames_from(0, 10).unwrap().len(),
             first_two,
+            "{what}: the listed frames"
+        );
+        assert_eq!(
+            reopen(&layout).frame_count().unwrap(),
+            u64::try_from(first_two).unwrap(),
             "{what}: the listed frames"
         );
     }

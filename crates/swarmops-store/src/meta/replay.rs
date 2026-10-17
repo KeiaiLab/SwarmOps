@@ -118,12 +118,13 @@ impl Overlay {
     }
 }
 
-/// A `Changeset` record of a frame.
-struct ChangesetRecord<'a> {
-    id: ChangesetId,
-    generation: u64,
-    delta_hash: &'a [u8; 32],
-    parents: &'a [ChangesetId],
+/// A `Changeset` record of a frame, its fields borrowed: what replay appends, and what the
+/// index compares its records past the checkpoint with ([`Index::open`]).
+pub(super) struct ChangesetRecord<'a> {
+    pub(super) id: ChangesetId,
+    pub(super) generation: u64,
+    pub(super) delta_hash: &'a [u8; 32],
+    pub(super) parents: &'a [ChangesetId],
 }
 
 impl ChangesetRecord<'_> {
@@ -140,7 +141,7 @@ impl ChangesetRecord<'_> {
 }
 
 /// The `Changeset` records of `frames`, in journal order.
-fn changesets(frames: &[Frame]) -> Vec<ChangesetRecord<'_>> {
+pub(super) fn changesets(frames: &[Frame]) -> Vec<ChangesetRecord<'_>> {
     frames
         .iter()
         .flat_map(|frame| &frame.records)
