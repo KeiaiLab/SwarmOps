@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value, json};
 use swarmops_api::ErrorCode;
 use swarmops_core::{ObjectKind, hash_object};
-use swarmops_store::Layout;
+use swarmops_store::{Layout, ORDER_CHECK_ENV};
 use tempfile::TempDir;
 
 use crate::support;
@@ -968,12 +968,17 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
 // Running the binary.
 // ---------------------------------------------------------------------------------------------
 
-/// The binary, with none of this process's `SWARMOPS_*` variables set.
+/// The binary, with none of this process's `SWARMOPS_*` variables, the order check on
+/// (`SWARMOPS_TEST_ORDER_CHECK=1`; a test's own `env` still wins), and a deadline
+/// (`support::RUN_TIMEOUT`): `output()` kills and reaps a run still going then, whose status
+/// has no exit code.
 fn swarmops() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_swarmops"));
     for var in support::swarmops_vars() {
         command.env_remove(var);
     }
+    command.env(ORDER_CHECK_ENV, "1");
+    command.timeout(support::RUN_TIMEOUT);
     command
 }
 
@@ -1123,8 +1128,18 @@ impl Session {
             command.write_stdin(stdin);
         }
         let output = command.output().expect("run swarmops");
+        let exit = output.status.code().unwrap_or_else(|| {
+            panic!(
+                "swarmops {args:?} ended {} (past its {:?} deadline, so killed, or by a signal)\n\
+                 --- stdout ---\n{}--- stderr ---\n{}",
+                output.status,
+                support::RUN_TIMEOUT,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )
+        });
         Output {
-            exit: output.status.code().expect("swarmops exited, not killed"),
+            exit,
             stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
             stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
         }

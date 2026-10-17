@@ -18,7 +18,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, EntryKind, ObjectId, ObjectKind, hash_object};
 use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::CRASH_AT_ENV;
+use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
 use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
@@ -792,7 +792,8 @@ fn create_crashing_at(k: u64, total: u64) {
     let child = run(
         this_test(&test_name!("create_resumes_after_a_crash_at_any_call"))
             .env(CHILD_ROOT, &root)
-            .env(CRASH_AT_ENV, k.to_string()),
+            .env(CRASH_AT_ENV, k.to_string())
+            .env(ORDER_CHECK_ENV, "1"),
     );
     let finished = child.status.success();
     assert_eq!(

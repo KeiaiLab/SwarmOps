@@ -28,9 +28,10 @@ left).
   what a disk may hold after the power fails at each of its steps (unsynced data dropped, cut at
   512 B or 4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync
   covered reverted), each of which the binary must recover. What stays open: `abort()` stands
-  in for `SIGKILL`, and the images come from a model of the disk, not a real device. A test with
-  a literal `SIGKILL` on a real device is *M6*. *Found: M1 Task 6; final review, question 11;
-  narrowed by M1.5 Task 3.*
+  in for `SIGKILL`, and the images come from a model of the disk, not a real device, and the
+  recorded run is short (its journal ends at 1,130 B), so a cut at 4 KiB is in the model but
+  never differs from dropping. A test with a literal `SIGKILL` on a real device is *M6*. *Found:
+  M1 Task 6; final review, question 11; narrowed by M1.5 Task 3.*
 - **A double failure leaves an index risk open.** When an index sync fails, the writer cuts the
   unsynced records back so the journal can supply them again; if the cut fails too, the error
   names both failures, and the risk stays open until the next successful sync, which could carry
@@ -273,6 +274,13 @@ These do not change what SwarmOps does, only how well the tests can see it.
 - **The gate lints only the all-features build.** Clippy runs with `--all-features`; the build
   without features is compiled and tested only by the release `test_hooks` run. *Unscheduled.
   Found: M1 final fix pass.*
+- **The journal's, the index's and the repository's crash sweeps recover unchecked.** They run
+  their crashing child under the order checker (`checked(...)` in the store's,
+  `SWARMOPS_TEST_ORDER_CHECK=1` in the repository's) but recover in the parent on the real
+  filesystem (`reopen()`/`open()` in the journal and index sweeps, `LocalRepo::open`/`create` in
+  the repository sweeps), so a rule broken only during recovery would go unnoticed; the sweeps
+  through the binary and the metadata store's own recover under the checker. *Target: M1.6.
+  Found: M1.5 final review.*
 - **Coverage is not measured by the gate.** It was measured once, part-way through M1, for core
   and store only: 94.61 % of lines. *Unscheduled.*
 - **Gaps the reviews found and left.** A `CrashAtFs` off-by-one would go unnoticed (the test

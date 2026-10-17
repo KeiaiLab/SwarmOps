@@ -20,7 +20,7 @@
 //!
 //! Images that hold the same files are checked once.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -33,7 +33,8 @@ use swarmops_core::{ChangesetId, EntryKind, RepoPath, Signature};
 use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{FsOps, Index, Layout, MetaLock, MetaStore};
 use swarmops_testkit::power::{
-    Chooser, Image, ImageRecordingFs, Keep, KeepAllBut, RecordedCall, SECTOR, Seeded, Timeline,
+    Chooser, Image, ImageRecordingFs, Keep, KeepAllBut, PAGE, RecordedCall, SECTOR, Seeded,
+    Timeline,
 };
 
 use crate::support;
@@ -850,6 +851,84 @@ fn a_lost_header_sector_is_a_torn_tail() {
     assert!(
         torn.iter().any(|&(_, lost)| (4..8).contains(&lost)),
         "a frame whose length lies in a lost sector, its CRC across the boundary: {torn:?}"
+    );
+}
+
+/// A frame written to `journal.log` and not yet synced may reach the disk in part: a power loss
+/// keeps the bytes before a 512 B boundary the writeback had reached and loses the rest. A frame
+/// that straddles a boundary is then cut there, its header whole or only its length kept, and none
+/// of its payload: a torn tail like any other, so the store opens and holds the frames before it.
+#[test]
+fn a_frame_kept_up_to_a_sector_boundary_is_a_torn_tail() {
+    let rec = record();
+    let log = "store/meta/journal.log";
+    let keep = Keep::Prefix {
+        granule: SECTOR,
+        pick: 0,
+    };
+    let mut kept = Vec::new();
+    let mut failures = Vec::new();
+    for (n, frame) in rec.frames.iter().enumerate() {
+        let [(at, len)] = rec.timeline.writes(frame.write)[..] else {
+            panic!("frame {n}: one write");
+        };
+        let boundary = (at / SECTOR + 1) * SECTOR;
+        if at + len <= boundary {
+            continue;
+        }
+        let image = image_losing(&rec, frame.write + 1, &[(log, keep)]);
+        let bytes = image.file(Path::new(log)).expect("journal.log");
+        assert_eq!(
+            to_u64(bytes.len()),
+            boundary,
+            "frame {n}: kept up to the boundary"
+        );
+        kept.push((n, boundary - at));
+        match found_in(&rec, &image) {
+            Ok(Found::Prefix(frames)) if frames == n => {}
+            other => failures.push(format!(
+                "frame {n} at {at}..{}, kept up to {boundary}: {other:?}",
+                at + len
+            )),
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n\n"));
+    assert!(
+        kept.iter().any(|&(_, bytes)| bytes >= 8),
+        "a frame whose whole header is kept, its payload lost: {kept:?}"
+    );
+    assert!(
+        kept.iter().any(|&(_, bytes)| (4..8).contains(&bytes)),
+        "a frame whose length is kept, its CRC lost: {kept:?}"
+    );
+}
+
+/// The sweeps rely on [`Seeded`] for the shapes of loss no other test pins: a seed of 2 or more
+/// picks each [`Keep`] at random (the prefix up to a sector and up to a page boundary among
+/// them), and, of a directory's changes no fsync covered, keeps some but not all.
+#[test]
+fn a_random_seed_picks_every_shape_of_loss() {
+    let shapes: BTreeSet<Keep> = (0..200)
+        .map(|cut| match Seeded::new(2, cut).data(Path::new("file")) {
+            Keep::Prefix { granule, .. } => Keep::Prefix { granule, pick: 0 },
+            other => other,
+        })
+        .collect();
+    let prefix = |granule| Keep::Prefix { granule, pick: 0 };
+    assert_eq!(
+        shapes.into_iter().collect::<Vec<_>>(),
+        [
+            Keep::Drop,
+            prefix(SECTOR),
+            prefix(PAGE),
+            Keep::All,
+            Keep::ZeroFilled,
+            Keep::FirstSectorLost
+        ]
+    );
+    assert!(
+        (0..200).any(|cut| (1..3).contains(&Seeded::new(2, cut).entries(Path::new("dir"), 3))),
+        "some of a directory's changes are kept, not none and not all"
     );
 }
 

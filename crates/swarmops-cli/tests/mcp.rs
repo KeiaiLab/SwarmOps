@@ -177,14 +177,22 @@ fn mcp_tools_list_schema_snapshot() {
     let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
     let mut listed = server.result("tools/list", json!({"_meta": latest_meta()}));
     server.finish_clean();
-    let server_info = &mut listed["_meta"]["io.modelcontextprotocol/serverInfo"];
-    assert_eq!(
-        server_info["version"],
-        env!("CARGO_PKG_VERSION"),
-        "{server_info}"
-    );
-    server_info["version"] = json!("[version]");
+    pin_server_version(&mut listed);
     insta::assert_json_snapshot!(listed);
+}
+
+/// The other half of the gate: the whole `server/discover` result of the latest revision. It
+/// holds the server's `instructions`, which a client loads before any tool (Claude Code, with
+/// tool search on, loads only the tool names and these), and the revisions served. The server's
+/// version is pinned as in the `tools/list` snapshot.
+#[test]
+fn mcp_discover_snapshot() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    let mut discovered = server.result("server/discover", json!({"_meta": latest_meta()}));
+    server.finish_clean();
+    pin_server_version(&mut discovered);
+    insta::assert_json_snapshot!(discovered);
 }
 
 /// A commit through the server, of every kind of content, then every read: each tool result is
@@ -781,7 +789,7 @@ fn vague_expectations_are_refused(server: &mut Server, c2: &str, c3: &str) {
         ),
         (
             "ref_set",
-            json!({"name": "main", "new": "main~1", "expected_old": "main"}),
+            json!({"name": "main", "new": c3, "expected_old": "main~1"}),
         ),
         (
             "ref_set",
@@ -883,30 +891,26 @@ fn mcp_startup_failures_go_to_stderr() {
         (&["mcp"], &[("SWARMOPS_FORMAT", "yaml")]),
     ];
     for (args, env) in cases {
-        let output = support::swarmops(args, env)
-            .output()
-            .expect("run swarmops mcp");
+        let run = support::run(args, env);
         assert!(
-            output.stdout.is_empty(),
+            run.stdout.is_empty(),
             "{args:?} {env:?}: nothing on stdout, not {:?}",
-            String::from_utf8_lossy(&output.stdout)
+            run.stdout
         );
-        assert_eq!(output.status.code(), Some(2), "{args:?} {env:?}");
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let envelope: Value = serde_json::from_str(stderr.trim_end())
-            .unwrap_or_else(|e| panic!("one envelope on stderr ({e}): {stderr}"));
+        assert_eq!(run.exit(), 2, "{args:?} {env:?}");
+        let envelope: Value = serde_json::from_str(run.stderr.trim_end())
+            .unwrap_or_else(|e| panic!("one envelope on stderr ({e}): {}", run.stderr));
         assert_eq!(
             (&envelope["op"], &envelope["error"]["code"]),
             (&json!("mcp"), &json!("E_INVALID_ARG")),
-            "{stderr}"
+            "{}",
+            run.stderr
         );
     }
-    let output = support::swarmops(&["info", "--no-such-flag"], &[])
-        .output()
-        .expect("run swarmops info");
-    assert!(output.stderr.is_empty(), "{output:?}");
-    assert_eq!(output.status.code(), Some(2));
-    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let run = support::run(&["info", "--no-such-flag"], &[]);
+    assert!(run.stderr.is_empty(), "{run}");
+    assert_eq!(run.exit(), 2);
+    let envelope: Value = serde_json::from_str(&run.stdout).unwrap();
     assert_eq!(envelope["error"]["code"], "E_INVALID_ARG");
 }
 
@@ -1112,13 +1116,15 @@ struct ToolCall {
 }
 
 impl Server {
-    /// `swarmops mcp`, then `args`, with `env` set and no other `SWARMOPS_*` variable.
+    /// `swarmops mcp`, then `args`, with the order check on, `env` set and no other `SWARMOPS_*`
+    /// variable.
     fn start(args: &[&str], env: &[(&str, &str)]) -> Server {
         let mut command = Command::new(support::BIN);
         command.arg("mcp").args(args);
         for name in support::swarmops_vars() {
             command.env_remove(name);
         }
+        command.env(swarmops_store::ORDER_CHECK_ENV, "1");
         command
             .envs(env.iter().copied())
             .stdin(Stdio::piped())
@@ -1478,6 +1484,18 @@ fn assert_no_references(name: &str, schema: &Value) {
 fn assert_cacheable(result: &Value) {
     assert!(result["ttlMs"].is_u64(), "{result}");
     assert_eq!(result["cacheScope"], "public", "{result}");
+}
+
+/// `result`'s server version, which every release bumps and no contract rests on, checked
+/// against this build's and replaced by `[version]`, for a snapshot.
+fn pin_server_version(result: &mut Value) {
+    let server_info = &mut result["_meta"]["io.modelcontextprotocol/serverInfo"];
+    assert_eq!(
+        server_info["version"],
+        env!("CARGO_PKG_VERSION"),
+        "{server_info}"
+    );
+    server_info["version"] = json!("[version]");
 }
 
 /// `text`, an envelope as printed, with the number of its `elapsed_ms` replaced by 0: the one
