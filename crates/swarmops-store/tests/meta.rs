@@ -2446,6 +2446,12 @@ fn fail_at_every_store_call_reports_honestly() {
                 let outcome = swept(&store, n);
                 drop(store);
                 assert!(k <= calls || outcome.is_ok(), "{what}: {outcome:?}");
+                if let Err(e @ StoreError::PostCommit { source, .. }) = &outcome {
+                    assert!(
+                        !matches!(**source, StoreError::NotCommitted { .. }),
+                        "{what}: a step after the commit point reports: {e}"
+                    );
+                }
                 post_commit += usize::from(matches!(outcome, Err(StoreError::PostCommit { .. })));
                 assert_recovers(&root, n, &[(n, said(&outcome))], &what);
             }

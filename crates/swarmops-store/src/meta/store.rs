@@ -691,7 +691,9 @@ impl MetaWrite<'_> {
         let journal = &self.store.journal;
         if compact {
             let sorted_count = self.index.compact()?;
-            journal.append_frame(&[Record::Compacted { sorted_count }])?;
+            journal
+                .append_frame(&[Record::Compacted { sorted_count }])
+                .map_err(marker_error)?;
         }
         journal.set_ckpt(journal.len())?;
         info.checkpointed = true;
@@ -752,6 +754,24 @@ impl fmt::Debug for MetaWrite<'_> {
             .field("uncheckpointed", &self.uncheckpointed)
             .field("records_queued", &self.records.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// The error of a failed append of the advisory `Compacted` marker, once the compaction is
+/// done: a marker cut back off the journal is told as the plain I/O error it is.
+/// [`StoreError::NotCommitted`] would say that the transaction did not commit, when it did (or
+/// queued nothing), and inside [`StoreError::PostCommit`] it would say both.
+fn marker_error(e: StoreError) -> StoreError {
+    match e {
+        StoreError::NotCommitted { source } => io::Error::new(
+            source.kind(),
+            format!(
+                "appending the Compacted marker failed, and it was cut back off the journal \
+                 (the compaction itself is done): {source}"
+            ),
+        )
+        .into(),
+        other => other,
     }
 }
 
