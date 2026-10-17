@@ -9,10 +9,12 @@
 //! 32 per parent, a ref move 13 bytes plus its name, its actor and 32 per id present, a
 //! `Compacted` record 9 bytes.
 
+#[cfg(feature = "test-hooks")]
 use std::ffi::OsString;
 use std::fmt::Debug;
 use std::fs;
 use std::io;
+#[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::slice;
@@ -24,9 +26,10 @@ use std::time::{Duration, Instant};
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
-use swarmops_store::{
-    CRASH_AT_ENV, CrashAtFs, Frame, FsOps, Journal, Layout, MetaLock, RealFs, Record, StoreError,
-};
+#[cfg(feature = "test-hooks")]
+use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
+use swarmops_store::{Frame, FsOps, Journal, Layout, MetaLock, RealFs, Record, StoreError};
+#[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::{FsyncModelFs, checked};
 use swarmops_testkit::fs::{Hook, RecordingFs, When};
@@ -34,6 +37,7 @@ use swarmops_testkit::store::{append_bytes, file_len, new_root, real_fs, set_len
 
 /// Set only in the children that `crash_at_any_journal_write_recovers_to_whole_frames`
 /// spawns: the store root.
+#[cfg(feature = "test-hooks")]
 const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_JOURNAL_CRASH_ROOT";
 
 /// A new, empty journal whose tail this handle has checked: what a writer holds.
@@ -1636,6 +1640,7 @@ fn real_fs_appends_truncates_and_replaces_durably() {
 /// One writer transaction in a child process, through a `CrashAtFs` that aborts on its
 /// k-th FsOps call, under the order checker: check the tail, append a frame, advance the
 /// checkpoint.
+#[cfg(feature = "test-hooks")]
 fn crash_child(root: OsString) {
     let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
     let layout = Layout::new(Utf8PathBuf::from_path_buf(root.into()).unwrap());
@@ -1648,6 +1653,7 @@ fn crash_child(root: OsString) {
 /// Runs the test named `test` again as a child process that runs [`crash_child`] on
 /// `layout` with `SWARMOPS_TEST_CRASH_AT=k`; it must die by SIGABRT, or exit cleanly if `k`
 /// is past its last FsOps call, `calls`.
+#[cfg(feature = "test-hooks")]
 fn run_crash_child(test: &str, layout: &Layout, k: u64, calls: u64) {
     let child = run(this_test(test)
         .env(CRASH_CHILD_ROOT, layout.root())
@@ -1667,6 +1673,7 @@ fn run_crash_child(test: &str, layout: &Layout, k: u64, calls: u64) {
 }
 
 /// `journal.log`, `journal.off` and the checkpoint as a crash left them.
+#[cfg(feature = "test-hooks")]
 fn on_disk(layout: &Layout) -> (u64, u64, u64) {
     (
         file_len(layout.journal_log()),
@@ -1676,6 +1683,7 @@ fn on_disk(layout: &Layout) -> (u64, u64, u64) {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_at_any_journal_write_recovers_to_whole_frames() {
     if let Some(root) = std::env::var_os(CRASH_CHILD_ROOT) {
         crash_child(root);
@@ -1728,6 +1736,7 @@ fn crash_at_any_journal_write_recovers_to_whole_frames() {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_while_recovery_lists_a_frame_recovers_to_whole_frames() {
     if let Some(root) = std::env::var_os(CRASH_CHILD_ROOT) {
         crash_child(root);

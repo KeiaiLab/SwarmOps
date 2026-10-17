@@ -14,10 +14,10 @@ workspace = true
 [features]
 # The test hooks, `SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FAIL_AT`
 # and `SWARMOPS_TEST_ORDER_CHECK`, which `HookedFs::from_env` reads, and the fault doubles they
-# build (`FailAtFs`, `OrderCheckFs`). Off unless asked for, so that every other build (a release
-# build included) ignores them and holds no such double; the workspace's gates turn it on with
-# `--all-features`. It turns on the test kit's too, so that this crate's tests run under the order
-# checker (`swarmops_testkit::faults::checked`) whenever they run with the hooks.
+# build (`CrashAtFs`, `FailAtFs`, `OrderCheckFs`). Off unless asked for, so that every other
+# build (a release build included) ignores them and holds no such double; the workspace's gates
+# turn it on with `--all-features`. It turns on the test kit's too, so that this crate's tests run
+# under the order checker (`swarmops_testkit::faults::checked`) whenever they run with the hooks.
 test-hooks = ["swarmops-testkit/test-hooks"]
 
 [dependencies]

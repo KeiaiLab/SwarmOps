@@ -78,8 +78,8 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
 - **Tests never need the network.** Tests that read real repositories on this host run only when
   `SWARMOPS_HOST_REPOS=1`.
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
-  `test-hooks` cargo feature (the store's `CrashAtFs` still compiles without it; M1.5 moves it
-  behind the feature), and a release build honours no test hook. The hooks are
+  `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
+  build without the feature can name), and a release build honours no test hook. The hooks are
   environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT`,
   `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_NOW`), read only under
   `#[cfg(feature = "test-hooks")]`. A test that needs them is marked

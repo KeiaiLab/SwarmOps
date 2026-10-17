@@ -3,7 +3,7 @@
 //! with the feature at its k-th filesystem call, `SWARMOPS_TEST_FS_CALLS=<file>`, which has it
 //! write how many calls it made, `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]`, which fails its
 //! k-th call (and with `persistent` every mutating call after it), `SWARMOPS_TEST_ORDER_CHECK=1`,
-//! which checks the order of its writes (the test support sets it for every run), and
+//! which checks the order of its writes (the test kit's runner sets it for every run), and
 //! `SWARMOPS_TEST_NOW=<unix seconds>`, which fixes the time it signs changesets at.
 //!
 //! The test exists only in a build without the feature, as `cargo build --release` is. `just
@@ -11,6 +11,14 @@
 //! (`--no-tests=fail`), so a build that turns the feature on all the same (a stray default, say)
 //! fails the gate rather than passing it with nothing tested. The crash tests (`crash.rs`) show
 //! the hooks acting when the feature is on.
+//!
+//! That release run is also the proof that a release build holds none of the store's fault
+//! doubles (`CrashAtFs`, `FailAtFs`, `OrderCheckFs`), and the proof is the compiler's: the doubles
+//! compile only with `swarmops-store`'s `test-hooks` feature, and the run builds the store, with
+//! the `swarmops` and `so` it tests, without it, so code a release build holds that names one
+//! does not compile, and fails the gate. (A scan of the binary's symbols would prove less:
+//! inlining and stripping change them.) The test kit's own `test-hooks` is not a default for the
+//! same reason: as a dev-dependency of this crate, a default would turn the store's on here.
 
 #![cfg(not(feature = "test-hooks"))]
 

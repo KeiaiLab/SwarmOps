@@ -22,8 +22,8 @@ use proptest::prelude::Rng;
 use proptest::test_runner::{RngAlgorithm, TestRng};
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV};
-use swarmops_store::{CrashAtFs, FsObjectStore, FsOps, Layout, ObjectStore, RealFs, StoreError};
+use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsOps};
+use swarmops_store::{FsObjectStore, Layout, ObjectStore, RealFs, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{self, SIGABRT, this_test};
 use swarmops_testkit::fs::{Call, Rendezvous, Watch, Watched};
@@ -808,6 +808,7 @@ fn crash_at_fs_aborts_child_at_call_k() {
 /// A [`CrashAtFs`] counts every call, and with a report file writes the count there when it
 /// is dropped.
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_at_fs_counts_its_calls_and_reports_them_when_dropped() {
     let (_root, layout) = new_root();
     let report = layout.root().join("calls").into_std_path_buf();

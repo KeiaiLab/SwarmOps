@@ -3,7 +3,7 @@
 //! FoundationDB's `AsyncFileNonDurable` and SQLite's crash VFS, made deterministic and
 //! exhaustive).
 //!
-//! A process crash ([`swarmops_store::CrashAtFs`]) leaves the kernel's page cache in place: every
+//! A process crash (`swarmops_store::CrashAtFs`) leaves the kernel's page cache in place: every
 //! byte a call wrote reaches the disk in the end. A power loss takes back what was never made
 //! durable. [`ImageRecordingFs`] runs the stores' [`FsOps`] calls on real files without a single
 //! flush to stable storage, and records each mutating call with its data ([`RecordedCall`]: not

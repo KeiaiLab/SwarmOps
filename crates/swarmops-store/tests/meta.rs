@@ -18,13 +18,15 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
-use swarmops_store::{
-    CRASH_AT_ENV, CasResult, ChangesetMeta, CommitInfo, CrashAtFs, Frame, FsOps, Index,
-    InsertOutcome, Journal, JournalEntry, Layout, MetaLock, MetaRead, MetaStore, MetaWrite, RealFs,
-    Record, RefMoveEntry, RefState, StoreError,
-};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{FailAt, FailAtFs, FailMode, InjectedError};
+use swarmops_store::{
+    CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError, MetaWrite,
+};
+use swarmops_store::{
+    CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
+    JournalEntry, Layout, MetaLock, MetaRead, MetaStore, RealFs, Record, RefMoveEntry, RefState,
+    StoreError,
+};
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
@@ -56,6 +58,7 @@ const NO_THREADS_ROOT: &str = "SWARMOPS_TEST_META_NO_THREADS_ROOT";
 
 /// Set only in the children of `crash_at_any_create_call_leaves_a_store_open_or_create_takes`:
 /// the store root.
+#[cfg(feature = "test-hooks")]
 const CREATE_CRASH_ROOT: &str = "SWARMOPS_TEST_META_CREATE_CRASH_ROOT";
 
 /// Set only in the children of `the_test_hooks_build_the_filesystem_they_name`: a directory of
@@ -2160,6 +2163,7 @@ const SWEEP_PLAN: &str = "SWARMOPS_TEST_META_SWEEP_PLAN";
 
 /// The transaction the store-level sweeps fail or crash: changeset `n`, a root, and
 /// `release/swept` created at it, in one frame.
+#[cfg(feature = "test-hooks")]
 fn swept(store: &MetaStore, n: u64) -> Result<CommitInfo, StoreError> {
     let mut write = store.write()?;
     write.insert_changeset(cs(n, &[]))?;
@@ -2168,6 +2172,7 @@ fn swept(store: &MetaStore, n: u64) -> Result<CommitInfo, StoreError> {
 }
 
 /// What a transaction's outcome says of it.
+#[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Said {
     /// It returned, or failed after its commit point ([`StoreError::PostCommit`]).
@@ -2178,6 +2183,7 @@ enum Said {
     Aborted,
 }
 
+#[cfg(feature = "test-hooks")]
 fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
     match outcome {
         Ok(_) | Err(StoreError::PostCommit { .. }) => Said::Committed,
@@ -2189,6 +2195,7 @@ fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
 /// subject): changesets `0..n` past the checkpoint, `n` returned, so that the swept transaction
 /// `n` moves the checkpoint (31 frames of one changeset each, the 32nd swept) or, `compacting`,
 /// compacts (1,024 changesets in one frame: the swept one takes the tail past the threshold).
+#[cfg(feature = "test-hooks")]
 fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
     let (dir, root) = new_root();
     let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
@@ -2210,6 +2217,7 @@ fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
 }
 
 /// A copy of the store at `template`, in a temp dir of its own.
+#[cfg(feature = "test-hooks")]
 fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
     let (dir, root) = new_root();
     copy_dir(template.as_std_path(), root.as_std_path());
@@ -2218,6 +2226,7 @@ fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
 
 /// How many filesystem calls `run` makes on a copy of the store at `template`, one index file
 /// synced at a time, no call failing.
+#[cfg(feature = "test-hooks")]
 fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
     let (_dir, root) = copy_of(template);
     let counter = Arc::new(CrashAtFs::new(FastFs, 0));
@@ -2234,6 +2243,7 @@ fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
 /// template's changesets are all there; a transaction's changeset is there exactly when it said
 /// it committed (either, after an abort), the swept one's ref with it; and the index holds each
 /// changeset once, the checkpoint at the journal's end.
+#[cfg(feature = "test-hooks")]
 #[track_caller]
 fn assert_recovers(root: &Utf8Path, template: u64, outcomes: &[(u64, Said)], what: &str) {
     let store = MetaStore::open_with_fs(root, checked(FastFs))
@@ -2670,6 +2680,7 @@ fn the_test_hooks_build_the_filesystem_they_name() {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
     if let Ok(root) = std::env::var(CREATE_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
@@ -3237,12 +3248,14 @@ fn reflog_walks_back_past_256_frames() {
 
 /// Set only in the children of `crash_at_any_replay_call_recovers_to_the_journal`: the store
 /// root.
+#[cfg(feature = "test-hooks")]
 const REPLAY_CRASH_ROOT: &str = "SWARMOPS_TEST_META_REPLAY_CRASH_ROOT";
 
 /// Lays out at `root` a store whose journal holds three frames past the checkpoint that no
 /// writer materialized, as a power loss can leave the index short of several frames' records:
 /// changesets 2..=4 on changeset 1, main moved from 1 to 4, release/new created and
 /// release/old deleted. Everything before them is materialized and checkpointed.
+#[cfg(feature = "test-hooks")]
 fn unreplayed_store(root: &Utf8Path) {
     let store = MetaStore::create_with_fs(root, checked(FastFs)).unwrap();
     insert(&store, &[cs(1, &[])]);
@@ -3269,6 +3282,7 @@ fn unreplayed_store(root: &Utf8Path) {
 }
 
 /// Asserts that `read` shows what [`unreplayed_store`]'s journal holds.
+#[cfg(feature = "test-hooks")]
 #[track_caller]
 fn assert_replayed(read: &MetaRead<'_>, what: &str) {
     assert_eq!(read.count_changesets().unwrap(), 4, "{what}");
@@ -3289,6 +3303,7 @@ fn assert_replayed(read: &MetaRead<'_>, what: &str) {
 /// write finishes the replay: every record once, in journal order, and each ref file as its
 /// last move leaves it.
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_at_any_replay_call_recovers_to_the_journal() {
     if let Ok(root) = std::env::var(REPLAY_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();

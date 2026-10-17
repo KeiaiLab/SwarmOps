@@ -5,24 +5,29 @@
 //! Every test owns a fresh store root (`tempfile::tempdir()`), so tests are independent and
 //! may run in any order or in parallel.
 
+#[cfg(feature = "test-hooks")]
 use std::ffi::OsString;
 use std::fmt::Debug;
 use std::fs;
 use std::io;
 use std::num::NonZero;
+#[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+#[cfg(feature = "test-hooks")]
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
-use swarmops_store::{
-    CRASH_AT_ENV, ChangesetMeta, CrashAtFs, FsOps, Index, Layout, RealFs, StoreError,
-};
+#[cfg(feature = "test-hooks")]
+use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
+use swarmops_store::{ChangesetMeta, FsOps, Index, Layout, RealFs, StoreError};
+#[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
+#[cfg(feature = "test-hooks")]
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{FastFs, RecordingFs};
 use swarmops_testkit::measure::{mix, percentile};
@@ -32,12 +37,14 @@ use tempfile::TempDir;
 
 /// Set only in the children that `crash_at_any_index_write_recovers_to_whole_records`
 /// spawns: the store root.
+#[cfg(feature = "test-hooks")]
 const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_INDEX_CRASH_ROOT";
 
 /// The FsOps calls of [`crash_child`]: none for its `repair_tail` (the files are clean),
 /// 3 appends of 5 calls each (1-15), the sync (16-20), then the compaction: 5 sync_data of
 /// the columns (21-25), per view 2 temp removes and 2 temp appends (26-33), 4 temp syncs
 /// (34-37) and 4 renames (38-41).
+#[cfg(feature = "test-hooks")]
 const CRASH_CHILD_CALLS: u64 = 41;
 
 /// The files `append` writes, in the order it writes them (`ids.col` last), with the size of
@@ -1269,13 +1276,17 @@ fn real_fs_appends_without_syncing_and_renames_durably() {
     );
 
     // CrashAtFs (k = 0 never aborts) and Arc forward both.
-    let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, 0));
-    assert_eq!(fs.append(&file, b"xy").unwrap(), 0);
-    fs.rename_durable(&file, &target).unwrap();
-    assert_eq!(fs::read(&target).unwrap(), b"xy");
+    #[cfg(feature = "test-hooks")]
+    {
+        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, 0));
+        assert_eq!(fs.append(&file, b"xy").unwrap(), 0);
+        fs.rename_durable(&file, &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"xy");
+    }
 }
 
 /// The records of the crash sweep: five compacted before the child runs, three it appends.
+#[cfg(feature = "test-hooks")]
 fn crash_metas() -> Vec<ChangesetMeta> {
     (0..8_u64)
         .map(|n| {
@@ -1292,6 +1303,7 @@ fn crash_metas() -> Vec<ChangesetMeta> {
 
 /// One writer's work in a child process, through a `CrashAtFs` that aborts on its k-th
 /// FsOps call, under the order checker: repair, append three records, sync, compact.
+#[cfg(feature = "test-hooks")]
 fn crash_child(root: OsString) {
     let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
     let layout = Layout::new(Utf8PathBuf::from_path_buf(root.into()).unwrap());
@@ -1306,6 +1318,7 @@ fn crash_child(root: OsString) {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_at_any_index_write_recovers_to_whole_records() {
     if let Some(root) = std::env::var_os(CRASH_CHILD_ROOT) {
         crash_child(root);
