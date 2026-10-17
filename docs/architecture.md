@@ -22,10 +22,11 @@ general-purpose git replacement. Its main users are LLM agents, so every operati
 function and the command line is a thin shell that prints JSON. It is fully embedded: one
 program, no external database, no daemon.
 
-M0 (bootstrap) and M1 (the single-agent core) are done. M1 is usable by one agent: its store
-already takes commits from many processes at once, safely, but nothing merges yet. Merging and
-landing (M4), git import and export (M3, M8), workspaces (M5) and review (M7) come later, in the
-order of umbrella §13. [known-limitations.md](known-limitations.md) lists what M1 leaves open.
+M0 (bootstrap), M1 (the single-agent core) and M1.5 (hardening and opening) are done. M1 is
+usable by one agent: its store already takes commits from many processes at once, safely, but
+nothing merges yet. Merging and landing (M4), git import and export (M3, M8), workspaces (M5)
+and review (M7) come later, in the order of umbrella §13.
+[known-limitations.md](known-limitations.md) lists what M1 leaves open.
 
 ## Crates and layering
 
