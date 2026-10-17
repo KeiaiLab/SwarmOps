@@ -7,8 +7,6 @@
 //! may run in any order or in parallel. The multi-process tests run this test binary again
 //! as their children (selected by [`CHILD_ROOT`]), all on the real filesystem.
 
-mod support;
-
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::process::ExitStatusExt;
@@ -27,13 +25,12 @@ use swarmops_store::{
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{FailAt, FailAtFs, FailMode, InjectedError};
+use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
+use swarmops_testkit::faults::checked;
+use swarmops_testkit::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
+use swarmops_testkit::store::temp_dir as new_root;
+use swarmops_testkit::store::{append_bytes, file_len};
 use tempfile::TempDir;
-
-use crate::support::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
-use crate::support::faults::checked;
-use crate::support::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
-use crate::support::temp_dir as new_root;
-use crate::support::{append_bytes, file_len};
 
 /// Set only in the children the multi-process tests spawn: the store root.
 const CHILD_ROOT: &str = "SWARMOPS_TEST_META_CHILD_ROOT";
@@ -791,7 +788,7 @@ fn compaction_triggered_past_threshold() {
         assert!(!insert(&store, &batch(b)).checkpointed, "batch {b}");
     }
     assert_eq!(index(&root).tail_len(), 1000);
-    assert_eq!(compacted_frames(&store), []);
+    assert_eq!(compacted_frames(&store), Vec::<u64>::new());
 
     // The write that takes the tail past the threshold compacts, then checkpoints.
     let info = insert(&store, &batch(10));
@@ -1677,7 +1674,11 @@ fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
     fail.clear();
     let cut = index(&root);
     assert_eq!((cut.len(), cut.sorted_count()), (32, 0));
-    assert_eq!(compacted_frames(&store), [], "nothing was compacted");
+    assert_eq!(
+        compacted_frames(&store),
+        Vec::<u64>::new(),
+        "nothing was compacted"
+    );
 
     assert!(store.write().unwrap().commit().unwrap().checkpointed);
     let index = index(&root);

@@ -4,8 +4,6 @@
 //! Every test owns a fresh store root (`tempfile::tempdir()`), so tests are
 //! independent and may run in any order or in parallel.
 
-mod support;
-
 use std::collections::BTreeSet;
 use std::fs;
 use std::io;
@@ -26,11 +24,10 @@ use swarmops_core::{ObjectId, ObjectKind, hash_object};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV};
 use swarmops_store::{CrashAtFs, FsObjectStore, FsOps, Layout, ObjectStore, RealFs, StoreError};
-
 #[cfg(feature = "test-hooks")]
-use crate::support::child::{self, SIGABRT, this_test};
-use crate::support::fs::{Call, Rendezvous, Watch, Watched};
-use crate::support::new_root;
+use swarmops_testkit::child::{self, SIGABRT, this_test};
+use swarmops_testkit::fs::{Call, Rendezvous, Watch, Watched};
+use swarmops_testkit::store::new_root;
 
 /// `"SOB1" | kind u8 | enc u8 | u16 rsvd | u64le ulen` (storage spec §2).
 const HEADER_LEN: usize = 16;
@@ -115,7 +112,7 @@ impl Calls {
 
 /// Counts the calls the store makes: the real filesystem watched by them is a
 /// [`counting_store`]'s.
-impl Watch for Arc<Calls> {
+impl Watch for Calls {
     fn before(&self, call: &Call<'_>) -> io::Result<()> {
         match call.method {
             "write_durable_temp" => {

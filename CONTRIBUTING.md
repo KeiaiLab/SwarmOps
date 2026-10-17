@@ -89,7 +89,9 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
   call (`SWARMOPS_TEST_CRASH_AT=k`) for every k a dry run counted (`SWARMOPS_TEST_FS_CALLS`). It
   runs both stores at parallelism 1 and pins the signing time (`SWARMOPS_TEST_NOW`), so that call
   k is the same call in every run.
-- **Child processes have deadlines.** A test that runs processes uses the test support's runner,
+- **Child processes have deadlines.** A test that runs processes uses the runner of
+  `swarmops-testkit` (the dev-dependency that holds the support the tests share: filesystem
+  doubles, power-loss images, and builders of stores, repositories and runs of the binary),
   which gives each child a deadline and kills and reaps it on failure, so a hang fails the test
   instead of stalling the gate.
 - **Slow tests are ignored by default** with a reason that names their cost

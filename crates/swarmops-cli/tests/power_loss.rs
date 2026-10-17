@@ -1,14 +1,14 @@
 //! Power loss at any point of a store's life, through the real binary (storage spec §2–§3): the
-//! crash images of the store's test support (`power.rs`), opened with `swarmops`.
+//! crash images of the test kit (`swarmops_testkit::power`), opened with `swarmops`.
 //!
 //! A process crash (`crash.rs`) leaves the kernel's page cache in place, so it cannot show a
 //! missing fsync, or writes not yet synced that a power loss tears, reorders or loses. Here one
-//! run of a store's life is made in this process on a [`RecordingFs`], deterministically (one
-//! thread, signatures at a fixed time): `init`; commits and ref moves (a create, moves, a delete)
-//! with a compaction and a checkpoint among them; then commits past the checkpoint, whose index
-//! records no sync has made durable. For a power failure after any step of the run, and a seed,
-//! the [`Image`] of what the disk may hold is written to a temp dir, and the binary must find in
-//! it, as RocksDB's crash tests put it, no hole:
+//! run of a store's life is made in this process on an [`ImageRecordingFs`], deterministically
+//! (one thread, signatures at a fixed time): `init`; commits and ref moves (a create, moves, a
+//! delete) with a compaction and a checkpoint among them; then commits past the checkpoint, whose
+//! index records no sync has made durable. For a power failure after any step of the run, and a
+//! seed, the [`Image`] of what the disk may hold is written to a temp dir, and the binary must
+//! find in it, as RocksDB's crash tests put it, no hole:
 //!
 //! - no store before `init` returned: `info` says `E_NOT_A_REPO`, and `init` then makes one;
 //! - otherwise a store in the state of a prefix of the transactions issued that holds every one
@@ -22,9 +22,6 @@
 
 mod support;
 
-#[path = "../../swarmops-store/tests/support/power.rs"]
-mod power;
-
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,11 +30,13 @@ use std::thread;
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use power::{Call, Chooser, Image, Keep, KeepAllBut, RecordingFs, SECTOR, Seeded, Timeline};
 use serde_json::Value;
 use swarmops_core::{ChangesetId, EntryKind, RepoPath, Signature};
 use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{FsOps, Index, Layout, MetaLock, MetaStore};
+use swarmops_testkit::power::{
+    Chooser, Image, ImageRecordingFs, Keep, KeepAllBut, RecordedCall, SECTOR, Seeded, Timeline,
+};
 
 /// How many images are checked at once, each in a temp dir of its own.
 const AT_ONCE: usize = 8;
@@ -174,7 +173,7 @@ struct Recorded {
     /// How many steps came before `init` returned.
     init: usize,
     /// The calls, as recorded.
-    calls: Vec<Call>,
+    calls: Vec<RecordedCall>,
 }
 
 /// A fixed signature, so that a commit makes the same changeset in every run.
@@ -188,13 +187,13 @@ fn signature() -> Signature {
     }
 }
 
-/// Runs `init`, then [`RUN`], on a [`RecordingFs`] in a temp dir, on a one-thread pool: objects
-/// are written, and directories synced, one at a time, in the same order every run.
+/// Runs `init`, then [`RUN`], on an [`ImageRecordingFs`] in a temp dir, on a one-thread pool:
+/// objects are written, and directories synced, one at a time, in the same order every run.
 fn record() -> Recorded {
     let dir = tempfile::tempdir().expect("make a temp dir");
     let base = dir.path().canonicalize().expect("the temp dir's path");
     let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
-    let fs = Arc::new(RecordingFs::new());
+    let fs = Arc::new(ImageRecordingFs::new());
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(1)
         .build()
@@ -210,7 +209,7 @@ fn record() -> Recorded {
     });
     let mut frames = Vec::new();
     for (at, call) in calls.iter().enumerate() {
-        if let Call::AppendDurable { path, bytes } = call
+        if let RecordedCall::AppendDurable { path, bytes } = call
             && *path == log
             && !bytes.is_empty()
         {
@@ -235,7 +234,7 @@ fn record() -> Recorded {
 }
 
 /// The run itself; the commits' ids and first parents.
-fn run(root: &Utf8Path, fs: &Arc<RecordingFs>) -> (Vec<ChangesetId>, Vec<Option<usize>>) {
+fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>) -> (Vec<ChangesetId>, Vec<Option<usize>>) {
     let shared: Arc<dyn FsOps> = Arc::clone(fs) as Arc<dyn FsOps>;
     let repo = LocalRepo::create_with_fs(root, "power", Arc::clone(&shared)).expect("init");
     fs.mark("init");
@@ -364,7 +363,7 @@ impl Recorded {
     /// How many filesystem calls the run made that change something (marks aside).
     fn calls(&self) -> usize {
         (self.calls.iter())
-            .filter(|call| !matches!(call, Call::Mark(_)))
+            .filter(|call| !matches!(call, RecordedCall::Mark(_)))
             .count()
     }
 
@@ -869,10 +868,10 @@ fn objects_referenced_by_a_durable_frame_survive_power_loss() {
     let mut links: Vec<(PathBuf, usize, &[u8])> = Vec::new();
     for (at, call) in rec.calls.iter().enumerate() {
         match call {
-            Call::WriteDurableTemp { path, bytes } => {
+            RecordedCall::WriteDurableTemp { path, bytes } => {
                 temps.insert(path, bytes);
             }
-            Call::LinkNoclobber {
+            RecordedCall::LinkNoclobber {
                 from,
                 to,
                 placed: true,

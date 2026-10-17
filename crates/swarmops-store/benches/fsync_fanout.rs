@@ -18,8 +18,6 @@
 //!
 //! Each variant runs in a directory of its own; docs/perf.md cites criterion's median.
 
-mod common;
-
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -31,9 +29,8 @@ use camino::Utf8PathBuf;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::{ChangesetMeta, Index, Layout, RealFs};
+use swarmops_testkit::measure::{base_dir, mix};
 use tempfile::TempDir;
-
-use crate::common::{base_dir, mix};
 
 /// New bytes appended to every file before each iteration, in 8-byte words (64 KiB).
 const WORDS: u64 = 8 * 1024;

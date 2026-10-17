@@ -6,8 +6,6 @@
 //! Every test owns a fresh store (`tempfile::tempdir()`). The crash sweep runs this test
 //! binary again as its children (selected by [`CHILD_ROOT`]).
 
-mod support;
-
 use std::fs;
 #[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
@@ -22,11 +20,10 @@ use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoI
 #[cfg(feature = "test-hooks")]
 use swarmops_store::CRASH_AT_ENV;
 use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
-
 #[cfg(feature = "test-hooks")]
-use crate::support::child::{SIGABRT, run, this_test};
-use crate::support::fs::RecordingFs;
-use crate::support::{blob, commit, new_repo, path, put, put_as, request};
+use swarmops_testkit::child::{SIGABRT, run, this_test};
+use swarmops_testkit::fs::RecordingFs;
+use swarmops_testkit::repo::{blob, commit, new_repo, path, put, put_as, request};
 
 /// Set only in the children of the crash sweep: the store root.
 #[cfg(feature = "test-hooks")]

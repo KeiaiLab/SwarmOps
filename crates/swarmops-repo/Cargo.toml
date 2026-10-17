@@ -23,4 +23,5 @@ camino.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
 tempfile.workspace = true

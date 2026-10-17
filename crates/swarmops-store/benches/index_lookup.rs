@@ -20,8 +20,6 @@
 //! Each lookup cycles through 1,024 targets in a scattered order. The parameter is the
 //! index's size; docs/perf.md cites criterion's median as the p50 per lookup.
 
-mod common;
-
 use std::hint::black_box;
 use std::path::Path;
 use std::sync::Arc;
@@ -32,9 +30,8 @@ use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, BenchmarkId, Criterion, criterion_group, criterion_main};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::{ChangesetMeta, Index, Layout, RealFs};
+use swarmops_testkit::measure::{base_dir, mix};
 use tempfile::TempDir;
-
-use crate::common::{base_dir, mix};
 
 /// The index sizes measured, in changesets.
 const SIZES: [u64; 3] = [10_000, 100_000, 200_000];

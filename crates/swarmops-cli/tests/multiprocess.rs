@@ -24,11 +24,11 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
-use support::doubles::{Call, Watch, Watched};
-use support::{BIN, Racers, Run, Store, agent, run_bin_within, run_within};
+use support::{BIN, Racers, Run, Store, agent, retry_busy, run, run_bin_within, run_within};
 use swarmops_core::{EntryKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{Layout, MetaLock};
+use swarmops_testkit::fs::{Call, Watch, Watched};
 
 /// How many children the commit tests race.
 const COMMITTERS: usize = 8;
@@ -167,7 +167,9 @@ fn blob_write_idempotent_across_processes() {
 /// now: in the first round they race to create it (`--create`), in each later round to move it
 /// from the last winner (`--expect <its id>`). Every round exactly one wins (exit 0), and every
 /// other one exits 4 with `E_CAS_MISMATCH`, whose `actual` is the winner. main's history is
-/// then the winners, and its version counts the rounds.
+/// then the winners, and its version counts the rounds. The racers' commits are the setup of
+/// each round: one that meets `E_BUSY` (a lock wait a loaded host stretched past its 10 s) runs
+/// again, as an agent's would ([`retry_busy`]); the ref moves, the race itself, never do.
 #[test]
 fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
     let store = Store::init();
@@ -176,6 +178,7 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
     for round in 0..ROUNDS {
         // Each racer's changeset, on main as it is (none in the first round), made at once.
         let mut commits = Racers::new(store.tmp());
+        let mut setups = Vec::with_capacity(RACERS);
         for racer in 0..RACERS {
             let changes = store.changes(
                 &format!("round-{round}-racer-{racer}"),
@@ -187,15 +190,18 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
                 args.extend(["--parent", main]);
             }
             let run_id = format!("round-{round}-racer-{racer}");
-            commits.spawn(
-                &store.args(&agent(racer), &args),
-                &[("SWARMOPS_RUN_ID", &run_id)],
-            );
+            let args = store.args(&agent(racer), &args);
+            commits.spawn(&args, &[("SWARMOPS_RUN_ID", &run_id)]);
+            setups.push((args, run_id));
         }
         let ids: Vec<String> = commits
             .race()
-            .iter()
-            .map(|run| run.ok()["changeset"].as_str().unwrap().to_owned())
+            .into_iter()
+            .zip(&setups)
+            .map(|(first, (args, run_id))| {
+                let made = retry_busy(first, || run(args, &[("SWARMOPS_RUN_ID", run_id)]));
+                made.ok()["changeset"].as_str().unwrap().to_owned()
+            })
             .collect();
 
         let mut moves = Racers::new(store.tmp());

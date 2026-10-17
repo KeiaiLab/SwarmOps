@@ -5,8 +5,10 @@
 //!
 //! A process crash ([`swarmops_store::CrashAtFs`]) leaves the kernel's page cache in place: every
 //! byte a call wrote reaches the disk in the end. A power loss takes back what was never made
-//! durable. [`RecordingFs`] runs the stores' [`FsOps`] calls on real files without a single flush
-//! to stable storage, and records each mutating call with its data. [`Timeline`] breaks the calls
+//! durable. [`ImageRecordingFs`] runs the stores' [`FsOps`] calls on real files without a single
+//! flush to stable storage, and records each mutating call with its data ([`RecordedCall`]: not
+//! [`crate::fs::RecordingFs`], which records calls by name and flushes as the real filesystem
+//! does). [`Timeline`] breaks the calls
 //! into steps, a call into more than one where it syncs part-way (`append_durable` writes, then
 //! syncs; `atomic_replace` writes its temp file, syncs it, renames it, then syncs the directory),
 //! and builds the [`Image`] of what the disk may hold when the power fails after any step:
@@ -24,9 +26,7 @@
 //! lost), 1 the most (every one kept, what a process crash at that point leaves), and any other
 //! seed at random, the same way each time.
 //!
-//! The CLI's power-loss tests include this file by its path.
-
-#![allow(dead_code)] // Each test binary uses the part it needs.
+//! The CLI's power-loss tests (`power_loss.rs`) use it.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -46,43 +46,66 @@ pub const SECTOR: u64 = 512;
 /// The page a filesystem writes back at.
 pub const PAGE: u64 = 4096;
 
-/// One mutating [`FsOps`] call as [`RecordingFs`] ran it, with the data it wrote; or a mark.
+/// One mutating [`FsOps`] call as [`ImageRecordingFs`] ran it, with the data it wrote; or a mark.
 #[derive(Debug, Clone)]
-pub enum Call {
+pub enum RecordedCall {
     /// `create_dir_all`: the directories it made, outermost first (none: not recorded).
     CreateDirAll(Vec<PathBuf>),
     /// `write_durable_temp`: the file it made and what it wrote there.
     WriteDurableTemp {
+        /// The temp file it made.
         path: PathBuf,
+        /// What it wrote there.
         bytes: Vec<u8>,
     },
     /// `link_noclobber`: whether `to` was made (it did not exist), then `from` removed.
     LinkNoclobber {
+        /// The temp file it linked, then removed.
         from: PathBuf,
+        /// The name it gave the file, unless that name existed.
         to: PathBuf,
+        /// Whether `to` was made: it did not exist.
         placed: bool,
     },
+    /// `fsync_dir` of the directory.
     FsyncDir(PathBuf),
+    /// `remove` of the file.
     Remove(PathBuf),
+    /// `append_durable`: the bytes it appended (then synced).
     AppendDurable {
+        /// The file it appended to, made if missing.
         path: PathBuf,
+        /// What it appended.
         bytes: Vec<u8>,
     },
+    /// `truncate`: the length it cut the file to (then synced).
     Truncate {
+        /// The file it cut.
         path: PathBuf,
+        /// Its length after the cut.
         len: u64,
     },
+    /// `atomic_replace`: the file's new content.
     AtomicReplace {
+        /// The file it replaced, made if missing.
         path: PathBuf,
+        /// Its new content.
         bytes: Vec<u8>,
     },
+    /// `sync_data` of the file.
     SyncData(PathBuf),
+    /// `append`: the bytes it appended, not synced.
     Append {
+        /// The file it appended to, made if missing.
         path: PathBuf,
+        /// What it appended.
         bytes: Vec<u8>,
     },
+    /// `rename_durable` of `from` to `to` (then the directory synced).
     RenameDurable {
+        /// The name it moved.
         from: PathBuf,
+        /// Where it moved it, replacing what was there.
         to: PathBuf,
     },
     /// Not a call: a point between calls that the test marked, an operation returning, say.
@@ -90,34 +113,40 @@ pub enum Call {
 }
 
 /// The real filesystem without a flush to stable storage, each mutating call recorded with its
-/// data ([`Call`]); reads go to [`RealFs`] unrecorded. Calls from several threads are run and
-/// recorded one at a time, so the record is the order they took effect in.
+/// data ([`RecordedCall`]); reads go to [`RealFs`] unrecorded. Calls from several threads are run
+/// and recorded one at a time, so the record is the order they took effect in.
 #[derive(Debug, Default)]
-pub struct RecordingFs {
-    calls: Mutex<Vec<Call>>,
+pub struct ImageRecordingFs {
+    /// The calls and marks so far, in the order they took effect.
+    calls: Mutex<Vec<RecordedCall>>,
 }
 
-impl RecordingFs {
-    pub fn new() -> RecordingFs {
-        RecordingFs::default()
+impl ImageRecordingFs {
+    /// A recorder that has recorded nothing yet.
+    pub fn new() -> ImageRecordingFs {
+        ImageRecordingFs::default()
     }
 
     /// Marks this point of the run as `label`.
     pub fn mark(&self, label: &str) {
-        self.log().push(Call::Mark(label.to_owned()));
+        self.log().push(RecordedCall::Mark(label.to_owned()));
     }
 
     /// The calls (and marks) so far.
-    pub fn calls(&self) -> Vec<Call> {
+    pub fn calls(&self) -> Vec<RecordedCall> {
         self.log().clone()
     }
 
-    fn log(&self) -> std::sync::MutexGuard<'_, Vec<Call>> {
+    /// The record, locked (a test that panicked with it held leaves it as it was).
+    fn log(&self) -> std::sync::MutexGuard<'_, Vec<RecordedCall>> {
         self.calls.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Runs `call` with the record locked, and records what it returns to record.
-    fn run<T>(&self, call: impl FnOnce() -> io::Result<(T, Option<Call>)>) -> io::Result<T> {
+    fn run<T>(
+        &self,
+        call: impl FnOnce() -> io::Result<(T, Option<RecordedCall>)>,
+    ) -> io::Result<T> {
         let mut log = self.log();
         let (out, recorded) = call()?;
         log.extend(recorded);
@@ -125,7 +154,7 @@ impl RecordingFs {
     }
 }
 
-impl FsOps for RecordingFs {
+impl FsOps for ImageRecordingFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
         self.run(|| {
             let mut made: Vec<PathBuf> = p
@@ -135,7 +164,10 @@ impl FsOps for RecordingFs {
                 .collect();
             made.reverse();
             fs::create_dir_all(p)?;
-            Ok(((), (!made.is_empty()).then_some(Call::CreateDirAll(made))))
+            Ok((
+                (),
+                (!made.is_empty()).then_some(RecordedCall::CreateDirAll(made)),
+            ))
         })
     }
 
@@ -144,7 +176,7 @@ impl FsOps for RecordingFs {
             let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
             temp.write_all(bytes)?;
             let (_file, path) = temp.keep().map_err(|e| e.error)?;
-            let call = Call::WriteDurableTemp {
+            let call = RecordedCall::WriteDurableTemp {
                 path: path.clone(),
                 bytes: bytes.to_vec(),
             };
@@ -165,7 +197,7 @@ impl FsOps for RecordingFs {
             } else {
                 LinkOutcome::AlreadyExists
             };
-            let call = Call::LinkNoclobber {
+            let call = RecordedCall::LinkNoclobber {
                 from: from.to_owned(),
                 to: to.to_owned(),
                 placed,
@@ -177,7 +209,7 @@ impl FsOps for RecordingFs {
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
         self.run(|| {
             File::open(p)?;
-            Ok(((), Some(Call::FsyncDir(p.to_owned()))))
+            Ok(((), Some(RecordedCall::FsyncDir(p.to_owned()))))
         })
     }
 
@@ -192,14 +224,14 @@ impl FsOps for RecordingFs {
     fn remove(&self, p: &Path) -> io::Result<()> {
         self.run(|| {
             fs::remove_file(p)?;
-            Ok(((), Some(Call::Remove(p.to_owned()))))
+            Ok(((), Some(RecordedCall::Remove(p.to_owned()))))
         })
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
         self.run(|| {
             let offset = append_to(path, bytes)?;
-            let call = Call::AppendDurable {
+            let call = RecordedCall::AppendDurable {
                 path: path.to_owned(),
                 bytes: bytes.to_vec(),
             };
@@ -214,7 +246,7 @@ impl FsOps for RecordingFs {
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
         self.run(|| {
             OpenOptions::new().write(true).open(path)?.set_len(len)?;
-            let call = Call::Truncate {
+            let call = RecordedCall::Truncate {
                 path: path.to_owned(),
                 len,
             };
@@ -228,7 +260,7 @@ impl FsOps for RecordingFs {
             let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
             temp.write_all(bytes)?;
             temp.persist(path).map_err(|e| e.error)?;
-            let call = Call::AtomicReplace {
+            let call = RecordedCall::AtomicReplace {
                 path: path.to_owned(),
                 bytes: bytes.to_vec(),
             };
@@ -239,14 +271,14 @@ impl FsOps for RecordingFs {
     fn sync_data(&self, path: &Path) -> io::Result<()> {
         self.run(|| {
             File::open(path)?;
-            Ok(((), Some(Call::SyncData(path.to_owned()))))
+            Ok(((), Some(RecordedCall::SyncData(path.to_owned()))))
         })
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
         self.run(|| {
             let offset = append_to(path, bytes)?;
-            let call = Call::Append {
+            let call = RecordedCall::Append {
                 path: path.to_owned(),
                 bytes: bytes.to_vec(),
             };
@@ -257,7 +289,7 @@ impl FsOps for RecordingFs {
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
         self.run(|| {
             fs::rename(from, to)?;
-            let call = Call::RenameDurable {
+            let call = RecordedCall::RenameDurable {
                 from: from.to_owned(),
                 to: to.to_owned(),
             };
@@ -277,7 +309,9 @@ fn append_to(path: &Path, bytes: &[u8]) -> io::Result<u64> {
 /// What a directory entry names: a directory, or a file (an inode, which hard links share).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Node {
+    /// The directory of this id.
     Dir(usize),
+    /// The file of this inode.
     File(usize),
 }
 
@@ -287,17 +321,29 @@ enum Node {
 enum Entry {
     /// `name` in `dir` names `node` now: a new directory, a new file, or a link to a file.
     Add {
+        /// The directory the name is in.
         dir: usize,
+        /// The name.
         name: OsString,
+        /// What it names.
         node: Node,
     },
     /// `name` in `dir` names nothing now.
-    Remove { dir: usize, name: OsString },
+    Remove {
+        /// The directory the name was in.
+        dir: usize,
+        /// The name.
+        name: OsString,
+    },
     /// `from_name` in `from_dir` moved to `to_name` in `to_dir`, replacing what was there.
     Rename {
+        /// The directory it moved from.
         from_dir: usize,
+        /// Its name there.
         from_name: OsString,
+        /// The directory it moved to.
         to_dir: usize,
+        /// Its name there.
         to_name: OsString,
     },
 }
@@ -315,18 +361,24 @@ impl Entry {
 /// What a step does.
 #[derive(Debug, Clone)]
 enum Effect {
+    /// A change to a directory.
     Entry(Entry),
     /// `fsync_dir`: every change made to the directory so far is durable.
     DirSync(usize),
     /// Bytes written to file `inode` at `at`: not durable yet.
     Write {
+        /// The file.
         inode: usize,
+        /// Where in it.
         at: u64,
+        /// What was written.
         bytes: Vec<u8>,
     },
     /// File `inode` cut (or grown) to `len`: not durable yet.
     SetLen {
+        /// The file.
         inode: usize,
+        /// Its new length.
         len: u64,
     },
     /// File `inode`'s data, as written so far, is durable.
@@ -339,36 +391,43 @@ pub struct Step {
     /// The call it is part of, its paths relative to the base: `append_durable
     /// store/meta/journal.log (write)`, say.
     pub label: String,
+    /// What it does, in order.
     effects: Vec<Effect>,
 }
 
 /// A run's calls, as steps the power may fail after; see the module documentation.
 #[derive(Debug, Clone)]
 pub struct Timeline {
+    /// The steps, in the order they took effect.
     steps: Vec<Step>,
     /// The steps of each call, by its index in the calls (a mark has none).
     call_steps: Vec<Range<usize>>,
     /// Each mark, with how many steps came before it.
     marks: Vec<(String, usize)>,
+    /// How many directories the calls named, the base among them.
     dirs: usize,
+    /// How many files the calls made.
     inodes: usize,
 }
 
 /// The directory tree as the calls leave it, while a [`Timeline`] is built.
 struct Builder<'a> {
+    /// The directory the calls' paths lie under.
     base: &'a Path,
     /// The entries of each directory, by id; 0 is the base.
     tree: Vec<BTreeMap<OsString, Node>>,
     /// The length of each file, by inode.
     lens: Vec<u64>,
+    /// How many temp files `atomic_replace` steps have named, for their names.
     temps: u64,
+    /// What it has built so far.
     timeline: Timeline,
 }
 
 impl Timeline {
-    /// The timeline of `calls`, which [`RecordingFs`] recorded on paths under `base` (`base`
+    /// The timeline of `calls`, which [`ImageRecordingFs`] recorded on paths under `base` (`base`
     /// existed already, and the calls made everything under it).
-    pub fn new(base: &Path, calls: &[Call]) -> Timeline {
+    pub fn new(base: &Path, calls: &[RecordedCall]) -> Timeline {
         let mut builder = Builder {
             base,
             tree: vec![BTreeMap::new()],
@@ -562,9 +621,10 @@ fn walk(
 }
 
 impl Builder<'_> {
-    fn call(&mut self, call: &Call) {
+    /// Adds the steps of `call`.
+    fn call(&mut self, call: &RecordedCall) {
         match call {
-            Call::CreateDirAll(made) => {
+            RecordedCall::CreateDirAll(made) => {
                 for dir in made {
                     let (parent, name) = self.place(dir);
                     let new = self.tree.len();
@@ -573,14 +633,14 @@ impl Builder<'_> {
                     self.step(format!("create_dir_all {}", self.rel(dir)), vec![add]);
                 }
             }
-            Call::WriteDurableTemp { path, bytes } => {
+            RecordedCall::WriteDurableTemp { path, bytes } => {
                 let inode = self.new_file("write_durable_temp", path, bytes);
                 self.step(
                     format!("write_durable_temp {} (sync)", self.rel(path)),
                     vec![Effect::DataSync(inode)],
                 );
             }
-            Call::LinkNoclobber { from, to, placed } => {
+            RecordedCall::LinkNoclobber { from, to, placed } => {
                 if *placed {
                     let inode = self.file(from);
                     let (dir, name) = self.place(to);
@@ -592,23 +652,23 @@ impl Builder<'_> {
                 let label = format!("link_noclobber {} (remove the temp)", self.rel(from));
                 self.step(label, vec![remove]);
             }
-            Call::FsyncDir(path) => {
+            RecordedCall::FsyncDir(path) => {
                 let dir = self.dir(path);
                 self.step(
                     format!("fsync_dir {}", self.rel(path)),
                     vec![Effect::DirSync(dir)],
                 );
             }
-            Call::Remove(path) => {
+            RecordedCall::Remove(path) => {
                 let remove = self.remove(path);
                 self.step(format!("remove {}", self.rel(path)), vec![remove]);
             }
-            Call::AppendDurable { path, bytes } => {
+            RecordedCall::AppendDurable { path, bytes } => {
                 let inode = self.append(path, bytes, "append_durable");
                 let label = format!("append_durable {} (sync)", self.rel(path));
                 self.step(label, vec![Effect::DataSync(inode)]);
             }
-            Call::Truncate { path, len } => {
+            RecordedCall::Truncate { path, len } => {
                 let inode = self.file(path);
                 self.lens[inode] = *len;
                 let rel = self.rel(path);
@@ -621,18 +681,18 @@ impl Builder<'_> {
                     vec![Effect::DataSync(inode)],
                 );
             }
-            Call::AtomicReplace { path, bytes } => self.atomic_replace(path, bytes),
-            Call::SyncData(path) => {
+            RecordedCall::AtomicReplace { path, bytes } => self.atomic_replace(path, bytes),
+            RecordedCall::SyncData(path) => {
                 let inode = self.file(path);
                 self.step(
                     format!("sync_data {}", self.rel(path)),
                     vec![Effect::DataSync(inode)],
                 );
             }
-            Call::Append { path, bytes } => {
+            RecordedCall::Append { path, bytes } => {
                 self.append(path, bytes, "append");
             }
-            Call::RenameDurable { from, to } => {
+            RecordedCall::RenameDurable { from, to } => {
                 let rename = self.rename(from, to);
                 let rel = self.rel(to);
                 self.step(format!("rename_durable {rel} (rename)"), vec![rename]);
@@ -642,7 +702,7 @@ impl Builder<'_> {
                     vec![Effect::DirSync(dir)],
                 );
             }
-            Call::Mark(label) => {
+            RecordedCall::Mark(label) => {
                 let at = self.timeline.steps.len();
                 self.timeline.marks.push((label.clone(), at));
             }
@@ -709,6 +769,7 @@ impl Builder<'_> {
         inode
     }
 
+    /// Adds a step `label` that does `effects`.
     fn step(&mut self, label: String, effects: Vec<Effect>) {
         self.timeline.steps.push(Step { label, effects });
     }
@@ -719,6 +780,7 @@ impl Builder<'_> {
         Effect::Entry(Entry::Add { dir, name, node })
     }
 
+    /// Removes `path` from the tree; the effect that does so.
     fn remove(&mut self, path: &Path) -> Effect {
         let (dir, name) = self.place(path);
         self.tree[dir]
@@ -727,6 +789,7 @@ impl Builder<'_> {
         Effect::Entry(Entry::Remove { dir, name })
     }
 
+    /// Moves `from` to `to` in the tree, replacing what was there; the effect that does so.
     fn rename(&mut self, from: &Path, to: &Path) -> Effect {
         let (from_dir, from_name) = self.place(from);
         let (to_dir, to_name) = self.place(to);
@@ -749,6 +812,7 @@ impl Builder<'_> {
         (self.dir(parent), name)
     }
 
+    /// The id of the directory at `path`, which must be one.
     fn dir(&self, path: &Path) -> usize {
         match self.find(path) {
             Some(Node::Dir(dir)) => dir,
@@ -756,6 +820,7 @@ impl Builder<'_> {
         }
     }
 
+    /// The inode of the file at `path`, which must be one.
     fn file(&self, path: &Path) -> usize {
         match self.find(path) {
             Some(Node::File(inode)) => inode,
@@ -781,6 +846,7 @@ impl Builder<'_> {
         Some(node)
     }
 
+    /// `path` relative to the base, as the step labels show it: `.` for the base itself.
     fn rel(&self, path: &Path) -> String {
         let rel = path.strip_prefix(self.base).unwrap_or(path);
         if rel.as_os_str().is_empty() {
@@ -794,11 +860,14 @@ impl Builder<'_> {
 /// One file's data once the power fails: what the disk holds for sure, and what was written.
 #[derive(Debug, Clone, Default)]
 struct Data {
+    /// What the last sync made durable.
     durable: Vec<u8>,
+    /// What was written, synced or not.
     current: Vec<u8>,
 }
 
 impl Data {
+    /// `bytes` written at `at`, the file grown with zeros to reach it.
     fn write(&mut self, at: u64, bytes: &[u8]) {
         let at = to_usize(at);
         if self.current.len() < at + bytes.len() {
@@ -807,10 +876,12 @@ impl Data {
         self.current[at..at + bytes.len()].copy_from_slice(bytes);
     }
 
+    /// The file cut, or grown with zeros, to `len`.
     fn set_len(&mut self, len: u64) {
         self.current.resize(to_usize(len), 0);
     }
 
+    /// Everything written so far is durable now.
     fn sync(&mut self) {
         self.durable.clone_from(&self.current);
     }
@@ -871,7 +942,12 @@ pub enum Keep {
     /// Those up to a boundary of `granule` bytes ([`SECTOR`] or [`PAGE`]) past the synced
     /// length, the `pick`-th of them (modulo how many there are); none if there is no such
     /// boundary before the end.
-    Prefix { granule: u64, pick: u64 },
+    Prefix {
+        /// The boundaries' spacing, in bytes.
+        granule: u64,
+        /// Which boundary, modulo how many there are.
+        pick: u64,
+    },
     /// All of them.
     All,
     /// The length, but zeros for the bytes.
@@ -895,11 +971,14 @@ pub trait Chooser {
 /// other seed picks at random, the same way for the same seed and cut.
 #[derive(Debug, Clone)]
 pub struct Seeded {
+    /// The seed: 0 keeps nothing, 1 everything, any other picks at random.
     seed: u64,
+    /// The random picks, from the seed and the cut.
     rng: SplitMix64,
 }
 
 impl Seeded {
+    /// The chooser of `seed` for a power loss after `cut` steps.
     pub fn new(seed: u64, cut: usize) -> Seeded {
         Seeded {
             seed,
@@ -941,7 +1020,10 @@ impl Chooser for Seeded {
 
 /// A [`Chooser`] that keeps every directory change, and of the files' data what `keep` says for
 /// each file (relative to the base), everything when it says `None`.
-pub struct KeepAllBut<F: FnMut(&Path) -> Option<Keep>>(pub F);
+pub struct KeepAllBut<F: FnMut(&Path) -> Option<Keep>>(
+    /// What to keep of each file's data: `None` for all of it.
+    pub F,
+);
 
 impl<F: FnMut(&Path) -> Option<Keep>> Chooser for KeepAllBut<F> {
     fn entries(&mut self, _dir: &Path, uncovered: usize) -> usize {
@@ -958,6 +1040,7 @@ impl<F: FnMut(&Path) -> Option<Keep>> Chooser for KeepAllBut<F> {
 struct SplitMix64(u64);
 
 impl SplitMix64 {
+    /// The next number.
     fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
@@ -977,6 +1060,7 @@ impl SplitMix64 {
 pub struct Image {
     /// Parents before children.
     dirs: Vec<PathBuf>,
+    /// Each file and what it holds.
     files: Vec<(PathBuf, Vec<u8>)>,
     /// What the chooser took back, one line each.
     choices: Vec<String>,
@@ -1032,10 +1116,12 @@ impl Image {
     }
 }
 
+/// `n`, which fits.
 fn to_u64(n: usize) -> u64 {
     u64::try_from(n).expect("usize fits in u64")
 }
 
+/// `n`, a length in memory, which fits.
 fn to_usize(n: u64) -> usize {
     usize::try_from(n).expect("a length in memory fits in usize")
 }

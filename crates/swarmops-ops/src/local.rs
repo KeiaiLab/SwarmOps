@@ -873,105 +873,17 @@ fn count(n: usize) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use std::io;
-    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use swarmops_api::{ChangeInput, ContentInput, RefSetReq};
-    use swarmops_store::{FsOps, LinkOutcome, RealFs};
+    use swarmops_testkit::fs::FailingFs;
 
     use super::*;
 
     /// The real filesystem, except that calls of `method` on a path ending in `suffix` fail
     /// with an injected error.
-    struct FailingFs {
-        method: &'static str,
-        suffix: &'static str,
-    }
-
-    impl FailingFs {
-        fn check(&self, method: &str, p: &Path) -> io::Result<()> {
-            if method == self.method && p.ends_with(self.suffix) {
-                Err(io::Error::other(format!(
-                    "injected failure: {method} {}",
-                    p.display()
-                )))
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    impl FsOps for FailingFs {
-        fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-            self.check("create_dir_all", p)?;
-            RealFs.create_dir_all(p)
-        }
-
-        fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-            self.check("write_durable_temp", dir)?;
-            RealFs.write_durable_temp(dir, bytes)
-        }
-
-        fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-            self.check("link_noclobber", to)?;
-            RealFs.link_noclobber(from, to)
-        }
-
-        fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-            self.check("fsync_dir", p)?;
-            RealFs.fsync_dir(p)
-        }
-
-        fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-            self.check("read", p)?;
-            RealFs.read(p)
-        }
-
-        fn exists(&self, p: &Path) -> io::Result<bool> {
-            self.check("exists", p)?;
-            RealFs.exists(p)
-        }
-
-        fn remove(&self, p: &Path) -> io::Result<()> {
-            self.check("remove", p)?;
-            RealFs.remove(p)
-        }
-
-        fn append_durable(&self, p: &Path, bytes: &[u8]) -> io::Result<u64> {
-            self.check("append_durable", p)?;
-            RealFs.append_durable(p, bytes)
-        }
-
-        fn file_len(&self, p: &Path) -> io::Result<u64> {
-            self.check("file_len", p)?;
-            RealFs.file_len(p)
-        }
-
-        fn truncate(&self, p: &Path, len: u64) -> io::Result<()> {
-            self.check("truncate", p)?;
-            RealFs.truncate(p, len)
-        }
-
-        fn atomic_replace(&self, p: &Path, bytes: &[u8]) -> io::Result<()> {
-            self.check("atomic_replace", p)?;
-            RealFs.atomic_replace(p, bytes)
-        }
-
-        fn sync_data(&self, p: &Path) -> io::Result<()> {
-            self.check("sync_data", p)?;
-            RealFs.sync_data(p)
-        }
-
-        fn append(&self, p: &Path, bytes: &[u8]) -> io::Result<u64> {
-            self.check("append", p)?;
-            RealFs.append(p, bytes)
-        }
-
-        fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-            self.check("rename_durable", to)?;
-            RealFs.rename_durable(from, to)
-        }
+    fn failing(method: &'static str, suffix: &'static str) -> FailingFs {
+        FailingFs::new(move |called, path| called == method && path.ends_with(suffix))
     }
 
     /// `LocalOps` over the store at `root`, its every filesystem call going through `fs`.
@@ -999,13 +911,7 @@ mod tests {
 
         // Materializing the commit's frame into the index fails once the frame is durable: the
         // commit succeeded, and says what went wrong after.
-        let ops = ops_on(
-            &root,
-            FailingFs {
-                method: "append",
-                suffix: "idx/ids.col",
-            },
-        );
+        let ops = ops_on(&root, failing("append", "idx/ids.col"));
         let put = ChangeInput {
             path: "f".to_owned(),
             op: ChangeOp::Put,
@@ -1024,13 +930,7 @@ mod tests {
         drop(ops);
 
         // Writing the ref file fails once the move's frame is durable: likewise.
-        let ops = ops_on(
-            &root,
-            FailingFs {
-                method: "atomic_replace",
-                suffix: "refs/main",
-            },
-        );
+        let ops = ops_on(&root, failing("atomic_replace", "refs/main"));
         let req = RefSetReq {
             name: "main".to_owned(),
             new: committed.changeset.as_str().into(),
@@ -1058,13 +958,7 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
         drop(LocalOps::init(&root, "acme").unwrap());
         let who = Identity::parse("agent/worker-17").unwrap();
-        let ops = ops_on(
-            &root,
-            FailingFs {
-                method: "append_durable",
-                suffix: "journal.log",
-            },
-        );
+        let ops = ops_on(&root, failing("append_durable", "journal.log"));
         let put = ChangeInput {
             path: "f".to_owned(),
             op: ChangeOp::Put,

@@ -9,8 +9,6 @@
 //! 32 per parent, a ref move 13 bytes plus its name, its actor and 32 per id present, a
 //! `Compacted` record 9 bytes.
 
-mod support;
-
 use std::ffi::OsString;
 use std::fmt::Debug;
 use std::fs;
@@ -29,11 +27,10 @@ use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
     CRASH_AT_ENV, CrashAtFs, Frame, FsOps, Journal, Layout, MetaLock, RealFs, Record, StoreError,
 };
-
-use crate::support::child::{SIGABRT, run, this_test};
-use crate::support::faults::{FsyncModelFs, checked};
-use crate::support::fs::{Hook, RecordingFs, When};
-use crate::support::{append_bytes, file_len, new_root, real_fs, set_len};
+use swarmops_testkit::child::{SIGABRT, run, this_test};
+use swarmops_testkit::faults::{FsyncModelFs, checked};
+use swarmops_testkit::fs::{Hook, RecordingFs, When};
+use swarmops_testkit::store::{append_bytes, file_len, new_root, real_fs, set_len};
 
 /// Set only in the children that `crash_at_any_journal_write_recovers_to_whole_frames`
 /// spawns: the store root.

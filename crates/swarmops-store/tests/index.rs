@@ -5,8 +5,6 @@
 //! Every test owns a fresh store root (`tempfile::tempdir()`), so tests are independent and
 //! may run in any order or in parallel.
 
-mod support;
-
 use std::ffi::OsString;
 use std::fmt::Debug;
 use std::fs;
@@ -24,14 +22,13 @@ use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
     CRASH_AT_ENV, ChangesetMeta, CrashAtFs, FsOps, Index, Layout, RealFs, StoreError,
 };
+use swarmops_testkit::child::{SIGABRT, run, this_test};
+use swarmops_testkit::faults::checked;
+use swarmops_testkit::fs::{FastFs, RecordingFs};
+use swarmops_testkit::measure::{mix, percentile};
+use swarmops_testkit::store::new_root as bare_root;
+use swarmops_testkit::store::{append_bytes, file_len, real_fs, set_len};
 use tempfile::TempDir;
-
-use crate::support::child::{SIGABRT, run, this_test};
-use crate::support::common::{mix, percentile};
-use crate::support::faults::checked;
-use crate::support::fs::{FastFs, RecordingFs};
-use crate::support::new_root as bare_root;
-use crate::support::{append_bytes, file_len, real_fs, set_len};
 
 /// Set only in the children that `crash_at_any_index_write_recovers_to_whole_records`
 /// spawns: the store root.

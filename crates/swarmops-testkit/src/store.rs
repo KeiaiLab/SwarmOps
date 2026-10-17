@@ -1,19 +1,4 @@
-//! What the store's integration tests share: fresh store roots and file helpers here, the
-//! [`FsOps`](swarmops_store::FsOps) doubles in [`fs`], the fault doubles (the Linux
-//! fsync-failure model, the order checker) in [`faults`], the child-process runner in
-//! [`child`], and what the measurement tests share with the benches in [`common`]. A module
-//! directory, so that Cargo does not take it for a test target of its own. The repository's
-//! tests include [`child`] and [`fs`] by their paths, and the CLI's tests [`fs`]. `power.rs`,
-//! the power-loss crash images, is not declared here: only the CLI's `power_loss.rs` uses it,
-//! and includes it by its path.
-
-#![allow(dead_code)] // Each test binary uses the part it needs.
-
-pub mod child;
-#[path = "../../benches/common/mod.rs"]
-pub mod common;
-pub mod faults;
-pub mod fs;
+//! Fresh store roots and the file helpers the store's tests use on them.
 
 use std::fs::{self as stdfs, OpenOptions};
 use std::io::Write;
@@ -42,15 +27,18 @@ pub fn real_fs() -> Arc<dyn FsOps> {
     Arc::new(RealFs)
 }
 
+/// The length of the file at `path`, which must exist.
 pub fn file_len(path: impl AsRef<Path>) -> u64 {
     stdfs::metadata(path).unwrap().len()
 }
 
+/// Appends `bytes` to the existing file at `path`, syncing nothing.
 pub fn append_bytes(path: impl AsRef<Path>, bytes: &[u8]) {
     let mut file = OpenOptions::new().append(true).open(path).unwrap();
     file.write_all(bytes).unwrap();
 }
 
+/// Cuts (or grows, with zeros) the existing file at `path` to `len` bytes, syncing nothing.
 pub fn set_len(path: impl AsRef<Path>, len: u64) {
     let file = OpenOptions::new().write(true).open(path).unwrap();
     file.set_len(len).unwrap();

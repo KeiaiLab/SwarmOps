@@ -3,9 +3,12 @@
 //! spawned (or let go) unless a test says otherwise, and one still running then is killed,
 //! reaped, and fails the test with what it printed. A child is reaped however the test ends:
 //! its handle kills and waits for it when it is dropped, a panic's unwinding included.
+//!
+//! [`Child`] is the one runner of the tests' children: the runs of the binary
+//! ([`crate::cli`]) wait for theirs through it too.
 
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{self, Command, Output, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -43,19 +46,27 @@ type Readers = (JoinHandle<Vec<u8>>, JoinHandle<Vec<u8>>);
 /// A child whose stdout and stderr threads of their own read. Dropped, it is killed if it still
 /// runs, and reaped either way.
 pub struct Child {
-    child: std::process::Child,
+    /// The process.
+    child: process::Child,
+    /// Its stdout's and stderr's readers, until it is waited for.
     output: Option<Readers>,
 }
 
 impl Child {
     /// Spawns `command`, reading nothing from stdin, its stdout and stderr piped.
     pub fn spawn(command: &mut Command) -> Child {
-        let mut child = command
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn a child");
+        Child::adopt(child)
+    }
+
+    /// `child`, spawned with its stdout and stderr piped: from now on threads of their own read
+    /// them, and it is killed and reaped when dropped.
+    pub fn adopt(mut child: process::Child) -> Child {
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
         Child {
@@ -64,9 +75,15 @@ impl Child {
         }
     }
 
-    /// Waits for the child to end, until `deadline`: one still running then is killed, reaped,
-    /// and fails the test with what it printed.
-    pub fn wait(mut self, deadline: Instant) -> Output {
+    /// The child's process id.
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Waits for the child to end, until `deadline`: one still running then is killed and
+    /// reaped. What it printed and how it ended, and whether it was killed. A child is waited
+    /// for once.
+    pub fn finish(&mut self, deadline: Instant) -> (Output, bool) {
         let mut killed = false;
         let status = loop {
             if let Some(status) = self.child.try_wait().expect("look whether a child ended") {
@@ -88,6 +105,13 @@ impl Child {
             stdout: stdout.join().expect("read a child's stdout"),
             stderr: stderr.join().expect("read a child's stderr"),
         };
+        (output, killed)
+    }
+
+    /// Waits for the child to end, until `deadline`: one still running then is killed, reaped,
+    /// and fails the test with what it printed.
+    pub fn wait(mut self, deadline: Instant) -> Output {
+        let (output, killed) = self.finish(deadline);
         assert!(
             !killed,
             "a child past its deadline, so killed: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",

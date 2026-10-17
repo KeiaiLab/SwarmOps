@@ -11,16 +11,17 @@
 //!   and the sweeps reach those calls too. [`dry_commit`] asserts that it does: a change to the
 //!   checkpoint's batching or to the template fails both sweeps at their dry runs, rather than
 //!   taking those calls out of them unseen.
+//!
+//! Each of them runs the [`Program`] its store's commands run.
 
 use std::fs;
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::thread;
 
-use swarmops_ops::NOW_ENV;
 use swarmops_store::FS_CALLS_ENV;
 
-use super::{Run, Store, agent, run};
+use super::{Program, Run, Store, agent, run};
 
 /// How many runs of a sweep go at once, each with a store of its own.
 pub const AT_ONCE: usize = 8;
@@ -75,16 +76,16 @@ pub fn reported_calls(file: &Path) -> u64 {
 }
 
 /// The file a run on `store` writes its call count to.
-pub fn calls_file(store: &Store) -> PathBuf {
+pub fn calls_file<P: Program>(store: &Store<P>) -> PathBuf {
     store.tmp().join("fs-calls")
 }
 
 /// A store for the commit sweeps: main at a first changeset, then changesets on it, until
 /// [`TEMPLATE_FRAMES`] frames lie past the checkpoint (which has passed none). Every command
-/// on it, and on its copies, signs at [`NOW`], so the store and every commit on it are the same
-/// in every run.
-pub fn commit_template() -> Store {
-    let store = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
+/// on it, and on its copies, signs at [`NOW`] ([`Program::NOW_ENV`]), so the store and every
+/// commit on it are the same in every run.
+pub fn commit_template<P: Program>() -> Store<P> {
+    let store = Store::<P>::init().with_env(&[(P::NOW_ENV, &NOW.to_string())]);
     let first = store.commit(&agent(0), "README.md", "# a sweep's template\n", None);
     let create = store.run_as(&agent(0), &["ref", "set", "main", &first, "--create"], &[]);
     create.ok();
@@ -102,7 +103,7 @@ pub fn commit_template() -> Store {
 
 /// Runs the commit the commit sweeps crash or fail on `store`, as `agent(1)`, with `env` set:
 /// [`SWEPT_PUTS`], on main.
-pub fn swept_commit(store: &Store, env: &[(&str, &str)]) -> Run {
+pub fn swept_commit<P: Program>(store: &Store<P>, env: &[(&str, &str)]) -> Run {
     let changes = store.changes_of("swept", &SWEPT_PUTS);
     store.run_as(
         &agent(1),
@@ -123,7 +124,7 @@ pub struct DryRun {
 /// Runs [`swept_commit`] on a copy of `template` with nothing crashing or failing it, counting
 /// its calls. It must make dozens of them, and move the checkpoint to the journal's end, so that
 /// a sweep of its calls reaches the index sync and the checkpoint's move.
-pub fn dry_commit(template: &Store) -> DryRun {
+pub fn dry_commit<P: Program>(template: &Store<P>) -> DryRun {
     let store = Store::copy_of(template);
     let file = calls_file(&store);
     let result = swept_commit(&store, &[(FS_CALLS_ENV, file.to_str().unwrap())]).ok();
@@ -142,10 +143,10 @@ pub fn dry_commit(template: &Store) -> DryRun {
 
 /// Runs `init` on a fresh path with nothing crashing or failing it; how many filesystem calls it
 /// made: more than the 256 fan-out directories it makes alone.
-pub fn dry_init() -> u64 {
-    let store = Store::empty();
+pub fn dry_init<P: Program>() -> u64 {
+    let store = Store::<P>::empty();
     let file = calls_file(&store);
-    run(
+    run::<P, _>(
         &["init", store.path()],
         &[(FS_CALLS_ENV, file.to_str().unwrap())],
     )
@@ -163,14 +164,14 @@ pub fn dry_init() -> u64 {
 /// without one, `info` says `E_NOT_A_REPO`, and a second `init` makes the store. Either way, the
 /// store is then a fresh one, and verifies clean. `what` names the run in messages.
 #[track_caller]
-pub fn init_again(store: &Store, what: &str) -> bool {
+pub fn init_again<P: Program>(store: &Store<P>, what: &str) -> bool {
     let info = store.read(&["info"]);
     let whole = info.exit() == 0;
     if whole {
-        run(&["init", store.path()], &[]).err("E_EXISTS");
+        run::<P, _>(&["init", store.path()], &[]).err("E_EXISTS");
     } else {
         info.err("E_NOT_A_REPO");
-        run(&["init", store.path()], &[]).ok();
+        run::<P, _>(&["init", store.path()], &[]).ok();
     }
     let info = store.info();
     let fresh = (info["name"].as_str(), info["changesets"].as_u64());

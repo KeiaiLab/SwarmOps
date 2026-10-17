@@ -38,9 +38,6 @@
 //! test as soon as a child fails, and waits for the children only until [`PARENT_DEADLINE`];
 //! and whatever ends the test early, [`Children`] kills and reaps every child still running.
 
-#[path = "../benches/common/mod.rs"]
-mod common;
-
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -54,8 +51,7 @@ use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::{
     ChangesetMeta, Frame, InsertOutcome, Journal, Layout, MetaStore, RealFs, Record, StoreError,
 };
-
-use crate::common::{base_dir, percentile};
+use swarmops_testkit::measure::{base_dir, percentile};
 
 /// How many writer processes the test runs.
 const CHILDREN: u64 = 32;

@@ -7,8 +7,6 @@
 //! `/proc/locks`, which lists the holder of each `flock` lock and every waiter blocked on it;
 //! it and its helpers are Linux-only.
 
-mod support;
-
 use std::fs;
 #[cfg(target_os = "linux")]
 use std::os::unix::fs::MetadataExt;
@@ -19,10 +17,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use swarmops_store::{Layout, MetaLock, StoreError};
+use swarmops_testkit::measure::percentile;
+use swarmops_testkit::store::new_root;
 use tempfile::TempDir;
-
-use crate::support::common::percentile;
-use crate::support::new_root;
 
 /// A fresh store root with its `meta/` directory, and its layout; the directory lives as long
 /// as the `TempDir`.
