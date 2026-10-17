@@ -893,7 +893,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "retryable": {
-              "description": "Whether the same operation can succeed when it is retried unchanged.",
+              "description": "Whether the operation can succeed when it is run again: as it is after a transient\nfailure, or, after a lost compare-and-swap, with what the error names re-read (the\nmessage says how; the `hint` reads it).",
               "type": "boolean"
             }
           },
@@ -1014,7 +1014,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_CAS_MISMATCH",
-          "description": "The ref no longer holds the expected target; `details.actual` holds what it does.",
+          "description": "The ref no longer holds the expected target (or, with `create`, exists at another one);\n`details.actual` holds what it does, `null` when the ref does not exist.",
           "type": "string"
         },
         {
@@ -1459,7 +1459,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "retryable": {
-          "description": "Whether the same operation can succeed when it is retried unchanged.",
+          "description": "Whether the operation can succeed when it is run again: as it is after a transient\nfailure, or, after a lost compare-and-swap, with what the error names re-read (the\nmessage says how; the `hint` reads it).",
           "type": "boolean"
         }
       },
@@ -1665,7 +1665,7 @@ expression: s.redact(&all)
       "properties": {
         "create": {
           "default": false,
-          "description": "To create the ref; if it exists already, the move fails with `E_CAS_MISMATCH`. Give this\nor `expected_old`, not both.",
+          "description": "To create the ref. If it exists at another target, the move fails with `E_CAS_MISMATCH`;\nif it already holds `new`, nothing is written and the response is a replay\n(`already_applied`). Give this or `expected_old`, not both.",
           "type": "boolean"
         },
         "expected_old": {
@@ -1700,7 +1700,7 @@ expression: s.redact(&all)
       "description": "`ref set` and `ref delete`: the move that was made.",
       "properties": {
         "already_applied": {
-          "description": "The ref was already in the requested state, so nothing changed and a replay is safe.",
+          "description": "The ref was already in the requested state, so nothing changed and a replay is safe;\n`old` and `new` are then the request's `expected_old` and `new`, resolved to full ids.",
           "type": "boolean"
         },
         "name": {
@@ -1715,7 +1715,7 @@ expression: s.redact(&all)
           ]
         },
         "old": {
-          "description": "Its target before; omitted when the ref was created.",
+          "description": "What the ref held before a move that was applied. On a replay (`already_applied`) it is\n`expected_old` as resolved, which the ref need not have held; omitted when `create` was\ngiven.",
           "type": [
             "string",
             "null"

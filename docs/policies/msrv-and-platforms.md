@@ -12,8 +12,8 @@ cargo-fuzz needs a nightly toolchain, so `just fuzz` runs `cargo +nightly fuzz`,
 `rust-version = "1.99"` in the workspace `Cargo.toml` makes the minimum supported Rust version
 the pinned one, for now. Three reasons:
 
-- SwarmOps ships a binary and publishes no crate, so no one else compiles it as a dependency
-  with an older compiler.
+- SwarmOps ships two binaries, `swarmops` and `so` (the same program), and publishes no crate,
+  so no one else compiles it as a dependency with an older compiler.
 - One toolchain is the one that is tested. An MSRV below the pin would need a CI job of its own
   to mean anything, and CI runs on small runners with a minutes budget.
 - The code uses recent standard-library features: the metadata lock is `std::fs::File::lock`

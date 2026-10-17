@@ -26,7 +26,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use super::to_u64;
 use crate::error::StoreError;
-use crate::fs_ops::FsOps;
+use crate::fs_ops::{FsOps, open_regular};
 
 /// How many entries a compaction reads, and writes, with one call.
 const BLOCK: usize = 4096;
@@ -505,7 +505,7 @@ impl<const K: usize> Writer<'_, K> {
 /// Opens `path` read-only with its length in entries of `width` bytes;
 /// [`StoreError::IndexCorrupt`] if it is missing or ends in a partial entry.
 fn open_entries(path: &Utf8Path, width: usize) -> Result<(File, u64), StoreError> {
-    let file = File::open(path).map_err(index_file_error)?;
+    let file = open_regular(path).map_err(index_file_error)?;
     let len = file.metadata()?.len();
     let width = to_u64(width);
     if !len.is_multiple_of(width) {

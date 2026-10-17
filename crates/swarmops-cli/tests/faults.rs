@@ -25,13 +25,19 @@
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
 
+use std::io;
+use std::os::unix::process::ExitStatusExt;
+use std::thread;
+use std::time::{Duration, Instant};
+
 use serde_json::Value;
 use swarmops_store::FAIL_AT_ENV;
+use swarmops_testkit::child::SIGABRT;
 
 use crate::support::sweep::{
-    commit_template, dry_commit, dry_init, init_again, sweep, swept_commit,
+    NOW, SWEPT_PUTS, commit_template, dry_commit, dry_init, init_again, sweep, swept_commit,
 };
-use crate::support::{Run, Store, agent, run};
+use crate::support::{self, Run, Store, agent, run};
 
 /// The failure modes and errnos the commit sweep runs each call with.
 const FAILURES: [&str; 4] = [
@@ -208,11 +214,16 @@ fn fail_at_every_call_reports_honestly() {
     );
 
     let calls = dry_init();
+    let mut aborted = false;
     for failure in INIT_FAILURES {
-        sweep(1..=calls, |k| {
-            init_failing_at(k, failure);
-        });
+        let runs = sweep(1..=calls, |k| init_failing_at(k, failure));
+        aborted |= failure.starts_with("persistent:")
+            && runs.iter().any(|run| matches!(run, Ended::Aborted));
     }
+    assert!(
+        aborted,
+        "no init run ended in the documented abort: the root sync failed and FORMAT could not be taken back"
+    );
 }
 
 /// The commit sweeps' dry run, in the default gate: the swept commit, on a copy of the
@@ -226,12 +237,80 @@ fn the_commit_sweeps_reach_the_index_sync_and_the_checkpoint() {
     dry_commit(&commit_template());
 }
 
-/// `init` failing once with `EIO` at each of its last calls: the sync of the store root that
-/// makes `FORMAT` durable (its work done, then failing, as a failed writeback does), and the reads
-/// of the new store it reports from. An `init` whose root sync fails takes `FORMAT` back (no
-/// store, and a second `init` makes it); one whose reads fail says it made the store
-/// (`details.created`). In the default gate; [`fail_at_every_call_reports_honestly`] sweeps
-/// every call.
+/// The documented abort of a commit (a failed journal append whose cut back off the journal
+/// fails too, [`ABORTS`]) ends the process by `std::process::abort` even when its reason cannot
+/// be written: here the run's stderr is a pipe nobody reads (its read end dropped before the
+/// run, so every write to it fails with `EPIPE`), and the run must still abort, not panic at
+/// the write and report `E_INTERNAL` (which `swarmops mcp`, catching a panic per call, would
+/// serve on after, against storage spec §2 rule 3). The aborting call is found by running the
+/// commit with a persistent `EIO` from each call in turn, cheaply, without the sweep's oracle;
+/// the first run that aborts is then run again without a reader.
+#[test]
+fn an_abort_whose_reason_cannot_be_written_still_aborts() {
+    let template = commit_template();
+    let dry = dry_commit(&template);
+    let fail_at = |k: u64| format!("{k}:persistent:eio");
+    let aborting = sweep(1..=dry.calls, |k| {
+        let store = Store::copy_of(&template);
+        let fail_at = fail_at(k);
+        swept_commit(&store, &[(FAIL_AT_ENV, fail_at.as_str())])
+            .aborted()
+            .then_some(k)
+    });
+    let k = aborting
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("a persistent EIO at the journal append aborts, as the sweep documents");
+
+    let store = Store::copy_of(&template);
+    let changes = store.changes_of("swept", &SWEPT_PUTS);
+    let args = store.args(&agent(1), &["commit", "-m", "swept", "--changes", &changes]);
+    let now = NOW.to_string();
+    let fail_at = fail_at(k);
+    let env = [
+        (swarmops_ops::NOW_ENV, now.as_str()),
+        (FAIL_AT_ENV, fail_at.as_str()),
+    ];
+    let mut command = support::swarmops(&args, &env);
+    let (reader, writer) = io::pipe().expect("a pipe");
+    drop(reader);
+    command.stderr(writer);
+    let mut child = command.spawn().expect("run swarmops");
+    let deadline = Instant::now() + support::RUN_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("look whether the run ended") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("call {k} failing persistently: the run was still going at the deadline");
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    let output = child.wait_with_output().expect("the run's output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        status.signal(),
+        Some(SIGABRT),
+        "call {k} failing persistently, stderr unwritable: {status}; stdout: {stdout}"
+    );
+    assert_eq!(stdout, "", "an aborted run prints no envelope");
+    store.assert_clean(&format!("call {k} failing persistently: after the abort"));
+}
+
+/// `init` failing at each of its last eight calls: the write of `FORMAT`'s temp file, its link,
+/// the sync of the store root that makes the link durable (its work done, then failing, as a
+/// failed writeback does), and the five reads of the new store it reports from. Failing once
+/// with `EIO`, each of them fails the `init`: the first three leave no store (an `init` whose
+/// root sync fails takes `FORMAT` back, and a second `init` makes the store), and the five reads
+/// fail after the store is made (`details.created`). The window's shape is pinned exactly: an
+/// `init` that ignored the failed root sync would report success there, and a change to
+/// `repo_info`'s FsOps reads moves the boundary. Failing persistently from the root's sync on,
+/// the taking back fails too, and the process aborts, as documented ([`ABORTS`]; `init` appends
+/// to no journal, so it has no other abort). In the default gate;
+/// [`fail_at_every_call_reports_honestly`] sweeps every call.
 #[test]
 fn an_init_failing_at_its_last_calls_reports_honestly() {
     let calls = dry_init();
@@ -241,12 +320,26 @@ fn an_init_failing_at_its_last_calls_reports_honestly() {
             Ended::Succeeded(_) | Ended::Aborted => None,
         }
     });
-    assert!(
-        created.contains(&Some(true)),
-        "a read after the store was made failed"
+    assert_eq!(
+        created,
+        [
+            Some(false),
+            Some(false),
+            Some(false),
+            Some(true),
+            Some(true),
+            Some(true),
+            Some(true),
+            Some(true)
+        ],
+        "init's last calls: the temp write, the link and the root's sync (whose take-back \
+         leaves no store, and the error says nothing was made), then the five reads of the \
+         report, each failing after the store is made (created: true); none succeeds, none \
+         aborts under a transient failure"
     );
+    let root_sync = calls - 5;
     assert!(
-        created.contains(&Some(false)),
-        "the root's sync after FORMAT failed"
+        matches!(init_failing_at(root_sync, "persistent:eio"), Ended::Aborted),
+        "a persistent failure at the root's sync, whose take-back fails too, aborts as documented"
     );
 }

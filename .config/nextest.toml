@@ -31,11 +31,16 @@ path = "junit.xml"
 
 # The weekly slow suite's profile (scheduled.yml runs `just check-ci-slow` with
 # `NEXTEST_PROFILE=ci-slow`): the ci profile, with a test killed after 20 minutes instead. Its
-# longest tests (the two crash sweeps, `compaction_preserves_lookups_proptest` at 2,000 cases)
-# take 20-60 s on this host and under 2 minutes on two of its CPUs with the host overloaded;
-# 20 minutes leave room for a slower runner and for longer sweeps, and stay well inside the
-# job's 45-minute timeout, so the report is written. Its JUnit report is
-# target/nextest/ci-slow/junit.xml.
+# longest tests, `faults::fail_at_every_call_reports_honestly`,
+# `power_loss::power_loss_images_recover_a_prefix_with_every_acknowledged_commit_at_every_cut`
+# (both run 8 stores at once) and `compaction_preserves_lookups_proptest` at 2,000 cases, take
+# 85-115 s on this host at 32 test threads. The 2-vCPU runner ran the same 8-child sweep harness
+# 2.2× slower than this host (the regular suite's order-check sweep, 30 s against 14 s on the
+# first CI run), and two of this host's CPUs at load 240 ran the earlier sweeps 3.4× slower: 3-5
+# minutes a sweep there, so only a hang reaches 20. The tests sum to about 980 s here: 20-30
+# minutes on two runner threads, up to 35 with one killed hang, which the job's 45 minutes hold
+# with the build; a sweep past about 6 minutes in the junit-slow report means raising this and
+# timeout-minutes together. Its JUnit report is target/nextest/ci-slow/junit.xml.
 [profile.ci-slow]
 inherits = "ci"
 slow-timeout = { period = "60s", terminate-after = 20 }

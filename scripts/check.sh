@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 cargo fmt --all --check
 cargo fmt --manifest-path fuzz/Cargo.toml --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+# `test_hooks` exists only without the feature, so the all-features run above compiles it to
+# nothing: this step lints it, and the library crates it builds, without the feature.
+cargo clippy --locked -p swarmops-cli --test test_hooks -- -D warnings
 cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 # `--all-features` turns on the test hooks the crash tests drive; the release run of
 # `test_hooks` is built without them, as `cargo build --release` is, and checks it ignores them.
@@ -24,5 +27,7 @@ else
     exit 1
   }
 fi
+# Twice: the second run, with every feature on, also renders and link-checks the test-hooks code.
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
 cargo deny --locked check

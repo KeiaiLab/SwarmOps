@@ -24,7 +24,8 @@
 //! Create writes it in step 5 below, after `meta/` and before `FORMAT`, replacing it
 //! atomically (a temp file in the store root, synced, renamed over it, the root synced), so a
 //! store with `FORMAT` always has it; a create that resumes after a crash writes it again,
-//! with a new id. Open requires it alongside `FORMAT`: after checking `FORMAT`, it reads
+//! with a new id. Open requires it alongside `FORMAT`: after refusing a path that leads under
+//! `/mnt/` as create does ([`StoreError::UnsupportedFs`]) and checking `FORMAT`, it reads
 //! `REPO`, and refuses a store whose `REPO` is missing, not UTF-8, or does not start with an
 //! id line ([`StoreError::Format`]).
 //!
@@ -56,7 +57,7 @@
 //! picks up where the crashed one stopped. Two creates of one store at once are not supported.
 
 use std::hash::{BuildHasher, RandomState};
-use std::io;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -156,8 +157,10 @@ impl LocalRepo {
 
     /// Opens the store at `store`. Checks `FORMAT` first, then reads `REPO`:
     /// [`StoreError::Format`] if `FORMAT` is missing (no store there) or names another layout
-    /// version, if `REPO` is missing or malformed, or if `meta/` is missing. Honors
-    /// `SWARMOPS_TEST_CRASH_AT` and `SWARMOPS_TEST_FS_CALLS` as [`LocalRepo::create`] does.
+    /// version, if `REPO` is missing or malformed, or if `meta/` is missing; and, before any of
+    /// that, [`StoreError::UnsupportedFs`] if the path leads under `/mnt/`, as `create` refuses
+    /// it. Honors `SWARMOPS_TEST_CRASH_AT` and `SWARMOPS_TEST_FS_CALLS` as [`LocalRepo::create`]
+    /// does.
     pub fn open(store: &Utf8Path) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::open_on(store, fs, one_thread)
@@ -231,7 +234,26 @@ impl LocalRepo {
         one_thread: bool,
     ) -> Result<LocalRepo, RepoError> {
         let root = camino::absolute_utf8(store)?;
+        // Where the path leads (symlinks followed whether or not their target exists, `..` as
+        // the kernel takes it), as `create` resolves it: a store that leads under /mnt/ is
+        // refused on open as on create, whether it was moved, copied or linked there.
+        let (target, _) = resolve(&root)?;
+        if !is_native_linux_fs(&target) {
+            return Err(StoreError::UnsupportedFs(target).into());
+        }
         let layout = Layout::new(root.clone());
+        // A FORMAT longer than the layout's names no layout this build reads, however long it
+        // is: measured before it is read (through `std::fs`, no `FsOps` call), so that a
+        // crafted file of huge length is never read into memory. A missing one reaches the read.
+        if let Ok(meta) = std::fs::metadata(layout.format_file().as_std_path())
+            && meta.len() > u64::try_from(FORMAT.len()).expect("usize fits in u64")
+        {
+            return Err(StoreError::Format(format!(
+                "{root}/FORMAT is {} bytes long, not a store layout this build reads",
+                meta.len()
+            ))
+            .into());
+        }
         match fs.read(layout.format_file().as_std_path())? {
             Some(format) if format == FORMAT => {}
             Some(_) => {
@@ -377,7 +399,9 @@ fn take_format_back(fs: &dyn FsOps, root: &Utf8Path, e: &io::Error) {
         .remove(format.as_std_path())
         .and_then(|()| fs.fsync_dir(root.as_std_path()));
     if let Err(undo) = undone {
-        eprintln!(
+        // A write that fails (a closed pipe, a full log) must not panic: the abort is the point.
+        let _ = writeln!(
+            io::stderr(),
             "swarmops: fatal: syncing {root} after linking {format} failed ({e}), and \
              {format} could not be taken back ({undo}): aborting, as a crash there would"
         );

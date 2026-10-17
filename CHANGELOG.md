@@ -64,12 +64,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   in 21 ms.
 - The MIT License ([LICENSE](LICENSE)), for every crate.
 
-#### M1.5: hardening and opening (2026-10-16)
+#### M1.5: hardening and opening (2026-10-17)
 
 - CI on GitHub Actions: `ci.yml` runs `just check` (the same gate as locally, `--locked`
   everywhere) and zizmor behind one `tests-pass` check; `scheduled.yml` runs the slow suite and
-  a fuzz smoke weekly; Dependabot keeps both lockfiles valid; the nextest `ci` and `ci-slow`
-  profiles kill hung tests.
+  a fuzz smoke weekly; Dependabot keeps the root and fuzz lockfiles valid; the nextest `ci`
+  and `ci-slow` profiles kill hung tests.
 - The project policies and the documentation set: [CONTRIBUTING.md](CONTRIBUTING.md),
   [SECURITY.md](SECURITY.md), [RELEASE.md](RELEASE.md), `AGENTS.md`, `docs/architecture.md`,
   `docs/known-limitations.md`, `docs/policies/`, the issue and pull request templates, and this
@@ -80,16 +80,20 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   and 2025-11-25 or 2025-06-18 after `initialize`. Each call resolves its revisions on its own
   (`meta.resolved` is no longer shared by a handle's requests), a mutation without an identity
   is refused, and `expected_old` of `ref_set` and `ref_delete` must be a full changeset id
-  through MCP.
+  through MCP, and a `{"file": path}` content must be an absolute path that is not the server's
+  own stdin or stdout.
 - `server/discover` and the `-32022` error list every revision served (2026-07-28, 2025-11-25,
   2025-06-18), so a client that cannot speak 2026-07-28 can fall back to `initialize`.
 - `ref set` to the target a ref already holds is a replay: `already_applied: true` and nothing
-  written, in the CLI and through MCP.
+  written, in the CLI and through MCP, `--create` included; `old` and `new` are then the
+  request's.
 - The `--expect` help of `ref set` and `ref delete` states the README's rule: give the full
-  changeset id you read, since a ref name, a relative revision such as `main~1` or an id prefix
-  is read from the store when the command runs, and then the compare-and-swap protects nothing.
+  changeset id you read, since a ref name or a relative revision such as `main~1` is read from
+  the store when the command runs, and then the compare-and-swap protects nothing, and an id
+  prefix stops resolving once another changeset shares it.
 - `so`, the short form of `swarmops`: the same program, built and installed with it; its usage
-  lines and help name the binary as invoked, and everything else still says `swarmops`.
+  lines, help and clap's message for a missing subcommand (`'so ref' requires a subcommand`)
+  name the binary as invoked, and everything else still says `swarmops`.
 - I/O-error injection and write-ordering checks, behind `test-hooks`:
   `SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]` fails the k-th filesystem call
   with an injected error (`FailAtFs`), and `SWARMOPS_TEST_ORDER_CHECK=1` checks every write
@@ -113,11 +117,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   with a warning, as every later failure already was (it was `E_IO_TRANSIENT`). A journal append
   that fails before its frame is whole, which was `E_IO`, is now `E_IO_TRANSIENT` too, as is a
   write whose tail check can neither sync nor write afresh the frames `journal.off` does not
-  list yet. In `swarmops-store`, `StoreError::Undecided` and `CrashAtFs::from_env` are removed,
-  and `HookedFs::from_env` replaces the latter.
+  list yet. In `swarmops-store`, `StoreError::Undecided` and `CrashAtFs::from_env` are removed.
+  `StoreError::NotCommitted` (a journal append that failed and was cut back off the journal;
+  retryable) is what `E_IO_TRANSIENT` now reports, and `HookedFs::from_env` replaces
+  `CrashAtFs::from_env`.
 - The schema describes `E_IO_TRANSIENT` by the journal append that failed (other failures before
   the commit point stay `E_IO`): the store cut what the append wrote back off the journal, so
   nothing was committed, and running the same operation again is safe.
+- **Contract change (text only):** `retryable` is now defined as "can succeed when it is run
+  again: as it is after a transient failure, or, after a lost compare-and-swap, with what the
+  error names re-read"; it said "retried unchanged", which does not describe a lost
+  compare-and-swap. No flag, exit code or schema shape changes.
 - `init` takes `FORMAT` back (and syncs its removal) when the sync of the store's root after it
   fails, so that no store looks complete whose completion mark may not be durable; when it made
   the store but reading it back fails, the error says so with `details.created: true`.
@@ -126,6 +136,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync covered
   reverted), opened with the binary, must recover a prefix of the run's transactions that holds
   every committed one.
+- Test infrastructure: the support the tests share is one crate, `swarmops-testkit` (a
+  dev-dependency; no test includes another crate's file by its path any more); the store's
+  `CrashAtFs` compiles only with the `test-hooks` feature, like `FailAtFs` and `OrderCheckFs`,
+  so no build without it can name a fault double; and where a crate has several integration-test
+  files, they are the modules of one test binary, `tests/all.rs`, their tests named
+  `<file>::<test>` (the CLI's release proof, `test_hooks`, stays a binary of its own; the CLI's
+  snapshots are now `all__cli__*.snap` and `all__mcp__*.snap`, their contents unchanged).
 - Recovery after a power loss: an unlisted journal frame whose header's length reads 0 is a torn
   tail and is cut (it was `E_STORE_CORRUPT`); readers drop zeroed entries at the end of
   `journal.off`, as recovery did; past the checkpoint and the sorted views, the index counts only
@@ -143,6 +160,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - `Journal::frame_count` drops the zeroed entries at the end of `journal.off` that readers and
   recovery drop; a reader's frame count after such a power loss was one too high until the next
   writer ran (the frames it read were right).
+- A reader's snapshot compares the frames it reads again whole instead of counting them: a frame
+  that a failed sync or rewrite cut back (storage spec §2 rule 3 (a)/(c)) and the next writer
+  replaced at its seq no longer lays its records over the replacement's ref files (a ref at a
+  target that never committed, at a version that never existed).
+- `verify` reports a `journal.ckpt` that is not a frame boundary (every read and write fails on
+  one); before, it reported nothing while the index counted by length.
+- Store files that are not regular files (a FIFO, a device, a socket, or a symlink to one) are
+  refused with an error instead of opened; a FIFO at `meta/journal.log` used to hang every
+  command.
+- A store path that leads under `/mnt/` is refused on open too (`E_UNSUPPORTED_FS`), not only
+  by `init`: a store copied, moved or symlinked onto a Windows drive under WSL is not opened.
 - `bench/compare/` (`just bench-compare`, `--quick` for a smoke run): the native metadata
   store, through its public API, against SQLite, redb, fjall and sled on SwarmOps' own
   workloads, in a cargo workspace of its own that `just check` never builds; SwarmOps depends on

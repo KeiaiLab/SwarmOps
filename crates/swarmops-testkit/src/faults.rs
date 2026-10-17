@@ -20,8 +20,8 @@ use swarmops_store::{FsOps, LinkOutcome, RealFs};
 
 /// `fs` with the store's write-ordering rules checked on every call
 /// (`swarmops_store::OrderCheckFs`, which panics at a call that breaks one), in a build with
-/// this crate's `test-hooks` feature (which the store's turns on, as `--all-features` does in the
-/// gates); `fs` as it is in any other.
+/// this crate's `test-hooks` feature (which the store's, the repository's, the operations' and
+/// the CLI's turn on, as `--all-features` does in the gates); `fs` as it is in any other.
 #[cfg(feature = "test-hooks")]
 pub fn checked(fs: impl FsOps + 'static) -> Arc<dyn FsOps> {
     Arc::new(swarmops_store::OrderCheckFs::new(fs))

@@ -240,10 +240,12 @@ fn sweep_checked(template: &Store, what: &str, args: impl Fn(&Store) -> Vec<Stri
 }
 
 /// Every crash sweep runs under the order checker (`swarmops_store::OrderCheckFs`, rules R1 to
-/// R7): the test support sets `SWARMOPS_TEST_ORDER_CHECK=1` for every run of the binary, the
-/// store's and the repository's sweeps wrap their filesystem in it, so a write that breaks a rule
-/// panics in the run crashed at any call, in the command that recovers from the crash, or in a
-/// dry run. This sweep, in the default gate, crashes a root commit on a fresh store and a ref
+/// R7): the tests set `SWARMOPS_TEST_ORDER_CHECK=1` for every run of the binary, and the store's
+/// and the repository's sweeps wrap their crashing child's filesystem in it, so a write that
+/// breaks a rule panics in the run crashed at any call or in a dry run, and, for the sweeps
+/// through the binary and the metadata store's own, in the command that recovers from the crash
+/// (the journal's, the index's and the repository's sweeps recover on the real filesystem,
+/// unchecked). This sweep, in the default gate, crashes a root commit on a fresh store and a ref
 /// move on top of it at each of their calls; the slow sweeps (`kill9_during_*`) do the same for
 /// `init` and for a commit that syncs the index and moves the checkpoint.
 #[test]

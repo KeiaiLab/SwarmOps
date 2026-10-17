@@ -110,8 +110,8 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   `IndexMismatch` and `MissingParent`; an `Io` error of kind `InvalidData` (a malformed
 ///   metadata file); and the store's `Format` other than while opening. Once the store is open,
 ///   the hint is `swarmops verify` (with `--deep` for an object whose bytes fail their id).
-/// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`; the hint
-///   points at a native filesystem.
+/// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`, on `init`
+///   and on open alike; the hint points at a native filesystem.
 /// - `E_IO`: any other `Io` error.
 /// - `E_IO_TRANSIENT` (retryable) `{committed}`, always `false`: the store's `NotCommitted`, a
 ///   journal append that failed and that the store cut back off the journal, so the write
@@ -159,7 +159,7 @@ impl LocalOps {
     }
 
     /// Opens the store at `path`. `E_NOT_A_REPO` if there is none, or if what is there is not a
-    /// store this build reads.
+    /// store this build reads; `E_UNSUPPORTED_FS` if the path leads under `/mnt/`.
     pub fn open(path: &Utf8Path) -> Result<LocalOps, OpError> {
         let repo = LocalRepo::open(path).map_err(|e| repo_error(e, During::Open(path)))?;
         Ok(Self::with_repo(repo, path))
@@ -539,7 +539,11 @@ impl StoreOps for Recording<'_> {
             // A move to the target it expects moves nothing: the ref holds it (a replay) or does
             // not (a mismatch), and nothing is written either way. The store's compare-and-swap
             // would journal the replay as a RefMove frame (two fdatasyncs), though the ref and
-            // its version would stay as they are; reading the ref skips the frame.
+            // its version would stay as they are; reading the ref skips the frame. The read is a
+            // reader's snapshot, which can show a writer's whole frame before its fdatasync
+            // (storage spec §3, reads; known-limitations, "Readers may return state that is not
+            // durable yet"), so this replay vouches for no durability. The compare-and-swap
+            // below takes the lock, which waits out that writer first.
             let current = self.ops.repo.get_ref(&name).map_err(op)?;
             CasOutcome {
                 result: CasResult::Mismatch {

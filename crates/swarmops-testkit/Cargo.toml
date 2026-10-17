@@ -16,7 +16,8 @@ workspace = true
 # checker of `faults::checked`. Not a default: the crates that use the test kit take it as a
 # dev-dependency, and a default here would, by feature unification, build the hooks into every
 # binary their tests build, the `swarmops` of the release run of `test_hooks` among them. The
-# gates turn it on with `--all-features`, and the store's own `test-hooks` turns it on too.
+# gates turn it on with `--all-features`, and the `test-hooks` of every crate that uses it
+# (store, repo, ops, cli) turns it on too.
 test-hooks = ["swarmops-store/test-hooks"]
 
 # A dev-dependency of the store, the repository, the operations and the CLI. It depends on no

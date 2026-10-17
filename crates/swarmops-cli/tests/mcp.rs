@@ -177,14 +177,22 @@ fn mcp_tools_list_schema_snapshot() {
     let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
     let mut listed = server.result("tools/list", json!({"_meta": latest_meta()}));
     server.finish_clean();
-    let server_info = &mut listed["_meta"]["io.modelcontextprotocol/serverInfo"];
-    assert_eq!(
-        server_info["version"],
-        env!("CARGO_PKG_VERSION"),
-        "{server_info}"
-    );
-    server_info["version"] = json!("[version]");
+    pin_server_version(&mut listed);
     insta::assert_json_snapshot!(listed);
+}
+
+/// The other half of the gate: the whole `server/discover` result of the latest revision. It
+/// holds the server's `instructions`, which a client loads before any tool (Claude Code, with
+/// tool search on, loads only the tool names and these), and the revisions served. The server's
+/// version is pinned as in the `tools/list` snapshot.
+#[test]
+fn mcp_discover_snapshot() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    let mut discovered = server.result("server/discover", json!({"_meta": latest_meta()}));
+    server.finish_clean();
+    pin_server_version(&mut discovered);
+    insta::assert_json_snapshot!(discovered);
 }
 
 /// A commit through the server, of every kind of content, then every read: each tool result is
@@ -705,6 +713,47 @@ fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
     assert_eq!(deleted.ok()["old"], c1.as_str());
 }
 
+/// A `commit`'s client file is read by this server, so a relative path (which the server would
+/// read from a working directory the agent cannot see: here the crate's, where `src/lib.rs`
+/// exists) and a path that is this process's own stdin or stdout (the protocol's pipes, which
+/// a read would block on) are refused before anything is resolved or opened, with the change
+/// and the file named; the server serves on, and the store is untouched.
+#[test]
+fn a_client_file_must_be_absolute_and_not_the_servers_stdio() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    for (file, why) in [
+        ("src/lib.rs", "relative path"),
+        ("/dev/stdin", "stdin or stdout"),
+        ("/dev/stdout", "stdin or stdout"),
+    ] {
+        let refused = server.err(
+            "commit",
+            json!({
+                "message": "x",
+                "changes": [
+                    {"path": "README.md", "op": "put", "content": {"inline": "# acme\n"}},
+                    {"path": "lib.rs", "op": "put", "content": {"file": file}},
+                ],
+            }),
+            "E_INVALID_ARG",
+        );
+        assert_eq!(
+            refused["error"]["details"],
+            json!({"index": 1, "path": "lib.rs", "file": file}),
+            "{refused}"
+        );
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains(why), "{file}: {message}");
+        assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
+        assert_eq!(server.result("ping", json!({})), json!({}));
+        let info = server.ok("repo_info", json!({}));
+        assert_eq!(info["result"]["changesets"], 0, "{file}: {info}");
+    }
+    server.finish_clean();
+    store.assert_clean("after the refused commits");
+}
 /// A changeset committed through `server` on `parent`, putting a file named `name`; its id.
 fn commit_on(server: &mut Server, name: &str, parent: &str) -> String {
     let arguments = json!({
@@ -740,7 +789,7 @@ fn vague_expectations_are_refused(server: &mut Server, c2: &str, c3: &str) {
         ),
         (
             "ref_set",
-            json!({"name": "main", "new": "main~1", "expected_old": "main"}),
+            json!({"name": "main", "new": c3, "expected_old": "main~1"}),
         ),
         (
             "ref_set",
@@ -842,30 +891,26 @@ fn mcp_startup_failures_go_to_stderr() {
         (&["mcp"], &[("SWARMOPS_FORMAT", "yaml")]),
     ];
     for (args, env) in cases {
-        let output = support::swarmops(args, env)
-            .output()
-            .expect("run swarmops mcp");
+        let run = support::run(args, env);
         assert!(
-            output.stdout.is_empty(),
+            run.stdout.is_empty(),
             "{args:?} {env:?}: nothing on stdout, not {:?}",
-            String::from_utf8_lossy(&output.stdout)
+            run.stdout
         );
-        assert_eq!(output.status.code(), Some(2), "{args:?} {env:?}");
-        let stderr = String::from_utf8(output.stderr).unwrap();
-        let envelope: Value = serde_json::from_str(stderr.trim_end())
-            .unwrap_or_else(|e| panic!("one envelope on stderr ({e}): {stderr}"));
+        assert_eq!(run.exit(), 2, "{args:?} {env:?}");
+        let envelope: Value = serde_json::from_str(run.stderr.trim_end())
+            .unwrap_or_else(|e| panic!("one envelope on stderr ({e}): {}", run.stderr));
         assert_eq!(
             (&envelope["op"], &envelope["error"]["code"]),
             (&json!("mcp"), &json!("E_INVALID_ARG")),
-            "{stderr}"
+            "{}",
+            run.stderr
         );
     }
-    let output = support::swarmops(&["info", "--no-such-flag"], &[])
-        .output()
-        .expect("run swarmops info");
-    assert!(output.stderr.is_empty(), "{output:?}");
-    assert_eq!(output.status.code(), Some(2));
-    let envelope: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let run = support::run(&["info", "--no-such-flag"], &[]);
+    assert!(run.stderr.is_empty(), "{run}");
+    assert_eq!(run.exit(), 2);
+    let envelope: Value = serde_json::from_str(&run.stdout).unwrap();
     assert_eq!(envelope["error"]["code"], "E_INVALID_ARG");
 }
 
@@ -1071,13 +1116,15 @@ struct ToolCall {
 }
 
 impl Server {
-    /// `swarmops mcp`, then `args`, with `env` set and no other `SWARMOPS_*` variable.
+    /// `swarmops mcp`, then `args`, with the order check on, `env` set and no other `SWARMOPS_*`
+    /// variable.
     fn start(args: &[&str], env: &[(&str, &str)]) -> Server {
         let mut command = Command::new(support::BIN);
         command.arg("mcp").args(args);
         for name in support::swarmops_vars() {
             command.env_remove(name);
         }
+        command.env(swarmops_store::ORDER_CHECK_ENV, "1");
         command
             .envs(env.iter().copied())
             .stdin(Stdio::piped())
@@ -1437,6 +1484,18 @@ fn assert_no_references(name: &str, schema: &Value) {
 fn assert_cacheable(result: &Value) {
     assert!(result["ttlMs"].is_u64(), "{result}");
     assert_eq!(result["cacheScope"], "public", "{result}");
+}
+
+/// `result`'s server version, which every release bumps and no contract rests on, checked
+/// against this build's and replaced by `[version]`, for a snapshot.
+fn pin_server_version(result: &mut Value) {
+    let server_info = &mut result["_meta"]["io.modelcontextprotocol/serverInfo"];
+    assert_eq!(
+        server_info["version"],
+        env!("CARGO_PKG_VERSION"),
+        "{server_info}"
+    );
+    server_info["version"] = json!("[version]");
 }
 
 /// `text`, an envelope as printed, with the number of its `elapsed_ms` replaced by 0: the one

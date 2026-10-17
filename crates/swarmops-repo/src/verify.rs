@@ -1,13 +1,15 @@
 //! Checking a store (storage spec §2–§3): [`Repo::verify`] reads all of a store once, without
 //! the writer lock and without writing, and reports what it finds damaged as
 //! [`VerifyProblem`]s. It fails only on an I/O error it cannot get past. A metadata file it
-//! cannot read as one (a journal file missing, `journal.ckpt` malformed, index files that do
-//! not open) is a [`VerifyProblem::MetaCorrupt`], and the rest is checked without it.
+//! cannot read as one (a journal file missing, `journal.ckpt` malformed or not a frame
+//! boundary, index files that do not open) is a [`VerifyProblem::MetaCorrupt`], and the rest is
+//! checked without it.
 //!
-//! It reads in this order, so that a commit running meanwhile never looks like damage: the
-//! checkpoint, the changeset index, the ref files, then the journal (whatever the index or a
-//! ref file shows had its frame in the journal before), then the objects (every object a
-//! recorded changeset references was durable before its frame).
+//! It reads in this order, so that a commit running meanwhile never looks like damage (one whose
+//! `journal.off` listing fails meanwhile and is cut back is the exception M1.5 keeps: it reads as
+//! a `JournalCorrupt` problem once): the checkpoint, the changeset index, the ref files, then the
+//! journal (whatever the index or a ref file shows had its frame in the journal before), then the
+//! objects (every object a recorded changeset references was durable before its frame).
 //!
 //! - The metadata. The index's records are compared with the journal's changeset records, place
 //!   by place: a record unlike the journal's at its seq, one the journal does not hold, and a
@@ -18,9 +20,10 @@
 //!   does not vouch for, which a power loss can leave there, is no damage, and the next writer
 //!   replays the journal's in its place. So a record that no frame holds at all, past the
 //!   journal's last changeset (what a writer that went around the journal would leave), is
-//!   reported only if the index counts it: if no changeset frame follows the checkpoint, or the
-//!   sorted views cover it. Otherwise the index does not count it, verify reports nothing, and
-//!   the next writer cuts it.) So are sorted-view
+//!   reported only if the journal reads whole and the index counts it: if no changeset frame
+//!   follows the checkpoint, or the sorted views cover it. Otherwise verify reports nothing for
+//!   it: the index does not count it and the next writer cuts it, or the journal is damaged or
+//!   missing, which verify reports instead.) So are sorted-view
 //!   entries that disagree with the index columns (the advisory `Compacted` frames are never
 //!   consulted); each names its [`MismatchCause`]. A frame the journal's reader finds corrupt is a
 //!   [`VerifyProblem::JournalCorrupt`]: the comparison stops there, and the index's records
@@ -122,8 +125,8 @@ pub enum VerifyProblem {
         offset: u64,
     },
     /// A metadata file that verify cannot read as one, so that what depends on it goes
-    /// unchecked: a journal file missing, `journal.ckpt` malformed, or index files that do not
-    /// open. Carries what is damaged and what is not checked for it.
+    /// unchecked: a journal file missing, `journal.ckpt` malformed or not a frame boundary, or
+    /// index files that do not open. Carries what is damaged and what is not checked for it.
     MetaCorrupt(String),
 }
 
@@ -280,6 +283,12 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             }
             None => (Vec::new(), false),
         };
+        // Every snapshot and write transaction reads the frames past the checkpoint: a
+        // checkpoint that is no frame boundary fails them all, so verify must say so.
+        let ckpt = match (&journal, ckpt) {
+            (Some(journal), Some(ckpt)) if whole => self.checkpoint_boundary(journal, ckpt)?,
+            _ => ckpt,
+        };
 
         // What the damaged files leave unchecked depends on which of the others read.
         if let Some(what) = journal_damage {
@@ -376,6 +385,29 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                      passed are not checked against the index"
                         .to_owned(),
                 ));
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Whether the checkpoint is a frame boundary (0, a listed frame's start, or the end of the
+    /// last listed frame), read as every snapshot and write transaction reads the frames past
+    /// it; reported, and `None`, if not. Checked only when the journal read whole: otherwise
+    /// the damage reported is the journal's.
+    fn checkpoint_boundary(
+        &mut self,
+        journal: &Journal,
+        ckpt: u64,
+    ) -> Result<Option<u64>, RepoError> {
+        match journal.tail_frames_from(ckpt) {
+            Ok(_) => Ok(Some(ckpt)),
+            Err(StoreError::JournalCorrupt { .. }) => {
+                self.meta.push(VerifyProblem::MetaCorrupt(format!(
+                    "meta/journal.ckpt holds {ckpt}, which is not a frame boundary: reads and \
+                     writes fail on it, and the records the checkpoint passed are not checked \
+                     against the index"
+                )));
                 Ok(None)
             }
             Err(e) => Err(e.into()),

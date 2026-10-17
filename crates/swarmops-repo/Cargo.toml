@@ -15,8 +15,10 @@ workspace = true
 
 [features]
 # The store's test hooks (`swarmops-store/test-hooks`), which `LocalRepo::create` and `open`
-# honor: for the crash tests, which require it.
-test-hooks = ["swarmops-store/test-hooks"]
+# honor: for the crash tests, which require it. It turns on the test kit's too, so that this
+# crate's tests run under the order checker (`swarmops_testkit::faults::checked`) whenever they
+# run with the hooks.
+test-hooks = ["swarmops-store/test-hooks", "swarmops-testkit/test-hooks"]
 
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }

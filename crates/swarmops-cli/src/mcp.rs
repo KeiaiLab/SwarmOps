@@ -7,8 +7,10 @@
 //! answers it on stdout if it is a request, and reads the next: one at a time, in order. stdout
 //! carries nothing but answers. stderr gets a line for a message that has no answer although it
 //! is neither a request nor a notification (a response from the client), a line for the I/O
-//! error that stops the server, and the panic hook's report of a bug; nothing else. The server
-//! exits 0 when stdin ends, and 1 if reading stdin or writing stdout fails.
+//! error that stops the server, the panic hook's report of a bug, and the reason one of the
+//! store's three documented aborts (storage spec §2; README) writes before
+//! `std::process::abort` ends the process; nothing else. The server exits 0 when stdin ends, 1
+//! if reading stdin or writing stdout fails, and by SIGABRT on those aborts.
 //!
 //! It serves the protocol's revisions each the way its clients open:
 //!
@@ -64,20 +66,26 @@
 //!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
 //! does not know is ignored, and arguments that do not fit the type are `E_INVALID_ARG`, as is
-//! a request that breaks this server's one rule of its own ([`Refuse`]): a `ref_set` or a
+//! a request that breaks one of this server's own rules ([`Refuse`]): a `ref_set` or a
 //! `ref_delete` must name what it expects the ref to hold by its full changeset id, since a ref
-//! name or a relative revision resolves when the call runs and so defeats the compare-and-swap
-//! (the CLI takes any revision for `--expect`, and its help warns why not to). A mutation then
+//! name or a relative revision resolves when the call runs and so defeats the compare-and-swap,
+//! and an id prefix stops resolving once another changeset shares it (the CLI takes any
+//! revision for `--expect`, and its help warns why not to); and a `commit` whose `{"file":
+//! <path>}` content names a relative path, or this process's own stdin or stdout, is refused,
+//! since the server would read the file from a working directory the agent cannot see, or
+//! block on the pipe that carries the protocol. A mutation then
 //! needs the server's identity, and last the store is opened and the operation runs; a
 //! `verify` that finds problems is `E_STORE_CORRUPT`, as `swarmops verify` is, and a panic in
 //! the operation is `E_INTERNAL`. The tool result holds the envelope the CLI prints for the
 //! same request, as its `structuredContent` and as the text of its one content block, and
 //! `isError` is true exactly when the envelope's `ok` is false.
 //!
-//! Clients cut long tool results (Claude Code at 25,000 tokens by default), and a result holds
-//! its envelope twice, so the descriptions and [`INSTRUCTIONS`] ask the model for small reads
-//! (`max_bytes` of 32 KiB or less, `limit` and `max_changes` of 100 or less, paging with the
-//! `cursor`); the API's defaults stay as the operations spec gives them.
+//! Clients limit long tool results. Claude Code saves a successful one over 25,000 tokens by
+//! default, or over 50,000 characters whatever its token count, to a file and gives the model
+//! its path instead; it cuts only the text of an error, past about 11,000 characters. A result
+//! holds its envelope twice, so the descriptions and [`INSTRUCTIONS`] ask the model for small
+//! reads (`max_bytes` of 32 KiB or less, `limit` and `max_changes` of 100 or less, paging with
+//! the `cursor`); the API's defaults stay as the operations spec gives them.
 //!
 //! # The store and the identity
 //!
@@ -86,8 +94,9 @@
 //! there is each call's `E_NOT_A_REPO`, and the server serves on. The identity is `--as`, else
 //! `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI; a mutation without one is
 //! `E_IDENTITY_REQUIRED`. The client starts the server as its own user, in its own trust
-//! domain, so `{"file": <path>}` content is read here, as the CLI reads it, a relative path from
-//! the server's working directory. The output flags (`--json`, `--human`, `--pretty`) do not
+//! domain, so `{"file": <path>}` content is read here, as the CLI reads it; a relative path, or
+//! one that is this process's own stdin or stdout, is refused ([`Refuse`]). The output flags
+//! (`--json`, `--human`, `--pretty`) do not
 //! apply. A command line that parses as `swarmops mcp` but is refused (a usage error in what
 //! follows the word `mcp`, a `SWARMOPS_FORMAT` that is neither `json` nor `human`), and a panic
 //! before the server serves, start no server: their envelope goes to stderr, not to stdout,
@@ -98,14 +107,16 @@
 
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
+use std::path::Path;
 use std::time::Instant;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use swarmops_api::{
-    CommitReq, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError, ReadFileReq, ReadTreeReq,
-    RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq, StoreOps, VerifyReq, schema_for_all,
+    CommitReq, ContentInput, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError, ReadFileReq,
+    ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq, StoreOps, VerifyReq,
+    schema_for_all,
 };
 
 use crate::cli::Global;
@@ -168,7 +179,8 @@ const INSTRUCTIONS: &str = "SwarmOps is source control for coding-agent swarms: 
 to one store at once. Each tool is one store operation, and its result is the SwarmOps envelope \
 {ok, op, api, result | error, meta}, as structuredContent and again as JSON text. A failed \
 operation sets isError and gives error {code, message, retryable, exit, details, hint}: \
-retryable says whether the same call can succeed again, and a hint is often a swarmops command, \
+retryable says whether the operation can succeed when it is run again, as it is or after \
+re-reading what the hint names, and a hint is often a swarmops command, \
 whose operation is the tool of the same name (ref list is ref_list, cat read_file, ls \
 read_tree, info repo_info). A revision is main, release/<name>, a changeset id or 12 or more of \
 its first hex digits, then optionally ~N for the N-th first parent. commit records a changeset \
@@ -179,12 +191,14 @@ the call runs instead of pinning the id you read: the ref's own name always matc
 compare-and-swap protects nothing, and main~1 on ref main never matches; the server refuses \
 them. After \
 E_CAS_MISMATCH, commit your change again on top of details.actual, re-applying your edits to \
-the content there, then retry with expected_old set to it. Clients cut long tool results \
-(Claude Code at 25,000 tokens by default) and each result carries its envelope twice, so ask \
-for little: max_bytes of 32768 or less for read_file (less for a binary file, which comes back \
-in base64), a limit of 100 or less for read_tree and log, paging on with the cursor a result \
-returns, and max_changes of 100 or less for show. Every change is recorded for the agent the \
-server runs as.";
+the content there, then retry with expected_old set to it. Clients limit long tool results \
+(Claude Code saves one over 25,000 tokens or 50,000 characters to a file and gives you its \
+path instead) and each result carries its envelope twice, so ask for little: max_bytes of \
+32768 or less for read_file (less for a binary file, which comes back in base64), a limit of \
+100 or less for read_tree and log, paging on with the cursor a result returns, and \
+max_changes of 100 or less for show. A {\"file\": path} content is read by this server, not \
+by your client: give an absolute path (a relative one, or the server's own stdin or stdout, \
+is refused). Every change is recorded for the agent the server runs as.";
 
 /// The tools, in the order `tools/list` gives them.
 static TOOLS: [Spec; 10] = [
@@ -204,7 +218,7 @@ static TOOLS: [Spec; 10] = [
         title: "Read a file",
         description: "Reads one file at a revision, without a checkout, as UTF-8 text or \
                       base64; pass max_bytes of 32768 or less (less for a binary file), since \
-                      clients cut long tool results and this one holds the content twice.",
+                      clients limit long tool results and this one holds the content twice.",
         effect: Effect::Reads,
     },
     Spec {
@@ -214,7 +228,7 @@ static TOOLS: [Spec; 10] = [
         title: "List a directory",
         description: "Lists one directory at a revision, without a checkout, a page of entries \
                       at a time; pass a limit of 100 or less and page on with the cursor, since \
-                      clients cut long tool results.",
+                      clients limit long tool results.",
         effect: Effect::Reads,
     },
     Spec {
@@ -223,7 +237,7 @@ static TOOLS: [Spec; 10] = [
         request: "ShowReq",
         title: "Show a changeset",
         description: "One changeset in full: its parents, author, message, changes and \
-                      signatures; pass max_changes of 100 or less, since clients cut long tool \
+                      signatures; pass max_changes of 100 or less, since clients limit long tool \
                       results.",
         effect: Effect::Reads,
     },
@@ -234,7 +248,7 @@ static TOOLS: [Spec; 10] = [
         title: "List history",
         description: "History along first parents, newest first, from main unless rev says \
                       otherwise; pass a limit of 100 or less and page on with the cursor, since \
-                      clients cut long tool results.",
+                      clients limit long tool results.",
         effect: Effect::Reads,
     },
     Spec {
@@ -273,7 +287,8 @@ static TOOLS: [Spec; 10] = [
         request: "CommitReq",
         title: "Commit a changeset",
         description: "Records a changeset from an explicit change list, on parent or else on \
-                      main's head; it moves no ref.",
+                      main's head; it moves no ref. A {\"file\": path} content is read by this \
+                      server: give an absolute path.",
         effect: Effect::Adds,
     },
     Spec {
@@ -827,8 +842,8 @@ fn request_of<R: Refuse>(spec: &Spec, arguments: Value) -> Result<R, OpError> {
     Ok(req)
 }
 
-/// This server's own rules for a request, which its type cannot say: a request type with one
-/// refuses what breaks it, the others nothing.
+/// This server's own rules for a request, which its type cannot say: a request type with rules
+/// refuses what breaks them, the others nothing.
 trait Refuse: DeserializeOwned {
     /// `E_INVALID_ARG` for a request that breaks the rule.
     fn refuse(&self) -> Result<(), OpError> {
@@ -842,8 +857,42 @@ impl Refuse for ReadTreeReq {}
 impl Refuse for ShowReq {}
 impl Refuse for LogReq {}
 impl Refuse for RefListReq {}
-impl Refuse for CommitReq {}
 impl Refuse for VerifyReq {}
+
+/// A change's client file is read by this server, so its path must be absolute (the agent
+/// cannot see the server's working directory) and must not be this process's own stdin or
+/// stdout, which carry the protocol: a read of either would block the session.
+impl Refuse for CommitReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        for (index, change) in self.changes.iter().enumerate() {
+            let Some(ContentInput::File(file)) = &change.content else {
+                continue;
+            };
+            let why = if !Path::new(file).is_absolute() {
+                "is a relative path, which the server would read from its own working \
+                 directory, not yours"
+            } else if commands::is_own_stdio(file) {
+                "is this process's own stdin or stdout, which carry the protocol"
+            } else {
+                continue;
+            };
+            return Err(OpError::new(
+                ErrorCode::InvalidArg,
+                output::printable(&format!(
+                    "change {index} ({:?}): the client file {file:?} {why}: give its absolute \
+                     path, or send the bytes as inline or base64 content",
+                    change.path
+                )),
+            )
+            .with_details(Map::from_iter([
+                ("index".to_owned(), Value::from(index)),
+                ("path".to_owned(), Value::from(change.path.as_str())),
+                ("file".to_owned(), Value::from(file.as_str())),
+            ])));
+        }
+        Ok(())
+    }
+}
 
 /// A move names the target it expects by its full id ([`concrete_expectation`]), unless it
 /// creates the ref.
@@ -1417,6 +1466,61 @@ mod tests {
         };
         assert!(delete(&id).refuse().is_ok());
         assert!(delete("main~1").refuse().is_err());
+    }
+
+    /// A commit's client file must be an absolute path, since the server would read a relative
+    /// one from its own working directory, which the agent cannot see; and not this process's
+    /// own stdin or stdout, which carry the protocol. The refusal names the change and the file.
+    #[test]
+    fn a_client_file_must_be_absolute_and_not_this_process_s_stdio() {
+        let commit = |file: &str| CommitReq {
+            parent: None,
+            changes: vec![
+                ChangeInput {
+                    path: "README.md".to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline("# acme\n".to_owned())),
+                    mode: None,
+                },
+                ChangeInput {
+                    path: "src/lib.rs".to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::File(file.to_owned())),
+                    mode: None,
+                },
+            ],
+            message: "x".to_owned(),
+            allow_empty: false,
+        };
+        let refused = |file: &str, why: &str| {
+            let error = commit(file).refuse().expect_err(file);
+            assert_eq!((error.code.as_str(), error.exit), ("E_INVALID_ARG", 2));
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"index": 1, "path": "src/lib.rs", "file": file})
+            );
+            assert!(error.message.contains(why), "{file}: {}", error.message);
+            assert!(!error.message.contains('\n'), "{}", error.message);
+        };
+        refused("src/lib.rs", "relative path");
+        refused("./src/lib.rs", "relative path");
+        // The test's stdin: /dev/null under the test harness, a pipe under most clients. A
+        // socket (what some clients give a server) has no path, so it is skipped.
+        if std::fs::metadata("/dev/stdin").is_ok() {
+            refused("/dev/stdin", "stdin or stdout");
+            refused("/proc/self/fd/0", "stdin or stdout");
+        }
+        if std::fs::metadata("/dev/stdout").is_ok() {
+            refused("/dev/stdout", "stdin or stdout");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let regular = dir.path().join("lib.rs");
+        std::fs::write(&regular, "pub fn f() {}\n").unwrap();
+        assert!(commit(regular.to_str().unwrap()).refuse().is_ok());
+        assert!(
+            commit("/no/such/file").refuse().is_ok(),
+            "read later, reported then"
+        );
     }
 
     /// A panic in a tool's operation is that call's `E_INTERNAL` envelope, with the store the

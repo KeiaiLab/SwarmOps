@@ -282,15 +282,18 @@ fn records_and_frames_use_the_fixed_byte_layout() {
         "compacted"
     );
 
-    // On disk: u32le len | u32le crc32(payload) | payload, payload = u16le count | records;
-    // journal.off gets the frame's start offset as u64le.
+    // On disk: u32le len | u32le crc32(payload) (CRC-32/IEEE, `crc32fast`) | payload, payload =
+    // u16le count | records; journal.off gets the frame's start offset as u64le.
     let (_root, layout) = new_root();
     new_journal(&layout)
         .append_frame(&[compacted(1024)])
         .unwrap();
     let payload = [1, 0, 4, 0x00, 0x04, 0, 0, 0, 0, 0, 0];
     let mut want = vec![11, 0, 0, 0];
-    want.extend(crc32fast::hash(&payload).to_le_bytes());
+    // CRC-32 (IEEE 802.3, zlib's crc32: reflected polynomial 0xEDB88320, init and xor-out
+    // 0xFFFFFFFF) of `payload`: 0x03aa1b33, little-endian. A literal, so that no swap of the
+    // algorithm passes by comparing the CRC with itself.
+    want.extend([0x33, 0x1b, 0xaa, 0x03]);
     want.extend(payload);
     assert_eq!(fs::read(layout.journal_log()).unwrap(), want);
     assert_eq!(fs::read(layout.journal_off()).unwrap(), [0; 8]);
@@ -1592,6 +1595,45 @@ fn ckpt_roundtrip_and_default_zero() {
     assert!(
         matches!(&got, Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidData),
         "a damaged checkpoint is an error, not a guess: {got:?}"
+    );
+}
+
+#[test]
+fn a_huge_checkpoint_file_is_malformed_not_read_whole() {
+    // journal.ckpt holds 8 bytes; one of any other length is damage. A crafted one of huge
+    // length (a sparse file, which costs no disk) must not be read into a buffer of that length:
+    // the read is capped, and the error is the file's own, at once.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.set_ckpt(84).unwrap();
+    set_len(layout.journal_ckpt(), 1 << 30);
+    let started = Instant::now();
+    let got = journal.ckpt();
+    let Err(StoreError::Io(e)) = &got else {
+        panic!("a 1 GiB checkpoint file: expected InvalidData, got {got:?}");
+    };
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+    assert!(
+        e.to_string()
+            .contains("holds more than 8 bytes, not a u64le"),
+        "{e}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "read whole: {:?}",
+        started.elapsed()
+    );
+    set_len(layout.journal_ckpt(), 9);
+    let got = journal.ckpt();
+    assert!(
+        matches!(&got, Err(StoreError::Io(e)) if e.to_string().contains("holds more than 8 bytes")),
+        "{got:?}"
+    );
+    set_len(layout.journal_ckpt(), 3);
+    let got = journal.ckpt();
+    assert!(
+        matches!(&got, Err(StoreError::Io(e)) if e.to_string().contains("holds 3 bytes, not a u64le")),
+        "{got:?}"
     );
 }
 

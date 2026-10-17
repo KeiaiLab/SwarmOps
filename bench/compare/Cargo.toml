@@ -7,7 +7,8 @@ license = "MIT"
 description = "Measures SwarmOps' native metadata store against embedded databases; SwarmOps depends on none of them"
 
 # Every version is pinned exactly; each, and each one in Cargo.lock, was released at least 7
-# days before the harness was written, except zstd 0.14.2, which swarmops-store itself pins.
+# days before the harness was written, except zstd 0.14.2 (5.7 days), zstd-safe 8.1.0 and
+# zstd-sys 2.1.1 (6.6 days), which swarmops-store's own zstd brings in.
 [dependencies]
 swarmops-core = { path = "../../crates/swarmops-core" }
 swarmops-store = { path = "../../crates/swarmops-store" }

@@ -10,6 +10,7 @@
 //! Every test owns a fresh store (`tempfile::tempdir()`) and damages it by hand.
 
 use std::fs;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use swarmops_store::{
     ChangesetMeta, FsObjectStore, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore, RealFs,
     Record,
 };
+use swarmops_testkit::fs::{RecordingFs, When};
 use swarmops_testkit::repo::{blob, commit, delete, new_repo, path, put, put_as, signature};
 use tempfile::TempDir;
 
@@ -388,6 +390,53 @@ fn verify_detects_index_records_lost_below_the_checkpoint() {
     assert_problems(&repo, vec![mismatch(1, MismatchCause::Journal)]);
 }
 
+/// A writer whose index sync fails cuts the index back to the checkpoint
+/// ([`Index::truncate_to`]). A verify that opened the index before the cut, and counted records
+/// the cut took, fails with an I/O error (`UnexpectedEof`) when it reads them, never with an
+/// [`VerifyProblem::IndexMismatch`]; one that runs after the cut finds nothing wrong.
+#[test]
+fn verify_racing_the_cut_of_a_failed_index_sync_fails_with_an_io_error() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
+    let c3 = commit(&repo, &[c2], vec![put("f", b"3")]);
+    // The checkpoint past records 0..=2; records 3 and 4 lie past it.
+    MetaStore::open(&root).unwrap().flush().unwrap();
+    let c4 = commit(&repo, &[c3], vec![put("f", b"4")]);
+    commit(&repo, &[c4], vec![put("f", b"5")]);
+    let layout = Layout::new(&root);
+    let records = || Index::open(&layout, Arc::new(RealFs)).unwrap().len();
+    assert_eq!(records(), 5);
+
+    let (writer_fs, _calls) = RecordingFs::new();
+    let fail = writer_fs.failing();
+    let mut writer = MetaStore::open_with_fs(&root, Arc::new(writer_fs)).unwrap();
+    writer.set_parallelism(1);
+    fail.set("sync_data ids.col");
+    // Verify opens the index (five records), then reads the ref files, `main` first, then the
+    // journal: right before it reads `main`, the writer's flush fails its sync and cuts the
+    // index back to the three records the checkpoint passed.
+    let (verify_fs, _calls) = RecordingFs::new();
+    let verify_fs = verify_fs.with_hook((
+        "read main".to_owned(),
+        When::Before,
+        Box::new(move || {
+            let cut = writer.flush();
+            assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+        }),
+    ));
+    let racing = LocalRepo::open_with_fs(&root, Arc::new(verify_fs)).unwrap();
+
+    match racing.verify(false) {
+        Err(RepoError::Store(StoreError::Io(e))) => {
+            assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}");
+        }
+        other => panic!("expected an I/O error from the stale index, got {other:?}"),
+    }
+    assert_eq!(records(), 3, "cut");
+    assert_problems(&repo, Vec::new());
+}
+
 #[test]
 fn verify_checks_the_sorted_views_against_the_columns() {
     let (_dir, root, repo) = new_repo();
@@ -458,17 +507,25 @@ fn verify_checks_each_record_is_named_once_in_a_sorted_view() {
 
 #[test]
 fn verify_fails_on_a_ref_file_it_cannot_read() {
-    // A ref file that is no ref file is damage verify reports (CorruptRef); one that cannot be
-    // read at all is an error it cannot get past.
+    // A ref file that is no ref file is damage verify reports (CorruptRef), a directory where
+    // the file should be among them (not a regular file); one that cannot be read at all is an
+    // error it cannot get past.
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     repo.cas_ref("release/a", None, Some(c1), "test/agent")
         .unwrap();
-    fs::create_dir(Layout::new(&root).meta_path("refs/release/b")).unwrap();
+    let b = Layout::new(&root).meta_path("refs/release/b");
+    fs::create_dir(&b).unwrap();
+    assert_problems(
+        &repo,
+        vec![VerifyProblem::CorruptRef("release/b".to_owned())],
+    );
+    fs::remove_dir(&b).unwrap();
+    std::os::unix::fs::symlink("b", &b).unwrap(); // a loop: a read of it fails with ELOOP
     for deep in [true, false] {
         match repo.verify(deep) {
             Err(RepoError::Store(StoreError::Io(e))) => {
-                assert_eq!(e.kind(), std::io::ErrorKind::IsADirectory, "{e}");
+                assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}");
             }
             other => panic!("deep: {deep}: expected an I/O error, got {other:?}"),
         }
@@ -555,6 +612,56 @@ fn verify_reports_damaged_metadata_files_and_checks_on() {
         report.problems[0].to_string(),
         "damaged metadata: meta/journal.log is missing: the journal is not checked"
     );
+}
+
+#[test]
+fn verify_reports_a_checkpoint_that_is_not_a_frame_boundary() {
+    // Every snapshot and write transaction reads the frames past the checkpoint: a checkpoint
+    // inside a frame, or past the log's end, fails them all with JournalCorrupt
+    // (E_STORE_CORRUPT), so verify must report it (it reported nothing). One at a frame
+    // boundary (0, a frame's start, the end of the last frame) is sound, and nothing is reported.
+    let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
+    let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
+    let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
+    let layout = Layout::new(&root);
+    let journal = Journal::open(&layout, Arc::new(RealFs)).unwrap();
+    let frames = journal.frames_from(0, usize::MAX).unwrap();
+    assert_eq!(frames.len(), 3, "c1, c2 and the ref move");
+    let end = fs::metadata(layout.journal_log()).unwrap().len();
+    for boundary in [0, frames[1].offset, frames[2].offset, end] {
+        journal.set_ckpt(boundary).unwrap();
+        MetaStore::open(&root).unwrap().read().unwrap();
+        let report = repo.verify(true).unwrap();
+        assert_eq!(
+            report.problems,
+            [dangling.clone(), corrupt.clone()],
+            "ckpt {boundary}: no false report"
+        );
+        assert_eq!(report.changesets_checked, 2, "ckpt {boundary}");
+    }
+    for bogus in [frames[1].offset - 1, frames[1].offset + 1, end + 8] {
+        journal.set_ckpt(bogus).unwrap();
+        let read = MetaStore::open(&root).unwrap().read().map(|_| ());
+        assert!(
+            matches!(read, Err(StoreError::JournalCorrupt { offset }) if offset == bogus),
+            "ckpt {bogus}: {read:?}"
+        );
+        let report = repo.verify(true).unwrap();
+        assert_eq!(
+            report.problems,
+            [
+                VerifyProblem::MetaCorrupt(format!(
+                    "meta/journal.ckpt holds {bogus}, which is not a frame boundary: reads and \
+                     writes fail on it, and the records the checkpoint passed are not checked \
+                     against the index"
+                )),
+                dangling.clone(),
+                corrupt.clone()
+            ],
+            "ckpt {bogus}"
+        );
+        assert_eq!(report.changesets_checked, 2, "ckpt {bogus}");
+    }
 }
 
 /// Damages metadata file `file` of the store at `root`: `journal.ckpt` malformed, a journal

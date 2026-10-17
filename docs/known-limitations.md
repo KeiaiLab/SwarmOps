@@ -4,7 +4,7 @@ What SwarmOps does not do yet, or does less well than it should, as of M1.5, and
 meant to change it. The items come from the M1 and M1.5 reviews: the carry-overs their tasks
 handed to later milestones, the deferred minors that are still open, and the rulings of M1's
 final review, which left 14 questions to the maintainer (the table at the end lists all 14).
-Each entry says where it was found; those pointers (an M1 task, a review, the 2026-10-16
+Each entry says where it was found; those pointers (an M1 or M1.5 task, a review, the 2026-10-16
 comparison) refer to the maintainer's local records, which are not in the repository. Code-level
 minors that change nothing a user or an agent can see (naming, comments, micro-optimizations,
 test labels) are not listed.
@@ -14,8 +14,9 @@ Targets are milestones of [the umbrella spec](superpowers/specs/2026-10-15-swarm
 M8 git export · M5 workspaces · M6 verify, crash safety and fuzzing · M7 blame and review ·
 M9 simulation and benchmarks · M11 remote sync, offline-first · M10 RPC server. M1.5, the
 hardening milestone after M1 ([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)),
-closes a few. "Unscheduled" means no milestone has taken the item yet; "documented" means it is
-the intended behaviour.
+closes a few, and M1.6, a second hardening plan after it (not yet in the umbrella spec), takes
+those marked for it. "Unscheduled" means no milestone has taken the item yet; "documented" means
+it is the intended behaviour.
 
 When a change closes an item, it removes the entry here in the same commit (or says what is
 left).
@@ -28,9 +29,10 @@ left).
   what a disk may hold after the power fails at each of its steps (unsynced data dropped, cut at
   512 B or 4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync
   covered reverted), each of which the binary must recover. What stays open: `abort()` stands
-  in for `SIGKILL`, and the images come from a model of the disk, not a real device. A test with
-  a literal `SIGKILL` on a real device is *M6*. *Found: M1 Task 6; final review, question 11;
-  narrowed by M1.5 Task 3.*
+  in for `SIGKILL`, and the images come from a model of the disk, not a real device, and the
+  recorded run is short (its journal ends at 1,130 B), so a cut at 4 KiB is in the model but
+  never differs from dropping. A test with a literal `SIGKILL` on a real device is *M6*. *Found:
+  M1 Task 6; final review, question 11; narrowed by M1.5 Task 3.*
 - **A double failure leaves an index risk open.** When an index sync fails, the writer cuts the
   unsynced records back so the journal can supply them again; if the cut fails too, the error
   names both failures, and the risk stays open until the next successful sync, which could carry
@@ -91,17 +93,26 @@ left).
   too. A no-clobber `REPO` link is the cheap hardening. *Target: M5 (with the workspace
   registry). Found: M1 Task 2c; final review, question 1.*
 - **A reader's snapshot loop has no cap.** A reader re-reads the refs and frames until the
-  frame count holds still, without a limit or back-off; under sustained commits with many frames
-  past the checkpoint it could keep retrying. *Unscheduled. Found: M1 Task 2c.*
-- **One transient error after a crash.** A reader that races the first repair after a crash can
-  see `E_STORE_CORRUPT` once; reading again succeeds. *Unscheduled (document or retry once).
-  Found: M1 final review.*
+  frames it reads hold still, without a limit or back-off; under sustained commits with many
+  frames past the checkpoint it could keep retrying. *Unscheduled. Found: M1 Task 2c.*
+- **One transient error after a crash, or after a failed `journal.off` listing.** A reader that
+  races the first repair after a crash, or a writer's cut of a `journal.off` entry whose sync
+  failed (storage spec §2 rule 3 (b)), can see `E_STORE_CORRUPT` once, and a `verify` that races
+  that cut can report a `JournalCorrupt` problem; reading again succeeds, and a `verify` run
+  afterwards reports no problem. *Target: M1.6 (the snapshot round re-reads a `journal.off` that
+  shrank; `verify` and paging too). Found: M1 final review; M1.5 final review.*
 - **Readers may return state that is not durable yet.** A reader sees a frame before its
   `fdatasync` completes, so a power loss, or a failed sync of that frame (which the writer then
   cuts back), can take back state a local reader returned (operations spec §4 says what agents
   may rely on). Readers whose results leave the host, M8's git export first, will read committed
   snapshots taken under the lock instead. *Target: M8. Found: M1 Task 2c; final review,
   question 2.*
+- **A `ref set` to the target it expects is answered from a snapshot.** When `new` equals
+  `expected_old`, `ref set` reads the ref without the lock and answers `already_applied: true` if
+  the ref holds `new`; that read can see another writer's frame before its sync, so the
+  acknowledgement can rest on state a failed sync or a power loss then takes back (the readers'
+  exposure above). Every other replay is decided under the lock, after the tail check. *Target:
+  M1.6 (decide it under the lock). Found: M1.5 final review.*
 - **A commit acknowledged with a warning can vanish for a moment.** When a writer's tail check
   writes unlisted frames afresh after a failed sync (storage spec §2 rule 3 (c)), a reader that
   reads between the cut and the rewrite does not see them: a changeset whose commit was
@@ -158,8 +169,9 @@ left).
 - **A zero-filled index tail over a damaged journal wedges the store.** A store whose journal
   is damaged before the checkpoint, and whose index records past the checkpoint a power loss
   zeroed, opens with `IndexCorrupt` (`E_STORE_CORRUPT`) on every read and write; no writer
-  repairs it. (A malformed `journal.ckpt` fails every read and write with `E_STORE_CORRUPT` on
-  its own.) *Target: M6 (fsck). Found: M1.5 minors (Task 3 review N1).*
+  repairs it. (A malformed `journal.ckpt`, or one that is not a frame boundary, fails every read
+  and write with `E_STORE_CORRUPT` on its own; verify reports both.) *Target: M6 (fsck). Found:
+  M1.5 minors (Task 3 review N1).*
 - **Temp files of crashed writes stay.** `objects/tmp/` keeps what interrupted object writes left
   there. *Target: M6 (`gc`). Found: M1 final review, question 8.*
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
@@ -181,12 +193,32 @@ left).
   crafted or damaged store can hold one. The fix is a streaming decoder that stops one byte past
   the expected length. *Unscheduled in the ledger; proposed for M6, with a fuzz target for
   object files. Found: M1 Task 1.*
-- **Crafted `journal.off` entries can cut a frame.** Entries crafted to agree with each other,
-  around an embedded valid frame, can make recovery cut a whole committed frame; that is outside
-  the crash model, and `verify`, which walks every listed frame, reports it. A checksum on each
-  entry is a format change: the next `FORMAT` (planned as 2, M6), together with a frame header
-  that carries the frame's sequence number and the previous frame's CRC. *Target: M6. Found: M1
-  fuzzing; final review, question 7.*
+- **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
+  past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
+  every read and write, and recovery's tail check and listed-chain walk), a column range
+  (`Column::entries`: the `ids.col` tail of every lookup, `by_length` over a damaged journal)
+  and a view range (`Sorted::recs`) are each read into one buffer sized from the file's length,
+  with an infallible allocation: a sparse or crafted file of gigabytes makes any command take
+  that much memory and abort when the allocation fails, instead of failing with an error, and
+  the abort is no panic, so `swarmops mcp` dies with it. SwarmOps never writes such a file.
+  *Target: M1.6 (bounded reads, beside Task 5's object reads). Found: M1.5 final review
+  (security-1).*
+- **`REPO` is read whole, however long.** `meta/REPO` holds the repository id and the name
+  `init` was given, which nothing bounds, so a crafted `REPO` of huge length is read into a
+  buffer of that length (`E_IO` "out of memory" when the allocator refuses). `FORMAT`,
+  `journal.ckpt` and the ref files are capped at their fixed sizes. *Target: M1.6 (a name-length
+  limit, with its spec line). Found: M1.5 final review (security-2).*
+- **Crafted `journal.off` entries can mis-number a read.** Entries crafted to agree with each
+  other (one pointing into a payload whose bytes read as a frame header ending where the next
+  entry starts), three or more links before the end, pass the two links recovery and readers
+  check: a read that starts past them numbers its frames by them, and `frame_count` counts
+  them. That is outside the crash model, and `verify`, which walks every listed frame, reports
+  it. No frame is lost: before recovery cuts or lists anything it checks every listed frame
+  ("Recovery after a crash walks all of `journal.off`" above), which the `journal_recovery`
+  fuzz target asserts on every input. A checksum on each entry is a format change: the next
+  `FORMAT` (planned as 2, M6), together with a frame header that carries the frame's sequence
+  number and the previous frame's CRC. *Target: M6. Found: M1 fuzzing; final review,
+  question 7.*
 - **A zeroed `journal.off` entry deep in the chain** (three or more links before the end) is
   outside the crash model: recovery checks the last two links, and `verify` finds the rest.
   *Target: M6 (the next `FORMAT`'s checksums). Found: M1 fuzzing review.*
@@ -204,7 +236,14 @@ left).
   Task 5 review.*
 - **`{"file": "<path>"}` content is read by whoever serves the request.** That is the caller
   for the CLI and the stdio MCP server; a network server must refuse such content, and a client
-  must turn it into bytes before the request leaves. *Target: M10. Found: M1 Task 4b.*
+  must turn it into bytes before the request leaves. Through MCP a relative path, and a path
+  that is the server's own stdin or stdout, is refused; a FIFO or another special file at an
+  absolute path still blocks the single-threaded session when it is read. *Target: M10 (M1.6
+  for the special files). Found: M1 Task 4b.*
+- **Four error codes are not raised yet.** `E_REF_NOT_FOUND` (no operation looks a ref up by
+  name), `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` (tokens, `policy.toml` and gc's
+  maintenance lease come later) are in the schema, so that an agent can match them before any
+  operation raises them. *Documented. Found: the 2026-10-16 comparison; M1.5 Task 9 review.*
 
 ## Git import and export
 
@@ -231,6 +270,11 @@ left).
 - **How a store path resolves.** A `..` after an existing file is taken lexically, and a
   dangling symlink is followed (both documented on the resolver). *Unscheduled. Found: M1
   Task 3.*
+- **A store is found by `--repo` or `SWARMOPS_REPO`, and nothing else.** There is no default
+  store location (`init` needs its directory; `~/.local/state/swarmops/repos/<name>/` is only the
+  convention the README follows) and no upward search for a `.swarmws` directory. *Target: M5
+  (the `.swarmws` search, with workspaces); a default location is unscheduled. Found: M1 Task 5;
+  umbrella spec §4; M1.5 final review.*
 - **No migration between pre-release formats.** A store made before a format change may be
   refused afterwards and need creating again; it happened once during M1. *Documented (the
   versioning policy, before 1.0).*
@@ -240,7 +284,7 @@ left).
 - **Part of each lock pass through the binary is unexplained.** In the quiet-window run the lock
   passed every 8.27 ms at store level (about two raw `fdatasync`s, which is what a transaction
   makes) and every 13.75 ms through the binary; the difference appears only with the commits'
-  own object writes on the same filesystem. *Target: the M1.5/M1.6 measurement (docs/perf.md),
+  own object writes on the same filesystem. *Target: M1.6 (docs/perf.md),
   then M2. Found: M1 Task 7b.*
 - **Commit-path costs.** Each blob is hashed twice (for its id, then when stored); reading one
   field of a changeset's index record reads all five index files; every commit's
@@ -256,21 +300,45 @@ left).
 
 These do not change what SwarmOps does, only how well the tests can see it.
 
-- **Shared test support and the fault-injection doubles.** Three crates share test support
-  through `#[path]` includes, and `CrashAtFs` compiles into the store crate even without the
-  `test-hooks` feature (its environment hooks are gated; a release build ignores them).
-  *Target: M1.5, Task 6 (a `swarmops-testkit` crate). Found: M1 Task 8; the 2026-10-16
-  comparison.*
-- **The gate lints only the all-features build.** Clippy runs with `--all-features`; the build
-  without features is compiled and tested only by the release `test_hooks` run. *Unscheduled.
-  Found: M1 final fix pass.*
+- **The gate lints the build without features only through `test_hooks`.** Clippy runs over
+  every target with `--all-features`, and without features only for the `test_hooks` target and
+  the library crates it builds; the other targets (unit tests, binaries, benches, the other test
+  files) are linted only with the features on. *Unscheduled. Found: M1 final fix pass; narrowed by
+  the M1.5 final review.*
+- **The journal's, the index's and the repository's crash sweeps recover unchecked.** They run
+  their crashing child under the order checker (`checked(...)` in the store's,
+  `SWARMOPS_TEST_ORDER_CHECK=1` in the repository's) but recover in the parent on the real
+  filesystem (`reopen()`/`open()` in the journal and index sweeps, `LocalRepo::open`/`create` in
+  the repository sweeps), so a rule broken only during recovery would go unnoticed; the sweeps
+  through the binary and the metadata store's own recover under the checker. *Target: M1.6.
+  Found: M1.5 final review.*
 - **Coverage is not measured by the gate.** It was measured once, part-way through M1, for core
   and store only: 94.61 % of lines. *Unscheduled.*
-- **Gaps the reviews found and left.** A `CrashAtFs` off-by-one would go unnoticed (the test
-  crashes only at call 2); the I/O-error sweeps now fail each of a commit's calls once, the
-  object store's links and directory fsyncs included, and check that the commit reports
-  honestly, but the cleanup after a failed link is still not asserted; the CLI's panic path and
-  the journal's adoption path in the crash sweeps are untested; there are no tests yet for a
+- **No test watches what a `RealFs` call does inside.** The order checker judges the order of
+  `FsOps` calls, and the power-loss images are built from them, each call taken as `FsOps`
+  documents it. That `atomic_replace` syncs its temp file before the rename and the directory
+  after it, that `append_durable`, `truncate` and `write_durable_temp` sync, that
+  `rename_durable` syncs the directory, and that `sync_data` and `fsync_dir` flush are read in
+  `fs_ops.rs`, not tested: a `RealFs` that dropped one of those syncs would pass every gate. The
+  tracer of `bench/compare` (`docs/perf.md`) counts a metadata commit's sync calls by file, but
+  `just check` does not run it. *Unscheduled. Found: M1.5 final coverage review.*
+- **Golden envelopes cover 14 of the 24 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 14; the other ten are in its `NOT_RAISED` list, each with why the test cannot raise
+  it (the four codes above among them). *Target: M1.6 (`E_IO` first). Found: the 2026-10-16
+  comparison.*
+- **A test file `tests/all.rs` does not declare is not built.** Where a crate's integration tests
+  are the modules of its `tests/all.rs` (`autotests = false`: core, api, store, repo and the
+  CLI), nothing fails when a new file lacks its `mod` line. A test that lists `tests/` against
+  `all.rs` (jj's `no_forgotten_test_files`) would catch it. *Target: M1.6. Found: M1.5 Task 6.*
+- **The eight-committer race can meet `E_BUSY` on a loaded host.**
+  `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
+  what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its
+  sixteen-racer sibling retries its setup commits (`retry_busy`). *Unscheduled. Found: M1.5
+  Task 3.*
+- **Gaps the reviews found and left.** The I/O-error sweeps now fail each of a commit's calls
+  once, the object store's links and directory fsyncs included, and check that the commit
+  reports honestly, but the cleanup after a failed link is still not asserted; the CLI's panic
+  path and the journal's adoption path in the crash sweeps are untested; there are no tests yet for a
   relative symlink target or a `..` after a symlink in the store path, and `verify`'s "read only
   up to its damage" message is not pinned; the CLI tests assume a temporary directory without
   spaces; and one end-to-end test skips when run as root. *Unscheduled. Found: M1 Tasks 1, 2a,

@@ -50,7 +50,12 @@ it. What may change between versions is in
    changes, add the compare link at the bottom, and leave an empty **Unreleased** section.
 5. **Bump the version** in `[workspace.package]` of `Cargo.toml` and in the
    `version = "X.Y.Z"` of every internal dependency in `crates/*/Cargo.toml`; let `cargo check`
-   update `Cargo.lock`; run `just check` again. Commit: `chore: release X.Y.Z`.
+   update `Cargo.lock`. The two other workspaces' lockfiles record the path crates' version
+   too and fail `--locked` until they are updated:
+   `cargo update --manifest-path fuzz/Cargo.toml -p swarmops-core -p swarmops-store`, and the
+   same with `--manifest-path bench/compare/Cargo.toml` (`-p` leaves every other pinned entry
+   as it is; `just check` gates only the fuzz lockfile, `just bench-compare` the other). Run
+   `just check` again. Commit: `chore: release X.Y.Z`.
 6. **Tag** that commit with an annotated, signed tag, and push it only once CI for the commit is
    green:
 

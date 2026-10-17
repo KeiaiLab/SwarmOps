@@ -21,10 +21,13 @@
 //! doc-hidden call fjall's own tests use), after which fjall deletes the journals no keyspace
 //! needs (within 10 s, or the settle fails: an unsettled store is not measured). What stays is
 //! the active journal: fjall rotates it only when it passes 64 MB at a flush, and an open
-//! replays it whole, flushed or not. So the flush shrinks a large store but not its open time,
-//! and a small store keeps its whole journal beside the new tables.
-//! `fjall-unflushed` settles with the journal sync alone: the same engine as the bulk load left
-//! it, measured in W3–W5 only, for the record.
+//! replays it whole, flushed or not. So the flush shrinks a large store and saves only the
+//! first open after the load: opening an unflushed store replays every journal, flushes what
+//! the load left in memtables and deletes the sealed journals (2.9 s against 0.55 s at 1M);
+//! every later open replays the same active journal. A small store keeps its whole journal
+//! beside the new tables. `fjall-unflushed` settles with the journal sync alone: the store as
+//! the bulk load left it, measured in W3–W5 only, for the record (W5 sizes it as left; W3 and
+//! W4 see it after its first open settled it).
 
 use std::path::Path;
 use std::thread;

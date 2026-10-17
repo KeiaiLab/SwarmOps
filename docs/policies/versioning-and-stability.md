@@ -21,8 +21,8 @@ to the weakest:
    `FORMAT` it knows; any other, the CLI refuses as `E_NOT_A_REPO`.
 3. **The command-line contract.** One JSON envelope per run on stdout,
    `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}`, with
-   `api` 1; the `E_*` error codes, each with its fixed exit code (0, 1, 2, 4, 5, 6; 3 is
-   reserved for conflicts) and its `retryable` flag; the commands, their flags and the grammar
+   `api` 1; the `E_*` error codes, each with its fixed exit code (1, 2, 4, 5, 6; 0 is success,
+   3 is reserved for conflicts) and its `retryable` flag; the commands, their flags and the grammar
    of their arguments, such as revisions and change lists (operations spec §0, §1); and the
    environment variables `SWARMOPS_REPO` (operations spec §1, umbrella §4), `SWARMOPS_FORMAT`
    (operations spec §0), `SWARMOPS_AGENT` (operations spec §5) and `SWARMOPS_RUN_ID`, which no
@@ -45,8 +45,9 @@ a code's exit code or `retryable` flag; or makes an optional input required.
 
 No compatibility is promised for:
 
-- **The Rust crate APIs**, all six of them. They are internal to the workspace and unpublished;
-  `swarmops-api`'s types are a contract only through their JSON.
+- **The Rust crate APIs**, all seven of them (the six product crates and `swarmops-testkit`).
+  They are internal to the workspace and unpublished; `swarmops-api`'s types are a contract only
+  through their JSON.
 - **Performance.** The spec's targets and the numbers in [docs/perf.md](../perf.md) are goals
   and measurements, not guarantees. A regression is a bug to fix, not a breaking change.
 - **Text meant for reading**: `error.message`, the wording of `hint`, `--human` output and
@@ -79,9 +80,11 @@ No compatibility is promised for:
   `FORMAT` (planned as 2, M6) adds a checksum to each `journal.off` entry and a frame header
   that carries the frame's sequence number and the previous frame's CRC; whichever version
   first changes the layout takes the next number.
-- **A contract change** shows up in a snapshot: `cli__schema_snapshot.snap` holds the schema of
-  every type and the MCP server's tool list has a snapshot of its own, so the gate fails until
-  the snapshot is updated in the same commit. That commit says that it changes the contract, and
-  the changelog records it. A change that breaks the envelope or a response's shape also
-  increments the envelope's `api` number.
+- **A contract change** shows up in a test the gate runs: `all__cli__schema_snapshot.snap` holds
+  the schema of every type, the MCP server's tool list and its discovery result have snapshots
+  of their own, and each error code's exit code and `retryable` flag, which no schema holds,
+  have a row in `spec_row` (`crates/swarmops-api/tests/schema.rs`). The gate fails until the
+  snapshot or the row is updated in the same commit. That commit says that it changes the
+  contract, and the changelog records it. A change that breaks the envelope or a response's
+  shape also increments the envelope's `api` number.
 - **An error code** that is removed is never reused for another meaning.

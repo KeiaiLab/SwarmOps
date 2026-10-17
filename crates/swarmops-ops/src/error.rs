@@ -362,6 +362,8 @@ mod tests {
         maps(io(io::ErrorKind::NotADirectory), op, ErrorCode::Io);
         let mnt = store(StoreError::UnsupportedFs("/mnt/c/store".into()));
         maps(mnt, During::Init(at), ErrorCode::UnsupportedFs);
+        let mnt = store(StoreError::UnsupportedFs("/mnt/c/store".into()));
+        maps(mnt, During::Open(at), ErrorCode::UnsupportedFs);
         maps(
             store(StoreError::RefName("x".into())),
             op,

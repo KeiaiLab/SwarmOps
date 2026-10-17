@@ -1,6 +1,8 @@
 //! Helpers shared by the journal fuzz targets: the canonical frame encoding, and a model of how
-//! the bytes at a frame boundary read that is written from the layout (storage spec §3), not
-//! from the store's parser.
+//! the bytes at a frame boundary read. The model's frame layer (length, CRC, record count) is
+//! written from the layout (storage spec §3), not from the store's parser. Its records are
+//! decoded by the store's own `Record::decode`, which the targets check by re-encoding what it
+//! decodes and by reading back what the store wrote, not by comparing it with the model.
 //!
 //! ```text
 //! frame   = u32le len | u32le crc32(payload) | payload      len = payload bytes, never 0
@@ -53,7 +55,9 @@ pub enum Model {
     Short,
     /// The frame is all there, but its payload does not match its CRC.
     BadCrc,
-    /// An empty payload, or one that matches its CRC but does not decode: never a torn write.
+    /// A header announcing an empty payload (a length of 0), or a payload that matches its
+    /// CRC but does not decode. Listed, either is damage; unlisted, the second is a frame a
+    /// writer wrote, and the first a torn tail (see [`zero_length`]).
     Invalid,
 }
 

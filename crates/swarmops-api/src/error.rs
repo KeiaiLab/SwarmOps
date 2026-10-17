@@ -13,7 +13,7 @@ use thiserror::Error;
 const EXIT_ERROR: i32 = 1;
 /// Exit code 2: the request or the command line is malformed.
 const EXIT_USAGE: i32 = 2;
-/// Exit code 4: retrying the same operation can succeed.
+/// Exit code 4: the operation can succeed when it is run again.
 const EXIT_RETRYABLE: i32 = 4;
 /// Exit code 5: an identity or policy requirement refused the operation.
 const EXIT_AUTH: i32 = 5;
@@ -72,7 +72,8 @@ error_codes! {
     /// The parent changeset is not in the store.
     // Exit 6: a not-found, though the name does not say so.
     UnknownParent => "E_UNKNOWN_PARENT", EXIT_NOT_FOUND, false;
-    /// The ref no longer holds the expected target; `details.actual` holds what it does.
+    /// The ref no longer holds the expected target (or, with `create`, exists at another one);
+    /// `details.actual` holds what it does, `null` when the ref does not exist.
     CasMismatch => "E_CAS_MISMATCH", EXIT_RETRYABLE, true;
     /// No ref by that name.
     RefNotFound => "E_REF_NOT_FOUND", EXIT_NOT_FOUND, false;
@@ -116,7 +117,9 @@ impl ErrorCode {
         self.row().1
     }
 
-    /// Whether the same operation can succeed when it is retried unchanged.
+    /// Whether the operation can succeed when it is run again: as it is after a transient
+    /// failure, or, after a lost compare-and-swap, with what the error names re-read (the
+    /// message says how; the `hint` reads it).
     pub fn retryable(&self) -> bool {
         self.row().2
     }
@@ -134,7 +137,9 @@ pub struct OpError {
     pub code: String,
     /// What went wrong.
     pub message: String,
-    /// Whether the same operation can succeed when it is retried unchanged.
+    /// Whether the operation can succeed when it is run again: as it is after a transient
+    /// failure, or, after a lost compare-and-swap, with what the error names re-read (the
+    /// message says how; the `hint` reads it).
     pub retryable: bool,
     /// The exit code of the CLI.
     pub exit: i32,

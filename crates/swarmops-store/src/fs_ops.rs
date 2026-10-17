@@ -34,6 +34,27 @@ use std::sync::Arc;
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Opens `path` read-only if it is a regular file, a symlink to one included; anything else
+/// is refused with `InvalidData` before it is opened. No store file is a FIFO, a device or a
+/// socket, and opening a FIFO would block until something opened it for writing.
+pub(crate) fn open_regular(path: impl AsRef<Path>) -> io::Result<File> {
+    let path = path.as_ref();
+    if !fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    File::open(path)
+}
+
+/// The bytes of the regular file at `path`, opened as [`open_regular`] opens it.
+pub(crate) fn read_regular(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    io::Read::read_to_end(&mut open_regular(path)?, &mut bytes)?;
+    Ok(bytes)
+}
+
 /// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_CRASH_AT=<k>` set
 /// to a positive k, the filesystem a store opens on by default aborts the process on its k-th
 /// call (`CrashAtFs`; see [`HookedFs::from_env`]).
@@ -94,7 +115,9 @@ pub trait FsOps: Send + Sync {
     /// Flushes directory `p` to stable storage, making the entries created in it durable.
     fn fsync_dir(&self, p: &Path) -> io::Result<()>;
 
-    /// The whole content of file `p`, or `None` if it does not exist.
+    /// The whole content of file `p`, or `None` if it does not exist. A `p` that is not a
+    /// regular file (a FIFO, a device, a socket, a directory) is `InvalidData`, refused before
+    /// it is opened.
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>>;
 
     /// Whether `p` exists.
@@ -169,7 +192,7 @@ impl FsOps for RealFs {
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        match fs::read(p) {
+        match read_regular(p) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -813,6 +836,36 @@ impl<F: FsOps> FsOps for FailAtFs<F> {
 #[cfg(all(test, feature = "test-hooks"))]
 mod tests {
     use super::*;
+
+    /// A store file is a regular file: a device or a directory where one is expected is refused
+    /// before it is opened (a FIFO would block the open), a symlink to a regular file is
+    /// followed, and a missing file is still `NotFound`.
+    #[test]
+    #[cfg(unix)]
+    fn only_regular_files_are_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        fs::write(&file, b"bytes").unwrap();
+        assert_eq!(read_regular(&file).unwrap(), b"bytes");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert_eq!(read_regular(&link).unwrap(), b"bytes");
+        let null = dir.path().join("null");
+        std::os::unix::fs::symlink("/dev/null", &null).unwrap();
+        for (path, what) in [
+            (null, "a symlink to a device"),
+            (dir.path().to_path_buf(), "a directory"),
+        ] {
+            let e = open_regular(&path).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{what}: {e}");
+            assert!(
+                e.to_string().ends_with("is not a regular file"),
+                "{what}: {e}"
+            );
+        }
+        let e = read_regular(dir.path().join("missing")).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+    }
 
     #[test]
     fn fail_at_specs_parse_as_documented() {

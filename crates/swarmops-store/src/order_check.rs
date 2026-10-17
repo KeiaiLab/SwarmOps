@@ -40,7 +40,10 @@
 //! - **R7, `FORMAT`.** A store's `FORMAT` file, the mark that the store is complete, is linked
 //!   only from synced data, and only once the rest of the store is durable: no entry under the
 //!   store root (or the root's own) waits for its directory's fsync, `objects/tmp/` and the
-//!   staging `meta.tmp/` aside, and no file there holds data not synced.
+//!   staging `meta.tmp/` aside, and no file there holds data not synced. R7 judges durability,
+//!   not completeness: it does not check that `meta/`, `REPO` and the fan-out directories exist.
+//!   The pinned call sequence of `LocalRepo::create` and the create sweeps' oracle hold that
+//!   they are made before `FORMAT`.
 //!
 //! # What it knows
 //!
@@ -53,6 +56,12 @@
 //! that took effect leaves its new name waiting for a directory fsync. It reads the files with
 //! `std::fs`, never through the [`FsOps`] it wraps, so that it changes no call count, and it
 //! holds no lock while a call runs, so that calls made at once stay at once.
+//!
+//! It judges the order of the calls, and takes each at what [`FsOps`] documents for it, not at
+//! what `RealFs` does inside it: that `atomic_replace` syncs its temp file before the rename and
+//! the directory after it, that `append_durable`, `truncate` and `write_durable_temp` sync, that
+//! `rename_durable` syncs the directory, and that `sync_data` and `fsync_dir` flush are read in
+//! `fs_ops.rs`, not tested.
 
 use std::collections::HashMap;
 use std::fs::{self, File};
@@ -1127,6 +1136,11 @@ mod tests {
         assert_breaks("R3", || ckpt_at(end));
         fs.fsync_dir(&meta.join("refs")).unwrap();
         ckpt_at(end);
+        // Synced, then written again: not synced since it last changed.
+        fs.append(&meta.join("idx/ids.col"), &[0; 32]).unwrap();
+        assert_breaks("R3", || ckpt_at(end));
+        fs.sync_data(&meta.join("idx/ids.col")).unwrap();
+        ckpt_at(end);
         // A failed index sync leaves records not durable, whatever later syncs say.
         let fs = OrderCheckFs::new(eio_at(2));
         let ids = meta.join("idx/ids.col");
@@ -1195,6 +1209,13 @@ mod tests {
         fs.append(&root.join("meta/sorted/ids.key.tmp"), &[0; 32])
             .unwrap();
         assert_breaks("R6", || rename(&fs, "ids.key"));
+        // The index synced, then written again: not synced since it last changed (R4), even
+        // with the temp synced (R6 kept).
+        fs.sync_data(&root.join("meta/sorted/ids.key.tmp")).unwrap();
+        fs.append(&root.join("meta/idx/ids.col"), &[0; 32]).unwrap();
+        assert_breaks("R4", || rename(&fs, "ids.key"));
+        fs.sync_data(&root.join("meta/idx/ids.col")).unwrap();
+        rename(&fs, "ids.key");
     }
 
     #[test]
@@ -1224,11 +1245,17 @@ mod tests {
         let staged = root.join("meta.tmp/meta");
         let fs = OrderCheckFs::new(RealFs);
         fs.create_dir_all(&staged.join("idx")).unwrap();
-        fs.append(&staged.join("idx/ids.col"), &[]).unwrap();
+        fs.append(&staged.join("idx/ids.col"), &[0; 8]).unwrap();
+        fs.sync_data(&staged.join("idx/ids.col")).unwrap();
         let to = root.join("staged");
         assert_breaks("R6", || fs.rename_durable(&staged, &to).unwrap());
+        fs.fsync_dir(&staged).unwrap(); // `idx` is durable, the entry `ids.col` in it is not
+        assert_breaks("R6", || fs.rename_durable(&staged, &to).unwrap());
         fs.fsync_dir(&staged.join("idx")).unwrap();
-        fs.fsync_dir(&staged).unwrap();
+        // Every entry durable, the file written since its sync.
+        fs.append(&staged.join("idx/ids.col"), &[0; 8]).unwrap();
+        assert_breaks("R6", || fs.rename_durable(&staged, &to).unwrap());
+        fs.sync_data(&staged.join("idx/ids.col")).unwrap();
         fs.rename_durable(&staged, &to).unwrap();
     }
 

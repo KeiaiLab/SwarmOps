@@ -7,8 +7,8 @@
 //! on the loaded host that docs/perf.md "M1 (CLI level)" records. `just check-slow` runs it
 //! unoptimized (one contention test at a time: `.config/nextest.toml`); `just perf` runs it
 //! optimized and prints only its summary, as docs/perf.md cites it: `cargo nextest run
-//! --release -p swarmops-cli --run-ignored all --test all -E 'test(/^contention::/)'
-//! --no-capture`.
+//! --locked --release -p swarmops-cli --run-ignored ignored-only --test all -E
+//! 'test(/^contention::/)' --no-capture`.
 //! [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of the harness.
 //!
 //! The parent `init`s a store in a fresh temporary directory under `SWARMOPS_BENCH_DIR`

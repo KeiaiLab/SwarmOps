@@ -43,11 +43,13 @@
 //!
 //! [`MetaStore::read`] takes no lock and writes nothing. It reads `journal.ckpt`, opens the
 //! index, reads the frames past the checkpoint (which vouch for the index's records past it,
-//! as [`Index::open`] says) and every ref file, and reads those frames again: if new ones
-//! have appeared, a ref file may already show one of them, so it reads the files and the
-//! frames again. The frames past the checkpoint (usually 0 to 31, and more only
-//! after a crash) then apply on top in memory: their changesets the index handle does not
-//! count, and their ref moves the ref files do not show yet.
+//! as [`Index::open`] says) and every ref file, and reads those frames again: if they are not
+//! the frames it read before (new ones have appeared, or the next writer's frame has taken the
+//! place of one that a failed sync or rewrite cut back, storage §2 rule 3 (a)/(c)), a ref file
+//! may already show a move of a frame it did not read, so it reads the files and the frames
+//! again. The frames past the checkpoint (usually 0 to 31, and more only after a crash) then
+//! apply on top in memory: their changesets the index handle does not count, and their ref
+//! moves the ref files do not show yet.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -274,10 +276,12 @@ impl MetaStore {
             })?;
         let files = loop {
             let files = refs::read_all(&self.layout, &*self.fs)?;
-            // A writer replaces ref files only after its frame is whole in the journal, so
-            // if no new frame has appeared, the files show none past `frames`.
+            // A writer replaces ref files only after its frame is whole in the journal, so if the
+            // frames are the ones read before (none new, and none that a failed sync or rewrite cut
+            // back, storage §2 rule 3 (a)/(c), and the next writer replaced at its seq), the files
+            // show none past `frames`.
             let again = self.journal.tail_frames_from(ckpt)?;
-            if again.len() == frames.len() {
+            if again == frames {
                 break files;
             }
             frames = again;
@@ -691,7 +695,9 @@ impl MetaWrite<'_> {
         let journal = &self.store.journal;
         if compact {
             let sorted_count = self.index.compact()?;
-            journal.append_frame(&[Record::Compacted { sorted_count }])?;
+            journal
+                .append_frame(&[Record::Compacted { sorted_count }])
+                .map_err(marker_error)?;
         }
         journal.set_ckpt(journal.len())?;
         info.checkpointed = true;
@@ -752,6 +758,24 @@ impl fmt::Debug for MetaWrite<'_> {
             .field("uncheckpointed", &self.uncheckpointed)
             .field("records_queued", &self.records.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// The error of a failed append of the advisory `Compacted` marker, once the compaction is
+/// done: a marker cut back off the journal is told as the plain I/O error it is.
+/// [`StoreError::NotCommitted`] would say that the transaction did not commit, when it did (or
+/// queued nothing), and inside [`StoreError::PostCommit`] it would say both.
+fn marker_error(e: StoreError) -> StoreError {
+    match e {
+        StoreError::NotCommitted { source } => io::Error::new(
+            source.kind(),
+            format!(
+                "appending the Compacted marker failed, and it was cut back off the journal \
+                 (the compaction itself is done): {source}"
+            ),
+        )
+        .into(),
+        other => other,
     }
 }
 

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Number, Value, json};
 use swarmops_api::ErrorCode;
 use swarmops_core::{ObjectKind, hash_object};
-use swarmops_store::Layout;
+use swarmops_store::{Layout, ORDER_CHECK_ENV};
 use tempfile::TempDir;
 
 use crate::support;
@@ -35,8 +35,8 @@ const AGENT: &str = "agent/worker-17";
 /// The keys whose numbers are times or durations, replaced by `[<key>]` in snapshots.
 const TIME_KEYS: &[&str] = &["elapsed_ms", "created_at", "secs"];
 
-/// A store path under `/mnt/`, where WSL mounts Windows drives: `init` refuses it by its name,
-/// so it need not exist, and nothing is made there.
+/// A store path under `/mnt/`, where WSL mounts Windows drives: `init` and every open refuse it
+/// by its name, so it need not exist, and nothing is made there.
 const MNT_STORE: &str = "/mnt/swarmops-cli-test/store";
 
 /// One `--human` run: the variables set, the arguments, the exit code it must give.
@@ -449,6 +449,71 @@ fn not_a_repo_exits_6() {
     assert!(!fs::exists(&missing).unwrap(), "nothing was created");
 
     insta::assert_json_snapshot!(s.transcript());
+}
+
+/// A store that leads under `/mnt/` is refused on open as `init` refuses it ([`MNT_STORE`]):
+/// `info` on a path there, and on a symlink that leads there, is `E_UNSUPPORTED_FS` with the
+/// `/mnt` path in `details.path`, before anything is read, and nothing is made there.
+#[test]
+fn a_store_that_leads_under_mnt_is_refused_on_open() {
+    let mut s = Session::new();
+    let direct = s.run(&["--repo", MNT_STORE, "info"]);
+    assert_eq!((direct.exit, direct.code()), (1, "E_UNSUPPORTED_FS"));
+    assert_eq!(direct["error"]["details"]["path"], MNT_STORE);
+    let link = format!("{}/link", s.tmp());
+    std::os::unix::fs::symlink(MNT_STORE, &link).unwrap();
+    let linked = s.run(&["--repo", &link, "info"]);
+    assert_eq!((linked.exit, linked.code()), (1, "E_UNSUPPORTED_FS"));
+    assert_eq!(linked["error"]["details"]["path"], MNT_STORE);
+    assert!(
+        !fs::exists(MNT_STORE).unwrap_or(false),
+        "nothing was made under /mnt"
+    );
+}
+
+/// `commit --changes -` has read the change list from stdin, so a change whose client file is
+/// this process's stdin would read what is left of it (nothing from a pipe, the list itself
+/// from a redirected file) and commit that: it is refused (`E_INVALID_ARG`, exit 2) and nothing
+/// is committed. With the list in a file, `/dev/stdin` content commits the bytes piped in.
+#[test]
+fn a_change_list_from_stdin_cannot_name_stdin_as_a_client_file() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let list = json!([
+        {"path": "a.txt", "op": "put", "content": {"inline": "a\n"}},
+        {"path": "piped.txt", "op": "put", "content": {"file": "/dev/stdin"}},
+    ])
+    .to_string();
+    let commit = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "x",
+        "--changes",
+    ];
+    let refused = s.run_stdin(&list, &[&commit[..], &["-"]].concat());
+    assert_eq!((refused.exit, refused.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"changes": "-", "index": 1, "path": "piped.txt", "file": "/dev/stdin"})
+    );
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains("stdin"), "{message}");
+    assert_eq!(
+        s.run(&["--repo", &store, "info"])["result"]["changesets"],
+        0
+    );
+
+    let file = s.file("changes.json", &list);
+    let committed = s.run_stdin("piped bytes\n", &[&commit[..], &[file.as_str()]].concat());
+    assert_eq!(committed.exit, 0, "{}", committed.json);
+    let c1 = s.name_at(&committed, "/result/changeset", "c1");
+    let piped = s.run(&["--repo", &store, "cat", &format!("{c1}:piped.txt")]);
+    assert_eq!(piped["result"]["content"], "piped bytes\n");
 }
 
 #[test]
@@ -903,12 +968,17 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
 // Running the binary.
 // ---------------------------------------------------------------------------------------------
 
-/// The binary, with none of this process's `SWARMOPS_*` variables set.
+/// The binary, with none of this process's `SWARMOPS_*` variables, the order check on
+/// (`SWARMOPS_TEST_ORDER_CHECK=1`; a test's own `env` still wins), and a deadline
+/// (`support::RUN_TIMEOUT`): `output()` kills and reaps a run still going then, whose status
+/// has no exit code.
 fn swarmops() -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_swarmops"));
     for var in support::swarmops_vars() {
         command.env_remove(var);
     }
+    command.env(ORDER_CHECK_ENV, "1");
+    command.timeout(support::RUN_TIMEOUT);
     command
 }
 
@@ -1058,8 +1128,18 @@ impl Session {
             command.write_stdin(stdin);
         }
         let output = command.output().expect("run swarmops");
+        let exit = output.status.code().unwrap_or_else(|| {
+            panic!(
+                "swarmops {args:?} ended {} (past its {:?} deadline, so killed, or by a signal)\n\
+                 --- stdout ---\n{}--- stderr ---\n{}",
+                output.status,
+                support::RUN_TIMEOUT,
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr),
+            )
+        });
         Output {
-            exit: output.status.code().expect("swarmops exited, not killed"),
+            exit,
             stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
             stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
         }

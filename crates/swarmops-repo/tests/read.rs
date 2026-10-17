@@ -18,7 +18,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, EntryKind, ObjectId, ObjectKind, hash_object};
 use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::CRASH_AT_ENV;
+use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
 use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
@@ -517,6 +517,35 @@ fn open_requires_the_repo_file() {
 }
 
 #[test]
+fn a_huge_format_file_is_not_a_store_and_is_not_read_whole() {
+    // FORMAT holds 17 bytes; one of any other length names no layout this build reads. A
+    // crafted one of huge length (a sparse file, which costs no disk) is refused by its length,
+    // before any of it is read, with the Format error a foreign FORMAT gets (E_NOT_A_REPO).
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    let format = root.join("FORMAT");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&format)
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let started = std::time::Instant::now();
+    match LocalRepo::open(&root) {
+        Err(RepoError::Store(StoreError::Format(what))) => assert_eq!(
+            what,
+            format!("{root}/FORMAT is 1073741824 bytes long, not a store layout this build reads")
+        ),
+        other => panic!("expected Format, got {:?}", other.map(|r| r.info())),
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "read whole: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn create_refuses_mnt_paths_before_touching_them() {
     // WSL mounts Windows drives under /mnt/ (drvfs): no store may live there. The check is
     // made before anything is created, so this test leaves no trace on the drive.
@@ -604,6 +633,34 @@ fn create_follows_symlinks_below_a_missing_directory_before_touching_anything() 
         Err(RepoError::Store(StoreError::Io(_))) => {}
         other => panic!("expected an I/O error, got {:?}", other.map(|r| r.info())),
     }
+}
+
+#[test]
+fn open_refuses_a_path_that_leads_under_mnt() {
+    // A store copied, moved or linked under /mnt/ (drvfs, whose locking and sync semantics the
+    // refusal keeps out) is refused on open as on create: by where the path leads, before
+    // FORMAT is read, so nothing under /mnt/ need exist, and nothing is made there.
+    let before = entries("/mnt");
+    let dir = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/mnt/swarmops-test-nowhere", base.join("dangling")).unwrap();
+    let linked = base.join("dangling/x");
+    for (store, leads_to) in [
+        ("/mnt/c/swarmops-test-store", "/mnt/c/swarmops-test-store"),
+        (linked.as_str(), "/mnt/swarmops-test-nowhere/x"),
+    ] {
+        match LocalRepo::open(Utf8Path::new(store)) {
+            Err(RepoError::Store(StoreError::UnsupportedFs(refused))) => {
+                assert_eq!(refused, leads_to);
+            }
+            other => panic!(
+                "{store}: expected UnsupportedFs, got {:?}",
+                other.map(|r| r.info())
+            ),
+        }
+    }
+    assert_eq!(entries("/mnt"), before, "nothing was created under /mnt");
+    assert!(!Path::new("/mnt/swarmops-test-nowhere").exists());
 }
 
 #[test]
@@ -735,7 +792,8 @@ fn create_crashing_at(k: u64, total: u64) {
     let child = run(
         this_test(&test_name!("create_resumes_after_a_crash_at_any_call"))
             .env(CHILD_ROOT, &root)
-            .env(CRASH_AT_ENV, k.to_string()),
+            .env(CRASH_AT_ENV, k.to_string())
+            .env(ORDER_CHECK_ENV, "1"),
     );
     let finished = child.status.success();
     assert_eq!(

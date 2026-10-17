@@ -31,7 +31,7 @@ use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, thi
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
 use swarmops_testkit::store::temp_dir as new_root;
-use swarmops_testkit::store::{append_bytes, file_len};
+use swarmops_testkit::store::{append_bytes, file_len, set_len};
 use swarmops_testkit::test_name;
 use tempfile::TempDir;
 
@@ -524,6 +524,38 @@ fn ref_files_lists_each_ref_file_even_when_one_is_damaged() {
         Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::InvalidData),
         other => panic!("expected InvalidData, got {other:?}"),
     }
+}
+
+#[test]
+fn a_huge_ref_file_is_not_a_ref_file_and_is_not_read_whole() {
+    // A ref file holds at most 86 bytes (64 hex digits, a line break, up to 20 decimal digits, a
+    // line break): a crafted one of huge length (a sparse file, which costs no disk) is refused
+    // by its length, before any of it is read, as the InvalidData every damaged ref file is.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    cas(&store, "main", None, Some(1));
+    let main = Layout::new(&root).meta_path("refs/main");
+    OpenOptions::new()
+        .write(true)
+        .open(&main)
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let started = Instant::now();
+    let got = store.read().map(|_| ());
+    let Err(StoreError::Io(e)) = &got else {
+        panic!("a 1 GiB ref file: expected InvalidData, got {got:?}");
+    };
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+    assert_eq!(
+        e.to_string(),
+        format!("{main} is 1073741824 bytes long, not a ref file")
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "read whole: {:?}",
+        started.elapsed()
+    );
 }
 
 /// A root changeset whose id starts with `prefix`, its other bytes `fill`.
@@ -1271,6 +1303,32 @@ fn snapshots_and_writes_vouch_for_the_index_with_the_frames_they_read() {
 }
 
 #[test]
+fn a_fifo_where_a_store_file_should_be_is_refused_not_opened() {
+    // `tar`, `cp -R` and `rsync -a` recreate a FIFO, and opening one blocks until something
+    // opens it for writing: a store file must be known to be a regular file before it is
+    // opened. The open runs on a thread with a deadline, so that a regression fails instead of
+    // hanging the test.
+    let (_dir, root, store) = new_store();
+    drop(store);
+    let log = Layout::new(&root).journal_log();
+    fs::remove_file(&log).unwrap();
+    assert!(Command::new("mkfifo").arg(&log).status().unwrap().success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let opened_root = root.clone();
+    thread::spawn(move || {
+        let _ = tx.send(MetaStore::open(&opened_root).map(drop));
+    });
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Err(StoreError::Io(e))) => {
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+            assert!(e.to_string().ends_with("is not a regular file"), "{e}");
+        }
+        Ok(other) => panic!("a FIFO at journal.log: expected InvalidData, got {other:?}"),
+        Err(timeout) => panic!("opening the store blocked on the FIFO at journal.log: {timeout}"),
+    }
+}
+
+#[test]
 fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_unreadable_one() {
     // Past the checkpoint the journal vouches for the index's records: a power loss zeroed
     // record 1's generation, so it is not counted. A checkpoint that does not hold a u64le is
@@ -1296,9 +1354,10 @@ fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_un
     );
 
     fs::remove_file(layout.journal_ckpt()).unwrap();
-    fs::create_dir(layout.journal_ckpt()).unwrap(); // a read of it fails with EISDIR
+    // A symlink to itself: a read of it fails with ELOOP.
+    std::os::unix::fs::symlink("journal.ckpt", layout.journal_ckpt()).unwrap();
     match Index::open(&layout, Arc::new(RealFs)) {
-        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::IsADirectory, "{e}"),
+        Err(StoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}"),
         other => panic!("an unreadable checkpoint: expected its I/O error, got {other:?}"),
     }
 }
@@ -1895,6 +1954,52 @@ fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_sort
     }
 }
 
+/// A snapshot whose index opened before a failed index sync's cut, and counted records the cut
+/// took, fails with an I/O error (`UnexpectedEof`) while it builds its overlay, never with
+/// wrong data ([`Index::truncate_to`], storage spec §3); a snapshot taken after the cut reads
+/// the index as cut, the journal's frames over it.
+#[test]
+fn a_snapshot_whose_index_a_writer_cuts_after_it_opened_fails_with_an_io_error() {
+    let (_dir, root) = new_root();
+    let (writer, fail) = failing_store(&root);
+    for n in 0..3 {
+        insert(&writer, &[chained(n)]);
+    }
+    writer.flush().unwrap(); // the checkpoint past records 0..=2
+    for n in 3..5 {
+        insert(&writer, &[chained(n)]); // records 3 and 4, past the checkpoint
+    }
+    assert_eq!(chained_lens(&root), chained_want(5));
+    fail.set("sync_data ids.col");
+    // The reader's first read of main's file comes once its index has opened and counted all
+    // five records, right before it builds its overlay: the writer's flush cuts the index back
+    // to the three records the checkpoint passed.
+    let (fs, _calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "read main".to_owned(),
+        When::Before,
+        Box::new(move || {
+            let cut = writer.flush();
+            assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+
+    match reader.read().map(drop) {
+        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}"),
+        other => panic!("expected an I/O error from the stale index, got {other:?}"),
+    }
+    assert_eq!(chained_lens(&root), chained_want(3), "cut");
+
+    // A new snapshot reads the index as cut, and the journal's two frames over it.
+    let read = reader.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), 5);
+    for n in 0..5 {
+        let got = read.changeset(id(n)).unwrap();
+        assert_eq!(got, Some(chained_stored(n)), "changeset {n}");
+    }
+}
+
 /// How many frames `journal.off` at `root` lists.
 fn listed(root: &Utf8Path) -> u64 {
     file_len(Layout::new(root).journal_off()) / 8
@@ -2387,6 +2492,12 @@ fn fail_at_every_store_call_reports_honestly() {
                 let outcome = swept(&store, n);
                 drop(store);
                 assert!(k <= calls || outcome.is_ok(), "{what}: {outcome:?}");
+                if let Err(e @ StoreError::PostCommit { source, .. }) = &outcome {
+                    assert!(
+                        !matches!(**source, StoreError::NotCommitted { .. }),
+                        "{what}: a step after the commit point reports: {e}"
+                    );
+                }
                 post_commit += usize::from(matches!(outcome, Err(StoreError::PostCommit { .. })));
                 assert_recovers(&root, n, &[(n, said(&outcome))], &what);
             }
@@ -2997,6 +3108,90 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
     let log = read.reflog("main", 10).unwrap();
     let moves: Vec<_> = log.iter().map(|entry| (entry.old, entry.new)).collect();
     assert_eq!(moves, [(Some(id(1)), Some(id(2))), (None, Some(id(1)))]);
+}
+
+/// A frame a lock-free reader holds can be cut back off the journal (a failed sync, storage
+/// spec §2 rule 3 (a)) and the next writer's frame can land at its seq and offset: the count of
+/// the frames past the checkpoint holds still, but the frames do not. The snapshot must read the
+/// ref files and the frames again, or it lays the cut frame's records over ref files that
+/// already show the replacement: a ref at a target that never committed, at a version that
+/// never existed.
+#[test]
+fn a_snapshot_reads_again_when_a_frame_it_read_was_cut_and_replaced() {
+    let (_dir, reader, calls) = snapshot_over_a_cut_and_replaced_frame(&[
+        changeset_record(&cs(2, &[1]), 2),
+        ref_move("main", Some(1), Some(2), ACTOR, 0),
+    ]);
+    let read = reader.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(3, 2)));
+    assert!(
+        read.changeset(id(3)).unwrap().is_some(),
+        "main's target is in the snapshot"
+    );
+    assert_eq!(
+        read.changeset(id(2)).unwrap(),
+        None,
+        "the cut frame's changeset is not"
+    );
+    assert_eq!(read.count_changesets().unwrap(), 2);
+    assert_eq!(
+        calls().iter().filter(|call| *call == "read main").count(),
+        2,
+        "the frames changed, so the ref files were read again"
+    );
+}
+
+/// The same with a cut frame that moved no ref: the snapshot would show the replacement's move
+/// (the ref file has it) without the replacement's changeset, a dangling ref.
+#[test]
+fn a_snapshot_reads_again_when_a_frame_it_read_was_cut_and_replaced_with_a_move() {
+    let (_dir, reader, _calls) =
+        snapshot_over_a_cut_and_replaced_frame(&[changeset_record(&cs(2, &[1]), 2)]);
+    let read = reader.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(3, 2)));
+    assert!(
+        read.changeset(id(3)).unwrap().is_some(),
+        "main's target is in the snapshot"
+    );
+    assert_eq!(read.changeset(id(2)).unwrap(), None);
+    assert_eq!(read.count_changesets().unwrap(), 2);
+}
+
+/// A reader of a store holding changeset 1 and `main` at it, whose snapshot reads frame F
+/// (`cut`, appended and then unlisted: the state on disk between a writer's append of the frame
+/// and its sync) among the frames past the checkpoint. Right before the reader's first read of
+/// main's file, that sync fails and F is cut back (storage spec §2 rule 3 (a)), and the next
+/// writer commits changeset 3 on 1 and moves `main` 1 -> 3: a frame at F's seq and offset. The
+/// function returned gives the reader's calls.
+fn snapshot_over_a_cut_and_replaced_frame(
+    cut: &[Record],
+) -> (TempDir, MetaStore, impl Fn() -> Vec<String> + use<>) {
+    let (dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    cas(&store, "main", None, Some(1));
+    drop(store);
+    let layout = Layout::new(&root);
+    let cut_at = append_unmaterialized(&root, cut).offset;
+    set_len(layout.journal_off(), file_len(layout.journal_off()) - 8);
+    let writer_root = root.clone();
+    let log = layout.journal_log();
+    let (fs, calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "read main".to_owned(),
+        When::Before,
+        Box::new(move || {
+            set_len(&log, cut_at);
+            let writer = open_checked(&writer_root).unwrap();
+            let mut write = writer.write().unwrap();
+            write.insert_changeset(cs(3, &[1])).unwrap();
+            write
+                .cas_ref("main", Some(id(1)), Some(id(3)), ACTOR)
+                .unwrap();
+            write.commit().unwrap();
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+    (dir, reader, calls)
 }
 
 /// How many changesets [`snapshots_stay_consistent_across_a_compaction`] seeds its store with,

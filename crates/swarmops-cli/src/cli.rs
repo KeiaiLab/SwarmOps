@@ -2,12 +2,15 @@
 //! operation's name each subcommand stands for in the envelope.
 
 use std::ffi::OsString;
+use std::path::Path;
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use swarmops_api::{
     DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT,
 };
+
+use crate::output::printable;
 
 /// The envelope's `op` for a command line that names no operation.
 pub const NO_OP: &str = "swarmops";
@@ -22,9 +25,10 @@ const EXPECT_HELP: &str = "The changeset the ref holds now: a full id, not a ref
 const SET_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
 
 Give the full changeset id you read (from ref list, show, log or a commit's result). A ref \
-name, a relative revision such as main~1 or an id prefix is read from the store when the \
-command runs instead of pinning the id you read: the ref's own name always matches (a deleted \
-ref errors instead), so the compare-and-swap protects nothing, and main~1 on main never matches.
+name or a relative revision such as main~1 is read from the store when the command runs \
+instead of pinning the id you read: the ref's own name always matches (a deleted ref errors \
+instead), so the compare-and-swap protects nothing, and main~1 on main never matches. An id \
+prefix pins the id you read only until another changeset shares it; then it is E_AMBIGUOUS_ID.
 
 After E_CAS_MISMATCH, re-apply your edits to the content at the error's `actual` and commit \
 with --parent <actual>, then retry with --expect <actual>. Do not re-send your old whole-file \
@@ -34,14 +38,16 @@ puts: M1 has no merge, so they would revert the winner's edits to shared files."
 const DELETE_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
 
 Give the full changeset id you read (from ref list, show, log or a commit's result). A ref \
-name, a relative revision such as main~1 or an id prefix is read from the store when the \
-command runs instead of pinning the id you read: the ref's own name always matches (a deleted \
-ref errors instead), so the compare-and-swap protects nothing, and main~1 on main never matches.
+name or a relative revision such as main~1 is read from the store when the command runs \
+instead of pinning the id you read: the ref's own name always matches (a deleted ref errors \
+instead), so the compare-and-swap protects nothing, and main~1 on main never matches. An id \
+prefix pins the id you read only until another changeset shares it; then it is E_AMBIGUOUS_ID.
 
 After E_CAS_MISMATCH, the ref holds the error's `actual`, which someone else moved it to: look \
 at it (swarmops show <actual>) before you delete it with --expect <actual>.";
 
-/// Source control for coding-agent swarms. Every command prints one JSON envelope on stdout.
+/// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
+/// on stdout.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version)]
 pub struct Cli {
@@ -200,7 +206,8 @@ pub enum RefCommand {
         rev: String,
         #[arg(long, value_name = "REV", help = EXPECT_HELP, long_help = SET_EXPECT_LONG_HELP)]
         expect: Option<String>,
-        /// Create the ref; it must not exist.
+        /// Create the ref; if it holds REV already that is a replay (already_applied), at
+        /// another target E_CAS_MISMATCH.
         #[arg(long)]
         create: bool,
     },
@@ -222,10 +229,11 @@ pub enum Parsed {
     Text(clap::Error),
     /// A usage error, with as much of the line as could be read despite it.
     Usage {
-        /// clap's error.
+        /// clap's error, for the line with each control character in it escaped.
         error: clap::Error,
         /// The name the line invokes the program by, which clap's usage lines give: the file
-        /// name of its first word, `so` or `swarmops`. `None` leaves clap's own, `swarmops`.
+        /// name of its first word, `so` or `swarmops`; `swarmops` if that has no UTF-8 file name.
+        /// `None` leaves clap's own, `swarmops`.
         bin: Option<String>,
         /// The subcommands named, outermost first, as far as they could be read.
         path: Vec<String>,
@@ -248,8 +256,17 @@ impl Parsed {
 
 /// Reads the command line `args`, the program's name first.
 pub fn parse(args: &[OsString]) -> Parsed {
-    // Parsing gives `grammar` the name the line invokes the program by, for its usage lines.
+    // Parsing gives `grammar` the name the line invokes the program by, for its usage lines: the
+    // file name of the first word, if it is UTF-8. Without one, clap's subcommand usage lines and
+    // messages name no program (`Usage: ref set …`), so name it `swarmops` here.
     let mut grammar = command();
+    if args
+        .first()
+        .and_then(|first| Path::new(first).file_name()?.to_str())
+        .is_none()
+    {
+        grammar.set_bin_name(grammar.get_name().to_owned());
+    }
     let parsed = grammar
         .try_get_matches_from_mut(args)
         .and_then(|matches| Ok((Cli::from_arg_matches(&matches)?, path(&matches))));
@@ -279,12 +296,35 @@ pub fn parse(args: &[OsString]) -> Parsed {
             );
             settle_format(&mut global, args);
             Parsed::Usage {
-                error,
+                error: shown(args, error),
                 bin: grammar.get_bin_name().map(str::to_owned),
                 path,
                 global,
             }
         }
+    }
+}
+
+/// `error`, which refused the line `args`, as it is to be shown. clap echoes the line's words in
+/// its text, and a newline in one would split that text where `commands::usage` reads it by its
+/// lines and blank lines. So where a word holds a control character, the error of the line with
+/// each such word escaped; `error` itself where none does, or where the escaped line is not
+/// refused alike.
+fn shown(args: &[OsString], error: clap::Error) -> clap::Error {
+    let holds_control = |arg: &OsString| arg.to_string_lossy().chars().any(char::is_control);
+    if !args.iter().any(holds_control) {
+        return error;
+    }
+    let escaped = args.iter().map(|arg| {
+        if holds_control(arg) {
+            OsString::from(printable(&arg.to_string_lossy()))
+        } else {
+            arg.clone()
+        }
+    });
+    match command().try_get_matches_from(escaped) {
+        Err(again) if again.kind() == error.kind() => again,
+        _ => error,
     }
 }
 
@@ -492,6 +532,32 @@ mod tests {
                 panic!("{first}: a usage error");
             };
             assert_eq!(bin.as_deref(), Some(name), "{first}");
+        }
+        // A first word with no UTF-8 file name (empty, the root, or not UTF-8) leaves the program
+        // `swarmops`, in the subcommands' usage lines and messages too.
+        let firsts = [
+            OsString::new(),
+            OsString::from("/"),
+            #[cfg(unix)]
+            std::os::unix::ffi::OsStringExt::from_vec(vec![0xff]),
+        ];
+        for first in firsts {
+            for (rest, shown) in [
+                (&["ref", "set"][..], "Usage: swarmops ref set"),
+                (&["ref"], "'swarmops ref' requires a subcommand"),
+                (&["info", "--frob"], "Usage: swarmops info"),
+            ] {
+                let mut line = args(rest);
+                line[0] = first.clone();
+                let Parsed::Usage { error, bin, .. } = parse(&line) else {
+                    panic!("{first:?} {rest:?}: a usage error");
+                };
+                assert_eq!(bin.as_deref(), Some("swarmops"), "{first:?} {rest:?}");
+                assert!(
+                    error.render().to_string().contains(shown),
+                    "{first:?} {rest:?}"
+                );
+            }
         }
     }
 

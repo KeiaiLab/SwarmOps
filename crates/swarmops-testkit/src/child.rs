@@ -4,8 +4,9 @@
 //! reaped, and fails the test with what it printed. A child is reaped however the test ends:
 //! its handle kills and waits for it when it is dropped, a panic's unwinding included.
 //!
-//! [`Child`] is the one runner of the tests' children: the runs of the binary
-//! ([`crate::cli`]) wait for theirs through it too.
+//! [`Child`] is the testkit's one runner of children: the runs of the binary ([`crate::cli`])
+//! wait for theirs through it too. The contention tests and the MCP tests' server spawn their
+//! children themselves, each with a deadline and a kill and reap on drop of its own.
 
 use std::io::Read;
 use std::process::{self, Command, Output, Stdio};
