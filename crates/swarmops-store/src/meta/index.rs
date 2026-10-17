@@ -148,8 +148,9 @@ impl Index {
     /// journal's frames past its checkpoint (and, only if the index holds none of their
     /// changesets, the frames before it back to its last changeset), and the records past the
     /// checkpoint and the views, which the journal must vouch for to be counted (the journal's
-    /// changesets past the checkpoint, in order, field by field). With no journal, or a damaged
-    /// one, it counts the records by their lengths, and reads the `par.col` entries of those
+    /// changesets past the checkpoint, in order, field by field). With no journal, a damaged
+    /// one, or an index that lacks the last changeset before the checkpoint, it counts the
+    /// records by their lengths, and reads the `par.col` entries of those
     /// past the views instead: [`StoreError::IndexCorrupt`] if they are out of their layout,
     /// which a power loss that zeroed some of them leaves. It repairs nothing, since a
     /// writer may be appending or compacting meanwhile: records that some files lack, or that

@@ -5,10 +5,11 @@
 //! boundary, index files that do not open) is a [`VerifyProblem::MetaCorrupt`], and the rest is
 //! checked without it.
 //!
-//! It reads in this order, so that a commit running meanwhile never looks like damage: the
-//! checkpoint, the changeset index, the ref files, then the journal (whatever the index or a
-//! ref file shows had its frame in the journal before), then the objects (every object a
-//! recorded changeset references was durable before its frame).
+//! It reads in this order, so that a commit running meanwhile never looks like damage (one whose
+//! `journal.off` listing fails meanwhile and is cut back is the exception M1.5 keeps: it reads as
+//! a `JournalCorrupt` problem once): the checkpoint, the changeset index, the ref files, then the
+//! journal (whatever the index or a ref file shows had its frame in the journal before), then the
+//! objects (every object a recorded changeset references was durable before its frame).
 //!
 //! - The metadata. The index's records are compared with the journal's changeset records, place
 //!   by place: a record unlike the journal's at its seq, one the journal does not hold, and a
@@ -19,9 +20,10 @@
 //!   does not vouch for, which a power loss can leave there, is no damage, and the next writer
 //!   replays the journal's in its place. So a record that no frame holds at all, past the
 //!   journal's last changeset (what a writer that went around the journal would leave), is
-//!   reported only if the index counts it: if no changeset frame follows the checkpoint, or the
-//!   sorted views cover it. Otherwise the index does not count it, verify reports nothing, and
-//!   the next writer cuts it.) So are sorted-view
+//!   reported only if the journal reads whole and the index counts it: if no changeset frame
+//!   follows the checkpoint, or the sorted views cover it. Otherwise verify reports nothing for
+//!   it: the index does not count it and the next writer cuts it, or the journal is damaged or
+//!   missing, which verify reports instead.) So are sorted-view
 //!   entries that disagree with the index columns (the advisory `Compacted` frames are never
 //!   consulted); each names its [`MismatchCause`]. A frame the journal's reader finds corrupt is a
 //!   [`VerifyProblem::JournalCorrupt`]: the comparison stops there, and the index's records

@@ -40,7 +40,10 @@
 //! - **R7, `FORMAT`.** A store's `FORMAT` file, the mark that the store is complete, is linked
 //!   only from synced data, and only once the rest of the store is durable: no entry under the
 //!   store root (or the root's own) waits for its directory's fsync, `objects/tmp/` and the
-//!   staging `meta.tmp/` aside, and no file there holds data not synced.
+//!   staging `meta.tmp/` aside, and no file there holds data not synced. R7 judges durability,
+//!   not completeness: it does not check that `meta/`, `REPO` and the fan-out directories exist.
+//!   The pinned call sequence of `LocalRepo::create` and the create sweeps' oracle hold that
+//!   they are made before `FORMAT`.
 //!
 //! # What it knows
 //!
@@ -53,6 +56,12 @@
 //! that took effect leaves its new name waiting for a directory fsync. It reads the files with
 //! `std::fs`, never through the [`FsOps`] it wraps, so that it changes no call count, and it
 //! holds no lock while a call runs, so that calls made at once stay at once.
+//!
+//! It judges the order of the calls, and takes each at what [`FsOps`] documents for it, not at
+//! what `RealFs` does inside it: that `atomic_replace` syncs its temp file before the rename and
+//! the directory after it, that `append_durable`, `truncate` and `write_durable_temp` sync, that
+//! `rename_durable` syncs the directory, and that `sync_data` and `fsync_dir` flush are read in
+//! `fs_ops.rs`, not tested.
 
 use std::collections::HashMap;
 use std::fs::{self, File};

@@ -539,7 +539,11 @@ impl StoreOps for Recording<'_> {
             // A move to the target it expects moves nothing: the ref holds it (a replay) or does
             // not (a mismatch), and nothing is written either way. The store's compare-and-swap
             // would journal the replay as a RefMove frame (two fdatasyncs), though the ref and
-            // its version would stay as they are; reading the ref skips the frame.
+            // its version would stay as they are; reading the ref skips the frame. The read is a
+            // reader's snapshot, which can show a writer's whole frame before its fdatasync
+            // (storage spec §3, reads; known-limitations, "Readers may return state that is not
+            // durable yet"), so this replay vouches for no durability. The compare-and-swap
+            // below takes the lock, which waits out that writer first.
             let current = self.ops.repo.get_ref(&name).map_err(op)?;
             CasOutcome {
                 result: CasResult::Mismatch {
