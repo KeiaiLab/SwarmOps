@@ -6,8 +6,9 @@
 //! other failures, sled's conflict reruns, and fairness: the spread of the writers' total times.
 
 use std::fs;
+use std::io::Read;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::Barrier;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,6 +17,14 @@ use super::{Values, WriterResult, writer_loop};
 use crate::data::{chain, changeset, hex, id};
 use crate::engines::{Db, Engine, Result, other};
 use crate::measure::Latency;
+
+/// How long the writer processes have, all together, to open the store and say they are ready.
+const READY_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How long a writer process that is ready waits for the start ([`wait_for_go`]): longer than
+/// [`READY_TIMEOUT`], within which the start comes, if it comes at all. A writer whose parent
+/// gave up on the barrier, or is gone, exits then rather than poll for ever.
+pub const GO_TIMEOUT: Duration = Duration::from_secs(360);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -85,23 +94,25 @@ fn processes(
     let sync = tempfile::Builder::new()
         .prefix("w2-barrier-")
         .tempdir_in(dir.parent().unwrap_or(dir))?;
-    let children = (0..writers)
-        .map(|w| {
-            Command::new(exe)
-                .arg("__w2")
-                .arg(engine.name())
-                .arg(dir)
-                .arg(w.to_string())
-                .arg(txns.to_string())
-                .arg(hex(root))
-                .arg(sync.path())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
-                .spawn()
-        })
-        .collect::<std::io::Result<Vec<_>>>()?;
+    // Declared after the barrier, so dropped before it: on any early return, the children are
+    // killed and reaped first.
+    let mut children = Writers(Vec::new());
+    for w in 0..writers {
+        let child = Command::new(exe)
+            .arg("__w2")
+            .arg(engine.name())
+            .arg(dir)
+            .arg(w.to_string())
+            .arg(txns.to_string())
+            .arg(hex(root))
+            .arg(sync.path())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+        children.0.push(child);
+    }
     // The barrier: every child has opened the store before any starts.
-    let deadline = Instant::now() + Duration::from_secs(300);
+    let deadline = Instant::now() + READY_TIMEOUT;
     loop {
         let ready = fs::read_dir(sync.path())?
             .filter(|e| {
@@ -122,10 +133,16 @@ fn processes(
     fs::File::create(sync.path().join("go"))?;
     let mut results = Vec::new();
     let mut failed = 0;
-    for child in children {
-        let out = child.wait_with_output()?;
-        let line = String::from_utf8_lossy(&out.stdout);
-        match (out.status.success(), line.lines().last()) {
+    for child in &mut children.0 {
+        // Its stdout to the end, then its exit: what `wait_with_output` does, the child left
+        // in `children` until it is reaped.
+        let mut out = Vec::new();
+        if let Some(mut stdout) = child.stdout.take() {
+            stdout.read_to_end(&mut out)?;
+        }
+        let status = child.wait()?;
+        let line = String::from_utf8_lossy(&out);
+        match (status.success(), line.lines().last()) {
             (true, Some(line)) => results.push(
                 serde_json::from_str(line).map_err(|e| other(format!("a writer's result: {e}")))?,
             ),
@@ -133,6 +150,36 @@ fn processes(
         }
     }
     Ok((results, failed))
+}
+
+/// The writer processes of one run, killed and reaped when dropped: whatever ends the run early
+/// (a barrier timeout, a failed spawn, a result that does not read) leaves none behind, polling
+/// for a start that never comes with the store open, and loading the host for every later
+/// measurement. Killing a child already reaped does nothing.
+struct Writers(Vec<Child>);
+
+impl Drop for Writers {
+    fn drop(&mut self) {
+        for child in &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// What a writer process does once it is ready: waits for the start, the `go` file in
+/// `barrier`, polling every 200 µs; an error after `timeout` ([`GO_TIMEOUT`]).
+pub fn wait_for_go(barrier: &Path, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while !barrier.join("go").exists() {
+        if Instant::now() > deadline {
+            return Err(other(format!(
+                "no start within {timeout:?}: the parent gave up on the barrier, or is gone"
+            )));
+        }
+        thread::sleep(Duration::from_micros(200));
+    }
+    Ok(())
 }
 
 fn threads(db: &dyn Db, writers: u64, txns: u64, root: &[u8; 32]) -> (Vec<WriterResult>, u64) {
@@ -205,4 +252,44 @@ fn summarize(results: &[WriterResult], failed: u64, retries: u64, planned: u64) 
         ("conflict_reruns".into(), retries as f64),
         ("spread".into(), spread),
     ])
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::Path;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use super::{Writers, wait_for_go};
+
+    #[test]
+    fn dropped_writers_are_killed_and_reaped() {
+        // No pipe of the test's own: a child left running must not hold the harness's output.
+        let child = Command::new("sleep")
+            .arg("60")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn sleep");
+        let proc = format!("/proc/{}", child.id());
+        assert!(Path::new(&proc).exists(), "{proc}: the child runs");
+        drop(Writers(vec![child]));
+        assert!(
+            !Path::new(&proc).exists(),
+            "{proc}: still there, so not killed or not reaped"
+        );
+    }
+
+    #[test]
+    fn a_ready_writer_waits_for_the_start_no_longer_than_its_timeout() {
+        let barrier = tempfile::tempdir().expect("a barrier directory");
+        let timeout = Duration::from_millis(50);
+        let started = Instant::now();
+        assert!(wait_for_go(barrier.path(), timeout).is_err(), "no start");
+        assert!(started.elapsed() >= timeout, "{:?}", started.elapsed());
+        fs::File::create(barrier.path().join("go")).expect("the start");
+        wait_for_go(barrier.path(), timeout).expect("the start is there");
+    }
 }
