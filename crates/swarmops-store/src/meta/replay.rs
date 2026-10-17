@@ -4,7 +4,8 @@
 //!
 //! The index holds a prefix of the journal's changesets, in journal order: records are
 //! appended frame by frame, what a crash takes from the index files is a suffix, and past the
-//! checkpoint an index handle counts only the records the journal vouches for, so that what a
+//! checkpoint and the sorted views an index handle counts only the records the journal vouches
+//! for (those the views cover count as they are, even past the checkpoint), so that what a
 //! power loss leaves there with its bytes lost is a suffix too ([`Index::open`]). So replay
 //! finds how many of the changesets past the checkpoint the index holds with a binary search
 //! (one lookup when it holds them all, the usual case) and appends the rest.
@@ -118,12 +119,13 @@ impl Overlay {
     }
 }
 
-/// A `Changeset` record of a frame.
-struct ChangesetRecord<'a> {
-    id: ChangesetId,
-    generation: u64,
-    delta_hash: &'a [u8; 32],
-    parents: &'a [ChangesetId],
+/// A `Changeset` record of a frame, its fields borrowed: what replay appends, and what the
+/// index compares its records past the checkpoint with ([`Index::open`]).
+pub(super) struct ChangesetRecord<'a> {
+    pub(super) id: ChangesetId,
+    pub(super) generation: u64,
+    pub(super) delta_hash: &'a [u8; 32],
+    pub(super) parents: &'a [ChangesetId],
 }
 
 impl ChangesetRecord<'_> {
@@ -140,7 +142,7 @@ impl ChangesetRecord<'_> {
 }
 
 /// The `Changeset` records of `frames`, in journal order.
-fn changesets(frames: &[Frame]) -> Vec<ChangesetRecord<'_>> {
+pub(super) fn changesets(frames: &[Frame]) -> Vec<ChangesetRecord<'_>> {
     frames
         .iter()
         .flat_map(|frame| &frame.records)

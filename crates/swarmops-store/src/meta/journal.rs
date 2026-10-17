@@ -435,10 +435,24 @@ impl Journal {
         self.len() == 0
     }
 
-    /// How many frames `journal.off` lists now (one `fstat`): the seq the next listed frame
-    /// takes.
+    /// How many frames `journal.off` lists now, as readers count them: the seq the next listed
+    /// frame takes. Its whole entries, measured on this handle (one `fstat`, no [`FsOps`]
+    /// call), less the zeroed ones at its end past frame 0, which a power loss leaves of
+    /// entries never synced, and which [`Journal::frames_from`], [`Journal::tail_frames_from`]
+    /// and recovery drop: one `read_at` of the last entry, and one more per zeroed one. An
+    /// entry cut since the measurement lists nothing either: a writer cuts only such zeroed or
+    /// partial entries, and one whose own append failed.
     pub fn frame_count(&self) -> Result<u64, StoreError> {
-        Ok(self.off.metadata()?.len() / ENTRY_LEN)
+        let mut listed = self.off.metadata()?.len() / ENTRY_LEN;
+        while listed > 1 {
+            match self.entry(listed - 1) {
+                Ok(0) => listed -= 1,
+                Ok(_) => break,
+                Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => listed -= 1,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(listed)
     }
 
     /// The offset up to which the journal is materialized: what [`Journal::set_ckpt`] last

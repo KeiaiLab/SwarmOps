@@ -421,7 +421,7 @@ struct Seen {
 impl Seen {
     /// Runs every reader once, checking each result and how they agree.
     fn read(journal: &Journal, files: &Files, ckpt: u64) -> Seen {
-        let listed = to_u64(files.entries().len());
+        let listed = to_u64(files.listed().len());
         assert_eq!(journal.frame_count().expect("frame_count"), listed);
         assert_eq!(
             journal

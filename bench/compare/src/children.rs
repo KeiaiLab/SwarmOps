@@ -5,13 +5,12 @@ use std::fs::File;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::data::{Id, chain, changeset, id, parse_id};
 use crate::engines::{Engine, Main, Result, by_name, other};
 use crate::workloads::w4::{Opened, Recovered};
-use crate::workloads::writer_loop;
+use crate::workloads::{w2, writer_loop};
 
 pub fn main(args: &[String]) -> ExitCode {
     match run(args) {
@@ -65,9 +64,7 @@ fn w2_writer(args: &[String]) -> Result<()> {
     let db = engine.open(arg(args, 2)?.as_ref())?;
     let mut session = db.session()?;
     File::create(barrier.join(format!("ready-{w}")))?;
-    while !barrier.join("go").exists() {
-        thread::sleep(Duration::from_micros(200));
-    }
+    w2::wait_for_go(&barrier, w2::GO_TIMEOUT)?;
     let result = writer_loop(&mut *session, w, txns, root)?;
     println!("{}", serde_json::to_string(&result).map_err(other)?);
     Ok(())

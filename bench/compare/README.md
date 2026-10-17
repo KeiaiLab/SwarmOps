@@ -13,6 +13,8 @@ The full run's time goes almost all to waiting for the disk: W1 makes 10,000 com
 
 The recipe runs `cargo run --release --locked --manifest-path bench/compare/Cargo.toml -- …`. The first build compiles SQLite's C sources (a C compiler is needed) and takes a minute or two. The report (Markdown) goes to stdout, progress to stderr, and every raw value to a JSON file (`bench/compare/target/results/`, or `--out`). The run needs no network.
 
+The harness has tests of its own, which `just check` does not run: after a change here, run `cargo test --manifest-path bench/compare/Cargo.toml --locked`, `cargo clippy --manifest-path bench/compare/Cargo.toml --locked --all-targets -- -D warnings` and `cargo fmt --manifest-path bench/compare/Cargo.toml --check`.
+
 ## Engines
 
 | name | engine | durability of a commit |
@@ -49,7 +51,7 @@ SQLite's schema mirrors the native index: rows in seq order (the rowid), a uniqu
 - **W1**: one writer, 10,000 transactions back to back after a warm-up: commits/s, p50/p99/max, and the closed store's bytes per transaction.
 - **W2**: 32 writers × 1,000 transactions, `main` compared against its value inside each transaction: throughput, p50/p99/max (a `Busy` retry included), `Busy` and failures, sled's conflict reruns, and the spread of the writers' total times (fairness).
 - **W3**: lookups on bulk-loaded stores of 100,000 and 1,000,000 changesets, warm: by id, by a 6-byte id prefix, by delta hash (the secondary index), a miss, all on one open snapshot; and by id in a fresh read transaction each.
-- **W4**: a fresh process opening the 1M store and looking up one changeset; and recovery after a writer process is killed with SIGKILL mid-loop: the next process's open plus first write, with every acknowledged commit checked present. Neither times a close: SQLite's open hands its connection to the first session, because closing a WAL store's last connection checkpoints the WAL into the database and deletes it, and the lookup's session is closed after the timing.
+- **W4**: a fresh process opening the 1M store and looking up one changeset; and recovery after a writer process is killed with SIGKILL mid-loop: the next process's open plus first write, with every acknowledged commit checked present. None of the open, first-lookup or first-write timers includes a close: SQLite's open hands its connection to the first session, because closing a WAL store's last connection checkpoints the WAL into the database and deletes it, and the lookup's session is closed after the timing (the opening process's time from spawn to exit, which the report also gives, spans its close).
 - **W5**: the bulk-loaded stores' size on disk, settled and closed, and how much of it is the engine's log (the native journal, SQLite's WAL, fjall's journals). Each store is built once per run; the first build is the store W3, W4 and W6 read, the others are deleted once measured.
 - **W6**: a reader's lookup latency (a fresh read transaction each) idle and while a writer commits W1's transaction continuously; reader and writer are two threads of one process, for every engine.
 

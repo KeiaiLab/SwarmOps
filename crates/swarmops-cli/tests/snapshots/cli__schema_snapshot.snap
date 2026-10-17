@@ -1049,7 +1049,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_IO_TRANSIENT",
-          "description": "The filesystem failed a write before its commit point, and the store undid what the\nwrite had reached (`details.committed` is `false`): nothing was committed, so running the\nsame operation again is safe. A failure after the commit point is no error: the\noperation succeeds, with a warning.",
+          "description": "A journal append failed, and the store cut what it wrote back off the journal\n(`details.committed` is `false`): nothing was committed, so running the same operation\nagain is safe. A failure after the commit point is no error: the operation succeeds,\nwith a warning.",
           "type": "string"
         },
         {

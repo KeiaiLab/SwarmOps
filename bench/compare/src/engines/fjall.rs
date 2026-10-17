@@ -19,9 +19,10 @@
 //! its log into its main structure, as SQLite's checkpoint does: it syncs the journal, then
 //! flushes every keyspace's memtable into table files (`rotate_memtable_and_wait`, a public but
 //! doc-hidden call fjall's own tests use), after which fjall deletes the journals no keyspace
-//! needs. What stays is the active journal: fjall rotates it only when it passes 64 MB at a
-//! flush, and an open replays it whole, flushed or not. So the flush shrinks a large store but
-//! not its open time, and a small store keeps its whole journal beside the new tables.
+//! needs (within 10 s, or the settle fails: an unsettled store is not measured). What stays is
+//! the active journal: fjall rotates it only when it passes 64 MB at a flush, and an open
+//! replays it whole, flushed or not. So the flush shrinks a large store but not its open time,
+//! and a small store keeps its whole journal beside the new tables.
 //! `fjall-unflushed` settles with the journal sync alone: the same engine as the bulk load left
 //! it, measured in W3–W5 only, for the record.
 
@@ -130,13 +131,32 @@ impl Db for FjallDb {
         for keyspace in keyspaces {
             AsRef::<fjall::Keyspace>::as_ref(keyspace).rotate_memtable_and_wait()?;
         }
-        // The flush worker deletes the journals no keyspace needs right after its last flush;
-        // `journal_count` counts the active one too.
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while self.db.journal_count() > 1 && Instant::now() < deadline {
-            thread::sleep(Duration::from_millis(10));
+        // The flush worker deletes the journals no keyspace needs right after its last flush.
+        wait_settled(|| self.db.journal_count(), SETTLE_TIMEOUT)
+    }
+}
+
+/// How long [`Db::settle`] waits for fjall to delete the journals its flush left unneeded.
+const SETTLE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Waits, polling every 10 ms, until `journals` (fjall's `journal_count`, which counts the
+/// active journal too) is down to one; an error after `timeout`. A store that keeps more is not
+/// settled: W3–W5 would time and size another store than the one the report names, so the
+/// seeding fails, and the report lists the error, rather than measure it.
+fn wait_settled(journals: impl Fn() -> usize, timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let count = journals();
+        if count <= 1 {
+            return Ok(());
         }
-        Ok(())
+        if Instant::now() >= deadline {
+            return Err(other(format!(
+                "fjall still holds {count} journals {timeout:?} after flushing every keyspace: \
+                 the store is not settled"
+            )));
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -270,5 +290,23 @@ impl Snapshot for FjallSnapshot<'_> {
             ids.push(to_id(&guard.value()?)?);
         }
         Ok(ids)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::wait_settled;
+
+    #[test]
+    fn settling_fails_when_the_unneeded_journals_stay() {
+        let timeout = Duration::from_millis(30);
+        let error = wait_settled(|| 2, timeout).expect_err("two journals stay");
+        assert!(
+            error.to_string().contains("still holds 2 journals"),
+            "{error}"
+        );
+        wait_settled(|| 1, timeout).expect("the active journal alone");
     }
 }

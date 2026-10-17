@@ -612,18 +612,21 @@ fn host(base: &Path, probes: usize) -> serde_json::Value {
         .max()
         .map(|(_, m)| m)
         .unwrap_or_default();
-    let git = Command::new("git")
-        .args([
-            "-C",
-            env!("CARGO_MANIFEST_DIR"),
-            "rev-parse",
-            "--short",
-            "HEAD",
-        ])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .unwrap_or_default();
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(env!("CARGO_MANIFEST_DIR"))
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+            .unwrap_or_default()
+    };
+    let git = tree_name(
+        &git(&["describe", "--always", "--dirty"]),
+        &git(&["status", "--porcelain"]),
+    );
     let date = Command::new("date")
         .args(["-u", "+%Y-%m-%dT%H:%M:%SZ"])
         .output()
@@ -642,6 +645,19 @@ fn host(base: &Path, probes: usize) -> serde_json::Value {
         "load_at_start": measure::load1(),
         "fdatasync_probe_ms_at_start": measure::ms(measure::probe(base, probes)),
     })
+}
+
+/// The tree a run measured, for its record: the commit as `git describe --always --dirty` names
+/// it (`-dirty` when a tracked file differs from it), and `+untracked` when `git status
+/// --porcelain` lists files git does not track (as the harness itself was when its first runs
+/// were made, under the commit before it). Empty outside a git checkout.
+fn tree_name(describe: &str, porcelain: &str) -> String {
+    let untracked = porcelain.lines().any(|line| line.starts_with("??"));
+    if describe.is_empty() || !untracked {
+        describe.to_owned()
+    } else {
+        format!("{describe}+untracked")
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1018,7 +1034,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::Instant;
 
-    use super::{Bench, seed_all, sync_runs};
+    use super::{Bench, seed_all, sync_runs, tree_name};
     use crate::engines::{self, Engine};
     use crate::workloads::Plan;
     use crate::workloads::sync::PerCommit;
@@ -1118,5 +1134,17 @@ mod tests {
             .expect("the work dir")
             .count();
         assert_eq!(left, 4, "only the kept stores are left in the work dir");
+    }
+
+    #[test]
+    fn a_record_names_a_tree_that_differs_from_its_commit() {
+        assert_eq!(tree_name("a7bcc61", ""), "a7bcc61");
+        let modified = " M bench/compare/src/main.rs\n";
+        assert_eq!(tree_name("a7bcc61-dirty", modified), "a7bcc61-dirty");
+        let untracked = "?? bench/compare/\n";
+        assert_eq!(tree_name("4a08240", untracked), "4a08240+untracked");
+        let both = format!("{modified}{untracked}");
+        assert_eq!(tree_name("4a08240-dirty", &both), "4a08240-dirty+untracked");
+        assert_eq!(tree_name("", untracked), "", "no git checkout");
     }
 }
