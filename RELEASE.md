@@ -8,12 +8,13 @@ it. What may change between versions is in
 
 - **The release workflow is deferred to the first tag.** `.github/workflows/release.yml` is
   added together with the first release, not before. It will run on a pushed `v*` tag and:
-  refuse to run unless the tag matches the workspace version; build the Linux binary with
-  `--locked` on the pinned toolchain; write a SHA-256 checksum for each archive; attest the
-  archives' build provenance with `actions/attest-build-provenance`; and create a draft GitHub
-  release. Like CI, it pins every action by commit, starts from `permissions: {}` and grants
-  `contents: write`, `id-token: write` and `attestations: write` only to the job that needs
-  them, and zizmor must pass on it.
+  refuse to run unless the tag matches the workspace version; build the two Linux binaries,
+  `swarmops` and its short form `so`, with `--locked` on the pinned toolchain; write a SHA-256
+  checksum for each archive; attest the archives' build provenance with
+  `actions/attest-build-provenance`; and create a draft GitHub release. Like CI, it pins every
+  action by commit, starts from `permissions: {}` and grants `contents: write`,
+  `id-token: write` and `attestations: write` only to the job that needs them, and zizmor must
+  pass on it.
 - **Provenance attestations need a public repository.** On GitHub's Free plan, artifact
   attestations are available for public repositories only
   ([GitHub docs](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)).

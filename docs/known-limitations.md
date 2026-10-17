@@ -1,20 +1,21 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M1, and the milestone
-meant to change it. The items come from M1's reviews: the carry-overs its tasks handed to later
-milestones, the deferred minors that are still open, and the rulings of the final review, which
-left 14 questions to the maintainer (the table at the end lists all 14). Each entry says where
-it was found; those pointers (an M1 task, a review, the 2026-10-16 comparison) refer to the
-maintainer's local records, which are not in the repository. Code-level minors that change
-nothing a user or an agent can see (naming, comments, micro-optimizations, test labels) are not
-listed.
+What SwarmOps does not do yet, or does less well than it should, as of M1.5, and the milestone
+meant to change it. The items come from the M1 and M1.5 reviews: the carry-overs their tasks
+handed to later milestones, the deferred minors that are still open, and the rulings of M1's
+final review, which left 14 questions to the maintainer (the table at the end lists all 14).
+Each entry says where it was found; those pointers (an M1 task, a review, the 2026-10-16
+comparison) refer to the maintainer's local records, which are not in the repository. Code-level
+minors that change nothing a user or an agent can see (naming, comments, micro-optimizations,
+test labels) are not listed.
 
-Targets are milestones of the umbrella spec (§13): M2 diff, history and derived data · M3 git
-import · M4 merge and landing · M8 git export · M5 workspaces · M6 verify, crash safety and
-fuzzing · M7 blame and review · M9 simulation and benchmarks · M10 RPC server. M1.5, the
-hardening milestone after M1 ([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)), closes
-a few. "Unscheduled" means no milestone has taken the item yet; "documented" means it is the
-intended behaviour.
+Targets are milestones of [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md)
+(§13): M2 diff, history and derived data · M3 git import · M4 merge and landing ·
+M8 git export · M5 workspaces · M6 verify, crash safety and fuzzing · M7 blame and review ·
+M9 simulation and benchmarks · M11 remote sync, offline-first · M10 RPC server. M1.5, the
+hardening milestone after M1 ([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)),
+closes a few. "Unscheduled" means no milestone has taken the item yet; "documented" means it is
+the intended behaviour.
 
 When a change closes an item, it removes the entry here in the same commit (or says what is
 left).
@@ -154,11 +155,11 @@ left).
   restoring the store is the only remedy. The index can be rebuilt from the journal in
   principle (`fsck --rebuild-index`). *Target: M6 (fsck). Found: M1 Tasks 2b, 2c and 3; final
   review, question 5.*
-- **A zero-filled index tail over a damaged journal wedges the store.** A store whose
-  journal is damaged before the checkpoint, or whose `journal.ckpt` is malformed, and whose
-  index records past the checkpoint a power loss zeroed opens with `IndexCorrupt`
-  (`E_STORE_CORRUPT`) on every read and write; no writer repairs it. *Target: M6 (fsck).
-  Found: M1.5 minors (Task 3 review N1).*
+- **A zero-filled index tail over a damaged journal wedges the store.** A store whose journal
+  is damaged before the checkpoint, and whose index records past the checkpoint a power loss
+  zeroed, opens with `IndexCorrupt` (`E_STORE_CORRUPT`) on every read and write; no writer
+  repairs it. (A malformed `journal.ckpt` fails every read and write with `E_STORE_CORRUPT` on
+  its own.) *Target: M6 (fsck). Found: M1.5 minors (Task 3 review N1).*
 - **Temp files of crashed writes stay.** `objects/tmp/` keeps what interrupted object writes left
   there. *Target: M6 (`gc`). Found: M1 final review, question 8.*
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,

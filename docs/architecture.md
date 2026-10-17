@@ -1,7 +1,7 @@
 # SwarmOps architecture
 
-An overview, in English, of how SwarmOps is built, as of M1. The design specs are the authority,
-and they are in Korean:
+An overview, in English, of how SwarmOps is built, as of M1.5. The design specs are the
+authority, and they are in Korean:
 
 - [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md) ("umbrella" below),
 - [storage core](superpowers/specs/2026-10-15-swarmops-storage-core-design.md) ("storage"),
@@ -14,17 +14,19 @@ the spec is right and this page has a bug.
 
 ## What SwarmOps is
 
-SwarmOps is source control for a swarm of coding agents on one host: 10 to 50 Claude Code or
-LangGraph processes working in one repository at once (umbrella §1). It takes the principles of
-Anthropic's Scion design ("Redesigning source control at Anthropic") to a single host, and is
-not meant as a general-purpose git replacement. Its main users are LLM agents, so every
-operation is a library function and the command line is a thin shell that prints JSON. It is
-fully embedded: one binary, no external database, no daemon.
+SwarmOps is source control for a swarm of coding agents on one host (and, from M11,
+offline-first across hosts): 10 to 50 Claude Code or LangGraph processes working in one
+repository at once (umbrella §1). It takes the principles of Anthropic's Scion design
+("Redesigning source control at Anthropic") to a single host, and is not meant as a
+general-purpose git replacement. Its main users are LLM agents, so every operation is a library
+function and the command line is a thin shell that prints JSON. It is fully embedded: one
+program, no external database, no daemon.
 
-M0 (bootstrap) and M1 (the single-agent core) are done. M1 is usable by one agent: its store
-already takes commits from many processes at once, safely, but nothing merges yet. Merging and
-landing (M4), git import and export (M3, M8), workspaces (M5) and review (M7) come later, in the
-order of umbrella §13. [known-limitations.md](known-limitations.md) lists what M1 leaves open.
+M0 (bootstrap), M1 (the single-agent core) and M1.5 (hardening and opening) are done. M1 is
+usable by one agent: its store already takes commits from many processes at once, safely, but
+nothing merges yet. Merging and landing (M4), git import and export (M3, M8), workspaces (M5)
+and review (M7) come later, in the order of umbrella §13.
+[known-limitations.md](known-limitations.md) lists what M1 and M1.5 leave open.
 
 ## Crates and layering
 
@@ -35,7 +37,7 @@ order of umbrella §13. [known-limitations.md](known-limitations.md) lists what 
 | `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, and `verify`. `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. |
-| `swarmops-cli` | The `swarmops` binary: one subcommand per operation, exactly one envelope per run on stdout. |
+| `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
 
 Dependencies point one way, from the binary down to the codec:
 
@@ -59,12 +61,13 @@ Two rules shape the layers (umbrella §1, AGENTS.md):
   is in `swarmops-repo`, exposed as `StoreOps` operations, and the CLI parses a command line,
   calls the operation and prints the result.
 - **Store-facing types carry no filesystem paths.** Every operation takes and returns serde
-  types, so `StoreOps` is the seam a remote client and an RPC server (M10) will share
-  (operations §7). The two exceptions are client-side: a change's `{"file": "<path>"}` content,
-  which is read on the client, in the caller's process, and `init`'s path (`init` is not a
-  `StoreOps` operation). This is also why `swarmops-api` and `swarmops-repo` each have their own
-  `ChangeOp`, `RepoInfo` and `VerifyReport`: the first are the wire format, the second the
-  domain, and `swarmops-ops` converts between them.
+  types, so `StoreOps` is the seam a remote client and a server will share: M11's sync, over
+  `ssh <host> swarmops serve --stdio`, and M10's RPC server (operations §7). The two exceptions
+  are client-side: a change's `{"file": "<path>"}` content, which is read on the client, in the
+  caller's process, and `init`'s path (`init` is not a `StoreOps` operation). This is also why
+  `swarmops-api` and `swarmops-repo` each have their own `ChangeOp`, `RepoInfo` and
+  `VerifyReport`: the first are the wire format, the second the domain, and `swarmops-ops`
+  converts between them.
 
 ## Data model
 
@@ -133,6 +136,32 @@ the record layouts are the disk contract of `FORMAT 1`: not part of the hash con
 changed only with a new `FORMAT` (storage §3). Later milestones add derived data (M2), the git
 id mapping (M3), workspaces (M5) and reviews (M7) to `meta/`.
 
+How the files depend on one another:
+
+```mermaid
+flowchart TB
+  root["FORMAT: the layout version, written last by init<br/>REPO: the repository's id and name"]
+  subgraph meta["meta/"]
+    direction TB
+    lock["lock<br/>serializes the writers"]
+    off["journal.off<br/>each frame's offset"]
+    ckpt["journal.ckpt<br/>materialized and<br/>synced up to here"]
+    log["journal.log<br/>append-only, CRC-framed:<br/>the source of truth"]
+    idx["idx/*.col, parents.log, sorted/*<br/>the changeset index"]
+    refs["refs/main, refs/release/*<br/>one file per ref"]
+    off -. "points into" .-> log
+    ckpt -. "marks a point in" .-> log
+    log -- "projected into" --> idx
+    log -- "projected into" --> refs
+  end
+  subgraph objects["objects/: immutable, content-addressed, one file each"]
+    direction LR
+    cs["changesets"] --> trees["trees"] --> blobs["blobs"]
+  end
+  idx -- "names" --> cs
+  refs -- "name" --> cs
+```
+
 ## Writing
 
 **Objects** (storage §2, rule 1). A new object is written to a temp file in `objects/tmp/`,
@@ -159,6 +188,23 @@ fan-out directory appeared. Object writes take no lock and repeating one changes
    flush), the five index files are synced and `journal.ckpt` moves to the end of the journal.
    When more than 1,024 index records sit past the sorted views, a compaction merges them into
    the views after the sync, before the checkpoint moves.
+
+The same steps, with what a failure on each side of the commit point leaves:
+
+```mermaid
+flowchart TD
+  start(["A commit"]) --> objs["Write the new objects, no lock:<br/>temp file, sync_all, link;<br/>fsync the fan-out directories"]
+  objs --> lock["Take meta/lock, an flock<br/>(E_BUSY after 10 s)"]
+  lock --> repair["Repair what a crash left:<br/>cut a torn frame, list the<br/>whole frames journal.off<br/>misses, repair the index tail"]
+  repair --> replay["Replay the frames past<br/>journal.ckpt into the index<br/>and the ref files"]
+  replay --> append["Append one frame to<br/>journal.log, fdatasync it:<br/>the commit point"]
+  append --> list["List its offset in<br/>journal.off, fdatasync"]
+  list --> mat["Materialize: append the index<br/>records, unsynced; replace<br/>each moved ref's file"]
+  mat --> settle["Housekeeping: every 32 frames,<br/>sync the index, move journal.ckpt;<br/>once over 1,024 records sit past<br/>the sorted views, compact them in too"]
+  settle --> done(["Release the lock"])
+  append -. "the append or<br/>its fdatasync fails" .-> cut["Cut the frame back:<br/>E_IO_TRANSIENT,<br/>committed: false<br/>(if the cut fails: abort)"]
+  list -. "any failure<br/>from here on" .-> warn["Committed and durable:<br/>a warning, and the next<br/>write repairs the rest"]
+```
 
 What a failure means depends on which side of the commit point it falls (storage §2 rule 3,
 §3):
@@ -208,15 +254,27 @@ goes into the transaction's frame, and the ref file is replaced after the commit
 ## Reading
 
 Readers take no lock (storage §3, "읽기"). `MetaStore::read()` takes a snapshot: it reads
-`journal.ckpt`, opens the index (counting only the records that all five index files hold
-whole), reads every frame past the checkpoint (whole frames not yet listed in `journal.off`
-included; it stops at a torn tail), reads every ref file, then reads the frames again, and if
-there are more, reads the refs and frames again. It then lays the frames past the checkpoint
-over the index and the refs in memory. Past the checkpoint and the sorted views, the index
-counts a record only if the frames past the checkpoint vouch for it, field by field (storage §3,
-"색인의 보증"): a record that a power loss zero-filled is not counted, the snapshot reads its
-changeset from the frame, and the next write replays it. Writers replace a ref file only after
-its frame is whole, so the refs it reads never run ahead of the frames it read.
+`journal.ckpt`, opens the index (counting only the records that all five index files hold whole,
+and, past the checkpoint and the sorted views, only those that the frames past the checkpoint
+vouch for, field by field, as storage §3, "색인의 보증", says: a record that a power loss zero-filled
+is not counted, the snapshot reads its changeset from the frame, and the next write replays it),
+reads every frame past the checkpoint (whole frames not yet listed in `journal.off` included; it
+stops at a torn tail), reads every ref file, then reads the frames again, and if there are more,
+reads the refs and frames again. It then lays the frames past the checkpoint over the index and
+the refs in memory. Writers replace a ref file only after its frame is whole, so the refs it
+reads never run ahead of the frames it read.
+
+```mermaid
+flowchart TD
+  start(["A read: a snapshot, no lock"]) --> ckpt["Read journal.ckpt"]
+  ckpt --> index["Open the index: count<br/>the records that all five<br/>index files hold whole"]
+  index --> frames["Read the frames past the<br/>checkpoint, up to a torn tail;<br/>past the sorted views, the index<br/>counts only what they vouch for"]
+  frames --> refs["Read every ref file"]
+  refs --> again["Read the frames again"]
+  again --> more{"More frames<br/>than before?"}
+  more -- "yes" --> refs
+  more -- "no" --> overlay["Lay the frames over the<br/>index and the refs, in memory"]
+```
 
 A lookup by id is a binary search in the sorted view, by `read_at` on the file (there is no
 mmap: `unsafe` is forbidden), then a linear scan of the records past the view, then the
