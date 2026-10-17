@@ -165,19 +165,39 @@ What a failure means depends on which side of the commit point it falls (storage
 
 - **Before it**: a failed `journal.log` append or `fdatasync` leaves nothing committed. The
   writer, still holding the lock, cuts the journal back to where the frame began (`ftruncate`,
-  then `fdatasync`) and returns the retryable `E_IO_TRANSIENT` with `details.committed = false`:
-  the transaction definitely did not commit, and running the same command again is safe. The
-  frame is cut, not left for a later writer to sync and list, because Linux reports a failed
-  writeback only once and may drop the unwritten pages: a later sync could succeed although the
-  frame never reached the disk. If the cut itself fails, the process aborts rather than go on
-  with a journal tail it cannot vouch for. A crash in the middle of the append leaves at most a
-  torn frame, which the next writer cuts; a crash after the whole frame was written but before
-  its `fdatasync` returned leaves a frame that the next writer syncs and lists, so that
-  transaction did commit, though no one was told.
+  then `fdatasync`; if nothing of the frame reached the file, there is nothing to cut) and
+  returns the retryable `E_IO_TRANSIENT` with `details.committed = false`: the transaction
+  definitely did not commit, and running the same command again is safe. The frame is cut, not
+  left for a later writer to sync and list, because Linux reports a failed writeback only once
+  and may drop the unwritten pages: a later sync could succeed although the frame never reached
+  the disk. If the cut itself fails, the process aborts rather than go on with a journal tail it
+  cannot vouch for. A crash in the middle of the append leaves at most a torn frame, which the
+  next writer cuts; a crash after the whole frame was written but before its `fdatasync`
+  returned leaves a frame that the next writer syncs and lists, so that transaction did commit,
+  though no one was told. If that writer's sync fails, no later sync could vouch for the frame
+  either, so the writer writes the unlisted frames afresh from the bytes it read (it cuts them
+  off, appends them again and syncs them) and lists them only then. Only if the rewrite fails
+  too does the frame stay cut off; then that transaction did not commit, and neither did the
+  writer's own, whose write fails with `E_IO_TRANSIENT`: the second way that error arises.
 - **After it**: any failure once the `fdatasync` has returned (listing the frame in
   `journal.off`, materializing it, syncing the index, moving the checkpoint) leaves the
   transaction committed and durable. It is reported as a warning beside the result, and the
-  next write repairs what is missing.
+  next write repairs what is missing. A listing that fails is cut back off `journal.off` first,
+  so that a power loss cannot leave a hole among the listed entries. One case escapes: a commit
+  whose listing failed waits, unlisted, for the next writer to list it, and if that writer's
+  sync and then its rewrite fail, or it crashes between its cut and its rewrite, the commit is
+  lost. That takes three faults (storage §2 rule 3 lists the remaining double and triple faults).
+
+Three double faults abort the process (`std::process::abort`, saying why on stderr) rather
+than let it go on with state it cannot vouch for: a failed frame whose cut fails too, a cut
+that fails while unlisted frames are written afresh, and an `init` that cannot take its
+`FORMAT` back. A long-lived process, such as `swarmops mcp`, ends with them, and its client
+sees it exit.
+
+`init` (storage §2) writes `FORMAT` last and then syncs the store's root. If that sync fails, it
+takes `FORMAT` back (removes it, and syncs the removal) and fails: the store is not complete,
+and running `init` again finishes it. If the store is made but reading it back for the report
+fails, the error says so with `details.created: true`.
 
 **A ref move** is a compare-and-swap under the same lock (storage §3): the ref's current target,
 after replay, is compared with the expected one. On a mismatch nothing is recorded and the
@@ -192,8 +212,11 @@ Readers take no lock (storage §3, "읽기"). `MetaStore::read()` takes a snapsh
 whole), reads every frame past the checkpoint (whole frames not yet listed in `journal.off`
 included; it stops at a torn tail), reads every ref file, then reads the frames again, and if
 there are more, reads the refs and frames again. It then lays the frames past the checkpoint
-over the index and the refs in memory. Writers replace a ref file only after its frame is whole,
-so the refs it reads never run ahead of the frames it read.
+over the index and the refs in memory. Past the checkpoint and the sorted views, the index
+counts a record only if the frames past the checkpoint vouch for it, field by field (storage §3,
+"색인의 보증"): a record that a power loss zero-filled is not counted, the snapshot reads its
+changeset from the frame, and the next write replays it. Writers replace a ref file only after
+its frame is whole, so the refs it reads never run ahead of the frames it read.
 
 A lookup by id is a binary search in the sorted view, by `read_at` on the file (there is no
 mmap: `unsafe` is forbidden), then a linear scan of the records past the view, then the
@@ -227,14 +250,37 @@ lock (I4). The tests that hold the code to them:
   compaction, the metadata store's creation and replay (ref files included), the repository's
   `create` and `commit`, and the binary's `init` and `commit`. Each time the store must open
   and verify clean;
+- **I/O-error sweeps** (M1.5): `SWARMOPS_TEST_FAIL_AT=k` fails the k-th call instead, with an
+  injected `EIO` or `ENOSPC`, once or for every write from then on. The store's sweeps do that at
+  every call of a checkpointing and of a compacting transaction, and of the recovery after a
+  crash; the binary's at every call of `init` and `commit`. Each outcome must be honest: a
+  success is in the store and verifies clean, a failure committed nothing or says that it did
+  (an `init` that made the store sets `details.created: true`) and is never `E_INTERNAL`,
+  `E_IO_TRANSIENT` says `details.committed = false`, an abort is one of the documented ones, and
+  the store takes the next write;
+- **write-ordering checks** (M1.5): `SWARMOPS_TEST_ORDER_CHECK=1` checks every filesystem call
+  against the store's write-ordering rules, R1 to R7 (a frame is listed only once it is durable,
+  a ref file changes only after its frame is durable, the checkpoint moves only over synced
+  index records, objects are durable before a frame names them, `FORMAT` is linked last, and
+  more), and panics at the first call that breaks one. Every run of the binary in the CLI tests
+  has it on, and so do the store's and the repository's crash sweeps;
+- **a model of fsync failures on Linux** (M1.5): the bytes a failed sync did not cover stay
+  lost, even when a later sync succeeds; under it, the journal must never list a frame that is
+  not on disk;
+- **power-loss images** (M1.5): one recorded run (an `init`, commits, ref moves, a compaction, a
+  checkpoint) is cut after each of its steps, and each cut gives disk images of what a power
+  loss there may leave: unsynced data dropped, cut at 512 B or 4 KiB, zero-filled or with its
+  first sector lost, and directory entries that no fsync covered reverted. Opened with the
+  binary, each must hold a prefix of the run's transactions with every committed one in it, and
+  verify clean;
 - property tests and fuzz targets for the codec and for journal recovery, the latter checked
   against a model;
 - multi-process tests through the binary (8 processes committing at once, 16 racing to move one
   ref), each ending with `verify --deep`.
 
-These model a process crash, which leaves the kernel's page cache intact. M1.5 extends the model
-to I/O errors, write ordering and power loss
-([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)).
+The crash sweeps model a process crash, which leaves the kernel's page cache intact, and the
+power-loss images a model of the disk rather than a real device: a test with a literal
+`SIGKILL` is M6 ([known-limitations.md](known-limitations.md)).
 
 ## Concurrency
 
@@ -256,11 +302,12 @@ What an agent sees (operations §4):
   wins each round; the others get `E_CAS_MISMATCH` and `details.actual`.
 - A read by changeset id is immutable, lock-free and cacheable. A ref named in a request is
   resolved once, and the envelope's `meta.resolved` says what it named.
-- A reader may see a frame before its `fdatasync` has completed. Until M10, a power loss, or a
-  failed sync of that frame (which the writer then cuts back), can therefore take back state
-  that a reader returned. A mutation that names such state (a parent, a ref's expected or new
-  target) is checked against the store as it is, and fails rather than build on what was taken
-  back.
+- A reader may see a frame before its `fdatasync` has completed. A power loss, or a failed sync
+  of that frame (which the writer then cuts back), can therefore take back state that a local
+  reader returned. A mutation that names such state (a parent, a ref's expected or new target)
+  is checked against the store as it is, and fails rather than build on what was taken back.
+  The first readers whose results leave the host (M8's git export, M11's `serve`) will read a
+  committed snapshot taken under the lock instead.
 - M1 has no merge: an agent that loses a ref race and commits its change again on top of the
   winner's can overwrite the winner's edits to the same files. Merging and landing arrive in
   M4.

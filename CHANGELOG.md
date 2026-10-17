@@ -81,7 +81,72 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (`meta.resolved` is no longer shared by a handle's requests), a mutation without an identity
   is refused, and `expected_old` of `ref_set` and `ref_delete` must be a full changeset id
   through MCP.
+- `server/discover` and the `-32022` error list every revision served (2026-07-28, 2025-11-25,
+  2025-06-18), so a client that cannot speak 2026-07-28 can fall back to `initialize`.
 - `ref set` to the target a ref already holds is a replay: `already_applied: true` and nothing
   written, in the CLI and through MCP.
+- The `--expect` help of `ref set` and `ref delete` states the README's rule: give the full
+  changeset id you read, since a ref name, a relative revision such as `main~1` or an id prefix
+  is read from the store when the command runs, and then the compare-and-swap protects nothing.
+- `so`, the short form of `swarmops`: the same program, built and installed with it; its usage
+  lines and help name the binary as invoked, and everything else still says `swarmops`.
+- I/O-error injection and write-ordering checks, behind `test-hooks`:
+  `SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]` fails the k-th filesystem call
+  with an injected error (`FailAtFs`), and `SWARMOPS_TEST_ORDER_CHECK=1` checks every write
+  against the store's write-ordering rules R1–R7 and panics at the first that breaks one
+  (`OrderCheckFs`, on for every run of the binary in the CLI tests and in the store's and the
+  repository's crash sweeps). A model of Linux's fsync failures (the bytes a failed sync did not
+  cover stay lost, even after a later sync succeeds) tests the journal, and I/O-error sweeps fail
+  every call of a checkpointing and of a compacting store transaction, of the recovery after a
+  crash, and of the binary's `init` and `commit`, checking that each outcome is honest.
+- The fsync-failure policy (storage spec §2 rule 3): a failed `journal.log` append or
+  `fdatasync` is cut back off the journal under the lock, and nothing is committed; a failed
+  `journal.off` listing after the commit point is cut back off `journal.off`, and the commit
+  stands, with a warning; a tail check whose sync fails writes the unlisted frames afresh from
+  the bytes it read before it lists them. Three documented double faults abort the process,
+  saying why on stderr: a cut of a failed frame that fails too, a cut that fails while unlisted
+  frames are written afresh, and an `init` that cannot take back its `FORMAT`. A long-lived
+  process, such as `swarmops mcp`, ends with them.
+- **Contract change:** `E_IO_TRANSIENT` now means that nothing was committed, with
+  `details.committed: false` (it said `details.may_have_committed: true`), so running the same
+  command again is safe; and a failed `journal.off` listing after the commit point is a success
+  with a warning, as every later failure already was (it was `E_IO_TRANSIENT`). A journal append
+  that fails before its frame is whole, which was `E_IO`, is now `E_IO_TRANSIENT` too, as is a
+  write whose tail check can neither sync nor write afresh the frames `journal.off` does not
+  list yet. In `swarmops-store`, `StoreError::Undecided` and `CrashAtFs::from_env` are removed,
+  and `HookedFs::from_env` replaces the latter.
+- The schema describes `E_IO_TRANSIENT` by the journal append that failed (other failures before
+  the commit point stay `E_IO`): the store cut what the append wrote back off the journal, so
+  nothing was committed, and running the same operation again is safe.
+- `init` takes `FORMAT` back (and syncs its removal) when the sync of the store's root after it
+  fails, so that no store looks complete whose completion mark may not be durable; when it made
+  the store but reading it back fails, the error says so with `details.created: true`.
+- Power-loss crash images (`crates/swarmops-cli/tests/power_loss.rs`): every cut of a recorded
+  run, with seeded choices of what a power loss keeps (unsynced data dropped, cut at 512 B or
+  4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync covered
+  reverted), opened with the binary, must recover a prefix of the run's transactions that holds
+  every committed one.
+- Recovery after a power loss: an unlisted journal frame whose header's length reads 0 is a torn
+  tail and is cut (it was `E_STORE_CORRUPT`); readers drop zeroed entries at the end of
+  `journal.off`, as recovery did; past the checkpoint and the sorted views, the index counts only
+  the records the journal vouches for, so zero-filled index records are replayed rather than
+  counted (they gave wrong counts and seqs, or `E_STORE_CORRUPT`); and a snapshot that opens
+  while a writer cuts the index counts every record the checkpoint passed or the sorted views
+  cover.
+- Where the journal cannot vouch for the index's records past the checkpoint (no journal, a
+  damaged one, or a `journal.ckpt` that does not hold a u64le — damage verify reports), the
+  index counts them by their lengths and now checks their `par.col` entries against the layout
+  (each record's parents start where the previous record's end): a zeroed entry, which a power
+  loss leaves, is `IndexCorrupt` (`E_STORE_CORRUPT`) and nothing is cut. Before, the next write
+  cut `parents.log` at the zeroed entry and replayed over the parents of checkpointed records.
+  `Index::open` returns any other error reading `journal.ckpt` instead of counting by length.
+- `Journal::frame_count` drops the zeroed entries at the end of `journal.off` that readers and
+  recovery drop; a reader's frame count after such a power loss was one too high until the next
+  writer ran (the frames it read were right).
+- `bench/compare/` (`just bench-compare`, `--quick` for a smoke run): the native metadata
+  store, through its public API, against SQLite, redb, fjall and sled on SwarmOps' own
+  workloads, in a cargo workspace of its own that `just check` never builds; SwarmOps depends on
+  none of them. Its numbers, in the M1.5 section of [docs/perf.md](docs/perf.md), are
+  provisional until a quiet-window run.
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable

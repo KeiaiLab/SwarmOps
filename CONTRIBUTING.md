@@ -79,16 +79,22 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
   `SWARMOPS_HOST_REPOS=1`.
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs` still compiles without it; M1.5 moves it
-  behind the feature), and a release build honours no test hook. The hooks are
-  environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT`,
-  `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_NOW`), read only under
+  behind the feature, where `FailAtFs` and `OrderCheckFs` already are), and a release build
+  honours no test hook. The hooks are five environment variables named `SWARMOPS_TEST_*`
+  (`SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FAIL_AT`,
+  `SWARMOPS_TEST_ORDER_CHECK`, `SWARMOPS_TEST_NOW`), read only under
   `#[cfg(feature = "test-hooks")]`. A test that needs them is marked
   `required-features = ["test-hooks"]` or `#[cfg(feature = "test-hooks")]`, so that a plain
   `cargo test` skips it. Step 4 of `just check` keeps this honest.
-- **Crash tests are deterministic.** A crash sweep aborts the process at its k-th filesystem
-  call (`SWARMOPS_TEST_CRASH_AT=k`) for every k a dry run counted (`SWARMOPS_TEST_FS_CALLS`). It
-  runs both stores at parallelism 1 and pins the signing time (`SWARMOPS_TEST_NOW`), so that call
-  k is the same call in every run.
+- **Crash and fault tests are deterministic.** A crash sweep aborts the process at its k-th
+  filesystem call (`SWARMOPS_TEST_CRASH_AT=k`) for every k a dry run counted
+  (`SWARMOPS_TEST_FS_CALLS`), and an I/O-error sweep fails that call instead
+  (`SWARMOPS_TEST_FAIL_AT=k`). Both run the stores at parallelism 1 and pin the signing time
+  (`SWARMOPS_TEST_NOW`), so that call k is the same call in every run.
+- **Writes are checked against the ordering rules.** Every run of the binary in the CLI tests,
+  and the store's and the repository's crash sweeps, check each filesystem call against the
+  store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`; rules R1 to R7, listed in
+  `crates/swarmops-store/src/order_check.rs`), and panic at the first call that breaks one.
 - **Child processes have deadlines.** A test that runs processes uses the test support's runner,
   which gives each child a deadline and kills and reaps it on failure, so a hang fails the test
   instead of stalling the gate.
@@ -105,7 +111,7 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
 
 | Command | What it does |
 | --- | --- |
-| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash sweeps, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
+| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash and I/O-error sweeps, the power-loss images at every cut, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
 | `just check-ci-slow` | Every ignored test except `regenerate_golden` and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |
