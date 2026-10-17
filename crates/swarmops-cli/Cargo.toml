@@ -26,8 +26,9 @@ path = "src/bin/so.rs"
 
 [features]
 # A `swarmops` and `so` that honor the test hooks (`swarmops-ops/test-hooks` turns on all of
-# them): for the crash tests, which require it, never for a release.
-test-hooks = ["swarmops-ops/test-hooks"]
+# them, and the test kit's puts this crate's tests under the order checker): for the crash
+# tests, which require it, never for a release.
+test-hooks = ["swarmops-ops/test-hooks", "swarmops-testkit/test-hooks"]
 
 # One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
 # its tests named `<file>::<test>`; `crash.rs` and `faults.rs` drive the test hooks, so `all.rs`
