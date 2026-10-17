@@ -1,13 +1,139 @@
-# SwarmOps
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="The SwarmOps logo: four agents' branches merging into one main line" width="112" height="112">
+</p>
 
-[![CI](https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml/badge.svg?branch=stable)](https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml?query=branch%3Astable)
+<h1 align="center">SwarmOps</h1>
 
-Source control for coding-agent swarms, in Rust: many agents commit to one store at once, every
-command answers with one JSON envelope and a fixed exit code, and a crash at any point of a
-write leaves a store that verifies clean. This is milestone M1: the native store, the repository
-engine and the `swarmops` command line. The design is in `docs/superpowers/specs/`.
+<p align="center">
+  <strong>Source control for swarms of coding agents: many writers, one store, one JSON envelope per command.</strong>
+</p>
 
-## Build
+<p align="center">
+  <a href="https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml?query=branch%3Astable"><img src="https://github.com/KeiaiLab/SwarmOps/actions/workflows/ci.yml/badge.svg?branch=stable" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License: MIT"></a>
+  <a href="docs/policies/msrv-and-platforms.md"><img src="https://img.shields.io/badge/rust-1.99-orange" alt="Rust 1.99"></a>
+  <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/status-pre--release-yellow" alt="Status: pre-release"></a>
+</p>
+
+<p align="center">
+  <a href="#why-swarmops">Why</a> ·
+  <a href="#swarmops-and-git">SwarmOps and git</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#mcp">MCP</a> ·
+  <a href="#commands">Commands</a> ·
+  <a href="#roadmap">Roadmap</a> ·
+  <a href="#documentation">Documentation</a>
+</p>
+
+SwarmOps is source control built for a swarm of coding agents: 10 to 50 Claude Code or LangGraph
+processes on one host, committing to one repository at once. It is written in Rust and fully
+embedded: one program, no external database, no daemon. It is pre-release, at milestone M1.5:
+usable by one agent, with a store that already takes commits from many processes at once;
+merging and landing, which a swarm needs, come in M4 ([roadmap](#roadmap)).
+
+## Why SwarmOps
+
+A swarm of agents is not a team of people, and it needs other things from source control:
+
+- **Many agents write at once.** Tens of agent processes commit into one repository on one host.
+  SwarmOps gives them one store that each of them writes directly: object writes take no lock,
+  metadata writes queue in the kernel for one lock, and refs move only by compare-and-swap.
+- **Agents read answers, not prose.** Every command prints one JSON envelope: a stable `E_*`
+  code, a fixed exit code, whether retrying can help, machine-readable `details` and a `hint`,
+  often the next command to run. `swarmops schema` describes every type, and `swarmops mcp`
+  serves the operations to MCP clients such as Claude Code.
+- **Agents get killed mid-write.** Durability is full fsync, with no fast mode: a commit returns
+  only once its journal frame is on disk, a crash leaves no stale lock, and the next writer
+  repairs whatever a crash cut short. Crash sweeps, injected I/O errors and simulated power
+  losses test this through the real binary.
+
+## SwarmOps and git
+
+SwarmOps is not meant as a general-purpose git replacement: it will import from git (M3) and
+export to it (M8). Where the two compare, this is where SwarmOps stands, judged strictly:
+
+**Ahead**: built, with evidence · **Ahead by design**, **behind by design**: judged from the
+design and the code, never measured against git · **Parity** · **Behind** · **Not yet
+comparable**: not built yet. In the middle column, ✅ marks what is delivered and 📋 what is
+planned, each with its milestone.
+
+| Dimension | SwarmOps | Against git |
+| --- | --- | --- |
+| Hash | ✅ M0: BLAKE3-256 ids, with the object's kind and layout version hashed in; every read re-hashes. | **Ahead** of git's default SHA-1: 128-bit collision resistance against at most 80 bits, by cryptanalysis, not by benchmark. **Parity** with git's opt-in SHA-256. |
+| Order of writes | ✅ M1: every commit and ref move is a frame of one journal, appended under one lock, so all of them have a single global order. | **Ahead by design.** |
+| Stale locks | ✅ M1: the writer lock is an `flock`, which the kernel releases when its holder dies. | **Ahead by design.** A git process killed while it holds `index.lock` or a ref's `.lock` leaves the file behind, to be removed by hand. |
+| Durability | ✅ M1: full fsync is the only mode; an object is synced before a journal frame names it, and a commit returns after its frame's `fdatasync`. ✅ M1.5: the policy for a failed fsync. | **Ahead by design.** Git's defaults (2.43) sync packs, pack metadata and the commit graph, not loose objects, refs or the index. |
+| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. |
+| Commits from many writers | ✅ M1: concurrent commits all succeed, short of a lock wait past 10 s (the retryable `E_BUSY`). | **Parity** with agents in separate git worktrees, on lost commits and lock failures. |
+| One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
+| Reading a path at a revision | ✅ M1: `cat REV:PATH` and `ls REV[:PATH]`, without a checkout. | **Parity** with `git show REV:PATH` and `git ls-tree`. |
+| Offline, on one host | ✅ M1: no network code; every operation runs against the host's own store. | **Parity.** |
+| Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s. | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
+| Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, branches or symbolic refs. |
+| Breadth of reads | Today one file or one directory per call. 📋 M2: ranged reads, depths and sizes. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, recursive listings, `git grep <tree>` and sparse checkouts. |
+| Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no deltas. 📋 M6: gc. | **Behind by design**, in bytes and in files, against git's packs. |
+| Conflicts | Today the one signal is `E_CAS_MISMATCH`, with the ref's actual target. 📋 M4: three-way merge, conflicts reported per hunk as JSON and resolved without a checkout. | **Behind** today: git merges without a checkout (`git merge-tree`), with typed conflict records. M4 is **not yet comparable**. |
+| Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
+| Sync between hosts | Nothing today. 📋 M11: offline-first sync, a full store on every host, `fetch` and `push` against one upstream. | **Behind**: git clones, fetches and pushes over any transport, and bundles without one. |
+| Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. 📋 M3: git import. 📋 M8: git export. No user hooks, signing, submodules or LFS. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
+| Maturity | Pre-release: no tag yet, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
+| Landing | Today an agent that loses a ref race commits again on the winner's head and retries the compare-and-swap by hand. 📋 M4: `land`. | **Not yet comparable**; the loop by hand is behind. |
+
+No git baseline has been measured yet: these verdicts come from the design, the code, and git's
+own documentation and source, not from a benchmark. The first measured comparison is planned
+for M9, the same 32-agent contention run against git worktrees. SwarmOps' own measurements are
+in [docs/perf.md](docs/perf.md).
+
+## How it works
+
+Every operation is a library function: `swarmops-repo` does the work, `swarmops-ops` exposes it
+as the `StoreOps` operations, and the binary parses a command line, calls one operation and
+prints its envelope. Each arrow points from a crate to one it depends on; the diagram leaves out
+the shortcuts (`swarmops-ops` also uses `swarmops-core` and `swarmops-store` directly, and
+`swarmops-repo` uses `swarmops-core`), which [docs/architecture.md](docs/architecture.md) lists
+beside its diagrams of the write and read paths.
+
+```mermaid
+flowchart TB
+  user(["Agents and people"])
+  cli["swarmops-cli<br/>swarmops and so: the commands,<br/>and swarmops mcp for MCP"]
+  api["swarmops-api<br/>the contract: request and<br/>response types, E_* codes,<br/>the envelope, StoreOps"]
+  ops["swarmops-ops<br/>LocalOps: StoreOps<br/>over a local store"]
+  repo["swarmops-repo<br/>the repository engine"]
+  store["swarmops-store<br/>object files and<br/>the metadata store"]
+  core["swarmops-core<br/>ids, paths and the<br/>canonical codec; no I/O"]
+  subgraph disk["A store: one directory"]
+    direction LR
+    objects[("objects/<br/>one file per blob,<br/>tree and changeset")]
+    meta[("meta/<br/>the journal, the index,<br/>the refs, the lock")]
+  end
+  user -- "a command or an MCP call" --> cli
+  cli --> ops
+  cli --> api
+  ops --> api
+  ops --> repo
+  repo --> store
+  store --> core
+  store --> objects
+  store --> meta
+```
+
+### The store on disk
+
+A store is one directory. `FORMAT` names its layout version (`init` writes it last, so a store
+without it was never finished), and `REPO` the repository's id and name. `objects/` holds one
+self-verifying, content-addressed file per blob, tree and changeset, in 256 fan-out directories
+(`objects/<2 hex>/<62 hex>`), staged through `objects/tmp/`. `meta/` holds the metadata: an
+append-only, CRC-framed journal (`journal.log`, with each frame's offset in `journal.off` and
+how far it is materialized in `journal.ckpt`) that is its source of truth, the changeset index
+built from it (`idx/`, `parents.log`, `sorted/`), one file per ref (`refs/`), and the lock that
+serializes writers (`lock`). Every object is durable before any metadata names it, and a write
+commits when its journal frame is durable, so the next write repairs whatever a crash cut short.
+
+## Quick start
+
+### Install
 
 Rust 1.99 (`rust-toolchain.toml` pins it), on Linux:
 
@@ -23,7 +149,7 @@ if the name `so` is taken).
 A store must live on a native Linux filesystem: a path under `/mnt/` (where WSL mounts Windows
 drives) is refused with `E_UNSUPPORTED_FS`.
 
-## Usage
+### First commands
 
 The examples use `so`, the short form; every command runs the same by either name. The hints in
 the envelopes give their commands as `swarmops …`.
@@ -46,6 +172,87 @@ so log -n 20
 so verify --deep
 ```
 
+Every command, its revisions and change lists, and its output are in [Commands](#commands).
+
+## MCP
+
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
+agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
+as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
+`ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
+`inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
+definitions it refers to written in place. Its result is the envelope the CLI prints for that
+request, as `structuredContent` and as text, and a failed operation sets `isError`, with the
+envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
+to clients that open with `initialize`.
+
+### Register the server
+
+Register it with Claude Code:
+
+```sh
+claude mcp add swarmops -- so mcp --repo <store> --as <agent>
+```
+
+or give a project a `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "swarmops": {
+      "command": "swarmops",
+      "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
+      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT}"}
+    }
+  }
+}
+```
+
+A project's `.mcp.json` is shared by every agent that opens the project, so it takes each
+agent's identity from that agent's own `SWARMOPS_AGENT`, which Claude Code expands into the
+server's environment, rather than giving all of them one `--as`. For the same reason it runs
+`swarmops`, not `so`: on some machine the short name may be missing (`--bin swarmops` installs
+the long one alone) or belong to another program.
+
+### Store, identity and lifetime
+
+The store and the identity are the server's, as they are a command's: `--repo`, else
+`SWARMOPS_REPO`, and `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`. No call can name
+another identity: every commit and ref move is recorded for the server's agent, and without one
+they fail with `E_IDENTITY_REQUIRED`. The client starts the server as its own user, so the
+server reads `{"file": "<path>"}` content as the CLI does, a relative path from its working
+directory: give absolute paths, the store's too. It opens the store for each call, and so sees
+what other agents commit meanwhile. The store runs in the server's process, so the server ends
+with it on any of the store's three documented aborts (storage spec §2): a failed journal write
+or sync whose cut-back fails too, in a write or in the repair before one, which any commit or
+ref move can meet; or an `init` that cannot take its `FORMAT` back, which no tool runs. The
+client sees the server exit, and has to start it again.
+
+### Rules for agents
+
+Two rules matter more to an agent than to a person at the CLI:
+
+- `ref_set` and `ref_delete` take `expected_old` as the full changeset id the ref held when the
+  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name, a relative
+  revision such as `main~1` or an id prefix is read from the store when the call runs instead
+  of pinning what the agent saw, so the compare-and-swap protects nothing: the server refuses
+  one with `E_INVALID_ARG`. The CLI's `--expect` still takes any revision, and its help says why
+  not to.
+- Clients cut long tool results (Claude Code at 25,000 tokens by default), and each result holds
+  its envelope twice, so an agent should ask for little: `max_bytes` of 32 KiB or less for
+  `read_file`, a `limit` of 100 or less for `read_tree` and `log`, paging on with the `cursor` a
+  result returns, and `max_changes` of 100 or less for `show`. The tools' descriptions say so;
+  the operations' own defaults stay as they are.
+
+### When the server does not start
+
+A command line that parses as `swarmops mcp` but is refused starts no server, and its envelope
+goes to stderr, not to stdout, which belongs to the protocol. A usage error before the word
+`mcp` (`swarmops --frob mcp`) is an ordinary command error, printed on stdout with exit code 2,
+and starts no server either.
+
+## Commands
+
 | Command | What it does |
 | --- | --- |
 | `init <dir> [--name N]` | Create a store in `<dir>` (made if missing) and describe it. |
@@ -59,7 +266,9 @@ so verify --deep
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
-| `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([below](#mcp)). |
+| `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([MCP](#mcp)). |
+
+### Revisions and change lists
 
 A revision is `main`, `release/<name>`, a changeset id or a unique prefix of 12 or more of its
 hex digits, then any number of `~N` (the N-th first parent). A change list is a JSON array of
@@ -105,86 +314,31 @@ machine-readable `details`, and a `hint`, often the next command to run. The exi
 
 `swarmops schema` gives every type and error code; the operations spec has the full table.
 
-### The store on disk
+## Roadmap
 
-A store is one directory. `FORMAT` names its layout version (`init` writes it last, so a store
-without it was never finished), and `REPO` the repository's id and name. `objects/` holds one
-self-verifying, content-addressed file per blob, tree and changeset, in 256 fan-out directories
-(`objects/<2 hex>/<62 hex>`), staged through `objects/tmp/`. `meta/` holds the metadata: an
-append-only, CRC-framed journal (`journal.log`, with each frame's offset in `journal.off` and
-how far it is materialized in `journal.ckpt`) that is its source of truth, the changeset index
-built from it (`idx/`, `parents.log`, `sorted/`), one file per ref (`refs/`), and the lock that
-serializes writers (`lock`). Every object is durable before any metadata names it, and a write
-commits when its journal frame is durable, so the next write repairs whatever a crash cut short.
+The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops-design.md)
+(§13), in the order they are built. ✅ delivered · 📋 planned.
 
-## MCP
+| Status | Milestone | Scope |
+| --- | --- | --- |
+| ✅ | M0 | Bootstrap: the workspace and its gates, the canonical codec and its golden vectors, the fsync experiment. |
+| ✅ | M1 | The single-agent core: `init`, `commit`, `cat`, `ls`, `log` and ref compare-and-swap, over the native metadata store and object files; crash sweeps. |
+| ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, I/O-error injection, write-ordering checks and the fsync-failure policy, power-loss images, the project policies, the MCP server and `so`. |
+| 📋 | M2 | Diff, history and the derived-data engine. |
+| 📋 | M3 | git import. |
+| 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |
+| 📋 | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |
+| 📋 | M5 | Workspaces, with an adapter for Claude Code's worktree hooks. |
+| 📋 | M6 | Verify, crash safety and fuzzing: fsck, gc, a TLA+/Quint model of the journal protocol, and the next store `FORMAT`. |
+| 📋 | M7 | Blame and review. |
+| 📋 | M9 | Simulation and benchmarks, a contention benchmark against git worktrees among them. |
+| 📋 | M11 | Remote sync, offline-first: a full store on every host, `fetch`, `push` and `sync status` against one upstream, over ssh. |
+| 📋 | M10 | The RPC server, after v1. |
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
-agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
-as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
-`ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
-`inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
-definitions it refers to written in place. Its result is the envelope the CLI prints for that
-request, as `structuredContent` and as text, and a failed operation sets `isError`, with the
-envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
-to clients that open with `initialize`.
-
-Register it with Claude Code:
-
-```sh
-claude mcp add swarmops -- so mcp --repo <store> --as <agent>
-```
-
-or give a project a `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "swarmops": {
-      "command": "swarmops",
-      "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
-      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT}"}
-    }
-  }
-}
-```
-
-A project's `.mcp.json` is shared by every agent that opens the project, so it takes each
-agent's identity from that agent's own `SWARMOPS_AGENT`, which Claude Code expands into the
-server's environment, rather than giving all of them one `--as`. For the same reason it runs
-`swarmops`, not `so`: on some machine the short name may be missing (`--bin swarmops` installs
-the long one alone) or belong to another program.
-
-The store and the identity are the server's, as they are a command's: `--repo`, else
-`SWARMOPS_REPO`, and `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`. No call can name
-another identity: every commit and ref move is recorded for the server's agent, and without one
-they fail with `E_IDENTITY_REQUIRED`. The client starts the server as its own user, so the
-server reads `{"file": "<path>"}` content as the CLI does, a relative path from its working
-directory: give absolute paths, the store's too. It opens the store for each call, and so sees
-what other agents commit meanwhile. The store runs in the server's process, so the server ends
-with it on any of the store's three documented aborts (storage spec §2): a failed journal write
-or sync whose cut-back fails too, in a write or in the repair before one, which any commit or
-ref move can meet; or an `init` that cannot take its `FORMAT` back, which no tool runs. The
-client sees the server exit, and has to start it again.
-
-Two rules matter more to an agent than to a person at the CLI:
-
-- `ref_set` and `ref_delete` take `expected_old` as the full changeset id the ref held when the
-  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name, a relative
-  revision such as `main~1` or an id prefix is read from the store when the call runs instead
-  of pinning what the agent saw, so the compare-and-swap protects nothing: the server refuses
-  one with `E_INVALID_ARG`. The CLI's `--expect` still takes any revision, and its help says why
-  not to.
-- Clients cut long tool results (Claude Code at 25,000 tokens by default), and each result holds
-  its envelope twice, so an agent should ask for little: `max_bytes` of 32 KiB or less for
-  `read_file`, a `limit` of 100 or less for `read_tree` and `log`, paging on with the `cursor` a
-  result returns, and `max_changes` of 100 or less for `show`. The tools' descriptions say so;
-  the operations' own defaults stay as they are.
-
-A command line that parses as `swarmops mcp` but is refused starts no server, and its envelope
-goes to stderr, not to stdout, which belongs to the protocol. A usage error before the word
-`mcp` (`swarmops --frob mcp`) is an ordinary command error, printed on stdout with exit code 2,
-and starts no server either.
+When it is usable (umbrella spec §1): by one agent from M1; by a swarm, with landing, from M4;
+as the complete v1, with review, at M9; across hosts, offline-first, from M11.
+[docs/known-limitations.md](docs/known-limitations.md) lists what is still open, and which
+milestone takes each item.
 
 ## Development
 
@@ -194,6 +348,7 @@ just check-slow   # more proptest cases, and the ignored tests: crash sweeps, co
 just perf         # the M1 measurements, optimized; docs/perf.md records them
 just fuzz [target]  # cargo-fuzz on nightly: codec_roundtrip, tree_decode, frame_decode, journal_recovery
 just bench
+just bench-compare  # the native metadata store against embedded databases (bench/compare/)
 ```
 
 `scripts/check.sh` runs `just check`'s steps on a machine without `just`. Tests never need the
@@ -214,34 +369,31 @@ rest). The gates build the tests with `--all-features`; a plain `cargo test` ski
 need the hooks. Every other build, `cargo build --release` included, ignores the variables, and
 `just check` runs a release build to show it.
 
-## Specs and docs
+## Documentation
 
-- `docs/superpowers/specs/2026-10-15-swarmops-design.md`: the design, which the specs below
-  refine; specs are the authority.
-- `docs/superpowers/specs/2026-10-15-swarmops-storage-core-design.md`: objects, the journal,
-  refs, crash safety, and the canonical byte layouts and hash recipe (the hash contract).
-- `docs/superpowers/specs/2026-10-15-swarmops-operations-landing-design.md`: the operations,
-  the CLI, the envelope and the error codes, workspaces and landing.
-- `docs/superpowers/specs/2026-10-15-swarmops-review-model-design.md`: change requests, their
-  classification and approvals, and the landing gate (after M1).
-- `docs/superpowers/plans/`: the milestone plans; `docs/perf.md`: the measurements.
+The design specs are the authority, and they are in Korean;
+[docs/architecture.md](docs/architecture.md) is the English overview.
 
-## Project
+| Document | What it holds |
+| --- | --- |
+| [docs/architecture.md](docs/architecture.md) | The design in English: crates, data model, the store on disk, the write and read paths, durability, concurrency, the contract. |
+| [docs/known-limitations.md](docs/known-limitations.md) | What is still open, and which milestone takes each item. |
+| [docs/perf.md](docs/perf.md) | Every measurement, and the decisions taken on them. |
+| [bench/compare/README.md](bench/compare/README.md) | The harness that measures the native metadata store against embedded databases. |
+| [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md) | What stays compatible, and how a breaking change is made. |
+| [docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md) | The Rust version and the platforms SwarmOps supports. |
+| [CHANGELOG.md](CHANGELOG.md) | What has changed; nothing is released yet. |
+| [RELEASE.md](RELEASE.md) | The release checklist. |
+| [The umbrella spec](docs/superpowers/specs/2026-10-15-swarmops-design.md) | The design, which the specs below refine. |
+| [Storage core](docs/superpowers/specs/2026-10-15-swarmops-storage-core-design.md) | Objects, the journal, refs, crash safety, and the canonical byte layouts and hash recipe (the hash contract). |
+| [Operations and landing](docs/superpowers/specs/2026-10-15-swarmops-operations-landing-design.md) | The operations, the CLI, the envelope and the error codes, workspaces and landing. |
+| [The review model](docs/superpowers/specs/2026-10-15-swarmops-review-model-design.md) | Change requests, their classification and approvals, and the landing gate (after M1). |
+| [docs/superpowers/plans/](docs/superpowers/plans/) | The milestone plans, with their tasks and acceptance tests. |
 
-- [CHANGELOG.md](CHANGELOG.md): what has changed; nothing is released yet.
+## Contributing, security and license
+
 - [CONTRIBUTING.md](CONTRIBUTING.md): how changes are made, the tests' rules, and how AI
   assistance is attributed. [AGENTS.md](AGENTS.md) holds the rules every coding agent here
   follows.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability privately, and what counts as one.
-- [docs/architecture.md](docs/architecture.md): the design in English, as an overview of the
-  Korean specs.
-- [docs/known-limitations.md](docs/known-limitations.md): what M1 leaves open, and which
-  milestone takes each item.
-- [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md): what
-  stays compatible. [docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md):
-  the Rust version and the platforms SwarmOps supports.
-- [RELEASE.md](RELEASE.md): the release checklist.
-
-## License
-
-SwarmOps is released under the [MIT License](LICENSE).
+- SwarmOps is released under the [MIT License](LICENSE).

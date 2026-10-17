@@ -6,8 +6,9 @@ alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here
 
 ## Before you change anything
 
-- **The specs are the authority.** `docs/superpowers/specs/2026-10-15-swarmops-design.md` and
-  its three sub-specs decide how SwarmOps behaves (they are in Korean;
+- **The specs are the authority.**
+  [`docs/superpowers/specs/2026-10-15-swarmops-design.md`](docs/superpowers/specs/2026-10-15-swarmops-design.md)
+  and its three sub-specs decide how SwarmOps behaves (they are in Korean;
   [docs/architecture.md](docs/architecture.md) is an English overview). A change that changes
   behaviour updates the spec paragraph that owns it in the same change. If the code and a spec
   disagree, one of them is a bug: say which, and fix it.
@@ -18,8 +19,9 @@ alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here
   on-disk layout of `FORMAT 1` (journal frames, records, index and ref files) needs a `FORMAT`
   bump. [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md)
   lists every public surface and how each one changes.
-- **Work from a plan.** Each milestone has a plan in `docs/superpowers/plans/` with its tasks and
-  acceptance tests, and cites the spec sections it implements. Small fixes need no plan.
+- **Work from a plan.** Each milestone has a plan in
+  [`docs/superpowers/plans/`](docs/superpowers/plans/) with its tasks and acceptance tests, and
+  cites the spec sections it implements. Small fixes need no plan.
 - **Check what is already known.** [docs/known-limitations.md](docs/known-limitations.md) lists
   what M1 leaves open and the milestone that is meant to close each item.
 

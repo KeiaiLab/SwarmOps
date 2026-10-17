@@ -134,7 +134,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   while a writer cuts the index counts every record the checkpoint passed or the sorted views
   cover.
 - Where the journal cannot vouch for the index's records past the checkpoint (no journal, a
-  damaged one, or a `journal.ckpt` that does not hold a u64le — damage verify reports), the
+  damaged one, or a `journal.ckpt` that does not hold a u64le: damage verify reports), the
   index counts them by their lengths and now checks their `par.col` entries against the layout
   (each record's parents start where the previous record's end): a zeroed entry, which a power
   loss leaves, is `IndexCorrupt` (`E_STORE_CORRUPT`) and nothing is cut. Before, the next write
