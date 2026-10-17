@@ -2,7 +2,9 @@
 //!
 //! - open: a fresh process opens the store and looks up one changeset (`__open`); the open,
 //!   the first lookup and the process from spawn to exit are timed. The files are in the page
-//!   cache (dropping it needs root): this is a warm open.
+//!   cache (dropping it needs root): this is a warm open. In a full run W3 has opened the store
+//!   before, so this times a re-open; with `--only w4`, run 1's first trial is the first open
+//!   after the load, which `open_max_ms` shows.
 //! - recovery: a writer process (`__writer`) commits W1's transaction in a loop, printing each
 //!   acknowledged commit; a seeded 0.1–1 s after its first, it is killed with SIGKILL, most
 //!   likely inside a commit. A fresh process (`__recover`) then opens the store, commits one

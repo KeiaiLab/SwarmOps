@@ -703,7 +703,7 @@ fn render(
     );
     let _ = writeln!(
         out,
-        "- {} runs of each measurement; cells are the median [min–max] over the runs; every row gives the 1-minute load at the start of each run (and its range during them) and the raw fdatasync probe taken at the start and end of each run\n",
+        "- {} runs of each measurement; cells are the median [min–max] over the runs; every row gives the 1-minute load at the start of each run (and its range during them) and the raw fdatasync probe taken at the start and end of each run, except the sync calls (counts, not timings), which have only the line above, taken just before them\n",
         plan.runs
     );
     let _ = writeln!(
@@ -928,11 +928,15 @@ fn render(
     section(
         &mut out,
         &format!("W4: opening a {largest}-changeset store (warm), in a fresh process"),
-        &format!("Median of {} opens per run.", plan.w4_opens),
+        &format!(
+            "Median of {} opens per run, and the worst of them; in a full run W3 has opened the store before, so these are re-opens.",
+            plan.w4_opens
+        ),
         "w4-open",
         &largest,
         &[
             Col("open_ms", "open ms"),
+            Col("open_max_ms", "worst open ms"),
             Col("first_lookup_ms", "first lookup ms"),
             Col("open_first_ms", "open + lookup ms"),
             Col("process_ms", "process ms"),
@@ -942,7 +946,7 @@ fn render(
         &mut out,
         &format!("W4: recovery after a writer is killed (SIGKILL), {largest} changesets"),
         &format!(
-            "Median of {} kills per run; the next process's open, its first write, both; every acknowledged commit checked present.",
+            "Median of {} kills per run; the next process's open, its first write, both; the last acknowledged commit checked present.",
             plan.w4_kills
         ),
         "w4-recover",
