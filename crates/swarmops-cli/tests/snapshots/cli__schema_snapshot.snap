@@ -1561,7 +1561,7 @@ expression: s.redact(&all)
       "properties": {
         "expected_old": {
           "$ref": "#/$defs/Rev",
-          "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is resolved when\nthe delete runs, so it always matches and the compare-and-swap protects nothing:\n`swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's `--expect` help warns\nagainst it."
+          "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name, a relative revision or an id prefix is\nread from the store when the delete runs instead of pinning the id the caller read: the\nref's own name always matches, so the compare-and-swap protects nothing, and `main~1` on\n`main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's\n`--expect` help warns against it."
         },
         "name": {
           "description": "The ref.",
@@ -1677,7 +1677,7 @@ expression: s.redact(&all)
               "type": "null"
             }
           ],
-          "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative\nrevision is resolved when the move runs, so it always matches and the compare-and-swap\nprotects nothing: `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's `--expect`\nhelp warns against it. Give this or `create`, not both."
+          "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name, a relative revision\nor an id prefix is read from the store when the move runs instead of pinning the id the\ncaller read: the ref's own name always matches, so the compare-and-swap protects nothing,\nand `main~1` on `main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and\nthe CLI's `--expect` help warns against it. Give this or `create`, not both."
         },
         "name": {
           "description": "The ref: `main` or `release/<name>`.",

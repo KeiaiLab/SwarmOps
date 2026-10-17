@@ -1,5 +1,5 @@
 //! `swarmops mcp`, the MCP server over stdio, as an agent's harness drives it: the protocol
-//! handshake of either revision it serves, one tool per `StoreOps` operation whose schema is
+//! handshake of each revision it serves, one tool per `StoreOps` operation whose schema is
 //! the request type's, tool results that carry the envelope the CLI prints, and JSON-RPC errors
 //! for what is not a valid request.
 //!
@@ -11,8 +11,8 @@
 //! however its test ends.
 //!
 //! The protocol revisions are MCP's latest, 2026-07-28 (stateless: each request names its
-//! version in `params._meta`), and the one before it, 2025-11-25 (a session that `initialize`
-//! opens).
+//! version in `params._meta`), and the two before it, 2025-11-25 and 2025-06-18, which have a
+//! handshake (a session that `initialize` opens).
 
 mod support;
 
@@ -44,6 +44,10 @@ const PREVIOUS: &str = "2025-11-25";
 /// The earliest revision `initialize` still serves: 2025-06-18, the first with
 /// `structuredContent` and `outputSchema`.
 const EARLIEST: &str = "2025-06-18";
+
+/// Every revision the server serves, newest first, as `server/discover` and a `-32022` error
+/// list them: the latest in `params._meta`, the other two through `initialize`.
+const SUPPORTED: [&str; 3] = [LATEST, PREVIOUS, EARLIEST];
 
 /// A command line that runs `swarmops mcp`: its arguments, and the variables it sets.
 type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
@@ -77,9 +81,9 @@ const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 // The tests.
 // ---------------------------------------------------------------------------------------------
 
-/// Either revision opens a session that lists the same ten tools: `initialize` negotiates
-/// 2025-11-25 (also for a client that asks for another version), `server/discover` advertises
-/// 2026-07-28, and each tool's schema is its request type's, standing alone.
+/// Every revision lists the same ten tools: `initialize` negotiates 2025-11-25 or 2025-06-18
+/// (2025-11-25 for a client that asks for a version it does not serve), `server/discover`
+/// advertises all three, and each tool's schema is its request type's, standing alone.
 #[test]
 fn mcp_initialize_lists_every_operation_as_a_tool() {
     let store = Store::init();
@@ -115,11 +119,15 @@ fn mcp_initialize_lists_every_operation_as_a_tool() {
         check_tool(name, request, tool, &all);
     }
 
-    // 2026-07-28: discovery names the version served without a handshake, and the same tools
-    // list, with the results' own fields.
+    // 2026-07-28: discovery names every revision served, the ones with a handshake too, and the
+    // same tools list, with the results' own fields.
     let discover = server.result("server/discover", json!({"_meta": latest_meta()}));
     assert_eq!(discover["resultType"], "complete", "{discover}");
-    assert_eq!(discover["supportedVersions"], json!([LATEST]), "{discover}");
+    assert_eq!(
+        discover["supportedVersions"],
+        json!(SUPPORTED),
+        "{discover}"
+    );
     assert_eq!(discover["capabilities"], json!({"tools": {}}), "{discover}");
     assert_eq!(discover["instructions"], init["instructions"], "{discover}");
     assert_cacheable(&discover);
@@ -161,13 +169,22 @@ fn mcp_initialize_lists_every_operation_as_a_tool() {
 }
 
 /// The contract-change review gate for agents: the whole `tools/list` result of the latest
-/// revision, every tool's name, title, description, input schema and annotations.
+/// revision, every tool's name, title, description, input schema and annotations. The server's
+/// version, which every release bumps and no contract rests on, is checked here and pinned as
+/// `[version]`.
 #[test]
 fn mcp_tools_list_schema_snapshot() {
     let store = Store::init();
     let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
-    let listed = server.result("tools/list", json!({"_meta": latest_meta()}));
+    let mut listed = server.result("tools/list", json!({"_meta": latest_meta()}));
     server.finish_clean();
+    let server_info = &mut listed["_meta"]["io.modelcontextprotocol/serverInfo"];
+    assert_eq!(
+        server_info["version"],
+        env!("CARGO_PKG_VERSION"),
+        "{server_info}"
+    );
+    server_info["version"] = json!("[version]");
     insta::assert_json_snapshot!(listed);
 }
 
@@ -347,7 +364,8 @@ fn the_cli_prints_the_same(server: &mut Server, store: &Store, c2: &str) {
 
 /// Mutations take the server's identity, from `--as`, else `SWARMOPS_AGENT` with
 /// `SWARMOPS_RUN_ID`: without one, `commit`, `ref_set` and `ref_delete` are each an
-/// `E_IDENTITY_REQUIRED` tool error that writes nothing, and no call can supply one.
+/// `E_IDENTITY_REQUIRED` tool error that writes nothing, in a session and in a 2026-07-28
+/// request alike, and no call can supply one.
 #[test]
 fn mcp_mutation_without_identity_is_e_identity_required() {
     let store = Store::init();
@@ -376,6 +394,11 @@ fn mcp_mutation_without_identity_is_e_identity_required() {
         assert!(hint.contains("--as"), "the hint names --as: {hint}");
         assert_eq!(refused["meta"]["resolved"], json!({}), "nothing resolved");
     }
+    // A 2026-07-28 request, which needs no session and is what Claude Code sends, is refused
+    // alike.
+    let latest = server.call_latest("commit", commit.clone()).envelope;
+    assert_eq!(latest["error"]["code"], "E_IDENTITY_REQUIRED", "{latest}");
+    assert_eq!(latest["error"]["exit"], 5, "{latest}");
     // An identity in the arguments is not one: the request types have no such field.
     let mut claimed = commit.clone();
     claimed["agent"] = json!(AGENT);
@@ -641,10 +664,10 @@ fn mcp_calls_do_not_share_resolution() {
 
 /// A ref move through the server is a compare-and-swap only when it names what it expects: an
 /// `expected_old` that is not a full changeset id (a ref name, a relative revision, an id
-/// prefix) is resolved when the call runs, so it would always match; the server refuses it with
-/// `E_INVALID_ARG` and moves nothing. With the full id the caller last read, a stale
-/// expectation is `E_CAS_MISMATCH`, and the same move again finds its work done. The CLI keeps
-/// taking any revision for `--expect`.
+/// prefix) is read when the call runs instead of pinning the id the caller read; the server
+/// refuses it with `E_INVALID_ARG` and moves nothing. With the full id the caller last read, a
+/// stale expectation is `E_CAS_MISMATCH`, and the same move again finds its work done. The CLI
+/// keeps taking any revision for `--expect`.
 #[test]
 fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
     let store = Store::init();
@@ -976,7 +999,7 @@ fn requests_before_initialize_are_refused(server: &mut Server) {
             let early = server.error(method, json!({"_meta": meta}), UNSUPPORTED_PROTOCOL_VERSION);
             assert_eq!(
                 early["error"]["data"],
-                json!({"supported": [LATEST], "requested": version}),
+                json!({"supported": SUPPORTED, "requested": version}),
                 "{early}"
             );
             let message = early["error"]["message"].as_str().unwrap();
@@ -1004,7 +1027,7 @@ fn requests_before_initialize_are_refused(server: &mut Server) {
     );
     assert_eq!(
         unsupported["error"]["data"],
-        json!({"supported": [LATEST], "requested": "2099-01-01"})
+        json!({"supported": SUPPORTED, "requested": "2099-01-01"})
     );
     let no_capabilities = json!({"io.modelcontextprotocol/protocolVersion": LATEST});
     server.error(

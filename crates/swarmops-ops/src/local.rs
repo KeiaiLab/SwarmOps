@@ -537,8 +537,9 @@ impl StoreOps for Recording<'_> {
         };
         let outcome = if expected == Some(new) {
             // A move to the target it expects moves nothing: the ref holds it (a replay) or does
-            // not (a mismatch). Either way nothing is written, where the store would record a
-            // no-op move, its version counting up.
+            // not (a mismatch), and nothing is written either way. The store's compare-and-swap
+            // would journal the replay as a RefMove frame (two fdatasyncs), though the ref and
+            // its version would stay as they are; reading the ref skips the frame.
             let current = self.ops.repo.get_ref(&name).map_err(op)?;
             CasOutcome {
                 result: CasResult::Mismatch {
