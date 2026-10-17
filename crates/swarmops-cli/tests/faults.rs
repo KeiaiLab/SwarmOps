@@ -25,13 +25,19 @@
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
 
+use std::io;
+use std::os::unix::process::ExitStatusExt;
+use std::thread;
+use std::time::{Duration, Instant};
+
 use serde_json::Value;
 use swarmops_store::FAIL_AT_ENV;
+use swarmops_testkit::child::SIGABRT;
 
 use crate::support::sweep::{
-    commit_template, dry_commit, dry_init, init_again, sweep, swept_commit,
+    NOW, SWEPT_PUTS, commit_template, dry_commit, dry_init, init_again, sweep, swept_commit,
 };
-use crate::support::{Run, Store, agent, run};
+use crate::support::{self, Run, Store, agent, run};
 
 /// The failure modes and errnos the commit sweep runs each call with.
 const FAILURES: [&str; 4] = [
@@ -224,6 +230,69 @@ fn fail_at_every_call_reports_honestly() {
 #[test]
 fn the_commit_sweeps_reach_the_index_sync_and_the_checkpoint() {
     dry_commit(&commit_template());
+}
+
+/// The documented abort of a commit (a failed journal append whose cut back off the journal
+/// fails too, [`ABORTS`]) ends the process by `std::process::abort` even when its reason cannot
+/// be written: here the run's stderr is a pipe nobody reads (its read end dropped before the
+/// run, so every write to it fails with `EPIPE`), and the run must still abort, not panic at
+/// the write and report `E_INTERNAL` (which `swarmops mcp`, catching a panic per call, would
+/// serve on after, against storage spec §2 rule 3). The aborting call is found by running the
+/// commit with a persistent `EIO` from each call in turn, cheaply, without the sweep's oracle;
+/// the first run that aborts is then run again without a reader.
+#[test]
+fn an_abort_whose_reason_cannot_be_written_still_aborts() {
+    let template = commit_template();
+    let dry = dry_commit(&template);
+    let fail_at = |k: u64| format!("{k}:persistent:eio");
+    let aborting = sweep(1..=dry.calls, |k| {
+        let store = Store::copy_of(&template);
+        let fail_at = fail_at(k);
+        swept_commit(&store, &[(FAIL_AT_ENV, fail_at.as_str())])
+            .aborted()
+            .then_some(k)
+    });
+    let k = aborting
+        .into_iter()
+        .flatten()
+        .next()
+        .expect("a persistent EIO at the journal append aborts, as the sweep documents");
+
+    let store = Store::copy_of(&template);
+    let changes = store.changes_of("swept", &SWEPT_PUTS);
+    let args = store.args(&agent(1), &["commit", "-m", "swept", "--changes", &changes]);
+    let now = NOW.to_string();
+    let fail_at = fail_at(k);
+    let env = [
+        (swarmops_ops::NOW_ENV, now.as_str()),
+        (FAIL_AT_ENV, fail_at.as_str()),
+    ];
+    let mut command = support::swarmops(&args, &env);
+    let (reader, writer) = io::pipe().expect("a pipe");
+    drop(reader);
+    command.stderr(writer);
+    let mut child = command.spawn().expect("run swarmops");
+    let deadline = Instant::now() + support::RUN_TIMEOUT;
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("look whether the run ended") {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("call {k} failing persistently: the run was still going at the deadline");
+        }
+        thread::sleep(Duration::from_millis(1));
+    };
+    let output = child.wait_with_output().expect("the run's output");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        status.signal(),
+        Some(SIGABRT),
+        "call {k} failing persistently, stderr unwritable: {status}; stdout: {stdout}"
+    );
+    assert_eq!(stdout, "", "an aborted run prints no envelope");
+    store.assert_clean(&format!("call {k} failing persistently: after the abort"));
 }
 
 /// `init` failing once with `EIO` at each of its last calls: the sync of the store root that

@@ -31,10 +31,11 @@
 //! with `read_at` on read-only handles, except that `journal.ckpt`, which
 //! [`Journal::set_ckpt`] replaces by rename, is read by path.
 
+use std::fmt;
 use std::fs::File;
+use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-use std::{fmt, io};
 
 use camino::Utf8PathBuf;
 
@@ -494,7 +495,10 @@ impl Journal {
     fn cut_failed_frame(&self, start: u64, e: io::Error) -> StoreError {
         let untouched = matches!(self.log.metadata(), Ok(meta) if meta.len() == start);
         if !untouched && let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), start) {
-            eprintln!(
+            // A write that fails (a closed pipe, a full log) must not panic: the abort is the
+            // point, and `swarmops mcp` would catch the panic and serve on.
+            let _ = writeln!(
+                io::stderr(),
                 "swarmops: fatal: appending a frame to {} failed ({e}), and the frame could not \
                  be cut back off it ({cut}): aborting, so that no later write of this process \
                  lists a frame that may not be on disk",
@@ -542,7 +546,8 @@ impl Journal {
     /// transaction did not commit. A cut that fails aborts the process, saying why on stderr.
     fn write_afresh(&self, from: u64, frames: &[u8], e: &io::Error) -> Result<(), StoreError> {
         if let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), from) {
-            eprintln!(
+            let _ = writeln!(
+                io::stderr(),
                 "swarmops: fatal: syncing the frames of {} that journal.off does not list yet \
                  failed ({e}), and they could not be cut back off it to be written afresh \
                  ({cut}): aborting, so that no later write of this process lists a frame that \

@@ -56,7 +56,7 @@
 //! picks up where the crashed one stopped. Two creates of one store at once are not supported.
 
 use std::hash::{BuildHasher, RandomState};
-use std::io;
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -389,7 +389,9 @@ fn take_format_back(fs: &dyn FsOps, root: &Utf8Path, e: &io::Error) {
         .remove(format.as_std_path())
         .and_then(|()| fs.fsync_dir(root.as_std_path()));
     if let Err(undo) = undone {
-        eprintln!(
+        // A write that fails (a closed pipe, a full log) must not panic: the abort is the point.
+        let _ = writeln!(
+            io::stderr(),
             "swarmops: fatal: syncing {root} after linking {format} failed ({e}), and \
              {format} could not be taken back ({undo}): aborting, as a crash there would"
         );
