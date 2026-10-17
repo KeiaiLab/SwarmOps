@@ -187,9 +187,13 @@ network; those that read real repositories on this host run only with `SWARMOPS_
 
 ### The `test-hooks` feature
 
-The crash tests drive three test-only environment variables: `SWARMOPS_TEST_CRASH_AT=<k>` aborts
-the process at its k-th store filesystem call, `SWARMOPS_TEST_FS_CALLS=<file>` makes it write how
-many calls it made, and `SWARMOPS_TEST_NOW=<unix seconds>` fixes the time it signs changesets at.
+The crash and fault tests drive five test-only environment variables:
+`SWARMOPS_TEST_CRASH_AT=<k>` aborts the process at its k-th store filesystem call,
+`SWARMOPS_TEST_FS_CALLS=<file>` makes it write how many calls it made,
+`SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]` fails its k-th call with an injected
+I/O error (and with `persistent` every mutating call after it), `SWARMOPS_TEST_ORDER_CHECK=1`
+checks every write against the store's write-ordering rules and panics at one that breaks a rule,
+and `SWARMOPS_TEST_NOW=<unix seconds>` fixes the time it signs changesets at.
 They act only in a build with the cargo feature `test-hooks` (on `swarmops-store`,
 `swarmops-repo`, `swarmops-ops` and `swarmops-cli`; `swarmops-cli/test-hooks` turns on the
 rest). The gates build the tests with `--all-features`; a plain `cargo test` skips the tests that

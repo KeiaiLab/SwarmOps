@@ -3,18 +3,23 @@
 //! temp dir of its own with the commands the tests run on it.
 //!
 //! Every child runs with none of the developer's `SWARMOPS_*` variables, only those the test
-//! sets, and its envelope is checked against the contract before a test reads it: stdout holds
-//! one JSON line, `ok` holds exactly when the exit code is 0, and an error's `exit` is the exit
-//! code. Every child has a deadline ([`RUN_TIMEOUT`] unless a test gives another): one still
+//! sets, and `SWARMOPS_TEST_ORDER_CHECK=1` (unless the test sets it otherwise): in a build with
+//! the `test-hooks` feature, as the gates build it, every write a child makes is checked against
+//! the store's write-ordering rules, and a call that breaks one panics, which the child reports
+//! as `E_INTERNAL`. Its envelope is checked against the contract before a test reads it: stdout
+//! holds one JSON line, `ok` holds exactly when the exit code is 0, and an error's `exit` is the
+//! exit code. Every child has a deadline ([`RUN_TIMEOUT`] unless a test gives another): one still
 //! running then is killed and fails the test with what it printed. A child is reaped however
 //! the test ends: its handle kills and waits for it when it is dropped, a panic's unwinding
-//! included.
+//! included. What the crash and error sweeps share (their runner, dry runs and commit template)
+//! is in [`sweep`].
 
 #![allow(dead_code)] // Each test binary uses the part it needs.
 
 /// The store's `FsOps` doubles, for the tests that run a store in this process.
 #[path = "../../../swarmops-store/tests/support/fs.rs"]
 pub mod doubles;
+pub mod sweep;
 
 use std::ffi::OsString;
 use std::fs;
@@ -29,7 +34,7 @@ use std::time::{Duration, Instant};
 use camino::Utf8PathBuf;
 use doubles::copy_dir;
 use serde_json::{Value, json};
-use swarmops_store::Layout;
+use swarmops_store::{Layout, ORDER_CHECK_ENV};
 use tempfile::TempDir;
 
 /// The binary under test.
@@ -53,8 +58,8 @@ pub fn agent(n: usize) -> String {
     format!("test-swarm/worker-{n}")
 }
 
-/// The binary with `args`, `env` set, and none of the other `SWARMOPS_*` variables of this
-/// process's environment.
+/// The binary with `args`, the order check on, `env` set, and none of the other `SWARMOPS_*`
+/// variables of this process's environment.
 pub fn swarmops<S: AsRef<str>>(args: &[S], env: &[(&str, &str)]) -> Command {
     let mut command = Command::new(BIN);
     command.args(args.iter().map(AsRef::as_ref));
@@ -71,12 +76,13 @@ pub fn swarmops_vars() -> impl Iterator<Item = OsString> {
 }
 
 /// Gives `command` the environment of this process without its `SWARMOPS_*` variables, then
-/// `env`; and pipes for its output.
+/// `SWARMOPS_TEST_ORDER_CHECK=1`, then `env`; and pipes for its output.
 fn with_env(command: &mut Command, env: &[(&str, &str)]) {
     for name in swarmops_vars() {
         command.env_remove(name);
     }
     command
+        .env(ORDER_CHECK_ENV, "1")
         .envs(env.iter().copied())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

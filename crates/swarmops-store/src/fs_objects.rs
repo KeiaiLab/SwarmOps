@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 
 use crate::error::StoreError;
-use crate::fs_ops::{CrashAtFs, FsOps, RealFs};
+use crate::fs_ops::{FsOps, HookedFs, RealFs};
 use crate::layout::Layout;
 
 const MAGIC: [u8; 4] = *b"SOB1";
@@ -98,17 +98,21 @@ impl FsObjectStore {
         }
     }
 
-    /// [`FsObjectStore::open`] on the real filesystem, wrapped in a [`CrashAtFs`] when a test
-    /// hook asks for one ([`CrashAtFs::from_env`]: `SWARMOPS_TEST_CRASH_AT=<k>`,
-    /// `SWARMOPS_TEST_FS_CALLS=<file>`, in a build with the `test-hooks` feature only). Under
-    /// either hook the store runs with parallelism 1 ([`FsObjectStore::set_parallelism`]):
-    /// `put_batch` then writes one object at a time and `flush` fsyncs one directory at a time,
-    /// so that call k is the same call in every run.
+    /// [`FsObjectStore::open`] on the real filesystem, or on what the test hooks ask for
+    /// ([`HookedFs::from_env`], in a build with the `test-hooks` feature only:
+    /// `SWARMOPS_TEST_CRASH_AT=<k>`, `SWARMOPS_TEST_FS_CALLS=<file>`,
+    /// `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]`, `SWARMOPS_TEST_ORDER_CHECK=1`). Under a hook
+    /// that counts calls (all but the order check) the store runs with parallelism 1
+    /// ([`FsObjectStore::set_parallelism`]): `put_batch` then writes one object at a time and
+    /// `flush` fsyncs one directory at a time, so that call k is the same call in every run.
     pub fn open_default(layout: Layout) -> Self {
-        match CrashAtFs::from_env() {
-            Some(fs) => {
-                let mut store = Self::open(layout, Box::new(fs));
-                store.set_parallelism(1);
+        match HookedFs::from_env() {
+            Some(hooked) => {
+                let counts_calls = hooked.counts_calls();
+                let mut store = Self::open(layout, hooked.into_fs());
+                if counts_calls {
+                    store.set_parallelism(1);
+                }
                 store
             }
             None => Self::open(layout, Box::new(RealFs)),
@@ -118,8 +122,8 @@ impl FsObjectStore {
     /// Runs [`ObjectStore::put_batch`], and the directory fsyncs of [`ObjectStore::flush`], on
     /// a pool of its own with `threads` threads (0: one per available core). With 1 both go
     /// one at a time, `flush` on the calling thread and in path order, so that a test counting
-    /// [`FsOps`] calls (a crash sweep's [`CrashAtFs`]) meets the same call at the same count in
-    /// every run. Until this is called, both use rayon's global pool, which by default also
+    /// [`FsOps`] calls (a crash sweep's [`crate::CrashAtFs`]) meets the same call at the same
+    /// count in every run. Until this is called, both use rayon's global pool, which by default also
     /// has one thread per available core.
     ///
     /// # Panics

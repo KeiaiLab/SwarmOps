@@ -13,8 +13,8 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,12 +22,15 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
 use swarmops_store::{
     CRASH_AT_ENV, CasResult, ChangesetMeta, CommitInfo, CrashAtFs, Frame, FsOps, Index,
-    InsertOutcome, Journal, JournalEntry, Layout, MetaLock, MetaRead, MetaStore, RealFs, Record,
-    RefMoveEntry, RefState, StoreError,
+    InsertOutcome, Journal, JournalEntry, Layout, MetaLock, MetaRead, MetaStore, MetaWrite, RealFs,
+    Record, RefMoveEntry, RefState, StoreError,
 };
+#[cfg(feature = "test-hooks")]
+use swarmops_store::{FailAt, FailAtFs, FailMode, InjectedError};
 use tempfile::TempDir;
 
 use crate::support::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
+use crate::support::faults::checked;
 use crate::support::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
 use crate::support::temp_dir as new_root;
 use crate::support::{append_bytes, file_len};
@@ -57,6 +60,11 @@ const NO_THREADS_ROOT: &str = "SWARMOPS_TEST_META_NO_THREADS_ROOT";
 /// Set only in the children of `crash_at_any_create_call_leaves_a_store_open_or_create_takes`:
 /// the store root.
 const CREATE_CRASH_ROOT: &str = "SWARMOPS_TEST_META_CREATE_CRASH_ROOT";
+
+/// Set only in the children of `the_test_hooks_build_the_filesystem_they_name`: a directory of
+/// their own.
+#[cfg(feature = "test-hooks")]
+const HOOKS_ROOT: &str = "SWARMOPS_TEST_META_HOOKS_ROOT";
 
 /// The FsOps calls of `MetaStore::create`, in order: the journal, `journal.ckpt` and the index
 /// (its columns, `parents.log` and its four view files) staged in `meta.tmp/meta/`, then
@@ -92,8 +100,19 @@ const CREATE_CALLS: [&str; 24] = [
 /// A fresh store; its directory lives as long as the `TempDir`.
 fn new_store() -> (TempDir, Utf8PathBuf, MetaStore) {
     let (dir, root) = new_root();
-    let store = MetaStore::create(&root).unwrap();
+    let store = create_checked(&root).unwrap();
     (dir, root, store)
+}
+
+/// [`MetaStore::create`], the store's writes checked against its ordering rules
+/// ([`checked`]): every test here runs under the order checker, but where it says otherwise.
+fn create_checked(root: &Utf8Path) -> Result<MetaStore, StoreError> {
+    MetaStore::create_with_fs(root, checked(RealFs))
+}
+
+/// [`MetaStore::open`], the store's writes checked against its ordering rules ([`checked`]).
+fn open_checked(root: &Utf8Path) -> Result<MetaStore, StoreError> {
+    MetaStore::open_with_fs(root, checked(RealFs))
 }
 
 /// The id of changeset `n`: a real hash, so the ids look like a store's.
@@ -287,7 +306,7 @@ fn insert_then_get_roundtrips_meta_and_generation() {
         stored(2, &[1], 1, 2),
         stored(3, &[2, 1], 2, 3),
     ];
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     for store in [&store, &reopened] {
         let read = store.read().unwrap();
         for meta in &want {
@@ -557,7 +576,7 @@ fn resolve_prefix_unique_and_ambiguous() {
 #[test]
 fn journal_after_returns_global_order() {
     let (_dir, root, first) = new_store();
-    let second = MetaStore::open(&root).unwrap(); // another handle, as another process has
+    let second = open_checked(&root).unwrap(); // another handle, as another process has
     let before = unix_now();
     insert(&first, &[cs(1, &[])]); // frame 0
     insert(&second, &[cs(2, &[1])]); // frame 1
@@ -665,7 +684,7 @@ fn drop_without_commit_discards() {
     assert_eq!(log_len(&root), 0);
     assert_eq!(ref_file(&root, "main"), None);
     // The lock went with it: another writer gets it at once.
-    let impatient = MetaStore::open(&root)
+    let impatient = open_checked(&root)
         .unwrap()
         .with_lock_timeout(Duration::ZERO);
     insert(&impatient, &[cs(1, &[])]);
@@ -719,7 +738,7 @@ fn reader_sees_frames_past_ckpt() {
     store.flush().unwrap();
     assert_eq!(ckpt(&root), log_len(&root));
 
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
     assert_eq!(read.changeset(id(2)).unwrap(), Some(stored(2, &[1], 1, 2)));
     assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(2, 1)));
@@ -757,7 +776,7 @@ fn torn_tail_recovered_on_next_write() {
         frames[1].offset, clean,
         "the new frame starts where the torn one did"
     );
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
     assert_eq!(read.changeset(id(2)).unwrap(), Some(stored(2, &[1], 1, 2)));
     assert_eq!(read.count_changesets().unwrap(), 2);
@@ -867,7 +886,7 @@ fn child_changeset(child: u64, j: u64) -> u64 {
 /// A child of `multi_process_inserts_all_persist`: [`PER_CHILD`] write transactions, each
 /// inserting the next changeset of its own chain off changeset 0.
 fn insert_child(root: &Utf8Path, child: u64) {
-    let store = MetaStore::open(root).unwrap();
+    let store = open_checked(root).unwrap();
     wait_for_go(root);
     let mut parent = 0;
     for j in 0..PER_CHILD {
@@ -898,7 +917,7 @@ fn multi_process_inserts_all_persist() {
         assert_eq!(report(number, output), "done");
     }
 
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
     let total = 1 + CHILDREN * PER_CHILD;
     assert_eq!(read.count_changesets().unwrap(), total);
@@ -930,7 +949,7 @@ fn multi_process_inserts_all_persist() {
 /// A child of `multi_process_cas_exactly_one_wins`: one try at moving main from changeset 0
 /// to its own changeset.
 fn cas_child(root: &Utf8Path, child: u64) {
-    let store = MetaStore::open(root).unwrap();
+    let store = open_checked(root).unwrap();
     wait_for_go(root);
     let mut write = store.write().unwrap();
     let actor = format!("agent/{child}");
@@ -983,7 +1002,7 @@ fn multi_process_cas_exactly_one_wins() {
         }
     }
 
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     let read = reopened.read().unwrap();
     let main = RefState { target, version: 2 };
     assert_eq!(read.get_ref("main").unwrap(), Some(main));
@@ -1277,7 +1296,7 @@ fn errors_after_the_commit_point_say_the_transaction_committed() {
         let (_dir, root) = new_root();
         let (fs, _calls) = RecordingFs::new();
         let fail = fs.failing();
-        let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+        let store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
         for n in 0..31 {
             insert(&store, &[cs(n, &[])]); // frames 0..=30
         }
@@ -1332,7 +1351,7 @@ fn an_empty_write_reports_its_housekeeping_errors_plainly() {
     let (_dir, root) = new_root();
     let (fs, _calls) = RecordingFs::new();
     let fail = fs.failing();
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
     // The compaction cannot write the sorted views.
     fail.set("append ids.key.tmp");
     let mut write = store.write().unwrap();
@@ -1362,10 +1381,22 @@ fn an_empty_write_reports_its_housekeeping_errors_plainly() {
     assert_eq!(ckpt(&root), log_len(&root));
 }
 
-/// A store on a [`RecordingFs`], and what makes its calls fail. Its write transactions sync
-/// the index one file after another, in write order (parallelism 1), so that a failure lands at
-/// the same point of the same call sequence in every run.
+/// A store on a [`RecordingFs`], under the order checker, and what makes its calls fail. Its
+/// write transactions sync the index one file after another, in write order (parallelism 1), so
+/// that a failure lands at the same point of the same call sequence in every run.
 fn failing_store(root: &Utf8Path) -> (MetaStore, Failing) {
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    let mut store = MetaStore::create_with_fs(root, checked(fs)).unwrap();
+    store.set_parallelism(1);
+    (store, fail)
+}
+
+/// [`failing_store`] without the order checker: for the one test that pins a hazard the
+/// checker rightly refuses (R3: a checkpoint past index records a failed sync may have lost,
+/// once cutting them back failed too), which storage spec §3 documents as open until the next
+/// successful sync.
+fn unchecked_failing_store(root: &Utf8Path) -> (MetaStore, Failing) {
     let (fs, _calls) = RecordingFs::new();
     let fail = fs.failing();
     let mut store = MetaStore::create_with_fs(root, Arc::new(fs)).unwrap();
@@ -1550,7 +1581,7 @@ fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
 #[test]
 fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
     let (_dir, root) = new_root();
-    let (store, fail) = failing_store(&root);
+    let (store, fail) = unchecked_failing_store(&root);
     for n in 0..31 {
         insert(&store, &[chained(n)]);
     }
@@ -1753,125 +1784,596 @@ fn listed(root: &Utf8Path) -> u64 {
     file_len(Layout::new(root).journal_off()) / 8
 }
 
-/// A transaction whose frame is durable in journal.log, but whose listing in journal.off
-/// fails, may have committed: commit says so ([`StoreError::Undecided`]), readers see the frame
-/// already, and the next write lists and replays it, so that retrying the transaction finds it
-/// done.
-#[test]
-fn a_frame_journal_off_fails_to_list_leaves_its_transaction_undecided() {
-    let (_dir, root) = new_root();
-    let (store, fail) = failing_store(&root);
-    insert(&store, &[cs(0, &[])]); // frame 0
-    fail.set("append_durable journal.off");
-    let mut write = store.write().unwrap();
-    write.insert_changeset(cs(1, &[0])).unwrap();
-    write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
-    match write.commit() {
-        Err(StoreError::Undecided { source }) => {
-            assert!(matches!(*source, StoreError::Io(_)), "{source:?}");
-        }
-        other => panic!("expected Undecided, got {other:?}"),
-    }
-    fail.clear();
-    assert_eq!(
-        (listed(&root), frames(&root).len()),
-        (1, 2),
-        "the frame is whole in journal.log, unlisted"
-    );
-    let read = store.read().unwrap();
-    assert_eq!(
-        read.changeset(id(1)).unwrap(),
-        Some(stored(1, &[0], 1, 2)),
-        "readers see it"
-    );
-    drop(read);
-
-    // Retrying finds the transaction done: the write lists the frame and replays it first.
-    let mut write = store.write().unwrap();
-    assert_eq!(listed(&root), 2, "the write listed the frame");
-    let again = write.insert_changeset(cs(1, &[0])).unwrap();
-    assert_eq!(again, InsertOutcome::AlreadyPresent);
-    let moved = write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
-    assert_eq!(
-        moved,
-        CasResult::Mismatch {
-            actual: Some(id(1))
-        }
-    );
-    write.commit().unwrap();
-    let read = store.read().unwrap();
-    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
-    assert_eq!(read.count_changesets().unwrap(), 2);
+/// Where a [`Fails`] fails its call.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Strike {
+    /// The call does nothing, and fails: a write refused.
+    Before,
+    /// The call runs, then fails: a sync that fails after its write, the bytes in the file (the
+    /// page cache) and the caller told they are not durable.
+    After,
 }
 
-/// What fails the next `append_durable` of journal.log once it has run, when armed: the frame
-/// is whole in the file, and the call fails as a sync that fails after its write does.
-#[derive(Default)]
-struct LogSyncFails {
+/// When armed, fails the next call named `call` ([`Call::named`]) once, as `strike` says; and,
+/// while set, every call named `cut` before it runs. Records every call it sees, by name.
+struct Fails {
+    call: &'static str,
+    strike: Strike,
+    cut: Option<&'static str>,
     armed: AtomicBool,
+    calls: Mutex<Vec<String>>,
 }
 
-impl Watch for LogSyncFails {
-    fn before(&self, _call: &Call<'_>) -> io::Result<()> {
+impl Fails {
+    fn new(call: &'static str, strike: Strike) -> Fails {
+        Fails {
+            call,
+            strike,
+            cut: None,
+            armed: AtomicBool::new(false),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn arm(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// The calls made since this last ran.
+    fn calls(&self) -> Vec<String> {
+        std::mem::take(&mut *self.calls.lock().unwrap())
+    }
+
+    /// Whether the armed failure strikes `call`, at `strike`; disarms it if so.
+    fn strikes(&self, call: &str, strike: Strike) -> bool {
+        call == self.call && self.strike == strike && self.armed.swap(false, Ordering::SeqCst)
+    }
+}
+
+impl Watch for Fails {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        let named = call.named();
+        self.calls.lock().unwrap().push(named.clone());
+        if self.cut == Some(named.as_str()) || self.strikes(&named, Strike::Before) {
+            return Err(io::Error::other(format!("injected: {named}")));
+        }
         Ok(())
     }
 
     fn after_success(&self, call: &Call<'_>) -> io::Result<()> {
-        if call.named() == "append_durable journal.log" && self.armed.swap(false, Ordering::SeqCst)
-        {
-            return Err(io::Error::other(
-                "injected: the sync after the write failed",
-            ));
+        let named = call.named();
+        if self.strikes(&named, Strike::After) {
+            return Err(io::Error::other(format!(
+                "injected: {named} wrote, then its sync failed"
+            )));
         }
         Ok(())
     }
 }
 
-/// An append to journal.log that fails after it wrote the frame whole (its sync failed) leaves
-/// the transaction undecided too: the next write syncs journal.log and lists the frame. One that
-/// fails before it writes anything leaves no frame: that transaction did not commit, and the
-/// error is the plain one.
-#[test]
-fn a_failed_append_is_undecided_exactly_when_the_frame_reached_journal_log() {
-    let (_dir, root) = new_root();
-    let fs = Arc::new(Watched(LogSyncFails::default()));
-    let store = MetaStore::create_with_fs(&root, Arc::clone(&fs) as Arc<dyn FsOps>).unwrap();
-    insert(&store, &[cs(0, &[])]);
-    fs.armed.store(true, Ordering::SeqCst);
-    let mut write = store.write().unwrap();
-    write.insert_changeset(cs(1, &[0])).unwrap();
-    match write.commit() {
-        Err(StoreError::Undecided { source }) => {
-            assert!(source.to_string().contains("injected"), "{source}");
-        }
-        other => panic!("expected Undecided, got {other:?}"),
-    }
-    let mut write = store.write().unwrap();
-    assert_eq!(
-        listed(&root),
-        2,
-        "the next write synced and listed the frame"
-    );
-    let again = write.insert_changeset(cs(1, &[0])).unwrap();
-    assert_eq!(again, InsertOutcome::AlreadyPresent);
-    drop(write);
+/// A store at `root` on `fails`, under the order checker, its index synced one file at a time.
+fn store_on(root: &Utf8Path, fails: &Arc<Watched<Fails>>) -> MetaStore {
+    let mut store = MetaStore::create_with_fs(root, checked(Arc::clone(fails))).unwrap();
+    store.set_parallelism(1);
+    store
+}
 
-    let (_dir, root) = new_root();
-    let (store, fail) = failing_store(&root);
+/// Set only in the child of `a_failed_log_sync_cuts_the_frame_and_reports_not_committed` that
+/// must abort: the store root.
+const ABORT_ROOT: &str = "SWARMOPS_TEST_META_ABORT_ROOT";
+
+/// The child of [`a_failed_log_sync_cuts_the_frame_and_reports_not_committed`] that aborts: a
+/// commit whose frame's fdatasync fails, and so does the cut that would take the frame back.
+fn cut_fails_child(root: &Utf8Path) {
+    let mut fails = Fails::new("append_durable journal.log", Strike::After);
+    fails.cut = Some("truncate journal.log");
+    let fails = Arc::new(Watched(fails));
+    let store = MetaStore::create_with_fs(root, Arc::clone(&fails) as Arc<dyn FsOps>).unwrap();
     insert(&store, &[cs(0, &[])]);
-    fail.set("append_durable journal.log");
+    fails.arm();
     let mut write = store.write().unwrap();
     write.insert_changeset(cs(1, &[0])).unwrap();
-    match write.commit() {
-        Err(StoreError::Io(_)) => {}
-        other => panic!("expected a plain Io error, got {other:?}"),
+    let outcome = write.commit();
+    println!("{REPORT}the commit returned: {outcome:?}");
+}
+
+/// A journal append whose fdatasync fails once its frame is written whole (Linux reports a
+/// failed writeback once and may drop the pages it could not write, so a later sync can succeed
+/// without them: the fsyncgate pattern) leaves nothing a later writer could list: the writer,
+/// still holding meta/lock, cuts journal.log back to where the frame starts and syncs the cut,
+/// and the transaction did not commit ([`StoreError::NotCommitted`]; the API layer reports it as
+/// `E_IO_TRANSIENT`, `committed: false`). So does an append that fails before it writes
+/// anything, which leaves nothing to cut. Retrying commits the transaction afresh, as frame 1
+/// (the order checker would refuse a frame listed after the failed sync). If the cut fails too,
+/// the process aborts, saying why, so that no later write in it can list a frame that may not
+/// be on disk; the store then opens as after a crash.
+#[test]
+fn a_failed_log_sync_cuts_the_frame_and_reports_not_committed() {
+    if let Ok(root) = std::env::var(ABORT_ROOT) {
+        cut_fails_child(Utf8Path::new(&root));
+        return;
     }
-    fail.clear();
-    assert_eq!(frames(&root).len(), 1, "no frame of it");
-    let mut write = store.write().unwrap();
-    let fresh = write.insert_changeset(cs(1, &[0])).unwrap();
-    assert_eq!(fresh, InsertOutcome::Inserted { seq: 1 });
-    write.commit().unwrap();
+    for strike in [Strike::After, Strike::Before] {
+        let (_dir, root) = new_root();
+        let fails = Arc::new(Watched(Fails::new("append_durable journal.log", strike)));
+        let store = store_on(&root, &fails);
+        insert(&store, &[cs(0, &[])]); // frame 0
+        let (frame_start, entries) = (log_len(&root), listed(&root));
+        fails.calls();
+        fails.arm();
+        let mut write = store.write().unwrap();
+        write.insert_changeset(cs(1, &[0])).unwrap();
+        write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
+        match write.commit() {
+            Err(StoreError::NotCommitted { source }) => {
+                assert!(source.to_string().contains("injected"), "{source}");
+            }
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        let made = fails.calls();
+        let cut = made.iter().any(|call| call == "truncate journal.log");
+        assert_eq!(
+            cut,
+            strike == Strike::After,
+            "a cut only of what was written: {made:?}"
+        );
+        if strike == Strike::After {
+            assert_eq!(
+                made[made.len() - 2..],
+                ["append_durable journal.log", "truncate journal.log"],
+                "the cut comes right after the failed append, under the lock"
+            );
+        }
+        assert_eq!(
+            (log_len(&root), listed(&root)),
+            (frame_start, entries),
+            "no frame of it in journal.log, none listed"
+        );
+        let read = store.read().unwrap();
+        assert_eq!(read.changeset(id(1)).unwrap(), None, "not committed");
+        assert_eq!(read.get_ref("main").unwrap(), None);
+        drop(read);
+
+        // Retrying commits it, afresh.
+        let mut write = store.write().unwrap();
+        let again = write.insert_changeset(cs(1, &[0])).unwrap();
+        assert_eq!(again, InsertOutcome::Inserted { seq: 1 });
+        let moved = write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
+        assert_eq!(moved, CasResult::Applied { old: None });
+        assert_eq!(write.commit().unwrap().frame_seq, 1);
+        let read = store.read().unwrap();
+        assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+        assert_eq!(read.count_changesets().unwrap(), 2);
+    }
+
+    // The cut fails too: the process aborts, and the store opens as a crash would leave it.
+    let (_dir, root) = new_root();
+    let child = run(
+        this_test("a_failed_log_sync_cuts_the_frame_and_reports_not_committed")
+            .env(ABORT_ROOT, &root),
+    );
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert_eq!(
+        child.status.signal(),
+        Some(SIGABRT),
+        "{:?}\n{stderr}",
+        child.status
+    );
+    assert!(
+        stderr.contains("could not be cut back off it"),
+        "the abort says why: {stderr}"
+    );
+    let store = open_checked(&root).unwrap();
+    store.write().unwrap().commit().unwrap();
+    assert!(store.read().unwrap().count_changesets().unwrap() >= 1);
+}
+
+/// A journal append whose frame is durable in journal.log (its fdatasync succeeded: the commit
+/// point) but whose listing in journal.off fails has committed: commit says so,
+/// [`StoreError::PostCommit`] at the frame's seq (a warning to the repository and the API
+/// layer), readers see the frame, and the next write lists it and replays it, so that retrying
+/// the transaction finds it done. When the entry reached journal.off and its sync failed, the
+/// writer first cuts journal.off back to the entries before it: an entry a failed writeback may
+/// have lost must not stay listed while later entries are made durable after it, a hole a power
+/// loss would leave among the listed frames (the order checker refuses that: R1).
+#[test]
+fn a_failed_off_append_after_the_log_sync_is_post_commit() {
+    for strike in [Strike::After, Strike::Before] {
+        let (_dir, root) = new_root();
+        let fails = Arc::new(Watched(Fails::new("append_durable journal.off", strike)));
+        let store = store_on(&root, &fails);
+        insert(&store, &[cs(0, &[])]); // frame 0
+        fails.calls();
+        fails.arm();
+        let mut write = store.write().unwrap();
+        write.insert_changeset(cs(1, &[0])).unwrap();
+        write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
+        match write.commit() {
+            Err(StoreError::PostCommit {
+                frame_seq: 1,
+                source,
+            }) => {
+                let message = source.to_string();
+                assert!(message.contains("journal.off"), "{message}");
+                assert!(message.contains("injected"), "{message}");
+            }
+            other => panic!("expected PostCommit at frame 1, got {other:?}"),
+        }
+        let made = fails.calls();
+        let cut = made.iter().any(|call| call == "truncate journal.off");
+        assert_eq!(
+            cut,
+            strike == Strike::After,
+            "a cut only of what was written: {made:?}"
+        );
+        assert_eq!(
+            (listed(&root), frames(&root).len()),
+            (1, 2),
+            "the frame is whole in journal.log, unlisted"
+        );
+        let read = store.read().unwrap();
+        assert_eq!(read.changeset(id(1)).unwrap(), Some(stored(1, &[0], 1, 2)));
+        assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+        drop(read);
+
+        // Retrying finds the transaction done: the write lists the frame and replays it first.
+        let mut write = store.write().unwrap();
+        assert_eq!(listed(&root), 2, "the write listed the frame");
+        let again = write.insert_changeset(cs(1, &[0])).unwrap();
+        assert_eq!(again, InsertOutcome::AlreadyPresent);
+        let moved = write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
+        assert_eq!(
+            moved,
+            CasResult::Mismatch {
+                actual: Some(id(1))
+            }
+        );
+        write.commit().unwrap();
+        let read = store.read().unwrap();
+        assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+        assert_eq!(read.count_changesets().unwrap(), 2);
+        assert_eq!(ref_file(&root, "main"), Some(ref_content(1, 1)));
+    }
+}
+
+/// Set only in the children of the store-level error sweeps: the store root.
+#[cfg(feature = "test-hooks")]
+const SWEEP_ROOT: &str = "SWARMOPS_TEST_META_SWEEP_ROOT";
+
+/// Set with [`SWEEP_ROOT`]: what the child does, `fail:<k>:<errno>:<n>` (the swept transaction
+/// `n`, its k-th call and every mutating one after it failing) or `crash:<k>:<n>` (its k-th call
+/// aborting it).
+#[cfg(feature = "test-hooks")]
+const SWEEP_PLAN: &str = "SWARMOPS_TEST_META_SWEEP_PLAN";
+
+/// The transaction the store-level sweeps fail or crash: changeset `n`, a root, and
+/// `release/swept` created at it, in one frame.
+fn swept(store: &MetaStore, n: u64) -> Result<CommitInfo, StoreError> {
+    let mut write = store.write()?;
+    write.insert_changeset(cs(n, &[]))?;
+    write.cas_ref("release/swept", None, Some(id(n)), ACTOR)?;
+    write.commit()
+}
+
+/// What a transaction's outcome says of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Said {
+    /// It returned, or failed after its commit point ([`StoreError::PostCommit`]).
+    Committed,
+    /// It failed otherwise: nothing of it may be in the store.
+    NotCommitted,
+    /// It aborted (a crash, or the documented abort after a failed cut): either may hold.
+    Aborted,
+}
+
+fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
+    match outcome {
+        Ok(_) | Err(StoreError::PostCommit { .. }) => Said::Committed,
+        Err(_) => Said::NotCommitted,
+    }
+}
+
+/// A store for the error sweeps, on a filesystem that never syncs (durability is not their
+/// subject): changesets `0..n` past the checkpoint, `n` returned, so that the swept transaction
+/// `n` moves the checkpoint (31 frames of one changeset each, the 32nd swept) or, `compacting`,
+/// compacts (1,024 changesets in one frame: the swept one takes the tail past the threshold).
+fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
+    let (dir, root) = new_root();
+    let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    let n = if compacting {
+        let mut write = store.write().unwrap();
+        for m in 0..Index::COMPACT_THRESHOLD {
+            write.insert_changeset(cs(m, &[])).unwrap();
+        }
+        write.commit().unwrap();
+        Index::COMPACT_THRESHOLD
+    } else {
+        for m in 0..31 {
+            insert(&store, &[cs(m, &[])]);
+        }
+        31
+    };
+    assert_eq!(ckpt(&root), 0);
+    (dir, root, n)
+}
+
+/// A copy of the store at `template`, in a temp dir of its own.
+fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
+    let (dir, root) = new_root();
+    copy_dir(template.as_std_path(), root.as_std_path());
+    (dir, root)
+}
+
+/// How many filesystem calls `run` makes on a copy of the store at `template`, one index file
+/// synced at a time, no call failing.
+fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
+    let (_dir, root) = copy_of(template);
+    let counter = Arc::new(CrashAtFs::new(FastFs, 0));
+    let mut store = MetaStore::open_with_fs(&root, Arc::clone(&counter) as Arc<dyn FsOps>).unwrap();
+    store.set_parallelism(1);
+    run(&store);
+    counter.calls()
+}
+
+/// The store at `root`, after transactions that each `said` what they did of their changeset
+/// (`(n, said)`), on a template of changesets `0..template`, the first of them the swept one
+/// (with `release/swept`): it opens (on a filesystem that never syncs, under the order checker:
+/// durability is not the subject here), takes a write (its recovery runs) and a flush; the
+/// template's changesets are all there; a transaction's changeset is there exactly when it said
+/// it committed (either, after an abort), the swept one's ref with it; and the index holds each
+/// changeset once, the checkpoint at the journal's end.
+#[track_caller]
+fn assert_recovers(root: &Utf8Path, template: u64, outcomes: &[(u64, Said)], what: &str) {
+    let store = MetaStore::open_with_fs(root, checked(FastFs))
+        .unwrap_or_else(|e| panic!("{what}: the store does not open: {e}"));
+    store
+        .write()
+        .and_then(MetaWrite::commit)
+        .unwrap_or_else(|e| panic!("{what}: the next write fails: {e}"));
+    store
+        .flush()
+        .unwrap_or_else(|e| panic!("{what}: the flush fails: {e}"));
+    let read = store.read().unwrap();
+    let mut held = template;
+    for (at, &(n, said)) in outcomes.iter().enumerate() {
+        let there = read.changeset(id(n)).unwrap().is_some();
+        match said {
+            Said::Committed => assert!(there, "{what}: changeset {n} said it committed"),
+            Said::NotCommitted => assert!(!there, "{what}: changeset {n} said it did not commit"),
+            Said::Aborted => {}
+        }
+        if at == 0 {
+            let swept_ref = read.get_ref("release/swept").unwrap();
+            assert_eq!(swept_ref.is_some(), there, "{what}: one frame holds both");
+        }
+        held += u64::from(there);
+    }
+    assert_eq!(read.count_changesets().unwrap(), held, "{what}");
+    for m in [0, template / 2, template - 1] {
+        assert!(
+            read.changeset(id(m)).unwrap().is_some(),
+            "{what}: changeset {m} is lost"
+        );
+    }
+    drop(read);
+    let index = index(root);
+    assert_eq!(
+        index.len(),
+        held,
+        "{what}: each changeset once in the index"
+    );
+    assert_eq!(
+        ckpt(root),
+        log_len(root),
+        "{what}: the flush checkpointed it all"
+    );
+}
+
+/// What a child of the store-level sweeps does: the swept transaction `n` on the store at
+/// `root`, its calls failing or crashing as `plan` says; reports what it said.
+#[cfg(feature = "test-hooks")]
+fn sweep_child(root: &Utf8Path, plan: &str) {
+    let parts: Vec<&str> = plan.split(':').collect();
+    let k: u64 = parts[1].parse().unwrap();
+    let (fs, n): (Arc<dyn FsOps>, u64) = match parts[0] {
+        "fail" => {
+            let error = match parts[2] {
+                "eio" => InjectedError::Eio,
+                _ => InjectedError::Enospc,
+            };
+            let fail = FailAt {
+                at: k,
+                mode: FailMode::Persistent,
+                error,
+            };
+            (
+                checked(FailAtFs::new(FastFs, fail)),
+                parts[3].parse().unwrap(),
+            )
+        }
+        _ => (
+            checked(CrashAtFs::new(FastFs, k)),
+            parts[2].parse().unwrap(),
+        ),
+    };
+    let mut store = MetaStore::open_with_fs(root, fs).unwrap();
+    store.set_parallelism(1);
+    let outcome = swept(&store, n);
+    println!("{REPORT}{:?}", said(&outcome));
+}
+
+/// Runs a child of the store-level sweeps on `root` with `plan` (see [`SWEEP_PLAN`]) and
+/// returns what its transaction said: aborted only by the documented abort (a cut after a
+/// failed journal append that fails too), which says why on stderr, or by a planned crash.
+#[cfg(feature = "test-hooks")]
+fn run_sweep_child(test: &str, root: &Utf8Path, plan: &str) -> Said {
+    let child = run(this_test(test).env(SWEEP_ROOT, root).env(SWEEP_PLAN, plan));
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    if child.status.signal() == Some(SIGABRT) {
+        assert!(
+            plan.starts_with("crash") || stderr.contains("could not be cut back off it"),
+            "{plan}: an abort that is not the documented one\n{stderr}"
+        );
+        return Said::Aborted;
+    }
+    let stdout = String::from_utf8_lossy(&child.stdout);
+    match report(0, &child).as_str() {
+        "Committed" => Said::Committed,
+        "NotCommitted" => Said::NotCommitted,
+        other => panic!("{plan}: {other:?}\n{stdout}\n{stderr}"),
+    }
+}
+
+/// An injected I/O error at any filesystem call of a write transaction, and of one that
+/// compacts, is reported honestly: a transaction that returns, or says it committed
+/// ([`StoreError::PostCommit`]), is in the store; one that fails otherwise is not; and the store
+/// always opens and takes the next write. The transaction is swept call by call (k = 1..=N + 1,
+/// N counted by a dry run), its k-th call failing once with `EIO` (a flushing call does its work
+/// first, then fails) or `ENOSPC` (the call does nothing), under the order checker. The same
+/// with every call from the k-th on failing is
+/// [`persistent_failures_at_every_store_call_report_honestly`], in the slow suite.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn fail_at_every_store_call_reports_honestly() {
+    for compacting in [false, true] {
+        let (_dir, template, n) = sweep_template(compacting);
+        let calls = calls_of(&template, |store| {
+            swept(store, n).unwrap();
+        });
+        assert!(calls > 20, "{calls}");
+        let kind = if compacting {
+            "a compaction"
+        } else {
+            "a checkpoint"
+        };
+        let mut post_commit = 0;
+        for error in [InjectedError::Eio, InjectedError::Enospc] {
+            for k in 1..=calls + 1 {
+                let what = format!("{kind}, call {k} of {calls} failing once with {error:?}");
+                let (_dir, root) = copy_of(&template);
+                let fail = FailAt {
+                    at: k,
+                    mode: FailMode::Once,
+                    error,
+                };
+                let mut store =
+                    MetaStore::open_with_fs(&root, checked(FailAtFs::new(FastFs, fail))).unwrap();
+                store.set_parallelism(1);
+                let outcome = swept(&store, n);
+                drop(store);
+                assert!(k <= calls || outcome.is_ok(), "{what}: {outcome:?}");
+                post_commit += usize::from(matches!(outcome, Err(StoreError::PostCommit { .. })));
+                assert_recovers(&root, n, &[(n, said(&outcome))], &what);
+            }
+        }
+        assert!(
+            post_commit > 0,
+            "{kind}: some failure came after the commit point"
+        );
+    }
+}
+
+/// [`fail_at_every_store_call_reports_honestly`] with every mutating call from the k-th on
+/// failing (reads aside), as a device gone bad: each run in a child process, since a failed
+/// journal append whose cut fails too aborts (the documented abort, which says why on stderr).
+/// A run that aborts may have committed or not, but never half: the store opens, and holds the
+/// transaction whole or not at all.
+#[test]
+#[ignore = "slow, ~15 s: ~140 child processes; just check-slow runs it"]
+#[cfg(feature = "test-hooks")]
+fn persistent_failures_at_every_store_call_report_honestly() {
+    const TEST: &str = "persistent_failures_at_every_store_call_report_honestly";
+    if let (Ok(root), Ok(plan)) = (std::env::var(SWEEP_ROOT), std::env::var(SWEEP_PLAN)) {
+        sweep_child(Utf8Path::new(&root), &plan);
+        return;
+    }
+    let mut aborted = 0;
+    for compacting in [false, true] {
+        let (_dir, template, n) = sweep_template(compacting);
+        let calls = calls_of(&template, |store| {
+            swept(store, n).unwrap();
+        });
+        let kind = if compacting {
+            "a compaction"
+        } else {
+            "a checkpoint"
+        };
+        for errno in ["eio", "enospc"] {
+            for k in 1..=calls {
+                let what = format!("{kind}, calls {k}.. of {calls} failing with {errno}");
+                let (_dir, root) = copy_of(&template);
+                let said = run_sweep_child(TEST, &root, &format!("fail:{k}:{errno}:{n}"));
+                aborted += usize::from(said == Said::Aborted);
+                assert_recovers(&root, n, &[(n, said)], &what);
+            }
+        }
+    }
+    assert!(
+        aborted > 0,
+        "a failed journal append whose cut fails too aborts"
+    );
+}
+
+/// Errors while a writer recovers from a crash (SQLite's compound failure: an I/O error while
+/// recovering from a prior crash) leave the store openable. The swept transaction is crashed at
+/// each of its calls in turn (a child each); then, on each crashed store, the next transaction (a
+/// changeset of its own) fails once with `EIO` at each call its write's recovery makes (the tail
+/// check, the index repair, the replay: counted by a dry run on the crashed store). The crashed
+/// transaction is in the store whole or not at all, the next one exactly when it said it
+/// committed, and the store takes a write and a flush after. The next transaction's own calls,
+/// past its recovery, are [`fail_at_every_store_call_reports_honestly`]'s.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn errors_during_recovery_leave_the_store_openable() {
+    const TEST: &str = "errors_during_recovery_leave_the_store_openable";
+    const NEXT: u64 = 1000;
+    if let (Ok(root), Ok(plan)) = (std::env::var(SWEEP_ROOT), std::env::var(SWEEP_PLAN)) {
+        sweep_child(Utf8Path::new(&root), &plan);
+        return;
+    }
+    let next = |store: &MetaStore| -> Result<CommitInfo, StoreError> {
+        let mut write = store.write()?;
+        write.insert_changeset(cs(NEXT, &[]))?;
+        write.commit()
+    };
+    let (_dir, template, n) = sweep_template(false);
+    let calls = calls_of(&template, |store| {
+        swept(store, n).unwrap();
+    });
+    let mut most = 0;
+    for k1 in 1..=calls {
+        let (_crashed_dir, crashed) = copy_of(&template);
+        let crashed_said = run_sweep_child(TEST, &crashed, &format!("crash:{k1}:{n}"));
+        assert_eq!(crashed_said, Said::Aborted, "crash at {k1}");
+        let recovery = calls_of(&crashed, |store| {
+            drop(store.write().unwrap());
+        });
+        most = most.max(recovery);
+        for k2 in 1..=recovery {
+            let what = format!("crash at {k1}, then recovery call {k2} of {recovery} failing");
+            let (_dir, root) = copy_of(&crashed);
+            let fail = FailAt {
+                at: k2,
+                mode: FailMode::Once,
+                error: InjectedError::Eio,
+            };
+            let mut store =
+                MetaStore::open_with_fs(&root, checked(FailAtFs::new(FastFs, fail))).unwrap();
+            store.set_parallelism(1);
+            let outcome = next(&store);
+            drop(store);
+            assert_recovers(
+                &root,
+                n,
+                &[(n, Said::Aborted), (NEXT, said(&outcome))],
+                &what,
+            );
+        }
+    }
+    assert!(
+        most > 4,
+        "some crash left recovery work: {most} calls at most"
+    );
 }
 
 #[track_caller]
@@ -1963,7 +2465,7 @@ fn assert_fresh_meta(root: &Utf8Path) {
     }
     assert!(!root.join("meta.tmp").exists(), "the staging is gone");
     let (fs, calls) = RecordingFs::new();
-    let reader = MetaStore::open_with_fs(root, Arc::new(fs)).unwrap();
+    let reader = MetaStore::open_with_fs(root, checked(fs)).unwrap();
     assert_eq!(reader.read().unwrap().count_changesets().unwrap(), 0);
     // It measures the journal past the checkpoint (journal.off first) before and after
     // reading the ref files.
@@ -1975,11 +2477,91 @@ fn assert_fresh_meta(root: &Utf8Path) {
     );
 }
 
+/// The child of [`the_test_hooks_build_the_filesystem_they_name`]: makes, through the
+/// filesystem the hooks ask for, the calls the hook in its environment acts on, and reports
+/// what each returned.
+#[cfg(feature = "test-hooks")]
+fn hooks_child(dir: &Utf8Path) {
+    let hooked = swarmops_store::HookedFs::from_env().expect("a hook is set");
+    println!("{REPORT}counts calls: {}", hooked.counts_calls());
+    let fs = hooked.into_fs();
+    let meta = Layout::new(dir).meta_dir().into_std_path_buf();
+    std::fs::create_dir_all(&meta).unwrap();
+    let (log, off) = (meta.join("journal.log"), meta.join("journal.off"));
+    if std::env::var_os(swarmops_store::FAIL_AT_ENV).is_some() {
+        // Calls 1 to 4: a read, an append, a read, a sync.
+        let outcomes = [
+            fs.file_len(&log).map(drop),
+            fs.append(&log, b"x").map(drop),
+            fs.file_len(&log).map(drop),
+            fs.sync_data(&log),
+        ];
+        let errnos: Vec<String> = outcomes
+            .iter()
+            .map(|outcome| match outcome {
+                Ok(()) => "ok".to_owned(),
+                Err(e) => e
+                    .raw_os_error()
+                    .map_or("?".to_owned(), |errno| errno.to_string()),
+            })
+            .collect();
+        println!("{REPORT}calls: {}", errnos.join(" "));
+    } else {
+        // Written, never synced, then listed: R1 refuses it.
+        let at = fs.append(&log, b"\x01\0\0\0crc!x").unwrap();
+        fs.append_durable(&off, &at.to_le_bytes()).unwrap();
+        println!("{REPORT}listed an unsynced frame");
+    }
+}
+
+/// The test hooks reach a whole process through its environment ([`HookedFs::from_env`],
+/// which the stores open on): `SWARMOPS_TEST_ORDER_CHECK=1` checks the writes, and a call that
+/// breaks a rule panics, naming it, while counting no calls (the stores keep their
+/// parallelism); `SWARMOPS_TEST_FAIL_AT=2:persistent:enospc` fails call 2 with ENOSPC, and every
+/// mutating call after it, reads aside.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn the_test_hooks_build_the_filesystem_they_name() {
+    const TEST: &str = "the_test_hooks_build_the_filesystem_they_name";
+    if let Some(dir) = std::env::var_os(HOOKS_ROOT) {
+        hooks_child(&Utf8PathBuf::from_path_buf(dir.into()).unwrap());
+        return;
+    }
+    let (_dir, root) = new_root();
+    let checked = run(this_test(TEST)
+        .env(HOOKS_ROOT, &root)
+        .env(swarmops_store::ORDER_CHECK_ENV, "1"));
+    let stderr = String::from_utf8_lossy(&checked.stderr);
+    assert!(
+        !checked.status.success() && stderr.contains("order check: R1 violated by append_durable"),
+        "{:?}\n{stderr}",
+        checked.status
+    );
+    let stdout = String::from_utf8_lossy(&checked.stdout);
+    assert!(stdout.contains("counts calls: false"), "{stdout}");
+
+    let (_dir, root) = new_root();
+    let failing = run(this_test(TEST)
+        .env(HOOKS_ROOT, &root)
+        .env(swarmops_store::FAIL_AT_ENV, "2:persistent:enospc"));
+    assert!(failing.status.success(), "{:?}", failing.status);
+    let stdout = String::from_utf8_lossy(&failing.stdout);
+    let reported: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix(REPORT))
+        .collect();
+    assert_eq!(
+        reported,
+        ["counts calls: true", "calls: ok 28 ok 28"],
+        "{stdout}"
+    );
+}
+
 #[test]
 fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
     if let Ok(root) = std::env::var(CREATE_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, k));
+        let fs = checked(CrashAtFs::new(RealFs, k));
         MetaStore::create_with_fs(Utf8Path::new(&root), fs).unwrap();
         return;
     }
@@ -2005,11 +2587,8 @@ fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
         // The rename into place is the last call: a crash at any call leaves no meta/, so
         // open refuses and the next create cleans up and succeeds.
         if k <= calls {
-            assert_format(
-                MetaStore::open(&root),
-                &format!("open after a crash at {k}"),
-            );
-            MetaStore::create(&root).unwrap();
+            assert_format(open_checked(&root), &format!("open after a crash at {k}"));
+            create_checked(&root).unwrap();
         }
         assert_fresh_meta(&root);
     }
@@ -2024,8 +2603,8 @@ fn create_starts_over_from_what_a_crashed_create_left() {
     fs::create_dir_all(&staged).unwrap();
     fs::write(staged.join(".tmpA1b2C3"), b"half a checkpoint").unwrap();
     fs::write(staged.join("journal.log"), b"not a frame").unwrap();
-    assert_format(MetaStore::open(&root), "a staged meta/ is no store");
-    MetaStore::create(&root).unwrap();
+    assert_format(open_checked(&root), "a staged meta/ is no store");
+    create_checked(&root).unwrap();
     assert_fresh_meta(&root);
     assert!(!Layout::new(&root).meta_path(".tmpA1b2C3").exists());
 }
@@ -2033,12 +2612,12 @@ fn create_starts_over_from_what_a_crashed_create_left() {
 #[test]
 fn create_lays_out_meta_and_open_requires_it() {
     let (_dir, root) = new_root();
-    assert_format(MetaStore::open(&root), "open before create");
-    let store = MetaStore::create(&root).unwrap();
+    assert_format(open_checked(&root), "open before create");
+    let store = create_checked(&root).unwrap();
     assert_fresh_meta(&root);
-    assert_format(MetaStore::create(&root), "a second create");
+    assert_format(create_checked(&root), "a second create");
 
-    let reopened = MetaStore::open(&root).unwrap();
+    let reopened = open_checked(&root).unwrap();
     for store in [&store, &reopened] {
         let read = store.read().unwrap();
         assert_eq!(read.count_changesets().unwrap(), 0);
@@ -2235,7 +2814,7 @@ fn snapshots_stay_consistent_while_a_writer_commits() {
 fn write_times_out_as_busy() {
     let (_dir, root, store) = new_store();
     let held = store.write().unwrap();
-    let impatient = MetaStore::open(&root)
+    let impatient = open_checked(&root)
         .unwrap()
         .with_lock_timeout(Duration::from_millis(100));
     let started = Instant::now();
@@ -2248,7 +2827,7 @@ fn write_times_out_as_busy() {
     drop(held);
     // A fresh handle with the default timeout: the abandoned wait lets the lock go as soon as
     // it gets it, but a 100 ms timeout need not cover a helper thread scheduled late.
-    MetaStore::open(&root)
+    open_checked(&root)
         .unwrap()
         .write()
         .unwrap()
@@ -2269,7 +2848,7 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
         "read main".to_owned(),
         When::Before,
         Box::new(move || {
-            let writer = MetaStore::open(&writer_root).unwrap();
+            let writer = open_checked(&writer_root).unwrap();
             let mut write = writer.write().unwrap();
             write.insert_changeset(cs(2, &[1])).unwrap();
             write
@@ -2278,7 +2857,7 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
             write.commit().unwrap();
         }),
     ));
-    let reader = MetaStore::open_with_fs(&root, Arc::new(fs)).unwrap();
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
 
     let read = reader.read().unwrap();
     assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(2, 2)));
@@ -2352,7 +2931,7 @@ fn snapshots_stay_consistent_across_a_compaction() {
     // The commit whose changeset makes the tail one longer than the threshold.
     const COMPACTS: u64 = Index::COMPACT_THRESHOLD + 1;
     let (_dir, root) = new_root();
-    let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(FastFs)).unwrap();
     let seeds: Vec<ChangesetMeta> = (0..SEEDS).map(|i| cs(seed(i), &[])).collect();
     assert!(insert(&store, &seeds).checkpointed, "the seeds compact");
     assert_eq!(index(&root).sorted_count(), SEEDS);
@@ -2367,7 +2946,7 @@ fn snapshots_stay_consistent_across_a_compaction() {
                 let (root, done, compacted) = (&root, &done, &compacted);
                 scope.spawn(move || {
                     // A handle of its own, as a reader in another process has.
-                    let store = MetaStore::open(root).unwrap();
+                    let store = open_checked(root).unwrap();
                     let mut before = None;
                     let mut read_again = false;
                     let mut last = 0;
@@ -2502,7 +3081,7 @@ type Move = (u64, Option<ChangesetId>, Option<ChangesetId>);
 #[test]
 fn reflog_walks_back_past_256_frames() {
     let (_dir, root) = new_root();
-    let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(FastFs)).unwrap();
     insert(&store, &[cs(1, &[]), cs(2, &[])]); // frame 0
     cas(&store, "release/old", None, Some(1)); // frame 1, its only move
     // Frames 2..=601: every third moves main between changesets 1 and 2, the others
@@ -2553,7 +3132,7 @@ const REPLAY_CRASH_ROOT: &str = "SWARMOPS_TEST_META_REPLAY_CRASH_ROOT";
 /// changesets 2..=4 on changeset 1, main moved from 1 to 4, release/new created and
 /// release/old deleted. Everything before them is materialized and checkpointed.
 fn unreplayed_store(root: &Utf8Path) {
-    let store = MetaStore::create_with_fs(root, Arc::new(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(root, checked(FastFs)).unwrap();
     insert(&store, &[cs(1, &[])]);
     cas(&store, "main", None, Some(1));
     cas(&store, "release/old", None, Some(1));
@@ -2601,7 +3180,7 @@ fn assert_replayed(read: &MetaRead<'_>, what: &str) {
 fn crash_at_any_replay_call_recovers_to_the_journal() {
     if let Ok(root) = std::env::var(REPLAY_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
-        let fs: Arc<dyn FsOps> = Arc::new(CrashAtFs::new(RealFs, k));
+        let fs = checked(CrashAtFs::new(RealFs, k));
         let mut store = MetaStore::open_with_fs(Utf8Path::new(&root), fs).unwrap();
         // One file at a time, in write order, as the dry run: call k is the same call.
         store.set_parallelism(1);
@@ -2616,7 +3195,7 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
     let (_dry_dir, dry) = new_root();
     copy_dir(template.as_std_path(), dry.as_std_path());
     let (fs, calls) = RecordingFs::new();
-    let mut store = MetaStore::open_with_fs(&dry, Arc::new(fs)).unwrap();
+    let mut store = MetaStore::open_with_fs(&dry, checked(fs)).unwrap();
     store.set_parallelism(1);
     store.write().unwrap().commit().unwrap();
     let dry_calls = calls();
@@ -2645,7 +3224,7 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
             String::from_utf8_lossy(&child.stderr)
         );
 
-        let store = MetaStore::open(&root).unwrap();
+        let store = open_checked(&root).unwrap();
         assert_replayed(&store.read().unwrap(), &format!("k={k}, after the crash"));
         store.write().unwrap().commit().unwrap();
         assert_replayed(&store.read().unwrap(), &format!("k={k}, replayed"));
@@ -2665,7 +3244,7 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
 fn write_and_commit_make_the_documented_fs_calls() {
     let (_dir, root) = new_root();
     let (fs, calls) = RecordingFs::new();
-    let mut store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let mut store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
     // One thread: the index's five syncs go one after another, in write order, as crash
     // sweeps that count calls need them.
     store.set_parallelism(1);
@@ -2776,7 +3355,7 @@ fn commit_with_no_thread_to_spare(root: &Utf8Path) {
         return;
     }
     let (fs, calls) = RecordingFs::new();
-    let store = MetaStore::create_with_fs(root, Arc::new(fs)).unwrap();
+    let store = MetaStore::create_with_fs(root, checked(fs)).unwrap();
     for n in 0..31 {
         insert(&store, &[cs(n, &[])]);
     }
@@ -2850,7 +3429,7 @@ fn the_index_syncs_its_five_files_at_once_and_the_checkpoint_waits_for_them() {
     let (fs, calls) = RecordingFs::new();
     let (syncs, fail) = (fs.syncs(), fs.failing());
     // The default parallelism: 5.
-    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
     for n in 0..31 {
         insert(&store, &[cs(n, &[])]); // frames 0..=30
     }

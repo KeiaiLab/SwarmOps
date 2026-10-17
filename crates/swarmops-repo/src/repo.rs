@@ -47,7 +47,10 @@
 //! 5. It writes `REPO` atomically, with a new repository id (see above).
 //! 6. Last, it links `FORMAT` into place without replacing anything, from a temp file in
 //!    `objects/tmp/` that is synced first (so `FORMAT` is never seen half written), and syncs
-//!    the store root.
+//!    the store root. If that sync fails, it takes `FORMAT` back (removed, the removal synced)
+//!    and fails: Linux reports a failed writeback once, so no later sync could tell whether the
+//!    name reached the disk, and the next create completes the store. If even that fails, the
+//!    process aborts, as a crash between the link and the sync would leave it.
 //!
 //! A crash before the link leaves no `FORMAT`: open refuses the directory, and the next create
 //! picks up where the crashed one stopped. Two creates of one store at once are not supported.
@@ -60,8 +63,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
-    CasResult, CrashAtFs, FsObjectStore, FsOps, Layout, LinkOutcome, MetaStore, ObjectStore,
-    RealFs, RefState, StoreError, is_native_linux_fs,
+    CasResult, FsObjectStore, FsOps, HookedFs, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs,
+    RefState, StoreError, is_native_linux_fs,
 };
 
 use crate::error::RepoError;
@@ -127,12 +130,15 @@ impl LocalRepo {
     ///
     /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests; only in a build with the store's
     /// `test-hooks` feature, which this crate's turns on), the object store and the metadata
-    /// store share one [`CrashAtFs`] whose k-th call aborts the process, and objects are
-    /// written (and the directories and the index's files synced) one at a time, so that the
-    /// k-th call is the same call in every run. With `SWARMOPS_TEST_FS_CALLS=<file>` set, the
-    /// same holds, and that [`CrashAtFs`] writes how many calls both stores made to `<file>`
-    /// when the repository is dropped: a dry run's count. A build without the feature ignores
-    /// both variables.
+    /// store share one [`swarmops_store::CrashAtFs`] whose k-th call aborts the process, and
+    /// objects are written (and the directories and the index's files synced) one at a time, so
+    /// that the k-th call is the same call in every run. With `SWARMOPS_TEST_FS_CALLS=<file>`
+    /// set, the same holds, and that `CrashAtFs` writes how many calls both stores made to
+    /// `<file>` when the repository is dropped: a dry run's count.
+    /// `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` fails call k of the same count with an
+    /// injected I/O error instead, and `SWARMOPS_TEST_ORDER_CHECK=1` checks the order of the
+    /// stores' writes ([`HookedFs::from_env`]). A build without the feature ignores the
+    /// variables.
     pub fn create(store: &Utf8Path, name: &str) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::create_on(store, name, fs, one_thread)
@@ -212,7 +218,10 @@ impl LocalRepo {
         if fs.link_noclobber(&temp, format_file.as_std_path())? == LinkOutcome::AlreadyExists {
             return Err(RepoError::Exists);
         }
-        fs.fsync_dir(root.as_std_path())?;
+        if let Err(e) = fs.fsync_dir(root.as_std_path()) {
+            take_format_back(&*fs, &root, &e);
+            return Err(e.into());
+        }
         Ok(Self::assemble(layout, fs, meta, identity, one_thread))
     }
 
@@ -283,10 +292,10 @@ impl<O: ObjectStore> Repo<O> {
     /// [`RepoError::NotFound`] for a `new` that is not a changeset in the store.
     ///
     /// A move whose journal frame is durable is applied even if a step after that failed
-    /// ([`StoreError::PostCommit`]): the outcome carries a warning, and the next write to the
-    /// store repairs the ref file. A journal append that fails once the frame is written
-    /// ([`StoreError::Undecided`]) is returned as it is: the move may be applied, and the same
-    /// move made again finds the ref at `new` ([`CasResult::Mismatch`]) if it was.
+    /// ([`StoreError::PostCommit`], its listing in `journal.off` among them): the outcome
+    /// carries a warning, and the next write to the store repairs what is missing. A journal
+    /// append that fails ([`StoreError::NotCommitted`]) is returned as it is: the frame was cut
+    /// back off the journal, the move is not applied, and the same move made again applies it.
     pub fn cas_ref(
         &self,
         name: &str,
@@ -355,16 +364,41 @@ fn ref_error(e: StoreError) -> RepoError {
     }
 }
 
-/// The filesystem a store opens on: the real one; or, when a crash test's hook asks for it
-/// ([`CrashAtFs::from_env`], in a build with the `test-hooks` feature only:
+/// What a create does when the sync of the store root that makes `FORMAT`'s name durable fails
+/// with `e`: `FORMAT` makes the store complete for every reader at once, but Linux reports a
+/// failed writeback once, so no later sync could tell whether its name reached the disk. So it
+/// is removed again, the removal synced, and the create fails: the store is not complete, and
+/// the next create makes it so (storage spec §2). If that fails too, the process aborts
+/// ([`std::process::abort`]), saying why on stderr, as a crash between the link and the sync
+/// would leave it: the next `open` finds a store or none, and `create` finishes it.
+fn take_format_back(fs: &dyn FsOps, root: &Utf8Path, e: &io::Error) {
+    let format = Layout::new(root).format_file();
+    let undone = fs
+        .remove(format.as_std_path())
+        .and_then(|()| fs.fsync_dir(root.as_std_path()));
+    if let Err(undo) = undone {
+        eprintln!(
+            "swarmops: fatal: syncing {root} after linking {format} failed ({e}), and \
+             {format} could not be taken back ({undo}): aborting, as a crash there would"
+        );
+        std::process::abort();
+    }
+}
+
+/// The filesystem a store opens on: the real one; or, when a test hook asks for it
+/// ([`HookedFs::from_env`], in a build with the `test-hooks` feature only:
 /// `SWARMOPS_TEST_CRASH_AT=<k>` to abort at call k, `SWARMOPS_TEST_FS_CALLS=<file>` to write the
-/// call count when the repository is dropped), one [`CrashAtFs`] for both stores, so that they
-/// count their calls together. `true` with the latter: objects are then written, and the
-/// directories and the index's files synced, one at a time, so that call k is the same call in
-/// every run.
+/// call count when the repository is dropped, `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` to
+/// fail call k, `SWARMOPS_TEST_ORDER_CHECK=1` to check the order of the writes), one filesystem
+/// for both stores, so that they count their calls together. `true` with a hook that counts
+/// calls (all but the order check): objects are then written, and the directories and the
+/// index's files synced, one at a time, so that call k is the same call in every run.
 fn default_fs() -> (Arc<dyn FsOps>, bool) {
-    match CrashAtFs::from_env() {
-        Some(fs) => (Arc::new(fs), true),
+    match HookedFs::from_env() {
+        Some(hooked) => {
+            let counts_calls = hooked.counts_calls();
+            (Arc::from(hooked.into_fs()), counts_calls)
+        }
         None => (Arc::new(RealFs), false),
     }
 }

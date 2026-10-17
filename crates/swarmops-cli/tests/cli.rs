@@ -782,7 +782,7 @@ fn error_codes_reach_the_cli() {
         ("E_IO", "needs a failing filesystem"),
         (
             "E_IO_TRANSIENT",
-            "needs a journal.off that refuses writes: tests/crash.rs raises it",
+            "needs a journal append that fails: tests/faults.rs raises it",
         ),
         ("E_BUSY", "needs the store's lock held for its 10 s wait"),
         ("E_INTERNAL", "a caught panic: the binary's unit tests"),

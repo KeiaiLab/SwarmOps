@@ -21,9 +21,9 @@
 //! 5. Inserts the changeset in a write transaction of its own and commits that: its journal
 //!    frame is the commit point. A failure after it ([`StoreError::PostCommit`]) leaves the
 //!    changeset committed, and is reported as a warning; the next write to the store repairs
-//!    what is missing. A journal append that fails once the frame is written
-//!    ([`StoreError::Undecided`]) is returned as it is: the changeset may be committed, and the
-//!    same request made again is safe (it finds the changeset, or records it).
+//!    what is missing. A journal append that fails ([`StoreError::NotCommitted`]) is returned
+//!    as it is: the frame was cut back off the journal, so the changeset is not recorded, and
+//!    the same request made again records it.
 //!
 //! An identical request computes the same objects and the same changeset: the store has them
 //! all, so nothing is written, and the insert finds the changeset

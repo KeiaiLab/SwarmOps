@@ -113,12 +113,12 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`; the hint
 ///   points at a native filesystem.
 /// - `E_IO`: any other `Io` error.
-/// - `E_IO_TRANSIENT` (retryable) `{may_have_committed}`, always `true`: the store's `Undecided`,
-///   a journal append that failed once its frame was whole, so the write may have committed;
-///   the hint says to run the same command again, which is safe whether it did or not (a ref
-///   move run again reports `already_applied` if it did; a commit moves no ref).
-/// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning, so
-///   that it never reaches here.
+/// - `E_IO_TRANSIENT` (retryable) `{committed}`, always `false`: the store's `NotCommitted`, a
+///   journal append that failed and that the store cut back off the journal, so the write
+///   committed nothing; the hint says to run the same command again.
+/// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning (a
+///   failure after the commit point, a failed listing in `journal.off` among them), so that it
+///   never reaches here.
 ///
 /// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
 /// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does
@@ -147,11 +147,14 @@ impl fmt::Debug for LocalOps {
 impl LocalOps {
     /// Creates a store at `path` for a repository named `name`, creating the directory if it is
     /// missing, and opens it (CLI `init`). `E_EXISTS` if a store is there already,
-    /// `E_UNSUPPORTED_FS` for a path under `/mnt/`.
+    /// `E_UNSUPPORTED_FS` for a path under `/mnt/`. A store made whole whose reading back for
+    /// the report fails is that read's error, saying the store is made (`details.created`).
     pub fn init(path: &Utf8Path, name: &str) -> Result<(LocalOps, RepoInfo), OpError> {
         let repo = LocalRepo::create(path, name).map_err(|e| repo_error(e, During::Init(path)))?;
         let ops = Self::with_repo(repo, path);
-        let info = ops.repo_info(InfoReq {})?;
+        let info = ops
+            .repo_info(InfoReq {})
+            .map_err(|e| crate::error::created_but_unread(path, e))?;
         Ok((ops, info))
     }
 
@@ -1045,11 +1048,11 @@ mod tests {
         assert_eq!(info.changesets, 1);
     }
 
-    /// A commit whose journal frame is written but cannot be listed (journal.off refuses its
-    /// entry) may have committed: `E_IO_TRANSIENT`, retryable, `may_have_committed`, with a hint
-    /// to run it again. It has: a fresh handle sees the changeset.
+    /// A commit whose journal frame cannot be appended (journal.log refuses it) committed
+    /// nothing: `E_IO_TRANSIENT`, retryable, `committed: false`, with a hint to run it again. A
+    /// fresh handle sees no changeset.
     #[test]
-    fn an_undecided_commit_is_retryable_and_says_it_may_have_committed() {
+    fn a_commit_whose_journal_append_fails_is_retryable_and_not_committed() {
         let dir = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
         drop(LocalOps::init(&root, "acme").unwrap());
@@ -1058,7 +1061,7 @@ mod tests {
             &root,
             FailingFs {
                 method: "append_durable",
-                suffix: "journal.off",
+                suffix: "journal.log",
             },
         );
         let put = ChangeInput {
@@ -1079,11 +1082,11 @@ mod tests {
             ("E_IO_TRANSIENT", 4, true),
             "{error:?}"
         );
-        assert_eq!(error.details["may_have_committed"], true, "{error:?}");
+        assert_eq!(error.details["committed"], false, "{error:?}");
         assert!(error.hint.is_some(), "{error:?}");
         drop(ops);
 
         let fresh = LocalOps::open(&root).unwrap();
-        assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 1);
+        assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 0);
     }
 }

@@ -30,7 +30,7 @@ use swarmops_repo::{
     CasResult, Change, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
 };
 #[cfg(feature = "test-hooks")]
-use swarmops_store::CRASH_AT_ENV;
+use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
 use swarmops_store::{ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
 
 use crate::support::child::{CHILD_TIMEOUT, Child, this_test};
@@ -521,12 +521,14 @@ fn child_root() -> Option<Utf8PathBuf> {
 }
 
 /// Runs test `test` again in a child process on the store at `root`, the child's k-th
-/// filesystem call aborting it (`SWARMOPS_TEST_CRASH_AT=k`).
+/// filesystem call aborting it (`SWARMOPS_TEST_CRASH_AT=k`) and every call before it checked
+/// against the store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`).
 #[cfg(feature = "test-hooks")]
 fn crash_child(test: &str, root: &Utf8Path, k: u64) -> Output {
     run(this_test(test)
         .env(CHILD_ROOT, root)
-        .env(CRASH_AT_ENV, k.to_string()))
+        .env(CRASH_AT_ENV, k.to_string())
+        .env(ORDER_CHECK_ENV, "1"))
 }
 
 /// The commit the crash sweep's child makes: a root commit of three files in nested

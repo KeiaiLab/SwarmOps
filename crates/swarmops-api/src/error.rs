@@ -86,11 +86,10 @@ error_codes! {
     UnsupportedFs => "E_UNSUPPORTED_FS", EXIT_ERROR, false;
     /// The filesystem refused an operation.
     Io => "E_IO", EXIT_ERROR, false;
-    /// The filesystem failed once a write had gone far enough that it may have committed
-    /// (`details.may_have_committed`). Running the same operation again is safe and settles it,
-    /// but a `commit` run again signs at its own time: if the first did commit, the second may
-    /// record another changeset while the first stays unreferenced (M4's idempotency key closes
-    /// this).
+    /// The filesystem failed a write before its commit point, and the store undid what the
+    /// write had reached (`details.committed` is `false`): nothing was committed, so running the
+    /// same operation again is safe. A failure after the commit point is no error: the
+    /// operation succeeds, with a warning.
     IoTransient => "E_IO_TRANSIENT", EXIT_RETRYABLE, true;
     /// Another writer held the store's metadata lock for the whole wait.
     Busy => "E_BUSY", EXIT_RETRYABLE, true;

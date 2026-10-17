@@ -1,20 +1,28 @@
 //! The filesystem operations the object store and the metadata store (journal and index)
-//! perform, behind a trait so tests can count them or crash the process at an exact point of
-//! a write.
+//! perform, behind a trait so tests can count them, crash the process at an exact point of a
+//! write, fail them, or check the order they come in.
 //!
-//! Two test hooks reach a whole process through its environment, for crash tests of a binary
-//! (`swarmops` itself): `SWARMOPS_TEST_CRASH_AT=<k>` aborts it at its k-th call, and
-//! `SWARMOPS_TEST_FS_CALLS=<file>` has it write how many calls it made, so that a dry run tells
-//! a crash sweep where it ends. [`CrashAtFs::from_env`] reads both; the stores open on what it
-//! gives by default ([`crate::FsObjectStore::open_default`], and `swarmops-repo`'s
-//! `LocalRepo::open` and `create`, which share one for both stores). A third, test-only too,
-//! `SWARMOPS_TEST_NOW=<unix seconds>`, has `swarmops-ops` sign changesets at that time: a commit
-//! then writes the same objects in every run, so call k is the same call in every run.
+//! Four test hooks reach a whole process through its environment, for tests of a binary
+//! (`swarmops` itself), and [`HookedFs::from_env`] reads them; the stores open on what it gives
+//! by default ([`crate::FsObjectStore::open_default`], and `swarmops-repo`'s `LocalRepo::open`
+//! and `create`, which share one for both stores):
+//!
+//! - `SWARMOPS_TEST_CRASH_AT=<k>` aborts the process at its k-th call ([`CrashAtFs`]);
+//! - `SWARMOPS_TEST_FS_CALLS=<file>` has it write how many calls it made, so that a dry run tells
+//!   a sweep where it ends ([`CrashAtFs::reporting_calls_to`]);
+//! - `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` fails its k-th call with an injected I/O
+//!   error, and with `persistent` every mutating call after it too (`FailAtFs`);
+//! - `SWARMOPS_TEST_ORDER_CHECK=1` checks the store's write-ordering rules on every call, and
+//!   panics, naming the rule and the call, at the first that breaks one
+//!   (`OrderCheckFs`).
+//!
+//! A fifth, `SWARMOPS_TEST_NOW=<unix seconds>`, has `swarmops-ops` sign changesets at that time:
+//! a commit then writes the same objects in every run, so call k is the same call in every run.
 //!
 //! The hooks act only in a build with the `test-hooks` feature (this crate's, which the
 //! `test-hooks` features of `swarmops-repo`, `swarmops-ops` and `swarmops-cli` turn on): any
-//! other build, a release build among them, ignores the variables. The workspace's gates build
-//! the tests with it.
+//! other build, a release build among them, ignores the variables, and holds no `FailAtFs` or
+//! `OrderCheckFs` at all. The workspace's gates build the tests with it.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
@@ -23,16 +31,31 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_CRASH_AT=<k>` set
-/// to a positive k, the filesystem a store opens on by default is a [`CrashAtFs`] that aborts
-/// the process on its k-th call (see [`CrashAtFs::from_env`]).
+/// to a positive k, the filesystem a store opens on by default aborts the process on its k-th
+/// call ([`CrashAtFs`]; see [`HookedFs::from_env`]).
 pub const CRASH_AT_ENV: &str = "SWARMOPS_TEST_CRASH_AT";
 
 /// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_FS_CALLS=<file>`
-/// set, the filesystem a store opens on by default is a [`CrashAtFs`] that writes how many calls
-/// it made to `<file>`, in decimal, when it is dropped: a crash test's dry run, to count the
-/// calls of a run it then crashes at each of (see [`CrashAtFs::from_env`]). A run that crashes
-/// writes nothing.
+/// set, the filesystem a store opens on by default writes how many calls it made to `<file>`, in
+/// decimal, when it is dropped ([`CrashAtFs::reporting_calls_to`]): a test's dry run, to count
+/// the calls of a run it then crashes or fails at each of (see [`HookedFs::from_env`]). A run
+/// that crashes writes nothing.
 pub const FS_CALLS_ENV: &str = "SWARMOPS_TEST_FS_CALLS";
+
+/// Test hook, in a build with the `test-hooks` feature: with
+/// `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` set, k positive, the filesystem a store opens
+/// on by default fails its k-th call with an injected I/O error (a `FailAtFs`; see
+/// [`HookedFs::from_env`]), counting calls as `SWARMOPS_TEST_CRASH_AT` does. `<mode>` is `once`
+/// (the default: that call alone) or `persistent` (that call and every mutating call after it);
+/// `<errno>` is `eio` (the default) or `enospc`. Any other value is a mistake in the test, and
+/// the store's opening panics on it.
+pub const FAIL_AT_ENV: &str = "SWARMOPS_TEST_FAIL_AT";
+
+/// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_ORDER_CHECK=1` set,
+/// the filesystem a store opens on by default checks the store's write-ordering rules on every
+/// call (an `OrderCheckFs`; see [`HookedFs::from_env`]) and panics at the first call that
+/// breaks one. Any other value leaves the check off.
+pub const ORDER_CHECK_ENV: &str = "SWARMOPS_TEST_ORDER_CHECK";
 
 /// What [`FsOps::link_noclobber`] found at its target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,6 +294,65 @@ impl<F: FsOps + ?Sized> FsOps for Arc<F> {
     }
 }
 
+/// Operations chosen at run time: the test hooks stack their wrappers so.
+impl<F: FsOps + ?Sized> FsOps for Box<F> {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        (**self).create_dir_all(p)
+    }
+
+    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        (**self).write_durable_temp(dir, bytes)
+    }
+
+    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+        (**self).link_noclobber(from, to)
+    }
+
+    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+        (**self).fsync_dir(p)
+    }
+
+    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+        (**self).read(p)
+    }
+
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        (**self).exists(p)
+    }
+
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        (**self).remove(p)
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        (**self).append_durable(path, bytes)
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        (**self).file_len(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        (**self).truncate(path, len)
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        (**self).atomic_replace(path, bytes)
+    }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        (**self).sync_data(path)
+    }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        (**self).append(path, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        (**self).rename_durable(from, to)
+    }
+}
+
 /// Fault injection for crash tests: forwards to `inner`, except that the k-th call
 /// (counting every [`FsOps`] method, from 1) aborts the process with
 /// [`std::process::abort`] instead of running, as a crash at that exact point would. It
@@ -286,36 +368,78 @@ pub struct CrashAtFs<F: FsOps> {
     report: Option<PathBuf>,
 }
 
-impl CrashAtFs<RealFs> {
-    /// The filesystem the test hooks ask for, if they ask for one: the real filesystem in a
-    /// [`CrashAtFs`] that aborts at call k when `SWARMOPS_TEST_CRASH_AT=<k>` is set to a
-    /// positive k, and reports its call count to `<file>` when `SWARMOPS_TEST_FS_CALLS=<file>`
-    /// is set (either, or both). `None` when neither is set, or both are empty; and always
-    /// `None` in a build without the `test-hooks` feature, which ignores both variables.
-    pub fn from_env() -> Option<CrashAtFs<RealFs>> {
+/// The filesystem the test hooks ask a store to open on: see [`HookedFs::from_env`].
+pub struct HookedFs {
+    fs: Box<dyn FsOps>,
+    counts_calls: bool,
+}
+
+impl HookedFs {
+    /// The filesystem the test hooks ask for, if they ask for one, in a build with the
+    /// `test-hooks` feature: the real filesystem, wrapped from the inside out in
+    ///
+    /// 1. a `FailAtFs` when `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` is set (see
+    ///    [`FAIL_AT_ENV`]); a malformed value panics, as a mistake in the test;
+    /// 2. a [`CrashAtFs`] when `SWARMOPS_TEST_CRASH_AT=<k>` is set to a positive k, or
+    ///    `SWARMOPS_TEST_FS_CALLS=<file>` is set: it aborts at call k, and reports its call
+    ///    count to `<file>`. Being outside the `FailAtFs`, it counts the calls that fails too;
+    /// 3. an `OrderCheckFs` when `SWARMOPS_TEST_ORDER_CHECK=1` is set: outermost, so
+    ///    that it sees every call, the injected failures included, and judges them as real ones.
+    ///
+    /// `None` when none of them is set (or each is empty), and always `None` in a build without
+    /// the `test-hooks` feature, which ignores the variables.
+    pub fn from_env() -> Option<HookedFs> {
         hooked_fs()
     }
+
+    /// Whether one of the hooks counts calls (`SWARMOPS_TEST_CRASH_AT`,
+    /// `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FAIL_AT`): a store must then make its calls one
+    /// at a time (parallelism 1), so that call k is the same call in every run. The order check
+    /// alone counts nothing, and leaves the parallelism as it is.
+    pub fn counts_calls(&self) -> bool {
+        self.counts_calls
+    }
+
+    /// The filesystem.
+    pub fn into_fs(self) -> Box<dyn FsOps> {
+        self.fs
+    }
 }
 
-/// [`CrashAtFs::from_env`] in a build with the `test-hooks` feature.
+/// [`HookedFs::from_env`] in a build with the `test-hooks` feature.
 #[cfg(feature = "test-hooks")]
-fn hooked_fs() -> Option<CrashAtFs<RealFs>> {
+fn hooked_fs() -> Option<HookedFs> {
     let crash_at = crash_at_from_env();
     let report = std::env::var_os(FS_CALLS_ENV).filter(|file| !file.is_empty());
-    if crash_at.is_none() && report.is_none() {
+    let fail_at = std::env::var(FAIL_AT_ENV).ok().and_then(|spec| {
+        FailAt::parse(&spec).unwrap_or_else(|e| panic!("{FAIL_AT_ENV}={spec:?}: {e}"))
+    });
+    let order_check = std::env::var_os(ORDER_CHECK_ENV).is_some_and(|value| value == "1");
+    let counts_calls = crash_at.is_some() || report.is_some() || fail_at.is_some();
+    if !counts_calls && !order_check {
         return None;
     }
-    let fs = CrashAtFs::new(RealFs, crash_at.unwrap_or(0));
-    Some(match report {
-        Some(file) => fs.reporting_calls_to(file.into()),
-        None => fs,
-    })
+    let mut fs: Box<dyn FsOps> = Box::new(RealFs);
+    if let Some(fail) = fail_at {
+        fs = Box::new(FailAtFs::new(fs, fail));
+    }
+    if crash_at.is_some() || report.is_some() {
+        let crash = CrashAtFs::new(fs, crash_at.unwrap_or(0));
+        fs = Box::new(match report {
+            Some(file) => crash.reporting_calls_to(file.into()),
+            None => crash,
+        });
+    }
+    if order_check {
+        fs = Box::new(crate::OrderCheckFs::new(fs));
+    }
+    Some(HookedFs { fs, counts_calls })
 }
 
-/// [`CrashAtFs::from_env`] in a build without the `test-hooks` feature: the hooks' variables
+/// [`HookedFs::from_env`] in a build without the `test-hooks` feature: the hooks' variables
 /// are ignored.
 #[cfg(not(feature = "test-hooks"))]
-fn hooked_fs() -> Option<CrashAtFs<RealFs>> {
+fn hooked_fs() -> Option<HookedFs> {
     None
 }
 
@@ -446,4 +570,304 @@ fn crash_at_from_env() -> Option<u64> {
         .parse()
         .ok()
         .filter(|&k| k > 0)
+}
+
+/// What [`FailAtFs`] fails, as `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` says it.
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FailAt {
+    /// The call that fails (or fails first), counting every [`FsOps`] call from 1.
+    pub at: u64,
+    /// Whether the calls after it fail too.
+    pub mode: FailMode,
+    /// The error the failing calls return.
+    pub error: InjectedError,
+}
+
+/// Which calls a [`FailAtFs`] fails.
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailMode {
+    /// Call k, and no other: a transient error (`once`).
+    Once,
+    /// Call k, whatever it is, and every mutating call after it: a device gone bad
+    /// (`persistent`). Reads (`read`, `exists`, `file_len`) after call k still succeed, as
+    /// reads from the page cache do.
+    Persistent,
+}
+
+/// The error a [`FailAtFs`] injects, and where in the call it strikes.
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InjectedError {
+    /// `EIO` (`eio`). A call that flushes to stable storage (`append_durable`, `truncate`,
+    /// `sync_data`, `fsync_dir`, `atomic_replace`, `write_durable_temp`, `rename_durable`) runs,
+    /// and then fails, as when the writeback its flush waits for fails: whatever it wrote stays
+    /// written (in the page cache, as far as the caller can tell), and the caller is told it
+    /// failed. Any other call fails before it does anything.
+    Eio,
+    /// `ENOSPC` (`enospc`): the call fails before it does anything, as a write the filesystem
+    /// has no room for does.
+    Enospc,
+}
+
+#[cfg(feature = "test-hooks")]
+impl InjectedError {
+    /// The OS error, as the kernel reports it (Linux's errno values).
+    pub fn os_error(self) -> io::Error {
+        io::Error::from_raw_os_error(match self {
+            InjectedError::Eio => 5,
+            InjectedError::Enospc => 28,
+        })
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl FailAt {
+    /// The failure `spec` names: `<k>[:<mode>[:<errno>]]`, k positive, `<mode>` `once` (the
+    /// default) or `persistent`, `<errno>` `eio` (the default) or `enospc`, each of either case.
+    /// `Ok(None)` for an empty spec or k = 0, which fail nothing; an error for anything else.
+    pub fn parse(spec: &str) -> Result<Option<FailAt>, String> {
+        let mut parts = spec.split(':');
+        let at = parts.next().unwrap_or_default();
+        if at.is_empty() {
+            return Ok(None);
+        }
+        let at: u64 = at
+            .parse()
+            .map_err(|_| format!("{at:?} is not a call number"))?;
+        let mode = match parts.next().map(str::to_ascii_lowercase).as_deref() {
+            None | Some("once") => FailMode::Once,
+            Some("persistent") => FailMode::Persistent,
+            Some(other) => return Err(format!("{other:?} is not a mode: once or persistent")),
+        };
+        let error = match parts.next().map(str::to_ascii_lowercase).as_deref() {
+            None | Some("eio") => InjectedError::Eio,
+            Some("enospc") => InjectedError::Enospc,
+            Some(other) => return Err(format!("{other:?} is not an errno: eio or enospc")),
+        };
+        if let Some(extra) = parts.next() {
+            return Err(format!(
+                "{extra:?} follows the errno: <k>[:<mode>[:<errno>]]"
+            ));
+        }
+        Ok((at > 0).then_some(FailAt { at, mode, error }))
+    }
+}
+
+/// Fault injection for error tests: forwards to `inner`, except that the calls [`FailAt`]
+/// names fail with an injected I/O error ([`InjectedError`] says where in the call): call k
+/// (counting every [`FsOps`] method, from 1, as [`CrashAtFs`] counts them), and with
+/// [`FailMode::Persistent`] every mutating call after it too. It counts every call
+/// ([`FailAtFs::calls`]) and every failure ([`FailAtFs::failures`]).
+#[cfg(feature = "test-hooks")]
+pub struct FailAtFs<F: FsOps> {
+    inner: F,
+    fail: FailAt,
+    /// Every call so far, the failed ones included.
+    calls: AtomicU64,
+    /// The calls failed so far.
+    failures: AtomicU64,
+}
+
+/// Where a [`FailAtFs`] fails a call.
+#[cfg(feature = "test-hooks")]
+#[derive(Clone, Copy)]
+enum Strike {
+    /// The call does nothing, and fails.
+    Before,
+    /// The call runs, and then fails (unless it failed on its own).
+    After,
+}
+
+#[cfg(feature = "test-hooks")]
+impl<F: FsOps> FailAtFs<F> {
+    /// Wraps `inner` so that the calls `fail` names fail.
+    pub fn new(inner: F, fail: FailAt) -> Self {
+        Self {
+            inner,
+            fail,
+            calls: AtomicU64::new(0),
+            failures: AtomicU64::new(0),
+        }
+    }
+
+    /// How many calls it has seen.
+    pub fn calls(&self) -> u64 {
+        self.calls.load(Ordering::SeqCst)
+    }
+
+    /// How many calls it has failed.
+    pub fn failures(&self) -> u64 {
+        self.failures.load(Ordering::SeqCst)
+    }
+
+    /// Counts one call of `method`, and runs it as [`FailAt`] says: `call` runs unless the call
+    /// fails before it, and an injected error replaces its result if the call fails.
+    fn call<T>(&self, method: &str, call: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        let fails = n == self.fail.at
+            || (self.fail.mode == FailMode::Persistent
+                && n > self.fail.at
+                && !matches!(method, "read" | "exists" | "file_len"));
+        if !fails {
+            return call();
+        }
+        self.failures.fetch_add(1, Ordering::SeqCst);
+        let flushes = matches!(
+            method,
+            "append_durable"
+                | "truncate"
+                | "sync_data"
+                | "fsync_dir"
+                | "atomic_replace"
+                | "write_durable_temp"
+                | "rename_durable"
+        );
+        let strike = match self.fail.error {
+            InjectedError::Eio if flushes => Strike::After,
+            InjectedError::Eio | InjectedError::Enospc => Strike::Before,
+        };
+        match strike {
+            Strike::Before => Err(self.fail.error.os_error()),
+            Strike::After => {
+                call()?;
+                Err(self.fail.error.os_error())
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test-hooks")]
+impl<F: FsOps> FsOps for FailAtFs<F> {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.call("create_dir_all", || self.inner.create_dir_all(p))
+    }
+
+    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        self.call("write_durable_temp", || {
+            self.inner.write_durable_temp(dir, bytes)
+        })
+    }
+
+    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+        self.call("link_noclobber", || self.inner.link_noclobber(from, to))
+    }
+
+    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+        self.call("fsync_dir", || self.inner.fsync_dir(p))
+    }
+
+    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+        self.call("read", || self.inner.read(p))
+    }
+
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        self.call("exists", || self.inner.exists(p))
+    }
+
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        self.call("remove", || self.inner.remove(p))
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.call("append_durable", || self.inner.append_durable(path, bytes))
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        self.call("file_len", || self.inner.file_len(path))
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        self.call("truncate", || self.inner.truncate(path, len))
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.call("atomic_replace", || self.inner.atomic_replace(path, bytes))
+    }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        self.call("sync_data", || self.inner.sync_data(path))
+    }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.call("append", || self.inner.append(path, bytes))
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.call("rename_durable", || self.inner.rename_durable(from, to))
+    }
+}
+
+#[cfg(all(test, feature = "test-hooks"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fail_at_specs_parse_as_documented() {
+        let fail = |at, mode, error| Ok(Some(FailAt { at, mode, error }));
+        assert_eq!(
+            FailAt::parse("7"),
+            fail(7, FailMode::Once, InjectedError::Eio)
+        );
+        assert_eq!(
+            FailAt::parse("7:persistent"),
+            fail(7, FailMode::Persistent, InjectedError::Eio)
+        );
+        assert_eq!(
+            FailAt::parse("7:once:ENOSPC"),
+            fail(7, FailMode::Once, InjectedError::Enospc)
+        );
+        assert_eq!(FailAt::parse(""), Ok(None));
+        assert_eq!(FailAt::parse("0:persistent"), Ok(None));
+        for bad in ["x", "-1", "3:sometimes", "3:once:ebusy", "3:once:eio:more"] {
+            assert!(FailAt::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn injected_errors_are_the_kernels() {
+        assert_eq!(InjectedError::Eio.os_error().raw_os_error(), Some(5));
+        let full = InjectedError::Enospc.os_error();
+        assert_eq!(
+            (full.raw_os_error(), full.kind()),
+            (Some(28), io::ErrorKind::StorageFull)
+        );
+    }
+
+    /// An `EIO` lets a flushing call do its work, then fails it; a call that does not flush, and
+    /// any call under `ENOSPC`, fails before it does anything. `once` fails call k alone,
+    /// `persistent` every mutating call from k on, reads aside.
+    #[test]
+    fn calls_fail_where_the_injected_error_strikes() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        let failing = |at, mode, error| FailAtFs::new(RealFs, FailAt { at, mode, error });
+
+        let eio = failing(2, FailMode::Once, InjectedError::Eio);
+        eio.append_durable(&file, b"ab").unwrap();
+        let err = eio.append_durable(&file, b"cd").unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(5));
+        assert_eq!(fs::read(&file).unwrap(), b"abcd", "the work was done");
+        eio.append(&file, b"ef").unwrap();
+        assert_eq!((eio.calls(), eio.failures()), (3, 1));
+
+        let full = failing(1, FailMode::Persistent, InjectedError::Enospc);
+        let err = full.append_durable(&file, b"gh").unwrap_err();
+        assert_eq!(err.raw_os_error(), Some(28));
+        assert_eq!(fs::read(&file).unwrap(), b"abcdef", "nothing was done");
+        assert_eq!(full.file_len(&file).unwrap(), 6, "reads still succeed");
+        assert!(
+            full.append(&file, b"gh").is_err(),
+            "every mutating call fails"
+        );
+        assert_eq!((full.calls(), full.failures()), (3, 2));
+
+        let eio = failing(1, FailMode::Once, InjectedError::Eio);
+        assert_eq!(
+            eio.append(&file, b"ij").unwrap_err().raw_os_error(),
+            Some(5)
+        );
+        assert_eq!(fs::read(&file).unwrap(), b"abcdef", "append does not flush");
+    }
 }
