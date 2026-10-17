@@ -565,6 +565,56 @@ fn verify_reports_damaged_metadata_files_and_checks_on() {
     );
 }
 
+#[test]
+fn verify_reports_a_checkpoint_that_is_not_a_frame_boundary() {
+    // Every snapshot and write transaction reads the frames past the checkpoint: a checkpoint
+    // inside a frame, or past the log's end, fails them all with JournalCorrupt
+    // (E_STORE_CORRUPT), so verify must report it (it reported nothing). One at a frame
+    // boundary (0, a frame's start, the end of the last frame) is sound, and nothing is reported.
+    let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
+    let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
+    let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
+    let layout = Layout::new(&root);
+    let journal = Journal::open(&layout, Arc::new(RealFs)).unwrap();
+    let frames = journal.frames_from(0, usize::MAX).unwrap();
+    assert_eq!(frames.len(), 3, "c1, c2 and the ref move");
+    let end = fs::metadata(layout.journal_log()).unwrap().len();
+    for boundary in [0, frames[1].offset, frames[2].offset, end] {
+        journal.set_ckpt(boundary).unwrap();
+        MetaStore::open(&root).unwrap().read().unwrap();
+        let report = repo.verify(true).unwrap();
+        assert_eq!(
+            report.problems,
+            [dangling.clone(), corrupt.clone()],
+            "ckpt {boundary}: no false report"
+        );
+        assert_eq!(report.changesets_checked, 2, "ckpt {boundary}");
+    }
+    for bogus in [frames[1].offset - 1, frames[1].offset + 1, end + 8] {
+        journal.set_ckpt(bogus).unwrap();
+        let read = MetaStore::open(&root).unwrap().read().map(|_| ());
+        assert!(
+            matches!(read, Err(StoreError::JournalCorrupt { offset }) if offset == bogus),
+            "ckpt {bogus}: {read:?}"
+        );
+        let report = repo.verify(true).unwrap();
+        assert_eq!(
+            report.problems,
+            [
+                VerifyProblem::MetaCorrupt(format!(
+                    "meta/journal.ckpt holds {bogus}, which is not a frame boundary: reads and \
+                     writes fail on it, and the records the checkpoint passed are not checked \
+                     against the index"
+                )),
+                dangling.clone(),
+                corrupt.clone()
+            ],
+            "ckpt {bogus}"
+        );
+        assert_eq!(report.changesets_checked, 2, "ckpt {bogus}");
+    }
+}
+
 /// Damages metadata file `file` of the store at `root`: `journal.ckpt` malformed, a journal
 /// file removed, or a sorted view (compacted first) cut inside an entry.
 fn damage_meta(root: &Utf8Path, file: &str) {

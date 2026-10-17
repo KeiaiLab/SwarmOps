@@ -143,6 +143,8 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - `Journal::frame_count` drops the zeroed entries at the end of `journal.off` that readers and
   recovery drop; a reader's frame count after such a power loss was one too high until the next
   writer ran (the frames it read were right).
+- `verify` reports a `journal.ckpt` that is not a frame boundary (every read and write fails on
+  one); before, it reported nothing while the index counted by length.
 - Store files that are not regular files (a FIFO, a device, a socket, or a symlink to one) are
   refused with an error instead of opened; a FIFO at `meta/journal.log` used to hang every
   command.
