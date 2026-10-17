@@ -146,7 +146,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - `bench/compare/` (`just bench-compare`, `--quick` for a smoke run): the native metadata
   store, through its public API, against SQLite, redb, fjall and sled on SwarmOps' own
   workloads, in a cargo workspace of its own that `just check` never builds; SwarmOps depends on
-  none of them. Its numbers, in the M1.5 section of [docs/perf.md](docs/perf.md), are
-  provisional until a quiet-window run.
+  none of them. Its numbers, in the M1.5 section of [docs/perf.md](docs/perf.md), are the
+  quiet-window run's at the plan's sizes (2026-10-17), no longer provisional.
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
