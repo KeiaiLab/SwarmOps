@@ -458,17 +458,25 @@ fn verify_checks_each_record_is_named_once_in_a_sorted_view() {
 
 #[test]
 fn verify_fails_on_a_ref_file_it_cannot_read() {
-    // A ref file that is no ref file is damage verify reports (CorruptRef); one that cannot be
-    // read at all is an error it cannot get past.
+    // A ref file that is no ref file is damage verify reports (CorruptRef), a directory where
+    // the file should be among them (not a regular file); one that cannot be read at all is an
+    // error it cannot get past.
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     repo.cas_ref("release/a", None, Some(c1), "test/agent")
         .unwrap();
-    fs::create_dir(Layout::new(&root).meta_path("refs/release/b")).unwrap();
+    let b = Layout::new(&root).meta_path("refs/release/b");
+    fs::create_dir(&b).unwrap();
+    assert_problems(
+        &repo,
+        vec![VerifyProblem::CorruptRef("release/b".to_owned())],
+    );
+    fs::remove_dir(&b).unwrap();
+    std::os::unix::fs::symlink("b", &b).unwrap(); // a loop: a read of it fails with ELOOP
     for deep in [true, false] {
         match repo.verify(deep) {
             Err(RepoError::Store(StoreError::Io(e))) => {
-                assert_eq!(e.kind(), std::io::ErrorKind::IsADirectory, "{e}");
+                assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}");
             }
             other => panic!("deep: {deep}: expected an I/O error, got {other:?}"),
         }

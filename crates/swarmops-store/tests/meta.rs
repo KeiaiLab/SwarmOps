@@ -1271,6 +1271,32 @@ fn snapshots_and_writes_vouch_for_the_index_with_the_frames_they_read() {
 }
 
 #[test]
+fn a_fifo_where_a_store_file_should_be_is_refused_not_opened() {
+    // `tar`, `cp -R` and `rsync -a` recreate a FIFO, and opening one blocks until something
+    // opens it for writing: a store file must be known to be a regular file before it is
+    // opened. The open runs on a thread with a deadline, so that a regression fails instead of
+    // hanging the test.
+    let (_dir, root, store) = new_store();
+    drop(store);
+    let log = Layout::new(&root).journal_log();
+    fs::remove_file(&log).unwrap();
+    assert!(Command::new("mkfifo").arg(&log).status().unwrap().success());
+    let (tx, rx) = std::sync::mpsc::channel();
+    let opened_root = root.clone();
+    thread::spawn(move || {
+        let _ = tx.send(MetaStore::open(&opened_root).map(drop));
+    });
+    match rx.recv_timeout(Duration::from_secs(5)) {
+        Ok(Err(StoreError::Io(e))) => {
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+            assert!(e.to_string().ends_with("is not a regular file"), "{e}");
+        }
+        Ok(other) => panic!("a FIFO at journal.log: expected InvalidData, got {other:?}"),
+        Err(timeout) => panic!("opening the store blocked on the FIFO at journal.log: {timeout}"),
+    }
+}
+
+#[test]
 fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_unreadable_one() {
     // Past the checkpoint the journal vouches for the index's records: a power loss zeroed
     // record 1's generation, so it is not counted. A checkpoint that does not hold a u64le is
@@ -1296,9 +1322,10 @@ fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_un
     );
 
     fs::remove_file(layout.journal_ckpt()).unwrap();
-    fs::create_dir(layout.journal_ckpt()).unwrap(); // a read of it fails with EISDIR
+    // A symlink to itself: a read of it fails with ELOOP.
+    std::os::unix::fs::symlink("journal.ckpt", layout.journal_ckpt()).unwrap();
     match Index::open(&layout, Arc::new(RealFs)) {
-        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::IsADirectory, "{e}"),
+        Err(StoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}"),
         other => panic!("an unreadable checkpoint: expected its I/O error, got {other:?}"),
     }
 }

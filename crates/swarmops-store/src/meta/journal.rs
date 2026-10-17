@@ -31,7 +31,7 @@
 //! with `read_at` on read-only handles, except that `journal.ckpt`, which
 //! [`Journal::set_ckpt`] replaces by rename, is read by path.
 
-use std::fs::{self, File};
+use std::fs::File;
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
@@ -41,7 +41,7 @@ use camino::Utf8PathBuf;
 use super::frame::{Frame, HEADER_LEN, Parsed, Record, encode_frame, parse_frame};
 use super::to_u64;
 use crate::error::StoreError;
-use crate::fs_ops::FsOps;
+use crate::fs_ops::{FsOps, open_regular};
 use crate::layout::Layout;
 
 /// The size of one `journal.off` entry.
@@ -103,8 +103,8 @@ impl Journal {
     /// reads only the files' lengths; the tail is checked by the first
     /// [`Journal::append_frame`] or [`Journal::truncate_torn_tail`].
     pub fn open(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Journal, StoreError> {
-        let log = File::open(layout.journal_log())?;
-        let off = File::open(layout.journal_off())?;
+        let log = open_regular(layout.journal_log())?;
+        let off = open_regular(layout.journal_off())?;
         let tail = Tail {
             len: log.metadata()?.len(),
             frames: off.metadata()?.len() / ENTRY_LEN,
@@ -458,8 +458,9 @@ impl Journal {
     /// The offset up to which the journal is materialized: what [`Journal::set_ckpt`] last
     /// stored, or 0 if it never ran.
     pub fn ckpt(&self) -> Result<u64, StoreError> {
-        let bytes = match fs::read(&self.ckpt_path) {
-            Ok(bytes) => bytes,
+        let mut bytes = Vec::new();
+        match open_regular(&self.ckpt_path) {
+            Ok(mut file) => io::Read::read_to_end(&mut file, &mut bytes)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e.into()),
         };

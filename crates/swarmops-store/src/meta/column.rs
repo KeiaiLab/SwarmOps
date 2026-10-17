@@ -14,7 +14,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use super::sorted::index_file_error;
 use super::to_u64;
 use crate::error::StoreError;
-use crate::fs_ops::FsOps;
+use crate::fs_ops::{FsOps, open_regular};
 
 /// See the module documentation.
 pub(crate) struct AppendOnlyColumn<const W: usize> {
@@ -27,7 +27,7 @@ impl<const W: usize> AppendOnlyColumn<W> {
     /// Opens the file at `path` read-only. A missing one is [`StoreError::IndexCorrupt`]: a
     /// store has every index file from its creation.
     pub(crate) fn open(path: Utf8PathBuf) -> Result<Self, StoreError> {
-        let file = File::open(&path).map_err(index_file_error)?;
+        let file = open_regular(&path).map_err(index_file_error)?;
         Ok(Self { path, file })
     }
 
