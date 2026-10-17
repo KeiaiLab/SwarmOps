@@ -60,19 +60,19 @@ planned, each with its milestone.
 
 | Dimension | SwarmOps | Against git |
 | --- | --- | --- |
-| Hash | ✅ M0: BLAKE3-256 ids, with the object's kind and layout version hashed in; every read re-hashes. | **Ahead** of git's default SHA-1: 128-bit collision resistance against at most 80 bits, by cryptanalysis, not by benchmark. **Parity** with git's opt-in SHA-256. |
+| Hash | ✅ M0: BLAKE3-256 ids, with the object's kind and layout version hashed in. ✅ M1: every read re-hashes. | **Ahead** of git's default SHA-1: 128-bit collision resistance against at most 80 bits, by cryptanalysis, not by benchmark. **Parity** with git's opt-in SHA-256. |
 | Order of writes | ✅ M1: every commit and ref move is a frame of one journal, appended under one lock, so all of them have a single global order. | **Ahead by design.** |
-| Stale locks | ✅ M1: the writer lock is an `flock`, which the kernel releases when its holder dies. | **Ahead by design.** A git process killed while it holds `index.lock` or a ref's `.lock` leaves the file behind, to be removed by hand. |
+| Stale locks | ✅ M1: the writer lock is an `flock`, which the kernel releases when its holder dies. | **Ahead by design.** A git process killed with `SIGKILL` while it holds `index.lock` or a ref's `.lock` leaves the file behind, to be removed by hand (git removes its lock files on the signals it can catch). |
 | Durability | ✅ M1: full fsync is the only mode; an object is synced before a journal frame names it, and a commit returns after its frame's `fdatasync`. ✅ M1.5: the policy for a failed fsync. | **Ahead by design.** Git's defaults (2.43) sync packs, pack metadata and the commit graph, not loose objects, refs or the index. |
-| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. |
+| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gaps: `E_CAS_MISMATCH` is marked retryable, and four codes are not raised yet. |
 | Commits from many writers | ✅ M1: concurrent commits all succeed, short of a lock wait past 10 s (the retryable `E_BUSY`). | **Parity** with agents in separate git worktrees, on lost commits and lock failures. |
 | One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
 | Reading a path at a revision | ✅ M1: `cat REV:PATH` and `ls REV[:PATH]`, without a checkout. | **Parity** with `git show REV:PATH` and `git ls-tree`. |
 | Offline, on one host | ✅ M1: no network code; every operation runs against the host's own store. | **Parity.** |
 | Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s. | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
-| Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, branches or symbolic refs. |
+| Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
 | Breadth of reads | Today one file or one directory per call. 📋 M2: ranged reads, depths and sizes. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, recursive listings, `git grep <tree>` and sparse checkouts. |
-| Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no deltas. 📋 M6: gc. | **Behind by design**, in bytes and in files, against git's packs. |
+| Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
 | Conflicts | Today the one signal is `E_CAS_MISMATCH`, with the ref's actual target. 📋 M4: three-way merge, conflicts reported per hunk as JSON and resolved without a checkout. | **Behind** today: git merges without a checkout (`git merge-tree`), with typed conflict records. M4 is **not yet comparable**. |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | Nothing today. 📋 M11: offline-first sync, a full store on every host, `fetch` and `push` against one upstream. | **Behind**: git clones, fetches and pushes over any transport, and bundles without one. |
@@ -81,18 +81,19 @@ planned, each with its milestone.
 | Landing | Today an agent that loses a ref race commits again on the winner's head and retries the compare-and-swap by hand. 📋 M4: `land`. | **Not yet comparable**; the loop by hand is behind. |
 
 No git baseline has been measured yet: these verdicts come from the design, the code, and git's
-own documentation and source, not from a benchmark. The first measured comparison is planned
-for M9, the same 32-agent contention run against git worktrees. SwarmOps' own measurements are
-in [docs/perf.md](docs/perf.md).
+own documentation and source, not from a benchmark. The first measured comparison is planned for
+M9: SwarmOps' 32-agent contention scenario, run side by side with git worktrees. SwarmOps' own
+measurements are in [docs/perf.md](docs/perf.md).
 
 ## How it works
 
 Every operation is a library function: `swarmops-repo` does the work, `swarmops-ops` exposes it
 as the `StoreOps` operations, and the binary parses a command line, calls one operation and
-prints its envelope. Each arrow points from a crate to one it depends on; the diagram leaves out
-the shortcuts (`swarmops-ops` also uses `swarmops-core` and `swarmops-store` directly, and
-`swarmops-repo` uses `swarmops-core`), which [docs/architecture.md](docs/architecture.md) lists
-beside its diagrams of the write and read paths.
+prints its envelope. An arrow between two crates points from a crate to one it depends on; the
+diagram leaves out the shortcuts (`swarmops-ops` also uses `swarmops-core` and `swarmops-store`
+directly, and `swarmops-repo` uses `swarmops-core`).
+[docs/architecture.md](docs/architecture.md) lists every dependency and draws the write and read
+paths.
 
 ```mermaid
 flowchart TB
@@ -323,7 +324,7 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | --- | --- | --- |
 | ✅ | M0 | Bootstrap: the workspace and its gates, the canonical codec and its golden vectors, the fsync experiment. |
 | ✅ | M1 | The single-agent core: `init`, `commit`, `cat`, `ls`, `log` and ref compare-and-swap, over the native metadata store and object files; crash sweeps. |
-| ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, I/O-error injection, write-ordering checks and the fsync-failure policy, power-loss images, the project policies, the MCP server and `so`. |
+| ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, `--locked` everywhere; I/O-error injection, write-ordering checks and the fsync-failure policy; power-loss images; the project policies; benchmarks of the metadata store against embedded databases; the MCP server and `so`. |
 | 📋 | M2 | Diff, history and the derived-data engine. |
 | 📋 | M3 | git import. |
 | 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |

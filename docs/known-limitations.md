@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M1, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M1.5, and the milestone
 meant to change it. The items come from M1's reviews: the carry-overs its tasks handed to later
 milestones, the deferred minors that are still open, and the rulings of the final review, which
 left 14 questions to the maintainer (the table at the end lists all 14). Each entry says where

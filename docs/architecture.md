@@ -1,7 +1,7 @@
 # SwarmOps architecture
 
-An overview, in English, of how SwarmOps is built, as of M1. The design specs are the authority,
-and they are in Korean:
+An overview, in English, of how SwarmOps is built, as of M1.5. The design specs are the
+authority, and they are in Korean:
 
 - [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md) ("umbrella" below),
 - [storage core](superpowers/specs/2026-10-15-swarmops-storage-core-design.md) ("storage"),
@@ -20,7 +20,7 @@ repository at once (umbrella §1). It takes the principles of Anthropic's Scion 
 ("Redesigning source control at Anthropic") to a single host, and is not meant as a
 general-purpose git replacement. Its main users are LLM agents, so every operation is a library
 function and the command line is a thin shell that prints JSON. It is fully embedded: one
-binary, no external database, no daemon.
+program, no external database, no daemon.
 
 M0 (bootstrap) and M1 (the single-agent core) are done. M1 is usable by one agent: its store
 already takes commits from many processes at once, safely, but nothing merges yet. Merging and
