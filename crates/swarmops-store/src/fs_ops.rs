@@ -48,7 +48,10 @@ pub const FS_CALLS_ENV: &str = "SWARMOPS_TEST_FS_CALLS";
 /// [`HookedFs::from_env`]), counting calls as `SWARMOPS_TEST_CRASH_AT` does. `<mode>` is `once`
 /// (the default: that call alone) or `persistent` (that call and every mutating call after it);
 /// `<errno>` is `eio` (the default) or `enospc`. Any other value is a mistake in the test, and
-/// the store's opening panics on it.
+/// the store's opening panics on it. A failure during recovery (`during_recovery`) is no mode
+/// but two runs: `SWARMOPS_TEST_CRASH_AT=<k1>` in one, then `SWARMOPS_TEST_FAIL_AT=<k2>` in the
+/// next, which fails the k2-th call, counted from that run's first, of the open and write that
+/// recover from the crash.
 pub const FAIL_AT_ENV: &str = "SWARMOPS_TEST_FAIL_AT";
 
 /// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_ORDER_CHECK=1` set,

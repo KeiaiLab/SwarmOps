@@ -12,9 +12,15 @@
 //! - The metadata. The index's records are compared with the journal's changeset records, place
 //!   by place: a record unlike the journal's at its seq, one the journal does not hold, and a
 //!   journal record below the checkpoint that the index lacks are each an
-//!   [`VerifyProblem::IndexMismatch`]. (Past the checkpoint the index counts only the records
-//!   the journal vouches for, `Index::open`: one it does not, which a power loss can leave there,
-//!   is no damage, and the next writer replays the journal's in its place.) So are sorted-view
+//!   [`VerifyProblem::IndexMismatch`]. (Past the checkpoint and the sorted views the index counts
+//!   only the records the journal vouches for, `Index::open`; those the views cover count as
+//!   they are, even past the checkpoint, synced before the views were written. One the journal
+//!   does not vouch for, which a power loss can leave there, is no damage, and the next writer
+//!   replays the journal's in its place. So a record that no frame holds at all, past the
+//!   journal's last changeset (what a writer that went around the journal would leave), is
+//!   reported only if the index counts it: if no changeset frame follows the checkpoint, or the
+//!   sorted views cover it. Otherwise the index does not count it, verify reports nothing, and
+//!   the next writer cuts it.) So are sorted-view
 //!   entries that disagree with the index columns (the advisory `Compacted` frames are never
 //!   consulted); each names its [`MismatchCause`]. A frame the journal's reader finds corrupt is a
 //!   [`VerifyProblem::JournalCorrupt`]: the comparison stops there, and the index's records

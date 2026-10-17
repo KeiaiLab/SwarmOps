@@ -3,7 +3,9 @@
 //! fsync-failure model, the order checker) in [`faults`], the child-process runner in
 //! [`child`], and what the measurement tests share with the benches in [`common`]. A module
 //! directory, so that Cargo does not take it for a test target of its own. The repository's
-//! tests include [`child`] and [`fs`] by their paths, and the CLI's tests [`fs`].
+//! tests include [`child`] and [`fs`] by their paths, and the CLI's tests [`fs`]. `power.rs`,
+//! the power-loss crash images, is not declared here: only the CLI's `power_loss.rs` uses it,
+//! and includes it by its path.
 
 #![allow(dead_code)] // Each test binary uses the part it needs.
 
