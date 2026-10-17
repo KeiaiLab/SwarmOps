@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use support::doubles::{Call, Watch, Watched};
-use support::{Racers, Run, Store, agent, run_within};
+use support::{BIN, Racers, Run, Store, agent, run_bin_within, run_within};
 use swarmops_core::{EntryKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{Layout, MetaLock};
@@ -293,6 +293,32 @@ fn a_run_past_its_deadline_is_killed_and_reported() {
     let args = store.args(&agent(0), &["commit", "-m", "waits", "--changes", &changes]);
     let started = Instant::now();
     let caught = panic::catch_unwind(|| run_within(&args, &[], Duration::from_millis(300)));
+    let message = panic_message(caught.expect_err("a run past its deadline fails the test"));
+    assert!(message.contains("past its deadline"), "{message}");
+    assert!(message.contains("signal: 9"), "killed: {message}");
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(5),
+        "killed at its deadline: {waited:?}"
+    );
+    drop(lock);
+    store.assert_clean("after a commit killed while it waited for the lock");
+}
+
+/// A run is killed at its deadline however much of its input the child leaves unread: the input
+/// is written while the deadline runs, not before it starts. Here the child, a commit waiting
+/// for the lock, reads none of it, and it is more than a pipe holds (64 KiB on Linux), so a
+/// write of all of it would block until the child ends.
+#[test]
+fn a_run_whose_input_goes_unread_is_killed_at_its_deadline() {
+    let store = Store::init();
+    let lock = hold_the_lock(&store);
+    let changes = store.changes("waits", "waits.txt", "waits for the lock\n");
+    let args = store.args(&agent(0), &["commit", "-m", "waits", "--changes", &changes]);
+    let input = "x".repeat(1 << 20);
+    let started = Instant::now();
+    let caught =
+        panic::catch_unwind(|| run_bin_within(BIN, &args, &[], &input, Duration::from_millis(300)));
     let message = panic_message(caught.expect_err("a run past its deadline fails the test"));
     assert!(message.contains("past its deadline"), "{message}");
     assert!(message.contains("signal: 9"), "killed: {message}");

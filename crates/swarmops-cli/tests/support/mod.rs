@@ -1,6 +1,7 @@
-//! Running the real `swarmops` binary (`CARGO_BIN_EXE_swarmops`) from the multi-process and
-//! crash tests: one run to its end, children that race behind a start barrier, and a store in a
-//! temp dir of its own with the commands the tests run on it.
+//! Running the real `swarmops` binary (`CARGO_BIN_EXE_swarmops`, or by its short name `so`,
+//! `CARGO_BIN_EXE_so`) from the multi-process and crash tests: one run to its end, children that
+//! race behind a start barrier, and a store in a temp dir of its own with the commands the tests
+//! run on it.
 //!
 //! Every child runs with none of the developer's `SWARMOPS_*` variables, only those the test
 //! sets, and `SWARMOPS_TEST_ORDER_CHECK=1` (unless the test sets it otherwise): in a build with
@@ -40,6 +41,9 @@ use tempfile::TempDir;
 /// The binary under test.
 pub const BIN: &str = env!("CARGO_BIN_EXE_swarmops");
 
+/// The binary under test by its short name, `so`: the same program.
+pub const SO: &str = env!("CARGO_BIN_EXE_so");
+
 /// The signal `std::process::abort` raises: how a `SWARMOPS_TEST_CRASH_AT` crash ends.
 const SIGABRT: i32 = 6;
 
@@ -61,7 +65,12 @@ pub fn agent(n: usize) -> String {
 /// The binary with `args`, the order check on, `env` set, and none of the other `SWARMOPS_*`
 /// variables of this process's environment.
 pub fn swarmops<S: AsRef<str>>(args: &[S], env: &[(&str, &str)]) -> Command {
-    let mut command = Command::new(BIN);
+    named(BIN, args, env)
+}
+
+/// [`swarmops`] by the name `bin`: [`BIN`] or [`SO`].
+fn named<S: AsRef<str>>(bin: &str, args: &[S], env: &[(&str, &str)]) -> Command {
+    let mut command = Command::new(bin);
     command.args(args.iter().map(AsRef::as_ref));
     with_env(&mut command, env);
     command
@@ -99,6 +108,36 @@ pub fn run<S: AsRef<str>>(args: &[S], env: &[(&str, &str)]) -> Run {
 pub fn run_within<S: AsRef<str>>(args: &[S], env: &[(&str, &str)], timeout: Duration) -> Run {
     let child = swarmops(args, env).spawn().expect("run swarmops");
     Running::start(args, child).finish(Instant::now() + timeout)
+}
+
+/// Runs the binary by the name `bin` ([`BIN`] or [`SO`]) with `args` and `env` to its end,
+/// within [`RUN_TIMEOUT`], `input` all that it reads on stdin.
+pub fn run_bin<S: AsRef<str>>(bin: &str, args: &[S], env: &[(&str, &str)], input: &str) -> Run {
+    run_bin_within(bin, args, env, input, RUN_TIMEOUT)
+}
+
+/// [`run_bin`] within `timeout`: a child still running then is killed and fails the test. The
+/// input is written from a thread of its own ([`feed`]) while the deadline runs, so a child that
+/// leaves it unread cannot hold the test past its deadline, however much of it there is.
+pub fn run_bin_within<S: AsRef<str>>(
+    bin: &str,
+    args: &[S],
+    env: &[(&str, &str)],
+    input: &str,
+    timeout: Duration,
+) -> Run {
+    let mut child = named(bin, args, env)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("run swarmops");
+    let stdin = child.stdin.take().expect("a piped stdin");
+    let mut running = Running::start(args, child);
+    let feeding = feed(stdin, input);
+    let run = running.finish(Instant::now() + timeout);
+    // The child is reaped, so the write is over. Past the deadline, `finish` fails the test
+    // before this, and the thread ends by itself: the killed child's end of the pipe is closed.
+    feeding.join().expect("write a child's stdin");
+    run
 }
 
 /// The threads that read a child's stdout and stderr to their ends.
@@ -169,6 +208,16 @@ fn drain(pipe: Option<impl Read + Send + 'static>) -> JoinHandle<Vec<u8>> {
         let mut bytes = Vec::new();
         let _ = pipe.read_to_end(&mut bytes);
         bytes
+    })
+}
+
+/// A thread that writes `input` to `pipe`, a child's stdin, then closes it. The write ends once
+/// the child has read all of it, or once the child has ended, which closes its end of the pipe.
+fn feed(mut pipe: ChildStdin, input: &str) -> JoinHandle<()> {
+    let input = input.to_owned();
+    thread::spawn(move || {
+        // A child that exits before it reads all of its input shows that in its run.
+        let _ = pipe.write_all(input.as_bytes());
     })
 }
 

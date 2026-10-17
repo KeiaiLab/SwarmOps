@@ -308,8 +308,16 @@ pub fn panicked(payload: &(dyn Any + Send)) -> OpError {
 
 /// The envelope of a command line clap refused: `E_INVALID_ARG` (exit 2) with clap's message
 /// in one line as `message`, and its tips and the usage of the subcommand `path` names as
-/// `hint`, a line each. Control characters (from the line itself) are escaped in both.
-pub fn usage(error: &clap::Error, path: &[String], format: Format, started: Instant) -> Printed {
+/// `hint`, a line each. The usage names the program `bin`, as the line invoked it, whether it
+/// is clap's or, where clap gives none, the CLI's. Control characters (from the line itself)
+/// are escaped in both.
+pub fn usage(
+    error: &clap::Error,
+    bin: Option<&str>,
+    path: &[String],
+    format: Format,
+    started: Instant,
+) -> Printed {
     let rendered = error.render().to_string();
     let mut paragraphs = rendered
         .split("\n\n")
@@ -327,7 +335,7 @@ pub fn usage(error: &clap::Error, path: &[String], format: Format, started: Inst
             .iter()
             .position(|text| text.starts_with("For more information"))
             .unwrap_or(hint.len());
-        hint.insert(at, cli::usage(path));
+        hint.insert(at, output::printable(&cli::usage(bin, path)));
     }
     let message = output::printable(&message.join(" "));
     let error = OpError::new(ErrorCode::InvalidArg, message).with_hint(hint.join("\n"));
@@ -605,6 +613,26 @@ mod tests {
                 .unwrap()
                 .contains(&"Rev".into())
         );
+    }
+
+    /// The usage line the CLI adds where clap gives none names the program as the line invoked
+    /// it, its control characters escaped like the rest of the line's text: here a carriage
+    /// return, which clap's text keeps (it strips escape sequences only).
+    #[test]
+    fn the_added_usage_line_escapes_the_program_name() {
+        let line = ["/tmp/s\ro", "log", "-n", "many"].map(std::ffi::OsString::from);
+        let cli::Parsed::Usage {
+            error, bin, path, ..
+        } = cli::parse(&line)
+        else {
+            panic!("a usage error");
+        };
+        let format = Format::Json { pretty: false };
+        let printed = usage(&error, bin.as_deref(), &path, format, Instant::now());
+        let envelope: Value = serde_json::from_str(&printed.stdout).unwrap();
+        let hint = envelope["error"]["hint"].as_str().unwrap();
+        let line = r"Usage: s\ro log [OPTIONS] [REV]";
+        assert!(hint.lines().any(|text| text == line), "{hint:?}");
     }
 
     #[test]

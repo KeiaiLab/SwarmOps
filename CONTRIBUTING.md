@@ -62,7 +62,9 @@ A change is done when `just check` passes on it. It runs, in order:
    hooks the crash tests drive);
 4. the `test_hooks` test in a release build without the feature, which proves that such a build
    ignores the test hooks (`--no-tests=fail`: it fails if the test does not run);
-5. `cargo doc` with `RUSTDOCFLAGS="-D warnings"`;
+5. `cargo doc` with `RUSTDOCFLAGS="-D warnings"` and `--document-private-items`, which documents
+   private items too, so that the CLI's internal docs (its modules are private to its library)
+   stay link-checked;
 6. `cargo deny check`: advisories, licenses, bans and sources.
 
 Every cargo build, test, clippy and doc step uses `--locked`, so `Cargo.lock` (committed, like
