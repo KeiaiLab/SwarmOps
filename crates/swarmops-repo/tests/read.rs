@@ -517,6 +517,35 @@ fn open_requires_the_repo_file() {
 }
 
 #[test]
+fn a_huge_format_file_is_not_a_store_and_is_not_read_whole() {
+    // FORMAT holds 17 bytes; one of any other length names no layout this build reads. A
+    // crafted one of huge length (a sparse file, which costs no disk) is refused by its length,
+    // before any of it is read, with the Format error a foreign FORMAT gets (E_NOT_A_REPO).
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    let format = root.join("FORMAT");
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&format)
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let started = std::time::Instant::now();
+    match LocalRepo::open(&root) {
+        Err(RepoError::Store(StoreError::Format(what))) => assert_eq!(
+            what,
+            format!("{root}/FORMAT is 1073741824 bytes long, not a store layout this build reads")
+        ),
+        other => panic!("expected Format, got {:?}", other.map(|r| r.info())),
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "read whole: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn create_refuses_mnt_paths_before_touching_them() {
     // WSL mounts Windows drives under /mnt/ (drvfs): no store may live there. The check is
     // made before anything is created, so this test leaves no trace on the drive.

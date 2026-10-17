@@ -181,6 +181,11 @@ left).
   crafted or damaged store can hold one. The fix is a streaming decoder that stops one byte past
   the expected length. *Unscheduled in the ledger; proposed for M6, with a fuzz target for
   object files. Found: M1 Task 1.*
+- **`REPO` is read whole, however long.** `meta/REPO` holds the repository id and the name
+  `init` was given, which nothing bounds, so a crafted `REPO` of huge length is read into a
+  buffer of that length (`E_IO` "out of memory" when the allocator refuses). `FORMAT`,
+  `journal.ckpt` and the ref files are capped at their fixed sizes. *Target: M1.6 (a name-length
+  limit, with its spec line). Found: M1.5 final review (security-2).*
 - **Crafted `journal.off` entries can cut a frame.** Entries crafted to agree with each other,
   around an embedded valid frame, can make recovery cut a whole committed frame; that is outside
   the crash model, and `verify`, which walks every listed frame, reports it. A checksum on each

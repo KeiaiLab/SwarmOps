@@ -526,6 +526,38 @@ fn ref_files_lists_each_ref_file_even_when_one_is_damaged() {
     }
 }
 
+#[test]
+fn a_huge_ref_file_is_not_a_ref_file_and_is_not_read_whole() {
+    // A ref file holds at most 86 bytes (64 hex digits, a line break, up to 20 decimal digits, a
+    // line break): a crafted one of huge length (a sparse file, which costs no disk) is refused
+    // by its length, before any of it is read, as the InvalidData every damaged ref file is.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    cas(&store, "main", None, Some(1));
+    let main = Layout::new(&root).meta_path("refs/main");
+    OpenOptions::new()
+        .write(true)
+        .open(&main)
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let started = Instant::now();
+    let got = store.read().map(|_| ());
+    let Err(StoreError::Io(e)) = &got else {
+        panic!("a 1 GiB ref file: expected InvalidData, got {got:?}");
+    };
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+    assert_eq!(
+        e.to_string(),
+        format!("{main} is 1073741824 bytes long, not a ref file")
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "read whole: {:?}",
+        started.elapsed()
+    );
+}
+
 /// A root changeset whose id starts with `prefix`, its other bytes `fill`.
 fn with_prefix(prefix: &[u8], fill: u8) -> ChangesetMeta {
     let mut bytes = [fill; 32];

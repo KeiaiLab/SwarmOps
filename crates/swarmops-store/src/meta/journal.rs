@@ -456,22 +456,24 @@ impl Journal {
     }
 
     /// The offset up to which the journal is materialized: what [`Journal::set_ckpt`] last
-    /// stored, or 0 if it never ran.
+    /// stored, or 0 if it never ran. A file of any length but 8 is `InvalidData`; the read is
+    /// capped at 9 bytes, so a crafted file of huge length is never read into memory.
     pub fn ckpt(&self) -> Result<u64, StoreError> {
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(9);
         match open_regular(&self.ckpt_path) {
-            Ok(mut file) => io::Read::read_to_end(&mut file, &mut bytes)?,
+            Ok(file) => io::Read::read_to_end(&mut io::Read::take(file, 9), &mut bytes)?,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
             Err(e) => return Err(e.into()),
         };
         let offset = <[u8; 8]>::try_from(bytes.as_slice()).map_err(|_| {
+            let length = if bytes.len() > 8 {
+                "more than 8".to_owned()
+            } else {
+                bytes.len().to_string()
+            };
             io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!(
-                    "{} holds {} bytes, not a u64le",
-                    self.ckpt_path,
-                    bytes.len()
-                ),
+                format!("{} holds {length} bytes, not a u64le", self.ckpt_path),
             )
         })?;
         Ok(u64::from_le_bytes(offset))

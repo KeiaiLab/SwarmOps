@@ -232,6 +232,18 @@ impl LocalRepo {
     ) -> Result<LocalRepo, RepoError> {
         let root = camino::absolute_utf8(store)?;
         let layout = Layout::new(root.clone());
+        // A FORMAT longer than the layout's names no layout this build reads, however long it
+        // is: measured before it is read (through `std::fs`, no `FsOps` call), so that a
+        // crafted file of huge length is never read into memory. A missing one reaches the read.
+        if let Ok(meta) = std::fs::metadata(layout.format_file().as_std_path())
+            && meta.len() > u64::try_from(FORMAT.len()).expect("usize fits in u64")
+        {
+            return Err(StoreError::Format(format!(
+                "{root}/FORMAT is {} bytes long, not a store layout this build reads",
+                meta.len()
+            ))
+            .into());
+        }
         match fs.read(layout.format_file().as_std_path())? {
             Some(format) if format == FORMAT => {}
             Some(_) => {

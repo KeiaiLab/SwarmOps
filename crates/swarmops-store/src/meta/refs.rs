@@ -31,6 +31,10 @@ use crate::layout::Layout;
 /// The most bytes a ref name may take: its length is one byte of a `RefMove` record.
 const MAX_NAME_LEN: usize = 255;
 
+/// The most bytes a ref file holds: 64 hex digits, a line break, a version of at most 20
+/// decimal digits (a `u64`), a line break.
+const MAX_FILE_LEN: u64 = 64 + 1 + 20 + 1;
+
 /// Where a ref points, as its file (or the journal past the checkpoint) says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RefState {
@@ -196,8 +200,20 @@ fn make_dir(fs: &dyn FsOps, dir: &Utf8Path, parent: &Utf8Path) -> Result<(), Sto
 }
 
 /// The state a ref file holds; `None` if there is no file. Anything but
-/// `<64 hex digits>\n<version>\n`, the version a decimal of at least 1, is `InvalidData`.
+/// `<64 hex digits>\n<version>\n`, the version a decimal of at least 1, is `InvalidData`. A
+/// file longer than [`MAX_FILE_LEN`] is refused by its length, measured before it is read
+/// (through `std::fs`, no [`FsOps`] call), so that a crafted file of huge length is never read
+/// into memory; a missing file reaches the read, which reports it.
 fn read_file(fs: &dyn FsOps, path: &Utf8Path) -> Result<Option<RefState>, StoreError> {
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > MAX_FILE_LEN
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("{path} is {} bytes long, not a ref file", meta.len()),
+        )
+        .into());
+    }
     let Some(bytes) = fs.read(path.as_std_path())? else {
         return Ok(None);
     };

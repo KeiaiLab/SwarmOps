@@ -1596,6 +1596,45 @@ fn ckpt_roundtrip_and_default_zero() {
 }
 
 #[test]
+fn a_huge_checkpoint_file_is_malformed_not_read_whole() {
+    // journal.ckpt holds 8 bytes; one of any other length is damage. A crafted one of huge
+    // length (a sparse file, which costs no disk) must not be read into a buffer of that length:
+    // the read is capped, and the error is the file's own, at once.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.set_ckpt(84).unwrap();
+    set_len(layout.journal_ckpt(), 1 << 30);
+    let started = Instant::now();
+    let got = journal.ckpt();
+    let Err(StoreError::Io(e)) = &got else {
+        panic!("a 1 GiB checkpoint file: expected InvalidData, got {got:?}");
+    };
+    assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+    assert!(
+        e.to_string()
+            .contains("holds more than 8 bytes, not a u64le"),
+        "{e}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "read whole: {:?}",
+        started.elapsed()
+    );
+    set_len(layout.journal_ckpt(), 9);
+    let got = journal.ckpt();
+    assert!(
+        matches!(&got, Err(StoreError::Io(e)) if e.to_string().contains("holds more than 8 bytes")),
+        "{got:?}"
+    );
+    set_len(layout.journal_ckpt(), 3);
+    let got = journal.ckpt();
+    assert!(
+        matches!(&got, Err(StoreError::Io(e)) if e.to_string().contains("holds 3 bytes, not a u64le")),
+        "{got:?}"
+    );
+}
+
+#[test]
 fn real_fs_appends_truncates_and_replaces_durably() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("f");
