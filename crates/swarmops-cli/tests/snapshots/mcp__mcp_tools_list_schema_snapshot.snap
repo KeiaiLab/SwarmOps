@@ -7,7 +7,7 @@ expression: listed
     "io.modelcontextprotocol/serverInfo": {
       "name": "swarmops",
       "title": "SwarmOps",
-      "version": "0.1.0"
+      "version": "[version]"
     }
   },
   "cacheScope": "public",
@@ -217,7 +217,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Moves a ref, or creates one, by compare-and-swap: give create, or expected_old, the full 64-hex changeset id the ref held when you read it; a ref name or a relative revision is refused, since it would always match.",
+      "description": "Moves a ref, or creates one, by compare-and-swap: give create, or expected_old, the full 64-hex changeset id the ref held when you read it; a ref name, a relative revision or an id prefix is refused, since it is read when the call runs instead of pinning the id you read.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of\n`expected_old` and `create`; both or neither is `E_INVALID_ARG`.",
@@ -237,7 +237,7 @@ expression: listed
                 "type": "null"
               }
             ],
-            "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative\nrevision is resolved when the move runs, so it always matches and the compare-and-swap\nprotects nothing: `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's `--expect`\nhelp warns against it. Give this or `create`, not both."
+            "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name, a relative revision\nor an id prefix is read from the store when the move runs instead of pinning the id the\ncaller read: the ref's own name always matches, so the compare-and-swap protects nothing,\nand `main~1` on `main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and\nthe CLI's `--expect` help warns against it. Give this or `create`, not both."
           },
           "name": {
             "description": "The ref: `main` or `release/<name>`.",
@@ -265,13 +265,13 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Removes a ref by compare-and-swap, if it still holds expected_old, the full 64-hex changeset id it held when you read it; a ref name or a relative revision is refused, since it would always match.",
+      "description": "Removes a ref by compare-and-swap, if it still holds expected_old, the full 64-hex changeset id it held when you read it; a ref name, a relative revision or an id prefix is refused, since it is read when the call runs instead of pinning the id you read.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`ref delete`: remove a ref by compare-and-swap.",
         "properties": {
           "expected_old": {
-            "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is resolved when\nthe delete runs, so it always matches and the compare-and-swap protects nothing:\n`swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's `--expect` help warns\nagainst it. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name, a relative revision or an id prefix is\nread from the store when the delete runs instead of pinning the id the caller read: the\nref's own name always matches, so the compare-and-swap protects nothing, and `main~1` on\n`main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's\n`--expect` help warns against it. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
             "type": "string"
           },
           "name": {

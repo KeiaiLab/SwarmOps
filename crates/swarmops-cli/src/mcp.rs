@@ -47,7 +47,7 @@
 //! | `-32601` | Method not found | a method its revision does not have (`ping` in 2026-07-28, `initialize` in a request that names 2026-07-28) |
 //! | `-32602` | Invalid params | `params`, or a `params._meta`, that is not an object, or a protocol version in it that is not a string; before `initialize`, a request that names no version in `_meta` (but `ping`), and a `server/discover` that names none at any time; a 2026-07-28 `_meta` without the client's capabilities; an `initialize` without the client's `protocolVersion`; a `tools/call` without a known tool's name, or with `arguments` that are not an object; a `tools/list` cursor (there is one page) |
 //! | `-32603` | Internal error | a panic outside an operation (a bug) |
-//! | `-32022` | Unsupported protocol version | a `_meta` version from 2026-07-28 on that is not 2026-07-28; before `initialize`, a `_meta` version with a handshake; `data` gives the `supported` versions (2026-07-28: the ones a request may name) and the `requested` one |
+//! | `-32022` | Unsupported protocol version | a `_meta` version from 2026-07-28 on that is not 2026-07-28; before `initialize`, a `_meta` version with a handshake; `data` gives the `supported` versions ([`SUPPORTED`]: 2026-07-28, and the ones `initialize` opens) and the `requested` one |
 //!
 //! An operation that fails is not a protocol error: it is a tool result, below.
 //!
@@ -88,10 +88,13 @@
 //! `E_IDENTITY_REQUIRED`. The client starts the server as its own user, in its own trust
 //! domain, so `{"file": <path>}` content is read here, as the CLI reads it, a relative path from
 //! the server's working directory. The output flags (`--json`, `--human`, `--pretty`) do not
-//! apply. A command line that the CLI refuses (a usage error, a `SWARMOPS_FORMAT` that is
-//! neither `json` nor `human`), and a panic before the server serves, start no server: their
-//! envelope goes to stderr, never to stdout, which belongs to the protocol, and the process
-//! exits with its code.
+//! apply. A command line that parses as `swarmops mcp` but is refused (a usage error in what
+//! follows the word `mcp`, a `SWARMOPS_FORMAT` that is neither `json` nor `human`), and a panic
+//! before the server serves, start no server: their envelope goes to stderr, not to stdout,
+//! which belongs to the protocol, and the process exits with its code. Of the flags, only those
+//! after `mcp` are refused that way: a flag refused before the subcommand (`swarmops --frob
+//! mcp`) is a plain usage error of the CLI, whose envelope goes to stdout with exit code 2, and
+//! no server starts either.
 
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
@@ -121,6 +124,15 @@ pub const PREVIOUS: &str = "2025-11-25";
 /// 2025-06-18, the first with `structuredContent` and `outputSchema`. Both get the same tools
 /// and results; 2025-03-26 and older are not served.
 pub const HANDSHAKE: [&str; 2] = [PREVIOUS, "2025-06-18"];
+
+/// Every revision the server serves, newest first: [`LATEST`], which a request names in
+/// `params._meta`, then the [`HANDSHAKE`] revisions, which `initialize` opens. `server/discover`
+/// lists them, and so does a `-32022` error, so that a client that cannot speak [`LATEST`] sees
+/// that it can open with `initialize` instead.
+pub const SUPPORTED: [&str; 3] = {
+    let [previous, earliest] = HANDSHAKE;
+    [LATEST, previous, earliest]
+};
 
 /// The `_meta` key under which a 2026-07-28 request names its protocol version.
 const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
@@ -162,8 +174,10 @@ read_tree, info repo_info). A revision is main, release/<name>, a changeset id o
 its first hex digits, then optionally ~N for the N-th first parent. commit records a changeset \
 and moves no ref. ref_set and ref_delete change a ref by compare-and-swap, so their \
 expected_old is the full 64-hex changeset id the ref held when you read it (from ref_list, \
-show, log or a commit's result): a ref name or a relative revision is resolved when the call \
-runs, always matches and defeats the compare-and-swap, so the server refuses it. After \
+show, log or a commit's result). A ref name, a relative revision or an id prefix is read when \
+the call runs instead of pinning the id you read: the ref's own name always matches, so the \
+compare-and-swap protects nothing, and main~1 on ref main never matches; the server refuses \
+them. After \
 E_CAS_MISMATCH, commit your change again on top of details.actual, re-applying your edits to \
 the content there, then retry with expected_old set to it. Clients cut long tool results \
 (Claude Code at 25,000 tokens by default) and each result carries its envelope twice, so ask \
@@ -238,7 +252,8 @@ static TOOLS: [Spec; 10] = [
         title: "Move a ref",
         description: "Moves a ref, or creates one, by compare-and-swap: give create, or \
                       expected_old, the full 64-hex changeset id the ref held when you read it; a \
-                      ref name or a relative revision is refused, since it would always match.",
+                      ref name, a relative revision or an id prefix is refused, since it is read \
+                      when the call runs instead of pinning the id you read.",
         effect: Effect::Moves,
     },
     Spec {
@@ -247,8 +262,9 @@ static TOOLS: [Spec; 10] = [
         request: "RefDeleteReq",
         title: "Delete a ref",
         description: "Removes a ref by compare-and-swap, if it still holds expected_old, the \
-                      full 64-hex changeset id it held when you read it; a ref name or a \
-                      relative revision is refused, since it would always match.",
+                      full 64-hex changeset id it held when you read it; a ref name, a relative \
+                      revision or an id prefix is refused, since it is read when the call runs \
+                      instead of pinning the id you read.",
         effect: Effect::Moves,
     },
     Spec {
@@ -465,7 +481,7 @@ impl<'a> Server<'a> {
             };
             return match method {
                 "server/discover" => reply.result(Discovered {
-                    supported_versions: [LATEST],
+                    supported_versions: &SUPPORTED,
                     capabilities: Capabilities { tools: Empty {} },
                     instructions: INSTRUCTIONS,
                     ttl_ms: TTL_MS,
@@ -524,6 +540,9 @@ impl<'a> Server<'a> {
             .into_iter()
             .find(|version| *version == asked)
             .unwrap_or(PREVIOUS);
+        // A second initialize opens the session anew, at the version it negotiates: tolerated on
+        // purpose, since a session holds nothing but its revision, and every revision with a
+        // handshake gets the same tools and results.
         self.session = Some(version);
         let reply = Reply {
             id,
@@ -651,7 +670,7 @@ impl Rejected {
                      params._meta, and {} through initialize",
                     HANDSHAKE.join(" and ")
                 ),
-                Some(json!({"supported": [LATEST], "requested": requested})),
+                Some(json!({"supported": SUPPORTED, "requested": requested})),
             ),
             Rejected::Handshake(requested) => error_with(
                 Some(id),
@@ -662,7 +681,7 @@ impl Rejected {
                      params._meta",
                     HANDSHAKE.join(" and ")
                 ),
-                Some(json!({"supported": [LATEST], "requested": requested})),
+                Some(json!({"supported": SUPPORTED, "requested": requested})),
             ),
         }
     }
@@ -846,10 +865,12 @@ impl Refuse for RefDeleteReq {
 
 /// `E_INVALID_ARG` unless `expected`, the target a move or a delete of ref `name` expects, is a
 /// full changeset id: 64 hex digits, as the resolver takes them. Anything else (a ref name, a
-/// relative revision, an id's prefix) is resolved when the call runs, against the store as it
-/// is then, so it always matches what the ref holds and the compare-and-swap protects nothing:
-/// a move computed on a stale read would silently drop what another agent moved the ref to, and
-/// the same call made twice would move the ref twice. The CLI takes any revision for
+/// relative revision, an id's prefix) is read from the store when the call runs instead of
+/// pinning the id the caller read. The ref's own name always matches, so the compare-and-swap
+/// protects nothing: a move computed on a stale read would silently drop what another agent
+/// moved the ref to, and a move to `main~1` made twice would move the ref twice. `main~1` on
+/// `main` names main's parent and never matches, and a prefix stops resolving
+/// (`E_AMBIGUOUS_ID`) once another changeset shares it. The CLI takes any revision for
 /// `--expect`, whose help warns of this; an agent through this server gets the rule enforced.
 fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
     let rev = expected.as_str();
@@ -860,10 +881,10 @@ fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
         ErrorCode::InvalidArg,
         output::printable(&format!(
             "expected_old {rev:?} is not a full changeset id, which a compare-and-swap needs: a \
-             ref name or a relative revision is resolved when the call runs, so it always \
-             matches what ref {name} holds then and the compare-and-swap protects nothing; pass \
-             the 64-hex id the ref held when you read it, from ref_list, show, log or a \
-             commit's result"
+             ref name, a relative revision or an id prefix is read when the call runs instead \
+             of pinning the id you read ({name} itself always matches, so the compare-and-swap \
+             would protect nothing, and {name}~1 never matches); pass the 64-hex id the ref \
+             held when you read it, from ref_list, show, log or a commit's result"
         )),
     )
     .with_details(Map::from_iter([
@@ -1074,7 +1095,8 @@ impl Effect {
             // idempotentHint rests on concrete_expectation: the server refuses an expected_old
             // that is not a full id, so the same move again compares against the same changeset
             // and finds its work done (already_applied, nothing written) or the ref elsewhere
-            // (E_CAS_MISMATCH). A ref name would match anew at every call and move the ref again.
+            // (E_CAS_MISMATCH). The ref's own name would match anew at every call and move the
+            // ref again.
             Effect::Moves => (false, true, true),
         };
         json!({
@@ -1163,7 +1185,7 @@ struct Initialized {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Discovered {
-    supported_versions: [&'static str; 1],
+    supported_versions: &'static [&'static str],
     capabilities: Capabilities,
     instructions: &'static str,
     ttl_ms: u64,
@@ -1470,19 +1492,15 @@ mod tests {
         assert_eq!(envelope["meta"]["resolved"], json!({"main": c1}));
     }
 
+    /// Each tool's description is one line, without a run of spaces that a broken string
+    /// continuation leaves; `the_tools_are_the_store_operations` checks the names and the
+    /// request types.
     #[test]
-    fn every_tool_names_a_request_type_and_a_line_of_its_own() {
-        let all = schema_for_all();
-        let mut names = Vec::new();
+    fn every_tool_has_a_description_of_one_line() {
         for spec in &TOOLS {
-            assert!(all.get(spec.request).is_some(), "{}", spec.request);
             assert!(!spec.description.contains('\n'), "{}", spec.name);
             assert!(!spec.description.contains("  "), "{}", spec.name);
-            names.push(spec.name);
         }
-        names.sort_unstable();
-        names.dedup();
-        assert_eq!(names.len(), TOOLS.len(), "two tools share a name");
     }
 
     #[test]
