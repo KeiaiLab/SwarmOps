@@ -705,6 +705,47 @@ fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
     assert_eq!(deleted.ok()["old"], c1.as_str());
 }
 
+/// A `commit`'s client file is read by this server, so a relative path (which the server would
+/// read from a working directory the agent cannot see: here the crate's, where `src/lib.rs`
+/// exists) and a path that is this process's own stdin or stdout (the protocol's pipes, which
+/// a read would block on) are refused before anything is resolved or opened, with the change
+/// and the file named; the server serves on, and the store is untouched.
+#[test]
+fn a_client_file_must_be_absolute_and_not_the_servers_stdio() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    for (file, why) in [
+        ("src/lib.rs", "relative path"),
+        ("/dev/stdin", "stdin or stdout"),
+        ("/dev/stdout", "stdin or stdout"),
+    ] {
+        let refused = server.err(
+            "commit",
+            json!({
+                "message": "x",
+                "changes": [
+                    {"path": "README.md", "op": "put", "content": {"inline": "# acme\n"}},
+                    {"path": "lib.rs", "op": "put", "content": {"file": file}},
+                ],
+            }),
+            "E_INVALID_ARG",
+        );
+        assert_eq!(
+            refused["error"]["details"],
+            json!({"index": 1, "path": "lib.rs", "file": file}),
+            "{refused}"
+        );
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains(why), "{file}: {message}");
+        assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
+        assert_eq!(server.result("ping", json!({})), json!({}));
+        let info = server.ok("repo_info", json!({}));
+        assert_eq!(info["result"]["changesets"], 0, "{file}: {info}");
+    }
+    server.finish_clean();
+    store.assert_clean("after the refused commits");
+}
 /// A changeset committed through `server` on `parent`, putting a file named `name`; its id.
 fn commit_on(server: &mut Server, name: &str, parent: &str) -> String {
     let arguments = json!({

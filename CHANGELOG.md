@@ -80,7 +80,8 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   and 2025-11-25 or 2025-06-18 after `initialize`. Each call resolves its revisions on its own
   (`meta.resolved` is no longer shared by a handle's requests), a mutation without an identity
   is refused, and `expected_old` of `ref_set` and `ref_delete` must be a full changeset id
-  through MCP.
+  through MCP, and a `{"file": path}` content must be an absolute path that is not the server's
+  own stdin or stdout.
 - `server/discover` and the `-32022` error list every revision served (2026-07-28, 2025-11-25,
   2025-06-18), so a client that cannot speak 2026-07-28 can fall back to `initialize`.
 - `ref set` to the target a ref already holds is a replay: `already_applied: true` and nothing

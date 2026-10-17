@@ -471,6 +471,51 @@ fn a_store_that_leads_under_mnt_is_refused_on_open() {
     );
 }
 
+/// `commit --changes -` has read the change list from stdin, so a change whose client file is
+/// this process's stdin would read what is left of it (nothing from a pipe, the list itself
+/// from a redirected file) and commit that: it is refused (`E_INVALID_ARG`, exit 2) and nothing
+/// is committed. With the list in a file, `/dev/stdin` content commits the bytes piped in.
+#[test]
+fn a_change_list_from_stdin_cannot_name_stdin_as_a_client_file() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let list = json!([
+        {"path": "a.txt", "op": "put", "content": {"inline": "a\n"}},
+        {"path": "piped.txt", "op": "put", "content": {"file": "/dev/stdin"}},
+    ])
+    .to_string();
+    let commit = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "x",
+        "--changes",
+    ];
+    let refused = s.run_stdin(&list, &[&commit[..], &["-"]].concat());
+    assert_eq!((refused.exit, refused.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"changes": "-", "index": 1, "path": "piped.txt", "file": "/dev/stdin"})
+    );
+    let message = refused["error"]["message"].as_str().unwrap();
+    assert!(message.contains("stdin"), "{message}");
+    assert_eq!(
+        s.run(&["--repo", &store, "info"])["result"]["changesets"],
+        0
+    );
+
+    let file = s.file("changes.json", &list);
+    let committed = s.run_stdin("piped bytes\n", &[&commit[..], &[file.as_str()]].concat());
+    assert_eq!(committed.exit, 0, "{}", committed.json);
+    let c1 = s.name_at(&committed, "/result/changeset", "c1");
+    let piped = s.run(&["--repo", &store, "cat", &format!("{c1}:piped.txt")]);
+    assert_eq!(piped["result"]["content"], "piped bytes\n");
+}
+
 #[test]
 fn usage_error_exits_2_with_envelope() {
     let mut s = Session::new();

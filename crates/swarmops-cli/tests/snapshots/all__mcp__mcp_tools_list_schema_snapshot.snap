@@ -296,7 +296,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Records a changeset from an explicit change list, on parent or else on main's head; it moves no ref.",
+      "description": "Records a changeset from an explicit change list, on parent or else on main's head; it moves no ref. A {\"file\": path} content is read by this server: give an absolute path.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`commit`: record a changeset from an explicit change list. It moves no ref.",

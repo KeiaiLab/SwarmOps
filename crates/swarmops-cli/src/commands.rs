@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read as _};
+use std::os::fd::AsFd;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Instant;
 
@@ -32,9 +34,9 @@ use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use swarmops_api::{
-    ChangeInput, CommitReq, Envelope, ErrorCode, InfoReq, LogReq, Meta, OpError, ReadFileReq,
-    ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev, ShowReq, StoreOps,
-    VerifyReport, VerifyReq, schema_for_all,
+    ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, InfoReq, LogReq, Meta, OpError,
+    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev, ShowReq,
+    StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Resolved, shell_word};
@@ -449,11 +451,58 @@ fn read_changes(source: &str) -> Result<Vec<ChangeInput>, OpError> {
         fs::read(source)
     }
     .map_err(|e| refuse(format!("cannot read the changes from {shown}: {e}")))?;
-    serde_json::from_slice(&bytes).map_err(|e| {
+    let changes: Vec<ChangeInput> = serde_json::from_slice(&bytes).map_err(|e| {
         refuse(format!("the changes in {shown} are not a JSON array of changes: {e}")).with_hint(
             r#"the changes are an array such as [{"path": "a.txt", "op": "put", "content": {"inline": "hi"}}]; swarmops schema ChangeInput gives the rest"#,
         )
-    })
+    })?;
+    if source == "-" {
+        // The list has drained stdin: a change whose client file is this process's stdin would
+        // read what is left of it (nothing from a pipe, the list itself from a redirected file)
+        // and commit that. Stdout is the envelope's, and a read of it would block.
+        let own = changes
+            .iter()
+            .enumerate()
+            .find_map(|(index, change)| match &change.content {
+                Some(ContentInput::File(file)) if is_own_stdio(file) => Some((index, change, file)),
+                _ => None,
+            });
+        if let Some((index, change, file)) = own {
+            return Err(OpError::new(
+                ErrorCode::InvalidArg,
+                output::printable(&format!(
+                    "change {index} ({:?}): the client file {file:?} is this process's own \
+                     stdin, which the change list came from, or its stdout: name a regular file, \
+                     or send the bytes as inline or base64 content",
+                    change.path
+                )),
+            )
+            .with_details(details([
+                ("changes", source.into()),
+                ("index", index.into()),
+                ("path", change.path.as_str().into()),
+                ("file", file.as_str().into()),
+            ])));
+        }
+    }
+    Ok(changes)
+}
+
+/// Whether `path` names this process's own stdin or stdout (the same device and inode), which
+/// `swarmops mcp` must never read: they carry the protocol, and a read would block on them.
+/// `stat`, not `open`, so that a FIFO at `path` cannot block here either; a path that cannot be
+/// stat'ed is not ours, and the read reports its own error later.
+pub(crate) fn is_own_stdio(path: &str) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let own = |fd: std::os::fd::BorrowedFd<'_>| {
+        fd.try_clone_to_owned()
+            .ok()
+            .and_then(|owned| fs::File::from(owned).metadata().ok())
+            .is_some_and(|ours| ours.dev() == meta.dev() && ours.ino() == meta.ino())
+    };
+    own(io::stdin().as_fd()) || own(io::stdout().as_fd())
 }
 
 /// `<rev>:<path>` split at the first `:`, or all of `target` as the revision when it holds

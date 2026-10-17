@@ -210,7 +210,10 @@ left).
   Task 5 review.*
 - **`{"file": "<path>"}` content is read by whoever serves the request.** That is the caller
   for the CLI and the stdio MCP server; a network server must refuse such content, and a client
-  must turn it into bytes before the request leaves. *Target: M10. Found: M1 Task 4b.*
+  must turn it into bytes before the request leaves. Through MCP a relative path, and a path
+  that is the server's own stdin or stdout, is refused; a FIFO or another special file at an
+  absolute path still blocks the single-threaded session when it is read. *Target: M10 (M1.6
+  for the special files). Found: M1 Task 4b.*
 
 ## Git import and export
 

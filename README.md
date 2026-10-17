@@ -221,8 +221,10 @@ The store and the identity are the server's, as they are a command's: `--repo`, 
 `SWARMOPS_REPO`, and `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`. No call can name
 another identity: every commit and ref move is recorded for the server's agent, and without one
 they fail with `E_IDENTITY_REQUIRED`. The client starts the server as its own user, so the
-server reads `{"file": "<path>"}` content as the CLI does, a relative path from its working
-directory: give absolute paths, the store's too. It opens the store for each call, and so sees
+server reads `{"file": "<path>"}` content as the CLI does, on its own machine; it refuses a
+relative path (`E_INVALID_ARG`), since an agent cannot see the server's working directory, and
+a path that is the server's own stdin or stdout, the protocol's pipes: give absolute paths,
+the store's too. It opens the store for each call, and so sees
 what other agents commit meanwhile. The store runs in the server's process, so the server ends
 with it on any of the store's three documented aborts (storage spec §2): a failed journal write
 or sync whose cut-back fails too, in a write or in the repair before one, which any commit or
