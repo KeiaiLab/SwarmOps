@@ -177,8 +177,8 @@ What a failure means depends on which side of the commit point it falls (storage
   though no one was told. If that writer's sync fails, no later sync could vouch for the frame
   either, so the writer writes the unlisted frames afresh from the bytes it read (it cuts them
   off, appends them again and syncs them) and lists them only then. Only if the rewrite fails
-  too is the frame cut; then that transaction did not commit, and neither did the writer's own,
-  whose write fails with `E_IO_TRANSIENT`: the second way that error arises.
+  too does the frame stay cut off; then that transaction did not commit, and neither did the
+  writer's own, whose write fails with `E_IO_TRANSIENT`: the second way that error arises.
 - **After it**: any failure once the `fdatasync` has returned (listing the frame in
   `journal.off`, materializing it, syncing the index, moving the checkpoint) leaves the
   transaction committed and durable. It is reported as a warning beside the result, and the
@@ -212,8 +212,11 @@ Readers take no lock (storage §3, "읽기"). `MetaStore::read()` takes a snapsh
 whole), reads every frame past the checkpoint (whole frames not yet listed in `journal.off`
 included; it stops at a torn tail), reads every ref file, then reads the frames again, and if
 there are more, reads the refs and frames again. It then lays the frames past the checkpoint
-over the index and the refs in memory. Writers replace a ref file only after its frame is whole,
-so the refs it reads never run ahead of the frames it read.
+over the index and the refs in memory. Past the checkpoint and the sorted views, the index
+counts a record only if the frames past the checkpoint vouch for it, field by field (storage §3,
+"색인의 보증"): a record that a power loss zero-filled is not counted, the snapshot reads its
+changeset from the frame, and the next write replays it. Writers replace a ref file only after
+its frame is whole, so the refs it reads never run ahead of the frames it read.
 
 A lookup by id is a binary search in the sorted view, by `read_at` on the file (there is no
 mmap: `unsafe` is forbidden), then a linear scan of the records past the view, then the
@@ -251,9 +254,10 @@ lock (I4). The tests that hold the code to them:
   injected `EIO` or `ENOSPC`, once or for every write from then on. The store's sweeps do that at
   every call of a checkpointing and of a compacting transaction, and of the recovery after a
   crash; the binary's at every call of `init` and `commit`. Each outcome must be honest: a
-  success is in the store and verifies clean, a failure committed nothing (and is never
-  `E_INTERNAL`), `E_IO_TRANSIENT` says `details.committed = false`, an abort is one of the
-  documented ones, and the store takes the next write;
+  success is in the store and verifies clean, a failure committed nothing or says that it did
+  (an `init` that made the store sets `details.created: true`) and is never `E_INTERNAL`,
+  `E_IO_TRANSIENT` says `details.committed = false`, an abort is one of the documented ones, and
+  the store takes the next write;
 - **write-ordering checks** (M1.5): `SWARMOPS_TEST_ORDER_CHECK=1` checks every filesystem call
   against the store's write-ordering rules, R1 to R7 (a frame is listed only once it is durable,
   a ref file changes only after its frame is durable, the checkpoint moves only over synced

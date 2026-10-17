@@ -38,20 +38,20 @@ left).
   then cut fails with an I/O error until the reader takes a new one. A snapshot that opens while
   the cut is made counts every record the checkpoint passed or the sorted views cover and reads
   the rest from the journal, or, if the index is cut again meanwhile, fails the same way.
-  Neither returns wrong data, or reports the index damaged. *Documented (storage spec §3).
+  Neither returns wrong data nor reports the index damaged. *Documented (storage spec §3).
   Found: M1 Task 6; M1.5 Task 3.*
 - **Double and triple faults in the journal's failure policy.** A failed journal append or
   sync is cut back, or the unlisted frames written afresh (storage spec §2 rule 3 (a)–(c)), but
-  a second fault can still defeat that. A process that aborts because its cut failed leaves the frame behind, and
-  another process may list it after a sync that succeeds (only on a filesystem that recovers
-  with its page cache intact: a cut fails in practice because the filesystem takes no more
-  writes, and then that listing fails too). A `journal.off` entry whose cut failed stays listed
-  though it may be lost. A crash between the cut and the rewrite of unlisted frames, or a
-  rewrite that fails, loses those frames, and one of them may be a commit acknowledged with a
-  warning, or one whose `journal.off` entry a power loss zeroed. A crash inside a frame's append,
-  between the write and its `fdatasync`, may leave no one to receive the frame's writeback
-  error. *Target: M6 (the next `FORMAT`'s frame header, with the frame's sequence number and the
-  previous frame's CRC, and fsck). Found: M1.5 Task 2.*
+  a second fault can still defeat that. A process that aborts because its cut failed leaves the
+  frame behind, and another process may list it after a sync that succeeds (only on a
+  filesystem that recovers with its page cache intact: a cut fails in practice because the
+  filesystem takes no more writes, and then that listing fails too). A `journal.off` entry whose
+  cut failed stays listed though it may be lost. A crash between the cut and the rewrite of
+  unlisted frames, or a rewrite that fails, loses those frames, and one of them may be a commit
+  acknowledged with a warning, or one whose `journal.off` entry a power loss zeroed. A crash
+  inside a frame's append, between the write and its `fdatasync`, may leave no one to receive
+  the frame's writeback error. *Target: M6 (the next `FORMAT`'s frame header, with the frame's
+  sequence number and the previous frame's CRC, and fsck). Found: M1.5 Task 2.*
 - **A failed directory fsync in the object store is retried, not taken back.**
   `FsObjectStore::flush` keeps a fan-out directory whose fsync failed and fsyncs it again on a
   later flush. Linux reports a failed writeback once, so the later fsync's success does not

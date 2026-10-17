@@ -85,6 +85,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   2025-06-18), so a client that cannot speak 2026-07-28 can fall back to `initialize`.
 - `ref set` to the target a ref already holds is a replay: `already_applied: true` and nothing
   written, in the CLI and through MCP.
+- The `--expect` help of `ref set` and `ref delete` states the README's rule: give the full
+  changeset id you read, since a ref name, a relative revision such as `main~1` or an id prefix
+  is read from the store when the command runs, and then the compare-and-swap protects nothing.
 - `so`, the short form of `swarmops`: the same program, built and installed with it; its usage
   lines and help name the binary as invoked, and everything else still says `swarmops`.
 - I/O-error injection and write-ordering checks, behind `test-hooks`:
@@ -107,9 +110,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - **Contract change:** `E_IO_TRANSIENT` now means that nothing was committed, with
   `details.committed: false` (it said `details.may_have_committed: true`), so running the same
   command again is safe; and a failed `journal.off` listing after the commit point is a success
-  with a warning, as every later failure already was (it was `E_IO_TRANSIENT`). The schema's
-  `E_IO_TRANSIENT` description says so. In `swarmops-store`, `StoreError::Undecided` and
-  `CrashAtFs::from_env` are removed, and `HookedFs::from_env` replaces the latter.
+  with a warning, as every later failure already was (it was `E_IO_TRANSIENT`). A journal append
+  that fails before its frame is whole, which was `E_IO`, is now `E_IO_TRANSIENT` too, as is a
+  write whose tail check can neither sync nor write afresh the frames `journal.off` does not
+  list yet. In `swarmops-store`, `StoreError::Undecided` and `CrashAtFs::from_env` are removed,
+  and `HookedFs::from_env` replaces the latter.
+- The schema describes `E_IO_TRANSIENT` by the journal append that failed: the store cut what
+  the append wrote back off the journal, so nothing was committed, and running the same
+  operation again is safe.
 - `init` takes `FORMAT` back (and syncs its removal) when the sync of the store's root after it
   fails, so that no store looks complete whose completion mark may not be durable; when it made
   the store but reading it back fails, the error says so with `details.created: true`.
@@ -125,5 +133,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   counted (they gave wrong counts and seqs, or `E_STORE_CORRUPT`); and a snapshot that opens
   while a writer cuts the index counts every record the checkpoint passed or the sorted views
   cover.
+- When a power loss has zeroed index records past the checkpoint and the journal is also
+  damaged or missing, so that it cannot vouch for them, reads and writes fail with
+  `E_STORE_CORRUPT` (`IndexCorrupt`) and nothing is cut; before, the store counted the zeroed
+  records, and the next write cut `parents.log`.
+- `Journal::frame_count` drops the zeroed entries at the end of `journal.off`, as the readers
+  and recovery do; it counted them.
+- `bench/compare/` (`just bench-compare`, `--quick` for a smoke run): the native metadata
+  store, through its public API, against SQLite, redb, fjall and sled on SwarmOps' own
+  workloads, in a cargo workspace of its own that `just check` never builds; SwarmOps depends on
+  none of them. Its numbers, in the M1.5 section of [docs/perf.md](docs/perf.md), are
+  provisional until a quiet-window run.
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
