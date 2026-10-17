@@ -37,6 +37,7 @@ use swarmops_testkit::fs::FailingFs;
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::fs::copy_dir;
 use swarmops_testkit::repo::{blob, delete, new_repo, path, put, put_as, signature};
+use swarmops_testkit::test_name;
 
 /// Set only in the children this file's tests spawn: the store root.
 const CHILD_ROOT: &str = "SWARMOPS_TEST_REPO_COMMIT_CHILD_ROOT";
@@ -522,7 +523,7 @@ fn child_root() -> Option<Utf8PathBuf> {
 /// against the store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`).
 #[cfg(feature = "test-hooks")]
 fn crash_child(test: &str, root: &Utf8Path, k: u64) -> Output {
-    run(this_test(test)
+    run(this_test(&test_name!(test))
         .env(CHILD_ROOT, root)
         .env(CRASH_AT_ENV, k.to_string())
         .env(ORDER_CHECK_ENV, "1"))
@@ -951,7 +952,7 @@ fn commits_from_many_processes_all_land() {
     let children: Vec<Child> = (0..CHILDREN)
         .map(|number| {
             Child::spawn(
-                this_test("commits_from_many_processes_all_land")
+                this_test(&test_name!("commits_from_many_processes_all_land"))
                     .env(CHILD_ROOT, &root)
                     .env(CHILD_NUMBER, number.to_string()),
             )

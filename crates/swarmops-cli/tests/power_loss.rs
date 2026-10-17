@@ -20,8 +20,6 @@
 //!
 //! Images that hold the same files are checked once.
 
-mod support;
-
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,6 +35,8 @@ use swarmops_store::{FsOps, Index, Layout, MetaLock, MetaStore};
 use swarmops_testkit::power::{
     Chooser, Image, ImageRecordingFs, Keep, KeepAllBut, RecordedCall, SECTOR, Seeded, Timeline,
 };
+
+use crate::support;
 
 /// How many images are checked at once, each in a temp dir of its own.
 const AT_ONCE: usize = 8;

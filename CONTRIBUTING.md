@@ -94,10 +94,14 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
   doubles, power-loss images, and builders of stores, repositories and runs of the binary),
   which gives each child a deadline and kills and reaps it on failure, so a hang fails the test
   instead of stalling the gate.
+- **One integration-test binary per crate.** Where a crate has several test files, they are the
+  modules of its `tests/all.rs`, their tests named `<file>::<test>`; Cargo builds no other test
+  target from `tests/` there (`autotests = false`), so a new test file needs its `mod` line. The
+  CLI's release proof, `test_hooks.rs` (step 4 of `just check`), stays a binary of its own.
 - **Slow tests are ignored by default** with a reason that names their cost
   (`#[ignore = "slow, ~20 s: ~90 crashed commits"]`), and run in the slow suite below.
 - **Snapshots are contracts.** The insta snapshots in `crates/swarmops-cli/tests/snapshots/`
-  pin the CLI's output; `cli__schema_snapshot.snap` pins the JSON Schema of every request and
+  pin the CLI's output; `all__cli__schema_snapshot.snap` pins the JSON Schema of every request and
   response type, and the MCP server's tool list has a snapshot of its own. A snapshot changes only
   with an intended contract change: review the diff (`cargo insta review`), and say what changed
   in the commit and in `CHANGELOG.md`. Likewise, tests that pin a sequence of filesystem calls

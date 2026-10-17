@@ -95,7 +95,7 @@ Serial costs five fsyncs (5 × 3.8 ms). Parallel costs about two, because ext4 c
 
 ### 32 writer processes on one metadata store
 
-`crates/swarmops-store/tests/contention.rs`, ignored: `cargo nextest run --release -p swarmops-store --run-ignored all --test contention --no-capture`; `just check-slow` runs it unoptimized.
+`crates/swarmops-store/tests/contention.rs`, ignored: `cargo nextest run --release -p swarmops-store --run-ignored all --test all -E 'test(/^contention::/)' --no-capture`; `just check-slow` runs it unoptimized.
 
 - 32 child processes start together, and each runs 1,000 `MetaStore::write()` transactions. Each transaction inserts the next changeset of the child's own chain and commits, with the default 10 s lock timeout. A `Busy` is counted and the transaction tried again.
 - The lock wait is the time until `write()` returns: the wait for `meta/lock`, plus the tail checks and replay under it. Those alone take 0.06–0.09 ms (p50; p99 0.12 ms) uncontended, on the final store.
@@ -428,7 +428,7 @@ The CLI-level half of the M1 Task 7 experiments: 32 agents committing through th
 
 ### 32 agents committing through the binary
 
-`crates/swarmops-cli/tests/contention.rs`, ignored. `just perf` runs it optimized (`cargo nextest run --release -p swarmops-cli --run-ignored all --test contention --no-capture`), `just check-slow` unoptimized, both at the spec's 32 × 1,000 (at 32 × 250 for a while; see below).
+`crates/swarmops-cli/tests/contention.rs`, ignored. `just perf` runs it optimized (`cargo nextest run --release -p swarmops-cli --run-ignored all --test all -E 'test(/^contention::/)' --no-capture`), `just check-slow` unoptimized, both at the spec's 32 × 1,000 (at 32 × 250 for a while; see below).
 
 - The parent `init`s a store, commits a base changeset and creates main on it. Then 32 child processes start together behind a barrier (`ready-<n>` files, then `go`). Each runs `swarmops commit` 1,000 times in a row as agent `contention/agent-<n>`: one small file (`agents/<n>.txt`, about 20 bytes) per commit, on `--parent` its own previous changeset. So no child's commit depends on another's, and all they share is the store, and its `meta/lock`.
 - Every commit is a process of its own: start, store open, two metadata snapshots (resolving `--parent`, checking the parents), the blob, two trees and the changeset written and synced (`put_batch` + `flush`), then the metadata write transaction under `meta/lock`, then the envelope.

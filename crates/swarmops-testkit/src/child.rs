@@ -21,13 +21,35 @@ pub const SIGABRT: i32 = 6;
 /// How often a wait looks whether a child has ended.
 const POLL: Duration = Duration::from_millis(1);
 
-/// The test harness's arguments that run test `test` alone, ignored or not (it may be one only
-/// the slow suite runs), with its output shown.
+/// The name the test harness knows a test of the module this expands in by, given the test's
+/// own: the module's path past the test binary's crate name, then the test's name
+/// (`journal::a_test` for `a_test` in the `journal` module of a `tests/all.rs`, `a_test` at a
+/// test binary's root). [`this_test`] and [`test_args`] take it, to run that test again.
+#[macro_export]
+macro_rules! test_name {
+    ($test:expr) => {
+        $crate::child::test_path(module_path!(), $test)
+    };
+}
+
+/// The name the test harness knows test `test` of module `module` by, `module` being its path
+/// as `module_path!` gives it: `module` past its first segment (the test binary's crate name),
+/// then `test`. [`test_name!`](crate::test_name!) passes it the module it expands in.
+pub fn test_path(module: &str, test: &str) -> String {
+    match module.split_once("::") {
+        Some((_crate, path)) => format!("{path}::{test}"),
+        None => test.to_owned(),
+    }
+}
+
+/// The test harness's arguments that run the test it knows as `test` ([`test_name!`]) alone,
+/// ignored or not (it may be one only the slow suite runs), with its output shown.
 pub fn test_args(test: &str) -> [&str; 4] {
     ["--exact", test, "--include-ignored", "--nocapture"]
 }
 
-/// This test binary, set to run test `test` alone ([`test_args`]).
+/// This test binary, set to run the test it knows as `test` ([`test_name!`]) alone
+/// ([`test_args`]).
 pub fn this_test(test: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("the test binary"));
     command.args(test_args(test));

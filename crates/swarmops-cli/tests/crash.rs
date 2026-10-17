@@ -1,7 +1,7 @@
 //! `swarmops` processes that crash in the middle of a write (operations spec §0; storage spec
 //! §2–§3): the M1 acceptance tests for crash consistency, through the real binary. They drive
-//! the test hooks, so this test target requires the `test-hooks` feature, which the workspace's
-//! gates turn on (`--all-features`).
+//! the test hooks, so `all.rs` holds this module only with the `test-hooks` feature, which the
+//! workspace's gates turn on (`--all-features`).
 //!
 //! - A crash is `SWARMOPS_TEST_CRASH_AT=k`: the store's k-th filesystem call aborts the
 //!   process, as a `kill -9` at that exact point would (no destructor runs; what reached the
@@ -19,21 +19,20 @@
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
 
-mod support;
-
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use support::sweep::{
+use swarmops_ops::NOW_ENV;
+use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV};
+
+use crate::support::sweep::{
     DryRun, NOW, SWEPT_PUTS, TEMPLATE_FRAMES, calls_file, commit_template, dry_commit, dry_init,
     init_again, reported_calls, sweep, swept_commit,
 };
-use support::{Run, Store, agent, run};
-use swarmops_ops::NOW_ENV;
-use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV};
+use crate::support::{Run, Store, agent, run};
 
 /// `SWARMOPS_TEST_NOW=<unix seconds>`: a commit signs its changeset at that time, not the
 /// clock's, so that the same commit made twice is the same changeset, whenever it runs; unset,

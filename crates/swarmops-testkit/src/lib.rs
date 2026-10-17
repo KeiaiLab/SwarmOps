@@ -13,7 +13,8 @@
 //! - [`power`]: what a power loss can leave of a recorded run ([`power::ImageRecordingFs`],
 //!   [`power::Timeline`], [`power::Image`]).
 //! - [`child`]: this test binary run again as a child process, with a deadline, killed and
-//!   reaped however the test ends.
+//!   reaped however the test ends, by the name the harness knows the test by
+//!   ([`test_name!`]).
 //! - [`store`], [`repo`]: fresh store roots, repositories, and the changes and commit requests
 //!   the tests make.
 //! - [`cli`]: runs of the real `swarmops` binary, their envelopes checked against the contract,

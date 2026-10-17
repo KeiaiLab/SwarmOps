@@ -34,6 +34,8 @@ use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::{FsyncModelFs, checked};
 use swarmops_testkit::fs::{Hook, RecordingFs, When};
 use swarmops_testkit::store::{append_bytes, file_len, new_root, real_fs, set_len};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::test_name;
 
 /// Set only in the children that `crash_at_any_journal_write_recovers_to_whole_frames`
 /// spawns: the store root.
@@ -1655,7 +1657,7 @@ fn crash_child(root: OsString) {
 /// is past its last FsOps call, `calls`.
 #[cfg(feature = "test-hooks")]
 fn run_crash_child(test: &str, layout: &Layout, k: u64, calls: u64) {
-    let child = run(this_test(test)
+    let child = run(this_test(&test_name!(test))
         .env(CRASH_CHILD_ROOT, layout.root())
         .env(CRASH_AT_ENV, k.to_string()));
     let ended_as_expected = if k <= calls {

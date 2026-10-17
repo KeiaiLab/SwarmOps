@@ -11,8 +11,6 @@
 //! Every step is checked against the envelope contract as it runs (see [`check`]). The
 //! `--human` test snapshots text instead: each command, its exit code and what it printed.
 
-mod support;
-
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs;
@@ -28,6 +26,8 @@ use swarmops_api::ErrorCode;
 use swarmops_core::{ObjectKind, hash_object};
 use swarmops_store::Layout;
 use tempfile::TempDir;
+
+use crate::support;
 
 /// The agent most mutations act as.
 const AGENT: &str = "agent/worker-17";

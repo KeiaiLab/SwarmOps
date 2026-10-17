@@ -8,10 +8,9 @@
 //! name ran it: the envelope's `op`, the hints and messages SwarmOps writes (commands, which run
 //! by either name), `--version` and the MCP server's name.
 
-mod support;
-
 use serde_json::{Value, json};
-use support::{BIN, SO, Store, run_bin};
+
+use crate::support::{BIN, SO, Store, run_bin};
 
 /// Command lines clap refuses, each on a path of its own, and the usage line each one's hint
 /// gives after the program's name: a missing subcommand, at the top and under `ref` (clap's

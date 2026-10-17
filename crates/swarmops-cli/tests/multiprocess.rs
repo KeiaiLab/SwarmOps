@@ -4,12 +4,10 @@
 //!
 //! - Every child is the binary itself (`CARGO_BIN_EXE_swarmops`) with its own `--repo`, `--as`
 //!   and environment; children that must race start together behind a barrier
-//!   ([`support::Racers`]).
+//!   ([`Racers`]).
 //! - Every test ends with `verify --deep` through the binary, and reads its `problems`.
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
-
-mod support;
 
 use std::any::Any;
 use std::collections::BTreeSet;
@@ -24,11 +22,12 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
-use support::{BIN, Racers, Run, Store, agent, retry_busy, run, run_bin_within, run_within};
 use swarmops_core::{EntryKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{Layout, MetaLock};
 use swarmops_testkit::fs::{Call, Watch, Watched};
+
+use crate::support::{BIN, Racers, Run, Store, agent, retry_busy, run, run_bin_within, run_within};
 
 /// How many children the commit tests race.
 const COMMITTERS: usize = 8;

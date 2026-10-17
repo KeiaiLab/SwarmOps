@@ -33,6 +33,8 @@ use swarmops_testkit::fs::{FastFs, RecordingFs};
 use swarmops_testkit::measure::{mix, percentile};
 use swarmops_testkit::store::new_root as bare_root;
 use swarmops_testkit::store::{append_bytes, file_len, real_fs, set_len};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::test_name;
 use tempfile::TempDir;
 
 /// Set only in the children that `crash_at_any_index_write_recovers_to_whole_records`
@@ -1333,11 +1335,11 @@ fn crash_at_any_index_write_recovers_to_whole_records() {
         index.compact().unwrap();
         drop(index);
 
-        let child = run(
-            this_test("crash_at_any_index_write_recovers_to_whole_records")
-                .env(CRASH_CHILD_ROOT, layout.root())
-                .env(CRASH_AT_ENV, k.to_string()),
-        );
+        let child = run(this_test(&test_name!(
+            "crash_at_any_index_write_recovers_to_whole_records"
+        ))
+        .env(CRASH_CHILD_ROOT, layout.root())
+        .env(CRASH_AT_ENV, k.to_string()));
         let ended_as_expected = if k <= CRASH_CHILD_CALLS {
             child.status.signal() == Some(SIGABRT)
         } else {

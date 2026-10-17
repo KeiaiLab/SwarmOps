@@ -28,6 +28,8 @@ use swarmops_store::{FsObjectStore, Layout, ObjectStore, RealFs, StoreError};
 use swarmops_testkit::child::{self, SIGABRT, this_test};
 use swarmops_testkit::fs::{Call, Rendezvous, Watch, Watched};
 use swarmops_testkit::store::new_root;
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::test_name;
 
 /// `"SOB1" | kind u8 | enc u8 | u16 rsvd | u64le ulen` (storage spec §2).
 const HEADER_LEN: usize = 16;
@@ -753,7 +755,7 @@ fn open_default_under_crash_at_puts_one_object_at_a_time() {
             fs::create_dir_all(layout.objects_dir().join(format!("{byte:02x}"))).unwrap();
         }
         let child = child::run(
-            this_test(TEST)
+            this_test(&test_name!(TEST))
                 .env(ONE_AT_A_TIME_ROOT, layout.root())
                 .env(CRASH_AT_ENV, (5 * whole + 3).to_string()),
         );
@@ -786,7 +788,7 @@ fn crash_at_fs_aborts_child_at_call_k() {
 
     let (_root, layout) = new_root();
     let child = child::run(
-        this_test("crash_at_fs_aborts_child_at_call_k")
+        this_test(&test_name!("crash_at_fs_aborts_child_at_call_k"))
             .env(CRASH_CHILD_ROOT, layout.root())
             .env(CRASH_AT_ENV, "2"),
     );
@@ -851,7 +853,9 @@ fn fs_calls_hook_reports_how_many_calls_a_process_made() {
     for crash_at in [None, Some(calls)] {
         let (_root, layout) = new_root();
         let report = layout.root().join("calls").into_std_path_buf();
-        let mut child = this_test("fs_calls_hook_reports_how_many_calls_a_process_made");
+        let mut child = this_test(&test_name!(
+            "fs_calls_hook_reports_how_many_calls_a_process_made"
+        ));
         child
             .env(COUNT_CHILD_ROOT, layout.root())
             .env(FS_CALLS_ENV, &report)

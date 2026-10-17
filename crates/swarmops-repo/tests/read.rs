@@ -24,6 +24,8 @@ use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::fs::RecordingFs;
 use swarmops_testkit::repo::{blob, commit, new_repo, path, put, put_as, request};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::test_name;
 
 /// Set only in the children of the crash sweep: the store root.
 #[cfg(feature = "test-hooks")]
@@ -730,9 +732,11 @@ fn create_makes_the_documented_fs_calls() {
 fn create_crashing_at(k: u64, total: u64) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-    let child = run(this_test("create_resumes_after_a_crash_at_any_call")
-        .env(CHILD_ROOT, &root)
-        .env(CRASH_AT_ENV, k.to_string()));
+    let child = run(
+        this_test(&test_name!("create_resumes_after_a_crash_at_any_call"))
+            .env(CHILD_ROOT, &root)
+            .env(CRASH_AT_ENV, k.to_string()),
+    );
     let finished = child.status.success();
     assert_eq!(
         finished,

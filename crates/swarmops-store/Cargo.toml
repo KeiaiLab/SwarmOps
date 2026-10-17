@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+# The integration tests are one test binary, `tests/all.rs` (see `[[test]]`).
+autotests = false
 
 [lints]
 workspace = true
@@ -34,6 +36,12 @@ zstd.workspace = true
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
 criterion.workspace = true
 proptest.workspace = true
+
+# One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
+# its tests named `<file>::<test>`. Cargo builds no other test target from `tests/`
+# (`autotests = false`), so a new test file is a `mod` line there.
+[[test]]
+name = "all"
 
 [[bench]]
 name = "fsync_latency"

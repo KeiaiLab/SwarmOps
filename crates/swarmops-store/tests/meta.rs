@@ -32,6 +32,7 @@ use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
 use swarmops_testkit::store::temp_dir as new_root;
 use swarmops_testkit::store::{append_bytes, file_len};
+use swarmops_testkit::test_name;
 use tempfile::TempDir;
 
 /// Set only in the children the multi-process tests spawn: the store root.
@@ -847,7 +848,7 @@ fn run_children(test: &str, root: &Utf8Path) -> Vec<Output> {
     let children: Vec<Child> = (0..CHILDREN)
         .map(|number| {
             Child::spawn(
-                this_test(test)
+                this_test(&test_name!(test))
                     .env(CHILD_ROOT, root)
                     .env(CHILD_NUMBER, number.to_string()),
             )
@@ -2063,10 +2064,10 @@ fn a_failed_log_sync_cuts_the_frame_and_reports_not_committed() {
 
     // The cut fails too: the process aborts, and the store opens as a crash would leave it.
     let (_dir, root) = new_root();
-    let child = run(
-        this_test("a_failed_log_sync_cuts_the_frame_and_reports_not_committed")
-            .env(ABORT_ROOT, &root),
-    );
+    let child = run(this_test(&test_name!(
+        "a_failed_log_sync_cuts_the_frame_and_reports_not_committed"
+    ))
+    .env(ABORT_ROOT, &root));
     let stderr = String::from_utf8_lossy(&child.stderr);
     assert_eq!(
         child.status.signal(),
@@ -2329,7 +2330,9 @@ fn sweep_child(root: &Utf8Path, plan: &str) {
 /// failed journal append that fails too), which says why on stderr, or by a planned crash.
 #[cfg(feature = "test-hooks")]
 fn run_sweep_child(test: &str, root: &Utf8Path, plan: &str) -> Said {
-    let child = run(this_test(test).env(SWEEP_ROOT, root).env(SWEEP_PLAN, plan));
+    let child = run(this_test(&test_name!(test))
+        .env(SWEEP_ROOT, root)
+        .env(SWEEP_PLAN, plan));
     let stderr = String::from_utf8_lossy(&child.stderr);
     if child.status.signal() == Some(SIGABRT) {
         assert!(
@@ -2650,7 +2653,7 @@ fn the_test_hooks_build_the_filesystem_they_name() {
         return;
     }
     let (_dir, root) = new_root();
-    let checked = run(this_test(TEST)
+    let checked = run(this_test(&test_name!(TEST))
         .env(HOOKS_ROOT, &root)
         .env(swarmops_store::ORDER_CHECK_ENV, "1"));
     let stderr = String::from_utf8_lossy(&checked.stderr);
@@ -2663,7 +2666,7 @@ fn the_test_hooks_build_the_filesystem_they_name() {
     assert!(stdout.contains("counts calls: false"), "{stdout}");
 
     let (_dir, root) = new_root();
-    let failing = run(this_test(TEST)
+    let failing = run(this_test(&test_name!(TEST))
         .env(HOOKS_ROOT, &root)
         .env(swarmops_store::FAIL_AT_ENV, "2:persistent:enospc"));
     assert!(failing.status.success(), "{:?}", failing.status);
@@ -2691,11 +2694,11 @@ fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
     let calls = u64::try_from(CREATE_CALLS.len()).unwrap();
     for k in 1..=calls + 1 {
         let (_dir, root) = new_root();
-        let child = run(
-            this_test("crash_at_any_create_call_leaves_a_store_open_or_create_takes")
-                .env(CREATE_CRASH_ROOT, &root)
-                .env(CRASH_AT_ENV, k.to_string()),
-        );
+        let child = run(this_test(&test_name!(
+            "crash_at_any_create_call_leaves_a_store_open_or_create_takes"
+        ))
+        .env(CREATE_CRASH_ROOT, &root)
+        .env(CRASH_AT_ENV, k.to_string()));
         let ended_as_expected = if k <= calls {
             child.status.signal() == Some(SIGABRT)
         } else {
@@ -3334,11 +3337,11 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
     for k in 1..=total + 1 {
         let (_dir, root) = new_root();
         copy_dir(template.as_std_path(), root.as_std_path());
-        let child = run(
-            this_test("crash_at_any_replay_call_recovers_to_the_journal")
-                .env(REPLAY_CRASH_ROOT, &root)
-                .env(CRASH_AT_ENV, k.to_string()),
-        );
+        let child = run(this_test(&test_name!(
+            "crash_at_any_replay_call_recovers_to_the_journal"
+        ))
+        .env(REPLAY_CRASH_ROOT, &root)
+        .env(CRASH_AT_ENV, k.to_string()));
         let ended_as_expected = if k <= total {
             child.status.signal() == Some(SIGABRT)
         } else {
@@ -3524,7 +3527,7 @@ fn a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer() {
         .arg("-c")
         .arg("ulimit -u 1 2>/dev/null || ulimit -p 1; exec \"$0\" \"$@\"")
         .arg(std::env::current_exe().unwrap())
-        .args(test_args(TEST))
+        .args(test_args(&test_name!(TEST)))
         .env(NO_THREADS_ROOT, &root));
     let report = report(0, &child);
     if report == "threads can be spawned" {
