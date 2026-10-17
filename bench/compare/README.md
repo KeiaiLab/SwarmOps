@@ -4,7 +4,7 @@ This directory exists **only to measure SwarmOps' native metadata store** (`swar
 
 ```sh
 just bench-compare --quick     # a smoke run of everything at small sizes: under 2 minutes once built
-just bench-compare             # the full run at the plan's sizes: about two hours at 4 ms per fdatasync
+just bench-compare             # the full run at the plan's sizes: 3 h 18 min measured (2026-10-17), with W2 at about 7 ms per fdatasync
 just bench-compare --only w1,w3 --engines native,sqlite --runs 5
 just bench-compare --w1-txns 2000 --w2-txns 100   # smaller W1 and W2, everything else full
 ```
