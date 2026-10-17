@@ -86,10 +86,13 @@ jobs:
       # Audits the workflows and dependabot.yml, online audits included (impostor commits,
       # known-vulnerable actions) with the job's read-only token. The findings go to the log:
       # code scanning is not available to a private repository on this plan. The image is the
-      # zizmor release the action pins as `latest`, by digest (1.30.1 at v0.6.4).
+      # zizmor release the action pins as `latest`, by digest (1.30.1 at v0.6.4). The auditor
+      # persona, because the regular one lets an explicit `persist-credentials: true`, a
+      # workflow-level write grant and a missing version comment through; this tree is clean.
       - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
         with:
           advanced-security: false
+          persona: auditor
       # gitoxide's `check-blocking`: a job added to this workflow must be one that `tests-pass`
       # needs, or it would never block anything.
       - name: tests-pass needs every other job

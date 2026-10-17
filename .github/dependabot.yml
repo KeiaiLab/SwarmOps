@@ -6,10 +6,16 @@
 # they share (blake3, zstd, camino, ...) are locked twice, in Cargo.lock and in fuzz/Cargo.lock,
 # and `just check` builds both workspaces `--locked`. `increase-if-necessary` leaves a requirement
 # as it is while it allows the new release, so a pull request for / changes Cargo.lock alone and
-# fuzz/Cargo.lock stays valid; the /fuzz entry (`allow: all`, the shared crates being indirect
-# dependencies there) brings fuzz/Cargo.lock up to date in its own pull request. A
+# fuzz/Cargo.lock stays valid; the /fuzz entry brings fuzz/Cargo.lock up to date in its own pull
+# request. Both entries say `allow: all`: the shared crates are indirect dependencies in fuzz, and
+# the product's own transitive crates (zstd-sys with its bundled libzstd, libc, rustix, ...) must
+# move in both lockfiles, or the fuzzer drifts onto versions the shipped binary does not use. A
 # semver-incompatible release does change a requirement in Cargo.toml: that pull request fails
 # the gate until `cargo update --manifest-path fuzz/Cargo.toml -p <crate>` is pushed to it.
+# bench/compare, a third workspace and lockfile on the same two path dependencies, has no entry on
+# purpose: it pins every version exactly (`=`) to the ones docs/perf.md's comparison names, so it
+# is refreshed by hand when the comparison is run again. `just check` does not build it; the
+# weekly scheduled workflow does.
 version: 2
 updates:
   - package-ecosystem: cargo
@@ -19,6 +25,8 @@ updates:
     cooldown:
       default-days: 7
     versioning-strategy: increase-if-necessary
+    allow:
+      - dependency-type: all
     groups:
       cargo:
         patterns: ["*"]

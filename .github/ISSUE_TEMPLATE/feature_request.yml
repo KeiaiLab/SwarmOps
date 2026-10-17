@@ -37,6 +37,7 @@ body:
         - "M6: verify, crash safety, fuzzing"
         - "M7: blame and review"
         - "M9: simulation and benchmarks"
+        - "M11: remote sync, offline-first"
         - "M10: RPC server"
         - Not sure
   - type: checkboxes
