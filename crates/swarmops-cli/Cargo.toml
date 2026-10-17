@@ -39,4 +39,7 @@ swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 assert_cmd.workspace = true
 insta.workspace = true
+# The power-loss tests record a run on a one-thread pool, so that it makes its calls in the
+# same order every time.
+rayon.workspace = true
 tempfile.workspace = true

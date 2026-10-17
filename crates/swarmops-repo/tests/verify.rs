@@ -325,20 +325,37 @@ fn verify_detects_index_journal_mismatch() {
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
+    let layout = Layout::new(&root);
+    let bogus = ChangesetMeta {
+        id: ChangesetId(hash_object(ObjectKind::Changeset, b"not in the journal")),
+        seq: 0,
+        generation: 1,
+        delta_hash: [7; 32],
+        parents: Vec::new(),
+    };
+
+    // Past the checkpoint (still at 0), the index's records are the journal's to vouch for:
+    // one it does not, as a power loss can leave there, is counted by no handle, so verify
+    // finds nothing; and the next writer cuts it and replays the journal's in its place.
+    let replace_id = |at: usize| {
+        let ids = layout.meta_path("idx/ids.col");
+        let mut column = fs::read(&ids).unwrap();
+        column[at * 32..at * 32 + 32].copy_from_slice(&bogus.id.0.0);
+        fs::write(&ids, column).unwrap();
+    };
+    replace_id(1);
+    assert_problems(&repo, Vec::new());
+    assert_eq!(Index::open(&layout, Arc::new(RealFs)).unwrap().len(), 1);
+    // Then move the checkpoint past both records: the writer's flush replays the record first.
+    MetaStore::open(&root).unwrap().flush().unwrap();
+    assert_eq!(Index::open(&layout, Arc::new(RealFs)).unwrap().len(), 2);
+    assert_problems(&repo, Vec::new());
 
     // An index record that no journal frame holds: what a writer that went around the
     // journal would leave.
-    let layout = Layout::new(&root);
     {
         let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
         let mut index = Index::open(&layout, Arc::new(RealFs)).unwrap();
-        let bogus = ChangesetMeta {
-            id: ChangesetId(hash_object(ObjectKind::Changeset, b"not in the journal")),
-            seq: 0,
-            generation: 1,
-            delta_hash: [7; 32],
-            parents: Vec::new(),
-        };
         assert_eq!(index.append(&bogus).unwrap(), 2);
         index.sync().unwrap();
     }
@@ -699,6 +716,9 @@ fn verify_detects_generation_and_delta_hash_drift() {
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     commit(&repo, &[c1], vec![put("f", b"2")]);
+    // Below the checkpoint, where the index holds its records for good (past it, the journal
+    // vouches for them: `verify_detects_index_journal_mismatch`).
+    MetaStore::open(&root).unwrap().flush().unwrap();
     let generations = Layout::new(&root).meta_path("idx/gen.col");
     let mut column = fs::read(&generations).unwrap();
     column[8..16].copy_from_slice(&9_u64.to_le_bytes());

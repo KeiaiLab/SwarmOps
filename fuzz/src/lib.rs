@@ -102,11 +102,13 @@ fn records_of(payload: &[u8]) -> Option<Vec<Record>> {
     rest.is_empty().then_some(records)
 }
 
-/// Whether `rest`, the unlisted bytes from a frame boundary to the end of `journal.log`, are
-/// zero-filled: at least one byte, every byte 0. A filesystem may expose such blocks after a
-/// crash, and no frame starts with `len == 0`, so they are a torn tail, never a frame.
-pub fn zero_filled(rest: &[u8]) -> bool {
-    !rest.is_empty() && rest.iter().all(|&byte| byte == 0)
+/// Whether `rest`, the unlisted bytes from a frame boundary to the end of `journal.log`, start
+/// with a frame header whose length reads 0. No writer writes a frame of length 0, and an
+/// append's sync makes its header durable, so such a header never reached the disk (zeros a
+/// filesystem exposed after a crash, or the first sector of an append that a power loss lost
+/// while it kept a later one): a torn tail, whatever follows it.
+pub fn zero_length(rest: &[u8]) -> bool {
+    rest.starts_with(&[0; 4])
 }
 
 /// Whether `e` is an error the journal reports for damage: `JournalCorrupt`, or `Io` with
