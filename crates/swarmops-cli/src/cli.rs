@@ -25,9 +25,10 @@ const EXPECT_HELP: &str = "The changeset the ref holds now: a full id, not a ref
 const SET_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
 
 Give the full changeset id you read (from ref list, show, log or a commit's result). A ref \
-name, a relative revision such as main~1 or an id prefix is read from the store when the \
-command runs instead of pinning the id you read: the ref's own name always matches (a deleted \
-ref errors instead), so the compare-and-swap protects nothing, and main~1 on main never matches.
+name or a relative revision such as main~1 is read from the store when the command runs \
+instead of pinning the id you read: the ref's own name always matches (a deleted ref errors \
+instead), so the compare-and-swap protects nothing, and main~1 on main never matches. An id \
+prefix pins the id you read only until another changeset shares it; then it is E_AMBIGUOUS_ID.
 
 After E_CAS_MISMATCH, re-apply your edits to the content at the error's `actual` and commit \
 with --parent <actual>, then retry with --expect <actual>. Do not re-send your old whole-file \
@@ -37,14 +38,16 @@ puts: M1 has no merge, so they would revert the winner's edits to shared files."
 const DELETE_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
 
 Give the full changeset id you read (from ref list, show, log or a commit's result). A ref \
-name, a relative revision such as main~1 or an id prefix is read from the store when the \
-command runs instead of pinning the id you read: the ref's own name always matches (a deleted \
-ref errors instead), so the compare-and-swap protects nothing, and main~1 on main never matches.
+name or a relative revision such as main~1 is read from the store when the command runs \
+instead of pinning the id you read: the ref's own name always matches (a deleted ref errors \
+instead), so the compare-and-swap protects nothing, and main~1 on main never matches. An id \
+prefix pins the id you read only until another changeset shares it; then it is E_AMBIGUOUS_ID.
 
 After E_CAS_MISMATCH, the ref holds the error's `actual`, which someone else moved it to: look \
 at it (swarmops show <actual>) before you delete it with --expect <actual>.";
 
-/// Source control for coding-agent swarms. Every command prints one JSON envelope on stdout.
+/// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
+/// on stdout.
 #[derive(Parser, Debug)]
 #[command(name = "swarmops", version)]
 pub struct Cli {
