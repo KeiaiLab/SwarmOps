@@ -259,10 +259,11 @@ and, past the checkpoint and the sorted views, only those that the frames past t
 vouch for, field by field, as storage §3, "색인의 보증", says: a record that a power loss zero-filled
 is not counted, the snapshot reads its changeset from the frame, and the next write replays it),
 reads every frame past the checkpoint (whole frames not yet listed in `journal.off` included; it
-stops at a torn tail), reads every ref file, then reads the frames again, and if there are more,
-reads the refs and frames again. It then lays the frames past the checkpoint over the index and
-the refs in memory. Writers replace a ref file only after its frame is whole, so the refs it
-reads never run ahead of the frames it read.
+stops at a torn tail), reads every ref file, then reads the frames again, and if they are not the
+frames it read (new ones, or a frame a failed sync or rewrite cut back and the next writer
+replaced at its seq), reads the refs and frames again. It then lays the frames past the
+checkpoint over the index and the refs in memory. Writers replace a ref file only after its
+frame is whole, so the refs it reads never run ahead of the frames it read.
 
 ```mermaid
 flowchart TD
@@ -271,7 +272,7 @@ flowchart TD
   index --> frames["Read the frames past the<br/>checkpoint, up to a torn tail;<br/>past the sorted views, the index<br/>counts only what they vouch for"]
   frames --> refs["Read every ref file"]
   refs --> again["Read the frames again"]
-  again --> more{"More frames<br/>than before?"}
+  again --> more{"Frames changed?"}
   more -- "yes" --> refs
   more -- "no" --> overlay["Lay the frames over the<br/>index and the refs, in memory"]
 ```

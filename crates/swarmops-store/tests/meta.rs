@@ -31,7 +31,7 @@ use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, thi
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
 use swarmops_testkit::store::temp_dir as new_root;
-use swarmops_testkit::store::{append_bytes, file_len};
+use swarmops_testkit::store::{append_bytes, file_len, set_len};
 use swarmops_testkit::test_name;
 use tempfile::TempDir;
 
@@ -3062,6 +3062,90 @@ fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
     let log = read.reflog("main", 10).unwrap();
     let moves: Vec<_> = log.iter().map(|entry| (entry.old, entry.new)).collect();
     assert_eq!(moves, [(Some(id(1)), Some(id(2))), (None, Some(id(1)))]);
+}
+
+/// A frame a lock-free reader holds can be cut back off the journal (a failed sync, storage
+/// spec §2 rule 3 (a)) and the next writer's frame can land at its seq and offset: the count of
+/// the frames past the checkpoint holds still, but the frames do not. The snapshot must read the
+/// ref files and the frames again, or it lays the cut frame's records over ref files that
+/// already show the replacement: a ref at a target that never committed, at a version that
+/// never existed.
+#[test]
+fn a_snapshot_reads_again_when_a_frame_it_read_was_cut_and_replaced() {
+    let (_dir, reader, calls) = snapshot_over_a_cut_and_replaced_frame(&[
+        changeset_record(&cs(2, &[1]), 2),
+        ref_move("main", Some(1), Some(2), ACTOR, 0),
+    ]);
+    let read = reader.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(3, 2)));
+    assert!(
+        read.changeset(id(3)).unwrap().is_some(),
+        "main's target is in the snapshot"
+    );
+    assert_eq!(
+        read.changeset(id(2)).unwrap(),
+        None,
+        "the cut frame's changeset is not"
+    );
+    assert_eq!(read.count_changesets().unwrap(), 2);
+    assert_eq!(
+        calls().iter().filter(|call| *call == "read main").count(),
+        2,
+        "the frames changed, so the ref files were read again"
+    );
+}
+
+/// The same with a cut frame that moved no ref: the snapshot would show the replacement's move
+/// (the ref file has it) without the replacement's changeset, a dangling ref.
+#[test]
+fn a_snapshot_reads_again_when_a_frame_it_read_was_cut_and_replaced_with_a_move() {
+    let (_dir, reader, _calls) =
+        snapshot_over_a_cut_and_replaced_frame(&[changeset_record(&cs(2, &[1]), 2)]);
+    let read = reader.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(3, 2)));
+    assert!(
+        read.changeset(id(3)).unwrap().is_some(),
+        "main's target is in the snapshot"
+    );
+    assert_eq!(read.changeset(id(2)).unwrap(), None);
+    assert_eq!(read.count_changesets().unwrap(), 2);
+}
+
+/// A reader of a store holding changeset 1 and `main` at it, whose snapshot reads frame F
+/// (`cut`, appended and then unlisted: the state on disk between a writer's append of the frame
+/// and its sync) among the frames past the checkpoint. Right before the reader's first read of
+/// main's file, that sync fails and F is cut back (storage spec §2 rule 3 (a)), and the next
+/// writer commits changeset 3 on 1 and moves `main` 1 -> 3: a frame at F's seq and offset. The
+/// function returned gives the reader's calls.
+fn snapshot_over_a_cut_and_replaced_frame(
+    cut: &[Record],
+) -> (TempDir, MetaStore, impl Fn() -> Vec<String> + use<>) {
+    let (dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    cas(&store, "main", None, Some(1));
+    drop(store);
+    let layout = Layout::new(&root);
+    let cut_at = append_unmaterialized(&root, cut).offset;
+    set_len(layout.journal_off(), file_len(layout.journal_off()) - 8);
+    let writer_root = root.clone();
+    let log = layout.journal_log();
+    let (fs, calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "read main".to_owned(),
+        When::Before,
+        Box::new(move || {
+            set_len(&log, cut_at);
+            let writer = open_checked(&writer_root).unwrap();
+            let mut write = writer.write().unwrap();
+            write.insert_changeset(cs(3, &[1])).unwrap();
+            write
+                .cas_ref("main", Some(id(1)), Some(id(3)), ACTOR)
+                .unwrap();
+            write.commit().unwrap();
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+    (dir, reader, calls)
 }
 
 /// How many changesets [`snapshots_stay_consistent_across_a_compaction`] seeds its store with,

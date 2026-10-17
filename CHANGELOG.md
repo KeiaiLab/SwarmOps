@@ -143,6 +143,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - `Journal::frame_count` drops the zeroed entries at the end of `journal.off` that readers and
   recovery drop; a reader's frame count after such a power loss was one too high until the next
   writer ran (the frames it read were right).
+- A reader's snapshot compares the frames it reads again whole instead of counting them: a frame
+  that a failed sync or rewrite cut back (storage spec §2 rule 3 (a)/(c)) and the next writer
+  replaced at its seq no longer lays its records over the replacement's ref files (a ref at a
+  target that never committed, at a version that never existed).
 - `verify` reports a `journal.ckpt` that is not a frame boundary (every read and write fails on
   one); before, it reported nothing while the index counted by length.
 - Store files that are not regular files (a FIFO, a device, a socket, or a symlink to one) are

@@ -91,8 +91,8 @@ left).
   too. A no-clobber `REPO` link is the cheap hardening. *Target: M5 (with the workspace
   registry). Found: M1 Task 2c; final review, question 1.*
 - **A reader's snapshot loop has no cap.** A reader re-reads the refs and frames until the
-  frame count holds still, without a limit or back-off; under sustained commits with many frames
-  past the checkpoint it could keep retrying. *Unscheduled. Found: M1 Task 2c.*
+  frames it reads hold still, without a limit or back-off; under sustained commits with many
+  frames past the checkpoint it could keep retrying. *Unscheduled. Found: M1 Task 2c.*
 - **One transient error after a crash.** A reader that races the first repair after a crash can
   see `E_STORE_CORRUPT` once; reading again succeeds. *Unscheduled (document or retry once).
   Found: M1 final review.*

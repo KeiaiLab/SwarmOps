@@ -43,11 +43,13 @@
 //!
 //! [`MetaStore::read`] takes no lock and writes nothing. It reads `journal.ckpt`, opens the
 //! index, reads the frames past the checkpoint (which vouch for the index's records past it,
-//! as [`Index::open`] says) and every ref file, and reads those frames again: if new ones
-//! have appeared, a ref file may already show one of them, so it reads the files and the
-//! frames again. The frames past the checkpoint (usually 0 to 31, and more only
-//! after a crash) then apply on top in memory: their changesets the index handle does not
-//! count, and their ref moves the ref files do not show yet.
+//! as [`Index::open`] says) and every ref file, and reads those frames again: if they are not
+//! the frames it read before (new ones have appeared, or the next writer's frame has taken the
+//! place of one that a failed sync or rewrite cut back, storage §2 rule 3 (a)/(c)), a ref file
+//! may already show a move of a frame it did not read, so it reads the files and the frames
+//! again. The frames past the checkpoint (usually 0 to 31, and more only after a crash) then
+//! apply on top in memory: their changesets the index handle does not count, and their ref
+//! moves the ref files do not show yet.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -274,10 +276,12 @@ impl MetaStore {
             })?;
         let files = loop {
             let files = refs::read_all(&self.layout, &*self.fs)?;
-            // A writer replaces ref files only after its frame is whole in the journal, so
-            // if no new frame has appeared, the files show none past `frames`.
+            // A writer replaces ref files only after its frame is whole in the journal, so if the
+            // frames are the ones read before (none new, and none that a failed sync or rewrite cut
+            // back, storage §2 rule 3 (a)/(c), and the next writer replaced at its seq), the files
+            // show none past `frames`.
             let again = self.journal.tail_frames_from(ckpt)?;
-            if again.len() == frames.len() {
+            if again == frames {
                 break files;
             }
             frames = again;
