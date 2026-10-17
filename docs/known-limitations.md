@@ -21,18 +21,45 @@ left).
 
 ## Durability
 
-- **The crash model is a process crash.** The sweeps abort the process at a chosen filesystem
-  call, which leaves the kernel's page cache intact; a power loss, which can lose, tear or
-  reorder unsynced writes, is not modelled yet. *Target: M1.5, Task 3 (power-loss images).*
-  `abort()` also stands in for `SIGKILL`: a test with a literal `SIGKILL` is *M6*. *Found: M1
-  Task 6; final review, question 11.*
+- **The crash model is a process crash and a modelled power loss.** The sweeps abort the process
+  at a chosen filesystem call, which leaves the kernel's page cache intact. A power loss is
+  modelled by the images of `crates/swarmops-cli/tests/power_loss.rs`: for one recorded run,
+  what a disk may hold after the power fails at each of its steps (unsynced data dropped, cut at
+  512 B or 4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync
+  covered reverted), each of which the binary must recover. What stays open: `abort()` stands
+  in for `SIGKILL`, and the images come from a model of the disk, not a real device. A test with
+  a literal `SIGKILL` on a real device is *M6*. *Found: M1 Task 6; final review, question 11;
+  narrowed by M1.5 Task 3.*
 - **A double failure leaves an index risk open.** When an index sync fails, the writer cuts the
   unsynced records back so the journal can supply them again; if the cut fails too, the error
   names both failures, and the risk stays open until the next successful sync, which could carry
   the checkpoint past records the failed writeback lost. *Target: M6 (fsck). Found: M1 Task 6.*
 - **A reader can get `E_IO` after such a cut.** A snapshot that counted the records a writer
-  then cut fails with an I/O error until the reader takes a new one. It never returns wrong data.
-  *Documented (storage spec §3). Found: M1 Task 6.*
+  then cut fails with an I/O error until the reader takes a new one. A snapshot that opens while
+  the cut is made counts every record the checkpoint passed or the sorted views cover and reads
+  the rest from the journal, or, if the index is cut again meanwhile, fails the same way.
+  Neither returns wrong data, or reports the index damaged. *Documented (storage spec §3).
+  Found: M1 Task 6; M1.5 Task 3.*
+- **Double and triple faults in the journal's failure policy.** A failed journal append or
+  sync is cut back, or the unlisted frames written afresh (storage spec §2 rule 3 (a)–(c)), but
+  a second fault can still defeat that. A process that aborts because its cut failed leaves the frame behind, and
+  another process may list it after a sync that succeeds (only on a filesystem that recovers
+  with its page cache intact: a cut fails in practice because the filesystem takes no more
+  writes, and then that listing fails too). A `journal.off` entry whose cut failed stays listed
+  though it may be lost. A crash between the cut and the rewrite of unlisted frames, or a
+  rewrite that fails, loses those frames, and one of them may be a commit acknowledged with a
+  warning, or one whose `journal.off` entry a power loss zeroed. A crash inside a frame's append,
+  between the write and its `fdatasync`, may leave no one to receive the frame's writeback
+  error. *Target: M6 (the next `FORMAT`'s frame header, with the frame's sequence number and the
+  previous frame's CRC, and fsck). Found: M1.5 Task 2.*
+- **A failed directory fsync in the object store is retried, not taken back.**
+  `FsObjectStore::flush` keeps a fan-out directory whose fsync failed and fsyncs it again on a
+  later flush. Linux reports a failed writeback once, so the later fsync's success does not
+  prove that the earlier links reached the disk, and a later commit may name an object whose
+  link a power loss then takes back. The journal's policy above does not cover objects, and
+  neither the order checker nor the fsync-failure model applies lost writebacks to directories.
+  On ext4 a failed directory fsync normally aborts the filesystem's journal, which bounds the
+  risk. *Target: M6. Found: M1.5 Task 2; the 2026-10-16 expert review.*
 - **Full fsync is slow on this host.** An uncontended durable commit takes about 21 ms through
   the binary, at about 4 ms per fsync; the umbrella spec's commit target (5 ms plus 0.3 ms per
   file) leaves syncs out. Batching object and journal syncs, and whether any
@@ -69,11 +96,17 @@ left).
   see `E_STORE_CORRUPT` once; reading again succeeds. *Unscheduled (document or retry once).
   Found: M1 final review.*
 - **Readers may return state that is not durable yet.** A reader sees a frame before its
-  `fdatasync` completes, so until M10 a power loss, or a failed sync of that frame (which the
-  writer then cuts back), can take back state a reader returned (operations spec §4 says what
-  agents may rely on). Strict read-committed reads, limited to
-  frames already listed in `journal.off`, come if remote readers need them. *Target: M10.
-  Found: M1 Task 2c; final review, question 2.*
+  `fdatasync` completes, so a power loss, or a failed sync of that frame (which the writer then
+  cuts back), can take back state a local reader returned (operations spec §4 says what agents
+  may rely on). Readers whose results leave the host, M8's git export first, will read committed
+  snapshots taken under the lock instead. *Target: M8. Found: M1 Task 2c; final review,
+  question 2.*
+- **A commit acknowledged with a warning can vanish for a moment.** When a writer's tail check
+  writes unlisted frames afresh after a failed sync (storage spec §2 rule 3 (c)), a reader that
+  reads between the cut and the rewrite does not see them: a changeset whose commit was
+  acknowledged with a warning can be `E_REV_NOT_FOUND` for that moment, and a retry finds it.
+  It takes a failed listing and then a failed sync. *Documented (storage spec §3). Found: M1.5
+  Task 2 review.*
 
 ## Reads and response sizes
 
@@ -87,7 +120,7 @@ left).
   page sizes are measured again then, because `size` makes every entry longer. *Target: M2.
   Found: M1 Task 5; final review, question 9.*
 - **Every read takes a full metadata snapshot**, and a snapshot reads every ref file: cheap with
-  a few refs, linear in their number. A commit takes about four snapshots; passing one through
+  a few refs, linear in their number. A commit takes two; passing one through
   is the fix once measurements ask for it. *Target: M2 (with the other commit-path costs below).
   Found: M1 Tasks 2c, 3 and 4b.*
 - **A large frame past the checkpoint is parsed by every read.** After a bulk write, such as a
@@ -124,8 +157,9 @@ left).
 - **Temp files of crashed writes stay.** `objects/tmp/` keeps what interrupted object writes left
   there. *Target: M6 (`gc`). Found: M1 final review, question 8.*
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
-  and checks each sorted-view entry with its own reads (about 4 million system calls at a
-  million changesets). *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
+  and checks each sorted-view entry with its own reads (about 9 million reads at a million
+  changesets, about 9 per changeset: each index record, and each entry of both sorted views, is
+  read on its own). *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
 - **A missing `journal.off` opens as `E_IO`**, not `E_STORE_CORRUPT`; `verify` names it.
   *Unscheduled. Found: M1 final review.*
 - **`verify --deep` skips object files that are symlinks**, because the object listing ignores
@@ -197,9 +231,11 @@ left).
 
 ## Performance
 
-- **Part of each lock pass is unexplained.** Under 32 writers a pass takes about 14 ms, about
-  four raw `fdatasync`s for a transaction that makes two; about 6.5 ms of it is not accounted
-  for. *Target: M2 (profiling, in a quiet window). Found: M1 Task 7b.*
+- **Part of each lock pass through the binary is unexplained.** In the quiet-window run the lock
+  passed every 8.27 ms at store level (about two raw `fdatasync`s, which is what a transaction
+  makes) and every 13.75 ms through the binary; the difference appears only with the commits'
+  own object writes on the same filesystem. *Target: the M1.5/M1.6 measurement (docs/perf.md),
+  then M2. Found: M1 Task 7b.*
 - **Commit-path costs.** Each blob is hashed twice (for its id, then when stored); reading one
   field of a changeset's index record reads all five index files; every commit's
   materialization scans the index tail; and the reflog walks frames past the snapshot only to
@@ -225,12 +261,14 @@ These do not change what SwarmOps does, only how well the tests can see it.
 - **Coverage is not measured by the gate.** It was measured once, part-way through M1, for core
   and store only: 94.61 % of lines. *Unscheduled.*
 - **Gaps the reviews found and left.** A `CrashAtFs` off-by-one would go unnoticed (the test
-  crashes only at call 2); the object store's link-error cleanup and failed-fsync paths, the
-  CLI's panic path and the journal's adoption path in the crash sweeps are untested; there are
-  no tests yet for a relative symlink target or a `..` after a symlink in the store path, and
-  `verify`'s "read only up to its damage" message is not pinned; the CLI tests assume a temporary
-  directory without spaces; and one end-to-end test skips when run as root. *Unscheduled.
-  Found: M1 Tasks 1, 2a, 3, 5 and 8, and the final fix pass.*
+  crashes only at call 2); the I/O-error sweeps now fail each of a commit's calls once, the
+  object store's links and directory fsyncs included, and check that the commit reports
+  honestly, but the cleanup after a failed link is still not asserted; the CLI's panic path and
+  the journal's adoption path in the crash sweeps are untested; there are no tests yet for a
+  relative symlink target or a `..` after a symlink in the store path, and `verify`'s "read only
+  up to its damage" message is not pinned; the CLI tests assume a temporary directory without
+  spaces; and one end-to-end test skips when run as root. *Unscheduled. Found: M1 Tasks 1, 2a,
+  3, 5 and 8, and the final fix pass; narrowed by M1.5 Task 2.*
 - **The specs are in Korean.** They are the authority; [architecture.md](architecture.md) is an
   English overview, not a translation. *Unscheduled.*
 
@@ -242,7 +280,7 @@ each ruling is tracked above:
 | # | Question | Ruling | Entry |
 | --- | --- | --- | --- |
 | 1 | Concurrent `init` on one directory | unsupported, documented; revisit with workspaces | M5, "Concurrent `init`" |
-| 2 | Readers return state from frames not yet synced | allowed by the spec until remote readers | M10, "Readers may return state" |
+| 2 | Readers return state from frames not yet synced | allowed for local readers; committed snapshots for off-host readers | M8, "Readers may return state" |
 | 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | M6, "bounded, not first-in, first-out" |
 | 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2, "Full fsync is slow" |
 | 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | M6, "Recovery after a crash walks all of `journal.off`", "No repair tool" |

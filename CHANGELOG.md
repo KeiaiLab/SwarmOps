@@ -81,7 +81,49 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (`meta.resolved` is no longer shared by a handle's requests), a mutation without an identity
   is refused, and `expected_old` of `ref_set` and `ref_delete` must be a full changeset id
   through MCP.
+- `server/discover` and the `-32022` error list every revision served (2026-07-28, 2025-11-25,
+  2025-06-18), so a client that cannot speak 2026-07-28 can fall back to `initialize`.
 - `ref set` to the target a ref already holds is a replay: `already_applied: true` and nothing
   written, in the CLI and through MCP.
+- `so`, the short form of `swarmops`: the same program, built and installed with it; its usage
+  lines and help name the binary as invoked, and everything else still says `swarmops`.
+- I/O-error injection and write-ordering checks, behind `test-hooks`:
+  `SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]` fails the k-th filesystem call
+  with an injected error (`FailAtFs`), and `SWARMOPS_TEST_ORDER_CHECK=1` checks every write
+  against the store's write-ordering rules R1–R7 and panics at the first that breaks one
+  (`OrderCheckFs`, on for every run of the binary in the CLI tests and in the store's and the
+  repository's crash sweeps). A model of Linux's fsync failures (the bytes a failed sync did not
+  cover stay lost, even after a later sync succeeds) tests the journal, and I/O-error sweeps fail
+  every call of a checkpointing and of a compacting store transaction, of the recovery after a
+  crash, and of the binary's `init` and `commit`, checking that each outcome is honest.
+- The fsync-failure policy (storage spec §2 rule 3): a failed `journal.log` append or
+  `fdatasync` is cut back off the journal under the lock, and nothing is committed; a failed
+  `journal.off` listing after the commit point is cut back off `journal.off`, and the commit
+  stands, with a warning; a tail check whose sync fails writes the unlisted frames afresh from
+  the bytes it read before it lists them. Three documented double faults abort the process,
+  saying why on stderr: a cut of a failed frame that fails too, a cut that fails while unlisted
+  frames are written afresh, and an `init` that cannot take back its `FORMAT`. A long-lived
+  process, such as `swarmops mcp`, ends with them.
+- **Contract change:** `E_IO_TRANSIENT` now means that nothing was committed, with
+  `details.committed: false` (it said `details.may_have_committed: true`), so running the same
+  command again is safe; and a failed `journal.off` listing after the commit point is a success
+  with a warning, as every later failure already was (it was `E_IO_TRANSIENT`). The schema's
+  `E_IO_TRANSIENT` description says so. In `swarmops-store`, `StoreError::Undecided` and
+  `CrashAtFs::from_env` are removed, and `HookedFs::from_env` replaces the latter.
+- `init` takes `FORMAT` back (and syncs its removal) when the sync of the store's root after it
+  fails, so that no store looks complete whose completion mark may not be durable; when it made
+  the store but reading it back fails, the error says so with `details.created: true`.
+- Power-loss crash images (`crates/swarmops-cli/tests/power_loss.rs`): every cut of a recorded
+  run, with seeded choices of what a power loss keeps (unsynced data dropped, cut at 512 B or
+  4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync covered
+  reverted), opened with the binary, must recover a prefix of the run's transactions that holds
+  every committed one.
+- Recovery after a power loss: an unlisted journal frame whose header's length reads 0 is a torn
+  tail and is cut (it was `E_STORE_CORRUPT`); readers drop zeroed entries at the end of
+  `journal.off`, as recovery did; past the checkpoint and the sorted views, the index counts only
+  the records the journal vouches for, so zero-filled index records are replayed rather than
+  counted (they gave wrong counts and seqs, or `E_STORE_CORRUPT`); and a snapshot that opens
+  while a writer cuts the index counts every record the checkpoint passed or the sorted views
+  cover.
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
