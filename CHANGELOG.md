@@ -120,6 +120,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - The schema describes `E_IO_TRANSIENT` by the journal append that failed (other failures before
   the commit point stay `E_IO`): the store cut what the append wrote back off the journal, so
   nothing was committed, and running the same operation again is safe.
+- **Contract change (text only):** `retryable` is now defined as "can succeed when it is run
+  again: as it is after a transient failure, or, after a lost compare-and-swap, with what the
+  error names re-read"; it said "retried unchanged", which does not describe a lost
+  compare-and-swap. No flag, exit code or schema shape changes.
 - `init` takes `FORMAT` back (and syncs its removal) when the sync of the store's root after it
   fails, so that no store looks complete whose completion mark may not be durable; when it made
   the store but reading it back fails, the error says so with `details.created: true`.

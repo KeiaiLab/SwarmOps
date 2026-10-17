@@ -179,7 +179,8 @@ const INSTRUCTIONS: &str = "SwarmOps is source control for coding-agent swarms: 
 to one store at once. Each tool is one store operation, and its result is the SwarmOps envelope \
 {ok, op, api, result | error, meta}, as structuredContent and again as JSON text. A failed \
 operation sets isError and gives error {code, message, retryable, exit, details, hint}: \
-retryable says whether the same call can succeed again, and a hint is often a swarmops command, \
+retryable says whether the operation can succeed when it is run again, as it is or after \
+re-reading what the hint names, and a hint is often a swarmops command, \
 whose operation is the tool of the same name (ref list is ref_list, cat read_file, ls \
 read_tree, info repo_info). A revision is main, release/<name>, a changeset id or 12 or more of \
 its first hex digits, then optionally ~N for the N-th first parent. commit records a changeset \

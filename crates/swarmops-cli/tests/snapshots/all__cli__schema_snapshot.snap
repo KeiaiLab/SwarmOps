@@ -893,7 +893,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "retryable": {
-              "description": "Whether the same operation can succeed when it is retried unchanged.",
+              "description": "Whether the operation can succeed when it is run again: as it is after a transient\nfailure, or, after a lost compare-and-swap, with what the error names re-read (the\nmessage says how; the `hint` reads it).",
               "type": "boolean"
             }
           },
@@ -1459,7 +1459,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "retryable": {
-          "description": "Whether the same operation can succeed when it is retried unchanged.",
+          "description": "Whether the operation can succeed when it is run again: as it is after a transient\nfailure, or, after a lost compare-and-swap, with what the error names re-read (the\nmessage says how; the `hint` reads it).",
           "type": "boolean"
         }
       },

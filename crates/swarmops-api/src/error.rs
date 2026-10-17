@@ -13,7 +13,7 @@ use thiserror::Error;
 const EXIT_ERROR: i32 = 1;
 /// Exit code 2: the request or the command line is malformed.
 const EXIT_USAGE: i32 = 2;
-/// Exit code 4: retrying the same operation can succeed.
+/// Exit code 4: the operation can succeed when it is run again.
 const EXIT_RETRYABLE: i32 = 4;
 /// Exit code 5: an identity or policy requirement refused the operation.
 const EXIT_AUTH: i32 = 5;
@@ -117,7 +117,9 @@ impl ErrorCode {
         self.row().1
     }
 
-    /// Whether the same operation can succeed when it is retried unchanged.
+    /// Whether the operation can succeed when it is run again: as it is after a transient
+    /// failure, or, after a lost compare-and-swap, with what the error names re-read (the
+    /// message says how; the `hint` reads it).
     pub fn retryable(&self) -> bool {
         self.row().2
     }
@@ -135,7 +137,9 @@ pub struct OpError {
     pub code: String,
     /// What went wrong.
     pub message: String,
-    /// Whether the same operation can succeed when it is retried unchanged.
+    /// Whether the operation can succeed when it is run again: as it is after a transient
+    /// failure, or, after a lost compare-and-swap, with what the error names re-read (the
+    /// message says how; the `hint` reads it).
     pub retryable: bool,
     /// The exit code of the CLI.
     pub exit: i32,

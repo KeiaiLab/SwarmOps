@@ -64,7 +64,7 @@ planned, each with its milestone.
 | Order of writes | ✅ M1: every commit and ref move is a frame of one journal, appended under one lock, so all of them have a single global order. | **Ahead by design.** |
 | Stale locks | ✅ M1: the writer lock is an `flock`, which the kernel releases when its holder dies. | **Ahead by design.** A git process killed with `SIGKILL` while it holds `index.lock` or a ref's `.lock` leaves the file behind, to be removed by hand (git removes its lock files on the signals it can catch). |
 | Durability | ✅ M1: full fsync is the only mode; an object is synced before a journal frame names it, and a commit returns after its frame's `fdatasync`. ✅ M1.5: the policy for a failed fsync. | **Ahead by design.** Git's defaults (2.43) sync packs, pack metadata and the commit graph, not loose objects, refs or the index. |
-| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gaps: `E_CAS_MISMATCH` is marked retryable, and four codes are not raised yet. |
+| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gap: four codes are not raised yet. |
 | Commits from many writers | ✅ M1: concurrent commits all succeed, short of a lock wait past 10 s (the retryable `E_BUSY`). | **Parity** with agents in separate git worktrees, on lost commits and lock failures. |
 | One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
 | Reading a path at a revision | ✅ M1: `cat REV:PATH` and `ls REV[:PATH]`, without a checkout. | **Parity** with `git show REV:PATH` and `git ls-tree`. |
@@ -304,8 +304,9 @@ plain text, and `mcp` speaks MCP there instead): pretty on a terminal, compact o
 ```
 
 `op` names the operation (`cat` is `read_file`), and `meta.resolved` what each revision named.
-A failure's `error` carries a stable `E_*` code, whether retrying the same command can succeed,
-machine-readable `details`, and a `hint`, often the next command to run. The exit code is
+A failure's `error` carries a stable `E_*` code, whether running it again can succeed (as it
+is, or after re-reading what the error names), machine-readable `details`, and a `hint`, often
+the next command to run. The exit code is
 `error.exit`:
 
 | Exit | Meaning | For example |
