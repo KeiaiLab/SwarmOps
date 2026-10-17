@@ -636,6 +636,34 @@ fn create_follows_symlinks_below_a_missing_directory_before_touching_anything() 
 }
 
 #[test]
+fn open_refuses_a_path_that_leads_under_mnt() {
+    // A store copied, moved or linked under /mnt/ (drvfs, whose locking and sync semantics the
+    // refusal keeps out) is refused on open as on create: by where the path leads, before
+    // FORMAT is read, so nothing under /mnt/ need exist, and nothing is made there.
+    let before = entries("/mnt");
+    let dir = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
+    std::os::unix::fs::symlink("/mnt/swarmops-test-nowhere", base.join("dangling")).unwrap();
+    let linked = base.join("dangling/x");
+    for (store, leads_to) in [
+        ("/mnt/c/swarmops-test-store", "/mnt/c/swarmops-test-store"),
+        (linked.as_str(), "/mnt/swarmops-test-nowhere/x"),
+    ] {
+        match LocalRepo::open(Utf8Path::new(store)) {
+            Err(RepoError::Store(StoreError::UnsupportedFs(refused))) => {
+                assert_eq!(refused, leads_to);
+            }
+            other => panic!(
+                "{store}: expected UnsupportedFs, got {:?}",
+                other.map(|r| r.info())
+            ),
+        }
+    }
+    assert_eq!(entries("/mnt"), before, "nothing was created under /mnt");
+    assert!(!Path::new("/mnt/swarmops-test-nowhere").exists());
+}
+
+#[test]
 fn create_syncs_each_directory_it_makes() {
     // create makes the store root and the missing directories above it: each new entry is
     // made durable, by syncing the directory that holds it, outermost first.

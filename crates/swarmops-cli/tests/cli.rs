@@ -35,8 +35,8 @@ const AGENT: &str = "agent/worker-17";
 /// The keys whose numbers are times or durations, replaced by `[<key>]` in snapshots.
 const TIME_KEYS: &[&str] = &["elapsed_ms", "created_at", "secs"];
 
-/// A store path under `/mnt/`, where WSL mounts Windows drives: `init` refuses it by its name,
-/// so it need not exist, and nothing is made there.
+/// A store path under `/mnt/`, where WSL mounts Windows drives: `init` and every open refuse it
+/// by its name, so it need not exist, and nothing is made there.
 const MNT_STORE: &str = "/mnt/swarmops-cli-test/store";
 
 /// One `--human` run: the variables set, the arguments, the exit code it must give.
@@ -449,6 +449,26 @@ fn not_a_repo_exits_6() {
     assert!(!fs::exists(&missing).unwrap(), "nothing was created");
 
     insta::assert_json_snapshot!(s.transcript());
+}
+
+/// A store that leads under `/mnt/` is refused on open as `init` refuses it ([`MNT_STORE`]):
+/// `info` on a path there, and on a symlink that leads there, is `E_UNSUPPORTED_FS` with the
+/// `/mnt` path in `details.path`, before anything is read, and nothing is made there.
+#[test]
+fn a_store_that_leads_under_mnt_is_refused_on_open() {
+    let mut s = Session::new();
+    let direct = s.run(&["--repo", MNT_STORE, "info"]);
+    assert_eq!((direct.exit, direct.code()), (1, "E_UNSUPPORTED_FS"));
+    assert_eq!(direct["error"]["details"]["path"], MNT_STORE);
+    let link = format!("{}/link", s.tmp());
+    std::os::unix::fs::symlink(MNT_STORE, &link).unwrap();
+    let linked = s.run(&["--repo", &link, "info"]);
+    assert_eq!((linked.exit, linked.code()), (1, "E_UNSUPPORTED_FS"));
+    assert_eq!(linked["error"]["details"]["path"], MNT_STORE);
+    assert!(
+        !fs::exists(MNT_STORE).unwrap_or(false),
+        "nothing was made under /mnt"
+    );
 }
 
 #[test]

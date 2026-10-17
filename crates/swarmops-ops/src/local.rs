@@ -110,8 +110,8 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   `IndexMismatch` and `MissingParent`; an `Io` error of kind `InvalidData` (a malformed
 ///   metadata file); and the store's `Format` other than while opening. Once the store is open,
 ///   the hint is `swarmops verify` (with `--deep` for an object whose bytes fail their id).
-/// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`; the hint
-///   points at a native filesystem.
+/// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`, on `init`
+///   and on open alike; the hint points at a native filesystem.
 /// - `E_IO`: any other `Io` error.
 /// - `E_IO_TRANSIENT` (retryable) `{committed}`, always `false`: the store's `NotCommitted`, a
 ///   journal append that failed and that the store cut back off the journal, so the write
@@ -159,7 +159,7 @@ impl LocalOps {
     }
 
     /// Opens the store at `path`. `E_NOT_A_REPO` if there is none, or if what is there is not a
-    /// store this build reads.
+    /// store this build reads; `E_UNSUPPORTED_FS` if the path leads under `/mnt/`.
     pub fn open(path: &Utf8Path) -> Result<LocalOps, OpError> {
         let repo = LocalRepo::open(path).map_err(|e| repo_error(e, During::Open(path)))?;
         Ok(Self::with_repo(repo, path))

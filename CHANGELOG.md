@@ -152,6 +152,8 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - Store files that are not regular files (a FIFO, a device, a socket, or a symlink to one) are
   refused with an error instead of opened; a FIFO at `meta/journal.log` used to hang every
   command.
+- A store path that leads under `/mnt/` is refused on open too (`E_UNSUPPORTED_FS`), not only
+  by `init`: a store copied, moved or symlinked onto a Windows drive under WSL is not opened.
 - `bench/compare/` (`just bench-compare`, `--quick` for a smoke run): the native metadata
   store, through its public API, against SQLite, redb, fjall and sled on SwarmOps' own
   workloads, in a cargo workspace of its own that `just check` never builds; SwarmOps depends on
