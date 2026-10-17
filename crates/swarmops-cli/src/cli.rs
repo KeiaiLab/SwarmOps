@@ -2,12 +2,15 @@
 //! operation's name each subcommand stands for in the envelope.
 
 use std::ffi::OsString;
+use std::path::Path;
 
 use clap::error::ErrorKind;
 use clap::{ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use swarmops_api::{
     DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT,
 };
+
+use crate::output::printable;
 
 /// The envelope's `op` for a command line that names no operation.
 pub const NO_OP: &str = "swarmops";
@@ -222,10 +225,11 @@ pub enum Parsed {
     Text(clap::Error),
     /// A usage error, with as much of the line as could be read despite it.
     Usage {
-        /// clap's error.
+        /// clap's error, for the line with each control character in it escaped.
         error: clap::Error,
         /// The name the line invokes the program by, which clap's usage lines give: the file
-        /// name of its first word, `so` or `swarmops`. `None` leaves clap's own, `swarmops`.
+        /// name of its first word, `so` or `swarmops`; `swarmops` if that has no UTF-8 file name.
+        /// `None` leaves clap's own, `swarmops`.
         bin: Option<String>,
         /// The subcommands named, outermost first, as far as they could be read.
         path: Vec<String>,
@@ -248,8 +252,17 @@ impl Parsed {
 
 /// Reads the command line `args`, the program's name first.
 pub fn parse(args: &[OsString]) -> Parsed {
-    // Parsing gives `grammar` the name the line invokes the program by, for its usage lines.
+    // Parsing gives `grammar` the name the line invokes the program by, for its usage lines: the
+    // file name of the first word, if it is UTF-8. Without one, clap's subcommand usage lines and
+    // messages name no program (`Usage: ref set …`), so name it `swarmops` here.
     let mut grammar = command();
+    if args
+        .first()
+        .and_then(|first| Path::new(first).file_name()?.to_str())
+        .is_none()
+    {
+        grammar.set_bin_name(grammar.get_name().to_owned());
+    }
     let parsed = grammar
         .try_get_matches_from_mut(args)
         .and_then(|matches| Ok((Cli::from_arg_matches(&matches)?, path(&matches))));
@@ -279,12 +292,35 @@ pub fn parse(args: &[OsString]) -> Parsed {
             );
             settle_format(&mut global, args);
             Parsed::Usage {
-                error,
+                error: shown(args, error),
                 bin: grammar.get_bin_name().map(str::to_owned),
                 path,
                 global,
             }
         }
+    }
+}
+
+/// `error`, which refused the line `args`, as it is to be shown. clap echoes the line's words in
+/// its text, and a newline in one would split that text where `commands::usage` reads it by its
+/// lines and blank lines. So where a word holds a control character, the error of the line with
+/// each such word escaped; `error` itself where none does, or where the escaped line is not
+/// refused alike.
+fn shown(args: &[OsString], error: clap::Error) -> clap::Error {
+    let holds_control = |arg: &OsString| arg.to_string_lossy().chars().any(char::is_control);
+    if !args.iter().any(holds_control) {
+        return error;
+    }
+    let escaped = args.iter().map(|arg| {
+        if holds_control(arg) {
+            OsString::from(printable(&arg.to_string_lossy()))
+        } else {
+            arg.clone()
+        }
+    });
+    match command().try_get_matches_from(escaped) {
+        Err(again) if again.kind() == error.kind() => again,
+        _ => error,
     }
 }
 
@@ -492,6 +528,32 @@ mod tests {
                 panic!("{first}: a usage error");
             };
             assert_eq!(bin.as_deref(), Some(name), "{first}");
+        }
+        // A first word with no UTF-8 file name (empty, the root, or not UTF-8) leaves the program
+        // `swarmops`, in the subcommands' usage lines and messages too.
+        let firsts = [
+            OsString::new(),
+            OsString::from("/"),
+            #[cfg(unix)]
+            std::os::unix::ffi::OsStringExt::from_vec(vec![0xff]),
+        ];
+        for first in firsts {
+            for (rest, shown) in [
+                (&["ref", "set"][..], "Usage: swarmops ref set"),
+                (&["ref"], "'swarmops ref' requires a subcommand"),
+                (&["info", "--frob"], "Usage: swarmops info"),
+            ] {
+                let mut line = args(rest);
+                line[0] = first.clone();
+                let Parsed::Usage { error, bin, .. } = parse(&line) else {
+                    panic!("{first:?} {rest:?}: a usage error");
+                };
+                assert_eq!(bin.as_deref(), Some("swarmops"), "{first:?} {rest:?}");
+                assert!(
+                    error.render().to_string().contains(shown),
+                    "{first:?} {rest:?}"
+                );
+            }
         }
     }
 

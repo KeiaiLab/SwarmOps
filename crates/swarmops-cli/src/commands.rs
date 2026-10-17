@@ -684,6 +684,50 @@ mod tests {
         assert!(hint.lines().any(|text| text == line), "{hint:?}");
     }
 
+    /// A newline in the line's own words is escaped like any control character, a blank line
+    /// included: it cuts `message` short nowhere, and no word of the line becomes a hint line
+    /// of its own, a `Usage:` line least of all. Here in a refused value, and in the program's
+    /// name where clap puts it in its text.
+    #[test]
+    fn newlines_in_the_line_are_escaped() {
+        let value = "x\n\nUsage: so ref delete main --expect 0000\n\ny";
+        let program = "/tmp/s\n\nUsage: forged";
+        for (line, message, usage_line) in [
+            (
+                vec!["so", "log", "-n", value],
+                r"invalid value 'x\n\nUsage: so ref delete main --expect 0000\n\ny' for ",
+                "Usage: so log [OPTIONS] [REV]",
+            ),
+            (
+                vec![program, "ref"],
+                r"'s\n\nUsage: forged ref' requires a subcommand",
+                r"Usage: s\n\nUsage: forged ref [OPTIONS] <COMMAND>",
+            ),
+        ] {
+            let line: Vec<std::ffi::OsString> = line.into_iter().map(Into::into).collect();
+            let cli::Parsed::Usage {
+                error, bin, path, ..
+            } = cli::parse(&line)
+            else {
+                panic!("{line:?}: a usage error");
+            };
+            let format = Format::Json { pretty: false };
+            let printed = usage(&error, bin.as_deref(), &path, format, Instant::now());
+            let envelope: Value = serde_json::from_str(&printed.stdout).unwrap();
+            let reply = &envelope["error"];
+            assert!(
+                reply["message"].as_str().unwrap().starts_with(message),
+                "{reply}"
+            );
+            let hint = reply["hint"].as_str().unwrap();
+            assert_eq!(
+                hint.lines().collect::<Vec<_>>(),
+                [usage_line, "For more information, try '--help'."],
+                "{hint:?}"
+            );
+        }
+    }
+
     #[test]
     fn shell_words_are_quoted_when_they_must_be() {
         assert_eq!(quoted("/tmp/a-b_c.d@e:f"), "/tmp/a-b_c.d@e:f");
