@@ -50,7 +50,7 @@ const SIGABRT: i32 = 6;
 /// How long [`Racers::race`] waits for every child to reach the barrier.
 const READY_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// How long a child may run, unless a test says otherwise ([`run_within`],
+/// How long a child may run, unless a test says otherwise ([`run_within`], [`run_bin_within`],
 /// [`Racers::race_within`]).
 pub const RUN_TIMEOUT: Duration = Duration::from_secs(120);
 

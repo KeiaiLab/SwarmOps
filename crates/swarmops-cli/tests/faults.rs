@@ -139,23 +139,71 @@ fn init_failing_at(k: u64, failure: &str) -> Ended {
     ended
 }
 
+/// Whether a run, failing as its first argument says, ended as its second says.
+type EndedSo = fn(&str, &Ended) -> bool;
+
+/// The outcomes the commit sweep exists to reach: a failed journal append, cut back off the
+/// journal and reported as `E_IO_TRANSIENT` that did not commit; a failed listing of the
+/// committed frame in `journal.off`, a success whose warning names it; and, under a persistent
+/// failure, the documented abort of a failed append whose cut fails too.
+const COMMIT_OUTCOMES: [(&str, EndedSo); 3] = [
+    ("E_IO_TRANSIENT, not committed", |_, ended| {
+        matches!(ended, Ended::Failed(error)
+            if error["code"] == "E_IO_TRANSIENT" && error["details"]["committed"] == false)
+    }),
+    (
+        "a success with a warning that names journal.off",
+        |_, ended| matches!(ended, Ended::Succeeded(result) if warns_of(result, "journal.off")),
+    ),
+    (
+        "a documented abort under a persistent failure",
+        |failure, ended| failure.starts_with("persistent:") && matches!(ended, Ended::Aborted),
+    ),
+];
+
+/// Whether one of the warnings of a successful `result` names `what`.
+fn warns_of(result: &Value, what: &str) -> bool {
+    result["warnings"].as_array().is_some_and(|warnings| {
+        (warnings.iter()).any(|warning| warning.as_str().is_some_and(|w| w.contains(what)))
+    })
+}
+
+/// Which of [`COMMIT_OUTCOMES`] no run of `ended` reached, each run with the failure it ran
+/// with. A change to the commit path could take one out of the sweep unseen, every run still
+/// ending honestly.
+fn unreached(ended: &[(&str, Ended)]) -> Vec<&'static str> {
+    COMMIT_OUTCOMES
+        .into_iter()
+        .filter(|(_, so)| !ended.iter().any(|(failure, ended)| so(failure, ended)))
+        .map(|(what, _)| what)
+        .collect()
+}
+
 /// An injected I/O error at any filesystem call of `init` and of a `commit` that moves the
 /// checkpoint is reported honestly (Review Focus 3): each call of a dry run fails in turn, once
 /// and persistently, with `EIO` and with `ENOSPC` ([`FAILURES`], [`INIT_FAILURES`]). A success
 /// committed, visibly and cleanly; a failure committed nothing or says it did; the store always
 /// opens again; no run panics, and none aborts but as documented ([`ABORTS`]). The dry run of
 /// the commit asserts that it moves the checkpoint, so that the sweep fails the index sync and
-/// the checkpoint's move too.
+/// the checkpoint's move too; and the commit sweep reaches each outcome it exists for
+/// ([`COMMIT_OUTCOMES`]).
 #[test]
 #[ignore = "slow, ~3 min: ~1,300 failed runs of init and commit; just check-slow runs it"]
 fn fail_at_every_call_reports_honestly() {
     let template = commit_template();
     let dry = dry_commit(&template);
+    let mut ended = Vec::new();
     for failure in FAILURES {
-        sweep(1..=dry.calls, |k| {
-            commit_failing_at(&template, k, failure, &dry.changeset);
+        let runs = sweep(1..=dry.calls, |k| {
+            commit_failing_at(&template, k, failure, &dry.changeset)
         });
+        ended.extend(runs.into_iter().map(|run| (failure, run)));
     }
+    let missing = unreached(&ended);
+    assert!(
+        missing.is_empty(),
+        "no run of the commit sweep ended so: {missing:?}"
+    );
 
     let calls = dry_init();
     for failure in INIT_FAILURES {
