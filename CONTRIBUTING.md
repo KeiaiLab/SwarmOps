@@ -23,7 +23,7 @@ alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here
   [`docs/superpowers/plans/`](docs/superpowers/plans/) with its tasks and acceptance tests, and
   cites the spec sections it implements. Small fixes need no plan.
 - **Check what is already known.** [docs/known-limitations.md](docs/known-limitations.md) lists
-  what M1 leaves open and the milestone that is meant to close each item.
+  what M1 and M1.5 leave open and the milestone that is meant to close each item.
 
 ## Setup
 

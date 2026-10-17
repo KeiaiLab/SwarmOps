@@ -26,7 +26,7 @@ M0 (bootstrap), M1 (the single-agent core) and M1.5 (hardening and opening) are 
 usable by one agent: its store already takes commits from many processes at once, safely, but
 nothing merges yet. Merging and landing (M4), git import and export (M3, M8), workspaces (M5)
 and review (M7) come later, in the order of umbrella §13.
-[known-limitations.md](known-limitations.md) lists what M1 leaves open.
+[known-limitations.md](known-limitations.md) lists what M1 and M1.5 leave open.
 
 ## Crates and layering
 
