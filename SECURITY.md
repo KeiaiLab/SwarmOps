@@ -40,11 +40,20 @@ filesystem permissions are the access boundary. Within that model, these are vul
   (`objects/<2hex>/<62hex>`: the header, the zstd frame and the payload, which is checked against
   its id on every read), the journal (`meta/journal.log`, `journal.off`, `journal.ckpt`), the
   changeset index (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/*`) and ref files
-  (`meta/refs/*`). Two cases are known and tracked
+  (`meta/refs/*`). These cases are known and tracked
   ([docs/known-limitations.md](docs/known-limitations.md), "Hostile input"): a crafted zstd frame
   whose recorded size is huge makes the read panic or abort while it allocates, instead of
-  failing with an error; and crafted `journal.off` entries that agree with each other can make
-  recovery cut a committed frame, which `verify` then reports.
+  failing with an error; crafted `journal.off` entries that agree with each other, deeper than
+  the two links recovery and readers check, pass as valid, so a read that starts past them
+  numbers its frames by them until `verify` walks the file and reports them (recovery checks
+  every listed frame before it cuts or lists anything, so no committed frame is lost); a
+  `journal.log`, `journal.off`, index column or sorted view whose length is huge (sparse or
+  crafted) is read into one buffer of that length, so a read allocates without bound and aborts
+  when the allocation fails instead of returning an error; and `REPO`, whose name `init` does
+  not bound, is read whole with no size cap, so a huge one costs its length in memory and fails
+  with `E_IO` only when the allocation fails (`FORMAT`, `journal.ckpt` and the ref files are
+  capped at their fixed sizes, and a store file that is not a regular file is refused before it
+  is opened).
 - **Requests.** Change lists, revisions and paths that get past their checks: a repository
   path with a `..` component, a leading `/` or a NUL byte; a request that makes SwarmOps write
   outside the store; or one that corrupts the store.

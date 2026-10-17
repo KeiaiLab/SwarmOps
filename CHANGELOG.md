@@ -64,12 +64,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   in 21 ms.
 - The MIT License ([LICENSE](LICENSE)), for every crate.
 
-#### M1.5: hardening and opening (2026-10-16)
+#### M1.5: hardening and opening (2026-10-17)
 
 - CI on GitHub Actions: `ci.yml` runs `just check` (the same gate as locally, `--locked`
   everywhere) and zizmor behind one `tests-pass` check; `scheduled.yml` runs the slow suite and
-  a fuzz smoke weekly; Dependabot keeps both lockfiles valid; the nextest `ci` and `ci-slow`
-  profiles kill hung tests.
+  a fuzz smoke weekly; Dependabot keeps the root and fuzz lockfiles valid; the nextest `ci`
+  and `ci-slow` profiles kill hung tests.
 - The project policies and the documentation set: [CONTRIBUTING.md](CONTRIBUTING.md),
   [SECURITY.md](SECURITY.md), [RELEASE.md](RELEASE.md), `AGENTS.md`, `docs/architecture.md`,
   `docs/known-limitations.md`, `docs/policies/`, the issue and pull request templates, and this
@@ -88,10 +88,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   written, in the CLI and through MCP, `--create` included; `old` and `new` are then the
   request's.
 - The `--expect` help of `ref set` and `ref delete` states the README's rule: give the full
-  changeset id you read, since a ref name, a relative revision such as `main~1` or an id prefix
-  is read from the store when the command runs, and then the compare-and-swap protects nothing.
+  changeset id you read, since a ref name or a relative revision such as `main~1` is read from
+  the store when the command runs, and then the compare-and-swap protects nothing, and an id
+  prefix stops resolving once another changeset shares it.
 - `so`, the short form of `swarmops`: the same program, built and installed with it; its usage
-  lines and help name the binary as invoked, and everything else still says `swarmops`.
+  lines, help and clap's message for a missing subcommand (`'so ref' requires a subcommand`)
+  name the binary as invoked, and everything else still says `swarmops`.
 - I/O-error injection and write-ordering checks, behind `test-hooks`:
   `SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]` fails the k-th filesystem call
   with an injected error (`FailAtFs`), and `SWARMOPS_TEST_ORDER_CHECK=1` checks every write
@@ -115,8 +117,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   with a warning, as every later failure already was (it was `E_IO_TRANSIENT`). A journal append
   that fails before its frame is whole, which was `E_IO`, is now `E_IO_TRANSIENT` too, as is a
   write whose tail check can neither sync nor write afresh the frames `journal.off` does not
-  list yet. In `swarmops-store`, `StoreError::Undecided` and `CrashAtFs::from_env` are removed,
-  and `HookedFs::from_env` replaces the latter.
+  list yet. In `swarmops-store`, `StoreError::Undecided` and `CrashAtFs::from_env` are removed.
+  `StoreError::NotCommitted` (a journal append that failed and was cut back off the journal;
+  retryable) is what `E_IO_TRANSIENT` now reports, and `HookedFs::from_env` replaces
+  `CrashAtFs::from_env`.
 - The schema describes `E_IO_TRANSIENT` by the journal append that failed (other failures before
   the commit point stay `E_IO`): the store cut what the append wrote back off the journal, so
   nothing was committed, and running the same operation again is safe.
@@ -132,6 +136,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync covered
   reverted), opened with the binary, must recover a prefix of the run's transactions that holds
   every committed one.
+- Test infrastructure: the support the tests share is one crate, `swarmops-testkit` (a
+  dev-dependency; no test includes another crate's file by its path any more); the store's
+  `CrashAtFs` compiles only with the `test-hooks` feature, like `FailAtFs` and `OrderCheckFs`,
+  so no build without it can name a fault double; and where a crate has several integration-test
+  files, they are the modules of one test binary, `tests/all.rs`, their tests named
+  `<file>::<test>` (the CLI's release proof, `test_hooks`, stays a binary of its own; the CLI's
+  snapshots are now `all__cli__*.snap` and `all__mcp__*.snap`, their contents unchanged).
 - Recovery after a power loss: an unlisted journal frame whose header's length reads 0 is a torn
   tail and is cut (it was `E_STORE_CORRUPT`); readers drop zeroed entries at the end of
   `journal.off`, as recovery did; past the checkpoint and the sorted views, the index counts only

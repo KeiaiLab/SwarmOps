@@ -22,8 +22,8 @@ general-purpose git replacement. Its main users are LLM agents, so every operati
 function and the command line is a thin shell that prints JSON. It is fully embedded: one
 program, no external database, no daemon.
 
-M0 (bootstrap), M1 (the single-agent core) and M1.5 (hardening and opening) are done. M1 is
-usable by one agent: its store already takes commits from many processes at once, safely, but
+M0 (bootstrap), M1 (the single-agent core) and M1.5 (hardening and opening) are done. Since M1,
+SwarmOps is usable by one agent: its store already takes commits from many processes at once, safely, but
 nothing merges yet. Merging and landing (M4), git import and export (M3, M8), workspaces (M5)
 and review (M7) come later, in the order of umbrella §13.
 [known-limitations.md](known-limitations.md) lists what M1 and M1.5 leave open.
@@ -38,8 +38,9 @@ and review (M7) come later, in the order of umbrella §13.
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
+| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, and builders of stores, repositories and runs of the binary. A dev-dependency of the store, the repository, the operations and the CLI; no product build includes it. |
 
-Dependencies point one way, from the binary down to the codec:
+Dependencies point one way, from the binary down to the codec, the test kit's dev edges aside:
 
 ```text
 swarmops-core    depends on no SwarmOps crate
@@ -47,7 +48,8 @@ swarmops-api     depends on no SwarmOps crate
 swarmops-store   core
 swarmops-repo    core, store
 swarmops-ops     api, core, repo, store
-swarmops-cli     api, ops            (its tests also use core, repo and store)
+swarmops-cli     api, ops            (its tests also use core, repo, store and testkit)
+swarmops-testkit core, repo, store   (a dev-dependency of store, repo, ops and cli)
 ```
 
 `fuzz/` is a cargo workspace of its own, with four cargo-fuzz targets over the codec and the
@@ -379,7 +381,8 @@ fields they do not know, so versions can differ (operations §0). `StoreOps` has
 `repo_info`, `commit`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
 `ref_delete` and `verify`; `init`, `whoami` and `schema` live in the CLI.
 
-Every run of `swarmops` prints exactly one envelope on stdout:
+Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
+plain text, and `mcp`, below, speaks MCP there instead):
 
 ```text
 {"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth}}

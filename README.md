@@ -78,7 +78,7 @@ planned, each with its milestone.
 | Sync between hosts | Nothing today. 📋 M11: offline-first sync, a full store on every host, `fetch` and `push` against one upstream. | **Behind**: git clones, fetches and pushes over any transport, and bundles without one. |
 | Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. 📋 M3: git import. 📋 M8: git export. No user hooks, signing, submodules or LFS. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
 | Maturity | Pre-release: no tag yet, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
-| Landing | Today an agent that loses a ref race commits again on the winner's head and retries the compare-and-swap by hand. 📋 M4: `land`. | **Not yet comparable**; the loop by hand is behind. |
+| Landing | Today an agent that loses a ref race re-applies its edits on the winner's head by hand, commits again and retries the compare-and-swap. 📋 M4: `land`. | **Not yet comparable**; the loop by hand is behind. |
 
 No git baseline has been measured yet: these verdicts come from the design, the code, and git's
 own documentation and source, not from a benchmark. The first measured comparison is planned for
@@ -153,13 +153,15 @@ drives) is refused with `E_UNSUPPORTED_FS`.
 ### First commands
 
 The examples use `so`, the short form; every command runs the same by either name. The hints in
-the envelopes give their commands as `swarmops …`.
+the envelopes give their commands as `swarmops …`; only a usage error's hint, the usage line,
+names the program as you invoked it (`Usage: so …`).
 
 ```sh
 export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme   # or --repo <store> on each command
 export SWARMOPS_AGENT=agent/worker-1                 # or --as <family>/<instance>
 
 so init "$SWARMOPS_REPO" --name acme
+printf '#!/bin/sh\necho hello\n' > run.sh                 # the client file the second change reads
 cat > changes.json <<'EOF'
 [{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() {}\n"}},
  {"path": "run.sh", "op": "put", "content": {"file": "./run.sh"}, "mode": "exec"}]
@@ -203,7 +205,7 @@ or give a project a `.mcp.json`:
     "swarmops": {
       "command": "swarmops",
       "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
-      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT}"}
+      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT:-}"}
     }
   }
 }
@@ -213,7 +215,15 @@ A project's `.mcp.json` is shared by every agent that opens the project, so it t
 agent's identity from that agent's own `SWARMOPS_AGENT`, which Claude Code expands into the
 server's environment, rather than giving all of them one `--as`. For the same reason it runs
 `swarmops`, not `so`: on some machine the short name may be missing (`--bin swarmops` installs
-the long one alone) or belong to another program.
+the long one alone) or belong to another program. The empty default (`:-`) is deliberate:
+Claude Code passes an unset `${SWARMOPS_AGENT}` on as that very text, which the server refuses
+as an invalid agent name (`E_INVALID_ARG`; `claude mcp list` warns too), but an empty value is
+no identity, so a mutation by an agent without one gets `E_IDENTITY_REQUIRED`, as the next
+section says.
+
+Claude Code starts one server for a session, and the session's subagents share it, so every
+commit and ref move they make is recorded for the session's agent. An agent that needs an
+identity of its own runs as its own Claude Code process, with its own `SWARMOPS_AGENT`.
 
 ### Store, identity and lifetime
 
@@ -224,8 +234,8 @@ they fail with `E_IDENTITY_REQUIRED`. The client starts the server as its own us
 server reads `{"file": "<path>"}` content as the CLI does, on its own machine; it refuses a
 relative path (`E_INVALID_ARG`), since an agent cannot see the server's working directory, and
 a path that is the server's own stdin or stdout, the protocol's pipes: give absolute paths,
-the store's too. It opens the store for each call, and so sees
-what other agents commit meanwhile. The store runs in the server's process, so the server ends
+the store's too. It opens the store for each call, and so sees what other agents commit
+meanwhile. The store runs in the server's process, so the server ends
 with it on any of the store's three documented aborts (storage spec §2): a failed journal write
 or sync whose cut-back fails too, in a write or in the repair before one, which any commit or
 ref move can meet; or an `init` that cannot take its `FORMAT` back, which no tool runs. The
@@ -236,11 +246,12 @@ client sees the server exit, and has to start it again.
 Two rules matter more to an agent than to a person at the CLI:
 
 - `ref_set` and `ref_delete` take `expected_old` as the full changeset id the ref held when the
-  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name, a relative
-  revision such as `main~1` or an id prefix is read from the store when the call runs instead
-  of pinning what the agent saw, so the compare-and-swap protects nothing: the server refuses
-  one with `E_INVALID_ARG`. The CLI's `--expect` still takes any revision, and its help says why
-  not to.
+  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name or a relative
+  revision such as `main~1` is read from the store when the call runs instead of pinning what
+  the agent saw, so the compare-and-swap protects nothing (the ref's own name always matches,
+  and `main~1` on `main` never does), and an id prefix stops resolving (`E_AMBIGUOUS_ID`) once
+  another changeset shares it: the server refuses all three with `E_INVALID_ARG`. The CLI's
+  `--expect` still takes any revision, and its help says why not to.
 - Clients limit long tool results. Claude Code saves a successful one over 25,000 tokens by
   default, or over 50,000 characters whatever its token count, to a file and gives the agent its
   path instead; it cuts only the text of an error. Each result holds its envelope twice, so an
@@ -281,8 +292,10 @@ hex digits, then any number of `~N` (the N-th first parent). A change list is a 
 text>"}`, `{"base64": "<bytes>"}` or `{"file": "<path>"}` (read by the CLI, on the client), at
 most 512 MiB, and its `mode` is `file` (the default), `exec` or `symlink`; directories follow
 from the paths. A ref moves only by compare-and-swap: when another agent moved it first,
-`ref set` fails with `E_CAS_MISMATCH` (exit 4) and the ref's target in `details.actual`; commit
-your change again on top of it (`--parent <actual>`) and retry with `--expect <actual>`.
+`ref set` fails with `E_CAS_MISMATCH` (exit 4) and the ref's target in `details.actual`. Then
+read the files you changed at `<actual>`, re-apply your edits to them (M1 has no merge, so
+re-sending your old whole-file puts would revert the winner's edits to shared files), commit
+with `--parent <actual>` and retry with `--expect <actual>`.
 
 ### The store and the identity
 
@@ -293,10 +306,11 @@ moved each ref); without one, a mutation fails with `E_IDENTITY_REQUIRED` (exit 
 
 ### Output and exit codes
 
-Every command prints exactly one JSON envelope on stdout (only `--help` and `--version` print
-plain text, and `mcp` speaks MCP there instead): pretty on a terminal, compact otherwise
-(`--pretty[=BOOL]` decides), or a short text rendering with `--human` or
-`SWARMOPS_FORMAT=human`.
+Every command prints exactly one JSON envelope on stdout (only `--help`, `--version` and the
+`help` subcommand print plain text, and `mcp` speaks MCP there instead): pretty on a terminal,
+compact otherwise (`--pretty[=BOOL]` decides), or a short text rendering with `--human` or
+`SWARMOPS_FORMAT=human`. A run that meets one of the store's three documented aborts (storage
+spec §2) prints no envelope: the process aborts, saying why on stderr.
 
 ```json
 {"ok":true,"op":"read_file","api":1,"result":{"blob":"f5f5…","size":14,"kind":"file","encoding":"utf8","content":"pub fn f() {}\n","truncated":false},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":0,"resolved":{"main":"014c…"},"auth":"trust"}}
@@ -314,11 +328,14 @@ the next command to run. The exit code is
 | 0 | Success. | |
 | 1 | The operation failed. | `E_EMPTY_COMMIT`, `E_STORE_CORRUPT`, `E_IO` |
 | 2 | A malformed request or command line. | `E_INVALID_ARG` |
-| 4 | Retryable: the operation can succeed if run again (after a CAS mismatch, on top of `details.actual`). | `E_CAS_MISMATCH`, `E_BUSY`, `E_IO_TRANSIENT` |
+| 3 | Reserved for conflicts (M4); no M1 code exits with it. | |
+| 4 | Retryable: the operation can succeed if run again (after a CAS mismatch, on top of `details.actual`, with your edits re-applied there). | `E_CAS_MISMATCH`, `E_BUSY`, `E_IO_TRANSIENT` |
 | 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED` |
 | 6 | Something it names does not exist. | `E_NOT_A_REPO`, `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND` |
 
-`swarmops schema` gives every type and error code; the operations spec has the full table.
+`swarmops schema` gives every type and error code; `ErrorCode` in
+[crates/swarmops-api/src/error.rs](crates/swarmops-api/src/error.rs) is the one table of each
+code's exit and `retryable` flag.
 
 ## Roadmap
 
@@ -329,7 +346,7 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | --- | --- | --- |
 | ✅ | M0 | Bootstrap: the workspace and its gates, the canonical codec and its golden vectors, the fsync experiment. |
 | ✅ | M1 | The single-agent core: `init`, `commit`, `cat`, `ls`, `log` and ref compare-and-swap, over the native metadata store and object files; crash sweeps. |
-| ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, `--locked` everywhere; I/O-error injection, write-ordering checks and the fsync-failure policy; power-loss images; the project policies; benchmarks of the metadata store against embedded databases; the MCP server and `so`. |
+| ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, `--locked` everywhere; I/O-error injection, write-ordering checks and the fsync-failure policy; power-loss images; the project policies; the tests' shared support in one crate; benchmarks of the metadata store against embedded databases; the MCP server and `so`. |
 | 📋 | M2 | Diff, history and the derived-data engine. |
 | 📋 | M3 | git import. |
 | 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |
@@ -370,8 +387,9 @@ I/O error (and with `persistent` every mutating call after it), `SWARMOPS_TEST_O
 checks every write against the store's write-ordering rules and panics at one that breaks a rule,
 and `SWARMOPS_TEST_NOW=<unix seconds>` fixes the time it signs changesets at.
 They act only in a build with the cargo feature `test-hooks` (on `swarmops-store`,
-`swarmops-repo`, `swarmops-ops` and `swarmops-cli`; `swarmops-cli/test-hooks` turns on the
-rest). The gates build the tests with `--all-features`; a plain `cargo test` skips the tests that
+`swarmops-repo`, `swarmops-ops`, `swarmops-cli` and `swarmops-testkit`, the tests' support;
+`swarmops-cli/test-hooks` turns on the rest). The gates build the tests with `--all-features`; a
+plain `cargo test` skips the tests that
 need the hooks. Every other build, `cargo build --release` included, ignores the variables, and
 `just check` runs a release build to show it.
 

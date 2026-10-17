@@ -1,15 +1,21 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# A bare `just` runs `check`, the definition of done.
 default: check
 
 # The fuzz crate is a workspace of its own, built with nightly by `just fuzz`; stable formats
 # and lints it here. Its clippy step runs libfuzzer-sys's build script, which compiles
 # libFuzzer's C++ sources: on a cold cache it needs a C++ compiler (`c++`). `--all-features`
-# turns on `test-hooks`, the hooks the crash tests drive (`SWARMOPS_TEST_CRASH_AT`,
-# `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_NOW`); the release run of `test_hooks` after it is
-# built without the feature, as `cargo build --release` is, and checks that it ignores them.
+# turns on `test-hooks`, the five `SWARMOPS_TEST_*` hooks (`CRASH_AT`, `FS_CALLS`, `FAIL_AT`,
+# `ORDER_CHECK`, `NOW`); the release run of `test_hooks` after it is built without the feature,
+# as `cargo build --release` is, and checks that it ignores them.
 # That test exists only without the feature, so `--no-tests=fail` fails a build that turns it
-# on all the same. Every step that resolves dependencies runs `--locked`: a Cargo.lock (either
+# on all the same. The all-features clippy run compiles that test to nothing, so the clippy
+# step after it lints it, and the library crates it builds, without the feature. The docs run
+# twice: as `cargo doc` builds by default, and with `--all-features`, which renders and
+# link-checks the code behind `test-hooks` (the order checker and the fault doubles) that the
+# first run leaves out. A doc of the default build cannot link to that code, or the first run
+# fails. Every step that resolves dependencies runs `--locked`: a Cargo.lock (either
 # workspace's) that the manifests no longer match fails the gate instead of being rewritten.
 # CI (.github/workflows/ci.yml) runs this recipe with `NEXTEST_PROFILE=ci`; the release run
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
@@ -19,10 +25,12 @@ check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
     cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+    cargo clippy --locked -p swarmops-cli --test test_hooks -- -D warnings
     cargo clippy --locked --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     cargo nextest run --locked --workspace --all-features --no-tests=warn
     cargo nextest run --locked --profile default --release -p swarmops-cli --test test_hooks --no-tests=fail
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
     cargo deny --locked check
 
 # The test hooks are on (`--all-features`), as in `just check`.
@@ -39,6 +47,7 @@ check-slow:
 check-ci-slow:
     PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(thirty_two_processes)'
 
+# The criterion benches, with cargo's full output (`perf` prints only their summary lines).
 bench:
     cargo bench --locked --workspace
 
@@ -77,10 +86,11 @@ perf:
 # The native metadata store against SQLite, redb, fjall and sled on SwarmOps' own workloads:
 # bench/compare, a cargo workspace of its own that `just check` neither builds nor lints
 # (SwarmOps depends on none of these databases). `--quick` is a smoke run at small sizes, under
-# 2 minutes once built. The full run (the plan's sizes) waits on the disk for about two hours
-# at 4 ms per fdatasync, so give it a quiet host; `--w1-txns N --w2-txns N` scale it down. The
-# report goes to stdout, every raw value to bench/compare/target/results/; docs/perf.md
-# records it.
+# 2 minutes once built. The full run (the plan's sizes) waits on the disk: 3 h 18 min measured
+# (2026-10-17), with W2 at about 7 ms per fdatasync, so give it a quiet host;
+# `--w1-txns N --w2-txns N` scale it down. The report goes to stdout, every raw value to
+# bench/compare/target/results/; docs/perf.md records it.
+# The native metadata store against SQLite, redb, fjall and sled; `--quick` is a smoke run.
 bench-compare *args:
     cargo run --release --locked --manifest-path bench/compare/Cargo.toml -- {{args}}
 

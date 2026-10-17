@@ -58,15 +58,17 @@ sources, so it needs a C++ compiler (`c++`).
 A change is done when `just check` passes on it. It runs, in order:
 
 1. `cargo fmt --check`, for the workspace and for the fuzz crate;
-2. `cargo clippy -D warnings`, for the workspace (every target, every feature) and for the fuzz
-   crate;
+2. `cargo clippy -D warnings`, for the workspace (every target, every feature), for the
+   `test_hooks` target without the feature, with the library crates it builds (the all-features
+   run compiles that test to nothing), and for the fuzz crate;
 3. the test suite with `cargo nextest`, every feature on (`--all-features` turns on the test
    hooks the crash tests drive);
 4. the `test_hooks` test in a release build without the feature, which proves that such a build
    ignores the test hooks (`--no-tests=fail`: it fails if the test does not run);
 5. `cargo doc` with `RUSTDOCFLAGS="-D warnings"` and `--document-private-items`, which documents
    private items too, so that the CLI's internal docs (its modules are private to its library)
-   stay link-checked;
+   stay link-checked, run twice: as it stands, and with `--all-features`, which also renders and
+   link-checks the code behind `test-hooks` (the order checker and the fault doubles);
 6. `cargo deny check`: advisories, licenses, bans and sources.
 
 Every cargo build, test, clippy and doc step uses `--locked`, so `Cargo.lock` (committed, like
@@ -86,8 +88,9 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
   `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FAIL_AT`, `SWARMOPS_TEST_ORDER_CHECK`,
   `SWARMOPS_TEST_NOW`), read only under
   `#[cfg(feature = "test-hooks")]`. A test that needs them is marked
-  `required-features = ["test-hooks"]` or `#[cfg(feature = "test-hooks")]`, so that a plain
-  `cargo test` skips it. Step 4 of `just check` keeps this honest.
+  `#[cfg(feature = "test-hooks")]`, or, for a whole file, its `mod` line in `tests/all.rs`
+  is (the CLI's `crash` and `faults` modules), so that a plain `cargo test` skips it. Step 4
+  of `just check` keeps this honest.
 - **Crash and fault tests are deterministic.** A crash sweep aborts the process at its k-th
   filesystem call (`SWARMOPS_TEST_CRASH_AT=k`) for every k a dry run counted
   (`SWARMOPS_TEST_FS_CALLS`), and an I/O-error sweep fails that call instead
@@ -122,7 +125,7 @@ without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is
 | Command | What it does |
 | --- | --- |
 | `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash and I/O-error sweeps, the power-loss images at every cut, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
-| `just check-ci-slow` | Every ignored test except `regenerate_golden` and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
+| `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden` and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |
 | `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. |
@@ -139,17 +142,21 @@ there belongs in a regression test.
 
 GitHub Actions runs `just check` on every push to `stable` and to `feat/**` branches and on every
 pull request to `stable`. The one check to look at is `tests-pass`: it passes only when every job
-it depends on passed. A weekly scheduled workflow runs `just check-ci-slow` and a 60-second fuzz
-smoke of every target. Dependabot proposes grouped, weekly updates for Cargo and GitHub Actions,
-after a cooldown; review them like any other change.
+it depends on passed. A weekly scheduled workflow runs `just check-ci-slow`, a 60-second fuzz
+smoke of every target, and the format, lint and test commands of `bench/compare` (a cargo
+workspace of its own that `just check` does not build). Dependabot proposes grouped, weekly
+updates for Cargo and GitHub Actions, after a cooldown; review them like any other change.
 
 - **Hung tests are killed and named.** The `ci` nextest profile ends a test after 10 minutes and
   the weekly `ci-slow` profile after 20; either way the test appears as a failure in the JUnit
   report the run uploads, and a hanging fuzz input stops after 30 seconds with its reproducer
   uploaded.
 - **Tool versions are bumped by hand.** `just`, `cargo-nextest` and `cargo-deny` are pinned in
-  the installer step of both workflows, each to a release at least 7 days old. Dependabot cannot
-  bump them; move them in a `ci:` commit when the local tools move.
+  the installer step of both workflows, `cargo-fuzz` in `scheduled.yml`'s `cargo install` step,
+  each to a release at least 7 days old. Dependabot cannot bump them. The installer step
+  (`fallback: none`) takes only releases in the manifest of the pinned `install-action`, so move
+  its pins in a `ci:` commit after Dependabot has bumped the action; CI's tools may therefore be
+  older than the local ones (nextest 0.9.146 against 0.9.148 at M1.5).
 - **A new RustSec advisory turns every push red** through `cargo deny check`, on purpose. Update
   the affected crate; if no fixed release exists and the advisory cannot affect SwarmOps, add an
   `ignore` entry with the advisory id and the reason to `[advisories]` in `deny.toml`, in a
