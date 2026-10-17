@@ -485,8 +485,9 @@ pub struct RefSetReq {
     /// the CLI's `--expect` help warns against it. Give this or `create`, not both.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_old: Option<Rev>,
-    /// To create the ref; if it exists already, the move fails with `E_CAS_MISMATCH`. Give this
-    /// or `expected_old`, not both.
+    /// To create the ref. If it exists at another target, the move fails with `E_CAS_MISMATCH`;
+    /// if it already holds `new`, nothing is written and the response is a replay
+    /// (`already_applied`). Give this or `expected_old`, not both.
     #[serde(default)]
     pub create: bool,
 }
@@ -496,13 +497,16 @@ pub struct RefSetReq {
 pub struct RefSetResp {
     /// The ref.
     pub name: String,
-    /// Its target before; omitted when the ref was created.
+    /// What the ref held before a move that was applied. On a replay (`already_applied`) it is
+    /// `expected_old` as resolved, which the ref need not have held; omitted when `create` was
+    /// given.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old: Option<String>,
     /// Its target after; omitted when the ref was deleted.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub new: Option<String>,
-    /// The ref was already in the requested state, so nothing changed and a replay is safe.
+    /// The ref was already in the requested state, so nothing changed and a replay is safe;
+    /// `old` and `new` are then the request's `expected_old` and `new`, resolved to full ids.
     pub already_applied: bool,
     /// Problems found after the move became durable, such as failed housekeeping; the move
     /// itself succeeded. Omitted when empty.

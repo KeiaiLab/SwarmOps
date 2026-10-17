@@ -85,7 +85,8 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - `server/discover` and the `-32022` error list every revision served (2026-07-28, 2025-11-25,
   2025-06-18), so a client that cannot speak 2026-07-28 can fall back to `initialize`.
 - `ref set` to the target a ref already holds is a replay: `already_applied: true` and nothing
-  written, in the CLI and through MCP.
+  written, in the CLI and through MCP, `--create` included; `old` and `new` are then the
+  request's.
 - The `--expect` help of `ref set` and `ref delete` states the README's rule: give the full
   changeset id you read, since a ref name, a relative revision such as `main~1` or an id prefix
   is read from the store when the command runs, and then the compare-and-swap protects nothing.

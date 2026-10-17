@@ -72,7 +72,8 @@ error_codes! {
     /// The parent changeset is not in the store.
     // Exit 6: a not-found, though the name does not say so.
     UnknownParent => "E_UNKNOWN_PARENT", EXIT_NOT_FOUND, false;
-    /// The ref no longer holds the expected target; `details.actual` holds what it does.
+    /// The ref no longer holds the expected target (or, with `create`, exists at another one);
+    /// `details.actual` holds what it does, `null` when the ref does not exist.
     CasMismatch => "E_CAS_MISMATCH", EXIT_RETRYABLE, true;
     /// No ref by that name.
     RefNotFound => "E_REF_NOT_FOUND", EXIT_NOT_FOUND, false;

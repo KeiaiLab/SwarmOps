@@ -203,7 +203,8 @@ pub enum RefCommand {
         rev: String,
         #[arg(long, value_name = "REV", help = EXPECT_HELP, long_help = SET_EXPECT_LONG_HELP)]
         expect: Option<String>,
-        /// Create the ref; it must not exist.
+        /// Create the ref; if it holds REV already that is a replay (already_applied), at
+        /// another target E_CAS_MISMATCH.
         #[arg(long)]
         create: bool,
     },

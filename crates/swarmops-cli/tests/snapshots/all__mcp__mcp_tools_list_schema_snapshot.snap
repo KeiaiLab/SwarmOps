@@ -224,7 +224,7 @@ expression: listed
         "properties": {
           "create": {
             "default": false,
-            "description": "To create the ref; if it exists already, the move fails with `E_CAS_MISMATCH`. Give this\nor `expected_old`, not both.",
+            "description": "To create the ref. If it exists at another target, the move fails with `E_CAS_MISMATCH`;\nif it already holds `new`, nothing is written and the response is a replay\n(`already_applied`). Give this or `expected_old`, not both.",
             "type": "boolean"
           },
           "expected_old": {
