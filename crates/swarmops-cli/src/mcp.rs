@@ -76,10 +76,12 @@
 //! same request, as its `structuredContent` and as the text of its one content block, and
 //! `isError` is true exactly when the envelope's `ok` is false.
 //!
-//! Clients cut long tool results (Claude Code at 25,000 tokens by default), and a result holds
-//! its envelope twice, so the descriptions and [`INSTRUCTIONS`] ask the model for small reads
-//! (`max_bytes` of 32 KiB or less, `limit` and `max_changes` of 100 or less, paging with the
-//! `cursor`); the API's defaults stay as the operations spec gives them.
+//! Clients limit long tool results. Claude Code saves a successful one over 25,000 tokens by
+//! default, or over 50,000 characters whatever its token count, to a file and gives the model
+//! its path instead; it cuts only the text of an error, past about 11,000 characters. A result
+//! holds its envelope twice, so the descriptions and [`INSTRUCTIONS`] ask the model for small
+//! reads (`max_bytes` of 32 KiB or less, `limit` and `max_changes` of 100 or less, paging with
+//! the `cursor`); the API's defaults stay as the operations spec gives them.
 //!
 //! # The store and the identity
 //!
@@ -181,12 +183,12 @@ the call runs instead of pinning the id you read: the ref's own name always matc
 compare-and-swap protects nothing, and main~1 on ref main never matches; the server refuses \
 them. After \
 E_CAS_MISMATCH, commit your change again on top of details.actual, re-applying your edits to \
-the content there, then retry with expected_old set to it. Clients cut long tool results \
-(Claude Code at 25,000 tokens by default) and each result carries its envelope twice, so ask \
-for little: max_bytes of 32768 or less for read_file (less for a binary file, which comes back \
-in base64), a limit of 100 or less for read_tree and log, paging on with the cursor a result \
-returns, and max_changes of 100 or less for show. Every change is recorded for the agent the \
-server runs as.";
+the content there, then retry with expected_old set to it. Clients limit long tool results \
+(Claude Code saves one over 25,000 tokens or 50,000 characters to a file and gives you its \
+path instead) and each result carries its envelope twice, so ask for little: max_bytes of \
+32768 or less for read_file (less for a binary file, which comes back in base64), a limit of \
+100 or less for read_tree and log, paging on with the cursor a result returns, and \
+max_changes of 100 or less for show. Every change is recorded for the agent the server runs as.";
 
 /// The tools, in the order `tools/list` gives them.
 static TOOLS: [Spec; 10] = [
@@ -206,7 +208,7 @@ static TOOLS: [Spec; 10] = [
         title: "Read a file",
         description: "Reads one file at a revision, without a checkout, as UTF-8 text or \
                       base64; pass max_bytes of 32768 or less (less for a binary file), since \
-                      clients cut long tool results and this one holds the content twice.",
+                      clients limit long tool results and this one holds the content twice.",
         effect: Effect::Reads,
     },
     Spec {
@@ -216,7 +218,7 @@ static TOOLS: [Spec; 10] = [
         title: "List a directory",
         description: "Lists one directory at a revision, without a checkout, a page of entries \
                       at a time; pass a limit of 100 or less and page on with the cursor, since \
-                      clients cut long tool results.",
+                      clients limit long tool results.",
         effect: Effect::Reads,
     },
     Spec {
@@ -225,7 +227,7 @@ static TOOLS: [Spec; 10] = [
         request: "ShowReq",
         title: "Show a changeset",
         description: "One changeset in full: its parents, author, message, changes and \
-                      signatures; pass max_changes of 100 or less, since clients cut long tool \
+                      signatures; pass max_changes of 100 or less, since clients limit long tool \
                       results.",
         effect: Effect::Reads,
     },
@@ -236,7 +238,7 @@ static TOOLS: [Spec; 10] = [
         title: "List history",
         description: "History along first parents, newest first, from main unless rev says \
                       otherwise; pass a limit of 100 or less and page on with the cursor, since \
-                      clients cut long tool results.",
+                      clients limit long tool results.",
         effect: Effect::Reads,
     },
     Spec {

@@ -239,11 +239,13 @@ Two rules matter more to an agent than to a person at the CLI:
   of pinning what the agent saw, so the compare-and-swap protects nothing: the server refuses
   one with `E_INVALID_ARG`. The CLI's `--expect` still takes any revision, and its help says why
   not to.
-- Clients cut long tool results (Claude Code at 25,000 tokens by default), and each result holds
-  its envelope twice, so an agent should ask for little: `max_bytes` of 32 KiB or less for
-  `read_file`, a `limit` of 100 or less for `read_tree` and `log`, paging on with the `cursor` a
-  result returns, and `max_changes` of 100 or less for `show`. The tools' descriptions say so;
-  the operations' own defaults stay as they are.
+- Clients limit long tool results. Claude Code saves a successful one over 25,000 tokens by
+  default, or over 50,000 characters whatever its token count, to a file and gives the agent its
+  path instead; it cuts only the text of an error. Each result holds its envelope twice, so an
+  agent should ask for little: `max_bytes` of 32 KiB or less for `read_file`, a `limit` of 100
+  or less for `read_tree` and `log`, paging on with the `cursor` a result returns, and
+  `max_changes` of 100 or less for `show`. The tools' descriptions say so; the operations' own
+  defaults stay as they are.
 
 ### When the server does not start
 

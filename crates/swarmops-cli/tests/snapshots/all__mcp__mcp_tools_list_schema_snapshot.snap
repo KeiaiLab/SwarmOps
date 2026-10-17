@@ -37,7 +37,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Reads one file at a revision, without a checkout, as UTF-8 text or base64; pass max_bytes of 32768 or less (less for a binary file), since clients cut long tool results and this one holds the content twice.",
+      "description": "Reads one file at a revision, without a checkout, as UTF-8 text or base64; pass max_bytes of 32768 or less (less for a binary file), since clients limit long tool results and this one holds the content twice.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout.",
@@ -75,7 +75,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Lists one directory at a revision, without a checkout, a page of entries at a time; pass a limit of 100 or less and page on with the cursor, since clients cut long tool results.",
+      "description": "Lists one directory at a revision, without a checkout, a page of entries at a time; pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime.",
@@ -122,7 +122,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "One changeset in full: its parents, author, message, changes and signatures; pass max_changes of 100 or less, since clients cut long tool results.",
+      "description": "One changeset in full: its parents, author, message, changes and signatures; pass max_changes of 100 or less, since clients limit long tool results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`show`: one changeset in full.",
@@ -155,7 +155,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "History along first parents, newest first, from main unless rev says otherwise; pass a limit of 100 or less and page on with the cursor, since clients cut long tool results.",
+      "description": "History along first parents, newest first, from main unless rev says otherwise; pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`log`: history along first parents, a page at a time.",
