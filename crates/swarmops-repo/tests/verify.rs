@@ -10,6 +10,7 @@
 //! Every test owns a fresh store (`tempfile::tempdir()`) and damages it by hand.
 
 use std::fs;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,6 +24,7 @@ use swarmops_store::{
     ChangesetMeta, FsObjectStore, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore, RealFs,
     Record,
 };
+use swarmops_testkit::fs::{RecordingFs, When};
 use swarmops_testkit::repo::{blob, commit, delete, new_repo, path, put, put_as, signature};
 use tempfile::TempDir;
 
@@ -386,6 +388,53 @@ fn verify_detects_index_records_lost_below_the_checkpoint() {
     let column = fs::read(&ids).unwrap();
     fs::write(&ids, &column[..32]).unwrap();
     assert_problems(&repo, vec![mismatch(1, MismatchCause::Journal)]);
+}
+
+/// A writer whose index sync fails cuts the index back to the checkpoint
+/// ([`Index::truncate_to`]). A verify that opened the index before the cut, and counted records
+/// the cut took, fails with an I/O error (`UnexpectedEof`) when it reads them, never with an
+/// [`VerifyProblem::IndexMismatch`]; one that runs after the cut finds nothing wrong.
+#[test]
+fn verify_racing_the_cut_of_a_failed_index_sync_fails_with_an_io_error() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
+    let c3 = commit(&repo, &[c2], vec![put("f", b"3")]);
+    // The checkpoint past records 0..=2; records 3 and 4 lie past it.
+    MetaStore::open(&root).unwrap().flush().unwrap();
+    let c4 = commit(&repo, &[c3], vec![put("f", b"4")]);
+    commit(&repo, &[c4], vec![put("f", b"5")]);
+    let layout = Layout::new(&root);
+    let records = || Index::open(&layout, Arc::new(RealFs)).unwrap().len();
+    assert_eq!(records(), 5);
+
+    let (writer_fs, _calls) = RecordingFs::new();
+    let fail = writer_fs.failing();
+    let mut writer = MetaStore::open_with_fs(&root, Arc::new(writer_fs)).unwrap();
+    writer.set_parallelism(1);
+    fail.set("sync_data ids.col");
+    // Verify opens the index (five records), then reads the ref files, `main` first, then the
+    // journal: right before it reads `main`, the writer's flush fails its sync and cuts the
+    // index back to the three records the checkpoint passed.
+    let (verify_fs, _calls) = RecordingFs::new();
+    let verify_fs = verify_fs.with_hook((
+        "read main".to_owned(),
+        When::Before,
+        Box::new(move || {
+            let cut = writer.flush();
+            assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+        }),
+    ));
+    let racing = LocalRepo::open_with_fs(&root, Arc::new(verify_fs)).unwrap();
+
+    match racing.verify(false) {
+        Err(RepoError::Store(StoreError::Io(e))) => {
+            assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}");
+        }
+        other => panic!("expected an I/O error from the stale index, got {other:?}"),
+    }
+    assert_eq!(records(), 3, "cut");
+    assert_problems(&repo, Vec::new());
 }
 
 #[test]

@@ -1954,6 +1954,52 @@ fn a_snapshot_whose_index_a_writer_cuts_as_it_opens_counts_every_record_the_sort
     }
 }
 
+/// A snapshot whose index opened before a failed index sync's cut, and counted records the cut
+/// took, fails with an I/O error (`UnexpectedEof`) while it builds its overlay, never with
+/// wrong data ([`Index::truncate_to`], storage spec §3); a snapshot taken after the cut reads
+/// the index as cut, the journal's frames over it.
+#[test]
+fn a_snapshot_whose_index_a_writer_cuts_after_it_opened_fails_with_an_io_error() {
+    let (_dir, root) = new_root();
+    let (writer, fail) = failing_store(&root);
+    for n in 0..3 {
+        insert(&writer, &[chained(n)]);
+    }
+    writer.flush().unwrap(); // the checkpoint past records 0..=2
+    for n in 3..5 {
+        insert(&writer, &[chained(n)]); // records 3 and 4, past the checkpoint
+    }
+    assert_eq!(chained_lens(&root), chained_want(5));
+    fail.set("sync_data ids.col");
+    // The reader's first read of main's file comes once its index has opened and counted all
+    // five records, right before it builds its overlay: the writer's flush cuts the index back
+    // to the three records the checkpoint passed.
+    let (fs, _calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "read main".to_owned(),
+        When::Before,
+        Box::new(move || {
+            let cut = writer.flush();
+            assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+
+    match reader.read().map(drop) {
+        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::UnexpectedEof, "{e}"),
+        other => panic!("expected an I/O error from the stale index, got {other:?}"),
+    }
+    assert_eq!(chained_lens(&root), chained_want(3), "cut");
+
+    // A new snapshot reads the index as cut, and the journal's two frames over it.
+    let read = reader.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), 5);
+    for n in 0..5 {
+        let got = read.changeset(id(n)).unwrap();
+        assert_eq!(got, Some(chained_stored(n)), "changeset {n}");
+    }
+}
+
 /// How many frames `journal.off` at `root` lists.
 fn listed(root: &Utf8Path) -> u64 {
     file_len(Layout::new(root).journal_off()) / 8
