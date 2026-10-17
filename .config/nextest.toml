@@ -2,13 +2,15 @@
 # `crates/swarmops-cli/tests/contention.rs`) share the host's disk, and each asserts that no
 # writer waits out the store's 10 s lock timeout: they run one after another, never at once,
 # so that neither slows the other's lock passes towards that timeout (docs/perf.md, "M1 (CLI
-# level)"). The rest of the suite still runs beside them.
+# level)"). The rest of the suite still runs beside them. Each crate's integration tests are one
+# binary (`tests/all.rs`), so the group takes the tests by name: those of the `contention`
+# modules.
 
 [test-groups]
 contention = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(contention)'
+filter = 'test(/^contention::/)'
 test-group = 'contention'
 
 # CI's profile: ci.yml sets `NEXTEST_PROFILE=ci` for `just check`, whose workspace run then uses

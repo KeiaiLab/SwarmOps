@@ -1,6 +1,7 @@
 //! `swarmops` processes whose filesystem calls fail (storage spec §2 rule 3, §3; operations spec
-//! §1): the error sweeps through the real binary. They drive the test hooks, so this test target
-//! requires the `test-hooks` feature, which the workspace's gates turn on (`--all-features`).
+//! §1): the error sweeps through the real binary. They drive the test hooks, so `all.rs` holds
+//! this module only with the `test-hooks` feature, which the workspace's gates turn on
+//! (`--all-features`).
 //!
 //! - A failure is `SWARMOPS_TEST_FAIL_AT=<k>:<mode>:<errno>`: the store's k-th filesystem call,
 //!   counted as `SWARMOPS_TEST_CRASH_AT` counts them, fails with an injected I/O error, `once`
@@ -24,12 +25,13 @@
 //!
 //! Each test owns its temp dirs, and the tests share nothing.
 
-mod support;
-
 use serde_json::Value;
-use support::sweep::{commit_template, dry_commit, dry_init, init_again, sweep, swept_commit};
-use support::{Run, Store, agent, run};
 use swarmops_store::FAIL_AT_ENV;
+
+use crate::support::sweep::{
+    commit_template, dry_commit, dry_init, init_again, sweep, swept_commit,
+};
+use crate::support::{Run, Store, agent, run};
 
 /// The failure modes and errnos the commit sweep runs each call with.
 const FAILURES: [&str; 4] = [

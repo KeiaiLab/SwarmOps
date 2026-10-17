@@ -1,14 +1,5 @@
-//! What the repository's integration tests share: a fresh store, the changes and commit
-//! requests they make, and, from the store's tests, the child-process runner ([`child`]) and
-//! the `FsOps` doubles ([`fs`]). A module directory, so that Cargo does not take it for a test
-//! target of its own.
-
-#![allow(dead_code)] // Each test binary uses the part it needs.
-
-#[path = "../../../swarmops-store/tests/support/child.rs"]
-pub mod child;
-#[path = "../../../swarmops-store/tests/support/fs.rs"]
-pub mod fs;
+//! What the repository's tests build: a fresh store, and the changes and commit requests they
+//! make on it.
 
 use camino::Utf8PathBuf;
 use swarmops_core::{BlobId, ChangesetId, EntryKind, ObjectKind, RepoPath, Signature, hash_object};
@@ -23,18 +14,22 @@ pub fn new_repo() -> (TempDir, Utf8PathBuf, LocalRepo) {
     (dir, root, repo)
 }
 
+/// The repo path `s`, which must be valid.
 pub fn path(s: &str) -> RepoPath {
     RepoPath::new(s).expect("a valid repo path")
 }
 
+/// The id of the blob that holds `content`.
 pub fn blob(content: &[u8]) -> BlobId {
     BlobId(hash_object(ObjectKind::Blob, content))
 }
 
+/// A change that puts a regular file holding `content` at `p`.
 pub fn put(p: &str, content: &[u8]) -> Change {
     put_as(p, EntryKind::File, content)
 }
 
+/// A change that puts an entry of `kind` holding `content` at `p`.
 pub fn put_as(p: &str, kind: EntryKind, content: &[u8]) -> Change {
     Change {
         path: path(p),
@@ -45,6 +40,7 @@ pub fn put_as(p: &str, kind: EntryKind, content: &[u8]) -> Change {
     }
 }
 
+/// A change that deletes `p`.
 pub fn delete(p: &str) -> Change {
     Change {
         path: path(p),

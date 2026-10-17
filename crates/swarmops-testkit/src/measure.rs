@@ -1,8 +1,5 @@
-//! What the store's benches and measurement tests share. A module directory, not
-//! `benches/common.rs`, so that Cargo does not take it for a bench target of its own; the
-//! measurement tests include it with `#[path]`. Each includer uses what it needs.
-
-#![allow(dead_code)]
+//! What the store's benches and its measurement tests (`fsync_percentiles.rs`,
+//! `contention.rs`) share.
 
 use std::fs;
 use std::path::PathBuf;

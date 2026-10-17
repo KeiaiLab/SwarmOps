@@ -122,9 +122,9 @@ impl FsObjectStore {
     /// Runs [`ObjectStore::put_batch`], and the directory fsyncs of [`ObjectStore::flush`], on
     /// a pool of its own with `threads` threads (0: one per available core). With 1 both go
     /// one at a time, `flush` on the calling thread and in path order, so that a test counting
-    /// [`FsOps`] calls (a crash sweep's [`crate::CrashAtFs`]) meets the same call at the same
-    /// count in every run. Until this is called, both use rayon's global pool, which by default also
-    /// has one thread per available core.
+    /// [`FsOps`] calls (a crash sweep's `CrashAtFs`) meets the same call at the same count in
+    /// every run. Until this is called, both use rayon's global pool, which by default also has
+    /// one thread per available core.
     ///
     /// # Panics
     ///

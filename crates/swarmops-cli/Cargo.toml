@@ -7,6 +7,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+# The integration tests are two test binaries, `tests/all.rs` and the release proof
+# `tests/test_hooks.rs` (see `[[test]]`).
+autotests = false
 
 [lints]
 workspace = true
@@ -26,14 +29,17 @@ path = "src/bin/so.rs"
 # them): for the crash tests, which require it, never for a release.
 test-hooks = ["swarmops-ops/test-hooks"]
 
-# The crash and fault tests drive the test hooks: without the feature, `cargo test` skips them.
+# One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
+# its tests named `<file>::<test>`; `crash.rs` and `faults.rs` drive the test hooks, so `all.rs`
+# holds them only with the feature (a plain `cargo test` skips them). Cargo builds no other test
+# target from `tests/` (`autotests = false`), so a new test file is a `mod` line there.
 [[test]]
-name = "crash"
-required-features = ["test-hooks"]
+name = "all"
 
+# The release proof, a binary of its own: `just check` builds and runs it without the feature,
+# in release, as `cargo build --release` builds the binaries.
 [[test]]
-name = "faults"
-required-features = ["test-hooks"]
+name = "test_hooks"
 
 [dependencies]
 swarmops-api = { path = "../swarmops-api", version = "0.1.0" }
@@ -47,6 +53,7 @@ serde_json.workspace = true
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
 assert_cmd.workspace = true
 insta.workspace = true
 # The power-loss tests record a run on a one-thread pool, so that it makes its calls in the

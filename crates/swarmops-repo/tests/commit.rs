@@ -7,8 +7,6 @@
 //! run in any order or in parallel. The crash sweep and the multi-process test run this test
 //! binary again as their children (selected by [`CHILD_ROOT`]), on the real filesystem.
 
-mod support;
-
 use std::fs;
 use std::io;
 #[cfg(feature = "test-hooks")]
@@ -32,14 +30,14 @@ use swarmops_repo::{
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
 use swarmops_store::{ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
-
-use crate::support::child::{CHILD_TIMEOUT, Child, this_test};
+use swarmops_testkit::child::{CHILD_TIMEOUT, Child, this_test};
 #[cfg(feature = "test-hooks")]
-use crate::support::child::{SIGABRT, run};
-use crate::support::fs::FailingFs;
+use swarmops_testkit::child::{SIGABRT, run};
+use swarmops_testkit::fs::FailingFs;
 #[cfg(feature = "test-hooks")]
-use crate::support::fs::copy_dir;
-use crate::support::{blob, delete, new_repo, path, put, put_as, signature};
+use swarmops_testkit::fs::copy_dir;
+use swarmops_testkit::repo::{blob, delete, new_repo, path, put, put_as, signature};
+use swarmops_testkit::test_name;
 
 /// Set only in the children this file's tests spawn: the store root.
 const CHILD_ROOT: &str = "SWARMOPS_TEST_REPO_COMMIT_CHILD_ROOT";
@@ -59,7 +57,7 @@ const PER_CHILD: u64 = 4;
 fn request(parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
     CommitRequest {
         metadata: vec![("agent".to_owned(), b"test/agent".to_vec())],
-        ..support::request(parents, changes, "a test commit")
+        ..swarmops_testkit::repo::request(parents, changes, "a test commit")
     }
 }
 
@@ -525,7 +523,7 @@ fn child_root() -> Option<Utf8PathBuf> {
 /// against the store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`).
 #[cfg(feature = "test-hooks")]
 fn crash_child(test: &str, root: &Utf8Path, k: u64) -> Output {
-    run(this_test(test)
+    run(this_test(&test_name!(test))
         .env(CHILD_ROOT, root)
         .env(CRASH_AT_ENV, k.to_string())
         .env(ORDER_CHECK_ENV, "1"))
@@ -954,7 +952,7 @@ fn commits_from_many_processes_all_land() {
     let children: Vec<Child> = (0..CHILDREN)
         .map(|number| {
             Child::spawn(
-                this_test("commits_from_many_processes_all_land")
+                this_test(&test_name!("commits_from_many_processes_all_land"))
                     .env(CHILD_ROOT, &root)
                     .env(CHILD_NUMBER, number.to_string()),
             )

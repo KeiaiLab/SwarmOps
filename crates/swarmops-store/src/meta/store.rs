@@ -230,7 +230,7 @@ impl MetaStore {
     }
 
     /// Opens the existing metadata store under `dir`, every change going through `fs` (a
-    /// [`crate::CrashAtFs`] in crash tests). Reads only that `meta/journal.log` is there:
+    /// `CrashAtFs` in crash tests). Reads only that `meta/journal.log` is there:
     /// [`StoreError::Format`] if it is not.
     pub fn open_with_fs(dir: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
         let layout = Layout::new(dir);
@@ -256,7 +256,7 @@ impl MetaStore {
     /// [`Index::sync`], and the sync a compaction starts with) from `threads` threads at once
     /// (0: one per available core), at most one per file. 5 unless set. 1 syncs them one after
     /// another, in write order, so that a test counting [`FsOps`] calls (a crash sweep's
-    /// [`crate::CrashAtFs`]) meets the same call at the same count in every run.
+    /// `CrashAtFs`) meets the same call at the same count in every run.
     pub fn set_parallelism(&mut self, threads: usize) {
         self.parallelism = threads;
     }

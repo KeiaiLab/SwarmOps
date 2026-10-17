@@ -6,17 +6,14 @@
 //! bloated by an earlier one. Criterion reports per-sample means; for true
 //! per-write percentiles see `tests/fsync_percentiles.rs`.
 
-mod common;
-
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use swarmops_testkit::measure::base_dir;
 use tempfile::TempDir;
-
-use crate::common::base_dir;
 
 const PAYLOAD: [u8; 4096] = [0xA5; 4096];
 

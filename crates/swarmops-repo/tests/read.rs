@@ -6,8 +6,6 @@
 //! Every test owns a fresh store (`tempfile::tempdir()`). The crash sweep runs this test
 //! binary again as its children (selected by [`CHILD_ROOT`]).
 
-mod support;
-
 use std::fs;
 #[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
@@ -22,11 +20,12 @@ use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoI
 #[cfg(feature = "test-hooks")]
 use swarmops_store::CRASH_AT_ENV;
 use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
-
 #[cfg(feature = "test-hooks")]
-use crate::support::child::{SIGABRT, run, this_test};
-use crate::support::fs::RecordingFs;
-use crate::support::{blob, commit, new_repo, path, put, put_as, request};
+use swarmops_testkit::child::{SIGABRT, run, this_test};
+use swarmops_testkit::fs::RecordingFs;
+use swarmops_testkit::repo::{blob, commit, new_repo, path, put, put_as, request};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::test_name;
 
 /// Set only in the children of the crash sweep: the store root.
 #[cfg(feature = "test-hooks")]
@@ -733,9 +732,11 @@ fn create_makes_the_documented_fs_calls() {
 fn create_crashing_at(k: u64, total: u64) {
     let dir = tempfile::tempdir().unwrap();
     let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
-    let child = run(this_test("create_resumes_after_a_crash_at_any_call")
-        .env(CHILD_ROOT, &root)
-        .env(CRASH_AT_ENV, k.to_string()));
+    let child = run(
+        this_test(&test_name!("create_resumes_after_a_crash_at_any_call"))
+            .env(CHILD_ROOT, &root)
+            .env(CRASH_AT_ENV, k.to_string()),
+    );
     let finished = child.status.success();
     assert_eq!(
         finished,

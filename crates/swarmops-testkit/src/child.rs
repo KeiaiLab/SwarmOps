@@ -3,9 +3,12 @@
 //! spawned (or let go) unless a test says otherwise, and one still running then is killed,
 //! reaped, and fails the test with what it printed. A child is reaped however the test ends:
 //! its handle kills and waits for it when it is dropped, a panic's unwinding included.
+//!
+//! [`Child`] is the one runner of the tests' children: the runs of the binary
+//! ([`crate::cli`]) wait for theirs through it too.
 
 use std::io::Read;
-use std::process::{Command, Output, Stdio};
+use std::process::{self, Command, Output, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -18,13 +21,35 @@ pub const SIGABRT: i32 = 6;
 /// How often a wait looks whether a child has ended.
 const POLL: Duration = Duration::from_millis(1);
 
-/// The test harness's arguments that run test `test` alone, ignored or not (it may be one only
-/// the slow suite runs), with its output shown.
+/// The name the test harness knows a test of the module this expands in by, given the test's
+/// own: the module's path past the test binary's crate name, then the test's name
+/// (`journal::a_test` for `a_test` in the `journal` module of a `tests/all.rs`, `a_test` at a
+/// test binary's root). [`this_test`] and [`test_args`] take it, to run that test again.
+#[macro_export]
+macro_rules! test_name {
+    ($test:expr) => {
+        $crate::child::test_path(module_path!(), $test)
+    };
+}
+
+/// The name the test harness knows test `test` of module `module` by, `module` being its path
+/// as `module_path!` gives it: `module` past its first segment (the test binary's crate name),
+/// then `test`. [`test_name!`](crate::test_name!) passes it the module it expands in.
+pub fn test_path(module: &str, test: &str) -> String {
+    match module.split_once("::") {
+        Some((_crate, path)) => format!("{path}::{test}"),
+        None => test.to_owned(),
+    }
+}
+
+/// The test harness's arguments that run the test it knows as `test` ([`test_name!`]) alone,
+/// ignored or not (it may be one only the slow suite runs), with its output shown.
 pub fn test_args(test: &str) -> [&str; 4] {
     ["--exact", test, "--include-ignored", "--nocapture"]
 }
 
-/// This test binary, set to run test `test` alone ([`test_args`]).
+/// This test binary, set to run the test it knows as `test` ([`test_name!`]) alone
+/// ([`test_args`]).
 pub fn this_test(test: &str) -> Command {
     let mut command = Command::new(std::env::current_exe().expect("the test binary"));
     command.args(test_args(test));
@@ -43,19 +68,27 @@ type Readers = (JoinHandle<Vec<u8>>, JoinHandle<Vec<u8>>);
 /// A child whose stdout and stderr threads of their own read. Dropped, it is killed if it still
 /// runs, and reaped either way.
 pub struct Child {
-    child: std::process::Child,
+    /// The process.
+    child: process::Child,
+    /// Its stdout's and stderr's readers, until it is waited for.
     output: Option<Readers>,
 }
 
 impl Child {
     /// Spawns `command`, reading nothing from stdin, its stdout and stderr piped.
     pub fn spawn(command: &mut Command) -> Child {
-        let mut child = command
+        let child = command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .expect("spawn a child");
+        Child::adopt(child)
+    }
+
+    /// `child`, spawned with its stdout and stderr piped: from now on threads of their own read
+    /// them, and it is killed and reaped when dropped.
+    pub fn adopt(mut child: process::Child) -> Child {
         let stdout = drain(child.stdout.take());
         let stderr = drain(child.stderr.take());
         Child {
@@ -64,9 +97,15 @@ impl Child {
         }
     }
 
-    /// Waits for the child to end, until `deadline`: one still running then is killed, reaped,
-    /// and fails the test with what it printed.
-    pub fn wait(mut self, deadline: Instant) -> Output {
+    /// The child's process id.
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Waits for the child to end, until `deadline`: one still running then is killed and
+    /// reaped. What it printed and how it ended, and whether it was killed. A child is waited
+    /// for once.
+    pub fn finish(&mut self, deadline: Instant) -> (Output, bool) {
         let mut killed = false;
         let status = loop {
             if let Some(status) = self.child.try_wait().expect("look whether a child ended") {
@@ -88,6 +127,13 @@ impl Child {
             stdout: stdout.join().expect("read a child's stdout"),
             stderr: stderr.join().expect("read a child's stderr"),
         };
+        (output, killed)
+    }
+
+    /// Waits for the child to end, until `deadline`: one still running then is killed, reaped,
+    /// and fails the test with what it printed.
+    pub fn wait(mut self, deadline: Instant) -> Output {
+        let (output, killed) = self.finish(deadline);
         assert!(
             !killed,
             "a child past its deadline, so killed: {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",

@@ -7,7 +7,8 @@
 //! on the loaded host that docs/perf.md "M1 (CLI level)" records. `just check-slow` runs it
 //! unoptimized (one contention test at a time: `.config/nextest.toml`); `just perf` runs it
 //! optimized and prints only its summary, as docs/perf.md cites it: `cargo nextest run
-//! --release -p swarmops-cli --run-ignored all --test contention --no-capture`.
+//! --release -p swarmops-cli --run-ignored all --test all -E 'test(/^contention::/)'
+//! --no-capture`.
 //! [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of the harness.
 //!
 //! The parent `init`s a store in a fresh temporary directory under `SWARMOPS_BENCH_DIR`
@@ -50,8 +51,6 @@
 //! reaps every child still running. [`a_hung_child_is_killed_and_reported`] checks the parent's
 //! deadline with a child told ([`HANG`]) to sleep past it.
 
-mod support;
-
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
@@ -64,6 +63,9 @@ use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use swarmops_store::{Layout, MetaLock};
+use swarmops_testkit::test_name;
+
+use crate::support;
 
 /// How many children commit at once.
 const CHILDREN: usize = 32;
@@ -597,7 +599,12 @@ fn spawn_children(
             File::create(output_file(work, stream, number)).expect("create a child's output file")
         };
         let child = Command::new(&exe)
-            .args(["--exact", test, "--include-ignored", "--nocapture"])
+            .args([
+                "--exact",
+                &test_name!(test),
+                "--include-ignored",
+                "--nocapture",
+            ])
             .env(WORK_DIR, work)
             .env(CHILD_NUMBER, number.to_string())
             .env(BASE, base)

@@ -5,15 +5,11 @@
 //! under `SWARMOPS_BENCH_DIR` (default `~/.local/state/swarmops-bench`) and
 //! records every iteration's own duration; the table is what `docs/perf.md` cites.
 
-#[path = "../benches/common/mod.rs"]
-mod common;
-
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 use std::time::Instant;
-
-use crate::common::{base_dir, percentile};
+use swarmops_testkit::measure::{base_dir, percentile};
 
 const N: usize = 1000;
 const PAYLOAD: [u8; 4096] = [0xA5; 4096];

@@ -14,8 +14,6 @@
 //! version in `params._meta`), and the two before it, 2025-11-25 and 2025-06-18, which have a
 //! handshake (a session that `initialize` opens).
 
-mod support;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -27,10 +25,11 @@ use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use serde_json::{Value, json};
-use support::Store;
 use swarmops_api::{ErrorCode, ShowReq, StoreOps, schema_for_all};
 use swarmops_core::{ObjectKind, hash_object};
 use swarmops_ops::{LocalOps, Resolved};
+
+use crate::support::{self, Store};
 
 /// The agent the servers act as.
 const AGENT: &str = "agent/worker-17";

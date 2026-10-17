@@ -130,7 +130,7 @@ impl LocalRepo {
     ///
     /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests; only in a build with the store's
     /// `test-hooks` feature, which this crate's turns on), the object store and the metadata
-    /// store share one [`swarmops_store::CrashAtFs`] whose k-th call aborts the process, and
+    /// store share one `swarmops_store::CrashAtFs` whose k-th call aborts the process, and
     /// objects are written (and the directories and the index's files synced) one at a time, so
     /// that the k-th call is the same call in every run. With `SWARMOPS_TEST_FS_CALLS=<file>`
     /// set, the same holds, and that `CrashAtFs` writes how many calls both stores made to

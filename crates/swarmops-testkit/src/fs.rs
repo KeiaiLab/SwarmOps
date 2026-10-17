@@ -7,8 +7,7 @@
 //! - [`FastFs`]: the real filesystem without a single flush to stable storage.
 //! - [`Rendezvous`]: tells calls made at once from calls made one after another.
 //!
-//! The store's tests use them, and so do the repository's and the CLI's, which include this
-//! file by its path.
+//! The store's tests use them, and so do the repository's, the operations' and the CLI's.
 
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
@@ -49,6 +48,7 @@ impl Call<'_> {
     }
 }
 
+/// The file name of `path`, which must have one.
 fn file_name(path: &Path) -> String {
     path.file_name()
         .expect("a path with a file name")
@@ -72,9 +72,27 @@ pub trait Watch: Send + Sync {
     }
 }
 
+/// A watcher the test holds a handle on too, to read what it counted.
+impl<W: Watch + ?Sized> Watch for Arc<W> {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        (**self).before(call)
+    }
+
+    fn after(&self, call: &Call<'_>) {
+        (**self).after(call);
+    }
+
+    fn after_success(&self, call: &Call<'_>) -> io::Result<()> {
+        (**self).after_success(call)
+    }
+}
+
 /// The real filesystem ([`RealFs`]), its watcher run around each call. It dereferences to the
 /// watcher.
-pub struct Watched<W>(pub W);
+pub struct Watched<W>(
+    /// The watcher.
+    pub W,
+);
 
 impl<W> Deref for Watched<W> {
     type Target = W;
@@ -85,6 +103,7 @@ impl<W> Deref for Watched<W> {
 }
 
 impl<W: Watch> Watched<W> {
+    /// Runs `call`, the call of `method` on `paths`, with the watcher around it.
     fn around<T>(
         &self,
         method: &'static str,
@@ -176,7 +195,9 @@ pub type Hook = (String, When, Box<dyn FnOnce() + Send>);
 /// When a [`Hook`] runs, around the call it names.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum When {
+    /// Right before the call runs.
     Before,
+    /// Right after it ran, whether it failed or not.
     After,
 }
 
@@ -187,10 +208,15 @@ pub type RecordingFs = Watched<Recorder>;
 
 /// The watcher of a [`RecordingFs`].
 pub struct Recorder {
+    /// The calls recorded since the recorder's function last returned them.
     calls: Arc<Mutex<Vec<String>>>,
+    /// How it names a call.
     name: Box<dyn Fn(&Call<'_>) -> String + Send + Sync>,
+    /// The hook still to run, if any.
     hook: Mutex<Option<Hook>>,
+    /// The calls it fails.
     failing: Failing,
+    /// Its `sync_data` calls in flight.
     syncs: Rendezvous,
 }
 
@@ -307,6 +333,7 @@ impl Failing {
         self.0.lock().unwrap().push(call);
     }
 
+    /// Fails no call.
     pub fn clear(&self) {
         self.0.lock().unwrap().clear();
     }
@@ -332,6 +359,8 @@ type Predicate = dyn Fn(&str, &Path) -> bool + Send + Sync;
 pub struct FailWhen(Box<Predicate>);
 
 impl FailingFs {
+    /// The real filesystem, failing the calls `fail` picks, given the method's name and the
+    /// path the call acts on.
     pub fn new(fail: impl Fn(&str, &Path) -> bool + Send + Sync + 'static) -> Self {
         Watched(FailWhen(Box::new(fail)))
     }
@@ -429,10 +458,14 @@ impl FsOps for FastFs {
 #[derive(Clone, Default)]
 pub struct Rendezvous(Arc<(Mutex<InFlight>, Condvar)>);
 
+/// What a [`Rendezvous`] counts.
 #[derive(Default)]
 struct InFlight {
+    /// How many calls each call waits to be in flight with it; 0 waits for none.
     want: usize,
+    /// The calls in flight now.
     now: usize,
+    /// The most calls that were in flight at once since it was last armed.
     most: usize,
 }
 

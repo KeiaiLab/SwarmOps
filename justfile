@@ -56,13 +56,15 @@ perf:
     export SWARMOPS_TEST_CLI_CONTENTION_COMMITS="${SWARMOPS_TEST_CLI_CONTENTION_COMMITS:-1000}"
     load() { echo "perf: load average $1: $(cut -d' ' -f1-3 /proc/loadavg)"; }
     load before
-    cargo nextest run --locked --release -p swarmops-store --run-ignored ignored-only --test contention \
-        --no-capture 2>&1 | tee target/perf/store-contention.log | grep --line-buffered -E \
+    cargo nextest run --locked --release -p swarmops-store --run-ignored ignored-only --test all \
+        -E 'test(/^contention::/)' --no-capture 2>&1 | tee target/perf/store-contention.log \
+        | grep --line-buffered -E \
         '^[0-9]+ processes x |^  (wall |transaction:|lock wait |child total time:|journal:|uncontended )'
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
-    cargo nextest run --locked --release -p swarmops-cli --run-ignored ignored-only --test contention \
-        --no-capture 2>&1 | tee target/perf/contention.log | grep --line-buffered '^contention: '
+    cargo nextest run --locked --release -p swarmops-cli --run-ignored ignored-only --test all \
+        -E 'test(/^contention::/)' --no-capture 2>&1 | tee target/perf/contention.log \
+        | grep --line-buffered '^contention: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     cargo bench --locked -p swarmops-store --bench '*' -- --output-format bencher 2>&1 \

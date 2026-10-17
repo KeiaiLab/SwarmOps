@@ -8,8 +8,7 @@
 //!   [`FsyncModelFs::write_durable_image`]).
 //! - [`checked`]: a filesystem under the order checker in a build that has it.
 //!
-//! The store's tests use them, and so may the repository's and the CLI's, which include this
-//! file by its path.
+//! The store's tests use them.
 
 use std::collections::HashMap;
 use std::fs;
@@ -21,13 +20,14 @@ use swarmops_store::{FsOps, LinkOutcome, RealFs};
 
 /// `fs` with the store's write-ordering rules checked on every call
 /// (`swarmops_store::OrderCheckFs`, which panics at a call that breaks one), in a build with
-/// the `test-hooks` feature, as the gates build the tests; `fs` as it is in any other.
+/// this crate's `test-hooks` feature (which the store's turns on, as `--all-features` does in the
+/// gates); `fs` as it is in any other.
 #[cfg(feature = "test-hooks")]
 pub fn checked(fs: impl FsOps + 'static) -> Arc<dyn FsOps> {
     Arc::new(swarmops_store::OrderCheckFs::new(fs))
 }
 
-/// `fs` as it is: a build without the `test-hooks` feature has no order checker.
+/// `fs` as it is: a build without this crate's `test-hooks` feature has no order checker.
 #[cfg(not(feature = "test-hooks"))]
 pub fn checked(fs: impl FsOps + 'static) -> Arc<dyn FsOps> {
     Arc::new(fs)
@@ -68,14 +68,18 @@ type FailWhen = dyn Fn(&SyncCall<'_>) -> bool + Send + Sync;
 /// their directory covered, which the power-loss images model), and so a failed `fsync_dir`, or
 /// a failed `rename_durable` or `atomic_replace` once its data is synced, loses no data here.
 pub struct FsyncModelFs<F: FsOps = RealFs> {
+    /// The filesystem the calls run on.
     inner: F,
+    /// The sync-class calls it fails.
     fail: Box<FailWhen>,
+    /// What it knows.
     state: Mutex<Model>,
 }
 
 /// What the model knows.
 #[derive(Default)]
 struct Model {
+    /// The files it follows, by path.
     files: HashMap<PathBuf, ModelFile>,
     /// The sync-class calls so far.
     syncs: u64,
@@ -105,6 +109,7 @@ impl ModelFile {
         }
     }
 
+    /// Whether the byte at `at` is one a failed sync lost.
     fn is_lost(&self, at: u64) -> bool {
         self.lost
             .iter()
@@ -232,6 +237,7 @@ impl<F: FsOps> FsyncModelFs<F> {
         }
     }
 
+    /// What it knows, locked (a test that panicked with it held leaves it as it was).
     fn state(&self) -> MutexGuard<'_, Model> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -306,10 +312,12 @@ fn injected(method: &str, path: &Path) -> io::Error {
     ))
 }
 
+/// The length of the file at `path`; 0 if there is none.
 fn len_of(path: &Path) -> u64 {
     fs::metadata(path).map_or(0, |meta| meta.len())
 }
 
+/// `n`, which fits.
 fn to_u64(n: usize) -> u64 {
     u64::try_from(n).expect("usize fits in u64")
 }

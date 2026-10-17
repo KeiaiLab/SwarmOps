@@ -7,8 +7,6 @@
 //! may run in any order or in parallel. The multi-process tests run this test binary again
 //! as their children (selected by [`CHILD_ROOT`]), all on the real filesystem.
 
-mod support;
-
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::process::ExitStatusExt;
@@ -20,20 +18,22 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
-use swarmops_store::{
-    CRASH_AT_ENV, CasResult, ChangesetMeta, CommitInfo, CrashAtFs, Frame, FsOps, Index,
-    InsertOutcome, Journal, JournalEntry, Layout, MetaLock, MetaRead, MetaStore, MetaWrite, RealFs,
-    Record, RefMoveEntry, RefState, StoreError,
-};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{FailAt, FailAtFs, FailMode, InjectedError};
+use swarmops_store::{
+    CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError, MetaWrite,
+};
+use swarmops_store::{
+    CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
+    JournalEntry, Layout, MetaLock, MetaRead, MetaStore, RealFs, Record, RefMoveEntry, RefState,
+    StoreError,
+};
+use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
+use swarmops_testkit::faults::checked;
+use swarmops_testkit::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
+use swarmops_testkit::store::temp_dir as new_root;
+use swarmops_testkit::store::{append_bytes, file_len};
+use swarmops_testkit::test_name;
 use tempfile::TempDir;
-
-use crate::support::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
-use crate::support::faults::checked;
-use crate::support::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
-use crate::support::temp_dir as new_root;
-use crate::support::{append_bytes, file_len};
 
 /// Set only in the children the multi-process tests spawn: the store root.
 const CHILD_ROOT: &str = "SWARMOPS_TEST_META_CHILD_ROOT";
@@ -59,6 +59,7 @@ const NO_THREADS_ROOT: &str = "SWARMOPS_TEST_META_NO_THREADS_ROOT";
 
 /// Set only in the children of `crash_at_any_create_call_leaves_a_store_open_or_create_takes`:
 /// the store root.
+#[cfg(feature = "test-hooks")]
 const CREATE_CRASH_ROOT: &str = "SWARMOPS_TEST_META_CREATE_CRASH_ROOT";
 
 /// Set only in the children of `the_test_hooks_build_the_filesystem_they_name`: a directory of
@@ -791,7 +792,7 @@ fn compaction_triggered_past_threshold() {
         assert!(!insert(&store, &batch(b)).checkpointed, "batch {b}");
     }
     assert_eq!(index(&root).tail_len(), 1000);
-    assert_eq!(compacted_frames(&store), []);
+    assert_eq!(compacted_frames(&store), Vec::<u64>::new());
 
     // The write that takes the tail past the threshold compacts, then checkpoints.
     let info = insert(&store, &batch(10));
@@ -847,7 +848,7 @@ fn run_children(test: &str, root: &Utf8Path) -> Vec<Output> {
     let children: Vec<Child> = (0..CHILDREN)
         .map(|number| {
             Child::spawn(
-                this_test(test)
+                this_test(&test_name!(test))
                     .env(CHILD_ROOT, root)
                     .env(CHILD_NUMBER, number.to_string()),
             )
@@ -1677,7 +1678,11 @@ fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
     fail.clear();
     let cut = index(&root);
     assert_eq!((cut.len(), cut.sorted_count()), (32, 0));
-    assert_eq!(compacted_frames(&store), [], "nothing was compacted");
+    assert_eq!(
+        compacted_frames(&store),
+        Vec::<u64>::new(),
+        "nothing was compacted"
+    );
 
     assert!(store.write().unwrap().commit().unwrap().checkpointed);
     let index = index(&root);
@@ -2059,10 +2064,10 @@ fn a_failed_log_sync_cuts_the_frame_and_reports_not_committed() {
 
     // The cut fails too: the process aborts, and the store opens as a crash would leave it.
     let (_dir, root) = new_root();
-    let child = run(
-        this_test("a_failed_log_sync_cuts_the_frame_and_reports_not_committed")
-            .env(ABORT_ROOT, &root),
-    );
+    let child = run(this_test(&test_name!(
+        "a_failed_log_sync_cuts_the_frame_and_reports_not_committed"
+    ))
+    .env(ABORT_ROOT, &root));
     let stderr = String::from_utf8_lossy(&child.stderr);
     assert_eq!(
         child.status.signal(),
@@ -2159,6 +2164,7 @@ const SWEEP_PLAN: &str = "SWARMOPS_TEST_META_SWEEP_PLAN";
 
 /// The transaction the store-level sweeps fail or crash: changeset `n`, a root, and
 /// `release/swept` created at it, in one frame.
+#[cfg(feature = "test-hooks")]
 fn swept(store: &MetaStore, n: u64) -> Result<CommitInfo, StoreError> {
     let mut write = store.write()?;
     write.insert_changeset(cs(n, &[]))?;
@@ -2167,6 +2173,7 @@ fn swept(store: &MetaStore, n: u64) -> Result<CommitInfo, StoreError> {
 }
 
 /// What a transaction's outcome says of it.
+#[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Said {
     /// It returned, or failed after its commit point ([`StoreError::PostCommit`]).
@@ -2177,6 +2184,7 @@ enum Said {
     Aborted,
 }
 
+#[cfg(feature = "test-hooks")]
 fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
     match outcome {
         Ok(_) | Err(StoreError::PostCommit { .. }) => Said::Committed,
@@ -2188,6 +2196,7 @@ fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
 /// subject): changesets `0..n` past the checkpoint, `n` returned, so that the swept transaction
 /// `n` moves the checkpoint (31 frames of one changeset each, the 32nd swept) or, `compacting`,
 /// compacts (1,024 changesets in one frame: the swept one takes the tail past the threshold).
+#[cfg(feature = "test-hooks")]
 fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
     let (dir, root) = new_root();
     let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
@@ -2209,6 +2218,7 @@ fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
 }
 
 /// A copy of the store at `template`, in a temp dir of its own.
+#[cfg(feature = "test-hooks")]
 fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
     let (dir, root) = new_root();
     copy_dir(template.as_std_path(), root.as_std_path());
@@ -2217,6 +2227,7 @@ fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
 
 /// How many filesystem calls `run` makes on a copy of the store at `template`, one index file
 /// synced at a time, no call failing.
+#[cfg(feature = "test-hooks")]
 fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
     let (_dir, root) = copy_of(template);
     let counter = Arc::new(CrashAtFs::new(FastFs, 0));
@@ -2233,6 +2244,7 @@ fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
 /// template's changesets are all there; a transaction's changeset is there exactly when it said
 /// it committed (either, after an abort), the swept one's ref with it; and the index holds each
 /// changeset once, the checkpoint at the journal's end.
+#[cfg(feature = "test-hooks")]
 #[track_caller]
 fn assert_recovers(root: &Utf8Path, template: u64, outcomes: &[(u64, Said)], what: &str) {
     let store = MetaStore::open_with_fs(root, checked(FastFs))
@@ -2318,7 +2330,9 @@ fn sweep_child(root: &Utf8Path, plan: &str) {
 /// failed journal append that fails too), which says why on stderr, or by a planned crash.
 #[cfg(feature = "test-hooks")]
 fn run_sweep_child(test: &str, root: &Utf8Path, plan: &str) -> Said {
-    let child = run(this_test(test).env(SWEEP_ROOT, root).env(SWEEP_PLAN, plan));
+    let child = run(this_test(&test_name!(test))
+        .env(SWEEP_ROOT, root)
+        .env(SWEEP_PLAN, plan));
     let stderr = String::from_utf8_lossy(&child.stderr);
     if child.status.signal() == Some(SIGABRT) {
         assert!(
@@ -2639,7 +2653,7 @@ fn the_test_hooks_build_the_filesystem_they_name() {
         return;
     }
     let (_dir, root) = new_root();
-    let checked = run(this_test(TEST)
+    let checked = run(this_test(&test_name!(TEST))
         .env(HOOKS_ROOT, &root)
         .env(swarmops_store::ORDER_CHECK_ENV, "1"));
     let stderr = String::from_utf8_lossy(&checked.stderr);
@@ -2652,7 +2666,7 @@ fn the_test_hooks_build_the_filesystem_they_name() {
     assert!(stdout.contains("counts calls: false"), "{stdout}");
 
     let (_dir, root) = new_root();
-    let failing = run(this_test(TEST)
+    let failing = run(this_test(&test_name!(TEST))
         .env(HOOKS_ROOT, &root)
         .env(swarmops_store::FAIL_AT_ENV, "2:persistent:enospc"));
     assert!(failing.status.success(), "{:?}", failing.status);
@@ -2669,6 +2683,7 @@ fn the_test_hooks_build_the_filesystem_they_name() {
 }
 
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
     if let Ok(root) = std::env::var(CREATE_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
@@ -2679,11 +2694,11 @@ fn crash_at_any_create_call_leaves_a_store_open_or_create_takes() {
     let calls = u64::try_from(CREATE_CALLS.len()).unwrap();
     for k in 1..=calls + 1 {
         let (_dir, root) = new_root();
-        let child = run(
-            this_test("crash_at_any_create_call_leaves_a_store_open_or_create_takes")
-                .env(CREATE_CRASH_ROOT, &root)
-                .env(CRASH_AT_ENV, k.to_string()),
-        );
+        let child = run(this_test(&test_name!(
+            "crash_at_any_create_call_leaves_a_store_open_or_create_takes"
+        ))
+        .env(CREATE_CRASH_ROOT, &root)
+        .env(CRASH_AT_ENV, k.to_string()));
         let ended_as_expected = if k <= calls {
             child.status.signal() == Some(SIGABRT)
         } else {
@@ -3236,12 +3251,14 @@ fn reflog_walks_back_past_256_frames() {
 
 /// Set only in the children of `crash_at_any_replay_call_recovers_to_the_journal`: the store
 /// root.
+#[cfg(feature = "test-hooks")]
 const REPLAY_CRASH_ROOT: &str = "SWARMOPS_TEST_META_REPLAY_CRASH_ROOT";
 
 /// Lays out at `root` a store whose journal holds three frames past the checkpoint that no
 /// writer materialized, as a power loss can leave the index short of several frames' records:
 /// changesets 2..=4 on changeset 1, main moved from 1 to 4, release/new created and
 /// release/old deleted. Everything before them is materialized and checkpointed.
+#[cfg(feature = "test-hooks")]
 fn unreplayed_store(root: &Utf8Path) {
     let store = MetaStore::create_with_fs(root, checked(FastFs)).unwrap();
     insert(&store, &[cs(1, &[])]);
@@ -3268,6 +3285,7 @@ fn unreplayed_store(root: &Utf8Path) {
 }
 
 /// Asserts that `read` shows what [`unreplayed_store`]'s journal holds.
+#[cfg(feature = "test-hooks")]
 #[track_caller]
 fn assert_replayed(read: &MetaRead<'_>, what: &str) {
     assert_eq!(read.count_changesets().unwrap(), 4, "{what}");
@@ -3288,6 +3306,7 @@ fn assert_replayed(read: &MetaRead<'_>, what: &str) {
 /// write finishes the replay: every record once, in journal order, and each ref file as its
 /// last move leaves it.
 #[test]
+#[cfg(feature = "test-hooks")]
 fn crash_at_any_replay_call_recovers_to_the_journal() {
     if let Ok(root) = std::env::var(REPLAY_CRASH_ROOT) {
         let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
@@ -3318,11 +3337,11 @@ fn crash_at_any_replay_call_recovers_to_the_journal() {
     for k in 1..=total + 1 {
         let (_dir, root) = new_root();
         copy_dir(template.as_std_path(), root.as_std_path());
-        let child = run(
-            this_test("crash_at_any_replay_call_recovers_to_the_journal")
-                .env(REPLAY_CRASH_ROOT, &root)
-                .env(CRASH_AT_ENV, k.to_string()),
-        );
+        let child = run(this_test(&test_name!(
+            "crash_at_any_replay_call_recovers_to_the_journal"
+        ))
+        .env(REPLAY_CRASH_ROOT, &root)
+        .env(CRASH_AT_ENV, k.to_string()));
         let ended_as_expected = if k <= total {
             child.status.signal() == Some(SIGABRT)
         } else {
@@ -3508,7 +3527,7 @@ fn a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer() {
         .arg("-c")
         .arg("ulimit -u 1 2>/dev/null || ulimit -p 1; exec \"$0\" \"$@\"")
         .arg(std::env::current_exe().unwrap())
-        .args(test_args(TEST))
+        .args(test_args(&test_name!(TEST)))
         .env(NO_THREADS_ROOT, &root));
     let report = report(0, &child);
     if report == "threads can be spawned" {

@@ -7,9 +7,9 @@
 //! by default ([`crate::FsObjectStore::open_default`], and `swarmops-repo`'s `LocalRepo::open`
 //! and `create`, which share one for both stores):
 //!
-//! - `SWARMOPS_TEST_CRASH_AT=<k>` aborts the process at its k-th call ([`CrashAtFs`]);
+//! - `SWARMOPS_TEST_CRASH_AT=<k>` aborts the process at its k-th call (`CrashAtFs`);
 //! - `SWARMOPS_TEST_FS_CALLS=<file>` has it write how many calls it made, so that a dry run tells
-//!   a sweep where it ends ([`CrashAtFs::reporting_calls_to`]);
+//!   a sweep where it ends (`CrashAtFs::reporting_calls_to`);
 //! - `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` fails its k-th call with an injected I/O
 //!   error, and with `persistent` every mutating call after it too (`FailAtFs`);
 //! - `SWARMOPS_TEST_ORDER_CHECK=1` checks the store's write-ordering rules on every call, and
@@ -21,23 +21,27 @@
 //!
 //! The hooks act only in a build with the `test-hooks` feature (this crate's, which the
 //! `test-hooks` features of `swarmops-repo`, `swarmops-ops` and `swarmops-cli` turn on): any
-//! other build, a release build among them, ignores the variables, and holds no `FailAtFs` or
-//! `OrderCheckFs` at all. The workspace's gates build the tests with it.
+//! other build, a release build among them, ignores the variables, and holds no fault double
+//! at all: `CrashAtFs`, `FailAtFs` and `OrderCheckFs` compile only with the feature, so a
+//! reference to one outside it does not compile. The workspace's gates build the tests with it.
+//! [`HookedFs`] is in every build, since the stores ask it for their filesystem: without the
+//! feature it has none to give.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(feature = "test-hooks")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_CRASH_AT=<k>` set
 /// to a positive k, the filesystem a store opens on by default aborts the process on its k-th
-/// call ([`CrashAtFs`]; see [`HookedFs::from_env`]).
+/// call (`CrashAtFs`; see [`HookedFs::from_env`]).
 pub const CRASH_AT_ENV: &str = "SWARMOPS_TEST_CRASH_AT";
 
 /// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_FS_CALLS=<file>`
 /// set, the filesystem a store opens on by default writes how many calls it made to `<file>`, in
-/// decimal, when it is dropped ([`CrashAtFs::reporting_calls_to`]): a test's dry run, to count
+/// decimal, when it is dropped (`CrashAtFs::reporting_calls_to`): a test's dry run, to count
 /// the calls of a run it then crashes or fails at each of (see [`HookedFs::from_env`]). A run
 /// that crashes writes nothing.
 pub const FS_CALLS_ENV: &str = "SWARMOPS_TEST_FS_CALLS";
@@ -237,8 +241,8 @@ fn parent_dir(path: &Path) -> &Path {
     }
 }
 
-/// One set of operations shared by several stores, so that they share one [`CrashAtFs`]
-/// call count.
+/// One set of operations shared by several stores, so that they share one `CrashAtFs` call
+/// count.
 impl<F: FsOps + ?Sized> FsOps for Arc<F> {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
         (**self).create_dir_all(p)
@@ -356,11 +360,12 @@ impl<F: FsOps + ?Sized> FsOps for Box<F> {
     }
 }
 
-/// Fault injection for crash tests: forwards to `inner`, except that the k-th call
-/// (counting every [`FsOps`] method, from 1) aborts the process with
+/// Fault injection for crash tests (feature `test-hooks`): forwards to `inner`, except that the
+/// k-th call (counting every [`FsOps`] method, from 1) aborts the process with
 /// [`std::process::abort`] instead of running, as a crash at that exact point would. It
 /// counts every call ([`CrashAtFs::calls`]), and can write the count to a file when it is
 /// dropped ([`CrashAtFs::reporting_calls_to`]).
+#[cfg(feature = "test-hooks")]
 pub struct CrashAtFs<F: FsOps> {
     inner: F,
     /// Calls left until the abort, the fatal one included; 0 never aborts.
@@ -383,7 +388,7 @@ impl HookedFs {
     ///
     /// 1. a `FailAtFs` when `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` is set (see
     ///    [`FAIL_AT_ENV`]); a malformed value panics, as a mistake in the test;
-    /// 2. a [`CrashAtFs`] when `SWARMOPS_TEST_CRASH_AT=<k>` is set to a positive k, or
+    /// 2. a `CrashAtFs` when `SWARMOPS_TEST_CRASH_AT=<k>` is set to a positive k, or
     ///    `SWARMOPS_TEST_FS_CALLS=<file>` is set: it aborts at call k, and reports its call
     ///    count to `<file>`. Being outside the `FailAtFs`, it counts the calls that fails too;
     /// 3. an `OrderCheckFs` when `SWARMOPS_TEST_ORDER_CHECK=1` is set: outermost, so
@@ -446,6 +451,7 @@ fn hooked_fs() -> Option<HookedFs> {
     None
 }
 
+#[cfg(feature = "test-hooks")]
 impl<F: FsOps> CrashAtFs<F> {
     /// Wraps `inner` so that call number `k` aborts; `k == 0` never aborts.
     pub fn new(inner: F, k: u64) -> Self {
@@ -485,6 +491,7 @@ impl<F: FsOps> CrashAtFs<F> {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 impl<F: FsOps> Drop for CrashAtFs<F> {
     fn drop(&mut self) {
         if let Some(file) = &self.report {
@@ -493,6 +500,7 @@ impl<F: FsOps> Drop for CrashAtFs<F> {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 impl<F: FsOps> FsOps for CrashAtFs<F> {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
         self.tick();

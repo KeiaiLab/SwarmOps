@@ -9,8 +9,6 @@
 //!
 //! Every test owns a fresh store (`tempfile::tempdir()`) and damages it by hand.
 
-mod support;
-
 use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
@@ -25,9 +23,8 @@ use swarmops_store::{
     ChangesetMeta, FsObjectStore, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore, RealFs,
     Record,
 };
+use swarmops_testkit::repo::{blob, commit, delete, new_repo, path, put, put_as, signature};
 use tempfile::TempDir;
-
-use crate::support::{blob, commit, delete, new_repo, path, put, put_as, signature};
 
 /// The file of object `id` in the store at `root`.
 fn object_file(root: &Utf8Path, id: ObjectId) -> Utf8PathBuf {

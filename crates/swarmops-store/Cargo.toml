@@ -7,6 +7,8 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
+# The integration tests are one test binary, `tests/all.rs` (see `[[test]]`).
+autotests = false
 
 [lints]
 workspace = true
@@ -14,10 +16,11 @@ workspace = true
 [features]
 # The test hooks, `SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FAIL_AT`
 # and `SWARMOPS_TEST_ORDER_CHECK`, which `HookedFs::from_env` reads, and the fault doubles they
-# build (`FailAtFs`, `OrderCheckFs`). Off unless asked for, so that every other build (a release
-# build included) ignores them and holds no such double; the workspace's gates turn it on with
-# `--all-features`.
-test-hooks = []
+# build (`CrashAtFs`, `FailAtFs`, `OrderCheckFs`). Off unless asked for, so that every other
+# build (a release build included) ignores them and holds no such double; the workspace's gates
+# turn it on with `--all-features`. It turns on the test kit's too, so that this crate's tests run
+# under the order checker (`swarmops_testkit::faults::checked`) whenever they run with the hooks.
+test-hooks = ["swarmops-testkit/test-hooks"]
 
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
@@ -29,8 +32,16 @@ thiserror.workspace = true
 zstd.workspace = true
 
 [dev-dependencies]
+# The integration tests' and benches' support; no unit test uses it (it depends on this crate).
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
 criterion.workspace = true
 proptest.workspace = true
+
+# One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
+# its tests named `<file>::<test>`. Cargo builds no other test target from `tests/`
+# (`autotests = false`), so a new test file is a `mod` line there.
+[[test]]
+name = "all"
 
 [[bench]]
 name = "fsync_latency"

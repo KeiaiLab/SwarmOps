@@ -1073,6 +1073,7 @@ dependencies = [
  "swarmops-ops",
  "swarmops-repo",
  "swarmops-store",
+ "swarmops-testkit",
  "tempfile",
 ]
 
@@ -1098,6 +1099,7 @@ dependencies = [
  "swarmops-core",
  "swarmops-repo",
  "swarmops-store",
+ "swarmops-testkit",
  "tempfile",
 ]
 
@@ -1108,6 +1110,7 @@ dependencies = [
  "camino",
  "swarmops-core",
  "swarmops-store",
+ "swarmops-testkit",
  "tempfile",
  "thiserror",
 ]
@@ -1122,9 +1125,22 @@ dependencies = [
  "proptest",
  "rayon",
  "swarmops-core",
+ "swarmops-testkit",
  "tempfile",
  "thiserror",
  "zstd",
+]
+
+[[package]]
+name = "swarmops-testkit"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "serde_json",
+ "swarmops-core",
+ "swarmops-repo",
+ "swarmops-store",
+ "tempfile",
 ]
 
 [[package]]

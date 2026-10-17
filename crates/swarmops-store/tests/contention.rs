@@ -2,8 +2,8 @@
 //! `meta/lock` (docs/perf.md, "M1 store level" and "M1 store fixes (7c)").
 //!
 //! Ignored, since it runs minutes of fsync'd transactions: `just check-slow` runs it, and
-//! `cargo nextest run --release -p swarmops-store --run-ignored all --test contention
-//! --no-capture` prints its table, as docs/perf.md cites it.
+//! `cargo nextest run --release -p swarmops-store --run-ignored all --test all -E
+//! 'test(/^contention::/)' --no-capture` prints its table, as docs/perf.md cites it.
 //!
 //! The test runs this test binary again as [`CHILDREN`] children (selected by [`WORK_DIR`])
 //! on a store in a fresh temporary directory under `SWARMOPS_BENCH_DIR` (default
@@ -38,9 +38,6 @@
 //! test as soon as a child fails, and waits for the children only until [`PARENT_DEADLINE`];
 //! and whatever ends the test early, [`Children`] kills and reaps every child still running.
 
-#[path = "../benches/common/mod.rs"]
-mod common;
-
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -54,8 +51,8 @@ use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::{
     ChangesetMeta, Frame, InsertOutcome, Journal, Layout, MetaStore, RealFs, Record, StoreError,
 };
-
-use crate::common::{base_dir, percentile};
+use swarmops_testkit::measure::{base_dir, percentile};
+use swarmops_testkit::test_name;
 
 /// How many writer processes the test runs.
 const CHILDREN: u64 = 32;
@@ -303,7 +300,7 @@ fn spawn_children(work: &Path) -> Children {
             File::create(output_file(work, stream, number)).expect("create a child's output file")
         };
         let child = Command::new(&exe)
-            .args(["--exact", TEST, "--ignored", "--nocapture"])
+            .args(["--exact", &test_name!(TEST), "--ignored", "--nocapture"])
             .env(WORK_DIR, work)
             .env(CHILD_NUMBER, number.to_string())
             .stdout(file("stdout"))

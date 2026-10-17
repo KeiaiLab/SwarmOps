@@ -28,8 +28,6 @@
 //!
 //! Throughput is reported in objects per second; docs/perf.md cites criterion's median.
 
-mod common;
-
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::Path;
@@ -44,9 +42,8 @@ use criterion::{
 };
 use swarmops_core::ObjectKind;
 use swarmops_store::{FsObjectStore, Layout, ObjectStore, RealFs};
+use swarmops_testkit::measure::{base_dir, mix};
 use tempfile::{NamedTempFile, TempDir};
-
-use crate::common::{base_dir, mix};
 
 /// Objects per iteration.
 const OBJECTS: u64 = 256;

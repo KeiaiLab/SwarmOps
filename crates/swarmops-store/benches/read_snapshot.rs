@@ -29,8 +29,6 @@
 //! for comparison with Task 2b's per-lookup `find` percentiles (`tests/index.rs`,
 //! `index_on_wide_history_is_fast`).
 
-mod common;
-
 use std::fs::{self, File, OpenOptions};
 use std::hint::black_box;
 use std::io::{self, Write};
@@ -46,8 +44,7 @@ use swarmops_core::{ChangesetId, ObjectKind, hash_object};
 use swarmops_store::{
     ChangesetMeta, FsOps, Journal, Layout, LinkOutcome, MetaStore, RealFs, StoreError,
 };
-
-use crate::common::{base_dir, mix};
+use swarmops_testkit::measure::{base_dir, mix};
 
 /// How many changesets the stores hold before the 31 more of `tail31`.
 const SIZES: [u64; 2] = [10_000, 100_000];

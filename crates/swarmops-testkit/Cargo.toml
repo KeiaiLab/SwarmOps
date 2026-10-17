@@ -1,0 +1,32 @@
+[package]
+name = "swarmops-testkit"
+description = "SwarmOps test support: FsOps doubles, power-loss images, the child-process runner, and the store, repository and binary builders the tests share"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# The store's test hooks (`swarmops-store/test-hooks`), for the doubles that need them: the order
+# checker of `faults::checked`. Not a default: the crates that use the test kit take it as a
+# dev-dependency, and a default here would, by feature unification, build the hooks into every
+# binary their tests build, the `swarmops` of the release run of `test_hooks` among them. The
+# gates turn it on with `--all-features`, and the store's own `test-hooks` turns it on too.
+test-hooks = ["swarmops-store/test-hooks"]
+
+# A dev-dependency of the store, the repository, the operations and the CLI. It depends on no
+# crate above the repository: the operations' unit tests use it, and there a dependency on
+# swarmops-ops would be a second copy of the crate under test (the store's unit tests do not use
+# it, for the same reason).
+[dependencies]
+swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
+swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+camino.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
