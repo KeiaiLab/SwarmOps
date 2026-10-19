@@ -702,6 +702,32 @@ fn usage_error_exits_2_with_envelope() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// `commit --advance`'s help says what an agent acts on before and after a lost race: the
+/// changeset and the move are recorded together or not at all, only while REF still names
+/// `--parent`, and after `E_CAS_MISMATCH` nothing was recorded, so the change is committed again
+/// on the error's `actual`. Help text is no contract (docs/policies/versioning-and-stability.md):
+/// this pins those facts, not the words around them.
+#[test]
+fn commit_advance_help_says_what_a_lost_race_recorded() {
+    let help = |flag: &str| {
+        let output = swarmops().args(["commit", flag]).output().unwrap();
+        assert_eq!(output.status.code(), Some(0), "commit {flag}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+    let short = help("-h");
+    let when = "in the same transaction, if REF still names --parent";
+    assert!(short.contains(when), "{when:?} not in: {short}");
+    let long = help("--help");
+    for fact in [
+        "in the same transaction: both are recorded, or neither",
+        "After E_CAS_MISMATCH nothing was recorded, neither the changeset nor the move",
+        "commit with --parent <actual> --advance REF",
+    ] {
+        assert!(long.contains(fact), "{fact:?} not in: {long}");
+    }
+}
+
 #[test]
 fn schema_snapshot() {
     let mut s = Session::new();
