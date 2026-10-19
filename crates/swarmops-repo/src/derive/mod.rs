@@ -37,6 +37,13 @@
 //! values its calls asked for) in memory until that node is done, and keeps the values it derived
 //! and could not store until it ends: so a run derives each value once, even over a store that
 //! takes none. A read of the store that fails is the run's error.
+//!
+//! # Eager derivations
+//!
+//! A derivation marked [`Derivation::EAGER`] is also derived ahead of any reader:
+//! [`Repo::derive_eager`], which `swarmops derive` runs, derives its value for each changeset the
+//! journal records after a frame, in journal order, so that a changeset's parents have theirs by
+//! the time its own is derived. A commit derives nothing (storage spec §5).
 
 mod engine;
 mod last_modified;
@@ -51,8 +58,8 @@ use std::sync::Arc;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
-use swarmops_core::{BlobId, Changeset, ChangesetId, ObjectKind, Tree, TreeId};
-use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore, StoreError};
+use swarmops_core::{BlobId, Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
+use swarmops_store::{DerivedSlot, DerivedStore, Journal, JournalEntry, ObjectStore, StoreError};
 use thiserror::Error;
 
 use self::engine::{Memo, Node};
@@ -448,6 +455,100 @@ impl<O: ObjectStore> Repo<O> {
     pub fn register<D: Derivation>(&mut self, derivation: D) -> Result<(), RepoError> {
         self.derivations.register(derivation)
     }
+}
+
+/// What one [`Repo::derive_eager`] call did: how many of the values it was asked for it derived
+/// and how many the store held, and where it leaves the journal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DeriveRun {
+    /// How many of the values it was asked for (each eager derivation's, of each changeset of the
+    /// frames it read) the store lacked: it derived them, and stored them unless a put failed. A
+    /// value one of them needed on the way that the store lacked, such as an older changeset's,
+    /// is derived too, and not counted.
+    pub derived: u64,
+    /// How many of the values it was asked for the store held already, which it left as they are.
+    pub cached: u64,
+    /// The frame to pass as `after` to go on: the last frame the call read; `None` if it read
+    /// none, as no frame follows `after`. With a `limit` of 0, the journal's last frame, and
+    /// `None` while the journal holds none.
+    pub last_frame: Option<u64>,
+}
+
+impl<O: ObjectStore> Repo<O> {
+    /// Derives, ahead of any reader, the value of every eager derivation ([`Derivation::EAGER`],
+    /// whose key is `()`) for each changeset recorded in the journal's frames after frame `after`
+    /// (from the first frame for `None`), reading at most `limit` frames: storage spec §5's eager
+    /// mode, which `swarmops derive` runs. The frames are read in one snapshot
+    /// ([`swarmops_store::MetaRead::journal_after`]), then the changesets taken in their order,
+    /// which puts a changeset's parents before it, so that its values find theirs stored. A value
+    /// the derived store holds is `cached`, any other is derived as [`Repo::derived`] derives it,
+    /// and stored, and counted `derived`. A frame that records no changeset (a ref's move) is
+    /// read and passed over.
+    ///
+    /// With a `limit` of 0 it reads no frame and derives nothing, wherever `after` is:
+    /// [`DeriveRun::last_frame`] is then the journal's last frame, from where a follower derives
+    /// only what is recorded later (`swarmops derive --follow`, unless `--from-start`).
+    ///
+    /// The errors are [`Repo::derived`]'s, for the first value that cannot be made, and
+    /// [`RepoError::Store`] for a read of the journal that fails; the values derived before the
+    /// error stay stored.
+    pub fn derive_eager(&self, after: Option<u64>, limit: usize) -> Result<DeriveRun, RepoError> {
+        if limit == 0 {
+            // What readers count as listed: the seq the next frame takes.
+            let journal = Journal::open(&self.layout, Arc::clone(&self.fs))?;
+            let last_frame = journal.frame_count()?.checked_sub(1);
+            return Ok(DeriveRun {
+                last_frame,
+                ..DeriveRun::default()
+            });
+        }
+        // The frames' records, read in one snapshot, which no derivation needs past this.
+        let entries = self.snapshot()?.meta.journal_after(after, limit)?;
+        let mut run = DeriveRun {
+            last_frame: entries.last().map(|entry| entry.seq),
+            ..DeriveRun::default()
+        };
+        // Each eager derivation, and its key: `()`'s bytes (`Registry::register` checks it).
+        let mut eager = Vec::new();
+        for (deriv, entry) in self.derivations.entries.iter().enumerate() {
+            if entry.eager {
+                let key: Arc<[u8]> = to_bytes(entry.name, "key", &())?.into();
+                eager.push((deriv, entry, key));
+            }
+        }
+        for cs in entries.iter().filter_map(recorded_changeset) {
+            for (deriv, entry, key) in &eager {
+                let slot = DerivedSlot {
+                    name: entry.name,
+                    version: entry.version,
+                    subject: cs.0,
+                    key,
+                };
+                if self.derived.get(&slot)?.is_some() {
+                    run.cached += 1;
+                    continue;
+                }
+                let node = Node {
+                    deriv: *deriv,
+                    cs,
+                    key: Arc::clone(key),
+                };
+                engine::run(&self.objects, &self.derived, &self.derivations, node)?;
+                run.derived += 1;
+            }
+        }
+        Ok(run)
+    }
+}
+
+/// The changeset that journal entry `entry` records, if it is a changeset record.
+fn recorded_changeset(entry: &JournalEntry) -> Option<ChangesetId> {
+    if entry.kind != "changeset" {
+        return None;
+    }
+    // A changeset record's key is the id's 32 bytes, as the journal holds them.
+    let id: [u8; 32] = entry.key.as_slice().try_into().ok()?;
+    Some(ChangesetId(ObjectId(id)))
 }
 
 /// The error of derivation `name`: [`RepoError::Derived`].

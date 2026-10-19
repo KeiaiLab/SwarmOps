@@ -1266,3 +1266,164 @@ mod skip_list {
         assert_eq!(list(&repo, c[4]), [c[3], c[2], c[0]]);
     }
 }
+
+/// Eager derivations (storage spec §5): `Repo::derive_eager`, which `swarmops derive` runs,
+/// derives the value of every eager derivation for each changeset the journal records after a
+/// frame, at most `limit` frames at a time, so that readers find those values stored.
+mod eager {
+    use swarmops_repo::derive::DeriveRun;
+    use swarmops_repo::{CasResult, FirstParentSkipList};
+
+    use super::*;
+
+    /// A changeset's first-parent depth, as [`Depth`] makes it, but eager: `swarmops derive`
+    /// derives it for each new changeset. Its derives are counted.
+    struct EagerDepth(Count);
+
+    impl Derivation for EagerDepth {
+        const NAME: &'static str = "eager_depth";
+        const VERSION: u32 = 1;
+        const EAGER: bool = true;
+        type Key = ();
+        type Value = u64;
+
+        fn deps(&self, subject: Subject<'_>, (): &()) -> Vec<(ChangesetId, ())> {
+            let first = subject.changeset.parents.first();
+            first.map(|&parent| (parent, ())).into_iter().collect()
+        }
+
+        fn derive(
+            &self,
+            ctx: &DeriveCtx<'_>,
+            subject: Subject<'_>,
+            (): &(),
+        ) -> Result<u64, DeriveError> {
+            self.0.bump();
+            match subject.changeset.parents.first() {
+                Some(&parent) => Ok(ctx.value::<EagerDepth>(parent, &())? + 1),
+                None => Ok(0),
+            }
+        }
+    }
+
+    /// What a call reports: the values it derived, those it found stored, and the frame it
+    /// leaves the journal at.
+    fn run(derived: u64, cached: u64, last_frame: Option<u64>) -> DeriveRun {
+        DeriveRun {
+            derived,
+            cached,
+            last_frame,
+        }
+    }
+
+    /// The changesets whose skip lists the store holds, as [`stored`] lists them.
+    fn lists(root: &Utf8Path) -> BTreeSet<String> {
+        stored(
+            root,
+            FirstParentSkipList::NAME,
+            FirstParentSkipList::VERSION,
+        )
+    }
+
+    /// Commits a put of `content` at `f` on `parent`; the new changeset's id.
+    fn commit_on(repo: &LocalRepo, parent: ChangesetId, content: &str) -> ChangesetId {
+        let req = request(&[parent], vec![put("f", content.as_bytes())], content);
+        repo.commit(req).expect("commit").id
+    }
+
+    /// A call derives the value of every eager derivation, the built-in skip list and a test's
+    /// own depth, for each changeset of the frames it reads: over three commits (frames 0 to 2),
+    /// 6 values, each derived once (3 depths derived), and it leaves the journal at frame 2. A
+    /// derivation that is not eager is left to readers. The same call again from there reads no
+    /// frame and derives nothing; from the first frame, it finds the 6 values stored and derives
+    /// none of them again.
+    #[test]
+    fn derive_eager_derives_every_new_changeset_once() {
+        let (_dir, root, mut repo) = new_repo();
+        let count = Count::default();
+        repo.register(EagerDepth(count.clone())).unwrap();
+        let lazy = Count::default();
+        repo.register(Depth(lazy.clone())).unwrap();
+        assert_eq!(repo.derive_eager(None, 1000).unwrap(), run(0, 0, None));
+        let c = chain(&repo, 3);
+
+        assert_eq!(repo.derive_eager(None, 1000).unwrap(), run(6, 0, Some(2)));
+        assert_eq!(count.get(), 3, "each depth derived once");
+        assert_eq!(
+            lazy.get(),
+            0,
+            "a derivation that is not eager waits for a reader"
+        );
+        assert_eq!(stored(&root, "depth", 1), BTreeSet::new());
+        assert_eq!(lists(&root), at(&c, &[0, 1, 2]));
+        assert_eq!(stored(&root, "eager_depth", 1), at(&c, &[0, 1, 2]));
+        assert_eq!(repo.derived::<EagerDepth>(c[2], &()).unwrap(), 2);
+        let list = repo.derived::<FirstParentSkipList>(c[2], &()).unwrap();
+        assert_eq!(list.into_vec(), [c[1], c[0]]);
+
+        assert_eq!(repo.derive_eager(Some(2), 1000).unwrap(), run(0, 0, None));
+        assert_eq!(repo.derive_eager(None, 1000).unwrap(), run(0, 6, Some(2)));
+        assert_eq!(count.get(), 3, "nothing derived again");
+    }
+
+    /// A call goes on after the frame it is given and reads at most `limit` frames; a frame that
+    /// records no changeset (a ref's move) is read and passed over, and frames before the
+    /// checkpoint read as those past it do. After c0 and c1 (frames 0, 1) are derived: c2 and
+    /// c3 (frames 2, 3, then behind the checkpoint), a move of `main` (frame 4) and c4 (frame 5).
+    /// Two frames after frame 1 derive c2's and c3's lists; the next two, c4's; after frame 5
+    /// nothing is left.
+    #[test]
+    fn derive_eager_resumes_after_its_frame() {
+        let (_dir, root, repo) = new_repo();
+        let c = chain(&repo, 2);
+        assert_eq!(repo.derive_eager(None, 1000).unwrap(), run(2, 0, Some(1)));
+
+        let c2 = commit_on(&repo, c[1], "2");
+        let c3 = commit_on(&repo, c2, "3");
+        MetaStore::open(&root).unwrap().flush().unwrap();
+        let moved = repo.cas_ref("main", None, Some(c3), "test/mover").unwrap();
+        assert!(
+            matches!(moved.result, CasResult::Applied { .. }),
+            "{moved:?}"
+        );
+        let c4 = commit_on(&repo, c3, "4");
+
+        assert_eq!(repo.derive_eager(Some(1), 2).unwrap(), run(2, 0, Some(3)));
+        assert_eq!(lists(&root), at(&[c[0], c[1], c2, c3], &[0, 1, 2, 3]));
+        assert_eq!(repo.derive_eager(Some(3), 2).unwrap(), run(1, 0, Some(5)));
+        let list = repo.derived::<FirstParentSkipList>(c4, &()).unwrap();
+        assert_eq!(list.into_vec(), [c3, c2, c[0]]);
+        assert_eq!(repo.derive_eager(Some(5), 2).unwrap(), run(0, 0, None));
+        assert_eq!(repo.derive_eager(None, 1000).unwrap(), run(0, 5, Some(5)));
+    }
+
+    /// A `limit` of 0 reads no frame and derives nothing, wherever `after` is: it gives the
+    /// journal's last frame, where a follower that leaves what is recorded so far starts, and
+    /// `None` while the journal holds no frame.
+    #[test]
+    fn a_limit_of_0_gives_the_journals_end_and_derives_nothing() {
+        let (_dir, root, repo) = new_repo();
+        assert_eq!(repo.derive_eager(None, 0).unwrap(), run(0, 0, None));
+        chain(&repo, 3);
+        assert_eq!(repo.derive_eager(None, 0).unwrap(), run(0, 0, Some(2)));
+        assert_eq!(repo.derive_eager(Some(0), 0).unwrap(), run(0, 0, Some(2)));
+        assert_eq!(repo.derive_eager(Some(7), 0).unwrap(), run(0, 0, Some(2)));
+        assert_eq!(lists(&root), BTreeSet::new(), "nothing derived");
+    }
+
+    /// Values a call needs on the way and the store lacks are derived, as `Repo::derived`
+    /// derives them, and not counted: a call after frame 2 of a chain c0 … c3 that nothing has
+    /// derived (a follower that started at the journal's end) is asked for c3's list alone, so
+    /// it counts 1, and derives c0's, c1's and c2's on the way.
+    #[test]
+    fn values_needed_on_the_way_are_derived_and_not_counted() {
+        let (_dir, root, repo) = new_repo();
+        let c = chain(&repo, 4);
+        assert_eq!(
+            repo.derive_eager(Some(2), 1000).unwrap(),
+            run(1, 0, Some(3))
+        );
+        assert_eq!(lists(&root), at(&c, &[0, 1, 2, 3]));
+        assert_eq!(repo.derive_eager(None, 1000).unwrap(), run(0, 4, Some(3)));
+    }
+}

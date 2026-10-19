@@ -55,6 +55,9 @@ pub const MAX_TREE_DEPTH: u32 = 64;
 /// 50 bytes.
 pub const DEFAULT_MAX_CHANGES: usize = 400;
 
+/// The default [`DeriveReq::limit`]: 1,000 journal frames, each one transaction.
+pub const DEFAULT_DERIVE_LIMIT: usize = 1000;
+
 fn default_max_bytes() -> u64 {
     DEFAULT_MAX_BYTES
 }
@@ -77,6 +80,10 @@ fn default_read_tree_depth() -> u32 {
 
 fn default_max_changes() -> usize {
     DEFAULT_MAX_CHANGES
+}
+
+fn default_derive_limit() -> usize {
+    DEFAULT_DERIVE_LIMIT
 }
 
 /// `init`: create a store.
@@ -831,6 +838,41 @@ pub struct VerifyFinding {
     pub cause: Option<String>,
 }
 
+/// `derive`: derive ahead of any reader the eager derived values (storage spec §5: each
+/// changeset's first-parent skip list) of the changesets the journal records after a frame, so
+/// that reads find them stored. It writes only the store's cache of derived values, so it takes
+/// no identity.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct DeriveReq {
+    /// Go on after this journal frame: a previous call's `next`. From the journal's first frame
+    /// when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub after: Option<u64>,
+    /// The most journal frames to read; a frame is one transaction, a commit or a ref's move. 0
+    /// reads none and derives nothing: `next` is then the journal's last frame, from where the
+    /// next calls derive only what is recorded later.
+    #[serde(default = "default_derive_limit")]
+    pub limit: usize,
+}
+
+/// `derive`: how many values one call derived, how many the store held already, and where to
+/// go on.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct DeriveResp {
+    /// How many values it derived: of each eager derivation, one for each changeset its frames
+    /// record whose value the store lacked. Values those needed on the way, an older
+    /// changeset's, are derived too and not counted.
+    pub derived: u64,
+    /// How many of those values the store held already.
+    pub cached: u64,
+    /// The last frame it read: pass it as the next call's `after` to go on, through a journal
+    /// longer than `limit` frames or through the frames recorded since. Omitted when it read no
+    /// frame, as none follows `after`: it is at the journal's end. With `limit` 0, the journal's
+    /// last frame, omitted while the journal holds none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<u64>,
+}
+
 /// One store's operations, implemented over a local store now and by a remote client later
 /// (operations spec §7).
 ///
@@ -886,6 +928,11 @@ pub trait StoreOps {
 
     /// Checks the whole store's consistency (CLI `verify`).
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError>;
+
+    /// Derives ahead of any reader the eager derived values of the changesets the journal
+    /// records after a frame, and says where to go on (CLI `derive`). It writes only the store's
+    /// cache of derived values, so it takes no identity.
+    fn derive(&self, req: DeriveReq) -> Result<DeriveResp, OpError>;
 }
 
 // The CLI holds a `dyn StoreOps` (operations spec §7); this stops compiling if the trait stops

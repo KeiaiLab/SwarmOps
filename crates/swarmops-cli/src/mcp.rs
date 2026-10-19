@@ -71,6 +71,9 @@
 //! full-id pattern ([`full_id_pattern`]), not any revision. A tool's annotations say whether it
 //! changes the store and how; none reaches beyond the store (`openWorldHint: false`).
 //!
+//! `derive` alone has no tool: `swarmops derive` runs it beside the store as maintenance,
+//! deriving values ahead of readers as the journal grows, which is no agent's work.
+//!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
 //! does not know is ignored, and arguments that do not fit the type are `E_INVALID_ARG`, as is
 //! a request that breaks one of this server's own rules ([`Refuse`]): a `ref_set` or a
@@ -1571,8 +1574,8 @@ mod tests {
     use camino::Utf8Path;
     use swarmops_api::{
         BlobHasResp, BlobPutResp, ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput,
-        FileContent, LogPage, PathHistoryPage, RefListResp, RefSetResp, RepoInfo, TreeListing,
-        VerifyReport,
+        DeriveReq, DeriveResp, FileContent, LogPage, PathHistoryPage, RefListResp, RefSetResp,
+        RepoInfo, TreeListing, VerifyReport,
     };
     use swarmops_ops::LocalOps;
 
@@ -1583,14 +1586,15 @@ mod tests {
     /// tool wired to the wrong one, fails here.
     #[test]
     fn the_tools_are_the_store_operations() {
-        // `init` runs on the client and is no `StoreOps` operation, so it has no tool.
+        // `init` runs on the client and is no `StoreOps` operation, so it has no tool; `derive`
+        // is maintenance, which `swarmops derive` runs beside the store, and no agent's work.
         let all = schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
-            .filter(|name| name.ends_with("Req") && *name != "InitReq")
+            .filter(|name| name.ends_with("Req") && !["InitReq", "DeriveReq"].contains(name))
             .collect();
         let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
         advertised.sort_unstable();
@@ -1717,6 +1721,10 @@ mod tests {
 
         fn blob_has(&self, _: BlobHasReq) -> Result<BlobHasResp, OpError> {
             self.called("blob_has", "BlobHasReq")
+        }
+
+        fn derive(&self, _: DeriveReq) -> Result<DeriveResp, OpError> {
+            self.called("derive", "DeriveReq")
         }
     }
 

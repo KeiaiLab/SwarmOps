@@ -241,8 +241,38 @@ pub enum Command {
     /// the identity are the server's, --repo and --as or their variables, never a call's. Speaks
     /// MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints
     /// no envelope: stdout carries the protocol until stdin ends, and a command line it refuses has
-    /// its envelope on stderr.
+    /// its envelope on stderr. The derive command has no tool: it is maintenance, no agent's work.
     Mcp,
+    /// Derive the eager derived values of new changesets, ahead of any reader.
+    ///
+    /// Once, it derives the values of the changesets the journal records in up to 1,000 frames,
+    /// from its first frame or after --after N, and gives the last frame it read as next: run it
+    /// with --after next to go on. With --follow it runs until it is killed: from the journal's
+    /// end (from its first frame with --from-start, or after --after N) it derives the changesets
+    /// as they are recorded, looking again every --interval-ms once it has caught up, and prints
+    /// one envelope a line for each run that derived something. A run that fails ends it with
+    /// that run's envelope and exit code. Commits derive nothing.
+    Derive {
+        /// Go on after journal frame N, a previous run's next (default: the first frame; with
+        /// --follow, the journal's end).
+        #[arg(long, value_name = "N", conflicts_with = "from_start")]
+        after: Option<u64>,
+        /// Keep deriving what the journal records, until killed.
+        #[arg(long)]
+        follow: bool,
+        /// With --follow: how many milliseconds to wait before looking again, once caught up.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 500,
+            requires = "follow",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        interval_ms: u64,
+        /// With --follow: start from the journal's first frame, not its end.
+        #[arg(long, requires = "follow")]
+        from_start: bool,
+    },
 }
 
 /// `blob`'s operations.
@@ -423,6 +453,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "delete"] => "ref_delete",
         ["verify"] => "verify",
         ["mcp"] => "mcp",
+        ["derive"] => "derive",
         _ => return None,
     })
 }
@@ -547,10 +578,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 17);
+        assert_eq!(ops.len(), 18);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 17, "two subcommands name one op");
+        assert_eq!(ops.len(), 18, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
     }

@@ -312,6 +312,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   listed one too, in pre-order, a directory before the entries below it, each entry past depth
   1 with its `path`, and a page's cursor its last entry's path. Every file entry carries its
   `size`, from its object's header. The two tools' descriptions in `swarmops mcp` say so.
+- `swarmops derive`: the eager derived values (storage spec §5; today each changeset's
+  first-parent skip list) derived ahead of any reader. Once, it derives those of the changesets
+  the journal records in up to 1,000 frames, from the first or after `--after N`, and reports
+  how many it `derived`, how many were `cached` already, and `next`, the last frame it read, to
+  go on from. With `--follow` it runs until it is killed: from the journal's end (its start with
+  `--from-start`), it derives the changesets as they are committed, looking again every
+  `--interval-ms` (500) once it has caught up, and prints one envelope a line for each run that
+  derived something. Commits derive nothing. It writes only the cache of derived values, so it
+  needs no identity, and it has no MCP tool. Its API is `StoreOps::derive` (`DeriveReq`,
+  `DeriveResp`) over `Repo::derive_eager`.
 
 ### Changed
 

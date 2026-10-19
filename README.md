@@ -300,6 +300,7 @@ and starts no server either.
 | `history REV:PATH [-n N] [--cursor C]` | The changesets that changed a file, or anything below a directory, newest first, each with what the path holds after it. |
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
+| `derive [--after N] [--follow] [--interval-ms N] [--from-start]` | Derive ahead of any reader the eager derived values (the first-parent skip list) of the changesets the journal records. Once: up to 1,000 journal frames, from the first or after `--after N`, its `next` saying where to go on. With `--follow`: as they are committed, from the journal's end (its start with `--from-start`), until killed, one envelope a line for each run that derived something. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
 | `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([MCP](#mcp)). |
 
