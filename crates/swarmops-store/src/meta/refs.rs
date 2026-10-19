@@ -17,6 +17,9 @@
 //! transaction that changes the target, however many moves the transaction made, and
 //! applying a frame again to a file that already shows its target changes nothing. That is
 //! what makes replay idempotent.
+//!
+//! [`FsOps::atomic_replace`]: crate::FsOps::atomic_replace
+//! [`FsOps::read`]: crate::FsOps::read
 
 use std::collections::BTreeMap;
 use std::io;
@@ -24,8 +27,8 @@ use std::io;
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId};
 
-use crate::error::StoreError;
-use crate::fs_ops::FsOps;
+use crate::error::{FileOp, StoreError};
+use crate::fs_ops::{FsMethod, StoreFs};
 use crate::layout::Layout;
 
 /// The most bytes a ref name may take: its length is one byte of a `RefMove` record.
@@ -76,23 +79,23 @@ pub fn check_ref_name(name: &str) -> Result<(), StoreError> {
 /// The state of ref `name` (a valid name) as its file says; `None` if it has no file.
 pub(crate) fn read(
     layout: &Layout,
-    fs: &dyn FsOps,
+    fs: &StoreFs,
     name: &str,
 ) -> Result<Option<RefState>, StoreError> {
-    read_file(fs, &path(layout, name), name)
+    read_file(fs, &path(layout, name))
 }
 
 /// Every ref that has a file, by name. Entries of `meta/refs/` that are not refs (temp
 /// files, anything this version does not name) are skipped.
 pub(crate) fn read_all(
     layout: &Layout,
-    fs: &dyn FsOps,
+    fs: &StoreFs,
 ) -> Result<BTreeMap<String, RefState>, StoreError> {
     let mut refs = BTreeMap::new();
     if let Some(state) = read(layout, fs, "main")? {
         refs.insert("main".to_owned(), state);
     }
-    for name in release_names(layout)? {
+    for name in release_names(layout, fs)? {
         // A file removed since the listing is a ref deleted meanwhile.
         if let Some(state) = read(layout, fs, &name)? {
             refs.insert(name, state);
@@ -104,9 +107,9 @@ pub(crate) fn read_all(
 /// Every ref that has a file, by name, each with its state or the error reading its file
 /// gave: [`read_all`], except that a damaged file does not fail the rest. The names are the
 /// ones [`read_all`] reads, and a file removed since the listing is skipped the same way.
-pub(crate) fn read_each(layout: &Layout, fs: &dyn FsOps) -> Result<Vec<RefFile>, StoreError> {
+pub(crate) fn read_each(layout: &Layout, fs: &StoreFs) -> Result<Vec<RefFile>, StoreError> {
     let mut names = vec!["main".to_owned()];
-    names.extend(release_names(layout)?);
+    names.extend(release_names(layout, fs)?);
     let mut refs = Vec::with_capacity(names.len());
     for name in names {
         let state = match read(layout, fs, &name) {
@@ -120,16 +123,19 @@ pub(crate) fn read_each(layout: &Layout, fs: &dyn FsOps) -> Result<Vec<RefFile>,
 }
 
 /// The names of the `release/<x>` refs that `meta/refs/release/` holds a file for, sorted.
-/// Entries that are not refs (temp files, anything this version does not name) are skipped.
-fn release_names(layout: &Layout) -> Result<Vec<String>, StoreError> {
-    let entries = match std::fs::read_dir(layout.meta_path("refs/release")) {
+/// Entries that are not refs (temp files, anything this version does not name) are skipped. A
+/// failure to list the directory is located by `fs`.
+fn release_names(layout: &Layout, fs: &StoreFs) -> Result<Vec<String>, StoreError> {
+    let dir = layout.meta_path("refs/release");
+    let listing_failed = |e| fs.locate(FileOp::ReadDir, &dir, e);
+    let entries = match std::fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(listing_failed(e).into()),
     };
     let mut names = Vec::new();
     for entry in entries {
-        let entry = entry?;
+        let entry = entry.map_err(listing_failed)?;
         let Some(file_name) = entry.file_name().to_str().map(str::to_owned) else {
             continue; // not UTF-8, so not a ref
         };
@@ -164,12 +170,12 @@ pub(crate) fn moved(current: Option<RefState>, target: Option<ChangesetId>) -> O
 /// is written after it. Returns whether it replaced or removed the file.
 pub(crate) fn write(
     layout: &Layout,
-    fs: &dyn FsOps,
+    fs: &StoreFs,
     name: &str,
     target: Option<ChangesetId>,
 ) -> Result<bool, StoreError> {
     let path = path(layout, name);
-    let current = read_file(fs, &path, name)?;
+    let current = read_file(fs, &path)?;
     match moved(current, target) {
         // It says that already: see above for why that is enough (rule 5).
         next if next == current => return Ok(false),
@@ -199,7 +205,7 @@ fn path(layout: &Layout, name: &str) -> Utf8PathBuf {
 }
 
 /// Creates `dir` if it is missing, and makes its entry in `parent` durable.
-fn make_dir(fs: &dyn FsOps, dir: &Utf8Path, parent: &Utf8Path) -> Result<(), StoreError> {
+fn make_dir(fs: &StoreFs, dir: &Utf8Path, parent: &Utf8Path) -> Result<(), StoreError> {
     if !dir.is_dir() {
         fs.create_dir_all(dir.as_std_path())?;
         fs.fsync_dir(parent.as_std_path())?;
@@ -207,25 +213,25 @@ fn make_dir(fs: &dyn FsOps, dir: &Utf8Path, parent: &Utf8Path) -> Result<(), Sto
     Ok(())
 }
 
-/// The state the file of ref `name`, at `path`, holds; `None` if there is no file. Anything
-/// but `<64 hex digits>\n<version>\n`, the version a decimal of at least 1, is
-/// `InvalidData`, its message naming the file by its place in the store, `meta/refs/<name>`
-/// (never the store's root, a host path). A file longer than [`MAX_FILE_LEN`] is refused by its
-/// length, measured before it is read (through `std::fs`, no [`FsOps`] call), so that a crafted
-/// file of huge length is never read into memory; a missing file reaches the read, which
-/// reports it.
-fn read_file(fs: &dyn FsOps, path: &Utf8Path, name: &str) -> Result<Option<RefState>, StoreError> {
+/// The state the ref file at `path` holds; `None` if there is no file. Anything but
+/// `<64 hex digits>\n<version>\n`, the version a decimal of at least 1, is `InvalidData`, a
+/// failed read of the file, which `fs` names by its place in the store, `meta/refs/<name>`
+/// (never by the store's root, a host path). A file longer than [`MAX_FILE_LEN`] is refused by
+/// its length, measured before it is read (through `std::fs`, no [`crate::FsOps`] call), so
+/// that a crafted file of huge length is never read into memory; a missing file reaches the
+/// read, which reports it.
+fn read_file(fs: &StoreFs, path: &Utf8Path) -> Result<Option<RefState>, StoreError> {
+    let refused = |why: String| {
+        let e = io::Error::new(io::ErrorKind::InvalidData, why);
+        StoreError::from(fs.locate(FileOp::Fs(FsMethod::Read), path, e))
+    };
     if let Ok(meta) = std::fs::metadata(path)
         && meta.len() > MAX_FILE_LEN
     {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "meta/refs/{name} is {} bytes long, not a ref file",
-                meta.len()
-            ),
-        )
-        .into());
+        return Err(refused(format!(
+            "is {} bytes long, not a ref file",
+            meta.len()
+        )));
     }
     let Some(bytes) = fs.read(path.as_std_path())? else {
         return Ok(None);
@@ -241,11 +247,7 @@ fn read_file(fs: &dyn FsOps, path: &Utf8Path, name: &str) -> Result<Option<RefSt
             version: version.parse().ok().filter(|&version| version > 0)?,
         })
     });
-    parsed.map(Some).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("meta/refs/{name} is not a ref file: \"<64 hex digits>\\n<version>\\n\""),
-        )
-        .into()
-    })
+    parsed
+        .map(Some)
+        .ok_or_else(|| refused(r#"not a ref file: "<64 hex digits>\n<version>\n""#.to_owned()))
 }

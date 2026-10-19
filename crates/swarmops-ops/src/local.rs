@@ -142,14 +142,19 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_STORE_CORRUPT`: `MissingObject`, and the store's `Corrupt` and `BadHeader`
 ///   `{object}`; `Codec`, and the store's `Codec`, `JournalCorrupt`, `IndexCorrupt`,
 ///   `IndexMismatch` and `MissingParent`; an `Io` error of kind `InvalidData` (a malformed
-///   metadata file); and the store's `Format` other than while opening. Once the store is open,
-///   the hint is `swarmops verify` (with `--deep` for an object whose bytes fail their id).
+///   metadata file) `{fs_op, store_file}`; and the store's `Format` other than while opening.
+///   Once the store is open, the hint is `swarmops verify` (with `--deep` for an object whose
+///   bytes fail their id).
 /// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`, on `init`
 ///   and on open alike; the hint points at a native filesystem.
-/// - `E_IO`: any other `Io` error, whatever its kind (an OS `EINVAL` among them).
-/// - `E_IO_TRANSIENT` (retryable) `{committed}`, always `false`: the store's `NotCommitted`, a
-///   journal append that failed and that the store cut back off the journal, so the write
-///   committed nothing; the hint says to run the same command again.
+/// - `E_IO` `{fs_op, store_file}`: any other `Io` error, whatever its kind (an OS `EINVAL` among
+///   them). `fs_op` names the file operation that failed; `store_file` the file of the store it
+///   was on, relative to the store's root (`.` for the root itself), and is absent for a path
+///   outside it; no error carries a host path.
+/// - `E_IO_TRANSIENT` (retryable) `{committed, fs_op, store_file}`, `committed` always `false`:
+///   the store's `NotCommitted`, a journal append that failed and that the store cut back off
+///   the journal, so the write committed nothing; `fs_op` and `store_file` name the append. The
+///   hint says to run the same command again.
 /// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning (a
 ///   failure after the commit point, a failed listing in `journal.off` among them), so that it
 ///   never reaches here; and the store's `BadCall`, a call its API does not take, which only a

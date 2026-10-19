@@ -25,7 +25,7 @@ use super::index::{ChangesetMeta, Index};
 use super::refs::{self, RefState};
 use super::to_u64;
 use crate::error::StoreError;
-use crate::fs_ops::FsOps;
+use crate::fs_ops::StoreFs;
 use crate::layout::Layout;
 
 /// What [`replay`] changed: what the frames it applied hold that the index and the ref files
@@ -44,7 +44,7 @@ pub(crate) struct Replayed {
 pub(crate) fn replay(
     index: &mut Index,
     layout: &Layout,
-    fs: &dyn FsOps,
+    fs: &StoreFs,
     frames: &[Frame],
 ) -> Result<Replayed, StoreError> {
     // The ref names first: frames this version cannot apply change nothing at all.
@@ -71,7 +71,7 @@ pub(crate) fn replay(
 pub(crate) fn materialize(
     index: &mut Index,
     layout: &Layout,
-    fs: &dyn FsOps,
+    fs: &StoreFs,
     frame: &Frame,
 ) -> Result<(), StoreError> {
     replay(index, layout, fs, slice::from_ref(frame)).map(drop)

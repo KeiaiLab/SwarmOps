@@ -183,8 +183,8 @@ left).
   over through MCP, whose result holds its envelope twice. *Target: M6 (streaming verify, which
   pages the report and says when it cut it, `truncated`). Found: M1.5 addendum review (gap 14;
   ruling 9(c)).*
-- **A missing `journal.off` opens as `E_IO`**, not `E_STORE_CORRUPT`; `verify` names it.
-  *Unscheduled. Found: M1 final review.*
+- **A missing `journal.off` opens as `E_IO`** (`details.store_file: meta/journal.off`), not
+  `E_STORE_CORRUPT`. *Unscheduled. Found: M1 final review.*
 - **`verify --deep` skips object files that are symlinks**, because the object listing ignores
   them; SwarmOps never writes one. *Unscheduled. Found: M1 final review.*
 
@@ -320,10 +320,10 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `fs_ops.rs`, not tested: a `RealFs` that dropped one of those syncs would pass every gate. The
   tracer of `bench/compare` (`docs/perf.md`) counts a metadata commit's sync calls by file, but
   `just check` does not run it. *Unscheduled. Found: M1.5 final coverage review.*
-- **Golden envelopes cover 14 of the 24 error codes.** `error_codes_reach_the_cli` pins the
-  envelope of 14; the other ten are in its `NOT_RAISED` list, each with why the test cannot raise
-  it (the four codes above among them). *Target: M1.6 (`E_IO` first). Found: the 2026-10-16
-  comparison.*
+- **Golden envelopes cover 15 of the 24 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 15; the other nine are in its `NOT_RAISED` list, each with why the test cannot raise
+  it (the four codes above among them). *Target: unscheduled (`E_IO` joined in M1.6). Found: the
+  2026-10-16 comparison.*
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its

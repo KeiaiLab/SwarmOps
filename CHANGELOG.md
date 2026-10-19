@@ -321,6 +321,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   that each result holds its envelope twice, which the envelope's sentence says, and its note on
   binary files, which `read_file`'s description gives: 2,034 of Claude Code's 2,048 characters
   (they were 1,990).
+- `E_IO`, `E_IO_TRANSIENT` and the `E_STORE_CORRUPT` of a metadata file that does not parse
+  name the file operation that failed and the store file it was on: `details.fs_op` (one of 22
+  names, such as `"open"` or `"append_durable"`) and `details.store_file` (relative to the
+  store's root, such as `meta/journal.off`; absent for a path outside it). Their messages say
+  the same before the operating system's text, no error carries the store's host path, and the
+  schema's descriptions of the three codes say so. A missing index file's `E_STORE_CORRUPT`
+  names it (`meta/idx/ids.col is missing`). In the Rust API, `StoreError::Io` and
+  `NotCommitted` carry an `IoFailure` (`op`, `file`, `source`, `also`) in place of an
+  `io::Error`, the new `StoreFs` locates the failure of every filesystem call the stores make,
+  and neither `StoreError` nor `RepoError` converts from a bare `io::Error` any more.
 
 ### Fixed
 

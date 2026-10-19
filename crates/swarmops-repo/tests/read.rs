@@ -757,11 +757,19 @@ fn create_follows_symlinks_below_a_missing_directory_before_touching_anything() 
     );
     assert!(!Path::new("/mnt/swarmops-test-nowhere").exists());
 
-    // A symlink loop is an error, not a hang.
+    // A symlink loop is an error, not a hang: one of working out where the path leads, which
+    // names no file of a store (there is none yet).
     std::os::unix::fs::symlink(base.join("loop"), base.join("loop")).unwrap();
     match LocalRepo::create(&base.join("loop/x"), "x") {
-        Err(RepoError::Store(StoreError::Io(_))) => {}
-        other => panic!("expected an I/O error, got {:?}", other.map(|r| r.info())),
+        Err(RepoError::Store(StoreError::Io(swarmops_store::IoFailure {
+            op: swarmops_store::FileOp::Resolve,
+            file: None,
+            ..
+        }))) => {}
+        other => panic!(
+            "expected an I/O error resolving the path, got {:?}",
+            other.map(|r| r.info())
+        ),
     }
 }
 

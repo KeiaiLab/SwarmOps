@@ -53,8 +53,8 @@ use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
 use super::replay::{ChangesetRecord, changesets};
 use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views};
 use super::to_u64;
-use crate::error::{LimitKind, StoreError};
-use crate::fs_ops::{FsOps, RealFs};
+use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
+use crate::fs_ops::{FsMethod, FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
 
 /// One changeset as the index holds it.
@@ -98,7 +98,8 @@ const PARENTS: &str = "parents.log";
 /// Lookups take `&self` and read with `read_at` on read-only handles; changes take
 /// `&mut self`, go through [`FsOps`], and need [`crate::MetaLock`].
 pub struct Index {
-    fs: Arc<dyn FsOps>,
+    /// What changes go through, and what locates a failure in the store.
+    fs: StoreFs,
     sorted_dir: Utf8PathBuf,
     ids: AppendOnlyColumn<32>,
     gens: AppendOnlyColumn<8>,
@@ -131,6 +132,12 @@ impl Index {
     /// calls it in its staging directory: a store gets its index files there, and nowhere
     /// else.
     pub fn create(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Index, StoreError> {
+        Self::create_in(layout, &StoreFs::new(fs, layout.root()))
+    }
+
+    /// [`Index::create`], through `fs`, whose root may be another than `layout`'s: a staged
+    /// create's files are named where they are, under `meta.tmp/`.
+    pub(crate) fn create_in(layout: &Layout, fs: &StoreFs) -> Result<Index, StoreError> {
         let idx = layout.meta_path("idx");
         let sorted = layout.meta_path("sorted");
         fs.create_dir_all(idx.as_std_path())?;
@@ -146,7 +153,7 @@ impl Index {
         fs.fsync_dir(idx.as_std_path())?;
         fs.fsync_dir(sorted.as_std_path())?;
         fs.fsync_dir(layout.meta_dir().as_std_path())?;
-        Self::open(layout, fs)
+        Self::open_in(layout, fs.clone())
     }
 
     /// Opens the index of `layout`, changes going through `fs`.
@@ -168,6 +175,12 @@ impl Index {
     /// renaming (or crashed renaming) counts as covering what it covers, or nothing. A writer
     /// repairs with [`Index::repair_tail`].
     pub fn open(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Index, StoreError> {
+        Self::open_in(layout, StoreFs::new(fs, layout.root()))
+    }
+
+    /// [`Index::open`], through `fs`, whose root may be another than `layout`'s (see
+    /// [`Index::create_in`]).
+    pub(crate) fn open_in(layout: &Layout, fs: StoreFs) -> Result<Index, StoreError> {
         let mut index = Self::handle(layout, fs)?;
         let lens = index.lens()?;
         let whole = index.whole_of(lens, None)?;
@@ -186,7 +199,7 @@ impl Index {
     /// takes another round when `journal.off` shrank as the frames were read).
     pub(crate) fn open_with_past<E: From<StoreError>>(
         layout: &Layout,
-        fs: Arc<dyn FsOps>,
+        fs: StoreFs,
         read_past: impl FnOnce() -> Result<Vec<Frame>, E>,
     ) -> Result<(Index, Vec<Frame>), E> {
         let mut index = Self::handle(layout, fs)?;
@@ -198,18 +211,19 @@ impl Index {
     }
 
     /// A handle on the files of `layout`, counting no record yet.
-    fn handle(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Index, StoreError> {
+    fn handle(layout: &Layout, fs: StoreFs) -> Result<Index, StoreError> {
         let sorted_dir = layout.meta_path("sorted");
         // The views before the columns: a compaction covers records that were whole when it
         // ran, and whole records stay, so the columns read afterwards hold all that the
         // views cover.
-        let views = Views::open(&sorted_dir)?;
+        let views = Views::open(&fs, &sorted_dir)?;
+        let path = |rel| layout.meta_path(rel);
         Ok(Index {
-            ids: AppendOnlyColumn::open(layout.meta_path(IDS))?,
-            gens: AppendOnlyColumn::open(layout.meta_path(GENS))?,
-            dhs: AppendOnlyColumn::open(layout.meta_path(DHS))?,
-            pars: AppendOnlyColumn::open(layout.meta_path(PARS))?,
-            parents: AppendOnlyColumn::open(layout.meta_path(PARENTS))?,
+            ids: AppendOnlyColumn::open(&fs, path(IDS), "meta/idx/ids.col is missing")?,
+            gens: AppendOnlyColumn::open(&fs, path(GENS), "meta/idx/gen.col is missing")?,
+            dhs: AppendOnlyColumn::open(&fs, path(DHS), "meta/idx/dh.col is missing")?,
+            pars: AppendOnlyColumn::open(&fs, path(PARS), "meta/idx/par.col is missing")?,
+            parents: AppendOnlyColumn::open(&fs, path(PARENTS), "meta/parents.log is missing")?,
             fs,
             sorted_dir,
             len: 0,
@@ -301,16 +315,19 @@ impl Index {
             count,
         };
         if at.offset > ParentsAt::MAX_OFFSET {
-            return Err(io::Error::new(io::ErrorKind::FileTooLarge, "parents.log is full").into());
+            let full = io::Error::new(io::ErrorKind::FileTooLarge, "the file is full");
+            return Err(self
+                .parents
+                .failed(FileOp::Fs(FsMethod::Append), full)
+                .into());
         }
         let mut buf = [0; MAX_PARENTS_LEN];
         let parents = parents::encode(&meta.parents, &mut buf);
-        let fs = &*self.fs;
-        self.parents.append(fs, parents, at.offset)?;
-        self.pars.append(fs, &at.entry().to_le_bytes(), rec)?;
-        self.gens.append(fs, &meta.generation.to_le_bytes(), rec)?;
-        self.dhs.append(fs, &meta.delta_hash, rec)?;
-        self.ids.append(fs, &meta.id.0.0, rec)?;
+        self.parents.append(parents, at.offset)?;
+        self.pars.append(&at.entry().to_le_bytes(), rec)?;
+        self.gens.append(&meta.generation.to_le_bytes(), rec)?;
+        self.dhs.append(&meta.delta_hash, rec)?;
+        self.ids.append(&meta.id.0.0, rec)?;
         self.len = rec + 1;
         self.parents_len = at.end();
         Ok(rec)
@@ -341,8 +358,8 @@ impl Index {
     /// concurrent fsyncs together: five at once cost about two (docs/perf.md).
     pub fn sync(&self) -> Result<(), StoreError> {
         let files = self.write_order();
-        let fs = &*self.fs;
-        let sync_all = |share: &[&Utf8Path]| -> io::Result<()> {
+        let fs = &self.fs;
+        let sync_all = |share: &[&Utf8Path]| -> Result<(), IoFailure> {
             share
                 .iter()
                 .try_for_each(|path| fs.sync_data(path.as_std_path()))
@@ -351,7 +368,7 @@ impl Index {
         if threads <= 1 {
             return Ok(sync_all(&files)?);
         }
-        let results: Vec<io::Result<()>> = thread::scope(|scope| {
+        let results: Vec<Result<(), IoFailure>> = thread::scope(|scope| {
             let syncs: Vec<_> = files
                 .chunks(files.len().div_ceil(threads))
                 .map(|share| {
@@ -371,7 +388,7 @@ impl Index {
                 })
                 .collect()
         });
-        Ok(results.into_iter().collect::<io::Result<()>>()?)
+        Ok(results.into_iter().collect::<Result<(), IoFailure>>()?)
     }
 
     /// Record `rec`: four `read_at`s of the columns, and one of `parents.log` if it has
@@ -583,12 +600,11 @@ impl Index {
             self.pars.len()?,
             self.parents.len()?,
         ];
-        let fs = &*self.fs;
-        self.ids.truncate(fs, ids, keep)?;
-        self.dhs.truncate(fs, dhs, keep)?;
-        self.gens.truncate(fs, gens, keep)?;
-        self.pars.truncate(fs, pars, keep)?;
-        self.parents.truncate(fs, parents, parents_len)?;
+        self.ids.truncate(ids, keep)?;
+        self.dhs.truncate(dhs, keep)?;
+        self.gens.truncate(gens, keep)?;
+        self.pars.truncate(pars, keep)?;
+        self.parents.truncate(parents, parents_len)?;
         Ok(keep)
     }
 
@@ -606,7 +622,7 @@ impl Index {
     /// [`Index::catch_up`], `past` vouching for the records this handle does not count, if
     /// given (see [`Index::repair_tail_with`]); else a read of the journal of its own.
     fn catch_up_vouched_by(&mut self, past: Option<&[Frame]>) -> Result<u64, StoreError> {
-        let views = Views::open(&self.sorted_dir)?;
+        let views = Views::open(&self.fs, &self.sorted_dir)?;
         let (whole, dropped) = self.repair_files(&views, past)?;
         (self.len, self.parents_len) = (whole.records, whole.parents_len);
         self.views = views;
@@ -636,8 +652,8 @@ impl Index {
                 tail: sorted_tail(&self.dhs, self.views.dh.len(), self.len)?,
             });
         }
-        sorted::rebuild(&*self.fs, &self.sorted_dir, &rebuilds)?;
-        let views = Views::open(&self.sorted_dir)?;
+        sorted::rebuild(&self.fs, &self.sorted_dir, &rebuilds)?;
+        let views = Views::open(&self.fs, &self.sorted_dir)?;
         views.check_within(self.len)?;
         self.views = views;
         Ok(())
@@ -662,15 +678,15 @@ impl Index {
         }
         views.check_within(whole.records)?;
         let [parents, pars, gens, dhs, ids] = whole.lens;
-        let (fs, records) = (&*self.fs, whole.records);
+        let records = whole.records;
         // Cut in the reverse of the write order, so that ids.col goes first.
         let dropped = [
-            self.ids.truncate(fs, ids, records)?,
-            self.dhs.truncate(fs, dhs, records)?,
-            self.gens.truncate(fs, gens, records)?,
-            self.pars.truncate(fs, pars, records)?,
+            self.ids.truncate(ids, records)?,
+            self.dhs.truncate(dhs, records)?,
+            self.gens.truncate(gens, records)?,
+            self.pars.truncate(pars, records)?,
         ];
-        self.parents.truncate(fs, parents, whole.parents_len)?;
+        self.parents.truncate(parents, whole.parents_len)?;
         Ok((whole, dropped.into_iter().max().unwrap_or(0)))
     }
 
@@ -992,7 +1008,7 @@ impl Index {
     }
 
     /// Whether the files end exactly where this handle's records do.
-    fn ends_where_counted(&self) -> io::Result<bool> {
+    fn ends_where_counted(&self) -> Result<bool, IoFailure> {
         Ok(self.parents.holds(self.parents_len)?
             && self.pars.holds(self.len)?
             && self.gens.holds(self.len)?

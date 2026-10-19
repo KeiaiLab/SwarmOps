@@ -977,7 +977,6 @@ fn error_codes_reach_the_cli() {
             "a parent is resolved first, so it is E_REV_NOT_FOUND",
         ),
         ("E_REF_NOT_FOUND", "no M1 operation looks a ref up by name"),
-        ("E_IO", "needs a failing filesystem"),
         (
             "E_IO_TRANSIENT",
             "needs a journal append that fails: tests/faults.rs raises it",
@@ -1015,6 +1014,29 @@ fn error_codes_reach_the_cli() {
     let corrupt = s.run(&["--repo", &store, "verify"]);
     assert_eq!(corrupt.code(), "E_STORE_CORRUPT");
     raised.push("E_STORE_CORRUPT");
+    // A metadata file that does not parse, and one that does not open: each failure names the
+    // file operation and the store file it failed on, relative to the store's root, and neither
+    // message carries the store's path.
+    let layout = Layout::new(Utf8PathBuf::from(&store));
+    fs::write(layout.journal_ckpt(), [0; 3]).unwrap();
+    let malformed = s.run(&["--repo", &store, "info"]);
+    assert_eq!((malformed.code(), malformed.exit), ("E_STORE_CORRUPT", 1));
+    assert_eq!(
+        malformed["error"]["details"],
+        json!({"fs_op": "read", "store_file": "meta/journal.ckpt"})
+    );
+    fs::remove_file(layout.journal_off()).unwrap();
+    let missing = s.run(&["--repo", &store, "info"]);
+    assert_eq!((missing.code(), missing.exit), ("E_IO", 1));
+    assert_eq!(
+        missing["error"]["details"],
+        json!({"fs_op": "open", "store_file": "meta/journal.off"})
+    );
+    for failed in [&malformed, &missing] {
+        let message = failed["error"]["message"].as_str().unwrap();
+        assert!(!message.contains(&store), "{message}");
+    }
+    raised.push("E_IO");
     assert!(
         !fs::exists(MNT_STORE).unwrap_or(false),
         "nothing was made under /mnt"

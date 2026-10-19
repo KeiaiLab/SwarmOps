@@ -429,6 +429,10 @@ changes are reviewed ([the versioning policy](policies/versioning-and-stability.
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what
 it repaired, in offsets and counts; it is no warning (operations §0).
 
+An I/O failure (`E_IO`, `E_IO_TRANSIENT`, and the `E_STORE_CORRUPT` of a metadata file that does
+not parse) names the file operation that failed and the store file it was on (`details.fs_op`,
+`details.store_file`, relative to the store's root), never a host path.
+
 A mutation needs an identity, `<family>/<instance>` (for example `agent/worker-17`), from
 `--as` or `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID` for the agent's run; without one it fails with
 `E_IDENTITY_REQUIRED`. M1 records identities without verifying them (`meta.auth` is `"trust"`).

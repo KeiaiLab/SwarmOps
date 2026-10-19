@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
 use swarmops_repo::{RepoError, StoreError};
-use swarmops_store::Layout;
+use swarmops_store::{IoFailure, Layout};
 
 use crate::local::cas_mismatch;
 
@@ -100,14 +100,14 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
             During::Init(_) | During::Op => corrupt(message, during, "swarmops verify"),
         },
         StoreError::Io(io) if io.kind() == io::ErrorKind::InvalidData => {
-            corrupt(message, during, "swarmops verify")
+            corrupt(message, during, "swarmops verify").with_details(located(&io))
         }
         StoreError::Io(io) => match during {
             During::Open(at) if io.kind() == io::ErrorKind::NotADirectory => error(
                 ErrorCode::NotARepo,
                 format!("{at} is not a directory, so it holds no store"),
             ),
-            _ => error(ErrorCode::Io, message),
+            _ => error(ErrorCode::Io, message).with_details(located(&io)),
         },
         StoreError::UnsupportedFs(at) => error(ErrorCode::UnsupportedFs, message)
             .with_details(details([("path", at.as_str().into())]))
@@ -140,10 +140,25 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         StoreError::PostCommit { .. } | StoreError::BadCall(_) => {
             error(ErrorCode::Internal, message)
         }
-        StoreError::NotCommitted { .. } => error(ErrorCode::IoTransient, message)
-            .with_details(details([("committed", false.into())]))
-            .with_hint("run the same command again: nothing of this one was committed"),
+        StoreError::NotCommitted { source } => {
+            let mut details = located(&source);
+            details.insert("committed".to_owned(), false.into());
+            error(ErrorCode::IoTransient, message)
+                .with_details(details)
+                .with_hint("run the same command again: nothing of this one was committed")
+        }
     }
+}
+
+/// What a filesystem failure names: the file operation that failed (`fs_op`), and, where it was
+/// on a file of the store, that file relative to the store's root (`store_file`), never a host
+/// path (operations spec §0).
+fn located(io: &IoFailure) -> Map<String, Value> {
+    let mut located = details([("fs_op", io.op.as_str().into())]);
+    if let Some(file) = &io.file {
+        located.insert("store_file".to_owned(), file.as_str().into());
+    }
+    located
 }
 
 /// The error of an `init` that made the store at `at`, whole and durable, but then failed with
@@ -286,7 +301,7 @@ pub fn shell_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use swarmops_core::{ChangesetId, CodecError, ObjectKind};
-    use swarmops_store::LimitKind;
+    use swarmops_store::{FileOp, FsMethod, IoFailure, LimitKind};
 
     use super::*;
 
@@ -417,7 +432,10 @@ mod tests {
     fn store_errors_map_to_their_codes() {
         let (op, at) = (During::Op, Utf8Path::new(AT));
         let store = RepoError::Store;
-        let io = |kind: io::ErrorKind| store(StoreError::Io(io::Error::new(kind, "boom")));
+        let io = |kind: io::ErrorKind| {
+            let failure = IoFailure::new(FileOp::Open, None, io::Error::new(kind, "boom"));
+            store(StoreError::Io(failure))
+        };
         maps(store(StoreError::Busy), op, ErrorCode::Busy);
         let contended = StoreError::SnapshotContended { rounds: 32 };
         maps(store(contended), op, ErrorCode::Busy);
@@ -470,7 +488,11 @@ mod tests {
         };
         maps(store(post), op, ErrorCode::Internal);
         let not_committed = StoreError::NotCommitted {
-            source: io::Error::other("boom"),
+            source: IoFailure::new(
+                FileOp::Fs(FsMethod::AppendDurable),
+                None,
+                io::Error::other("boom"),
+            ),
         };
         maps(store(not_committed), op, ErrorCode::IoTransient);
     }
@@ -510,6 +532,7 @@ mod tests {
         maps(store(call), op, ErrorCode::Internal);
         let einval = io::Error::from_raw_os_error(22);
         assert_eq!(einval.kind(), io::ErrorKind::InvalidInput);
+        let einval = IoFailure::new(FileOp::Fs(FsMethod::Truncate), None, einval);
         let error = repo_error(store(StoreError::Io(einval)), op);
         assert_eq!((error.code.as_str(), error.exit), ("E_IO", 1));
     }
@@ -519,7 +542,11 @@ mod tests {
     #[test]
     fn a_write_cut_back_off_the_journal_is_retryable_and_not_committed() {
         let not_committed = StoreError::NotCommitted {
-            source: io::Error::other("the fdatasync failed"),
+            source: IoFailure::new(
+                FileOp::Fs(FsMethod::AppendDurable),
+                Some("meta/journal.log".into()),
+                io::Error::other("the fdatasync failed"),
+            ),
         };
         let error = repo_error(RepoError::Store(not_committed), During::Op);
         assert_eq!(
@@ -534,6 +561,84 @@ mod tests {
         );
         let hint = error.hint.unwrap_or_default();
         assert!(hint.contains("same command"), "{hint}");
+    }
+
+    /// A filesystem failure names the file operation that failed (`details.fs_op`) and, where it
+    /// was on a file of the store, that file relative to the store's root
+    /// (`details.store_file`): on `E_IO`, which has no hint (no command fixes a file's owner); on
+    /// the `E_STORE_CORRUPT` of a metadata file that does not parse; and on the `E_IO_TRANSIENT`
+    /// of a journal append the store cut back, beside `committed`. A failure on no file of the
+    /// store has no `store_file`; an open of a store that is no directory is still
+    /// `E_NOT_A_REPO`.
+    #[test]
+    fn io_errors_name_the_operation_and_the_store_file() {
+        let (op, at) = (During::Op, Utf8Path::new(AT));
+        let failure = |what: FileOp, file: Option<&str>, source: io::Error| {
+            IoFailure::new(what, file.map(Into::into), source)
+        };
+        let io = |failure| repo_error(RepoError::Store(StoreError::Io(failure)), op);
+        let eio = || io::Error::from_raw_os_error(5);
+
+        let sync = failure(
+            FileOp::Fs(FsMethod::SyncData),
+            Some("meta/journal.off"),
+            eio(),
+        );
+        let error = io(sync);
+        assert_eq!((error.code.as_str(), error.exit), ("E_IO", 1));
+        assert_eq!(
+            error.message,
+            "i/o error: sync_data meta/journal.off: Input/output error (os error 5)"
+        );
+        assert_eq!(error.hint, None);
+        assert_eq!(
+            Value::Object(error.details),
+            serde_json::json!({"fs_op": "sync_data", "store_file": "meta/journal.off"})
+        );
+
+        let malformed = io::Error::new(io::ErrorKind::InvalidData, "holds 3 bytes, not a u64le");
+        let ckpt = failure(
+            FileOp::Fs(FsMethod::Read),
+            Some("meta/journal.ckpt"),
+            malformed,
+        );
+        let error = io(ckpt);
+        assert_eq!(error.code.as_str(), "E_STORE_CORRUPT");
+        assert_eq!(error.hint.as_deref(), Some("swarmops verify"));
+        assert_eq!(
+            Value::Object(error.details),
+            serde_json::json!({"fs_op": "read", "store_file": "meta/journal.ckpt"})
+        );
+
+        let lock = failure(FileOp::Lock, None, io::Error::other("ended without it"));
+        let error = io(lock);
+        assert_eq!(error.code.as_str(), "E_IO");
+        assert_eq!(
+            Value::Object(error.details),
+            serde_json::json!({"fs_op": "lock"})
+        );
+
+        let append = failure(
+            FileOp::Fs(FsMethod::AppendDurable),
+            Some("meta/journal.log"),
+            eio(),
+        );
+        let not_committed = StoreError::NotCommitted { source: append };
+        let error = repo_error(RepoError::Store(not_committed), op);
+        assert_eq!((error.code.as_str(), error.exit), ("E_IO_TRANSIENT", 4));
+        assert_eq!(
+            Value::Object(error.details),
+            serde_json::json!({
+                "committed": false,
+                "fs_op": "append_durable",
+                "store_file": "meta/journal.log"
+            })
+        );
+
+        let not_a_dir = io::Error::from(io::ErrorKind::NotADirectory);
+        let file = failure(FileOp::Fs(FsMethod::Read), Some("FORMAT"), not_a_dir);
+        let error = repo_error(RepoError::Store(StoreError::Io(file)), During::Open(at));
+        assert_eq!(error.code.as_str(), "E_NOT_A_REPO");
     }
 
     /// A snapshot whose every round met a new frame took no lock and wrote nothing: `E_BUSY`,

@@ -1,6 +1,7 @@
 //! One append-only file of the changeset index: entries of `W` bytes, entry `i` at byte
 //! `i × W`. It is read with `read_at` on a read-only handle, and changed only through
-//! [`FsOps`]: appends at its end, and cuts of its tail.
+//! [`FsOps`](crate::FsOps), by way of the index's [`StoreFs`] (which names a failure's file):
+//! appends at its end, and cuts of its tail.
 //!
 //! The four columns hold one entry per record (`W` = 32 or 8). `parents.log`, whose records'
 //! parents `par.col` finds by byte offset, is a column of bytes (`W` = 1).
@@ -13,22 +14,33 @@ use camino::{Utf8Path, Utf8PathBuf};
 
 use super::sorted::index_file_error;
 use super::to_u64;
-use crate::error::StoreError;
-use crate::fs_ops::{FsOps, open_regular};
+use crate::error::{FileOp, IoFailure, StoreError};
+use crate::fs_ops::{StoreFs, open_regular};
 
 /// See the module documentation.
 pub(crate) struct AppendOnlyColumn<const W: usize> {
     path: Utf8PathBuf,
     /// Read-only.
     file: File,
+    /// What the column changes the file through, and locates its failures with.
+    fs: StoreFs,
 }
 
 impl<const W: usize> AppendOnlyColumn<W> {
-    /// Opens the file at `path` read-only. A missing one is [`StoreError::IndexCorrupt`]: a
-    /// store has every index file from its creation.
-    pub(crate) fn open(path: Utf8PathBuf) -> Result<Self, StoreError> {
-        let file = open_regular(&path).map_err(index_file_error)?;
-        Ok(Self { path, file })
+    /// Opens the file at `path` read-only, changes going through `fs`. A missing one is
+    /// [`StoreError::IndexCorrupt`], `missing` saying which: a store has every index file from
+    /// its creation.
+    pub(crate) fn open(
+        fs: &StoreFs,
+        path: Utf8PathBuf,
+        missing: &'static str,
+    ) -> Result<Self, StoreError> {
+        let file = open_regular(&path).map_err(|e| index_file_error(fs, &path, e, missing))?;
+        Ok(Self {
+            path,
+            file,
+            fs: fs.clone(),
+        })
     }
 
     pub(crate) fn path(&self) -> &Utf8Path {
@@ -36,8 +48,9 @@ impl<const W: usize> AppendOnlyColumn<W> {
     }
 
     /// The file's length in bytes (one `fstat`), a partial entry at its end included.
-    pub(crate) fn len(&self) -> io::Result<u64> {
-        Ok(self.file.metadata()?.len())
+    pub(crate) fn len(&self) -> Result<u64, IoFailure> {
+        let meta = (self.file.metadata()).map_err(|e| self.failed(FileOp::Stat, e))?;
+        Ok(meta.len())
     }
 
     /// How many whole entries `len` bytes of the file hold.
@@ -46,12 +59,12 @@ impl<const W: usize> AppendOnlyColumn<W> {
     }
 
     /// Whether the file holds exactly `entries` entries.
-    pub(crate) fn holds(&self, entries: u64) -> io::Result<bool> {
+    pub(crate) fn holds(&self, entries: u64) -> Result<bool, IoFailure> {
         Ok(self.len()? == entries * to_u64(W))
     }
 
     /// Entry `i`, read with one `read_at`.
-    pub(crate) fn entry(&self, i: u64) -> io::Result<[u8; W]> {
+    pub(crate) fn entry(&self, i: u64) -> Result<[u8; W], IoFailure> {
         let mut entry = [0; W];
         self.read_at(i, &mut entry)?;
         Ok(entry)
@@ -59,11 +72,12 @@ impl<const W: usize> AppendOnlyColumn<W> {
 
     /// Fills `buf`, a whole number of entries, with the entries from entry `first` on, with one
     /// `read_at` (none for an empty `buf`).
-    pub(crate) fn read_at(&self, first: u64, buf: &mut [u8]) -> io::Result<()> {
+    pub(crate) fn read_at(&self, first: u64, buf: &mut [u8]) -> Result<(), IoFailure> {
         if buf.is_empty() {
             return Ok(());
         }
-        self.file.read_exact_at(buf, first * to_u64(W))
+        (self.file.read_exact_at(buf, first * to_u64(W)))
+            .map_err(|e| self.failed(FileOp::ReadAt, e))
     }
 
     /// The entries `[from, to)`, read with one `read_at` (none for no entries). A range that
@@ -76,17 +90,17 @@ impl<const W: usize> AppendOnlyColumn<W> {
             });
         };
         let len = usize::try_from(count * to_u64(W))
-            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+            .map_err(|_| self.failed(FileOp::ReadAt, io::ErrorKind::OutOfMemory.into()))?;
         let mut bytes = vec![0; len];
         self.read_at(from, &mut bytes)?;
         Ok(bytes)
     }
 
-    /// Appends `entries`, a whole number of them, with one [`FsOps::append`]. The file must
-    /// hold exactly `at` entries until then, as the caller counts them: one that does not
+    /// Appends `entries`, a whole number of them, with one [`crate::FsOps::append`]. The file
+    /// must hold exactly `at` entries until then, as the caller counts them: one that does not
     /// changed under the caller, [`StoreError::IndexCorrupt`].
-    pub(crate) fn append(&self, fs: &dyn FsOps, entries: &[u8], at: u64) -> Result<(), StoreError> {
-        if fs.append(self.path.as_std_path(), entries)? == at * to_u64(W) {
+    pub(crate) fn append(&self, entries: &[u8], at: u64) -> Result<(), StoreError> {
+        if self.fs.append(self.path.as_std_path(), entries)? == at * to_u64(W) {
             Ok(())
         } else {
             Err(StoreError::IndexCorrupt {
@@ -96,14 +110,19 @@ impl<const W: usize> AppendOnlyColumn<W> {
     }
 
     /// Cuts the file, `len` bytes long as the caller measured it, back to its first `keep`
-    /// entries with one [`FsOps::truncate`] (which syncs the cut), if it is longer; returns
+    /// entries with one [`crate::FsOps::truncate`] (which syncs the cut), if it is longer; returns
     /// how many entries were cut, a partial one counting as one.
-    pub(crate) fn truncate(&self, fs: &dyn FsOps, len: u64, keep: u64) -> Result<u64, StoreError> {
+    pub(crate) fn truncate(&self, len: u64, keep: u64) -> Result<u64, StoreError> {
         let keep_len = keep * to_u64(W);
         if len <= keep_len {
             return Ok(0);
         }
-        fs.truncate(self.path.as_std_path(), keep_len)?;
+        self.fs.truncate(self.path.as_std_path(), keep_len)?;
         Ok(len.div_ceil(to_u64(W)) - keep)
+    }
+
+    /// The failure `e` of `op` on this file, located; the index's own refusals on it too.
+    pub(crate) fn failed(&self, op: FileOp, e: io::Error) -> IoFailure {
+        self.fs.locate(op, &self.path, e)
     }
 }

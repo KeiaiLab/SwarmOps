@@ -79,18 +79,20 @@ error_codes! {
     RefNotFound => "E_REF_NOT_FOUND", EXIT_NOT_FOUND, false;
     /// The ref name is not `main` or `release/<name>`.
     RefNameInvalid => "E_REF_NAME_INVALID", EXIT_ERROR, false;
-    /// Stored data failed verification.
+    /// Stored data failed verification. A metadata file that does not parse also names
+    /// `details.fs_op` and `details.store_file`.
     StoreCorrupt => "E_STORE_CORRUPT", EXIT_ERROR, false;
     /// A malformed argument or request, including a command-line usage error.
     InvalidArg => "E_INVALID_ARG", EXIT_USAGE, false;
     /// The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`).
     UnsupportedFs => "E_UNSUPPORTED_FS", EXIT_ERROR, false;
-    /// The filesystem refused an operation.
+    /// The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`
+    /// the file of the store it was on, relative to the store's root.
     Io => "E_IO", EXIT_ERROR, false;
     /// A journal append failed, and the store cut what it wrote back off the journal
     /// (`details.committed` is `false`): nothing was committed, so running the same operation
     /// again is safe. A failure after the commit point is no error: the operation succeeds,
-    /// with a warning.
+    /// with a warning. `details.fs_op` and `details.store_file` name the append that failed.
     IoTransient => "E_IO_TRANSIENT", EXIT_RETRYABLE, true;
     /// Another writer held the store's metadata lock for the whole wait, or commits landed during
     /// every one of a read's attempts to take a snapshot; nothing was committed (a commit's

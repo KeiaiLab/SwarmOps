@@ -35,9 +35,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(feature = "test-hooks")]
+use std::sync::{Mutex, PoisonError};
 use tempfile::NamedTempFile;
+
+use crate::error::{FileOp, IoFailure};
 
 /// Opens `path` read-only if it is a regular file, a symlink to one included; anything else
 /// is refused with `InvalidData` before it is opened, the message naming the file by its
@@ -463,6 +468,183 @@ fn parent_dir(path: &Path) -> &Path {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),
     }
+}
+
+/// The store's view of an [`FsOps`]: each call forwarded exactly once and as it is (so the call
+/// counts, the injected failures and the order checker see what they saw before), its error
+/// located as an [`IoFailure`] that names the method and the path relative to the store's root:
+/// `link_noclobber` and `rename_durable` name their target, `write_durable_temp` its directory.
+/// Nothing is computed on success. [`StoreFs::locate`] does the same for the calls the store
+/// makes on its own handles and paths, off the seam (storage spec §8).
+///
+/// A store makes one on its real root, and its handles keep clones of it (two reference counts
+/// each): a create's staged files are named under `meta.tmp/`, where they are.
+#[derive(Clone)]
+pub struct StoreFs {
+    fs: Arc<dyn FsOps>,
+    root: Arc<Utf8Path>,
+}
+
+impl StoreFs {
+    /// `fs`, its failures located relative to the store rooted at `root`.
+    pub fn new(fs: Arc<dyn FsOps>, root: &Utf8Path) -> StoreFs {
+        StoreFs {
+            fs,
+            root: Arc::from(root),
+        }
+    }
+
+    /// The operations it forwards to.
+    pub fn ops(&self) -> &Arc<dyn FsOps> {
+        &self.fs
+    }
+
+    /// The store's root, which it names paths relative to.
+    pub fn root(&self) -> &Utf8Path {
+        &self.root
+    }
+
+    /// The failure `source` of `op` on `path`, located: `path` relative to the store's root
+    /// ([`store_relative`]). For the store's own calls, off the seam; the forwarded calls locate
+    /// theirs.
+    pub fn locate(&self, op: FileOp, path: impl AsRef<Path>, source: io::Error) -> IoFailure {
+        IoFailure::new(op, store_relative(&self.root, path.as_ref()), source)
+    }
+
+    /// The failure `source` of the forwarded call `method` on `path`, located.
+    fn failed(&self, method: FsMethod, path: &Path, source: io::Error) -> IoFailure {
+        self.locate(FileOp::Fs(method), path, source)
+    }
+
+    /// [`FsOps::create_dir_all`].
+    pub fn create_dir_all(&self, p: impl AsRef<Path>) -> Result<(), IoFailure> {
+        let p = p.as_ref();
+        (self.fs.create_dir_all(p)).map_err(|e| self.failed(FsMethod::CreateDirAll, p, e))
+    }
+
+    /// [`FsOps::write_durable_temp`]; a failure names `dir`.
+    pub fn write_durable_temp(
+        &self,
+        dir: impl AsRef<Path>,
+        bytes: &[u8],
+    ) -> Result<PathBuf, IoFailure> {
+        let dir = dir.as_ref();
+        (self.fs.write_durable_temp(dir, bytes))
+            .map_err(|e| self.failed(FsMethod::WriteDurableTemp, dir, e))
+    }
+
+    /// [`FsOps::link_noclobber`]; a failure names `to`.
+    pub fn link_noclobber(
+        &self,
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+    ) -> Result<LinkOutcome, IoFailure> {
+        let to = to.as_ref();
+        (self.fs.link_noclobber(from.as_ref(), to))
+            .map_err(|e| self.failed(FsMethod::LinkNoclobber, to, e))
+    }
+
+    /// [`FsOps::fsync_dir`].
+    pub fn fsync_dir(&self, p: impl AsRef<Path>) -> Result<(), IoFailure> {
+        let p = p.as_ref();
+        (self.fs.fsync_dir(p)).map_err(|e| self.failed(FsMethod::FsyncDir, p, e))
+    }
+
+    /// [`FsOps::read`].
+    pub fn read(&self, p: impl AsRef<Path>) -> Result<Option<Vec<u8>>, IoFailure> {
+        let p = p.as_ref();
+        (self.fs.read(p)).map_err(|e| self.failed(FsMethod::Read, p, e))
+    }
+
+    /// [`FsOps::exists`].
+    pub fn exists(&self, p: impl AsRef<Path>) -> Result<bool, IoFailure> {
+        let p = p.as_ref();
+        (self.fs.exists(p)).map_err(|e| self.failed(FsMethod::Exists, p, e))
+    }
+
+    /// [`FsOps::remove`].
+    pub fn remove(&self, p: impl AsRef<Path>) -> Result<(), IoFailure> {
+        let p = p.as_ref();
+        (self.fs.remove(p)).map_err(|e| self.failed(FsMethod::Remove, p, e))
+    }
+
+    /// [`FsOps::append_durable`].
+    pub fn append_durable(&self, path: impl AsRef<Path>, bytes: &[u8]) -> Result<u64, IoFailure> {
+        let path = path.as_ref();
+        (self.fs.append_durable(path, bytes))
+            .map_err(|e| self.failed(FsMethod::AppendDurable, path, e))
+    }
+
+    /// [`FsOps::file_len`].
+    pub fn file_len(&self, path: impl AsRef<Path>) -> Result<u64, IoFailure> {
+        let path = path.as_ref();
+        (self.fs.file_len(path)).map_err(|e| self.failed(FsMethod::FileLen, path, e))
+    }
+
+    /// [`FsOps::truncate`].
+    pub fn truncate(&self, path: impl AsRef<Path>, len: u64) -> Result<(), IoFailure> {
+        let path = path.as_ref();
+        (self.fs.truncate(path, len)).map_err(|e| self.failed(FsMethod::Truncate, path, e))
+    }
+
+    /// [`FsOps::atomic_replace`].
+    pub fn atomic_replace(&self, path: impl AsRef<Path>, bytes: &[u8]) -> Result<(), IoFailure> {
+        let path = path.as_ref();
+        (self.fs.atomic_replace(path, bytes))
+            .map_err(|e| self.failed(FsMethod::AtomicReplace, path, e))
+    }
+
+    /// [`FsOps::sync_data`].
+    pub fn sync_data(&self, path: impl AsRef<Path>) -> Result<(), IoFailure> {
+        let path = path.as_ref();
+        (self.fs.sync_data(path)).map_err(|e| self.failed(FsMethod::SyncData, path, e))
+    }
+
+    /// [`FsOps::append`].
+    pub fn append(&self, path: impl AsRef<Path>, bytes: &[u8]) -> Result<u64, IoFailure> {
+        let path = path.as_ref();
+        (self.fs.append(path, bytes)).map_err(|e| self.failed(FsMethod::Append, path, e))
+    }
+
+    /// [`FsOps::rename_durable`]; a failure names `to`.
+    pub fn rename_durable(
+        &self,
+        from: impl AsRef<Path>,
+        to: impl AsRef<Path>,
+    ) -> Result<(), IoFailure> {
+        let to = to.as_ref();
+        (self.fs.rename_durable(from.as_ref(), to))
+            .map_err(|e| self.failed(FsMethod::RenameDurable, to, e))
+    }
+}
+
+impl fmt::Debug for StoreFs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoreFs")
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
+}
+
+/// `path` relative to `root`, worked out from their text alone, with no system call: `.` for the
+/// root itself; `None` for a path outside the root, one that leaves it with a `..`, or one that
+/// is not UTF-8. A `.` in it is passed over.
+pub fn store_relative(root: &Utf8Path, path: &Path) -> Option<Utf8PathBuf> {
+    let rest = Utf8Path::from_path(path)?.strip_prefix(root).ok()?;
+    let mut relative = Utf8PathBuf::new();
+    for part in rest.components() {
+        match part {
+            Utf8Component::Normal(name) => relative.push(name),
+            Utf8Component::CurDir => {}
+            Utf8Component::ParentDir | Utf8Component::RootDir | Utf8Component::Prefix(_) => {
+                return None;
+            }
+        }
+    }
+    if relative.as_str().is_empty() {
+        relative.push(".");
+    }
+    Some(relative)
 }
 
 /// One set of operations shared by several stores, so that they share one `CrashAtFs` call
@@ -909,7 +1091,8 @@ impl FailAt {
 /// names fail with an injected I/O error ([`InjectedError`] says where in the call): call k
 /// (counting every [`FsOps`] method, from 1, as [`CrashAtFs`] counts them), and with
 /// [`FailMode::Persistent`] every mutating call after it too. It counts every call
-/// ([`FailAtFs::calls`]) and every failure ([`FailAtFs::failures`]).
+/// ([`FailAtFs::calls`]) and every failure ([`FailAtFs::failures`]), and keeps which calls it
+/// failed ([`FailAtFs::failed_calls`]).
 #[cfg(feature = "test-hooks")]
 pub struct FailAtFs<F: FsOps> {
     inner: F,
@@ -918,6 +1101,8 @@ pub struct FailAtFs<F: FsOps> {
     calls: AtomicU64,
     /// The calls failed so far.
     failures: AtomicU64,
+    /// The calls failed so far, in order: each one's method and the path it acted on.
+    failed: Mutex<Vec<(FsMethod, PathBuf)>>,
 }
 
 /// Where a [`FailAtFs`] fails a call.
@@ -939,6 +1124,7 @@ impl<F: FsOps> FailAtFs<F> {
             fail,
             calls: AtomicU64::new(0),
             failures: AtomicU64::new(0),
+            failed: Mutex::new(Vec::new()),
         }
     }
 
@@ -952,9 +1138,23 @@ impl<F: FsOps> FailAtFs<F> {
         self.failures.load(Ordering::SeqCst)
     }
 
-    /// Counts one call of `method`, and runs it as [`FailAt`] says: `call` runs unless the call
-    /// fails before it, and an injected error replaces its result if the call fails.
-    fn call<T>(&self, method: FsMethod, call: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    /// The calls it has failed, in order: each one's method and the path it acted on, as
+    /// [`StoreFs`] names a failure (a link's and a rename's target, a temp file's directory).
+    pub fn failed_calls(&self) -> Vec<(FsMethod, PathBuf)> {
+        self.failed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Counts one call of `method` on `path`, and runs it as [`FailAt`] says: `call` runs unless
+    /// the call fails before it, and an injected error replaces its result if the call fails.
+    fn call<T>(
+        &self,
+        method: FsMethod,
+        path: &Path,
+        call: impl FnOnce() -> io::Result<T>,
+    ) -> io::Result<T> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let fails = n == self.fail.at
             || (self.fail.mode == FailMode::Persistent && n > self.fail.at && method.is_mutating());
@@ -962,6 +1162,8 @@ impl<F: FsOps> FailAtFs<F> {
             return call();
         }
         self.failures.fetch_add(1, Ordering::SeqCst);
+        (self.failed.lock().unwrap_or_else(PoisonError::into_inner))
+            .push((method, path.to_path_buf()));
         let strike = match self.fail.error {
             InjectedError::Eio if method.flushes() => Strike::After,
             InjectedError::Eio | InjectedError::Enospc => Strike::Before,
@@ -979,67 +1181,67 @@ impl<F: FsOps> FailAtFs<F> {
 #[cfg(feature = "test-hooks")]
 impl<F: FsOps> FsOps for FailAtFs<F> {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.call(FsMethod::CreateDirAll, || self.inner.create_dir_all(p))
+        self.call(FsMethod::CreateDirAll, p, || self.inner.create_dir_all(p))
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.call(FsMethod::WriteDurableTemp, || {
+        self.call(FsMethod::WriteDurableTemp, dir, || {
             self.inner.write_durable_temp(dir, bytes)
         })
     }
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.call(FsMethod::LinkNoclobber, || {
+        self.call(FsMethod::LinkNoclobber, to, || {
             self.inner.link_noclobber(from, to)
         })
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.call(FsMethod::FsyncDir, || self.inner.fsync_dir(p))
+        self.call(FsMethod::FsyncDir, p, || self.inner.fsync_dir(p))
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.call(FsMethod::Read, || self.inner.read(p))
+        self.call(FsMethod::Read, p, || self.inner.read(p))
     }
 
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.call(FsMethod::Exists, || self.inner.exists(p))
+        self.call(FsMethod::Exists, p, || self.inner.exists(p))
     }
 
     fn remove(&self, p: &Path) -> io::Result<()> {
-        self.call(FsMethod::Remove, || self.inner.remove(p))
+        self.call(FsMethod::Remove, p, || self.inner.remove(p))
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.call(FsMethod::AppendDurable, || {
+        self.call(FsMethod::AppendDurable, path, || {
             self.inner.append_durable(path, bytes)
         })
     }
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.call(FsMethod::FileLen, || self.inner.file_len(path))
+        self.call(FsMethod::FileLen, path, || self.inner.file_len(path))
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.call(FsMethod::Truncate, || self.inner.truncate(path, len))
+        self.call(FsMethod::Truncate, path, || self.inner.truncate(path, len))
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.call(FsMethod::AtomicReplace, || {
+        self.call(FsMethod::AtomicReplace, path, || {
             self.inner.atomic_replace(path, bytes)
         })
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.call(FsMethod::SyncData, || self.inner.sync_data(path))
+        self.call(FsMethod::SyncData, path, || self.inner.sync_data(path))
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.call(FsMethod::Append, || self.inner.append(path, bytes))
+        self.call(FsMethod::Append, path, || self.inner.append(path, bytes))
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.call(FsMethod::RenameDurable, || {
+        self.call(FsMethod::RenameDurable, to, || {
             self.inner.rename_durable(from, to)
         })
     }
@@ -1188,5 +1390,124 @@ mod tests {
             Some(5)
         );
         assert_eq!(fs::read(&file).unwrap(), b"abcdef", "append does not flush");
+    }
+
+    /// `StoreFs` forwards each call once, as it is (a counter around the failing filesystem
+    /// counts one call per call), and locates the failure: the method, and the path relative to
+    /// the store's root (a link's and a rename's target, a temp file's directory; `.` for the
+    /// root, nothing for a path outside it), with the injected errno. What it names is what
+    /// `FailAtFs` records it failed. Locating a failure of the store's own makes no call.
+    #[test]
+    fn store_fs_forwards_each_call_once_and_locates_its_failure() {
+        use crate::error::FileOp;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        fs::create_dir_all(root.join("meta")).unwrap();
+        fs::create_dir_all(root.join("objects/tmp")).unwrap();
+        fs::write(root.join("meta/journal.off"), b"").unwrap();
+        fs::write(root.join("meta/b.tmp"), b"").unwrap();
+        // Every mutating call fails with EIO: before it runs, or, for one that flushes, after.
+        let fail = FailAt {
+            at: 1,
+            mode: FailMode::Persistent,
+            error: InjectedError::Eio,
+        };
+        let failing = Arc::new(FailAtFs::new(RealFs, fail));
+        let counter = Arc::new(CrashAtFs::new(Arc::clone(&failing), 0));
+        let store_fs = StoreFs::new(Arc::clone(&counter) as Arc<dyn FsOps>, root);
+        let object = root.join("objects/ab").join("cd".repeat(31));
+        let named =
+            |failure: &IoFailure| (failure.op, failure.file.clone(), failure.raw_os_error());
+        let failures = [
+            store_fs
+                .sync_data(root.join("meta/journal.off"))
+                .unwrap_err(),
+            (store_fs.link_noclobber(root.join("objects/tmp/.tmp1"), &object)).unwrap_err(),
+            (store_fs.write_durable_temp(root.join("objects/tmp"), b"x")).unwrap_err(),
+            (store_fs.rename_durable(root.join("meta/b.tmp"), root.join("meta/b"))).unwrap_err(),
+            store_fs.create_dir_all(root).unwrap_err(),
+            store_fs
+                .fsync_dir(dir.path().parent().unwrap())
+                .unwrap_err(),
+        ];
+        let want = [
+            (FsMethod::SyncData, Some("meta/journal.off".to_owned())),
+            (
+                FsMethod::LinkNoclobber,
+                Some(format!("objects/ab/{}", "cd".repeat(31))),
+            ),
+            (FsMethod::WriteDurableTemp, Some("objects/tmp".to_owned())),
+            (FsMethod::RenameDurable, Some("meta/b".to_owned())),
+            (FsMethod::CreateDirAll, Some(".".to_owned())),
+            (FsMethod::FsyncDir, None),
+        ];
+        for (failure, (method, file)) in failures.iter().zip(want) {
+            assert_eq!(
+                named(failure),
+                (FileOp::Fs(method), file.map(Utf8PathBuf::from), Some(5)),
+                "{failure}"
+            );
+        }
+        assert_eq!(counter.calls(), 6, "one call each");
+        let recorded: Vec<(FileOp, Option<Utf8PathBuf>)> = (failing.failed_calls().iter())
+            .map(|(method, path)| ((*method).into(), store_relative(root, path)))
+            .collect();
+        let located: Vec<(FileOp, Option<Utf8PathBuf>)> = (failures.iter())
+            .map(|failure| (failure.op, failure.file.clone()))
+            .collect();
+        assert_eq!(recorded, located, "named as FailAtFs failed them");
+
+        // A read after the failure succeeds (reads aside), forwarded once.
+        assert!(store_fs.exists(root.join("meta/journal.off")).unwrap());
+        assert_eq!(counter.calls(), 7);
+        let eof = io::Error::from(io::ErrorKind::UnexpectedEof);
+        let failure = store_fs.locate(FileOp::ReadAt, root.join("meta/journal.log"), eof);
+        assert_eq!(
+            failure.to_string(),
+            "read_at meta/journal.log: unexpected end of file"
+        );
+        assert_eq!(counter.calls(), 7, "locating makes no call");
+        assert_eq!(store_fs.root(), root);
+    }
+}
+
+#[cfg(test)]
+mod store_fs_tests {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    use camino::Utf8Path;
+
+    use super::store_relative;
+
+    /// A store-relative path is worked out from the path's text alone, with no system call: `.`
+    /// for the root; nothing for a path outside the root, or one that leaves it with `..`, or
+    /// one that is not UTF-8.
+    #[test]
+    fn store_relative_is_lexical_and_stays_in_the_root() {
+        let root = Utf8Path::new("/r");
+        let relative = |path: &str| store_relative(root, Path::new(path));
+        assert_eq!(relative("/r").as_deref(), Some(Utf8Path::new(".")));
+        assert_eq!(
+            relative("/r/meta/journal.off").as_deref(),
+            Some(Utf8Path::new("meta/journal.off"))
+        );
+        assert_eq!(
+            relative("/r/./meta/lock").as_deref(),
+            Some(Utf8Path::new("meta/lock"))
+        );
+        assert_eq!(relative("/elsewhere/x"), None);
+        assert_eq!(relative("/rx/meta"), None, "a name that merely starts so");
+        assert_eq!(relative("/r/../x"), None);
+        assert_eq!(relative("/r/meta/../../x"), None);
+        assert_eq!(
+            relative("r/meta"),
+            None,
+            "a relative path under an absolute root"
+        );
+        let not_utf8 = Path::new(OsStr::from_bytes(b"/r/meta/\xff"));
+        assert_eq!(store_relative(root, not_utf8), None);
     }
 }

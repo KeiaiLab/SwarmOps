@@ -1235,7 +1235,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_STORE_CORRUPT",
-          "description": "Stored data failed verification.",
+          "description": "Stored data failed verification. A metadata file that does not parse also names\n`details.fs_op` and `details.store_file`.",
           "type": "string"
         },
         {
@@ -1250,12 +1250,12 @@ expression: s.redact(&all)
         },
         {
           "const": "E_IO",
-          "description": "The filesystem refused an operation.",
+          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root.",
           "type": "string"
         },
         {
           "const": "E_IO_TRANSIENT",
-          "description": "A journal append failed, and the store cut what it wrote back off the journal\n(`details.committed` is `false`): nothing was committed, so running the same operation\nagain is safe. A failure after the commit point is no error: the operation succeeds,\nwith a warning.",
+          "description": "A journal append failed, and the store cut what it wrote back off the journal\n(`details.committed` is `false`): nothing was committed, so running the same operation\nagain is safe. A failure after the commit point is no error: the operation succeeds,\nwith a warning. `details.fs_op` and `details.store_file` name the append that failed.",
           "type": "string"
         },
         {

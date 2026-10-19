@@ -651,11 +651,23 @@ fn flush_at_parallelism_8_fsyncs_the_same_dirs_at_once_and_any_failure_fails_it(
     calls.failing_dirs.lock().unwrap().extend(failing.clone());
     calls.dir_fsyncs.arm(8);
     match store.flush() {
-        Err(StoreError::Io(e)) => assert_eq!(
-            e.to_string(),
-            format!("injected: fsync_dir {}", failing[0].display()),
-            "the first failure in path order is the one reported"
-        ),
+        Err(StoreError::Io(failure)) => {
+            let fanout = failing[0].strip_prefix(layout.root()).unwrap();
+            assert_eq!(
+                (failure.op, failure.file.as_deref()),
+                (
+                    swarmops_store::FileOp::Fs(FsMethod::FsyncDir),
+                    camino::Utf8Path::from_path(fanout)
+                ),
+                "the first failure in path order is the one reported, by its directory in the \
+                 store: {failure}"
+            );
+            assert_eq!(
+                failure.source.to_string(),
+                format!("injected: fsync_dir {}", failing[0].display()),
+                "the double's own error, as it came"
+            );
+        }
         other => panic!("expected the injected error, got {other:?}"),
     }
     assert_eq!(

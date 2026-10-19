@@ -67,8 +67,13 @@ enum Ended {
     Aborted,
 }
 
-/// How `run` ended, checked: an envelope, or the documented abort.
-fn ended(run: &Run) -> Ended {
+/// How `run` on the store at `store` ended, checked: an envelope, or the documented abort. A
+/// filesystem failure (`E_IO`, `E_IO_TRANSIENT`) names the file operation that failed
+/// (`details.fs_op`, one of the store's) and, where it was on a file of the store, that file
+/// relative to the store's root (`details.store_file`: never absolute, never with `..`). No
+/// error, and no warning of a run that succeeded, carries the store's path, but where an `init`
+/// that made the store says so: that message and its hint name the path the client gave.
+fn ended(run: &Run, store: &str) -> Ended {
     if run.aborted() {
         assert!(
             ABORTS.iter().any(|abort| run.stderr.contains(abort)),
@@ -77,7 +82,12 @@ fn ended(run: &Run) -> Ended {
         return Ended::Aborted;
     }
     if run.exit() == 0 {
-        return Ended::Succeeded(run.ok());
+        let result = run.ok();
+        assert!(
+            !result["warnings"].to_string().contains(store),
+            "a host path in a warning: {run}"
+        );
+        return Ended::Succeeded(result);
     }
     let mut envelope = run.envelope();
     let error = envelope["error"].take();
@@ -86,6 +96,31 @@ fn ended(run: &Run) -> Ended {
         assert_eq!(error["details"]["committed"], false, "{run}");
         assert_eq!(error["retryable"], true, "{run}");
     }
+    if error["code"] == "E_IO" || error["code"] == "E_IO_TRANSIENT" {
+        let op = error["details"]["fs_op"].as_str();
+        let ops = swarmops_store::FileOp::ALL.map(swarmops_store::FileOp::as_str);
+        assert!(op.is_some_and(|op| ops.contains(&op)), "{run}");
+        if let Some(file) = error["details"].get("store_file") {
+            let file = camino::Utf8Path::new(file.as_str().unwrap_or("/"));
+            let parent = camino::Utf8Component::ParentDir;
+            assert!(
+                file.is_relative() && !file.components().any(|part| part == parent),
+                "{run}"
+            );
+        }
+    }
+    let mut seen = error.clone();
+    if error["details"]["created"] == true {
+        let made = format!("the store at {store} is made, but reading it back failed: ");
+        let message = error["message"].as_str().unwrap_or_default();
+        let read = message.strip_prefix(&made);
+        seen["message"] = read.unwrap_or_else(|| panic!("{run}")).into();
+        seen["hint"] = Value::Null;
+    }
+    assert!(
+        !seen.to_string().contains(store),
+        "a host path in the error: {run}"
+    );
     Ended::Failed(error)
 }
 
@@ -98,7 +133,7 @@ fn commit_failing_at(template: &Store, k: u64, failure: &str, changeset: &str) -
     let what = format!("call {k} failing {failure}");
     let fail_at = format!("{k}:{failure}");
     let run = swept_commit(&store, &[(FAIL_AT_ENV, fail_at.as_str())]);
-    let ended = ended(&run);
+    let ended = ended(&run, store.path());
     if let Ended::Succeeded(result) = &ended {
         assert_eq!(result["changeset"], changeset, "{what}: {run}");
     }
@@ -130,7 +165,7 @@ fn init_failing_at(k: u64, failure: &str) -> Ended {
     let what = format!("init, call {k} failing {failure}");
     let fail_at = format!("{k}:{failure}");
     let init = run(&["init", store.path()], &[(FAIL_AT_ENV, fail_at.as_str())]);
-    let ended = ended(&init);
+    let ended = ended(&init, store.path());
     let whole = init_again(&store, &what);
     match &ended {
         Ended::Succeeded(result) => {
@@ -322,7 +357,7 @@ mod advance {
         let what = format!("advance, call {k} failing {failure}");
         let fail_at = format!("{k}:{failure}");
         let run = swept_advance(&store, base, &[(FAIL_AT_ENV, fail_at.as_str())]);
-        let ended = ended(&run);
+        let ended = ended(&run, store.path());
         if let Ended::Succeeded(result) = &ended {
             assert_eq!(
                 result["advanced"]["new"],

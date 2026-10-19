@@ -370,10 +370,12 @@ fn listed_one(records: u64, refs: u64) -> Value {
 
 /// A commit, then a ref move, whose journal frame is durable in `journal.log` but whose listing
 /// in `journal.off` fails (the file made read-only) has committed: the frame is its commit point.
-/// Each exits 0 with a warning that names `journal.off`, and readers see it already; while
-/// `journal.off` refuses writes, the next write fails, unable to list the frame, and reports no
-/// recovery. Once `journal.off` takes writes, the same commit run again finds its changeset (the
-/// store holds it once), the same move finds it applied, each reporting in `meta.recovered` the
+/// Each exits 0 with a warning that names the append that failed (`append_durable
+/// meta/journal.off`, relative to the store's root, never with the store's own path), and
+/// readers see it already; while `journal.off` refuses writes, the next write fails with `E_IO`,
+/// unable to list the frame, its `details` naming the same append, and reports no recovery.
+/// Once `journal.off` takes writes, the same commit run again finds its changeset (the store
+/// holds it once), the same move finds it applied, each reporting in `meta.recovered` the
 /// listing its write made and what it replayed, not as a warning; and the store verifies clean.
 #[test]
 fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
@@ -391,9 +393,10 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
         assert_eq!(warnings.len(), 1, "{run}");
         let warning = warnings[0].as_str().unwrap();
         assert!(
-            warning.contains("is committed") && warning.contains("journal.off"),
+            warning.contains("is committed") && warning.contains("append_durable meta/journal.off"),
             "{run}"
         );
+        assert!(!warning.contains(store.path()), "{run}");
         result
     };
 
@@ -405,7 +408,16 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
     let other = store.changes("other", "other.txt", "another change\n");
     let blocked = ["commit", "-m", "other", "--changes", other.as_str()];
     let blocked = store.run_as(&agent(0), &blocked, &[]);
-    blocked.err("E_IO");
+    let error = blocked.err("E_IO");
+    assert_eq!(
+        error["details"],
+        serde_json::json!({"fs_op": "append_durable", "store_file": "meta/journal.off"}),
+        "{error}"
+    );
+    assert!(
+        !error.to_string().contains(store.path()),
+        "no host path: {error}"
+    );
     let reported = blocked.envelope()["meta"].get("recovered").cloned();
     assert_eq!(
         reported, None,

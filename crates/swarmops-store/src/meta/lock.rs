@@ -29,7 +29,8 @@ use std::sync::mpsc::{self, RecvTimeoutError, SendError};
 use std::thread;
 use std::time::Duration;
 
-use crate::error::StoreError;
+use crate::error::{FileOp, IoFailure, StoreError};
+use crate::fs_ops::store_relative;
 use crate::layout::Layout;
 
 /// The exclusive lock on `meta/lock`, held until dropped.
@@ -46,17 +47,23 @@ impl MetaLock {
     /// Takes the lock on `layout`'s `meta/lock`, creating the file if it is missing (`meta/`
     /// must exist). If another handle holds it, waits in the kernel's queue (see the module
     /// documentation) until `timeout` has passed, then gives up with [`StoreError::Busy`]; a
-    /// zero `timeout` gives up at once.
+    /// zero `timeout` gives up at once. A failure names `meta/lock`, relative to the store's
+    /// root, and what failed: its open, or the lock.
     pub fn acquire(layout: &Layout, timeout: Duration) -> Result<MetaLock, StoreError> {
+        let failed = |op, e| {
+            let lock = layout.meta_lock();
+            IoFailure::new(op, store_relative(layout.root(), lock.as_std_path()), e)
+        };
         let file = OpenOptions::new()
             .write(true)
             .create(true)
             .truncate(false)
-            .open(layout.meta_lock())?;
+            .open(layout.meta_lock())
+            .map_err(|e| failed(FileOp::Open, e))?;
         match file.try_lock() {
             Ok(()) => return Ok(Self { file }),
             Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(e)) => return Err(e.into()),
+            Err(TryLockError::Error(e)) => return Err(failed(FileOp::Lock, e).into()),
         }
         if timeout.is_zero() {
             return Err(StoreError::Busy);
@@ -71,13 +78,16 @@ impl MetaLock {
                     // Dropping the guard unlocks the file.
                     drop(abandoned);
                 }
-            })?;
+            })
+            .map_err(|e| failed(FileOp::Lock, e))?;
         match waiting.recv_timeout(timeout) {
-            Ok(locked) => Ok(locked?),
+            Ok(locked) => Ok(locked.map_err(|e| failed(FileOp::Lock, e))?),
             Err(RecvTimeoutError::Timeout) => Err(StoreError::Busy),
-            Err(RecvTimeoutError::Disconnected) => {
-                Err(io::Error::other("the thread waiting for meta/lock ended without it").into())
-            }
+            Err(RecvTimeoutError::Disconnected) => Err(failed(
+                FileOp::Lock,
+                io::Error::other("the thread waiting for it ended without it"),
+            )
+            .into()),
         }
     }
 }

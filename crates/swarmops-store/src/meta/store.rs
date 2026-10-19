@@ -64,7 +64,6 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::io;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -79,8 +78,8 @@ use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
 use super::to_u64;
-use crate::error::{LimitKind, StoreError};
-use crate::fs_ops::{FsOps, RealFs};
+use crate::error::{FileOp, LimitKind, StoreError};
+use crate::fs_ops::{FsOps, RealFs, StoreFs};
 use crate::layout::Layout;
 
 /// How long [`MetaStore::write`] waits for [`MetaLock`] unless
@@ -108,7 +107,8 @@ const STAGING: &str = "meta.tmp";
 /// may hold at once.
 pub struct MetaStore {
     layout: Layout,
-    fs: Arc<dyn FsOps>,
+    /// What every change goes through, and what locates a failure in the store.
+    fs: StoreFs,
     journal: Journal,
     lock_timeout: Duration,
     /// What every write transaction's index gets ([`Index::set_parallelism`]).
@@ -275,18 +275,21 @@ impl MetaStore {
     /// through `std::fs`: [`FsOps`] removes no directories. Two creates of one store at once
     /// are not supported.
     pub fn create_with_fs(dir: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
+        // One on the real root, so that a failure on a staged file names it under meta.tmp/.
+        let fs = StoreFs::new(fs, dir);
         let meta = Layout::new(dir).meta_dir();
-        if std::fs::exists(&meta)? {
+        if std::fs::exists(&meta).map_err(|e| fs.locate(FileOp::Stat, &meta, e))? {
             return Err(StoreError::Format(format!("{meta} exists already")));
         }
         let staging = dir.join(STAGING);
-        if std::fs::exists(&staging)? {
+        if std::fs::exists(&staging).map_err(|e| fs.locate(FileOp::Stat, &staging, e))? {
             // What a create that crashed left behind: no part of a store yet.
-            std::fs::remove_dir_all(&staging)?;
+            std::fs::remove_dir_all(&staging)
+                .map_err(|e| fs.locate(FileOp::RemoveDirAll, &staging, e))?;
         }
         let staged = Layout::new(staging.as_path());
-        Journal::create(&staged, Arc::clone(&fs))?.set_ckpt(0)?;
-        Index::create(&staged, Arc::clone(&fs))?;
+        Journal::create_in(&staged, &fs)?.set_ckpt(0)?;
+        Index::create_in(&staged, &fs)?;
         let staged_meta = staged.meta_dir();
         fs.create_dir_all(staged.meta_path("refs").as_std_path())?;
         fs.append(staged.meta_lock().as_std_path(), &[])?;
@@ -296,7 +299,7 @@ impl MetaStore {
         fs.rename_durable(staged_meta.as_std_path(), meta.as_std_path())?;
         // Best effort: the staging directory is empty now, and harmless if it stays.
         let _ = std::fs::remove_dir(&staging);
-        Self::open_with_fs(dir, fs)
+        Self::open_on(dir, fs)
     }
 
     /// Opens the metadata store of the store rooted at `dir` on the real filesystem: see
@@ -309,14 +312,19 @@ impl MetaStore {
     /// `CrashAtFs` in crash tests). Reads only that `meta/journal.log` is there:
     /// [`StoreError::Format`] if it is not.
     pub fn open_with_fs(dir: &Utf8Path, fs: Arc<dyn FsOps>) -> Result<MetaStore, StoreError> {
+        Self::open_on(dir, StoreFs::new(fs, dir))
+    }
+
+    /// [`MetaStore::open_with_fs`] through `fs`, rooted at `dir`.
+    fn open_on(dir: &Utf8Path, fs: StoreFs) -> Result<MetaStore, StoreError> {
         let layout = Layout::new(dir);
         let log = layout.journal_log();
-        if !std::fs::exists(&log)? {
+        if !std::fs::exists(&log).map_err(|e| fs.locate(FileOp::Stat, &log, e))? {
             return Err(StoreError::Format(format!(
                 "{log} is missing: no metadata store here"
             )));
         }
-        let journal = Journal::open(&layout, Arc::clone(&fs))?;
+        let journal = Journal::open_in(&layout, fs.clone())?;
         Ok(Self::from_parts(layout, fs, journal))
     }
 
@@ -356,13 +364,13 @@ impl MetaStore {
                     let frames = self.journal.tail_frames_from_unless_shrunk(ckpt)?;
                     frames.ok_or(NotOpened::Shrunk)
                 };
-                match Index::open_with_past(&self.layout, Arc::clone(&self.fs), past) {
+                match Index::open_with_past(&self.layout, self.fs.clone(), past) {
                     Ok(opened) => opened,
                     Err(NotOpened::Shrunk) => continue,
                     Err(NotOpened::Failed(e)) => return Err(e),
                 }
             };
-            let files = refs::read_all(&self.layout, &*self.fs)?;
+            let files = refs::read_all(&self.layout, &self.fs)?;
             // A writer replaces ref files only after its frame is whole in the journal, so if the
             // frames are the ones read before (none new, and none that a failed sync or rewrite cut
             // back, storage §2 rule 3 (a)/(c), and the next writer replaced at its seq), the files
@@ -400,13 +408,12 @@ impl MetaStore {
         let ckpt = self.journal.ckpt()?;
         // The frames past the checkpoint vouch for the index's records past it, and are
         // replayed.
-        let (mut index, frames) =
-            Index::open_with_past(&self.layout, Arc::clone(&self.fs), || {
-                self.journal.tail_frames_from(ckpt)
-            })?;
+        let (mut index, frames) = Index::open_with_past(&self.layout, self.fs.clone(), || {
+            self.journal.tail_frames_from(ckpt)
+        })?;
         index.set_parallelism(self.parallelism);
         let repaired = index.repair_tail_with(&frames)?;
-        let replayed = replay::replay(&mut index, &self.layout, &*self.fs, &frames)?;
+        let replayed = replay::replay(&mut index, &self.layout, &self.fs, &frames)?;
         // The index holds every changeset of the journal now, those of the frames past the
         // checkpoint last.
         let past = frames
@@ -444,7 +451,7 @@ impl MetaStore {
     /// Entries of `meta/refs/` that cannot be refs (temp files, names this version does not
     /// use) are skipped, as snapshots skip them.
     pub fn ref_files(&self) -> Result<Vec<RefFile>, StoreError> {
-        refs::read_each(&self.layout, &*self.fs)
+        refs::read_each(&self.layout, &self.fs)
     }
 
     /// Makes the materialized files durable now: takes the lock, replays, then, if any frame
@@ -454,7 +461,7 @@ impl MetaStore {
         self.write()?.finish(true).map(drop)
     }
 
-    fn from_parts(layout: Layout, fs: Arc<dyn FsOps>, journal: Journal) -> MetaStore {
+    fn from_parts(layout: Layout, fs: StoreFs, journal: Journal) -> MetaStore {
         Self {
             layout,
             fs,
@@ -729,9 +736,7 @@ impl MetaWrite<'_> {
         }
         let current = match self.moved.get(name) {
             Some(&target) => target,
-            None => {
-                refs::read(&self.store.layout, &*self.store.fs, name)?.map(|state| state.target)
-            }
+            None => refs::read(&self.store.layout, &self.store.fs, name)?.map(|state| state.target),
         };
         if current != expected {
             return Ok(CasResult::Mismatch { actual: current });
@@ -782,7 +787,7 @@ impl MetaWrite<'_> {
             moved_refs: to_u64(self.records.len() - self.queued.len()),
             checkpointed: false,
         };
-        replay::materialize(&mut self.index, &store.layout, &*store.fs, &frame)
+        replay::materialize(&mut self.index, &store.layout, &store.fs, &frame)
             .and_then(|()| self.settle(info, flush))
             .map_err(|source| StoreError::PostCommit {
                 frame_seq: frame.seq,
@@ -822,20 +827,25 @@ impl MetaWrite<'_> {
     /// sync, and may drop the pages it failed to write: a later sync can then succeed without
     /// those records ever reaching the disk. Cut, they are appended again by the next write's
     /// replay, from the journal, and synced afresh. If the cut fails too, the error says so
-    /// beside the sync's; the records stay, and the next writer keeps them, since it finds them
-    /// whole: the hazard stays open until the next sync that succeeds, which may pass them.
+    /// beside the sync's, as what else failed; the records stay, and the next writer keeps them,
+    /// since it finds them whole: the hazard stays open until the next sync that succeeds, which
+    /// may pass them.
     fn sync_index(&mut self) -> Result<(), StoreError> {
         let Err(failed) = self.index.sync() else {
             return Ok(());
         };
-        match self.index.truncate_to(self.checkpointed_records) {
-            Ok(_) => Err(failed),
-            Err(cut) => Err(io::Error::other(format!(
-                "the index sync failed ({failed}), and so did cutting the index back to the \
-                 checkpoint ({cut})"
-            ))
-            .into()),
-        }
+        let Err(cut) = self.index.truncate_to(self.checkpointed_records) else {
+            return Err(failed);
+        };
+        Err(match failed {
+            StoreError::Io(failed) => failed
+                .with_also(format!(
+                    "cutting the index back to the checkpoint failed too: {cut}"
+                ))
+                .into(),
+            // The sync fails only on the filesystem: every one of its errors is an `Io`.
+            other => other,
+        })
     }
 
     /// Refuses, with [`StoreError::Limit`], a record past what the transaction's one frame
@@ -878,19 +888,17 @@ impl fmt::Debug for MetaWrite<'_> {
 }
 
 /// The error of a failed append of the advisory `Compacted` marker, once the compaction is
-/// done: a marker cut back off the journal is told as the plain I/O error it is.
-/// [`StoreError::NotCommitted`] would say that the transaction did not commit, when it did (or
-/// queued nothing), and inside [`StoreError::PostCommit`] it would say both.
+/// done: a marker cut back off the journal is told as the plain I/O failure it is, saying what
+/// the append was. [`StoreError::NotCommitted`] would say that the transaction did not commit,
+/// when it did (or queued nothing), and inside [`StoreError::PostCommit`] it would say both.
 fn marker_error(e: StoreError) -> StoreError {
     match e {
-        StoreError::NotCommitted { source } => io::Error::new(
-            source.kind(),
-            format!(
-                "appending the Compacted marker failed, and it was cut back off the journal \
-                 (the compaction itself is done): {source}"
-            ),
-        )
-        .into(),
+        StoreError::NotCommitted { source } => source
+            .with_also(
+                "it was appending the Compacted marker, which was cut back off the journal (the \
+                 compaction itself is done)",
+            )
+            .into(),
         other => other,
     }
 }

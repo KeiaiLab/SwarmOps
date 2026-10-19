@@ -370,21 +370,17 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         Ok(changesets)
     }
 
-    /// A handle on the journal, or what is wrong with it if one of its files is missing.
+    /// A handle on the journal, or what is wrong with it if one of its files is missing: the
+    /// failed open names the file, relative to the store's root.
     fn open_journal(&self) -> Result<Result<Journal, String>, RepoError> {
         let layout = &self.repo.layout;
         match Journal::open(layout, Arc::clone(&self.repo.fs)) {
             Ok(journal) => Ok(Ok(journal)),
             Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::NotFound => {
-                let missing = [layout.journal_log(), layout.journal_off()]
-                    .into_iter()
-                    .find(|file| !file.exists());
-                Ok(Err(
-                    match missing.as_ref().and_then(|file| file.file_name()) {
-                        Some(file) => format!("meta/{file} is missing"),
-                        None => format!("the journal does not open ({e})"),
-                    },
-                ))
+                Ok(Err(match &e.file {
+                    Some(file) => format!("{file} is missing"),
+                    None => format!("the journal does not open ({e})"),
+                }))
             }
             Err(e) => Err(e.into()),
         }

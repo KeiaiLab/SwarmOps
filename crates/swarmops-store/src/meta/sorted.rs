@@ -25,8 +25,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use camino::{Utf8Path, Utf8PathBuf};
 
 use super::to_u64;
-use crate::error::StoreError;
-use crate::fs_ops::{FsOps, open_regular};
+use crate::error::{FileOp, IoFailure, StoreError};
+use crate::fs_ops::{StoreFs, open_regular};
 
 /// How many entries a compaction reads, and writes, with one call.
 const BLOCK: usize = 4096;
@@ -48,10 +48,33 @@ const REC_LEN: usize = 8;
 #[derive(Debug)]
 pub struct SortedView<const K: usize> {
     /// The key file and the rec file, read-only; `None` exactly when `len` is 0.
-    files: Option<(File, File)>,
+    files: Option<ViewFiles>,
     len: u64,
     probes: AtomicU64,
     rec_reads: AtomicU64,
+}
+
+/// The two files of a view that holds entries, read-only, with their paths and what locates a
+/// failure to read them.
+#[derive(Debug)]
+struct ViewFiles {
+    keys: File,
+    recs: File,
+    key_path: Utf8PathBuf,
+    rec_path: Utf8PathBuf,
+    fs: StoreFs,
+}
+
+impl ViewFiles {
+    /// The failure `e` of a read of the key file, located.
+    fn keys_failed(&self, e: io::Error) -> IoFailure {
+        self.fs.locate(FileOp::ReadAt, &self.key_path, e)
+    }
+
+    /// The failure `e` of a read of the rec file, located.
+    fn recs_failed(&self, e: io::Error) -> IoFailure {
+        self.fs.locate(FileOp::ReadAt, &self.rec_path, e)
+    }
 }
 
 impl<const K: usize> SortedView<K> {
@@ -65,13 +88,20 @@ impl<const K: usize> SortedView<K> {
         }
     }
 
-    /// The view held by a key file and a rec file, each with its entry count. If the counts
-    /// differ the files are not one view (a compaction is renaming them, or crashed doing
-    /// so), and the view is empty.
-    fn pair((keys, len): (File, u64), (recs, rec_count): (File, u64)) -> Self {
-        if len == rec_count && len > 0 {
+    /// The view held by a key file and a rec file, each with its entry count, read through
+    /// `fs`'s locating of failures. If the counts differ the files are not one view (a
+    /// compaction is renaming them, or crashed doing so), and the view is empty.
+    fn pair(fs: &StoreFs, keys: ViewFile, recs: ViewFile) -> Self {
+        let len = keys.count;
+        if len == recs.count && len > 0 {
             Self {
-                files: Some((keys, recs)),
+                files: Some(ViewFiles {
+                    keys: keys.file,
+                    recs: recs.file,
+                    key_path: keys.path,
+                    rec_path: recs.path,
+                    fs: fs.clone(),
+                }),
                 len,
                 probes: AtomicU64::new(0),
                 rec_reads: AtomicU64::new(0),
@@ -160,8 +190,15 @@ impl<const K: usize> SortedView<K> {
         if range.is_empty() {
             return Ok(Vec::new());
         }
-        let count = usize::try_from(range.end - range.start)
-            .map_err(|_| io::Error::from(io::ErrorKind::OutOfMemory))?;
+        let Ok(count) = usize::try_from(range.end - range.start) else {
+            // More recs than memory holds: a read of the rec file that cannot be made.
+            let e = io::Error::from(io::ErrorKind::OutOfMemory);
+            return Err(match &self.files {
+                Some(files) => files.recs_failed(e),
+                None => IoFailure::new(FileOp::ReadAt, None, e),
+            }
+            .into());
+        };
         let mut bytes = vec![0; count * REC_LEN];
         self.read_recs(range.start, &mut bytes)?;
         Ok(bytes
@@ -175,24 +212,25 @@ impl<const K: usize> SortedView<K> {
     /// Fills `buf`, a whole number of keys, with the keys from key `first` on, in one
     /// `read_at`.
     fn read_keys(&self, first: u64, buf: &mut [u8]) -> Result<(), StoreError> {
-        let (keys, _) = self.files_for(first, buf.len() / K)?;
+        let files = self.files_for(first, buf.len() / K)?;
         self.probes.fetch_add(1, Ordering::Relaxed);
-        keys.read_exact_at(buf, first * to_u64(K))?;
+        (files.keys.read_exact_at(buf, first * to_u64(K))).map_err(|e| files.keys_failed(e))?;
         Ok(())
     }
 
     /// Fills `buf`, a whole number of recs, with the recs from entry `first` on, in one
     /// `read_at`.
     fn read_recs(&self, first: u64, buf: &mut [u8]) -> Result<(), StoreError> {
-        let (_, recs) = self.files_for(first, buf.len() / REC_LEN)?;
+        let files = self.files_for(first, buf.len() / REC_LEN)?;
         self.rec_reads.fetch_add(1, Ordering::Relaxed);
-        recs.read_exact_at(buf, first * to_u64(REC_LEN))?;
+        (files.recs.read_exact_at(buf, first * to_u64(REC_LEN)))
+            .map_err(|e| files.recs_failed(e))?;
         Ok(())
     }
 
     /// The files, if `count` entries from entry `first` on exist and `count` is not 0;
     /// otherwise [`StoreError::BadCall`]: no lookup asks for entries past the view's end.
-    fn files_for(&self, first: u64, count: usize) -> Result<&(File, File), StoreError> {
+    fn files_for(&self, first: u64, count: usize) -> Result<&ViewFiles, StoreError> {
         let end = first.checked_add(to_u64(count));
         match &self.files {
             Some(files) if count > 0 && end.is_some_and(|end| end <= self.len) => Ok(files),
@@ -216,30 +254,40 @@ pub(crate) struct Views {
 }
 
 impl Views {
-    /// Opens the views in `dir`, `meta/sorted/`. A view whose key and rec files hold
-    /// different counts is mid-rename (or a crash stopped one there) and is opened empty, so
-    /// its records count as tail.
+    /// Opens the views in `dir`, `meta/sorted/`, their reads' failures located by `fs`. A view
+    /// whose key and rec files hold different counts is mid-rename (or a crash stopped one
+    /// there) and is opened empty, so its records count as tail.
     ///
     /// Counts that grow along the rename order are [`StoreError::IndexCorrupt`], and so is
     /// a file that ends in a partial entry, or one that is missing: the store's creation
     /// made all four ([`crate::Index::create`]), and a compaction only renames over them.
-    pub(crate) fn open(dir: &Utf8Path) -> Result<Views, StoreError> {
+    pub(crate) fn open(fs: &StoreFs, dir: &Utf8Path) -> Result<Views, StoreError> {
         // The reverse of the rename order: once a file is seen new, every file opened after
         // it was renamed before it and is seen new too, so the counts seen never grow along
         // the rename order, however many compactions run meanwhile.
-        let dh_rec = open_entries(&dir.join(DH_REC), REC_LEN)?;
-        let dh_key = open_entries(&dir.join(DH_KEY), 32)?;
-        let ids_rec = open_entries(&dir.join(IDS_REC), REC_LEN)?;
-        let ids_key = open_entries(&dir.join(IDS_KEY), 32)?;
-        let counts = [ids_key.1, ids_rec.1, dh_key.1, dh_rec.1];
+        let dh_rec = open_entries(
+            fs,
+            dir.join(DH_REC),
+            REC_LEN,
+            "meta/sorted/dh.rec is missing",
+        )?;
+        let dh_key = open_entries(fs, dir.join(DH_KEY), 32, "meta/sorted/dh.key is missing")?;
+        let ids_rec = open_entries(
+            fs,
+            dir.join(IDS_REC),
+            REC_LEN,
+            "meta/sorted/ids.rec is missing",
+        )?;
+        let ids_key = open_entries(fs, dir.join(IDS_KEY), 32, "meta/sorted/ids.key is missing")?;
+        let counts = [ids_key.count, ids_rec.count, dh_key.count, dh_rec.count];
         if counts.windows(2).any(|pair| pair[0] < pair[1]) {
             return Err(StoreError::IndexCorrupt {
                 what: "the sorted views are out of the order compaction renames them in",
             });
         }
         Ok(Views {
-            ids: SortedView::pair(ids_key, ids_rec),
-            dh: SortedView::pair(dh_key, dh_rec),
+            ids: SortedView::pair(fs, ids_key, ids_rec),
+            dh: SortedView::pair(fs, dh_key, dh_rec),
             counts,
         })
     }
@@ -318,7 +366,7 @@ pub(crate) struct Rebuild<'a> {
 /// Entries out of order (a damaged view), or an id twice in the ids view, are
 /// [`StoreError::IndexCorrupt`]; nothing is renamed then.
 pub(crate) fn rebuild(
-    fs: &dyn FsOps,
+    fs: &StoreFs,
     dir: &Utf8Path,
     rebuilds: &[Rebuild<'_>],
 ) -> Result<(), StoreError> {
@@ -354,7 +402,7 @@ pub(crate) fn rebuild(
 }
 
 /// Removes `path` if it exists.
-fn remove_stale(fs: &dyn FsOps, path: &Utf8Path) -> Result<(), StoreError> {
+fn remove_stale(fs: &StoreFs, path: &Utf8Path) -> Result<(), StoreError> {
     match fs.remove(path.as_std_path()) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e.into()),
         _ => Ok(()),
@@ -446,7 +494,7 @@ impl<'a, const K: usize> Entries<'a, K> {
 
 /// Writes a view's entries to its two temp files, a block at a time.
 struct Writer<'a, const K: usize> {
-    fs: &'a dyn FsOps,
+    fs: &'a StoreFs,
     key_path: &'a Utf8Path,
     rec_path: &'a Utf8Path,
     /// Whether each key may appear once only (the ids view).
@@ -502,29 +550,54 @@ impl<const K: usize> Writer<'_, K> {
     }
 }
 
-/// Opens `path` read-only with its length in entries of `width` bytes;
-/// [`StoreError::IndexCorrupt`] if it is missing or ends in a partial entry.
-fn open_entries(path: &Utf8Path, width: usize) -> Result<(File, u64), StoreError> {
-    let file = open_regular(path).map_err(index_file_error)?;
-    let len = file.metadata()?.len();
+/// A view file, opened by [`open_entries`].
+struct ViewFile {
+    file: File,
+    path: Utf8PathBuf,
+    /// Its length, in entries.
+    count: u64,
+}
+
+/// Opens `path` read-only with its length in entries of `width` bytes, the failures located by
+/// `fs`; [`StoreError::IndexCorrupt`] if it ends in a partial entry, or if it is missing,
+/// `missing` saying which.
+fn open_entries(
+    fs: &StoreFs,
+    path: Utf8PathBuf,
+    width: usize,
+    missing: &'static str,
+) -> Result<ViewFile, StoreError> {
+    let file = open_regular(&path).map_err(|e| index_file_error(fs, &path, e, missing))?;
+    let len = file
+        .metadata()
+        .map_err(|e| fs.locate(FileOp::Stat, &path, e))?
+        .len();
     let width = to_u64(width);
     if !len.is_multiple_of(width) {
         return Err(StoreError::IndexCorrupt {
             what: "a sorted view file ends in a partial entry",
         });
     }
-    Ok((file, len / width))
+    Ok(ViewFile {
+        file,
+        path,
+        count: len / width,
+    })
 }
 
-/// What a failure to open an index file is: [`StoreError::IndexCorrupt`] if the file is not
-/// there, since a complete store has every index file; the I/O error otherwise.
-pub(crate) fn index_file_error(e: io::Error) -> StoreError {
+/// What a failure `e` to open the index file at `path` is: [`StoreError::IndexCorrupt`] if the
+/// file is not there, since a complete store has every index file, `missing` naming it; else the
+/// open's failure, located by `fs`.
+pub(crate) fn index_file_error(
+    fs: &StoreFs,
+    path: &Utf8Path,
+    e: io::Error,
+    missing: &'static str,
+) -> StoreError {
     if e.kind() == io::ErrorKind::NotFound {
-        StoreError::IndexCorrupt {
-            what: "an index file is missing",
-        }
+        StoreError::IndexCorrupt { what: missing }
     } else {
-        e.into()
+        fs.locate(FileOp::Open, path, e).into()
     }
 }
 
