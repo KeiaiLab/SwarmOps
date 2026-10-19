@@ -245,6 +245,22 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `ref set`), and the summary gives publishes/s and the journal frames, so the lock passes, each
   publish took. [docs/perf.md](docs/perf.md) has the section the quiet-window runs fill.
 
+#### M4: merge and landing (2026-10-19)
+
+- The contract of merging and landing, in `swarmops schema`, which `land`, `op log`, `op undo`
+  and `commit --key` serve: `LandReq` and `LandResp` (`status` `landed` or `replayed`);
+  `ConflictReport`, with `FileConflictOut`, `ConflictKindOut`, `HunkOut` and `LinesOut`, the
+  report a land that conflicts returns in `details.report` (each file with its kind of conflict,
+  one of seven, its hunks, whose lines count from 1 with both ends included, their texts within
+  `max_conflict_bytes`, and the target's changeset and agent that last changed it); `OpLogReq`,
+  `OpLogPage`, `OperationOut`, `OperationKind`, `OpChangesetOut` and `RefMoveOut` for the
+  operation log; and `UndoReq` and `UndoResp`. `CommitReq` gains `idempotency_key`, and
+  `CommitResp` gains `replayed`, written in every commit response (one without it, from a store
+  that predates it, reads as `false`); `show`'s `ChangesetDetail` gains `lander`, `land_key` and
+  `squashed_from`, omitted for a changeset no land made. Five error codes join the table:
+  `E_CONFLICT` (exit 3, which no code had), `E_CAS_RETRY_EXHAUSTED` (exit 4, retryable),
+  `E_NOTHING_TO_LAND` and `E_NOTHING_TO_UNDO` (exit 1) and `E_OP_NOT_FOUND` (exit 6).
+
 ### Changed
 
 #### M1.6: the code-review follow-ups (2026-10-19)

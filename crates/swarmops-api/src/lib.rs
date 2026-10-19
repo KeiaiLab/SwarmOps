@@ -18,12 +18,15 @@ pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
-    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
-    DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, FileContent, FileKind,
-    IdentityInfo, InfoReq, InitReq, LogPage, LogReq, ModeInput, ReadFileReq, ReadTreeReq,
-    RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq,
-    SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport,
-    VerifyReq,
+    CommitReq, CommitResp, ConflictKindOut, ConflictReport, ContentEncoding, ContentInput,
+    DEFAULT_LOG_LIMIT, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES,
+    DEFAULT_MAX_CHANGESETS, DEFAULT_MAX_CONFLICT_BYTES, DEFAULT_OP_LOG_LIMIT,
+    DEFAULT_READ_TREE_LIMIT, EntryKindOut, FileConflictOut, FileContent, FileKind, HunkOut,
+    IdentityInfo, InfoReq, InitReq, LandReq, LandResp, LandStatus, LinesOut, LogPage, LogReq,
+    MAX_LAND_ATTEMPTS, ModeInput, OpChangesetOut, OpLogPage, OpLogReq, OperationKind, OperationOut,
+    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut, RefSetReq,
+    RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
+    UndoReq, UndoResp, VerifyFinding, VerifyReport, VerifyReq,
 };
 pub use rev::Rev;
 
@@ -94,5 +97,22 @@ pub fn schema_for_all() -> serde_json::Value {
         VerifyReq,
         VerifyReport,
         VerifyFinding,
+        // land, op log, undo (M4).
+        LandReq,
+        LandResp,
+        LandStatus,
+        ConflictReport,
+        FileConflictOut,
+        ConflictKindOut,
+        HunkOut,
+        LinesOut,
+        OpLogReq,
+        OpLogPage,
+        OperationOut,
+        OperationKind,
+        OpChangesetOut,
+        RefMoveOut,
+        UndoReq,
+        UndoResp,
     ]
 }

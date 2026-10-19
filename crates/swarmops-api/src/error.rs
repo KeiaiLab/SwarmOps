@@ -13,6 +13,9 @@ use thiserror::Error;
 const EXIT_ERROR: i32 = 1;
 /// Exit code 2: the request or the command line is malformed.
 const EXIT_USAGE: i32 = 2;
+/// Exit code 3: the change conflicts with what it lands on; resolve it, then run the operation
+/// again.
+const EXIT_CONFLICT: i32 = 3;
 /// Exit code 4: the operation can succeed when it is run again.
 const EXIT_RETRYABLE: i32 = 4;
 /// Exit code 5: an identity or policy requirement refused the operation.
@@ -100,6 +103,22 @@ error_codes! {
     Busy => "E_BUSY", EXIT_RETRYABLE, true;
     /// A bug in SwarmOps, such as a caught panic.
     Internal => "E_INTERNAL", EXIT_ERROR, false;
+    // M4's merge and landing. Not raised yet: `land` (M4 Task 7) raises the first three and
+    // `undo` (M4 Task 9) the other two.
+    /// The change conflicts with the target: `details.report` lists each conflicting file with
+    /// its kind, its hunks and who changed it on the target. Nothing was recorded; resolve the
+    /// conflicts, then land again (the `hint` says how).
+    Conflict => "E_CONFLICT", EXIT_CONFLICT, false;
+    /// The target moved before every one of the land's attempts could publish; nothing was
+    /// recorded, and running the land again can succeed.
+    CasRetryExhausted => "E_CAS_RETRY_EXHAUSTED", EXIT_RETRYABLE, true;
+    /// The land has nothing to add to the target: its head is on the target already, or its
+    /// change is (`details.reason` says which).
+    NothingToLand => "E_NOTHING_TO_LAND", EXIT_ERROR, false;
+    /// The operation moved no ref, so there is nothing to restore.
+    NothingToUndo => "E_NOTHING_TO_UNDO", EXIT_ERROR, false;
+    /// The store has no operation by that number.
+    OpNotFound => "E_OP_NOT_FOUND", EXIT_NOT_FOUND, false;
     // Not raised in M1: token checks, `policy.toml` and the maintenance lease arrive later.
     /// The caller's token failed verification.
     Auth => "E_AUTH", EXIT_AUTH, false;
@@ -115,8 +134,8 @@ impl ErrorCode {
         self.row().0
     }
 
-    /// The process exit code: 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found
-    /// (3, conflict, has no M1 code).
+    /// The process exit code: 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6
+    /// not found.
     pub fn exit(&self) -> i32 {
         self.row().1
     }

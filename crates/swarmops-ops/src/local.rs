@@ -419,6 +419,9 @@ impl StoreOps for Recording<'_> {
             changes,
             message,
             advance,
+            // `commit --key` (M4 Task 8) gives the key its effect: until then it changes nothing,
+            // as for a store that does not know the field.
+            idempotency_key: _,
             allow_empty,
         } = req;
         let parent = match (&parent, &advance) {
@@ -472,6 +475,8 @@ impl StoreOps for Recording<'_> {
                 already_applied: moved.already_applied,
             }),
             warnings: outcome.warnings,
+            // Reported with `commit --key` (M4 Task 8).
+            replayed: false,
         })
     }
 
@@ -563,8 +568,12 @@ impl StoreOps for Recording<'_> {
             parents: changeset.parents.iter().map(ToString::to_string).collect(),
             root: changeset.root.to_string(),
             author: attribution(&changeset.metadata),
+            // A land's fields, which `land` (M4 Task 7) fills from the metadata it records.
+            lander: None,
             created_at: created_at(&changeset.committer),
             message: lossy(&changeset.message),
+            land_key: None,
+            squashed_from: Vec::new(),
             changes: changeset
                 .delta
                 .iter()
@@ -1171,6 +1180,7 @@ mod tests {
             message: "m".to_owned(),
             allow_empty: false,
             advance: None,
+            idempotency_key: None,
         };
         let committed = ops.commit(&who, req).unwrap();
         one_injected(&committed.warnings);
@@ -1219,6 +1229,7 @@ mod tests {
             message: "m".to_owned(),
             allow_empty: false,
             advance: None,
+            idempotency_key: None,
         };
         let error = ops.commit(&who, req).unwrap_err();
         assert_eq!(
@@ -1257,6 +1268,7 @@ mod tests {
             message: "m".to_owned(),
             allow_empty: false,
             advance: None,
+            idempotency_key: None,
         };
         one_injected(&ops.commit(&who, commit("f")).unwrap().warnings);
         let error = ops.commit(&who, commit("g")).unwrap_err();
@@ -1299,6 +1311,7 @@ mod tests {
                 message: "m".to_owned(),
                 allow_empty: false,
                 advance: None,
+                idempotency_key: None,
             };
             ops.commit(&who, req).unwrap().changeset
         };
@@ -1352,6 +1365,7 @@ mod tests {
             }],
             message: "m".to_owned(),
             advance: advance.map(str::to_owned),
+            idempotency_key: None,
             allow_empty: false,
         };
         let c0 = ops.commit(&who, req(None, "0", None)).unwrap().changeset;
@@ -1412,6 +1426,7 @@ mod tests {
                     message: "m".to_owned(),
                     allow_empty: false,
                     advance: None,
+                    idempotency_key: None,
                 };
                 ops.commit(&who, req).unwrap().changeset
             };

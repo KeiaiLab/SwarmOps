@@ -132,6 +132,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                     changes: read_changes(&changes)?,
                     message,
                     advance,
+                    idempotency_key: None,
                     allow_empty,
                 };
                 Ok((who, req))

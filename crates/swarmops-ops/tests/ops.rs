@@ -83,6 +83,7 @@ fn commit_req(parent: Option<&str>, changes: Vec<ChangeInput>) -> CommitReq {
         message: "a test commit".to_owned(),
         allow_empty: false,
         advance: None,
+        idempotency_key: None,
     }
 }
 
@@ -314,6 +315,7 @@ fn commit_from_inline_and_base64_contents_then_cat_ls_show_log() {
                 message: "add the readme\n\nand a tool".to_owned(),
                 allow_empty: false,
                 advance: None,
+                idempotency_key: None,
             },
         )
         .unwrap();
@@ -461,6 +463,7 @@ fn commit_on_main_by_default(ops: &LocalOps, who: &Identity, c1: &str) {
                 message: "update the readme".to_owned(),
                 allow_empty: false,
                 advance: None,
+                idempotency_key: None,
             },
         )
         .unwrap();

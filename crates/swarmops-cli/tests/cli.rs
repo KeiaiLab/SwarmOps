@@ -983,6 +983,11 @@ fn error_codes_reach_the_cli() {
         ),
         ("E_BUSY", "needs the store's lock held for its 10 s wait"),
         ("E_INTERNAL", "a caught panic: the binary's unit tests"),
+        ("E_CONFLICT", "`land` arrives later in M4"),
+        ("E_CAS_RETRY_EXHAUSTED", "`land` arrives later in M4"),
+        ("E_NOTHING_TO_LAND", "`land` arrives later in M4"),
+        ("E_NOTHING_TO_UNDO", "`op undo` arrives later in M4"),
+        ("E_OP_NOT_FOUND", "`op undo` arrives later in M4"),
         ("E_AUTH", "tokens arrive after M1"),
         ("E_POLICY_DENIED", "policies arrive after M1"),
         (
