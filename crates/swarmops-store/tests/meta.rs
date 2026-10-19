@@ -24,8 +24,8 @@ use swarmops_store::{
 };
 use swarmops_store::{
     CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
-    JournalEntry, Layout, MetaLock, MetaRead, MetaStore, RealFs, Record, RefMoveEntry, RefState,
-    StoreError,
+    JournalEntry, Layout, LimitKind, MetaLock, MetaRead, MetaStore, RealFs, Record, RefMoveEntry,
+    RefState, StoreError,
 };
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
 use swarmops_testkit::faults::checked;
@@ -485,10 +485,8 @@ fn cas_ref_rejects_unknown_target_and_bad_name() {
     }
     // An actor longer than a ref move can record is refused before anything is queued.
     let actor = "a".repeat(256);
-    match write.cas_ref("release/v2", None, Some(id(1)), &actor) {
-        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::InvalidInput),
-        other => panic!("expected InvalidInput, got {other:?}"),
-    }
+    let refused = write.cas_ref("release/v2", None, Some(id(1)), &actor);
+    assert_limit(refused, LimitKind::ActorBytes, 255, 256);
     assert_eq!(write.commit().unwrap().moved_refs, 4);
     let listed = store.read().unwrap().list_refs().unwrap();
     let names: Vec<&str> = listed.iter().map(|(name, _)| name.as_str()).collect();
@@ -598,8 +596,8 @@ fn resolve_prefix_unique_and_ambiguous() {
     assert_eq!(resolve(&one.id.0.to_hex()), [one.id], "all 64 digits");
     for bad in ["", "abcdef01234g", &"a".repeat(65)] {
         match read.resolve_prefix(bad) {
-            Err(StoreError::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),
-            other => panic!("{bad:?}: expected InvalidInput, got {other:?}"),
+            Err(StoreError::BadPrefix(prefix)) => assert_eq!(prefix, bad),
+            other => panic!("{bad:?}: expected BadPrefix, got {other:?}"),
         }
     }
     assert_eq!(read.by_delta_hash(&[0x30; 32]).unwrap(), [past.id]);
@@ -2740,11 +2738,22 @@ fn errors_during_recovery_leave_the_store_openable() {
     );
 }
 
+/// Asserts that `result` is the refusal of a request past the layout's limit `what`, which
+/// holds `max`, asking for `got`.
 #[track_caller]
-fn assert_invalid_input<T: std::fmt::Debug>(got: Result<T, StoreError>) {
-    match got {
-        Err(StoreError::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),
-        other => panic!("expected InvalidInput, got {other:?}"),
+fn assert_limit<T: std::fmt::Debug>(
+    result: Result<T, StoreError>,
+    what: LimitKind,
+    max: u64,
+    got: u64,
+) {
+    match result {
+        Err(StoreError::Limit {
+            what: limit,
+            max: most,
+            got: asked,
+        }) => assert_eq!((limit, most, asked), (what, max, got)),
+        other => panic!("expected Limit {{ {what:?}, {max}, {got} }}, got {other:?}"),
     }
 }
 
@@ -2762,8 +2771,10 @@ fn a_transaction_refuses_more_records_than_a_frame_holds() {
         main = target;
     }
     // The next record is refused, and nothing is queued; what queues nothing still answers.
-    assert_invalid_input(write.cas_ref("main", main, Some(id(2)), ACTOR));
-    assert_invalid_input(write.insert_changeset(cs(3, &[])));
+    let refused = write.cas_ref("main", main, Some(id(2)), ACTOR);
+    assert_limit(refused, LimitKind::Records, 65_535, 65_536);
+    let refused = write.insert_changeset(cs(3, &[]));
+    assert_limit(refused, LimitKind::Records, 65_535, 65_536);
     let present = write.insert_changeset(cs(1, &[])).unwrap();
     assert_eq!(present, InsertOutcome::AlreadyPresent);
     let stale = write.cas_ref("main", None, Some(id(2)), ACTOR).unwrap();

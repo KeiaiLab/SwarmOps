@@ -17,7 +17,7 @@ pub mod meta;
 #[cfg(feature = "test-hooks")]
 pub mod order_check;
 
-pub use error::StoreError;
+pub use error::{LimitKind, StoreError};
 pub use fs_objects::{FsObjectStore, ObjectStore};
 pub use fs_ops::{
     CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, FsOps, HookedFs, LinkOutcome, ORDER_CHECK_ENV, RealFs,

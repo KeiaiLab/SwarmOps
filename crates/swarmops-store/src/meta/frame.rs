@@ -18,7 +18,7 @@ use swarmops_core::bytes::Reader;
 use swarmops_core::{ChangesetId, ObjectId};
 
 use super::to_u64;
-use crate::error::{StoreError, invalid_input};
+use crate::error::{LimitKind, StoreError};
 
 /// A frame header: `u32le len | u32le crc32(payload)`.
 pub(crate) const HEADER_LEN: usize = 8;
@@ -76,19 +76,6 @@ pub struct Frame {
 }
 
 impl Record {
-    /// Appends the record's encoding to `out`.
-    ///
-    /// # Panics
-    ///
-    /// If a length does not fit its `u8` field: more than 255 parents, or a ref name or
-    /// an actor longer than 255 bytes. [`crate::Journal::append_frame`] refuses such
-    /// records with an error instead.
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        if let Err(too_long) = self.try_encode(out) {
-            panic!("cannot encode {too_long}");
-        }
-    }
-
     /// Decodes the record at the start of `buf`, returning it and how many bytes it took;
     /// the bytes after it are left alone.
     ///
@@ -121,9 +108,10 @@ impl Record {
         Ok((record, r.pos()))
     }
 
-    /// [`Record::encode`], or which field is too long for its `u8` length; `out` is left
-    /// untouched then.
-    fn try_encode(&self, out: &mut Vec<u8>) -> Result<(), &'static str> {
+    /// Appends the record's encoding to `out`. A length that does not fit its `u8` field (more
+    /// than 255 parents, or a ref name or an actor longer than 255 bytes) is
+    /// [`StoreError::Limit`], and `out` is left untouched then.
+    pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), StoreError> {
         match self {
             Self::Changeset {
                 id,
@@ -131,7 +119,7 @@ impl Record {
                 delta_hash,
                 parents,
             } => {
-                let n = u8::try_from(parents.len()).map_err(|_| "more than 255 parents")?;
+                let n = fits_u8(LimitKind::Parents, parents.len())?;
                 out.push(KIND_CHANGESET);
                 out.extend_from_slice(&id.0.0);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -148,10 +136,8 @@ impl Record {
                 actor,
                 ts,
             } => {
-                let name_len =
-                    u8::try_from(name.len()).map_err(|_| "a ref name longer than 255 bytes")?;
-                let actor_len =
-                    u8::try_from(actor.len()).map_err(|_| "an actor longer than 255 bytes")?;
+                let name_len = fits_u8(LimitKind::RefNameBytes, name.len())?;
+                let actor_len = fits_u8(LimitKind::ActorBytes, actor.len())?;
                 out.push(KIND_REF_MOVE);
                 out.push(name_len);
                 out.extend_from_slice(name.as_bytes());
@@ -170,6 +156,15 @@ impl Record {
     }
 }
 
+/// `len` as the `u8` a record's length field holds; past 255, [`StoreError::Limit`] for `what`.
+fn fits_u8(what: LimitKind, len: usize) -> Result<u8, StoreError> {
+    u8::try_from(len).map_err(|_| StoreError::Limit {
+        what,
+        max: u64::from(u8::MAX),
+        got: to_u64(len),
+    })
+}
+
 fn put_optional_id(out: &mut Vec<u8>, id: Option<ChangesetId>) {
     match id {
         Some(id) => {
@@ -180,24 +175,24 @@ fn put_optional_id(out: &mut Vec<u8>, id: Option<ChangesetId>) {
     }
 }
 
-/// The bytes of a frame holding `records`. Refuses, with `InvalidInput`, no records, more
-/// than 65,535, or a record whose lengths do not fit the layout.
+/// The bytes of a frame holding `records`. Refuses more than 65,535 records, or a record
+/// whose lengths do not fit the layout, with [`StoreError::Limit`]; no records, which no
+/// transaction appends, with [`StoreError::BadCall`].
 pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
-    let count = u16::try_from(records.len())
-        .ok()
-        .filter(|&count| count > 0)
-        .ok_or_else(|| {
-            invalid_input(format!(
-                "a frame holds 1 to 65,535 records, not {}",
-                records.len()
-            ))
-        })?;
+    if records.is_empty() {
+        return Err(StoreError::BadCall(
+            "a frame holds at least one record".to_owned(),
+        ));
+    }
+    let count = u16::try_from(records.len()).map_err(|_| StoreError::Limit {
+        what: LimitKind::Records,
+        max: to_u64(MAX_RECORDS),
+        got: to_u64(records.len()),
+    })?;
     let mut frame = vec![0; HEADER_LEN];
     frame.extend_from_slice(&count.to_le_bytes());
     for record in records {
-        record
-            .try_encode(&mut frame)
-            .map_err(|too_long| invalid_input(format!("cannot encode {too_long}")))?;
+        record.encode(&mut frame)?;
     }
     let payload = &frame[HEADER_LEN..];
     // At most 65,535 records of at most 8,234 bytes (a changeset with 255 parents).

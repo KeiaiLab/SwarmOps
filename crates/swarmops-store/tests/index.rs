@@ -25,7 +25,9 @@ use swarmops_core::bytes::to_u64;
 use swarmops_core::{ChangesetId, ObjectId};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
-use swarmops_store::{ChangesetMeta, FsOps, Index, Layout, RealFs, StoreError};
+use swarmops_store::{
+    ChangesetMeta, FsOps, Index, Layout, LimitKind, MetaStore, RealFs, StoreError,
+};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 #[cfg(feature = "test-hooks")]
@@ -175,11 +177,12 @@ fn assert_index_corrupt<T: Debug>(got: Result<T, StoreError>, what: &str) {
     }
 }
 
+/// Asserts that `got` is the refusal of a call the store does not take.
 #[track_caller]
-fn assert_invalid_input<T: Debug>(got: Result<T, StoreError>, what: &str) {
+fn assert_bad_call<T: Debug>(got: Result<T, StoreError>, what: &str) {
     match got {
-        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidInput => {}
-        other => panic!("{what}: expected InvalidInput, got {other:?}"),
+        Err(StoreError::BadCall(_)) => {}
+        other => panic!("{what}: expected BadCall, got {other:?}"),
     }
 }
 
@@ -225,8 +228,8 @@ fn append_get_roundtrip_with_parents() {
     };
     assert_eq!(index.append(&late).unwrap(), 4);
     assert_eq!(index.get(4).unwrap(), at_seq(&late, 4));
-    assert_invalid_input(index.get(5), "a rec past the end");
-    assert_invalid_input(index.get(u64::MAX), "u64::MAX");
+    assert_bad_call(index.get(5), "a rec past the end");
+    assert_bad_call(index.get(u64::MAX), "u64::MAX");
 }
 
 #[test]
@@ -314,7 +317,10 @@ fn find_prefix_rejects_what_is_not_a_hex_prefix() {
     append_all(&mut index, &[spread_meta(0)]);
     let too_long = "0".repeat(65);
     for bad in ["", "g", "0x12", "12 ", "é", too_long.as_str()] {
-        assert_invalid_input(index.find_prefix(bad), bad);
+        match index.find_prefix(bad) {
+            Err(StoreError::BadPrefix(prefix)) => assert_eq!(prefix, bad),
+            other => panic!("{bad:?}: expected BadPrefix, got {other:?}"),
+        }
     }
 }
 
@@ -1097,6 +1103,91 @@ fn compaction_refuses_damaged_views_and_ids_held_twice() {
 }
 
 #[test]
+fn a_sorted_view_rec_past_what_it_covers_is_index_corrupt() {
+    // A view of m entries holds the recs [0, m), as compaction checks when it merges one, so a
+    // lookup checks each rec it reads from a view against the view's own length: one at or
+    // past it is damage (a `.rec` entry gone bad), never a record to read, whether it points
+    // into the unsorted tail (another changeset's record) or past the index's end.
+    let (_root, layout) = new_root();
+    let mut index = open(&layout);
+    let metas: Vec<ChangesetMeta> = (0..5).map(spread_meta).collect();
+    append_all(&mut index, &metas[..3]);
+    assert_eq!(index.compact().unwrap(), 3);
+    append_all(&mut index, &metas[3..]);
+    assert_eq!((index.sorted_count(), index.tail_len()), (3, 2));
+    let id = keys_on_disk(&layout, "sorted/ids.key")[1];
+    let its_rec = recs_on_disk(&layout, "sorted/ids.rec")[1];
+    let dh = keys_on_disk(&layout, "sorted/dh.key")[1];
+    // The first record of the tail, then one past the index's end.
+    for rec in [3, 7] {
+        let ids = set_rec(&layout, "sorted/ids.rec", 1, rec);
+        let index = open(&layout);
+        assert_eq!(index.len(), 5);
+        assert_view_points_past(index.find(cs(id)), format!("find, rec {rec}"));
+        let prefix = &hex(&id)[..12];
+        assert_view_points_past(index.find_prefix(prefix), format!("find_prefix, rec {rec}"));
+        fs::write(layout.meta_path("sorted/ids.rec"), ids).unwrap();
+        let dhs = set_rec(&layout, "sorted/dh.rec", 1, rec);
+        let found = open(&layout).find_delta_hash(&dh);
+        assert_view_points_past(found, format!("find_delta_hash, rec {rec}"));
+        fs::write(layout.meta_path("sorted/dh.rec"), dhs).unwrap();
+    }
+    assert_eq!(
+        open(&layout).find(cs(id)).unwrap(),
+        Some(its_rec),
+        "the views restored"
+    );
+
+    // As a reader meets it, through a snapshot: one write of 1,025 changesets, whose commit
+    // compacts them (the tail passes 1,024), so that the views cover every record.
+    let (_dir, store_layout) = bare_root();
+    let store = MetaStore::create(store_layout.root()).unwrap();
+    let mut write = store.write().unwrap();
+    for n in 0..=Index::COMPACT_THRESHOLD {
+        write.insert_changeset(spread_meta(n)).unwrap();
+    }
+    write.commit().unwrap();
+    assert_eq!(
+        open(&store_layout).sorted_count(),
+        Index::COMPACT_THRESHOLD + 1
+    );
+    let first = keys_on_disk(&store_layout, "sorted/ids.key")[0];
+    set_rec(
+        &store_layout,
+        "sorted/ids.rec",
+        0,
+        Index::COMPACT_THRESHOLD + 1,
+    );
+    let read = store.read().unwrap();
+    assert_view_points_past(read.changeset(cs(first)), "a snapshot's changeset");
+    let prefix = &hex(&first)[..12];
+    assert_view_points_past(read.resolve_prefix(prefix), "a snapshot's resolve_prefix");
+}
+
+/// Sets entry `at` of the rec file `meta/<rel>` to `rec`; returns what the file held before.
+fn set_rec(layout: &Layout, rel: &str, at: usize, rec: u64) -> Vec<u8> {
+    let path = layout.meta_path(rel);
+    let before = fs::read(&path).unwrap();
+    let mut recs = before.clone();
+    recs[at * 8..at * 8 + 8].copy_from_slice(&rec.to_le_bytes());
+    fs::write(&path, recs).unwrap();
+    before
+}
+
+/// Asserts that `got` is the error of a lookup that read, from a sorted view, a rec the view
+/// does not cover.
+#[track_caller]
+fn assert_view_points_past<T: Debug>(got: Result<T, StoreError>, what: impl AsRef<str>) {
+    let what = what.as_ref();
+    match got {
+        Err(StoreError::IndexCorrupt {
+            what: "a sorted view points at a record it does not cover",
+        }) => {}
+        other => panic!("{what}: expected IndexCorrupt, got {other:?}"),
+    }
+}
+
+#[test]
 fn damage_under_an_open_handle_is_index_corrupt_and_cuts_nothing() {
     // gen.col cut back to 4 of 8 records under an open handle. No crash and no writer cuts
     // a whole record, so this is damage: whichever write meets it must refuse, without
@@ -1218,7 +1309,12 @@ fn append_refuses_more_than_255_parents() {
     append_all(&mut index, &[spread_meta(0)]);
     let before = column_lens(&layout);
     let too_many = meta(id_of(1), 2, [0; 32], vec![spread_id(0); 256]);
-    assert_invalid_input(index.append(&too_many), "256 parents");
+    match index.append(&too_many) {
+        Err(StoreError::Limit { what, max, got }) => {
+            assert_eq!((what, max, got), (LimitKind::Parents, 255, 256));
+        }
+        other => panic!("256 parents: expected Limit, got {other:?}"),
+    }
     assert_eq!(column_lens(&layout), before, "nothing written");
     assert_eq!(index.len(), 1);
     let most = meta(id_of(1), 2, [0; 32], vec![spread_id(0); 255]);

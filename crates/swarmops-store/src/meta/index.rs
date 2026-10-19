@@ -53,7 +53,7 @@ use super::parents::{self, MAX_PARENTS, MAX_PARENTS_LEN, PARENT_LEN, ParentsAt};
 use super::replay::{ChangesetRecord, changesets};
 use super::sorted::{self, Rebuild, SortedView, VIEW_FILES, ViewName, Views};
 use super::to_u64;
-use crate::error::{StoreError, invalid_input};
+use crate::error::{LimitKind, StoreError};
 use crate::fs_ops::{FsOps, RealFs};
 use crate::layout::Layout;
 
@@ -257,15 +257,14 @@ impl Index {
     /// this handle catches up first, cutting off what is not whole, as
     /// [`Index::repair_tail`] does; files that hold fewer whole records than this handle
     /// counts, or than the sorted views cover, are damaged, [`StoreError::IndexCorrupt`],
-    /// and nothing is cut or written then. More than 255 parents is an `InvalidInput` error,
+    /// and nothing is cut or written then. More than 255 parents is [`StoreError::Limit`],
     /// and nothing is written then either. After any other error, what was written is cut
     /// off by the next append or repair.
     pub fn append(&mut self, meta: &ChangesetMeta) -> Result<u64, StoreError> {
-        let count = u8::try_from(meta.parents.len()).map_err(|_| {
-            invalid_input(format!(
-                "a changeset has at most {MAX_PARENTS} parents, not {}",
-                meta.parents.len()
-            ))
+        let count = u8::try_from(meta.parents.len()).map_err(|_| StoreError::Limit {
+            what: LimitKind::Parents,
+            max: to_u64(MAX_PARENTS),
+            got: to_u64(meta.parents.len()),
         })?;
         if !self.ends_where_counted()? {
             self.catch_up()?;
@@ -350,11 +349,12 @@ impl Index {
     }
 
     /// Record `rec`: four `read_at`s of the columns, and one of `parents.log` if it has
-    /// parents. A rec this handle does not count is an `InvalidInput` error; parents off
-    /// `parents.log` are [`StoreError::IndexCorrupt`].
+    /// parents. A rec this handle does not count is [`StoreError::BadCall`] (the lookups never
+    /// give one: they check the recs they read from a sorted view); parents off `parents.log`
+    /// are [`StoreError::IndexCorrupt`].
     pub fn get(&self, rec: u64) -> Result<ChangesetMeta, StoreError> {
         if rec >= self.len {
-            return Err(invalid_input(format!(
+            return Err(StoreError::BadCall(format!(
                 "rec {rec} is past the index's {} records",
                 self.len
             )));
@@ -374,13 +374,14 @@ impl Index {
 
     /// The rec of changeset `id`, if the index holds it: a binary search of the id view's
     /// key column (one `read_at` per probe), then, if the view lacks it, a scan of the
-    /// tail of `ids.col`, read with one `read_at`.
+    /// tail of `ids.col`, read with one `read_at`. A rec the view names that the view does not
+    /// cover (a view of m entries holds the recs `[0, m)`) is [`StoreError::IndexCorrupt`].
     pub fn find(&self, id: ChangesetId) -> Result<Option<u64>, StoreError> {
         let key = id.0.0;
         let view = &self.views.ids;
         let at = view.lower_bound(&key)?;
         if at < view.len() && view.key_at(at)? == key {
-            return view.rec_at(at).map(Some);
+            return covered_by(view, view.rec_at(at)?).map(Some);
         }
         let from = view.len();
         let tail = self.ids.entries(from, self.len)?;
@@ -394,7 +395,7 @@ impl Index {
 
     /// The recs, ascending, of the changesets whose ids start with `prefix_nibbles`, 1 to 64
     /// hex digits of either case; an odd count compares the last digit with the high half of
-    /// its byte. Anything else is an `InvalidInput` error. A lower-bound search of the id
+    /// its byte. Anything else is [`StoreError::BadPrefix`]. A lower-bound search of the id
     /// view, a forward scan of its keys while they match, one read of their recs, and a scan
     /// of the tail of `ids.col`.
     pub fn find_prefix(&self, prefix_nibbles: &str) -> Result<Vec<u64>, StoreError> {
@@ -413,7 +414,8 @@ impl Index {
 
     /// The recs, ascending, of the records whose key `matches` accepts, the keys it accepts
     /// being a run in key order that starts at `low` or after it: that run of `view`, from a
-    /// lower-bound search, one read of its recs, and a scan of the tail of `column`.
+    /// lower-bound search, one read of its recs (each checked against what the view covers,
+    /// [`covered_by`]), and a scan of the tail of `column`.
     fn find_all(
         &self,
         view: &SortedView<32>,
@@ -424,6 +426,9 @@ impl Index {
         let start = view.lower_bound(low)?;
         let end = view.run_end(start, &matches)?;
         let mut recs = view.recs(start..end)?;
+        for &rec in &recs {
+            covered_by(view, rec)?;
+        }
         let from = view.len();
         let tail = column.entries(from, self.len)?;
         recs.extend(
@@ -980,6 +985,21 @@ impl fmt::Debug for Index {
     }
 }
 
+/// `rec`, read from `view`, if the view covers it: a view of m entries holds the recs `[0, m)`,
+/// so a rec at or past m is damage (a bit flipped in a `.rec` file), never a record to read. It
+/// would point into the unsorted tail (another changeset's record) or past the index's end. The
+/// same rule as a compaction's when it merges the view; an in-memory comparison, no read. A
+/// wrong rec within `[0, m)` is verify's to find.
+fn covered_by<const K: usize>(view: &SortedView<K>, rec: u64) -> Result<u64, StoreError> {
+    if rec < view.len() {
+        Ok(rec)
+    } else {
+        Err(StoreError::IndexCorrupt {
+            what: "a sorted view points at a record it does not cover",
+        })
+    }
+}
+
 /// The entries `[from, to)` of `column`; `None` if the file is shorter now than when it was
 /// measured (a writer cut what it found torn): records that are gone vouch for nothing.
 fn read_or_cut<const W: usize>(
@@ -1073,19 +1093,19 @@ struct Prefix {
 }
 
 impl Prefix {
+    /// The prefix `hex` spells: 1 to 64 hex digits of either case, else
+    /// [`StoreError::BadPrefix`].
     fn parse(hex: &str) -> Result<Prefix, StoreError> {
+        let bad = || StoreError::BadPrefix(hex.to_owned());
         if hex.is_empty() || hex.len() > 64 {
-            return Err(invalid_input(format!(
-                "an id prefix is 1 to 64 hex digits, not {} bytes",
-                hex.len()
-            )));
+            return Err(bad());
         }
         let mut low = [0; 32];
         for (i, digit) in hex.bytes().enumerate() {
             let nibble = char::from(digit)
                 .to_digit(16)
                 .and_then(|nibble| u8::try_from(nibble).ok())
-                .ok_or_else(|| invalid_input(format!("id prefix {hex:?} is not hex")))?;
+                .ok_or_else(bad)?;
             low[i / 2] |= if i.is_multiple_of(2) {
                 nibble << 4
             } else {

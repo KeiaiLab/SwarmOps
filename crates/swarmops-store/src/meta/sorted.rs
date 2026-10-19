@@ -104,15 +104,16 @@ impl<const K: usize> SortedView<K> {
         Ok(low)
     }
 
-    /// Key `i`, read with one `read_at`. `i` past the end is an `InvalidInput` error.
+    /// Key `i`, read with one `read_at`. `i` past the end is [`StoreError::BadCall`].
     pub fn key_at(&self, i: u64) -> Result<[u8; K], StoreError> {
         let mut key = [0; K];
         self.read_keys(i, &mut key)?;
         Ok(key)
     }
 
-    /// The rec of key `i`, read with one `read_at`. `i` past the end is an `InvalidInput`
-    /// error.
+    /// The rec of key `i`, read with one `read_at`. `i` past the end is
+    /// [`StoreError::BadCall`]. The rec itself is as the file holds it: the index's lookups
+    /// check it against what the view covers.
     pub fn rec_at(&self, i: u64) -> Result<u64, StoreError> {
         let mut rec = [0; REC_LEN];
         self.read_recs(i, &mut rec)?;
@@ -187,19 +188,15 @@ impl<const K: usize> SortedView<K> {
     }
 
     /// The files, if `count` entries from entry `first` on exist and `count` is not 0;
-    /// otherwise an `InvalidInput` error.
+    /// otherwise [`StoreError::BadCall`]: no lookup asks for entries past the view's end.
     fn files_for(&self, first: u64, count: usize) -> Result<&(File, File), StoreError> {
         let end = first.checked_add(to_u64(count));
         match &self.files {
             Some(files) if count > 0 && end.is_some_and(|end| end <= self.len) => Ok(files),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "entries {first}..+{count} are not within a sorted view of {} entries",
-                    self.len
-                ),
-            )
-            .into()),
+            _ => Err(StoreError::BadCall(format!(
+                "entries {first}..+{count} are not within a sorted view of {} entries",
+                self.len
+            ))),
         }
     }
 }

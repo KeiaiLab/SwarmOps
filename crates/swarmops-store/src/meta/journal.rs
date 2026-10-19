@@ -153,8 +153,9 @@ impl Journal {
     /// The caller must hold [`crate::MetaLock`]: this takes no lock. If the journal does
     /// not end where this handle last saw it end, or the handle never checked its tail,
     /// the tail is checked first, as [`Journal::truncate_torn_tail`] does, so that a frame
-    /// never lands after a torn one. Records the layout cannot hold are refused with
-    /// `InvalidInput` before anything is written.
+    /// never lands after a torn one. Records the layout cannot hold are refused before
+    /// anything is written: more than 65,535, or a record whose lengths do not fit, with
+    /// [`StoreError::Limit`]; none at all, with [`StoreError::BadCall`].
     ///
     /// When the first append fails, in its write or in its fdatasync, what reached
     /// `journal.log` of the frame is cut back off it first (the file truncated to where the

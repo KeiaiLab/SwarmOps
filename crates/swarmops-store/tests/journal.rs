@@ -28,7 +28,9 @@ use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
-use swarmops_store::{Frame, FsOps, Journal, Layout, MetaLock, RealFs, Record, StoreError};
+use swarmops_store::{
+    Frame, FsOps, Journal, Layout, LimitKind, MetaLock, RealFs, Record, StoreError,
+};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::{FsyncModelFs, checked};
@@ -96,7 +98,9 @@ fn compacted(sorted_count: u64) -> Record {
 
 fn encoded(record: &Record) -> Vec<u8> {
     let mut bytes = Vec::new();
-    record.encode(&mut bytes);
+    record
+        .encode(&mut bytes)
+        .expect("a record within the layout's limits encodes");
     bytes
 }
 
@@ -1556,8 +1560,9 @@ fn append_frame_refuses_records_the_layout_cannot_hold() {
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
     let too_long = "x".repeat(256);
+    // Each with the limit it goes past, as (what, max, got); none for a call no request makes.
     let refused = [
-        ("no records", vec![]),
+        ("no records", vec![], None),
         (
             "a 256-byte ref name",
             vec![Record::RefMove {
@@ -1567,6 +1572,7 @@ fn append_frame_refuses_records_the_layout_cannot_hold() {
                 actor: "claude/1".into(),
                 ts: 0,
             }],
+            Some((LimitKind::RefNameBytes, 255, 256)),
         ),
         (
             "a 256-byte actor",
@@ -1577,6 +1583,7 @@ fn append_frame_refuses_records_the_layout_cannot_hold() {
                 actor: too_long,
                 ts: 0,
             }],
+            Some((LimitKind::ActorBytes, 255, 256)),
         ),
         (
             "256 parents",
@@ -1586,15 +1593,22 @@ fn append_frame_refuses_records_the_layout_cannot_hold() {
                 delta_hash: [0; 32],
                 parents: vec![id(1); 256],
             }],
+            Some((LimitKind::Parents, 255, 256)),
         ),
-        ("65,536 records", vec![compacted(0); 65_536]),
+        (
+            "65,536 records",
+            vec![compacted(0); 65_536],
+            Some((LimitKind::Records, 65_535, 65_536)),
+        ),
     ];
-    for (what, records) in refused {
+    for (what, records, limit) in refused {
         let got = journal.append_frame(&records);
-        assert!(
-            matches!(&got, Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::InvalidInput),
-            "{what}: {got:?}"
-        );
+        match (&got, limit) {
+            (Err(StoreError::BadCall(_)), None) => {}
+            (Err(StoreError::Limit { what, max, got }), Some(limit))
+                if (*what, *max, *got) == limit => {}
+            _ => panic!("{what}: expected {limit:?} (None: BadCall), got {got:?}"),
+        }
     }
     assert_eq!(file_len(layout.journal_log()), 0, "nothing was written");
 

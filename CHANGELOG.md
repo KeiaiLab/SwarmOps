@@ -222,6 +222,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   carries, says so: another writer held the lock for the whole wait, or commits landed during
   every attempt to take a snapshot; either way nothing was committed (a commit's flushed objects
   may remain, for GC). It used to say only the first.
+- The store's limit refusals (more than 255 parents, an actor over 255 bytes, more than 65,535
+  records in one transaction) and malformed id prefixes are `E_INVALID_ARG`, with
+  `details.store_limit`, `max` and `got`, or `details.prefix`; they were `E_IO`. A call the
+  store's API does not take, which only a bug makes, is `E_INTERNAL`. No CLI, `StoreOps` or MCP
+  request reaches them in M1 (storage spec §3, operations spec §0). In the Rust API,
+  `StoreError` gains `Limit` (with `LimitKind`), `BadPrefix` and `BadCall`, its `Io` keeps the
+  failures the filesystem reported, and `Record::encode` returns a `Result` instead of
+  panicking on a record past the layout's lengths.
 
 ### Fixed
 
@@ -234,6 +242,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - A snapshot or `verify` whose index counts its records by their lengths (the journal cannot
   vouch for them) no longer fails with an I/O error when a writer cuts the index as it opens:
   it counts the records the cut keeps, and fails only if the index is cut again meanwhile.
+- A sorted-view entry that points at a record its view does not cover is `E_STORE_CORRUPT`
+  (`IndexCorrupt`) on every lookup that reads it. Before, a lookup by id, prefix or delta hash
+  answered with another changeset's record where the entry pointed into the unsorted tail, and
+  failed with `E_IO` past the index's end.
 
 ### Security
 

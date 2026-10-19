@@ -83,7 +83,9 @@ fn records_back_to_back(data: &[u8]) {
                     rest.len()
                 );
                 let mut bytes = Vec::new();
-                record.encode(&mut bytes);
+                record
+                    .encode(&mut bytes)
+                    .expect("a decoded record fits the layout's lengths");
                 assert_eq!(
                     bytes,
                     rest[..used],

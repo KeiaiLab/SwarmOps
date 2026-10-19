@@ -1,6 +1,6 @@
 //! The store's error type.
 
-use std::io;
+use std::{fmt, io};
 
 use camino::Utf8PathBuf;
 use swarmops_core::{ChangesetId, CodecError, ObjectId};
@@ -68,6 +68,25 @@ pub enum StoreError {
     /// A ref would point at a changeset that is not in the index.
     #[error("ref target {0} is not a changeset in the store")]
     UnknownRefTarget(ChangesetId),
+    /// A request past a limit of the store's layout, refused before anything of it is queued
+    /// or written: a definite failure, before any commit point.
+    #[error("{what}: at most {max}, not {got}")]
+    Limit {
+        /// Which limit.
+        what: LimitKind,
+        /// The most the layout holds.
+        max: u64,
+        /// What the request asked for.
+        got: u64,
+    },
+    /// An id prefix that is not 1 to 64 hex digits; carries the prefix as given.
+    #[error("id prefix {0:?} is not 1 to 64 hex digits")]
+    BadPrefix(String),
+    /// A call the store's API does not take, and that no request leads to: a frame of no
+    /// records, a rec the index handle does not count, entries past a sorted view's end. A bug
+    /// in the caller; carries what the call asked for.
+    #[error("a call the store does not take: {0}")]
+    BadCall(String),
     /// The changeset index files hold what no crash leaves behind, as `what` says: a sorted
     /// view file that ends in a partial entry; sorted views out of order, out of step in a
     /// way the order compaction renames them in cannot explain, or covering records the
@@ -118,8 +137,82 @@ pub enum StoreError {
     },
 }
 
-/// An `InvalidInput` I/O error: what the metadata store returns for a request it cannot carry
-/// out as asked (a record past what its layout holds, a rec past the index's end).
-pub(crate) fn invalid_input(message: String) -> StoreError {
-    io::Error::new(io::ErrorKind::InvalidInput, message).into()
+/// Which limit of the store's layout a request went past ([`StoreError::Limit`]; storage spec
+/// §3, "커밋 결과·오류·한도").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitKind {
+    /// A changeset's parents: a journal record and `par.col` count them in one byte (255).
+    Parents,
+    /// A ref move's actor, in bytes: one byte of the record holds its length (255).
+    ActorBytes,
+    /// A ref move's ref name, in bytes, as the journal encodes it (255).
+    /// [`crate::MetaWrite::cas_ref`] refuses a longer name first, as [`StoreError::RefName`].
+    RefNameBytes,
+    /// The records of one transaction: a frame counts them in a `u16le` (65,535).
+    Records,
+}
+
+impl LimitKind {
+    /// Every limit, in declaration order.
+    pub const ALL: [LimitKind; 4] = [
+        Self::Parents,
+        Self::ActorBytes,
+        Self::RefNameBytes,
+        Self::Records,
+    ];
+
+    /// Its name in the API's `details.store_limit`: `"parents"`, `"actor_bytes"`,
+    /// `"ref_name_bytes"` or `"records"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Parents => "parents",
+            Self::ActorBytes => "actor_bytes",
+            Self::RefNameBytes => "ref_name_bytes",
+            Self::Records => "records",
+        }
+    }
+}
+
+/// What the limit counts, as a message says it: "a changeset's parents", "an actor's bytes",
+/// "a ref name's bytes", "a transaction's records".
+impl fmt::Display for LimitKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Parents => "a changeset's parents",
+            Self::ActorBytes => "an actor's bytes",
+            Self::RefNameBytes => "a ref name's bytes",
+            Self::Records => "a transaction's records",
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limit_errors_say_which_limit_and_by_how_much() {
+        let limit = StoreError::Limit {
+            what: LimitKind::Parents,
+            max: 255,
+            got: 256,
+        };
+        assert_eq!(
+            limit.to_string(),
+            "a changeset's parents: at most 255, not 256"
+        );
+        assert_eq!(
+            LimitKind::ALL.map(LimitKind::as_str),
+            ["parents", "actor_bytes", "ref_name_bytes", "records"]
+        );
+        assert_eq!(
+            LimitKind::ALL.map(|what| what.to_string()),
+            [
+                "a changeset's parents",
+                "an actor's bytes",
+                "a ref name's bytes",
+                "a transaction's records",
+            ]
+        );
+    }
 }
