@@ -1,7 +1,8 @@
 //! The workspace's lint policy stays in force. Nothing else notices if it goes: a crate whose
-//! manifest drops `[lints] workspace = true` is no longer linted by the table, and a table
-//! without `missing_docs` stops the documentation gate, while `just check` stays green. These
-//! tests read the manifests as text (no TOML parser, no new dependency) and fail instead.
+//! manifest drops `[lints] workspace = true` is no longer linted by the table, a table without
+//! `missing_docs` stops the documentation gate, and one without `unsafe_code = "forbid"` lets
+//! `unsafe` in, while `just check` stays green. These tests read the manifests as text (no TOML
+//! parser, no new dependency) and fail instead.
 //! `fuzz/` and `bench/compare/` are workspaces of their own: they cannot inherit this table, and
 //! are not read here (`bench/compare/` keeps a lint table of its own; `fuzz/` has none).
 
@@ -45,6 +46,15 @@ fn keeps_missing_docs(root_manifest: &str) -> bool {
     )
 }
 
+/// The root manifest forbids `unsafe` code: a `forbid`, which no `#[allow]` in a crate lifts.
+fn forbids_unsafe_code(root_manifest: &str) -> bool {
+    table_holds(
+        root_manifest,
+        "workspace.lints.rust",
+        r#"unsafe_code = "forbid""#,
+    )
+}
+
 /// A crate's manifest takes the workspace's lints.
 fn inherits_workspace_lints(crate_manifest: &str) -> bool {
     table_holds(crate_manifest, "lints", "workspace = true")
@@ -56,6 +66,15 @@ fn the_workspace_table_keeps_missing_docs_a_warning() {
     assert!(
         keeps_missing_docs(&root),
         "Cargo.toml: [workspace.lints.rust] must hold `missing_docs = \"warn\"`"
+    );
+}
+
+#[test]
+fn the_workspace_table_forbids_unsafe_code() {
+    let root = fs::read_to_string(workspace_root().join("Cargo.toml")).unwrap();
+    assert!(
+        forbids_unsafe_code(&root),
+        "Cargo.toml: [workspace.lints.rust] must hold `unsafe_code = \"forbid\"`"
     );
 }
 
@@ -81,7 +100,7 @@ fn every_crate_inherits_the_workspace_lints() {
     );
 }
 
-/// The two checks above read the table they name: a manifest that lacks what they look for
+/// The three checks above read the table they name: a manifest that lacks what they look for
 /// fails them, however nearly it is spelt, and one that has it passes.
 #[test]
 fn the_checks_read_the_table_they_name() {
@@ -94,6 +113,16 @@ fn the_checks_read_the_table_they_name() {
         "[lints.rust]\nmissing_docs = \"warn\"\n",
     ] {
         assert!(!keeps_missing_docs(root), "{root:?}");
+    }
+    for root in [
+        "",
+        "[workspace.lints.rust]\nmissing_docs = \"warn\"\n",
+        "[workspace.lints.rust]\nunsafe_code = \"deny\"\n",
+        "[workspace.lints.rust]\n# unsafe_code = \"forbid\"\n",
+        "[workspace.lints.clippy]\nunsafe_code = \"forbid\"\n",
+        "[lints.rust]\nunsafe_code = \"forbid\"\n",
+    ] {
+        assert!(!forbids_unsafe_code(root), "{root:?}");
     }
     for krate in [
         "[package]\nname = \"x\"\n",
@@ -108,6 +137,7 @@ fn the_checks_read_the_table_they_name() {
     let root = "[workspace]\nmembers = []\n\n[workspace.lints.rust]\nunsafe_code = \"forbid\"\n\
                 missing_docs=\"warn\"  # a warning\n\n[workspace.lints.clippy]\nall = \"deny\"\n";
     assert!(keeps_missing_docs(root));
+    assert!(forbids_unsafe_code(root));
     let krate = "[package]\nname = \"x\"\n\n[lints]\n# the workspace's\nworkspace = true\n\n\
                  [[test]]\nname = \"all\"\n";
     assert!(inherits_workspace_lints(krate));

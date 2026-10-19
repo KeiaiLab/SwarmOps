@@ -1120,6 +1120,12 @@ fn a_lost_header_sector_is_a_torn_tail() {
             bytes[start..start + lost].iter().all(|&byte| byte == 0),
             "frame {n}: the first {lost} bytes of its length lost"
         );
+        // A length that straddles the boundary keeps a byte that is not 0 (its payload is over
+        // 255 bytes), so it reads as a length that is wrong, not as 0.
+        assert!(
+            lost == 4 || bytes[start + lost..start + 4].iter().any(|&byte| byte != 0),
+            "frame {n}: the rest of its length is 0"
+        );
         assert!(
             bytes[start..].iter().any(|&byte| byte != 0),
             "frame {n}: a later sector kept"
