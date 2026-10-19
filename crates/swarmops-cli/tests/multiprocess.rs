@@ -24,7 +24,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use swarmops_core::{EntryKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
-use swarmops_store::{Layout, MetaLock};
+use swarmops_store::{Layout, MetaLock, RealFs};
 use swarmops_testkit::fs::{Call, Watch, Watched};
 
 use crate::support::{BIN, Racers, Run, Store, agent, retry_busy, run, run_bin_within, run_within};
@@ -381,10 +381,13 @@ struct FailFirstSync {
 
 impl FailFirstSync {
     fn of(name: &'static str) -> Watched<FailFirstSync> {
-        Watched(FailFirstSync {
-            name,
-            failed: AtomicBool::new(false),
-        })
+        Watched(
+            FailFirstSync {
+                name,
+                failed: AtomicBool::new(false),
+            },
+            RealFs,
+        )
     }
 }
 

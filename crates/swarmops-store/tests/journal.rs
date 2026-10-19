@@ -27,7 +27,8 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    BadRecord, Frame, FsOps, Journal, Layout, LimitKind, MetaLock, RealFs, Record, StoreError,
+    BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, MetaLock, RealFs, Record,
+    StoreError,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
@@ -1016,10 +1017,13 @@ fn journal_off_cut_after_a_reader_measured_it_is_read_again() {
     // three times more, then reports the journal corrupt where the shrink would have, before it
     // ever measures journal.log.
     let entries: Vec<u8> = [0_u64, 84].iter().flat_map(|e| e.to_le_bytes()).collect();
-    let cutting = Arc::new(Watched(CutAfterEachMeasurement {
-        entries,
-        calls: Mutex::new(Vec::new()),
-    }));
+    let cutting = Arc::new(Watched(
+        CutAfterEachMeasurement {
+            entries,
+            calls: Mutex::new(Vec::new()),
+        },
+        RealFs,
+    ));
     let reader = Journal::open(&layout, Arc::clone(&cutting) as Arc<dyn FsOps>).unwrap();
     for (what, read, _, _) in reads {
         assert_corrupt_at(read(&reader), 0, what);
@@ -2104,8 +2108,10 @@ fn a_tail_check_whose_sync_fails_never_lists_a_frame_not_on_disk() {
                 call.method,
                 call.path.file_name().and_then(|name| name.to_str()),
             ) {
-                ("sync_data", Some("journal.log")) => nth(&log_syncs) == 1,
-                ("append_durable", Some("journal.off")) => off_listing && nth(&off_appends) == 3,
+                (FsMethod::SyncData, Some("journal.log")) => nth(&log_syncs) == 1,
+                (FsMethod::AppendDurable, Some("journal.off")) => {
+                    off_listing && nth(&off_appends) == 3
+                }
                 _ => false,
             }
         }))

@@ -291,6 +291,7 @@ dependencies = [
  "libfuzzer-sys",
  "swarmops-core",
  "swarmops-store",
+ "swarmops-testkit",
  "tempfile",
 ]
 
@@ -305,6 +306,16 @@ dependencies = [
  "tempfile",
  "thiserror",
  "zstd",
+]
+
+[[package]]
+name = "swarmops-testkit"
+version = "0.1.0"
+dependencies = [
+ "camino",
+ "swarmops-core",
+ "swarmops-store",
+ "tempfile",
 ]
 
 [[package]]

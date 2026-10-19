@@ -529,11 +529,14 @@ fn verify_reads_journal_off_again_when_a_writer_cuts_an_entry_it_measured() {
     let entries = fs::read(&off).unwrap();
     let verify_cutting_after = |nth| {
         fs::write(&off, &entries).unwrap();
-        let cutting = Arc::new(Watched(CutAfterMeasuring {
-            nth,
-            measured: AtomicU64::new(0),
-            calls: Mutex::new(Vec::new()),
-        }));
+        let cutting = Arc::new(Watched(
+            CutAfterMeasuring {
+                nth,
+                measured: AtomicU64::new(0),
+                calls: Mutex::new(Vec::new()),
+            },
+            RealFs,
+        ));
         let racing = LocalRepo::open_with_fs(&root, Arc::clone(&cutting) as Arc<dyn FsOps>);
         let report = racing.unwrap().verify(false).unwrap();
         let calls = std::mem::take(&mut *cutting.calls.lock().unwrap());

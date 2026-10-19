@@ -207,6 +207,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `_meta: {"anthropic/maxResultSizeChars": 200000}`, which Claude Code reads to keep a
   `read_file` result of up to 200,000 characters in the conversation instead of saving one over
   50,000 to a file. No other tool carries `_meta`.
+- `swarmops_store::FsMethod` names the 14 methods of the `FsOps` seam (`FsMethod::ALL`,
+  `as_str`, `is_mutating`, `flushes`): the one list the fault doubles and the test kit's
+  watchers classify calls with. It compares equal to the method's name.
 
 ### Changed
 
@@ -260,6 +263,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   building on it; they drop the revision grammar, which each tool's schema and a bad
   revision's hint give, and the parenthesis on Claude Code's result limits (1,990 of Claude
   Code's 2,048 characters; they were 2,043).
+- Test infrastructure: one `NoSyncFs` in `swarmops-testkit`, the real filesystem without its
+  flushes that fails where it fails (a sync of a missing path is `NotFound`), replaces the test
+  kit's `FastFs` and the copies in the `read_snapshot` bench and the `journal_recovery` fuzz
+  target, which had drifted apart (two of the three answered `Ok` to a sync of a missing path).
+  `Watched(watcher, fs)` runs its watcher over any filesystem, and a watcher sees a call's
+  method as an `FsMethod`. The test kit's CLI and repository helpers sit behind its default
+  features `cli` and `repo`, so the fuzz crate takes it with `default-features = false`.
 
 ### Fixed
 

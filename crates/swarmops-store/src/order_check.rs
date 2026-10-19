@@ -77,7 +77,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::{fmt, io};
 
-use crate::fs_ops::{FsOps, LinkOutcome};
+use crate::fs_ops::{FsMethod, FsOps, LinkOutcome};
 use crate::meta::frame::{Parsed, Record, parse_frame};
 
 /// The size of one `journal.off` entry.
@@ -635,7 +635,7 @@ impl fmt::Display for Rule {
 }
 
 /// Panics if `violation` holds one: rule `rule` is broken by `method` on `paths`.
-fn verdict(rule: Rule, method: &str, paths: &[&Path], violation: Option<String>) {
+fn verdict(rule: Rule, method: FsMethod, paths: &[&Path], violation: Option<String>) {
     if let Some(why) = violation {
         let paths: Vec<String> = paths
             .iter()
@@ -798,7 +798,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             }
         };
         if let Some((rule, why)) = violation {
-            verdict(rule, "link_noclobber", &[from, to], Some(why));
+            verdict(rule, FsMethod::LinkNoclobber, &[from, to], Some(why));
         }
         let existed = to.exists();
         let result = self.inner.link_noclobber(from, to);
@@ -843,7 +843,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
 
     fn remove(&self, p: &Path) -> io::Result<()> {
         let violation = ref_meta(p).and_then(|meta| self.state().ref_change(meta));
-        verdict(Rule::W2, "remove", &[p], violation);
+        verdict(Rule::W2, FsMethod::Remove, &[p], violation);
         let result = self.inner.remove(p);
         if result.is_ok() {
             let mut state = self.state();
@@ -866,7 +866,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             }
         };
         if let Some((rule, why)) = violation {
-            verdict(rule, "append_durable", &[path], Some(why));
+            verdict(rule, FsMethod::AppendDurable, &[path], Some(why));
         }
         let existed = path.exists();
         let result = self.inner.append_durable(path, bytes);
@@ -905,7 +905,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             }
         };
         if let Some((rule, why)) = violation {
-            verdict(rule, "atomic_replace", &[path], Some(why));
+            verdict(rule, FsMethod::AtomicReplace, &[path], Some(why));
         }
         let upto = self.state().generation;
         let result = self.inner.atomic_replace(path, bytes);
@@ -977,7 +977,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             }
         };
         if let Some((rule, why)) = violation {
-            verdict(rule, "rename_durable", &[from, to], Some(why));
+            verdict(rule, FsMethod::RenameDurable, &[from, to], Some(why));
         }
         let upto = self.state().generation;
         let result = self.inner.rename_durable(from, to);
@@ -999,7 +999,12 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         if result.is_ok()
             && let Some(meta) = view
         {
-            verdict(Rule::W4, "rename_durable", &[from, to], view_counts(meta));
+            verdict(
+                Rule::W4,
+                FsMethod::RenameDurable,
+                &[from, to],
+                view_counts(meta),
+            );
         }
         result
     }
@@ -1109,7 +1114,12 @@ mod tests {
         let off = Path::new("meta/journal.off");
         for (n, rule) in (1..).zip(Rule::ALL) {
             let message = panic_message(|| {
-                verdict(rule, "append_durable", &[off], Some("why".to_owned()));
+                verdict(
+                    rule,
+                    FsMethod::AppendDurable,
+                    &[off],
+                    Some("why".to_owned()),
+                );
             });
             let expected = format!(
                 "order check: W{n} violated by append_durable {}: why",

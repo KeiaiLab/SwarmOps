@@ -29,7 +29,7 @@ use swarmops_store::{
 };
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
 use swarmops_testkit::faults::checked;
-use swarmops_testkit::fs::{Call, Failing, FastFs, RecordingFs, Watch, Watched, When, copy_dir};
+use swarmops_testkit::fs::{Call, Failing, NoSyncFs, RecordingFs, Watch, Watched, When, copy_dir};
 use swarmops_testkit::store::temp_dir as new_root;
 use swarmops_testkit::store::{append_bytes, file_len, set_len};
 use swarmops_testkit::test_name;
@@ -2256,7 +2256,7 @@ const ABORT_ROOT: &str = "SWARMOPS_TEST_META_ABORT_ROOT";
 fn cut_fails_child(root: &Utf8Path) {
     let mut fails = Fails::new("append_durable journal.log", Strike::After);
     fails.cut = Some("truncate journal.log");
-    let fails = Arc::new(Watched(fails));
+    let fails = Arc::new(Watched(fails, RealFs));
     let store = MetaStore::create_with_fs(root, Arc::clone(&fails) as Arc<dyn FsOps>).unwrap();
     insert(&store, &[cs(0, &[])]);
     fails.arm();
@@ -2284,7 +2284,10 @@ fn a_failed_log_sync_cuts_the_frame_and_reports_not_committed() {
     }
     for strike in [Strike::After, Strike::Before] {
         let (_dir, root) = new_root();
-        let fails = Arc::new(Watched(Fails::new("append_durable journal.log", strike)));
+        let fails = Arc::new(Watched(
+            Fails::new("append_durable journal.log", strike),
+            RealFs,
+        ));
         let store = store_on(&root, &fails);
         insert(&store, &[cs(0, &[])]); // frame 0
         let (frame_start, entries) = (log_len(&root), listed(&root));
@@ -2369,7 +2372,10 @@ fn a_failed_log_sync_cuts_the_frame_and_reports_not_committed() {
 fn a_failed_off_append_after_the_log_sync_is_post_commit() {
     for strike in [Strike::After, Strike::Before] {
         let (_dir, root) = new_root();
-        let fails = Arc::new(Watched(Fails::new("append_durable journal.off", strike)));
+        let fails = Arc::new(Watched(
+            Fails::new("append_durable journal.off", strike),
+            RealFs,
+        ));
         let store = store_on(&root, &fails);
         insert(&store, &[cs(0, &[])]); // frame 0
         fails.calls();
@@ -2472,7 +2478,7 @@ fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
 #[cfg(feature = "test-hooks")]
 fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
     let (dir, root) = new_root();
-    let store = MetaStore::create_with_fs(&root, Arc::new(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
     let n = if compacting {
         let mut write = store.write().unwrap();
         for m in 0..Index::COMPACT_THRESHOLD {
@@ -2503,7 +2509,7 @@ fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
 #[cfg(feature = "test-hooks")]
 fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
     let (_dir, root) = copy_of(template);
-    let counter = Arc::new(CrashAtFs::new(FastFs, 0));
+    let counter = Arc::new(CrashAtFs::new(NoSyncFs, 0));
     let mut store = MetaStore::open_with_fs(&root, Arc::clone(&counter) as Arc<dyn FsOps>).unwrap();
     store.set_parallelism(1);
     run(&store);
@@ -2520,7 +2526,7 @@ fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
 #[cfg(feature = "test-hooks")]
 #[track_caller]
 fn assert_recovers(root: &Utf8Path, template: u64, outcomes: &[(u64, Said)], what: &str) {
-    let store = MetaStore::open_with_fs(root, checked(FastFs))
+    let store = MetaStore::open_with_fs(root, checked(NoSyncFs))
         .unwrap_or_else(|e| panic!("{what}: the store does not open: {e}"));
     store
         .write()
@@ -2583,12 +2589,12 @@ fn sweep_child(root: &Utf8Path, plan: &str) {
                 error,
             };
             (
-                checked(FailAtFs::new(FastFs, fail)),
+                checked(FailAtFs::new(NoSyncFs, fail)),
                 parts[3].parse().unwrap(),
             )
         }
         _ => (
-            checked(CrashAtFs::new(FastFs, k)),
+            checked(CrashAtFs::new(NoSyncFs, k)),
             parts[2].parse().unwrap(),
         ),
     };
@@ -2655,7 +2661,7 @@ fn fail_at_every_store_call_reports_honestly() {
                     error,
                 };
                 let mut store =
-                    MetaStore::open_with_fs(&root, checked(FailAtFs::new(FastFs, fail))).unwrap();
+                    MetaStore::open_with_fs(&root, checked(FailAtFs::new(NoSyncFs, fail))).unwrap();
                 store.set_parallelism(1);
                 let outcome = swept(&store, n);
                 drop(store);
@@ -2762,7 +2768,7 @@ fn errors_during_recovery_leave_the_store_openable() {
                 error: InjectedError::Eio,
             };
             let mut store =
-                MetaStore::open_with_fs(&root, checked(FailAtFs::new(FastFs, fail))).unwrap();
+                MetaStore::open_with_fs(&root, checked(FailAtFs::new(NoSyncFs, fail))).unwrap();
             store.set_parallelism(1);
             let outcome = next(&store);
             drop(store);
@@ -3423,7 +3429,7 @@ fn reader_racing_commits(commits: u32) -> (TempDir, Utf8PathBuf, MetaStore) {
         left: AtomicU32::new(commits),
         next: AtomicU64::new(2),
     };
-    let reader = MetaStore::open_with_fs(&root, checked(Watched(racing))).unwrap();
+    let reader = MetaStore::open_with_fs(&root, checked(Watched(racing, RealFs))).unwrap();
     (dir, root, reader)
 }
 
@@ -3517,7 +3523,7 @@ fn a_snapshot_racing_a_journal_off_cut_reads_again_and_reports_no_damage() {
         listed: listed_tx,
         measured: Mutex::new(measured_rx),
     };
-    let writer = MetaStore::open_with_fs(&root, checked(Watched(listing_fails))).unwrap();
+    let writer = MetaStore::open_with_fs(&root, checked(Watched(listing_fails, RealFs))).unwrap();
     // Right after the reader first measures journal.off, the writer's listing fails, and the
     // reader reads on once the writer has cut the entry back.
     let (fs, calls) = RecordingFs::new();
@@ -3636,7 +3642,7 @@ fn snapshots_stay_consistent_across_a_compaction() {
     // The commit whose changeset makes the tail one longer than the threshold.
     const COMPACTS: u64 = Index::COMPACT_THRESHOLD + 1;
     let (_dir, root) = new_root();
-    let store = MetaStore::create_with_fs(&root, checked(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(NoSyncFs)).unwrap();
     let seeds: Vec<ChangesetMeta> = (0..SEEDS).map(|i| cs(seed(i), &[])).collect();
     assert!(insert(&store, &seeds).checkpointed, "the seeds compact");
     assert_eq!(index(&root).sorted_count(), SEEDS);
@@ -3786,7 +3792,7 @@ type Move = (u64, Option<ChangesetId>, Option<ChangesetId>);
 #[test]
 fn reflog_walks_back_past_256_frames() {
     let (_dir, root) = new_root();
-    let store = MetaStore::create_with_fs(&root, checked(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(&root, checked(NoSyncFs)).unwrap();
     insert(&store, &[cs(1, &[]), cs(2, &[])]); // frame 0
     cas(&store, "release/old", None, Some(1)); // frame 1, its only move
     // Frames 2..=601: every third moves main between changesets 1 and 2, the others
@@ -3839,7 +3845,7 @@ const REPLAY_CRASH_ROOT: &str = "SWARMOPS_TEST_META_REPLAY_CRASH_ROOT";
 /// release/old deleted. Everything before them is materialized and checkpointed.
 #[cfg(feature = "test-hooks")]
 fn unreplayed_store(root: &Utf8Path) {
-    let store = MetaStore::create_with_fs(root, checked(FastFs)).unwrap();
+    let store = MetaStore::create_with_fs(root, checked(NoSyncFs)).unwrap();
     insert(&store, &[cs(1, &[])]);
     cas(&store, "main", None, Some(1));
     cas(&store, "release/old", None, Some(1));
