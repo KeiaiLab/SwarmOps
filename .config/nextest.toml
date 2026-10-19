@@ -2,15 +2,17 @@
 # `crates/swarmops-cli/tests/contention.rs`) share the host's disk, and each asserts that no
 # writer waits out the store's 10 s lock timeout: they run one after another, never at once,
 # so that neither slows the other's lock passes towards that timeout (docs/perf.md, "M1 (CLI
-# level)"). The rest of the suite still runs beside them. Each crate's integration tests are one
-# binary (`tests/all.rs`), so the group takes the tests by name: those of the `contention`
-# modules.
+# level)"). The three landing-model measurements of M4 Task 1
+# (`crates/swarmops-repo/tests/landing_models.rs`: 32 or 50 landing processes, each run's gate
+# failing a land past 30 s) join them, for the same reason. The rest of the suite still runs
+# beside them. Each crate's integration tests are one binary (`tests/all.rs`), so the group takes
+# the tests by name: those of the `contention` modules, and the three measurements.
 
 [test-groups]
 contention = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'test(/^contention::/)'
+filter = 'test(/^contention::/) | test(/^landing_models::landing_models_(closed_loop|open_loop|large_change)$/)'
 test-group = 'contention'
 
 # CI's profile: ci.yml sets `NEXTEST_PROFILE=ci` for `just check`, whose workspace run then uses
