@@ -22,8 +22,11 @@ test-hooks = ["swarmops-store/test-hooks", "swarmops-testkit/test-hooks"]
 
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+swarmops-merge = { path = "../swarmops-merge", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 camino.workspace = true
+postcard.workspace = true
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
