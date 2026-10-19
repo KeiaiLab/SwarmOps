@@ -43,9 +43,36 @@ commit_all() {
 }
 
 # craft <type> <file>: writes <file>'s bytes as an object of <type> that git would not make
-# itself (a tree out of order, a commit with an odd header), and prints its id.
+# itself (a tree out of order, a commit with an odd header), and prints its id. A <file> of `-`
+# is stdin, so that a crafted object's bytes never sit in the work tree, where `git add -A`
+# would take them.
 craft() {
-    git hash-object -t "$1" -w --literally "$2"
+    if [ "$2" = - ]; then
+        git hash-object -t "$1" -w --literally --stdin
+    else
+        git hash-object -t "$1" -w --literally "$2"
+    fi
+}
+
+# entry <mode> <name> <id>: one tree entry as git stores it, on stdout, for a crafted tree: the
+# mode's digits as given, a space, the name's bytes, a NUL, then the id's 20 bytes. A crafted
+# tree is its entries in the order the script writes them: git's own writers sort a tree and
+# normalize its modes. It sets the variables entry_rest and entry_tail.
+entry() {
+    printf '%s %s\000' "$1" "$2"
+    entry_rest=$3
+    while [ -n "$entry_rest" ]; do
+        entry_tail=${entry_rest#??}
+        printf "\\$(printf '%03o' "0x${entry_rest%"$entry_tail"}")"
+        entry_rest=$entry_tail
+    done
+}
+
+# idents: the author and committer lines git writes for a commit at the current tick, on
+# stdout, for the header of a crafted commit.
+idents() {
+    printf 'author %s\n' "$(git var GIT_AUTHOR_IDENT)"
+    printf 'committer %s\n' "$(git var GIT_COMMITTER_IDENT)"
 }
 
 # finish [--keep-loose]: the repository becomes the fixture's <out>/repo.git, bare, holding

@@ -10,9 +10,11 @@
 //! `Fixture Committer <committer@fixture.invalid>`). It sources `scripts/lib.sh`, whose helpers
 //! are `tick` (the author and committer dates, from `1700000000 +0000`, 60 s a commit),
 //! `commit_all <message>`, `craft <type> <file>` (`git hash-object -t <type> -w --literally`,
-//! for objects git would not make) and `finish [--keep-loose]` (the work tree's `.git` becomes
-//! `<out>/repo.git`, bare, holding only what its refs reach; then, unless `--keep-loose`,
-//! `git -c pack.threads=1 repack -adq` and `git pack-refs --all`).
+//! for objects git would not make; a `<file>` of `-` is stdin), `entry <mode> <name> <id>` (one
+//! tree entry's bytes, for a crafted tree), `idents` (the author and committer lines git writes
+//! at this tick, for a crafted commit) and `finish [--keep-loose]` (the work tree's `.git`
+//! becomes `<out>/repo.git`, bare, holding only what its refs reach; then, unless
+//! `--keep-loose`, `git -c pack.threads=1 repack -adq` and `git pack-refs --all`).
 //!
 //! Whatever the script leaves in `<out>` is the fixture, archived as `git-fixtures/<name>.tar`
 //! without what git keeps of a repository for a work tree or a person (under `repo.git/`:
@@ -940,6 +942,7 @@ mod base64_values {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::fmt::Write as _;
 
     use super::*;
 
@@ -1032,6 +1035,429 @@ mod tests {
             Some(oids[4])
         );
         assert_eq!(manifest.head.as_deref(), Some("refs/heads/main"));
+    }
+
+    /// What a crafted fixture's script says it made: the fixture, the claim, and its check on
+    /// the fixture's manifest.
+    type Claim = (&'static str, &'static str, fn(&Manifest) -> bool);
+
+    /// The empty tree's id in a SHA-1 repository.
+    const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+    /// The claims of the fixture set's scripts that the git import's tests build on, as the
+    /// manifests show them. What the import makes of each fixture is for the tests of
+    /// `swarmops-git`.
+    const CLAIMS: [Claim; 19] = [
+        (
+            "roots",
+            "three roots, one of them the empty tree's",
+            |manifest| {
+                let roots = || {
+                    manifest
+                        .commits
+                        .iter()
+                        .filter(|commit| commit.parents.is_empty())
+                };
+                roots().count() >= 3 && roots().any(|commit| commit.tree == EMPTY_TREE)
+            },
+        ),
+        (
+            "roots",
+            "a message without a final line feed, and an empty one",
+            |manifest| {
+                let raws = || manifest.commits.iter().map(|commit| commit.raw.as_slice());
+                raws().any(|raw| !raw.ends_with(b"\n")) && raws().any(|raw| raw.ends_with(b"\n\n"))
+            },
+        ),
+        (
+            "roots",
+            "an empty commit, of its parent's tree",
+            |manifest| {
+                manifest
+                    .commits
+                    .iter()
+                    .any(|commit| match &commit.parents[..] {
+                        [parent] => commit_of(manifest, parent).tree == commit.tree,
+                        _ => false,
+                    })
+            },
+        ),
+        (
+            "signatures",
+            "author times -86400 and -0000, offsets +0530, -1200 and +1400",
+            |manifest| {
+                [" -86400 +0000", " -0000", " +0530", " -1200", " +1400"]
+                    .iter()
+                    .all(|end| {
+                        header_lines(manifest).any(|line| {
+                            line.starts_with(b"author ") && line.ends_with(end.as_bytes())
+                        })
+                    })
+            },
+        ),
+        (
+            "signatures",
+            "an author name that is not UTF-8",
+            |manifest| {
+                header_lines(manifest)
+                    .any(|line| line.starts_with(b"author ") && std::str::from_utf8(line).is_err())
+            },
+        ),
+        (
+            "headers",
+            "encoding, gpgsig with a blank continuation line, mergetag, x-custom",
+            |manifest| {
+                [
+                    "\nencoding ISO-8859-1\n",
+                    "\ngpgsig ",
+                    "\n \n",
+                    "\nmergetag object ",
+                    "\nx-custom ",
+                ]
+                .iter()
+                .all(|part| {
+                    manifest
+                        .commits
+                        .iter()
+                        .any(|commit| contains(&commit.raw, part.as_bytes()))
+                })
+            },
+        ),
+        (
+            "many_parents",
+            "main a merge of 255 roots, too-many a merge of 256",
+            |manifest| {
+                // How many roots the branch's tip merges: its parents, if they are all roots and
+                // no two the same; otherwise none.
+                let roots_merged = |branch: &str| {
+                    let parents = &commit_of(manifest, &manifest.refs[branch]).parents;
+                    let distinct: BTreeSet<&String> = parents.iter().collect();
+                    let roots = parents
+                        .iter()
+                        .all(|parent| commit_of(manifest, parent).parents.is_empty());
+                    if roots && distinct.len() == parents.len() {
+                        parents.len()
+                    } else {
+                        0
+                    }
+                };
+                roots_merged("refs/heads/main") == 255 && roots_merged("refs/heads/too-many") == 256
+            },
+        ),
+        (
+            "gitlinks",
+            "a gitlink sub beside another entry, and a tree that holds nothing but a gitlink",
+            |manifest| {
+                let trees: Vec<Vec<StoredEntry>> = manifest
+                    .trees
+                    .values()
+                    .map(|bytes| stored_entries(bytes))
+                    .collect();
+                trees.iter().any(|entries| {
+                    entries.len() > 1
+                        && entries
+                            .iter()
+                            .any(|entry| entry.mode == b"160000" && entry.name == b"sub")
+                }) && trees
+                    .iter()
+                    .any(|entries| matches!(&entries[..], [only] if only.mode == b"160000"))
+            },
+        ),
+        (
+            "paths",
+            "a name that is not UTF-8, and the name ..",
+            |manifest| {
+                let entries = every_entry(manifest);
+                entries
+                    .iter()
+                    .any(|entry| std::str::from_utf8(&entry.name).is_err())
+                    && entries.iter().any(|entry| entry.name == b"..")
+            },
+        ),
+        (
+            "modes_odd",
+            "entries of the modes 100664, 100600 and 040000",
+            |manifest| {
+                let entries = every_entry(manifest);
+                [&b"100664"[..], b"100600", b"040000"]
+                    .iter()
+                    .all(|mode| entries.iter().any(|entry| entry.mode == *mode))
+            },
+        ),
+        (
+            "tree_order",
+            "trees out of git's order, in byte order or not, and a name twice",
+            |manifest| {
+                let trees: Vec<Vec<StoredEntry>> = manifest
+                    .trees
+                    .values()
+                    .map(|bytes| stored_entries(bytes))
+                    .collect();
+                let any_pair = |test: fn(&StoredEntry, &StoredEntry) -> bool| {
+                    trees
+                        .iter()
+                        .any(|entries| entries.windows(2).any(|pair| test(&pair[0], &pair[1])))
+                };
+                any_pair(|a, b| a.name > b.name)
+                    && any_pair(|a, b| a.name < b.name && order_key(a) > order_key(b))
+                    && any_pair(|a, b| a.name == b.name)
+            },
+        ),
+        (
+            "empty_trees",
+            "a directory entry named empty that names the empty tree",
+            |manifest| {
+                every_entry(manifest).iter().any(|entry| {
+                    entry.name == b"empty" && is_dir(&entry.mode) && entry.id == EMPTY_TREE
+                })
+            },
+        ),
+        (
+            "nonstandard",
+            "two spaces before <, the offset +05:30, no blank line, a parent twice",
+            |manifest| {
+                let raws = || manifest.commits.iter().map(|commit| commit.raw.as_slice());
+                raws().any(|raw| contains(raw, b"  <"))
+                    && raws().any(|raw| contains(raw, b" +05:30\n"))
+                    && raws().any(|raw| !contains(raw, b"\n\n"))
+                    && manifest
+                        .commits
+                        .iter()
+                        .any(|commit| commit.parents.windows(2).any(|pair| pair[0] == pair[1]))
+            },
+        ),
+        ("nonstandard", "a header line without a value", |manifest| {
+            header_lines(manifest).any(|line| !line.starts_with(b" ") && !line.contains(&b' '))
+        }),
+        ("sha256", "the object format sha256", |manifest| {
+            manifest.object_format == "sha256"
+        }),
+        ("shallow", "a shallow clone", |manifest| manifest.shallow),
+        (
+            "partial_clone",
+            "a tree that names a blob the repository lacks",
+            |manifest| {
+                every_entry(manifest).iter().any(|entry| {
+                    !is_dir(&entry.mode)
+                        && entry.mode != b"160000"
+                        && !manifest.blobs.contains_key(&entry.id)
+                })
+            },
+        ),
+        (
+            "refs",
+            "newer three commits past older, merged's second parent older, rewritten without it",
+            |manifest| {
+                let tip = |name: &str| manifest.refs[&format!("refs/heads/{name}")].clone();
+                let older = tip("older");
+                let newer = reaches(manifest, &tip("newer"));
+                let merged = commit_of(manifest, &tip("merged"));
+                newer.contains(&older)
+                    && newer.difference(&reaches(manifest, &older)).count() == 3
+                    && merged.parents.get(1) == Some(&older)
+                    && !reaches(manifest, &merged.parents[0]).contains(&older)
+                    && !reaches(manifest, &tip("rewritten")).contains(&older)
+            },
+        ),
+        (
+            "replace_ref",
+            "a replacement ref that names another commit",
+            |manifest| {
+                manifest.refs.iter().any(|(name, oid)| {
+                    name.strip_prefix("refs/replace/")
+                        .is_some_and(|replaced| replaced != oid)
+                })
+            },
+        ),
+    ];
+
+    /// What a fixture's script says its repository holds on disk: the fixture, the claim, and
+    /// its check on the fixture's `repo.git`.
+    type Layout = (&'static str, &'static str, fn(&Path) -> bool);
+
+    /// The claims of two scripts of the fixture set about their repositories' files.
+    const LAYOUTS: [Layout; 2] = [
+        (
+            "loose_and_packed",
+            "loose and packed objects, loose and packed refs",
+            |repo| {
+                let files = |dir: &str| {
+                    entries(&repo.join(dir))
+                        .into_iter()
+                        .filter(|entry| entry.kind != EntryKind::Dir)
+                        .map(|entry| entry.path)
+                        .collect::<Vec<_>>()
+                };
+                files("objects/pack").iter().any(|path| {
+                    path.extension()
+                        .is_some_and(|extension| extension == "pack")
+                }) && !loose_objects(repo).is_empty()
+                    && repo.join("packed-refs").is_file()
+                    && !files("refs").is_empty()
+            },
+        ),
+        (
+            "corrupt_object",
+            "a loose object whose file is a copy of another's",
+            |repo| {
+                let files: Vec<Vec<u8>> = loose_objects(repo)
+                    .iter()
+                    .map(|path| fs::read(path).expect("read a loose object"))
+                    .collect();
+                files
+                    .iter()
+                    .enumerate()
+                    .any(|(at, bytes)| files[at + 1..].contains(bytes))
+            },
+        ),
+    ];
+
+    #[test]
+    fn the_crafted_fixtures_hold_what_their_scripts_say() {
+        for (name, claim, holds) in CLAIMS {
+            let fixture = fixture(name);
+            let manifest = fixture
+                .manifest
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: no manifest"));
+            assert!(holds(manifest), "{name}: not {claim}");
+        }
+        for (name, claim, holds) in LAYOUTS {
+            let fixture = fixture(name);
+            let repo = fixture
+                .repo
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name}: no repository"));
+            assert!(holds(repo), "{name}: not {claim}");
+        }
+    }
+
+    /// An entry of a tree, as git stores it.
+    struct StoredEntry {
+        /// Its mode's octal digits, as stored.
+        mode: Vec<u8>,
+        /// Its name.
+        name: Vec<u8>,
+        /// The id of what it names, in hex.
+        id: String,
+    }
+
+    /// The entries of the tree `bytes` of a SHA-1 repository, in their stored order.
+    fn stored_entries(bytes: &[u8]) -> Vec<StoredEntry> {
+        let mut entries = Vec::new();
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let space = rest
+                .iter()
+                .position(|&byte| byte == b' ')
+                .expect("a mode ends at a space");
+            let nul = rest
+                .iter()
+                .position(|&byte| byte == 0)
+                .expect("a name ends at a NUL");
+            entries.push(StoredEntry {
+                mode: rest[..space].to_vec(),
+                name: rest[space + 1..nul].to_vec(),
+                id: rest[nul + 1..nul + 21].iter().fold(
+                    String::with_capacity(40),
+                    |mut hex, byte| {
+                        write!(hex, "{byte:02x}").expect("write to a String");
+                        hex
+                    },
+                ),
+            });
+            rest = &rest[nul + 21..];
+        }
+        entries
+    }
+
+    /// The entries of every tree of `manifest`.
+    fn every_entry(manifest: &Manifest) -> Vec<StoredEntry> {
+        manifest
+            .trees
+            .values()
+            .flat_map(|bytes| stored_entries(bytes))
+            .collect()
+    }
+
+    /// Whether `mode`, as a tree stores it, is a directory's.
+    fn is_dir(mode: &[u8]) -> bool {
+        std::str::from_utf8(mode)
+            .ok()
+            .and_then(|digits| u32::from_str_radix(digits, 8).ok())
+            .is_some_and(|mode| mode & 0o170_000 == 0o040_000)
+    }
+
+    /// `entry`'s name as git's tree order compares it: a directory's with a `/` after it.
+    fn order_key(entry: &StoredEntry) -> Vec<u8> {
+        let mut key = entry.name.clone();
+        if is_dir(&entry.mode) {
+            key.push(b'/');
+        }
+        key
+    }
+
+    /// The header lines of every commit of `manifest`: each commit's lines up to its first
+    /// empty one.
+    fn header_lines(manifest: &Manifest) -> impl Iterator<Item = &[u8]> {
+        manifest.commits.iter().flat_map(|commit| {
+            commit
+                .raw
+                .split(|&byte| byte == b'\n')
+                .take_while(|line| !line.is_empty())
+        })
+    }
+
+    /// Whether `bytes` holds `part`.
+    fn contains(bytes: &[u8], part: &[u8]) -> bool {
+        bytes.windows(part.len()).any(|window| window == part)
+    }
+
+    /// The commit `oid` of `manifest`; one it lacks fails the test.
+    fn commit_of<'m>(manifest: &'m Manifest, oid: &str) -> &'m ManifestCommit {
+        manifest
+            .commits
+            .iter()
+            .find(|commit| commit.oid == oid)
+            .unwrap_or_else(|| panic!("no commit {oid} in the manifest"))
+    }
+
+    /// Every commit of `manifest` that `tip` reaches, `tip` among them.
+    fn reaches(manifest: &Manifest, tip: &str) -> BTreeSet<String> {
+        let parents: BTreeMap<&str, &[String]> = manifest
+            .commits
+            .iter()
+            .map(|commit| (commit.oid.as_str(), commit.parents.as_slice()))
+            .collect();
+        let mut reached = BTreeSet::new();
+        let mut stack = vec![tip.to_owned()];
+        while let Some(oid) = stack.pop() {
+            if reached.contains(&oid) {
+                continue;
+            }
+            if let Some(&of) = parents.get(oid.as_str()) {
+                stack.extend(of.iter().cloned());
+            }
+            reached.insert(oid);
+        }
+        reached
+    }
+
+    /// The files of the repository `repo`'s loose objects, `objects/<2 hex>/<38 hex>`.
+    fn loose_objects(repo: &Path) -> Vec<PathBuf> {
+        entries(&repo.join("objects"))
+            .into_iter()
+            .filter(|entry| entry.kind != EntryKind::Dir)
+            .map(|entry| repo.join("objects").join(entry.path))
+            .filter(|path| {
+                path.parent()
+                    .and_then(Path::file_name)
+                    .and_then(|dir| dir.to_str())
+                    .is_some_and(|dir| {
+                        dir.len() == 2 && dir.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    })
+            })
+            .collect()
     }
 
     #[test]
