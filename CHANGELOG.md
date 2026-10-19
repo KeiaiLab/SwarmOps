@@ -269,6 +269,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   for the version matrix. The first fixtures: `linear`, `merges` (a `--no-ff` merge, an octopus,
   a criss-cross pair, an annotated and a lightweight tag) and `modes` (exec bits, symlinks,
   `a.b` beside a directory `a`, a path with a space and a UTF-8 name).
+- `MetaWrite::insert_changesets_batch` queues many changesets in one call, in order, each parent
+  in the store, queued before or earlier in the batch, and all or nothing: an error (more than 255
+  parents, a parent listed twice or missing, more records than a frame's 65,535) queues none of
+  them. A changeset the store holds, the transaction queued or the batch named before is
+  `AlreadyPresent`. The index appends a frame's changesets with one write to each of its five
+  files (`Index::append_batch`), as a commit materializes them and as replay restores them, where
+  it made five writes for each changeset.
 
 ### Changed
 
