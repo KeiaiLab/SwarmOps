@@ -1488,6 +1488,16 @@ expression: s.redact(&all)
           "const": "E_GIT_READ",
           "description": "`git import` could not read the source: an object is missing (as in a partial clone),\ndoes not hash to its id or does not parse, or the filesystem refused a read\n(`details.reason`; `details.object` names the object when there is one).",
           "type": "string"
+        },
+        {
+          "const": "E_GIT_EXPORT_DIVERGED",
+          "description": "`git export`: the branch holds commits that are not the export of the source ref's head\nor of an ancestor of it, so the branch did not move; there is no silent merge, and the\nrequest's `force` moves it anyway. `details.reason` says why: `branch_ahead` (commits\nmade in git on top of the export of the head itself, which `git import` brings in),\n`both_moved` (commits made in git on top of an older export, while the source ref moved\ntoo), `branch_moved` (the branch names a commit that is no export of this history),\n`source_moved_back` (the source ref's head is behind the export the branch holds, after\nan `undo` or a `ref set` backwards), `lossy_history` (the branch holds the original\ncommits of a history imported lossily, which the export would replace) or\n`moved_during_export` (another writer moved the branch while this export wrote; running\nthe export again settles it, and what it wrote stays). The first five are found before\nanything is written. `details` also names `branch`, `git_head` (the commit the branch\nholds), `head_changeset` and, when the branch holds the export of a changeset,\n`exported_changeset`.",
+          "type": "string"
+        },
+        {
+          "const": "E_GIT_WRITE",
+          "description": "`git export` could not write the repository; `details.reason` says what failed: `io` (the\nfilesystem refused a write; `details.path` names the file, relative to the git\ndirectory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists:\nanother git process holds it, or an earlier export died holding it, and git itself says\nto remove it once no git process runs; `details.path` names it) or `ref_name_conflict`\n(an existing ref stands where the branch's name needs a directory, or the other way\nround; `details.branch`). Running the export again after the cause is gone writes what\nis still missing.",
+          "type": "string"
         }
       ],
       "title": "ErrorCode"
@@ -1592,6 +1602,106 @@ expression: s.redact(&all)
         }
       ],
       "title": "FileKind"
+    },
+    "GitExportReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`git export`: write the history behind a store ref into a branch of a git repository. Every\ncommit that the branch's last export does not reach is written, parents first: a changeset\nthat was imported from git keeps the commit it came from, and one made in the store becomes a\ncommit with its own signatures and `SwarmOps-*` trailers. The branch moves to the export of\nthe ref's head by compare-and-swap, and only once everything it reaches is durable. It runs\non the caller's host, as `git import` does: no server receives this request, and it is no MCP\ntool.",
+      "properties": {
+        "branch": {
+          "default": "main",
+          "description": "The git branch to write, by its short name (`main`, the default, or `stable`; the\nrepository's `refs/heads/<branch>`), created if it does not exist. If it does, its commit\nmust be the export of `source_ref`'s head or of an ancestor of it, and only the commits\nafter that export are written; a branch at any other commit is `E_GIT_EXPORT_DIVERGED`,\nand nothing is written. In a repository with a work tree, the branch that `HEAD` names is\nrefused (`E_INVALID_ARG`, with `details.reason` `checked_out`), as `git push` refuses it\nby default.",
+          "type": "string"
+        },
+        "force": {
+          "default": false,
+          "description": "Move the branch although it diverged: to the export of `source_ref`'s head, by\ncompare-and-swap against the commit the export read, so that a branch another writer\nmoves meanwhile still stops it. It does not override a checked-out branch. Off by default.",
+          "type": "boolean"
+        },
+        "git_path": {
+          "description": "The git repository to write, on the caller's host: its directory, absolute or relative to\nthe caller's working directory (a bare repository, or a work tree with its `.git`). It\nexists already: `git init --bare` makes one. The caller reads and writes it; no store or\nserver is ever asked to read or write a path.",
+          "type": "string"
+        },
+        "source_ref": {
+          "default": "main",
+          "description": "The store ref whose history to export: `main` (the default) or `release/<name>`. Its head\nis the commit the branch ends at.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "git_path"
+      ],
+      "title": "GitExportReq",
+      "type": "object"
+    },
+    "GitExportResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`git export`: what the export wrote, and where the branch stands.",
+      "properties": {
+        "branch": {
+          "description": "The branch the export wrote, by its short name.",
+          "type": "string"
+        },
+        "branch_moved": {
+          "description": "Whether this export moved the branch, or created it; `false` when the branch named\n`head_sha` already, after an earlier export of the same head or a concurrent one.",
+          "type": "boolean"
+        },
+        "exported": {
+          "description": "How many commits this export wrote to the repository: the commits of the ref's history\nthat the branch's last export did not reach and the repository did not hold. A branch that\nis up to date exports 0.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "head_changeset": {
+          "description": "The changeset at `source_ref`'s head, which `head_sha` is the export of.",
+          "type": "string"
+        },
+        "head_sha": {
+          "description": "The commit the branch names now, the export of `head_changeset`: its git id, 40 lowercase\nhex digits.",
+          "type": "string"
+        },
+        "incremental": {
+          "description": "Whether the branch held an earlier export that this one continued, so that only the\ncommits after it were written; `false` for a branch the export created, or one that\n`force` moved from a history that was no export of this one.",
+          "type": "boolean"
+        },
+        "objects_written": {
+          "description": "How many git objects (commits, trees and blobs) this export wrote to the repository.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_sha": {
+          "description": "The commit the branch named when the export started; omitted when the branch did not\nexist, and the export created it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "rewritten": {
+          "description": "How many of the exported commits have another id than the commit they were imported from:\na commit the import took lossily (`git.lossy`) renders to other bytes than the git commit\nit came from, and so does every commit above it, whose parent has another id now; their\nsignature headers no longer verify. Commits made in the store were never imported and are\nnot counted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warnings": {
+          "description": "What the export has to say that did not stop it, such as how many of its commits it\nrewrote (`rewritten`). Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "exported",
+        "objects_written",
+        "head_changeset",
+        "head_sha",
+        "branch",
+        "branch_moved",
+        "incremental",
+        "rewritten"
+      ],
+      "title": "GitExportResp",
+      "type": "object"
     },
     "GitImportReq": {
       "$defs": {

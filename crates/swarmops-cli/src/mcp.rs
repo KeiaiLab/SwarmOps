@@ -1580,9 +1580,9 @@ mod tests {
     /// tool wired to the wrong one, fails here.
     #[test]
     fn the_tools_are_the_store_operations() {
-        // `init` and `git import` run on the client and are no `StoreOps` operations, so they
-        // have no tool.
-        let client_side = ["InitReq", "GitImportReq"];
+        // `init`, `git import` and `git export` run on the client and are no `StoreOps`
+        // operations, so they have no tool.
+        let client_side = ["InitReq", "GitImportReq", "GitExportReq"];
         let all = schema_for_all();
         let requests: Vec<&str> = all
             .as_object()

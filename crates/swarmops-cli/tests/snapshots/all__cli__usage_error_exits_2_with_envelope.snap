@@ -304,6 +304,8 @@ expression: s.transcript()
             "ErrorCode",
             "FileContent",
             "FileKind",
+            "GitExportReq",
+            "GitExportResp",
             "GitImportReq",
             "GitImportResp",
             "Identity",

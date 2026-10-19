@@ -22,6 +22,7 @@ const REQUESTS: &[&str] = &[
     "BlobPutReq",
     "ChangeInput",
     "CommitReq",
+    "GitExportReq",
     "GitImportReq",
     "Identity",
     "InfoReq",
@@ -49,6 +50,7 @@ const RESPONSES: &[&str] = &[
     "CommitResp",
     "Envelope",
     "FileContent",
+    "GitExportResp",
     "GitImportResp",
     "IdentityInfo",
     "LogCutOut",
@@ -221,6 +223,8 @@ fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
         ErrorCode::GitImportLossy => ("E_GIT_IMPORT_LOSSY", 1, false),
         ErrorCode::GitUnsupported => ("E_GIT_UNSUPPORTED", 1, false),
         ErrorCode::GitRead => ("E_GIT_READ", 1, false),
+        ErrorCode::GitExportDiverged => ("E_GIT_EXPORT_DIVERGED", 3, false),
+        ErrorCode::GitWrite => ("E_GIT_WRITE", 1, false),
     }
 }
 
@@ -1573,6 +1577,158 @@ mod git_import {
         assert_ignores_unknown_fields::<LossyCommitOut>(
             "LossyCommitOut",
             json!({"commit": "4b82", "changeset": "c9f1", "classes": []}),
+        );
+    }
+}
+
+/// `git export`'s contract (M8 Decisions 1, 8 to 11): a request with its defaults, the
+/// response, and two error codes. The operation runs on the client, as `init` and `git import`
+/// do, so it is no `StoreOps` method.
+mod git_export {
+    use serde_json::json;
+    use swarmops_api::{ErrorCode, GitExportReq, GitExportResp, OpError, schema_for_all};
+
+    use super::assert_ignores_unknown_fields;
+
+    /// A request names only the repository: it exports `main` into the branch `main`, and a
+    /// diverged branch stops it. The schema gives the same defaults, the other fields are taken
+    /// as given and written back in the operations spec's order, and `git_path` says that it is
+    /// read and written on the caller's host.
+    #[test]
+    fn a_git_export_request_takes_its_defaults() {
+        assert_eq!(
+            serde_json::from_value::<GitExportReq>(json!({"git_path": "x"})).unwrap(),
+            GitExportReq {
+                git_path: "x".to_owned(),
+                source_ref: "main".to_owned(),
+                branch: "main".to_owned(),
+                force: false,
+            }
+        );
+        assert!(serde_json::from_value::<GitExportReq>(json!({"branch": "main"})).is_err());
+        let schema = &schema_for_all()["GitExportReq"];
+        assert_eq!(schema["required"], json!(["git_path"]));
+        let properties = &schema["properties"];
+        assert_eq!(properties["source_ref"]["default"], "main");
+        assert_eq!(properties["branch"]["default"], "main");
+        assert_eq!(properties["force"]["default"], false);
+        let path = properties["git_path"]["description"].as_str().unwrap();
+        assert!(path.contains("caller's host"), "{path}");
+
+        let wire = r#"{"git_path":"../traders","source_ref":"release/traders","branch":"stable","force":true}"#;
+        let req: GitExportReq = serde_json::from_str(wire).unwrap();
+        assert_eq!(
+            req,
+            GitExportReq {
+                git_path: "../traders".to_owned(),
+                source_ref: "release/traders".to_owned(),
+                branch: "stable".to_owned(),
+                force: true,
+            }
+        );
+        assert_eq!(serde_json::to_string(&req).unwrap(), wire);
+        assert_ignores_unknown_fields::<GitExportReq>("GitExportReq", json!({"git_path": "x"}));
+    }
+
+    /// `E_GIT_EXPORT_DIVERGED` exits 3, the conflict exit, as `E_GIT_IMPORT_DIVERGED` does;
+    /// `E_GIT_WRITE` exits 1. Neither is retryable: running the same export again meets the
+    /// same branch, and a hint says what to do first.
+    #[test]
+    fn the_git_export_codes_have_their_exits() {
+        for (code, name, exit) in [
+            (ErrorCode::GitExportDiverged, "E_GIT_EXPORT_DIVERGED", 3),
+            (ErrorCode::GitWrite, "E_GIT_WRITE", 1),
+        ] {
+            assert_eq!(
+                (code.as_str(), code.exit(), code.retryable()),
+                (name, exit, false),
+                "{code:?}"
+            );
+            assert!(ErrorCode::ALL.contains(&code), "{name}");
+            assert_eq!(serde_json::to_value(code).unwrap(), name);
+            assert_eq!(
+                serde_json::from_value::<ErrorCode>(json!(name)).unwrap(),
+                code
+            );
+            let error = OpError::new(code, "m");
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                (name, exit, false)
+            );
+        }
+    }
+
+    /// The response follows the operations spec's field order; `old_sha` is omitted when the
+    /// export created the branch, and `warnings` when there are none, while the counts and
+    /// flags are always written.
+    #[test]
+    fn a_git_export_response_omits_what_it_lacks() {
+        let created = GitExportResp {
+            exported: 5,
+            objects_written: 17,
+            head_changeset: "c9f1".to_owned(),
+            head_sha: "4b82".to_owned(),
+            branch: "main".to_owned(),
+            old_sha: None,
+            branch_moved: true,
+            incremental: false,
+            rewritten: 0,
+            warnings: Vec::new(),
+        };
+        let value = serde_json::to_value(&created).unwrap();
+        assert!(value.get("old_sha").is_none(), "{value}");
+        assert!(value.get("warnings").is_none(), "{value}");
+        assert_eq!(
+            serde_json::to_string(&created).unwrap(),
+            [
+                r#"{"exported":5,"objects_written":17,"head_changeset":"c9f1","#,
+                r#""head_sha":"4b82","branch":"main","branch_moved":true,"#,
+                r#""incremental":false,"rewritten":0}"#,
+            ]
+            .concat()
+        );
+        let again = GitExportResp {
+            exported: 1,
+            objects_written: 3,
+            old_sha: Some("b0b0".to_owned()),
+            incremental: true,
+            rewritten: 2,
+            warnings: vec!["2 exported commits are new commits".to_owned()],
+            ..created
+        };
+        let text = serde_json::to_string(&again).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"exported":1,"objects_written":3,"head_changeset":"c9f1","#,
+                r#""head_sha":"4b82","branch":"main","old_sha":"b0b0","branch_moved":true,"#,
+                r#""incremental":true,"rewritten":2,"#,
+                r#""warnings":["2 exported commits are new commits"]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<GitExportResp>(&text).unwrap(), again);
+
+        assert_eq!(
+            schema_for_all()["GitExportResp"]["required"],
+            json!([
+                "exported",
+                "objects_written",
+                "head_changeset",
+                "head_sha",
+                "branch",
+                "branch_moved",
+                "incremental",
+                "rewritten"
+            ])
+        );
+        assert_ignores_unknown_fields::<GitExportResp>(
+            "GitExportResp",
+            json!({
+                "exported": 0, "objects_written": 0, "head_changeset": "c9f1",
+                "head_sha": "4b82", "branch": "main", "branch_moved": false,
+                "incremental": true, "rewritten": 0,
+            }),
         );
     }
 }

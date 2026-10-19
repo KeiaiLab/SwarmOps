@@ -11,11 +11,12 @@
 //! `path_history` stays within the operations spec's 64 KiB target for a default response (§9);
 //! `read_file`'s 1 MiB is the spec's own.
 //!
-//! No store-facing type carries a filesystem path. The three exceptions are client-side:
+//! No store-facing type carries a filesystem path. The four exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, [`InitReq::path`],
 //! because `init` runs on the client and is not a [`StoreOps`] method, and
-//! [`GitImportReq::git_path`], because `git import` reads its source repository on the
-//! caller's host and is not a [`StoreOps`] method either (nor an MCP tool).
+//! [`GitImportReq::git_path`] and [`GitExportReq::git_path`], because `git import` reads its
+//! source repository, and `git export` writes its destination, on the caller's host, and
+//! neither is a [`StoreOps`] method (nor an MCP tool).
 //!
 //! Not in M1 yet:
 //! - M2: `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each `TreeEntryOut`, and
@@ -915,6 +916,87 @@ pub struct LossyCommitOut {
     pub changeset: String,
     /// The classes dropped or normalized in it, ordered by name, as `git.lossy` lists them.
     pub classes: Vec<LossyClass>,
+}
+
+fn default_source_ref() -> String {
+    "main".to_owned()
+}
+
+fn default_branch() -> String {
+    "main".to_owned()
+}
+
+/// `git export`: write the history behind a store ref into a branch of a git repository. Every
+/// commit that the branch's last export does not reach is written, parents first: a changeset
+/// that was imported from git keeps the commit it came from, and one made in the store becomes a
+/// commit with its own signatures and `SwarmOps-*` trailers. The branch moves to the export of
+/// the ref's head by compare-and-swap, and only once everything it reaches is durable. It runs
+/// on the caller's host, as `git import` does: no server receives this request, and it is no MCP
+/// tool.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct GitExportReq {
+    /// The git repository to write, on the caller's host: its directory, absolute or relative to
+    /// the caller's working directory (a bare repository, or a work tree with its `.git`). It
+    /// exists already: `git init --bare` makes one. The caller reads and writes it; no store or
+    /// server is ever asked to read or write a path.
+    pub git_path: String,
+    /// The store ref whose history to export: `main` (the default) or `release/<name>`. Its head
+    /// is the commit the branch ends at.
+    #[serde(default = "default_source_ref")]
+    pub source_ref: String,
+    /// The git branch to write, by its short name (`main`, the default, or `stable`; the
+    /// repository's `refs/heads/<branch>`), created if it does not exist. If it does, its commit
+    /// must be the export of `source_ref`'s head or of an ancestor of it, and only the commits
+    /// after that export are written; a branch at any other commit is `E_GIT_EXPORT_DIVERGED`,
+    /// and nothing is written. In a repository with a work tree, the branch that `HEAD` names is
+    /// refused (`E_INVALID_ARG`, with `details.reason` `checked_out`), as `git push` refuses it
+    /// by default.
+    #[serde(default = "default_branch")]
+    pub branch: String,
+    /// Move the branch although it diverged: to the export of `source_ref`'s head, by
+    /// compare-and-swap against the commit the export read, so that a branch another writer
+    /// moves meanwhile still stops it. It does not override a checked-out branch. Off by default.
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `git export`: what the export wrote, and where the branch stands.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct GitExportResp {
+    /// How many commits this export wrote to the repository: the commits of the ref's history
+    /// that the branch's last export did not reach and the repository did not hold. A branch that
+    /// is up to date exports 0.
+    pub exported: u64,
+    /// How many git objects (commits, trees and blobs) this export wrote to the repository.
+    pub objects_written: u64,
+    /// The changeset at `source_ref`'s head, which `head_sha` is the export of.
+    pub head_changeset: String,
+    /// The commit the branch names now, the export of `head_changeset`: its git id, 40 lowercase
+    /// hex digits.
+    pub head_sha: String,
+    /// The branch the export wrote, by its short name.
+    pub branch: String,
+    /// The commit the branch named when the export started; omitted when the branch did not
+    /// exist, and the export created it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_sha: Option<String>,
+    /// Whether this export moved the branch, or created it; `false` when the branch named
+    /// `head_sha` already, after an earlier export of the same head or a concurrent one.
+    pub branch_moved: bool,
+    /// Whether the branch held an earlier export that this one continued, so that only the
+    /// commits after it were written; `false` for a branch the export created, or one that
+    /// `force` moved from a history that was no export of this one.
+    pub incremental: bool,
+    /// How many of the exported commits have another id than the commit they were imported from:
+    /// a commit the import took lossily (`git.lossy`) renders to other bytes than the git commit
+    /// it came from, and so does every commit above it, whose parent has another id now; their
+    /// signature headers no longer verify. Commits made in the store were never imported and are
+    /// not counted.
+    pub rewritten: u64,
+    /// What the export has to say that did not stop it, such as how many of its commits it
+    /// rewrote (`rewritten`). Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 /// One store's operations, implemented over a local store now and by a remote client later

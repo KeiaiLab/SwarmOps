@@ -136,6 +136,31 @@ error_codes! {
     /// does not hash to its id or does not parse, or the filesystem refused a read
     /// (`details.reason`; `details.object` names the object when there is one).
     GitRead => "E_GIT_READ", EXIT_ERROR, false;
+    // `git export` (M8): the history it writes and the repository it writes it into.
+    /// `git export`: the branch holds commits that are not the export of the source ref's head
+    /// or of an ancestor of it, so the branch did not move; there is no silent merge, and the
+    /// request's `force` moves it anyway. `details.reason` says why: `branch_ahead` (commits
+    /// made in git on top of the export of the head itself, which `git import` brings in),
+    /// `both_moved` (commits made in git on top of an older export, while the source ref moved
+    /// too), `branch_moved` (the branch names a commit that is no export of this history),
+    /// `source_moved_back` (the source ref's head is behind the export the branch holds, after
+    /// an `undo` or a `ref set` backwards), `lossy_history` (the branch holds the original
+    /// commits of a history imported lossily, which the export would replace) or
+    /// `moved_during_export` (another writer moved the branch while this export wrote; running
+    /// the export again settles it, and what it wrote stays). The first five are found before
+    /// anything is written. `details` also names `branch`, `git_head` (the commit the branch
+    /// holds), `head_changeset` and, when the branch holds the export of a changeset,
+    /// `exported_changeset`.
+    GitExportDiverged => "E_GIT_EXPORT_DIVERGED", EXIT_CONFLICT, false;
+    /// `git export` could not write the repository; `details.reason` says what failed: `io` (the
+    /// filesystem refused a write; `details.path` names the file, relative to the git
+    /// directory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists:
+    /// another git process holds it, or an earlier export died holding it, and git itself says
+    /// to remove it once no git process runs; `details.path` names it) or `ref_name_conflict`
+    /// (an existing ref stands where the branch's name needs a directory, or the other way
+    /// round; `details.branch`). Running the export again after the cause is gone writes what
+    /// is still missing.
+    GitWrite => "E_GIT_WRITE", EXIT_ERROR, false;
 }
 
 impl ErrorCode {

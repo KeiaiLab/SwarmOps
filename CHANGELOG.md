@@ -411,6 +411,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   it returns; on a clean tail it writes nothing. Local readers (the CLI, the MCP server) keep the
   lock-free snapshot. In the test kit, `fs::HoldThenFail` holds one `append_durable` between its
   write and its flush until the test lets it go, then fails it.
+- `git export`'s contract, ahead of the command that serves it: `swarmops schema` lists
+  `GitExportReq` (`git_path`, the repository to write, on the caller's host; `source_ref`, `main`
+  by default; `branch`, `main` by default; `force`, off by default) and `GitExportResp`
+  (`exported`, `objects_written`, `head_changeset`, `head_sha`, `branch`, `old_sha`,
+  `branch_moved`, `incremental`, `rewritten`, `warnings`), and two error codes, neither
+  retryable: `E_GIT_EXPORT_DIVERGED` (exit 3, conflict; `details.reason` is `branch_ahead`,
+  `both_moved`, `branch_moved`, `source_moved_back`, `lossy_history` or `moved_during_export`)
+  and `E_GIT_WRITE` (exit 1; `io`, `ref_locked` or `ref_name_conflict`). Like `git import`,
+  `git export` runs on the client and needs no identity: it is no `StoreOps` operation and no MCP
+  tool, and no server receives its request (operations spec §0, §1 and §7).
 
 ### Changed
 

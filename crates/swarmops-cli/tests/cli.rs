@@ -1171,6 +1171,9 @@ fn error_codes_reach_the_cli() {
         ("E_GIT_IMPORT_LOSSY", "no command imports from git yet"),
         ("E_GIT_UNSUPPORTED", "no command imports from git yet"),
         ("E_GIT_READ", "no command imports from git yet"),
+        // `git export`'s codes, likewise.
+        ("E_GIT_EXPORT_DIVERGED", "no command exports to git yet"),
+        ("E_GIT_WRITE", "no command exports to git yet"),
     ];
     let mut s = Session::new();
     let store = s.store();
