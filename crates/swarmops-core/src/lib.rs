@@ -11,7 +11,7 @@ pub mod object;
 pub mod path;
 
 pub use error::{IdError, PathError};
-pub use id::{BlobId, ChangesetId, ObjectId, ObjectKind, TreeId, hash_object};
+pub use id::{BlobId, ChangesetId, Hashed, ObjectId, ObjectKind, TreeId, hash_object};
 pub use object::{
     Changeset, CodecError, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, Signature, Tree,
     TreeEntry,

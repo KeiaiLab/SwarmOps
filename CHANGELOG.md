@@ -416,6 +416,19 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (`JournalCorrupt` at the frames' offset, `E_STORE_CORRUPT`) before anything is listed, where it
   used to list entries that pointed into other bytes.
 
+#### M2: diff, history and derived data (2026-10-19)
+
+- `blobs_written` in `commit`'s result (and `blobs_written`, `trees_written` of
+  `swarmops_repo::CommitOutcome`) counts exactly what the commit's own writes placed in the
+  object store: of processes that commit one new file at once, one counts its blob, where each
+  that found it missing used to (eight reported 8). A commit also hashes, encodes and looks up
+  each of its objects once (it hashed each object twice, encoded its changeset twice and checked
+  each blob and tree for existence twice), and makes `objects/tmp` once, not once per object:
+  `swarmops_core::Hashed`, which only hashing makes, carries an object with its id to the new
+  `ObjectStore::put_hashed_batch` (whose `PutOutcome.written` says whether the call placed the
+  file), and `Changeset::encode_hashed` gives the changeset's object and its delta hash from one
+  encoding.
+
 ### Security
 
 #### M1.6: the code-review follow-ups (2026-10-19)

@@ -71,3 +71,29 @@ fn display_and_debug_are_unchanged() {
         );
     }
 }
+
+/// `Hashed::new` hashes its payload once, as `hash_object` does, and keeps it: for each kind the
+/// id is the hash of the payload it carries, and `into_payload` hands back the very `Vec` it was
+/// given, not a copy.
+#[test]
+fn hashed_new_is_hash_object() {
+    use swarmops_core::Hashed;
+
+    for kind in [ObjectKind::Blob, ObjectKind::Tree, ObjectKind::Changeset] {
+        for payload in [Vec::new(), b"x".to_vec(), vec![7; 4096]] {
+            let hashed = Hashed::new(kind, payload.clone());
+            assert_eq!(hashed.id(), hash_object(kind, &payload), "{kind:?}");
+            assert_eq!(hashed.kind(), kind);
+            assert_eq!(hashed.payload(), payload.as_slice());
+        }
+        let payload = vec![7; 4096];
+        let at = payload.as_ptr();
+        let kept = Hashed::new(kind, payload).into_payload();
+        assert_eq!(
+            kept.as_ptr(),
+            at,
+            "{kind:?}: the payload is kept, not copied"
+        );
+        assert_eq!(kept, [7; 4096]);
+    }
+}

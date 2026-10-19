@@ -847,10 +847,11 @@ fn open_default_under_crash_at_puts_one_object_at_a_time() {
         let outcome = store.put_batch(one_at_a_time_batch());
         panic!("the crash hook did not fire: put_batch returned {outcome:?}");
     }
-    // With its fan-out dir in place, a new object's put makes five FsOps calls: exists,
-    // create_dir_all objects/tmp, exists of the fan-out dir, write_durable_temp,
-    // link_noclobber. One object at a time, call 5 × 20 + 3 comes in the middle of the 21st
-    // object's put, after 20 whole ones: the first 20, in every run.
+    // With its fan-out dir in place, a new object's put makes four FsOps calls: exists, exists
+    // of the fan-out dir, write_durable_temp, link_noclobber; and the batch's first new object
+    // one more before its temp file, create_dir_all objects/tmp, made once a batch. One object
+    // at a time, call 1 + 4 × 20 + 3 comes in the middle of the 21st object's put, after 20
+    // whole ones: the first 20, in every run.
     let whole = 20;
     let want: BTreeSet<ObjectId> = one_at_a_time_batch()[..whole]
         .iter()
@@ -865,7 +866,7 @@ fn open_default_under_crash_at_puts_one_object_at_a_time() {
         let child = child::run(
             this_test(&test_name!(TEST))
                 .env(ONE_AT_A_TIME_ROOT, layout.root())
-                .env(CRASH_AT_ENV, (5 * whole + 3).to_string()),
+                .env(CRASH_AT_ENV, (1 + 4 * whole + 3).to_string()),
         );
         assert_eq!(
             child.status.signal(),
@@ -1023,5 +1024,154 @@ fn fs_calls_hook_reports_how_many_calls_a_process_made() {
             assert!(output.status.success(), "{shown}");
             assert_eq!(fs::read_to_string(&report).unwrap(), calls.to_string());
         }
+    }
+}
+
+/// Puts of objects their caller hashed ([`ObjectStore::put_hashed_batch`], storage spec §8): each
+/// object's file placed once, the outcome saying whether this call placed it, and `objects/tmp`
+/// made at most once a batch.
+mod hashed {
+    use std::os::unix::fs::MetadataExt;
+
+    use swarmops_core::Hashed;
+    use swarmops_store::PutOutcome;
+    use swarmops_testkit::fs::RecordingFs;
+
+    use super::*;
+
+    /// One object of `kind` for each of `payloads`, hashed.
+    fn hashed(kind: ObjectKind, payloads: &[&[u8]]) -> Vec<Hashed> {
+        payloads
+            .iter()
+            .map(|payload| Hashed::new(kind, payload.to_vec()))
+            .collect()
+    }
+
+    /// The outcome of a put of `kind`/`payload` that placed its file (`written`) or did not.
+    fn outcome(kind: ObjectKind, payload: &[u8], written: bool) -> PutOutcome {
+        PutOutcome {
+            id: hash_object(kind, payload),
+            written,
+        }
+    }
+
+    #[test]
+    fn put_hashed_batch_reports_what_it_placed() {
+        let (_root, layout) = new_root();
+        let mut store = real_store(&layout);
+        store.set_parallelism(4);
+        let three: [&[u8]; 3] = [b"one", b"two", b"three"];
+        let placed = store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &three))
+            .unwrap();
+        let want = |written| three.map(|p| outcome(ObjectKind::Blob, p, written));
+        assert_eq!(placed, want(true), "three new objects, in input order");
+        let again = store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &three))
+            .unwrap();
+        assert_eq!(again, want(false), "the same three again: none placed");
+
+        // A batch of new and stored objects, of each kind: only the new ones are placed.
+        let mut mixed = hashed(ObjectKind::Blob, &[b"two", b"four"]);
+        mixed.extend(hashed(ObjectKind::Tree, &[b"one", b"a tree"]));
+        mixed.push(Hashed::new(ObjectKind::Changeset, b"a changeset".to_vec()));
+        let placed = store.put_hashed_batch(mixed.clone()).unwrap();
+        assert_eq!(
+            placed,
+            [
+                outcome(ObjectKind::Blob, b"two", false),
+                outcome(ObjectKind::Blob, b"four", true),
+                outcome(ObjectKind::Tree, b"one", true),
+                outcome(ObjectKind::Tree, b"a tree", true),
+                outcome(ObjectKind::Changeset, b"a changeset", true),
+            ],
+            "a tree of the same bytes as a stored blob is another object"
+        );
+        for (item, put) in mixed.into_iter().zip(placed) {
+            let stored = store.get(put.id).unwrap();
+            assert_eq!(stored, Some((item.kind(), item.into_payload())), "{put:?}");
+        }
+        assert_eq!(store.put_hashed_batch(Vec::new()).unwrap(), []);
+    }
+
+    #[test]
+    fn racing_put_hashed_batches_place_each_object_once() {
+        const THREADS: usize = 8;
+        let (_root, layout) = new_root();
+        let store = real_store(&layout);
+        let payload = random_bytes(1 << 20);
+        let barrier = Barrier::new(THREADS);
+        let outcomes: Vec<PutOutcome> = thread::scope(|s| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    s.spawn(|| {
+                        let item = Hashed::new(ObjectKind::Blob, payload.clone());
+                        barrier.wait();
+                        store.put_hashed_batch(vec![item]).unwrap()
+                    })
+                })
+                .collect();
+            (workers.into_iter())
+                .flat_map(|worker| worker.join().unwrap())
+                .collect()
+        });
+
+        let id = hash_object(ObjectKind::Blob, &payload);
+        assert!(outcomes.iter().all(|o| o.id == id), "{outcomes:?}");
+        let placed = outcomes.iter().filter(|o| o.written).count();
+        assert_eq!(
+            placed, 1,
+            "exactly one thread placed the file: {outcomes:?}"
+        );
+        let file = layout.object_path(id).into_std_path_buf();
+        assert_eq!(
+            object_files(&layout),
+            std::slice::from_ref(&file),
+            "one object file"
+        );
+        assert_eq!(
+            fs::metadata(&file).unwrap().nlink(),
+            1,
+            "no temp file names it"
+        );
+        assert_eq!(
+            files_in(layout.objects_tmp().as_std_path()),
+            Vec::<PathBuf>::new(),
+            "every temp file is removed, the losers' included"
+        );
+    }
+
+    #[test]
+    fn put_hashed_batch_makes_objects_tmp_at_most_once() {
+        let (_root, layout) = new_root();
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(layout.root().as_std_path().to_path_buf());
+        let mut store = FsObjectStore::open(layout.clone(), Box::new(fs));
+        store.set_parallelism(4);
+        let made = |calls: Vec<String>| {
+            (calls.iter())
+                .filter(|call| *call == "create_dir_all objects/tmp")
+                .count()
+        };
+        let first: [&[u8]; 3] = [b"first 0", b"first 1", b"first 2"];
+
+        assert!(!layout.objects_tmp().exists(), "a fresh root has none");
+        let placed = store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &first))
+            .unwrap();
+        assert!(placed.iter().all(|o| o.written), "{placed:?}");
+        assert_eq!(made(calls()), 1, "made once for three new objects");
+        assert!(layout.objects_tmp().is_dir());
+
+        store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &first))
+            .unwrap();
+        assert_eq!(made(calls()), 0, "a batch of stored objects writes nothing");
+
+        let second: [&[u8]; 3] = [b"second 0", b"second 1", b"second 2"];
+        store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &second))
+            .unwrap();
+        assert_eq!(made(calls()), 1, "once a batch, not once a store");
     }
 }
