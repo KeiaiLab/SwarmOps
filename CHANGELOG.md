@@ -363,6 +363,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   git 2.45 and newer), which `GixSource::open` refuses as `Unsupported(RefStorage("reftable"))`:
   `a_reftable_repository_is_unsupported` checks that on the fixture the version matrix's newest
   git makes, and says why it checks nothing where there is none.
+- The git version matrix: `scheduled.yml`'s weekly `git-matrix` job builds git 2.39.5, 2.43.0
+  and 2.56.0 (the newest on 2026-10-19) from kernel.org's release tarballs, each checked against
+  its pinned SHA-256 and cached by release. With each it rebuilds every git fixture and names
+  each difference from the archives' manifests (`check_git_fixtures`), then runs the fixture
+  tests and the git import's on the fixtures that git made (`SWARMOPS_GIT_FIXTURES_DIR`).
 
 ### Changed
 
