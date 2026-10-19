@@ -62,6 +62,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
     CasResult, FsObjectStore, FsOps, HookedFs, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs,
@@ -179,7 +180,7 @@ impl LocalRepo {
             name: self.identity.name.clone(),
             store_version: STORE_VERSION,
             changesets: read.count_changesets()?,
-            refs: u64::try_from(read.list_refs()?.len()).expect("usize fits in u64"),
+            refs: to_u64(read.list_refs()?.len()),
             main: read.get_ref("main")?.map(|state| state.target),
         })
     }
@@ -246,7 +247,7 @@ impl LocalRepo {
         // is: measured before it is read (through `std::fs`, no `FsOps` call), so that a
         // crafted file of huge length is never read into memory. A missing one reaches the read.
         if let Ok(meta) = std::fs::metadata(layout.format_file().as_std_path())
-            && meta.len() > u64::try_from(FORMAT.len()).expect("usize fits in u64")
+            && meta.len() > to_u64(FORMAT.len())
         {
             return Err(StoreError::Format(format!(
                 "{root}/FORMAT is {} bytes long, not a store layout this build reads",

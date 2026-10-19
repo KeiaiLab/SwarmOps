@@ -56,6 +56,7 @@ use std::fmt;
 use std::io;
 use std::sync::Arc;
 
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
     ChangesetMeta, Frame, Index, Journal, ObjectStore, Record, RefFile, SortedView, StoreError,
@@ -791,10 +792,6 @@ fn journal_changesets(frames: &[Frame]) -> Vec<(ChangesetMeta, u64)> {
         }
     }
     changesets
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
 }
 
 /// `n` as a `usize`; the counts verify converts are lengths of files it has open.

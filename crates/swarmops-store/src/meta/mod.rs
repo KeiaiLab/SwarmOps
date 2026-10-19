@@ -46,7 +46,5 @@ pub use store::{
     RefMoveEntry,
 };
 
-/// `n` as a file offset or a count of records: a `usize` always fits in a `u64` here.
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
-}
+// The submodules convert their offsets and counts with it, as `use super::to_u64;`.
+use swarmops_core::bytes::to_u64;

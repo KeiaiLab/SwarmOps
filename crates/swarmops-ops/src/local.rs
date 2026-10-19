@@ -16,6 +16,7 @@ use swarmops_api::{
     RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
     VerifyReport, VerifyReq,
 };
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, RepoPath, Signature, TreeEntry,
 };
@@ -355,8 +356,8 @@ impl StoreOps for Recording<'_> {
             changeset: outcome.id.to_string(),
             parent: parent.map(|id| id.to_string()),
             root: outcome.root.to_string(),
-            files_changed: count(outcome.files_changed),
-            blobs_written: count(outcome.blobs_written),
+            files_changed: to_u64(outcome.files_changed),
+            blobs_written: to_u64(outcome.blobs_written),
             warnings: outcome.warnings,
         })
     }
@@ -389,7 +390,7 @@ impl StoreOps for Recording<'_> {
         let (encoding, content) = content::encode(&bytes, keep);
         Ok(FileContent {
             blob: blob.to_string(),
-            size: count(bytes.len()),
+            size: to_u64(bytes.len()),
             kind: file_kind(kind),
             encoding,
             content,
@@ -457,7 +458,7 @@ impl StoreOps for Recording<'_> {
                 .take(max_changes)
                 .map(change_out)
                 .collect(),
-            files_changed: count(changeset.delta.len()),
+            files_changed: to_u64(changeset.delta.len()),
             changes_truncated: changeset.delta.len() > max_changes,
             metadata: changeset
                 .metadata
@@ -869,10 +870,6 @@ fn signature_out(signature: &Signature) -> SignatureOut {
 /// `bytes` as UTF-8, with invalid bytes replaced.
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
-}
-
-fn count(n: usize) -> u64 {
-    u64::try_from(n).expect("a usize fits in a u64")
 }
 
 #[cfg(test)]

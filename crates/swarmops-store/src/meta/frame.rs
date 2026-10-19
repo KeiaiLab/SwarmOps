@@ -17,6 +17,7 @@
 use swarmops_core::bytes::Reader;
 use swarmops_core::{ChangesetId, ObjectId};
 
+use super::to_u64;
 use crate::error::{StoreError, invalid_input};
 
 /// A frame header: `u32le len | u32le crc32(payload)`.
@@ -274,7 +275,7 @@ fn decode_payload(payload: &[u8]) -> Option<Vec<Record>> {
 /// position in them where decoding stopped.
 fn corrupt_at(pos: usize) -> StoreError {
     StoreError::JournalCorrupt {
-        offset: u64::try_from(pos).expect("a buffer position fits in u64"),
+        offset: to_u64(pos),
     }
 }
 
