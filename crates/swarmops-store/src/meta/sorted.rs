@@ -1,7 +1,8 @@
 //! The sorted views of the changeset index (storage spec §3, §3.1): for the id column and
 //! the delta-hash column, a key file and a rec file, parallel arrays in key order. A lookup
-//! binary-searches the key file alone, one `read_at` of one key per probe, and reads one rec
-//! once it has found its key.
+//! searches the key file alone, one `read_at` of one key per probe, by interpolation on the
+//! keys' first bytes where that helps and by bisection where it does not
+//! ([`SortedView::lower_bound`]), and reads one rec once it has found its key.
 //!
 //! ```text
 //! sorted/ids.key   id[32] × m, strictly ascending       sorted/ids.rec   rec u64le × m
@@ -122,19 +123,71 @@ impl<const K: usize> SortedView<K> {
     }
 
     /// The index of the first key not less than `key` (keys compare byte by byte, as
-    /// slices), or `len()` if every key is less. A binary search that reads one key per
-    /// probe with `read_at`, at most ⌊log2 len⌋ + 1 of them, and nothing of the rec file.
+    /// slices), or `len()` if every key is less. A search that reads one key per probe with
+    /// `read_at`, and nothing of the rec file: on keys spread as BLAKE3 ids and delta hashes
+    /// are, 4 to 6 of them in views of 100,000 to 1,000,000 keys; on any keys, at most
+    /// 2(⌊log2 len⌋ + 1).
+    ///
+    /// The search narrows `[low, high)`, the places the bound may be, and knows the first 8
+    /// bytes, read big-endian, of the last key it read below `key` and of the last it read not
+    /// below (0 and `u64::MAX` before it has read either). Ids and delta hashes are BLAKE3
+    /// outputs, spread evenly, so it probes where `key`'s first 8 bytes fall between those two,
+    /// by interpolation. It bisects instead, which halves the places, when:
+    ///
+    /// - the two are equal: keys that share their first 8 bytes give interpolation nothing to
+    ///   go on;
+    /// - the last two probes were interpolations that each left more than half of the places:
+    ///   keys bunched unevenly, which interpolation would crawl through;
+    /// - a probe that left all but one of the places would leave a bisection of the rest unable
+    ///   to finish within 2(⌊log2 len⌋ + 1) reads.
+    ///
+    /// So no search reads more keys than that bound, whatever the keys are. Keys compare whole,
+    /// so the index found is the one a bisection finds.
     pub fn lower_bound(&self, key: &[u8]) -> Result<u64, StoreError> {
-        let (mut low, mut high) = (0, self.len);
+        self.lower_bound_with_key(key).map(|(at, _)| at)
+    }
+
+    /// [`SortedView::lower_bound`], with the key at the index it returns, if that index is a
+    /// key of the view (`None` when it is `len()`): the key the search read when it last moved
+    /// its upper bound there. Every key at or past the upper bound is not less than `key`, and
+    /// the bound only moves down, so the key read there is the one at the index returned;
+    /// never the last key read, which may lie below it. A lookup compares it with what it asks
+    /// for instead of reading it again.
+    pub(crate) fn lower_bound_with_key(
+        &self,
+        key: &[u8],
+    ) -> Result<(u64, Option<[u8; K]>), StoreError> {
+        let budget = 2 * bisection_reads(self.len);
+        let target = first_8(key);
+        let (mut low, mut high, mut at_high) = (0, self.len, None);
+        let (mut below, mut above) = (0, u64::MAX);
+        // Interpolated probes in a row that each left more than half of the places.
+        let (mut reads, mut unhelpful) = (0, 0);
         while low < high {
-            let mid = low + (high - low) / 2;
-            if self.key_at(mid)?.as_slice() < key {
-                low = mid + 1;
+            let places = high - low;
+            // An interpolated probe may leave all but one of the places, a bisection at most
+            // half of them: the budget's test.
+            let interpolated =
+                below < above && unhelpful < 2 && reads + 1 + bisection_reads(places - 1) <= budget;
+            let mid = if interpolated {
+                low + interpolate(target, below, above, places)
             } else {
-                high = mid;
+                low + places / 2
+            };
+            let probe = self.key_at(mid)?;
+            reads += 1;
+            if probe.as_slice() < key {
+                (low, below) = (mid + 1, first_8(&probe));
+            } else {
+                (high, above, at_high) = (mid, first_8(&probe), Some(probe));
             }
+            unhelpful = if interpolated && high - low > places / 2 {
+                unhelpful + 1
+            } else {
+                0
+            };
         }
-        Ok(low)
+        Ok((low, at_high))
     }
 
     /// Key `i`, read with one `read_at`. `i` past the end is [`StoreError::BadCall`].
@@ -604,4 +657,30 @@ pub(crate) fn index_file_error(
 /// How many entries from index `start` a read of at most `max` takes, in a view of `len`.
 fn entries_from(start: u64, len: u64, max: usize) -> usize {
     usize::try_from(len.saturating_sub(start)).map_or(max, |left| left.min(max))
+}
+
+/// The most keys a bisection of `places` places reads: ⌊log2 places⌋ + 1, none for none.
+fn bisection_reads(places: u64) -> u64 {
+    u64::from(places.bit_width())
+}
+
+/// The first 8 bytes of `key`, read big-endian (zeros for those a shorter key lacks): where it
+/// lies in the key space, to interpolate with.
+fn first_8(key: &[u8]) -> u64 {
+    let mut bytes = [0; 8];
+    let len = key.len().min(8);
+    bytes[..len].copy_from_slice(&key[..len]);
+    u64::from_be_bytes(bytes)
+}
+
+/// Where among `places` keys spread evenly between two whose first 8 bytes are `below` and
+/// `above` (`below < above`), the first not less than a key whose first 8 bytes are `target`
+/// should lie: an offset below `places`.
+fn interpolate(target: u64, below: u64, above: u64, places: u64) -> u64 {
+    // `into < span`, so the offset is below `places`; the clamp only keeps it so if the keys
+    // read were not in order.
+    let into = u128::from(target.clamp(below, above) - below);
+    let span = u128::from(above - below) + 1;
+    let offset = into * u128::from(places) / span;
+    u64::try_from(offset).map_or(places - 1, |offset| offset.min(places - 1))
 }

@@ -497,12 +497,27 @@ pub struct MetaRead<'a> {
 }
 
 impl MetaRead<'_> {
-    /// Changeset `id`: an index lookup (a binary search of the sorted view, then the tail),
-    /// then the frames past the checkpoint.
+    /// Changeset `id`: an index lookup (a search of the sorted view, then the tail), then the
+    /// frames past the checkpoint.
     pub fn changeset(&self, id: ChangesetId) -> Result<Option<ChangesetMeta>, StoreError> {
         match self.index.find(id)? {
             Some(rec) => self.index.get(rec).map(Some),
             None => Ok(self.overlay.changeset(id).cloned()),
+        }
+    }
+
+    /// The first parent of changeset `id`, as [`MetaRead::changeset`] gives it, without the
+    /// rest of its record: `None` if the snapshot does not hold `id`, `Some(None)` for a root.
+    /// The same index lookup, then the record's `par.col` entry and its first parent in
+    /// `parents.log` ([`Index::first_parent`]); or the frames past the checkpoint. A step of a
+    /// first-parent walk.
+    pub fn first_parent(&self, id: ChangesetId) -> Result<Option<Option<ChangesetId>>, StoreError> {
+        match self.index.find(id)? {
+            Some(rec) => self.index.first_parent(rec).map(Some),
+            None => Ok(self
+                .overlay
+                .changeset(id)
+                .map(|meta| meta.parents.first().copied())),
         }
     }
 
@@ -614,11 +629,9 @@ impl MetaRead<'_> {
         Ok(self.index.len() + to_u64(self.overlay.extras().len()))
     }
 
-    /// The ids of index records `recs`.
+    /// The ids of index records `recs`: one `ids.col` read each ([`Index::id`]).
     fn ids_at(&self, recs: Vec<u64>) -> Result<Vec<ChangesetId>, StoreError> {
-        recs.into_iter()
-            .map(|rec| self.index.get(rec).map(|meta| meta.id))
-            .collect()
+        recs.into_iter().map(|rec| self.index.id(rec)).collect()
     }
 }
 
@@ -864,15 +877,15 @@ impl MetaWrite<'_> {
     }
 
     /// The generation of changeset `id` if this transaction queued it or the store holds
-    /// it; `None` otherwise.
+    /// it (one `gen.col` read once it is found: [`Index::generation`]); `None` otherwise.
     fn generation(&self, id: ChangesetId) -> Result<Option<u64>, StoreError> {
         if let Some(&generation) = self.queued.get(&id) {
             return Ok(Some(generation));
         }
-        match self.index.find(id)? {
-            Some(rec) => Ok(Some(self.index.get(rec)?.generation)),
-            None => Ok(None),
-        }
+        self.index
+            .find(id)?
+            .map(|rec| self.index.generation(rec))
+            .transpose()
     }
 }
 

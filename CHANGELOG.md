@@ -254,6 +254,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   The files are a cache outside the journal: written to a temp file and linked into place
   without a sync or a lock, and a file that fails its checks reads as missing and is removed, so
   that the value is derived again. `FORMAT` stays 1.
+- `MetaRead::first_parent(id)` gives a changeset's first parent without the rest of its index
+  record (`None` if the snapshot does not hold it, `Some(None)` for a root): the record's
+  `par.col` entry and 32 bytes of `parents.log`, where `changeset` reads four columns and every
+  parent. `Index::id`, `Index::generation` and `Index::first_parent` read one field of a record.
+- A criterion bench of history lookups (`crates/swarmops-store/benches/history.rs`, which
+  `just bench` and `just perf` run), on linear chains of 200,000 and 1,000,000 changesets:
+  100-step first-parent walks by `MetaRead::changeset` and by `MetaRead::first_parent`,
+  `Index::find` hits and misses beside a plain bisection, an insert with no record and with
+  1,024 records in the index's unsorted tail, and `reflog("main", 100)` with 31 frames past the
+  checkpoint, each with its percentiles. `SWARMOPS_BENCH_HISTORY_CHANGESETS` sets other sizes
+  for a quick check.
 
 ### Changed
 
@@ -347,6 +358,19 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   failed, where it was the non-retryable `E_IO`: nothing of the write was committed, and running
   it again lists the frame. In the Rust API it is `StoreError::NotCommitted`, where it was
   `StoreError::Io`.
+
+#### M2: diff, history and derived data (2026-10-19)
+
+- A lookup by id no longer reads the key it found a second time: the search keeps the key it
+  read where it stopped, so the lookup reads one byte range fewer. Lookups by prefix and by
+  delta hash (`resolve_prefix`, `by_delta_hash`) read only each result's id, and an
+  insert only each parent's generation, where both read the whole index record.
+- A lookup by id, prefix or delta hash searches a sorted view by interpolation on the keys'
+  first 8 bytes, which BLAKE3 spreads evenly, instead of bisecting it: 5.6 key reads per
+  search over 100,000 ids, where a bisection reads 16.7. It bisects where interpolation does
+  not help (keys that share their first 8 bytes, or two probes in a row that each left more
+  than half of the range), never reads more than 2(⌊log2 m⌋ + 1) keys, and finds the same
+  bound a bisection does.
 
 ### Fixed
 
