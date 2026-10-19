@@ -14,7 +14,7 @@
 //! (docs/perf.md).
 
 use std::collections::BTreeSet;
-use std::io;
+use std::io::{self, Read};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -34,6 +34,11 @@ const ENC_ZSTD: u8 = 1;
 /// Shorter payloads are stored raw without trying zstd.
 const MIN_COMPRESS_LEN: usize = 128;
 const ZSTD_LEVEL: i32 = 3;
+/// The largest zstd payload decoded in one pass, into a buffer of the size its file records. A
+/// larger one is decoded as a stream, its buffer growing only as the output arrives, so that a
+/// file whose recorded size is false costs at most this much memory before it is found out
+/// (storage spec §2 rule 1).
+const PREALLOC_MAX: usize = 64 << 20;
 
 /// Content-addressed storage of blobs, trees and changesets (storage spec §8).
 pub trait ObjectStore: Send + Sync {
@@ -356,8 +361,21 @@ fn compress(payload: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// Parses the object file read for `id` and verifies that its payload hashes to `id`. A raw
-/// payload comes back in `file` itself, its header drained off the front: no second copy.
-fn decode(id: ObjectId, mut file: Vec<u8>) -> Result<(ObjectKind, Vec<u8>), StoreError> {
+/// payload comes back in `file` itself, its header drained off the front: no second copy. A zstd
+/// payload of more than [`PREALLOC_MAX`] bytes is decoded as a stream ([`decode_capped`]).
+fn decode(id: ObjectId, file: Vec<u8>) -> Result<(ObjectKind, Vec<u8>), StoreError> {
+    decode_capped(id, file, PREALLOC_MAX)
+}
+
+/// [`decode`], with `cap` for [`PREALLOC_MAX`]: a zstd payload of at most `cap` bytes is decoded
+/// in one pass, into a buffer of the size its file records; a longer one as a stream
+/// ([`stream_decode`]), into a buffer that starts at `cap` bytes and grows only as the output
+/// arrives.
+fn decode_capped(
+    id: ObjectId,
+    mut file: Vec<u8>,
+    cap: usize,
+) -> Result<(ObjectKind, Vec<u8>), StoreError> {
     let bad_header = || StoreError::BadHeader { id };
     let corrupt = || StoreError::Corrupt { id };
     let (header, body) = file
@@ -377,12 +395,26 @@ fn decode(id: ObjectId, mut file: Vec<u8>) -> Result<(ObjectKind, Vec<u8>), Stor
         }
         ENC_ZSTD => {
             // Every frame this store writes records its decompressed size (one without it
-            // is damaged). It must equal ulen, which then bounds the output buffer.
+            // is damaged). It must equal ulen (storage spec §2 rule 1).
             let frame_len = zstd::bulk::Decompressor::upper_bound(body).ok_or_else(corrupt)?;
             if frame_len != ulen {
                 return Err(bad_header());
             }
-            zstd::bulk::decompress(body, ulen).map_err(|_| corrupt())?
+            let payload = if ulen <= cap {
+                zstd::bulk::decompress(body, ulen).map_err(|_| corrupt())?
+            } else {
+                stream_decode(body, ulen, cap).map_err(|e| match e.kind() {
+                    // The host could not hold what the frame really produces: not the file's
+                    // fault.
+                    io::ErrorKind::OutOfMemory => StoreError::Io(e),
+                    _ => corrupt(),
+                })?
+            };
+            // A frame that produces more or less than it records is zstd damage.
+            if payload.len() != ulen {
+                return Err(corrupt());
+            }
+            payload
         }
         _ => return Err(bad_header()),
     };
@@ -390,4 +422,69 @@ fn decode(id: ObjectId, mut file: Vec<u8>) -> Result<(ObjectKind, Vec<u8>), Stor
         return Err(corrupt());
     }
     Ok((kind, payload))
+}
+
+/// `body` decoded by zstd's streaming decoder into a buffer that starts at `start` bytes and
+/// grows only as the output arrives, keeping at most `ulen + 1` bytes of it: one more than the
+/// frame should produce, so that a longer output shows. `read_to_end` grows the buffer with
+/// `try_reserve` (std's behaviour today, not a documented guarantee), so that a growth the host
+/// cannot back comes back as `ErrorKind::OutOfMemory` instead of aborting the process. The
+/// decoder keeps zstd's default window limit, 2^27 bytes (this store's level-3 frames use at most
+/// 2^21), which refuses a frame whose header asks for a larger window: raising it would let a
+/// frame header size the decoder's own allocation.
+fn stream_decode(body: &[u8], ulen: usize, start: usize) -> io::Result<Vec<u8>> {
+    let mut payload = Vec::with_capacity(start);
+    zstd::stream::read::Decoder::with_buffer(body)?
+        .take(to_u64(ulen).saturating_add(1))
+        .read_to_end(&mut payload)?;
+    Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A SOB1 zstd blob file whose header and frame both record `size`, around a frame holding
+    /// one empty raw block: a lie that agrees with itself.
+    fn lying_zstd(size: u64) -> Vec<u8> {
+        let mut file = MAGIC.to_vec();
+        file.extend([kind_byte(ObjectKind::Blob), ENC_ZSTD, 0, 0]);
+        file.extend(size.to_le_bytes());
+        file.extend([0x28, 0xB5, 0x2F, 0xFD, 0xC0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
+        file.extend(size.to_le_bytes()); // frame content size
+        file.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
+        file
+    }
+
+    #[test]
+    fn decode_streams_past_the_cap_and_gives_the_same_payload() {
+        let payload = b"sixteen bytes, \n".repeat(256);
+        let id = hash_object(ObjectKind::Blob, &payload);
+        let file = encode(ObjectKind::Blob, &payload).unwrap();
+        assert_eq!(file[5], ENC_ZSTD, "4 KiB of one line compresses");
+        let corrupt = |got: Result<(ObjectKind, Vec<u8>), StoreError>| match got {
+            Err(StoreError::Corrupt { id: bad }) => bad == id,
+            _ => false,
+        };
+        // 1 KiB: the payload is past the cap, decoded as a stream; PREALLOC_MAX: in one pass.
+        for cap in [1 << 10, PREALLOC_MAX] {
+            let got = decode_capped(id, file.clone(), cap).unwrap();
+            assert_eq!(got, (ObjectKind::Blob, payload.clone()), "cap {cap}");
+
+            let mut cut = file.clone();
+            cut.pop();
+            assert!(corrupt(decode_capped(id, cut, cap)), "cut short, cap {cap}");
+            // The last byte of the frame's checksum: each decoder checks the checksum itself.
+            let mut flipped = file.clone();
+            *flipped.last_mut().unwrap() ^= 0x01;
+            assert!(
+                corrupt(decode_capped(id, flipped, cap)),
+                "checksum, cap {cap}"
+            );
+            assert!(
+                corrupt(decode_capped(id, lying_zstd(4096), cap)),
+                "a frame that records 4 KiB and makes nothing, cap {cap}"
+            );
+        }
+    }
 }

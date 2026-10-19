@@ -187,12 +187,13 @@ left).
 
 [SECURITY.md](../SECURITY.md) says which inputs are in scope.
 
-- **An oversized zstd frame aborts a read.** An object file whose zstd frame records a huge
-  decompressed size, equal to the header's length, makes `get` allocate that size up front and
-  panic or abort, instead of failing with `BadHeader`. SwarmOps never writes such a file; a
-  crafted or damaged store can hold one. The fix is a streaming decoder that stops one byte past
-  the expected length. *Unscheduled in the ledger; proposed for M6, with a fuzz target for
-  object files. Found: M1 Task 1.*
+- **A zstd bomb object is decoded whole.** An object file whose zstd frame really produces a
+  huge payload, a small file that decompresses to the size it records, is decompressed in full
+  before its hash is checked; a frame that only claims a huge size is refused as corrupt
+  (`E_STORE_CORRUPT`, which `verify --deep` lists) before more than 64 MiB is reserved for it.
+  SwarmOps never writes such a file; a crafted store can hold one. A maximum object length, or
+  streamed reads, closes it. *Target: M3 (the object-length decision, storage spec §10 item 6),
+  M2 (streamed reads). Found: M1 Task 1; the 2026-10-16 code review.*
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range
