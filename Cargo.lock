@@ -2136,6 +2136,7 @@ dependencies = [
  "gix",
  "proptest",
  "swarmops-core",
+ "swarmops-store",
  "swarmops-testkit",
  "tempfile",
  "thiserror",

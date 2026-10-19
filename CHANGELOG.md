@@ -368,6 +368,18 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   its pinned SHA-256 and cached by release. With each it rebuilds every git fixture and names
   each difference from the archives' manifests (`check_git_fixtures`), then runs the fixture
   tests and the git import's on the fixtures that git made (`SWARMOPS_GIT_FIXTURES_DIR`).
+- The conversion of git's objects (`swarmops_git::Converter`, storage spec §7): a commit becomes
+  the fields of a changeset (its parents in order, each once; its author, committer, message and
+  other headers as they are, a time before 1970 included; `git.oid` metadata, and `git.lossy`
+  before it when anything was lost), and its trees and blobs SwarmOps trees and blobs, each git
+  tree and blob converted once. A commit is taken without loss only if it renders back to its own
+  git id, trees in git's order and with git's modes (`render::tree_bytes`, `render::commit_bytes`,
+  which M8's export reuses), and the conversion checks that for every commit. What a changeset
+  cannot hold is refused naming the commit, the path and the class (`LossyClass`: `gitlinks`,
+  `paths`, `modes`, `tree_order`, `empty_trees`, `nonstandard`), unless that class is allowed,
+  when it is dropped or normalized and named in `git.lossy`; a mode of no file, directory,
+  symlink or gitlink, more than 255 parents and a blob longer than an object holds are refused
+  whatever is allowed, the blob before it is read.
 
 ### Changed
 
