@@ -1798,3 +1798,117 @@ fn commits_from_many_processes_all_land() {
     }
     assert_eq!(repo.verify(true).unwrap().problems, []);
 }
+
+/// A commit hashes, encodes and checks each of its objects once, handing the store its objects
+/// with their ids (`put_hashed_batch`), and counts the objects its own writes placed
+/// (`blobs_written`, `trees_written`): one that the store held already, or that another writer
+/// placed first, is not counted.
+mod objects_once {
+    use swarmops_store::{FsObjectStore, ObjectStore};
+    use swarmops_testkit::fs::{RecordingFs, When};
+
+    use super::*;
+
+    /// The file of object `id`, as a path in the store: `objects/<2 hex>/<62 hex>`.
+    fn object_file(id: ObjectId) -> String {
+        let hex = id.to_hex();
+        format!("objects/{}/{}", &hex[..2], &hex[2..])
+    }
+
+    /// A blob that another writer places in the store between a commit's check for it and its
+    /// link of it.
+    const RACED: &[u8] = b"placed by another writer first";
+
+    #[test]
+    fn each_object_is_checked_once_per_commit() {
+        let (_dir, root, repo) = new_repo();
+        let base = commit(&repo, &[], vec![put("a.txt", b"a"), put("d/b.txt", b"b")]);
+        drop(repo);
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(root.as_std_path().to_path_buf());
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+        calls();
+
+        // A new blob below d, a stored blob at a new path, and a put of what a.txt holds
+        // already, which changes nothing: two blobs, d, the root and the changeset to put.
+        let out = commit(
+            &repo,
+            &[base.id],
+            vec![put("d/c.txt", b"c"), put("e.txt", b"a"), put("a.txt", b"a")],
+        );
+        assert_eq!((out.blobs_written, out.trees_written), (1, 2));
+        let d = tree(vec![
+            TreeEntry::leaf("b.txt", LeafKind::File, blob(b"b")),
+            TreeEntry::leaf("c.txt", LeafKind::File, blob(b"c")),
+        ]);
+        let mut want: Vec<String> = [blob(b"c").0, blob(b"a").0, d.id().0, out.root.0, out.id.0]
+            .map(object_file)
+            .into();
+        want.sort();
+        let mut checked: Vec<String> = calls()
+            .into_iter()
+            .filter_map(|call| call.strip_prefix("exists ").map(str::to_owned))
+            .filter(|p| p.starts_with("objects/") && p.len() == "objects/".len() + 2 + 1 + 62)
+            .collect();
+        checked.sort();
+        assert_eq!(
+            checked, want,
+            "each object's file checked once, and only theirs"
+        );
+    }
+
+    #[test]
+    fn commit_counts_the_objects_it_wrote_exactly() {
+        let (_dir, root, repo) = new_repo();
+        drop(repo);
+        let other = root.clone();
+        let place = move || {
+            let store = FsObjectStore::open(Layout::new(other), Box::new(RealFs));
+            store.put(ObjectKind::Blob, RACED).unwrap();
+            store.flush().unwrap();
+        };
+        let raced = format!("exists {}", object_file(blob(RACED).0));
+        let (fs, _calls) = RecordingFs::new();
+        let fs = (fs.naming_paths_in(root.as_std_path().to_path_buf())).with_hook((
+            raced,
+            When::After,
+            Box::new(place),
+        ));
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+
+        let a = commit(
+            &repo,
+            &[],
+            vec![
+                put("a.txt", b"a"),
+                put("d/b.txt", b"b"),
+                put("d/c.txt", b"c"),
+            ],
+        );
+        assert_eq!((a.blobs_written, a.trees_written), (3, 2), "d and the root");
+        let req = request(&[a.id], vec![put("e.txt", b"a"), put("f.txt", b"f")]);
+        let b = repo.commit(req.clone()).unwrap();
+        assert_eq!(
+            (b.blobs_written, b.trees_written),
+            (1, 1),
+            "f's blob and the root: a's blob is stored already"
+        );
+        let again = repo.commit(req).unwrap();
+        assert_eq!(
+            (again.blobs_written, again.trees_written),
+            (0, 0),
+            "a replay"
+        );
+
+        // The other writer places the blob right after this commit found it missing: the
+        // commit's own link finds it there, so the commit wrote no blob.
+        let c = commit(&repo, &[b.id], vec![put("raced.txt", RACED)]);
+        assert_eq!(
+            (c.blobs_written, c.trees_written),
+            (0, 1),
+            "the other writer placed the blob, the commit only the root"
+        );
+        assert_eq!(content(&repo, c.id, "raced.txt"), Some(RACED.to_vec()));
+        assert_eq!(repo.verify(true).unwrap().problems, []);
+    }
+}

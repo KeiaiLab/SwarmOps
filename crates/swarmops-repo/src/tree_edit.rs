@@ -15,8 +15,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use swarmops_core::{
-    BlobId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectKind, RepoPath, Tree, TreeEntry,
-    TreeId, hash_object,
+    BlobId, DeltaEntry, DeltaOp, EntryTarget, Hashed, LeafKind, ObjectKind, RepoPath, Tree,
+    TreeEntry, TreeId,
 };
 use swarmops_store::ObjectStore;
 
@@ -35,8 +35,8 @@ pub(crate) struct Encoded {
     /// The root tree's id.
     pub(crate) root: TreeId,
     /// The trees that differ from the ones they were read from, each once, children first:
-    /// their ids and bytes.
-    pub(crate) changed: Vec<(TreeId, Vec<u8>)>,
+    /// their bytes with the ids they hash to.
+    pub(crate) changed: Vec<Hashed>,
 }
 
 /// One directory a change has reached into.
@@ -143,10 +143,10 @@ impl<'o, O: ObjectStore> TreeEdit<'o, O> {
                 (true, _) => continue,
                 (false, _) => Tree::new(entries)?,
             };
-            let bytes = tree.encode();
-            let id = TreeId(hash_object(ObjectKind::Tree, &bytes));
+            let object = Hashed::new(ObjectKind::Tree, tree.encode());
+            let id = TreeId(object.id());
             if dir.read_from != Some(id) && seen.insert(id) {
-                changed.push((id, bytes));
+                changed.push(object);
             }
             ids[at] = Some(id);
         }

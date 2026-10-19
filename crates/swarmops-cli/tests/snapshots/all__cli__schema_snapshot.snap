@@ -775,7 +775,7 @@ expression: s.redact(&all)
           "description": "The move of the ref the request's `advance` named: present exactly when the ref names\n`changeset` because of this request, or of an identical one before it\n(`already_applied`). A request with `advance` whose response lacks it went to a store\nthat ignores the field, and moved no ref."
         },
         "blobs_written": {
-          "description": "How many blobs the commit wrote to the object store.",
+          "description": "How many blobs this commit's own writes placed in the object store; blobs that were there\nalready, or that a concurrent writer placed first, count 0.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

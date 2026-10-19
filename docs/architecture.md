@@ -124,7 +124,7 @@ A store is one directory (storage §2, §3):
   meta/journal.ckpt          how far the journal is materialized and synced
   meta/idx/*.col             the changeset index, one column per field (id, generation, delta hash, parents)
   meta/parents.log           the parents the index points into
-  meta/sorted/*.{key,rec}    sorted views of the index, by id and by delta hash, for binary search
+  meta/sorted/*.{key,rec}    sorted views of the index, by id and by delta hash, for searching
   meta/refs/main             one file per ref ("<64 hex>\n<version>\n"); also meta/refs/release/<name>
   meta/derived/<name>/...    derived values, one file each: a cache beside the journal, never synced (M2)
   meta/derived/tmp/          where new derived values are staged
@@ -321,11 +321,13 @@ flowchart TD
   more -- "no" --> overlay["Lay the frames over the<br/>index and the refs, in memory"]
 ```
 
-A lookup by id is a binary search in the sorted view, by `read_at` on the file (there is no
-mmap: `unsafe` is forbidden), then a linear scan of the records past the view, then the
-in-memory frames; a lookup reads a few dozen small byte ranges. Files and directories at a
-revision are read from the trees, starting at the changeset's root: O(depth) object reads and no
-checkout.
+A lookup by id searches the sorted view, one 32-byte key per `read_at` on the file (there is no
+mmap: `unsafe` is forbidden). Ids are BLAKE3 hashes, spread evenly, so the search interpolates on
+their first 8 bytes and reads 4 to 6 keys at 100,000 to 1,000,000 changesets; it bisects where
+that does not help, and never reads more than twice the keys a bisection would. Then come a
+linear scan of the records past the view and the in-memory frames; a lookup reads about a dozen
+small byte ranges. Files and directories at a revision are read from the trees, starting at the
+changeset's root: O(depth) object reads and no checkout.
 Every object read checks the object's header and hash.
 
 ## Durability
