@@ -32,9 +32,11 @@ left).
   512 B or 4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync
   covered reverted), each of which the binary must recover. What stays open: `abort()` stands
   in for `SIGKILL`, and the images come from a model of the disk, not a real device, and the
-  recorded run is short (its journal ends at 1,130 B), so a cut at 4 KiB is in the model but
-  never differs from dropping. A test with a literal `SIGKILL` on a real device is *M6*. *Found:
-  M1 Task 6; final review, question 11; narrowed by M1.5 Task 3.*
+  recorded run is short (its journal ends at 2,016 B), so a cut at 4 KiB is in the model but
+  never differs from dropping there; only the slow variant's bulk frame (1,025 changeset
+  records, about 76 KB) reaches past a 4 KiB boundary. A test with a literal `SIGKILL` on a real
+  device is *M6*. *Found: M1 Task 6; final review, question 11; narrowed by M1.5 Task 3 and M1.6
+  Task 4.*
 - **A double failure leaves an index risk open.** When an index sync fails, the writer cuts the
   unsynced records back so the journal can supply them again; if the cut fails too, the error
   names both failures, and the risk stays open until the next successful sync, which could carry

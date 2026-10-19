@@ -2,8 +2,8 @@
 //! manifest drops `[lints] workspace = true` is no longer linted by the table, and a table
 //! without `missing_docs` stops the documentation gate, while `just check` stays green. These
 //! tests read the manifests as text (no TOML parser, no new dependency) and fail instead.
-//! `fuzz/` and `bench/compare/` are workspaces of their own, with lint tables of their own: they
-//! cannot inherit this one, and are not read here.
+//! `fuzz/` and `bench/compare/` are workspaces of their own: they cannot inherit this table, and
+//! are not read here (`bench/compare/` keeps a lint table of its own; `fuzz/` has none).
 
 use std::fs;
 use std::path::{Path, PathBuf};

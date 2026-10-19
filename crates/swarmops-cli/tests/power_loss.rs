@@ -1017,7 +1017,7 @@ fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit() {
 /// the five index files, for each record, as every commit's materialization makes). Of their
 /// cuts it checks the first and last eight and every 64th.
 #[test]
-#[ignore = "slow: thousands of images through the binary; just check-slow runs it"]
+#[ignore = "slow, ~280 s: images of 830 cuts x 10 seeds through the binary; just check-slow runs it"]
 fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit_at_every_cut() {
     let ops: Vec<Op> = RUN.iter().copied().chain([Op::Bulk]).collect();
     let rec = record_ops(&ops);
