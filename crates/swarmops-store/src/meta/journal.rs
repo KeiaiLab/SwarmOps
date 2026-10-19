@@ -37,6 +37,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
+use std::ops::RangeInclusive;
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -44,8 +45,8 @@ use camino::Utf8PathBuf;
 
 use super::frame::{Frame, HEADER_LEN, Parsed, Record, encode_frame, parse_frame};
 use super::to_u64;
-use crate::error::StoreError;
-use crate::fs_ops::{FsOps, open_regular};
+use crate::error::{FileOp, IoFailure, StoreError};
+use crate::fs_ops::{FsMethod, FsOps, StoreFs, open_regular};
 use crate::layout::Layout;
 
 /// The size of one `journal.off` entry.
@@ -64,8 +65,9 @@ pub struct Journal {
     off_path: Utf8PathBuf,
     ckpt_path: Utf8PathBuf,
     /// Every durable write goes through here, and so do the readers' measurements of the
-    /// files' lengths (`journal.off` first).
-    fs: Arc<dyn FsOps>,
+    /// files' lengths (`journal.off` first). It locates the failures of the reads on the
+    /// handles too.
+    fs: StoreFs,
     /// Read-only handle on `journal.log`.
     log: File,
     /// Read-only handle on `journal.off`.
@@ -140,6 +142,12 @@ impl Journal {
     /// Creates `meta/` and the journal files of `layout` where they are missing, makes their
     /// directory entries durable, and opens the journal. Existing files are kept as they are.
     pub fn create(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Journal, StoreError> {
+        Self::create_in(layout, &StoreFs::new(fs, layout.root()))
+    }
+
+    /// [`Journal::create`], through `fs`, whose root may be another than `layout`'s: a staged
+    /// create's files are named where they are, under `meta.tmp/`.
+    pub(crate) fn create_in(layout: &Layout, fs: &StoreFs) -> Result<Journal, StoreError> {
         let meta = layout.meta_dir();
         fs.create_dir_all(meta.as_std_path())?;
         for path in [layout.journal_log(), layout.journal_off()] {
@@ -148,18 +156,31 @@ impl Journal {
         }
         fs.fsync_dir(meta.as_std_path())?;
         fs.fsync_dir(layout.root().as_std_path())?;
-        Self::open(layout, fs)
+        Self::open_in(layout, fs.clone())
     }
 
     /// Opens the existing journal of `layout`, durable writes going through `fs`. Opening
     /// reads only the files' lengths; the tail is checked by the first
     /// [`Journal::append_frame`] or [`Journal::truncate_torn_tail`].
     pub fn open(layout: &Layout, fs: Arc<dyn FsOps>) -> Result<Journal, StoreError> {
-        let log = open_regular(layout.journal_log())?;
-        let off = open_regular(layout.journal_off())?;
+        Self::open_in(layout, StoreFs::new(fs, layout.root()))
+    }
+
+    /// [`Journal::open`], through `fs`, whose root may be another than `layout`'s (see
+    /// [`Journal::create_in`]).
+    pub(crate) fn open_in(layout: &Layout, fs: StoreFs) -> Result<Journal, StoreError> {
+        let log = open_regular(layout.journal_log())
+            .map_err(|e| fs.locate(FileOp::Open, layout.journal_log(), e))?;
+        let off = open_regular(layout.journal_off())
+            .map_err(|e| fs.locate(FileOp::Open, layout.journal_off(), e))?;
         let tail = Tail {
-            len: log.metadata()?.len(),
-            frames: off.metadata()?.len() / ENTRY_LEN,
+            len: (log.metadata())
+                .map_err(|e| fs.locate(FileOp::Stat, layout.journal_log(), e))?
+                .len(),
+            frames: (off.metadata())
+                .map_err(|e| fs.locate(FileOp::Stat, layout.journal_off(), e))?
+                .len()
+                / ENTRY_LEN,
             checked: false,
         };
         Ok(Self {
@@ -220,7 +241,7 @@ impl Journal {
         let entry_at = match self.fs.append_durable(self.off_path.as_std_path(), &entry) {
             Ok(entry_at) => entry_at,
             Err(e) => {
-                let source = self.cut_failed_entries(tail.frames, &e);
+                let source = self.cut_failed_entries(tail.frames, e);
                 return Err(StoreError::PostCommit {
                     frame_seq: tail.frames,
                     source: Box::new(source.into()),
@@ -308,7 +329,7 @@ impl Journal {
         if start > end {
             return Err(StoreError::JournalCorrupt { offset: start });
         }
-        let buf = read_upto(&self.log, start, end - start)?;
+        let buf = self.read_log(start, end - start)?;
 
         let mut frames = Vec::with_capacity(wanted);
         let mut at = 0;
@@ -431,7 +452,7 @@ impl Journal {
                 .ok()
                 .and_then(|i| entries.get(i).copied())
         };
-        let buf = read_upto(&self.log, offset, log_len - offset)?;
+        let buf = self.read_log(offset, log_len - offset)?;
 
         let mut frames = Vec::new();
         let mut seq = first;
@@ -492,7 +513,11 @@ impl Journal {
     ///   where it starts), fails its CRC or does not decode (a listed frame's bytes were
     ///   durable before it was listed, so its loss is a filesystem's, never a torn write); a
     ///   listed frame that fails the check before a cut or a listing; an unlisted frame that
-    ///   matches its CRC but does not decode (a newer version may have written it).
+    ///   matches its CRC but does not decode (a newer version may have written it);
+    /// - a listing that fails is cut back off `journal.off` (what reached it of the entry), and
+    ///   is [`StoreError::NotCommitted`]: nothing of the caller's is committed, and the next call
+    ///   lists the frame; so is a failed rewrite of the frames whose sync failed (storage spec §2
+    ///   rule 3 (b), (c)).
     ///
     /// Only the last listed frame, the headers of the two frames before it, and what follows
     /// are read, unless there is something to cut or list: then every listed frame is.
@@ -538,7 +563,11 @@ impl Journal {
     /// entry cut since the measurement lists nothing either: a writer cuts only such zeroed or
     /// partial entries, and one whose own append failed.
     pub fn frame_count(&self) -> Result<u64, StoreError> {
-        let mut listed = self.off.metadata()?.len() / ENTRY_LEN;
+        let off_len = self
+            .off
+            .metadata()
+            .map_err(|e| self.off_failed(FileOp::Stat, e))?;
+        let mut listed = off_len.len() / ENTRY_LEN;
         while listed > 1 {
             match self.entry(listed - 1) {
                 Ok(0) => listed -= 1,
@@ -551,16 +580,22 @@ impl Journal {
     }
 
     /// The offset up to which the journal is materialized: what [`Journal::set_ckpt`] last
-    /// stored, or 0 if it never ran. A file of any length but 8 is `InvalidData`, its message
-    /// naming `meta/journal.ckpt` by its place in the store (never the store's root, a host
-    /// path); the read is capped at 9 bytes, so a crafted file of huge length is never read
-    /// into memory.
+    /// stored, or 0 if it never ran. A file of any length but 8 is `InvalidData`, a failed read
+    /// of `meta/journal.ckpt` (named by its place in the store, never by the store's root, a
+    /// host path), as is every other failure to read it; the read is capped at 9 bytes, so a
+    /// crafted file of huge length is never read into memory.
     pub fn ckpt(&self) -> Result<u64, StoreError> {
+        let failed = |e| {
+            self.fs
+                .locate(FileOp::Fs(FsMethod::Read), &self.ckpt_path, e)
+        };
         let mut bytes = Vec::with_capacity(9);
         match open_regular(&self.ckpt_path) {
-            Ok(file) => io::Read::read_to_end(&mut io::Read::take(file, 9), &mut bytes)?,
+            Ok(file) => {
+                io::Read::read_to_end(&mut io::Read::take(file, 9), &mut bytes).map_err(failed)?
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(failed(e).into()),
         };
         let offset = <[u8; 8]>::try_from(bytes.as_slice()).map_err(|_| {
             let length = if bytes.len() > 8 {
@@ -568,10 +603,10 @@ impl Journal {
             } else {
                 bytes.len().to_string()
             };
-            io::Error::new(
+            failed(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("meta/journal.ckpt holds {length} bytes, not a u64le"),
-            )
+                format!("holds {length} bytes, not a u64le"),
+            ))
         })?;
         Ok(u64::from_le_bytes(offset))
     }
@@ -588,7 +623,7 @@ impl Journal {
     /// cut back to `start` and the cut synced, unless it still ends there (nothing of the frame
     /// reached it: measured on this handle's own descriptor, with no [`FsOps`] call). If the cut
     /// fails, the process aborts: see [`Journal::append_frame`].
-    fn cut_failed_frame(&self, start: u64, e: io::Error) -> StoreError {
+    fn cut_failed_frame(&self, start: u64, e: IoFailure) -> StoreError {
         let untouched = matches!(self.log.metadata(), Ok(meta) if meta.len() == start);
         if !untouched && let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), start) {
             // A write that fails (a closed pipe, a full log) must not panic: the abort is the
@@ -605,12 +640,12 @@ impl Journal {
         StoreError::NotCommitted { source: e }
     }
 
-    /// The error of a failed append `e` to `journal.off`, which held `listed` entries before
-    /// it, once whatever of the entry reached the file is cut back off it and the cut synced
-    /// (unless the file still ends there, measured on this handle's own descriptor): an entry
-    /// whose sync failed must not stay listed while later entries are made durable after it. A
-    /// cut that fails too is told beside `e`.
-    fn cut_failed_entries(&self, listed: u64, e: &io::Error) -> io::Error {
+    /// The failure `e` of an append to `journal.off`, which held `listed` entries before it,
+    /// once whatever of the entry reached the file is cut back off it and the cut synced (unless
+    /// the file still ends there, measured on this handle's own descriptor): an entry whose sync
+    /// failed must not stay listed while later entries are made durable after it. A cut that
+    /// fails too is told beside `e`, as what else failed.
+    fn cut_failed_entries(&self, listed: u64, e: IoFailure) -> IoFailure {
         let end = listed * ENTRY_LEN;
         let untouched = matches!(self.off.metadata(), Ok(meta) if meta.len() == end);
         let cut = if untouched {
@@ -618,29 +653,36 @@ impl Journal {
         } else {
             self.fs.truncate(self.off_path.as_std_path(), end)
         };
-        let what = format!("listing a frame in journal.off failed: {e}");
         match cut {
-            Ok(()) => io::Error::new(e.kind(), what),
-            Err(cut) => io::Error::new(
-                e.kind(),
-                format!("{what}; cutting back what reached journal.off failed too: {cut}"),
-            ),
+            Ok(()) => e,
+            Err(cut) => e.with_also(format!("cutting back what reached it failed too: {cut}")),
         }
     }
 
     /// What the tail check does when the sync that would make the whole frames `journal.off`
-    /// does not list yet durable (`frames`, from offset `from` to the end of the last of them)
-    /// fails with `e`. Linux reports a failed writeback once, to the sync that meets it, and may
-    /// drop the pages it could not write: no later sync can vouch for those frames, and one
-    /// that succeeds would let them be listed while they are not on disk. Nor may they simply
-    /// be cut: one may be a committed frame whose listing failed ([`StoreError::PostCommit`]),
-    /// durable since its own sync, or frames whose entries a power loss zeroed. So they are
-    /// written afresh, from the bytes the tail check read: `journal.log` is cut back to `from`
-    /// (the cut synced) and they are appended again and synced, at the offsets they had, and
-    /// the tail check lists them then. If that append fails, they are cut back off as a failed
-    /// frame append is, and the error is [`StoreError::NotCommitted`]: the writer's own
-    /// transaction did not commit. A cut that fails aborts the process, saying why on stderr.
-    fn write_afresh(&self, from: u64, frames: &[u8], e: &io::Error) -> Result<(), StoreError> {
+    /// does not list yet durable (`frames`, the frames `seqs`, from offset `from` to the end of
+    /// the last of them) fails with `e`. Linux reports a failed writeback once, to the sync that
+    /// meets it, and may drop the pages it could not write: no later sync can vouch for those
+    /// frames, and one that succeeds would let them be listed while they are not on disk. Nor
+    /// may they simply be cut: one may be a committed frame whose listing failed
+    /// ([`StoreError::PostCommit`]), durable since its own sync, or frames whose entries a power
+    /// loss zeroed. So they are written afresh, from the bytes the tail check read:
+    /// `journal.log` is cut back to `from` (the cut synced; it takes a torn tail behind them too)
+    /// and they are appended again and synced, at the offsets they had, and the tail check lists
+    /// them then. If that append fails, they are cut back off as a failed frame append is, and
+    /// the error is [`StoreError::NotCommitted`], naming them by seq: the writer's own
+    /// transaction did not commit. If they land anywhere but `from` (another writer's bytes came
+    /// in between: one without the lock, or a tail state gone wrong), they are cut back to
+    /// `from` and the error is [`StoreError::JournalCorrupt`] at `from`, before anything is
+    /// listed: entries at the offsets the check computed would point into other bytes. A cut
+    /// that fails aborts the process, saying why on stderr.
+    fn write_afresh(
+        &self,
+        from: u64,
+        seqs: RangeInclusive<u64>,
+        frames: &[u8],
+        e: &IoFailure,
+    ) -> Result<(), StoreError> {
         if let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), from) {
             let _ = writeln!(
                 io::stderr(),
@@ -653,15 +695,27 @@ impl Journal {
             std::process::abort();
         }
         match self.fs.append_durable(self.log_path.as_std_path(), frames) {
-            Ok(_) => Ok(()),
+            Ok(landed) if landed == from => Ok(()),
+            Ok(landed) => {
+                if let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), from) {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "swarmops: fatal: the frames of {} that journal.off does not list yet, \
+                         written afresh, landed at {landed} and not at {from}, and they could not \
+                         be cut back off it ({cut}): aborting, so that no later write of this \
+                         process lists a frame where it is not",
+                        self.log_path
+                    );
+                    std::process::abort();
+                }
+                Err(StoreError::JournalCorrupt { offset: from })
+            }
             Err(again) => {
-                let again = io::Error::new(
-                    again.kind(),
-                    format!(
-                        "syncing the frames journal.off does not list yet failed ({e}), and so \
-                         did writing them afresh: {again}"
-                    ),
-                );
+                let (first, last) = seqs.into_inner();
+                let again = again.with_also(format!(
+                    "it was writing afresh frames {first}..={last}, which journal.off does not \
+                     list yet, after syncing them failed: {e}; they were cut back off the journal"
+                ));
                 Err(self.cut_failed_frame(from, again))
             }
         }
@@ -674,10 +728,18 @@ impl Journal {
     }
 
     /// Whether `tail` was checked and the files still end exactly there.
-    fn still_ends_at(&self, tail: &Tail) -> io::Result<bool> {
-        Ok(tail.checked
-            && self.log.metadata()?.len() == tail.len
-            && self.off.metadata()?.len() == tail.frames * ENTRY_LEN)
+    fn still_ends_at(&self, tail: &Tail) -> Result<bool, IoFailure> {
+        let log = || {
+            self.log
+                .metadata()
+                .map_err(|e| self.log_failed(FileOp::Stat, e))
+        };
+        let off = || {
+            self.off
+                .metadata()
+                .map_err(|e| self.off_failed(FileOp::Stat, e))
+        };
+        Ok(tail.checked && log()?.len() == tail.len && off()?.len() == tail.frames * ENTRY_LEN)
     }
 
     /// The work of [`Journal::repair_tail`]: returns the journal's new end and what it changed.
@@ -701,7 +763,7 @@ impl Journal {
         if start > log_len {
             return Err(StoreError::JournalCorrupt { offset: start });
         }
-        let buf = read_upto(&self.log, start, log_len - start)?;
+        let buf = self.read_log(start, log_len - start)?;
         let mut at = 0; // where in `buf` the unlisted frames begin
         if let Some(last) = listed.checked_sub(1) {
             let previous_start = self.entry_before(last)?;
@@ -754,17 +816,27 @@ impl Journal {
             // may still be only in the page cache: a listed frame must be durable. If the sync
             // fails, no later one can vouch for them: they are written afresh.
             if let Err(e) = self.fs.sync_data(self.log_path.as_std_path()) {
-                self.write_afresh(from, &buf[unlisted_at..at], &e)?;
+                let seqs = listed..=listed + to_u64(unlisted.len()) - 1;
+                self.write_afresh(from, seqs, &buf[unlisted_at..at], &e)?;
                 rewritten = true;
             }
         }
         for (at, offset) in (listed..).zip(&unlisted) {
             let entry = offset.to_le_bytes();
             if let Err(e) = self.fs.append_durable(self.off_path.as_std_path(), &entry) {
-                return Err(self.cut_failed_entries(at, &e).into());
+                // The caller's own transaction never began: nothing of it is committed, and the
+                // next tail check lists the frame (storage spec §2 rule 3 (b)).
+                return Err(StoreError::NotCommitted {
+                    source: self.cut_failed_entries(at, e),
+                });
             }
         }
-        if let Some(cut) = cut {
+        // A rewrite cut journal.log back to the first unlisted frame, and the torn tail behind
+        // them with it: then there is nothing left to cut, though the report still says the
+        // torn tail went.
+        if let Some(cut) = cut
+            && !rewritten
+        {
             self.fs.truncate(self.log_path.as_std_path(), cut)?;
         }
         let tail = Tail {
@@ -798,7 +870,7 @@ impl Journal {
             let Some(end) = self.frame_end(start, log_len)? else {
                 return Err(StoreError::JournalCorrupt { offset: start });
             };
-            let bytes = read_upto(&self.log, start, end - start)?;
+            let bytes = self.read_log(start, end - start)?;
             if !matches!(parse_frame(&bytes), Parsed::Whole { size, .. } if size == bytes.len()) {
                 return Err(StoreError::JournalCorrupt { offset: start });
             }
@@ -852,13 +924,15 @@ impl Journal {
     /// Entry `index` of `journal.off`: where frame `index` starts.
     fn entry(&self, index: u64) -> Result<u64, StoreError> {
         let mut bytes = [0; 8];
-        self.off.read_exact_at(&mut bytes, index * ENTRY_LEN)?;
+        (self.off.read_exact_at(&mut bytes, index * ENTRY_LEN))
+            .map_err(|e| self.off_failed(FileOp::ReadAt, e))?;
         Ok(u64::from_le_bytes(bytes))
     }
 
     /// Up to `count` entries of `journal.off` from entry `first`, in one `read_at`.
     fn entries(&self, first: u64, count: u64) -> Result<Vec<u64>, StoreError> {
-        let bytes = read_upto(&self.off, first * ENTRY_LEN, count * ENTRY_LEN)?;
+        let bytes = read_upto(&self.off, first * ENTRY_LEN, count * ENTRY_LEN)
+            .map_err(|e| self.off_failed(FileOp::ReadAt, e))?;
         let (entries, _partial) = bytes.as_chunks::<8>();
         Ok(entries
             .iter()
@@ -874,7 +948,8 @@ impl Journal {
             return Ok(None);
         }
         let mut len = [0; 4];
-        self.log.read_exact_at(&mut len, offset)?;
+        (self.log.read_exact_at(&mut len, offset))
+            .map_err(|e| self.log_failed(FileOp::ReadAt, e))?;
         let len = u32::from_le_bytes(len);
         if len == 0 {
             return Err(StoreError::JournalCorrupt { offset });
@@ -897,6 +972,21 @@ impl Journal {
             }
         }
         Ok(low)
+    }
+
+    /// Up to `len` bytes of `journal.log` from `offset`, as [`read_upto`] reads them.
+    fn read_log(&self, offset: u64, len: u64) -> Result<Vec<u8>, IoFailure> {
+        read_upto(&self.log, offset, len).map_err(|e| self.log_failed(FileOp::ReadAt, e))
+    }
+
+    /// The failure `e` of `op` on this handle's `journal.log`, located.
+    fn log_failed(&self, op: FileOp, e: io::Error) -> IoFailure {
+        self.fs.locate(op, &self.log_path, e)
+    }
+
+    /// The failure `e` of `op` on this handle's `journal.off`, located.
+    fn off_failed(&self, op: FileOp, e: io::Error) -> IoFailure {
+        self.fs.locate(op, &self.off_path, e)
     }
 }
 

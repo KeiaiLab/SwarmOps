@@ -644,7 +644,10 @@ fn verify_checks_each_record_is_named_once_in_a_sorted_view() {
 fn verify_fails_on_a_ref_file_it_cannot_read() {
     // A ref file that is no ref file is damage verify reports (CorruptRef), a directory where
     // the file should be among them (not a regular file); one that cannot be read at all is an
-    // error it cannot get past.
+    // error it cannot get past, which names the read that failed and the ref file, by its place
+    // in the store.
+    use swarmops_store::{FileOp, FsMethod};
+
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     repo.cas_ref("release/a", None, Some(c1), "test/agent")
@@ -661,6 +664,14 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
         match repo.verify(deep) {
             Err(RepoError::Store(StoreError::Io(e))) => {
                 assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}");
+                assert_eq!(
+                    (e.op, e.file.as_deref()),
+                    (
+                        FileOp::Fs(FsMethod::Read),
+                        Some(Utf8Path::new("meta/refs/release/b"))
+                    ),
+                    "{e}"
+                );
             }
             other => panic!("deep: {deep}: expected an I/O error, got {other:?}"),
         }

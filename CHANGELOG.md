@@ -321,6 +321,22 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   that each result holds its envelope twice, which the envelope's sentence says, and its note on
   binary files, which `read_file`'s description gives: 2,034 of Claude Code's 2,048 characters
   (they were 1,990).
+- `E_IO`, `E_IO_TRANSIENT` and the `E_STORE_CORRUPT` of a metadata file that does not parse
+  name the file operation that failed and the store file it was on: `details.fs_op` (one of 22
+  names, such as `"open"` or `"append_durable"`) and `details.store_file` (relative to the
+  store's root, such as `meta/journal.off`; absent for a path outside it). Their messages say
+  the same before the operating system's text, no error carries the store's host path, and the
+  schema's descriptions of the three codes say so. A missing index file's `E_STORE_CORRUPT`
+  names it (`meta/idx/ids.col is missing`). In the Rust API, `StoreError::Io` and
+  `NotCommitted` carry an `IoFailure` (`op`, `file`, `source`, `also`) in place of an
+  `io::Error`, the new `StoreFs` locates the failure of every filesystem call the stores make,
+  and neither `StoreError` nor `RepoError` converts from a bare `io::Error` any more.
+- A write whose tail check cannot list a frame that an earlier transaction left whole and
+  unlisted (that transaction's own listing in `journal.off` failed: committed, with a warning)
+  is the retryable `E_IO_TRANSIENT`, `committed: false`, its `details` naming the append that
+  failed, where it was the non-retryable `E_IO`: nothing of the write was committed, and running
+  it again lists the frame. In the Rust API it is `StoreError::NotCommitted`, where it was
+  `StoreError::Io`.
 
 ### Fixed
 
@@ -359,6 +375,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   longer from a snapshot that can show another writer's frame before that frame's sync, which a
   failed sync or a power loss could then take back. It can now wait for the lock (`E_BUSY` after
   10 s) and repair what a crashed writer left; it still writes no journal frame.
+- When the tail check's rewrite of the frames `journal.off` does not list yet fails, its error
+  names those frames by seq; a tail check that rewrote them no longer cuts and syncs
+  `journal.log` again to the length the rewrite left; and a rewrite that does not land where the
+  frames were (another writer's bytes in between) is cut back and refused as damage
+  (`JournalCorrupt` at the frames' offset, `E_STORE_CORRUPT`) before anything is listed, where it
+  used to list entries that pointed into other bytes.
 
 ### Security
 

@@ -550,7 +550,7 @@ fn a_huge_ref_file_is_not_a_ref_file_and_is_not_read_whole() {
     assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
     assert_eq!(
         e.to_string(),
-        "meta/refs/main is 1073741824 bytes long, not a ref file"
+        "read meta/refs/main: is 1073741824 bytes long, not a ref file"
     );
     assert!(
         started.elapsed() < Duration::from_secs(1),
@@ -562,8 +562,8 @@ fn a_huge_ref_file_is_not_a_ref_file_and_is_not_read_whole() {
 #[test]
 fn a_malformed_checkpoint_or_ref_file_is_reported_without_the_store_path() {
     // The store's root is a host path, which no error carries to an agent (operations spec
-    // §0): a metadata file that does not read as one is named by its place in the store, and
-    // a store file that is not a regular file by its name.
+    // §0): a metadata file that does not read as one, or that is not a regular file, is named
+    // by its place in the store, as the read that failed.
     let (_dir, root, store) = new_store();
     insert(&store, &[cs(1, &[])]);
     cas(&store, "main", None, Some(1));
@@ -580,20 +580,20 @@ fn a_malformed_checkpoint_or_ref_file_is_reported_without_the_store_path() {
     let ckpt = layout.journal_ckpt();
     let kept = fs::read(&ckpt).unwrap();
     fs::write(&ckpt, [0; 3]).unwrap();
-    read_fails_with("meta/journal.ckpt holds 3 bytes, not a u64le");
+    read_fails_with("read meta/journal.ckpt: holds 3 bytes, not a u64le");
     fs::remove_file(&ckpt).unwrap();
     fs::create_dir(&ckpt).unwrap();
-    read_fails_with("journal.ckpt is not a regular file");
+    read_fails_with("read meta/journal.ckpt: journal.ckpt is not a regular file");
     fs::remove_dir(&ckpt).unwrap();
     fs::write(&ckpt, kept).unwrap();
 
     let main = layout.meta_path("refs/main");
     let kept = fs::read(&main).unwrap();
     fs::write(&main, b"not a ref file\n").unwrap();
-    read_fails_with(r#"meta/refs/main is not a ref file: "<64 hex digits>\n<version>\n""#);
+    read_fails_with(r#"read meta/refs/main: not a ref file: "<64 hex digits>\n<version>\n""#);
     // One byte past what a ref file holds: refused by its length, before it is read.
     fs::write(&main, [b'0'; 87]).unwrap();
-    read_fails_with("meta/refs/main is 87 bytes long, not a ref file");
+    read_fails_with("read meta/refs/main: is 87 bytes long, not a ref file");
     fs::write(&main, kept).unwrap();
     assert_eq!(
         store.read().unwrap().get_ref("main").unwrap(),
@@ -1794,8 +1794,9 @@ fn a_failed_sync_before_a_compaction_cuts_the_index_and_compacts_nothing() {
     assert_eq!(ckpt(&root), log_len(&root));
 }
 
-/// When the cut fails too, the error says so beside the sync's: the next writer finds the
-/// records whole and keeps them, and syncs them again before it checkpoints.
+/// When the cut fails too, the error says so beside the sync's: the sync's failure, naming the
+/// index file it failed on, with the cut's failure as what else failed. The next writer finds
+/// the records whole and keeps them, and syncs them again before it checkpoints.
 #[test]
 fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
     let (_dir, root) = new_root();
@@ -1811,7 +1812,22 @@ fn a_cut_that_fails_after_a_failed_sync_is_reported_with_it() {
         Err(StoreError::PostCommit {
             frame_seq: 31,
             source,
-        }) => source.to_string(),
+        }) => {
+            let StoreError::Io(failure) = &*source else {
+                panic!("expected the sync's I/O failure, got {source:?}");
+            };
+            assert_eq!(
+                (failure.op, failure.file.as_deref()),
+                (
+                    swarmops_store::FileOp::Fs(swarmops_store::FsMethod::SyncData),
+                    Some(Utf8Path::new("meta/idx/ids.col"))
+                ),
+                "{failure}"
+            );
+            let also = failure.also.as_deref().unwrap_or_default();
+            assert!(also.contains("truncate meta/idx/ids.col"), "{failure}");
+            source.to_string()
+        }
         other => panic!("expected PostCommit at frame 31, got {other:?}"),
     };
     for injected in ["injected: sync_data ids.col", "injected: truncate ids.col"] {
@@ -2391,9 +2407,18 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
                 frame_seq: 1,
                 source,
             }) => {
-                let message = source.to_string();
-                assert!(message.contains("journal.off"), "{message}");
-                assert!(message.contains("injected"), "{message}");
+                let StoreError::Io(failure) = &*source else {
+                    panic!("expected the listing's I/O failure, got {source:?}");
+                };
+                assert_eq!(
+                    (failure.op, failure.file.as_deref()),
+                    (
+                        swarmops_store::FileOp::Fs(swarmops_store::FsMethod::AppendDurable),
+                        Some(Utf8Path::new("meta/journal.off"))
+                    ),
+                    "{failure}"
+                );
+                assert!(failure.to_string().contains("injected"), "{failure}");
             }
             other => panic!("expected PostCommit at frame 1, got {other:?}"),
         }
@@ -2431,6 +2456,60 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
         assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
         assert_eq!(read.count_changesets().unwrap(), 2);
         assert_eq!(ref_file(&root, "main"), Some(ref_content(1, 1)));
+    }
+}
+
+/// A write whose tail check cannot list a frame that a transaction before it left whole and
+/// unlisted (its own listing failed: committed, [`StoreError::PostCommit`]) has committed nothing
+/// of its own: its transaction never began, and running it again lists the frame. So the error is
+/// [`StoreError::NotCommitted`], naming the append that failed (the API layer's retryable
+/// `E_IO_TRANSIENT`), not a plain [`StoreError::Io`]; what reached `journal.off` of the entry is
+/// cut back off it first, so nothing more is listed. The next write lists the frame, and the
+/// retried transaction finds it done.
+#[test]
+fn a_failed_listing_in_the_tail_check_is_not_committed() {
+    use swarmops_store::{FileOp, FsMethod};
+
+    for strike in [Strike::After, Strike::Before] {
+        let (_dir, root) = new_root();
+        let fails = Arc::new(Watched(
+            Fails::new("append_durable journal.off", strike),
+            RealFs,
+        ));
+        let store = store_on(&root, &fails);
+        insert(&store, &[cs(0, &[])]); // frame 0
+        fails.arm();
+        let mut write = store.write().unwrap();
+        write.insert_changeset(cs(1, &[0])).unwrap();
+        let committed = write.commit();
+        assert!(
+            matches!(committed, Err(StoreError::PostCommit { frame_seq: 1, .. })),
+            "{committed:?}"
+        );
+        assert_eq!(listed(&root), 1, "frame 1 is whole and unlisted");
+
+        // The next write's tail check lists frame 1, and that listing fails.
+        fails.arm();
+        match store.write() {
+            Err(StoreError::NotCommitted { source }) => assert_eq!(
+                (source.op, source.file.as_deref()),
+                (
+                    FileOp::Fs(FsMethod::AppendDurable),
+                    Some(Utf8Path::new("meta/journal.off"))
+                ),
+                "{source}"
+            ),
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        assert_eq!(listed(&root), 1, "nothing more is listed");
+
+        // Run again, the write lists the frame, and the retried transaction finds it done.
+        let mut write = store.write().unwrap();
+        assert_eq!(listed(&root), 2, "the write listed the frame");
+        let again = write.insert_changeset(cs(1, &[0])).unwrap();
+        assert_eq!(again, InsertOutcome::AlreadyPresent);
+        write.commit().unwrap();
+        assert_eq!(store.read().unwrap().count_changesets().unwrap(), 2);
     }
 }
 
@@ -2647,14 +2726,218 @@ fn steady_writes_on_the_real_filesystem_report_no_recovery() {
     steady_writes(|| checked(RealFs));
 }
 
+/// An injected failure is named by the call it struck, its file relative to the store's root:
+/// the frame's append to `journal.log`, failing once it wrote ([`StoreError::NotCommitted`]);
+/// the replacement of `meta/refs/main` after the commit point; and the first index file the
+/// checkpoint syncs, `meta/parents.log` (each a [`StoreError::PostCommit`] at the frame). The
+/// double's own error follows the call, and the store's path is nowhere in the text.
+#[test]
+fn an_injected_failure_names_the_call_it_struck() {
+    use swarmops_store::{FileOp, FsMethod};
+
+    let cases = [
+        // The struck call, its method, its file, and the frames committed before.
+        (
+            "append_durable journal.log",
+            FsMethod::AppendDurable,
+            "meta/journal.log",
+            1,
+        ),
+        (
+            "atomic_replace main",
+            FsMethod::AtomicReplace,
+            "meta/refs/main",
+            1,
+        ),
+        (
+            "sync_data parents.log",
+            FsMethod::SyncData,
+            "meta/parents.log",
+            31,
+        ),
+    ];
+    for (call, method, file, before) in cases {
+        let (_dir, root) = new_root();
+        let fails = Arc::new(Watched(Fails::new(call, Strike::After), RealFs));
+        let store = store_on(&root, &fails);
+        for n in 0..before {
+            insert(&store, &[cs(n, &[])]);
+        }
+        fails.arm();
+        let mut write = store.write().unwrap();
+        write.insert_changeset(cs(before, &[])).unwrap();
+        write
+            .cas_ref("main", None, Some(id(before)), ACTOR)
+            .unwrap();
+        let outcome = write.commit();
+        let reported = match &outcome {
+            Err(StoreError::NotCommitted { .. }) => method == FsMethod::AppendDurable,
+            Err(StoreError::PostCommit { frame_seq, .. }) => {
+                method != FsMethod::AppendDurable && *frame_seq == before
+            }
+            _ => false,
+        };
+        assert!(reported, "{call}: {outcome:?}");
+        let Some(failure) = outcome.as_ref().err().and_then(io_failure) else {
+            panic!("{call}: no I/O failure in {outcome:?}");
+        };
+        assert_eq!(
+            (failure.op, failure.file.as_deref()),
+            (FileOp::Fs(method), Some(Utf8Path::new(file))),
+            "{call}: {failure}"
+        );
+        let text = failure.to_string();
+        assert!(
+            text.starts_with(&format!("{method} {file}: injected: {call}")),
+            "{text}"
+        );
+        assert!(!text.contains(root.as_str()), "no host path: {text}");
+    }
+}
+
+/// One row of [`a_direct_read_that_fails_names_its_file`]: what it damages in `meta/`, what it
+/// runs on the store, and the failure it expects (the operation, the file, the error's kind).
+struct DirectRead {
+    what: &'static str,
+    damage: fn(&Utf8Path),
+    run: fn(&Utf8Path) -> Result<(), StoreError>,
+    op: swarmops_store::FileOp,
+    file: &'static str,
+    kind: io::ErrorKind,
+}
+
+/// Puts an empty directory where the file `meta/<file>` was.
+fn a_directory_for(meta: &Utf8Path, file: &str) {
+    fs::remove_file(meta.join(file)).unwrap();
+    fs::create_dir(meta.join(file)).unwrap();
+}
+
+/// A failure of the metadata store's own reads, off the `FsOps` seam, names its file relative to
+/// the store's root as well, and never the root: a `journal.off` that is gone fails the open of
+/// it (`NotFound`); a `journal.ckpt` that is a directory, or three bytes long, and a ref file
+/// that is a directory fail their reads as damage (`InvalidData`: a store file that is not a
+/// regular file is refused before it is opened); a `meta/lock` that is a directory fails its
+/// open (`EISDIR`); and each of the nine index files, gone, is [`StoreError::IndexCorrupt`]
+/// naming it. Root-safe: no file mode is involved.
+#[test]
+fn a_direct_read_that_fails_names_its_file() {
+    use swarmops_store::{FileOp, FsMethod};
+
+    let (_dir, template, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    let moved = cas(&store, "main", None, Some(0));
+    assert_eq!(moved, CasResult::Applied { old: None });
+    drop(store);
+    let damaged = |damage: &dyn Fn(&Utf8Path)| {
+        let (dir, root) = new_root();
+        copy_dir(template.as_std_path(), root.as_std_path());
+        damage(&Layout::new(&root).meta_dir());
+        (dir, root)
+    };
+    let read: fn(&Utf8Path) -> Result<(), StoreError> =
+        |root| MetaStore::open(root).and_then(|store| store.read().map(drop));
+    let cases = [
+        DirectRead {
+            what: "journal.off gone",
+            damage: |meta| fs::remove_file(meta.join("journal.off")).unwrap(),
+            run: |root| MetaStore::open(root).map(drop),
+            op: FileOp::Open,
+            file: "meta/journal.off",
+            kind: io::ErrorKind::NotFound,
+        },
+        DirectRead {
+            what: "journal.ckpt a directory",
+            damage: |meta| a_directory_for(meta, "journal.ckpt"),
+            run: read,
+            op: FileOp::Fs(FsMethod::Read),
+            file: "meta/journal.ckpt",
+            kind: io::ErrorKind::InvalidData,
+        },
+        DirectRead {
+            what: "journal.ckpt of three bytes",
+            damage: |meta| fs::write(meta.join("journal.ckpt"), [0; 3]).unwrap(),
+            run: read,
+            op: FileOp::Fs(FsMethod::Read),
+            file: "meta/journal.ckpt",
+            kind: io::ErrorKind::InvalidData,
+        },
+        DirectRead {
+            what: "refs/main a directory",
+            damage: |meta| a_directory_for(meta, "refs/main"),
+            run: read,
+            op: FileOp::Fs(FsMethod::Read),
+            file: "meta/refs/main",
+            kind: io::ErrorKind::InvalidData,
+        },
+        DirectRead {
+            what: "meta/lock a directory",
+            damage: |meta| a_directory_for(meta, "lock"),
+            run: |root| MetaStore::open(root).and_then(|store| store.write().map(drop)),
+            op: FileOp::Open,
+            file: "meta/lock",
+            kind: io::ErrorKind::IsADirectory,
+        },
+    ];
+    for case in cases {
+        let (_dir, root) = damaged(&case.damage);
+        let failure = match (case.run)(&root) {
+            Err(StoreError::Io(failure)) => failure,
+            other => panic!("{}: expected an I/O failure, got {other:?}", case.what),
+        };
+        assert_eq!(
+            (failure.op, failure.file.as_deref(), failure.kind()),
+            (case.op, Some(Utf8Path::new(case.file)), case.kind),
+            "{}: {failure}",
+            case.what
+        );
+        let text = failure.to_string();
+        assert!(!text.contains(root.as_str()), "{}: {text}", case.what);
+        if case.what == "journal.ckpt of three bytes" {
+            assert_eq!(text, "read meta/journal.ckpt: holds 3 bytes, not a u64le");
+        }
+    }
+
+    for file in [
+        "idx/ids.col",
+        "idx/gen.col",
+        "idx/dh.col",
+        "idx/par.col",
+        "parents.log",
+        "sorted/ids.key",
+        "sorted/ids.rec",
+        "sorted/dh.key",
+        "sorted/dh.rec",
+    ] {
+        let (_dir, root) = damaged(&|meta| fs::remove_file(meta.join(file)).unwrap());
+        match Index::open(&Layout::new(&root), Arc::new(RealFs)) {
+            Err(StoreError::IndexCorrupt { what }) => {
+                assert_eq!(what, format!("meta/{file} is missing"));
+            }
+            other => panic!("{file} gone: expected IndexCorrupt, got {other:?}"),
+        }
+    }
+}
+
+/// The I/O failure `e` reports: its own, a [`StoreError::NotCommitted`]'s, or that of the step
+/// a [`StoreError::PostCommit`] says failed; `None` for an error of another kind.
+fn io_failure(e: &StoreError) -> Option<&swarmops_store::IoFailure> {
+    match e {
+        StoreError::Io(failure) | StoreError::NotCommitted { source: failure } => Some(failure),
+        StoreError::PostCommit { source, .. } => io_failure(source),
+        _ => None,
+    }
+}
+
 /// An injected I/O error at any filesystem call of a write transaction, and of one that
 /// compacts, is reported honestly: a transaction that returns, or says it committed
 /// ([`StoreError::PostCommit`]), is in the store; one that fails otherwise is not; and the store
 /// always opens and takes the next write. The transaction is swept call by call (k = 1..=N + 1,
 /// N counted by a dry run), its k-th call failing once with `EIO` (a flushing call does its work
-/// first, then fails) or `ENOSPC` (the call does nothing), under the order checker. The same
-/// with every call from the k-th on failing is
-/// [`persistent_failures_at_every_store_call_report_honestly`], in the slow suite.
+/// first, then fails) or `ENOSPC` (the call does nothing), under the order checker. Every error
+/// names the call that failed, as `FailAtFs` recorded it: its method, and the path it acted on
+/// relative to the store's root, with the injected errno. The same with every call from the
+/// k-th on failing is [`persistent_failures_at_every_store_call_report_honestly`], in the slow
+/// suite.
 #[test]
 #[cfg(feature = "test-hooks")]
 fn fail_at_every_store_call_reports_honestly() {
@@ -2679,12 +2962,29 @@ fn fail_at_every_store_call_reports_honestly() {
                     mode: FailMode::Once,
                     error,
                 };
+                let failing = Arc::new(FailAtFs::new(NoSyncFs, fail));
                 let mut store =
-                    MetaStore::open_with_fs(&root, checked(FailAtFs::new(NoSyncFs, fail))).unwrap();
+                    MetaStore::open_with_fs(&root, checked(Arc::clone(&failing))).unwrap();
                 store.set_parallelism(1);
                 let outcome = swept(&store, n);
                 drop(store);
                 assert!(k <= calls || outcome.is_ok(), "{what}: {outcome:?}");
+                if let Err(e) = &outcome {
+                    let failed = failing.failed_calls();
+                    let [(method, path)] = failed.as_slice() else {
+                        panic!("{what}: one call failed: {failed:?}");
+                    };
+                    let file = path.strip_prefix(&root).ok().and_then(Utf8Path::from_path);
+                    let named = io_failure(e).map(|failure| {
+                        (failure.op, failure.file.as_deref(), failure.raw_os_error())
+                    });
+                    let injected = error.os_error().raw_os_error();
+                    assert_eq!(
+                        named,
+                        Some(((*method).into(), file, injected)),
+                        "{what}: the error names the call that failed: {e}"
+                    );
+                }
                 if let Err(e @ StoreError::PostCommit { source, .. }) = &outcome {
                     assert!(
                         !matches!(**source, StoreError::NotCommitted { .. }),

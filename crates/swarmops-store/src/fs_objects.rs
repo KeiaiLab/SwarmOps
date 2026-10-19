@@ -15,7 +15,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{self, Read};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use rayon::ThreadPool;
@@ -23,8 +23,8 @@ use rayon::prelude::*;
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 
-use crate::error::StoreError;
-use crate::fs_ops::{FsOps, HookedFs, RealFs};
+use crate::error::{FileOp, IoFailure, StoreError};
+use crate::fs_ops::{FsMethod, FsOps, HookedFs, RealFs, StoreFs};
 use crate::layout::Layout;
 
 const MAGIC: [u8; 4] = *b"SOB1";
@@ -78,7 +78,8 @@ pub trait ObjectStore: Send + Sync {
 /// store while another flush waited, the two would deadlock.
 pub struct FsObjectStore {
     layout: Layout,
-    fs: Box<dyn FsOps>,
+    /// Every filesystem call goes through it, its failure located in the store.
+    fs: StoreFs,
     /// Directories `flush` must fsync: the fan-out directory of every object put since
     /// the last flush, and `objects/` if one of those fan-out directories was created.
     touched: Mutex<BTreeSet<Utf8PathBuf>>,
@@ -95,6 +96,13 @@ impl FsObjectStore {
     /// The object store of `layout`, doing all filesystem access through `fs`. Opening
     /// touches nothing; directories are created by the first write that needs them.
     pub fn open(layout: Layout, fs: Box<dyn FsOps>) -> Self {
+        Self::open_shared(layout, Arc::from(fs))
+    }
+
+    /// [`FsObjectStore::open`] on a filesystem the caller shares with other stores, the
+    /// metadata store of the same root among them, so that they count their calls together.
+    pub fn open_shared(layout: Layout, fs: Arc<dyn FsOps>) -> Self {
+        let fs = StoreFs::new(fs, layout.root());
         Self {
             layout,
             fs,
@@ -146,7 +154,7 @@ impl FsObjectStore {
     /// One `fsync_dir` of each of `dirs`, every one made whatever the others return; the
     /// results in `dirs`' order. One after another on this thread when the pool has one
     /// thread (or there is one dir); otherwise on the pool, as many at once as it has threads.
-    fn fsync_dirs(&self, dirs: &[Utf8PathBuf]) -> Vec<io::Result<()>> {
+    fn fsync_dirs(&self, dirs: &[Utf8PathBuf]) -> Vec<Result<(), IoFailure>> {
         let fsync = |dir: &Utf8PathBuf| self.fs.fsync_dir(dir.as_std_path());
         let threads = self
             .pool
@@ -178,7 +186,7 @@ impl FsObjectStore {
         path: &Utf8Path,
         fanout: &Utf8Path,
     ) -> Result<(), StoreError> {
-        let file = encode(kind, payload)?;
+        let file = encode(kind, payload).map_err(|e| self.fs.locate(FileOp::Compress, path, e))?;
         let tmp_dir = self.layout.objects_tmp();
         self.fs.create_dir_all(tmp_dir.as_std_path())?;
         self.ensure_fanout(fanout)?;
@@ -260,18 +268,20 @@ impl ObjectStore for FsObjectStore {
         let mut ids = Vec::new();
         for byte in 0..=u8::MAX {
             let fanout = format!("{byte:02x}");
-            let entries = match std::fs::read_dir(self.layout.objects_dir().join(&fanout)) {
+            let dir = self.layout.objects_dir().join(&fanout);
+            let listing_failed = |e| self.fs.locate(FileOp::ReadDir, &dir, e);
+            let entries = match std::fs::read_dir(&dir) {
                 Ok(entries) => entries,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
+                Err(e) => return Err(listing_failed(e).into()),
             };
             for entry in entries {
-                let entry = entry?;
+                let entry = entry.map_err(listing_failed)?;
                 let name = entry.file_name();
                 let Some(rest) = name.to_str().filter(|rest| is_object_name(rest)) else {
                     continue;
                 };
-                if entry.file_type()?.is_file() {
+                if entry.file_type().map_err(listing_failed)?.is_file() {
                     let id = ObjectId::from_hex(&format!("{fanout}{rest}"))
                         .expect("two and 62 hex digits make an id");
                     ids.push(id);
@@ -412,8 +422,11 @@ fn decode_capped(
             } else {
                 stream_decode(body, ulen, cap).map_err(|e| match e.kind() {
                     // The host could not hold what the frame really produces: not the file's
-                    // fault.
-                    io::ErrorKind::OutOfMemory => StoreError::Io(e),
+                    // fault, but a failed read of it, named by its place in the store.
+                    io::ErrorKind::OutOfMemory => {
+                        let file = Layout::new(Utf8PathBuf::new()).object_path(id);
+                        IoFailure::new(FileOp::Fs(FsMethod::Read), Some(file), e).into()
+                    }
                     _ => corrupt(),
                 })?
             };

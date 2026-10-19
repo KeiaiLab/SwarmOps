@@ -66,8 +66,8 @@ use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
-    CasResult, FsObjectStore, FsOps, HookedFs, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs,
-    Recovered, RefState, StoreError, is_native_linux_fs,
+    CasResult, FileOp, FsObjectStore, FsOps, HookedFs, IoFailure, Layout, LinkOutcome, MetaStore,
+    ObjectStore, RealFs, Recovered, RefState, StoreError, StoreFs, is_native_linux_fs,
 };
 
 use crate::error::RepoError;
@@ -220,8 +220,10 @@ impl LocalRepo {
             }
             .into());
         }
-        let root = native_root(store, &*fs)?;
+        let root = native_root(store, &fs)?;
         let layout = Layout::new(root.clone());
+        // Each call below names the file of the store it failed on.
+        let fs = StoreFs::new(fs, &root);
         if fs.exists(layout.format_file().as_std_path())? {
             return Err(RepoError::Exists);
         }
@@ -235,9 +237,9 @@ impl LocalRepo {
         fs.fsync_dir(root.as_std_path())?;
         // MetaStore::create renames a whole meta/ into place, so one that exists is whole.
         let meta = if fs.exists(layout.meta_dir().as_std_path())? {
-            MetaStore::open_with_fs(&root, Arc::clone(&fs))?
+            MetaStore::open_with_fs(&root, Arc::clone(fs.ops()))?
         } else {
-            MetaStore::create_with_fs(&root, Arc::clone(&fs))?
+            MetaStore::create_with_fs(&root, Arc::clone(fs.ops()))?
         };
         let identity = Identity {
             repo_id: new_repo_id(),
@@ -252,10 +254,16 @@ impl LocalRepo {
             return Err(RepoError::Exists);
         }
         if let Err(e) = fs.fsync_dir(root.as_std_path()) {
-            take_format_back(&*fs, &root, &e);
+            take_format_back(&fs, &root, &e);
             return Err(e.into());
         }
-        Ok(Self::assemble(layout, fs, meta, identity, one_thread))
+        Ok(Self::assemble(
+            layout,
+            Arc::clone(fs.ops()),
+            meta,
+            identity,
+            one_thread,
+        ))
     }
 
     fn open_on(
@@ -263,7 +271,7 @@ impl LocalRepo {
         fs: Arc<dyn FsOps>,
         one_thread: bool,
     ) -> Result<LocalRepo, RepoError> {
-        let root = camino::absolute_utf8(store)?;
+        let root = absolute(store)?;
         // Where the path leads (symlinks followed whether or not their target exists, `..` as
         // the kernel takes it), as `create` resolves it: a store that leads under /mnt/ is
         // refused on open as on create, whether it was moved, copied or linked there.
@@ -284,7 +292,9 @@ impl LocalRepo {
             ))
             .into());
         }
-        match fs.read(layout.format_file().as_std_path())? {
+        // Each call below names the file of the store it failed on.
+        let store_fs = StoreFs::new(Arc::clone(&fs), &root);
+        match store_fs.read(layout.format_file().as_std_path())? {
             Some(format) if format == FORMAT => {}
             Some(_) => {
                 return Err(StoreError::Format(format!(
@@ -298,7 +308,7 @@ impl LocalRepo {
                 );
             }
         }
-        let identity = read_identity(&layout, &*fs)?;
+        let identity = read_identity(&layout, &store_fs)?;
         let meta = MetaStore::open_with_fs(&root, Arc::clone(&fs))?;
         Ok(Self::assemble(layout, fs, meta, identity, one_thread))
     }
@@ -310,7 +320,7 @@ impl LocalRepo {
         identity: Identity,
         one_thread: bool,
     ) -> LocalRepo {
-        let mut objects = FsObjectStore::open(layout.clone(), Box::new(Arc::clone(&fs)));
+        let mut objects = FsObjectStore::open_shared(layout.clone(), Arc::clone(&fs));
         if one_thread {
             objects.set_parallelism(1);
             meta.set_parallelism(1);
@@ -438,7 +448,7 @@ pub(crate) fn ref_error(e: StoreError) -> RepoError {
 /// the next create makes it so (storage spec §2). If that fails too, the process aborts
 /// ([`std::process::abort`]), saying why on stderr, as a crash between the link and the sync
 /// would leave it: the next `open` finds a store or none, and `create` finishes it.
-fn take_format_back(fs: &dyn FsOps, root: &Utf8Path, e: &io::Error) {
+fn take_format_back(fs: &StoreFs, root: &Utf8Path, e: &IoFailure) {
     let format = Layout::new(root).format_file();
     let undone = fs
         .remove(format.as_std_path())
@@ -485,11 +495,15 @@ fn default_fs() -> (Arc<dyn FsOps>, bool) {
 /// fsync logs what it syncs alone: there a power loss after a resumed create may take back the
 /// directories the crashed one made above the store, and the store with them; creating it
 /// again mends that, as nothing but a fresh store is at stake.
-fn native_root(store: &Utf8Path, fs: &dyn FsOps) -> Result<Utf8PathBuf, RepoError> {
-    let (target, missing) = resolve(&camino::absolute_utf8(store)?)?;
+///
+/// A failure names the store directory as `.` and the directories above it as no file of the
+/// store; one of working out where the path leads is [`FileOp::Resolve`], with no file.
+fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, RepoError> {
+    let (target, missing) = resolve(&absolute(store)?)?;
     if !is_native_linux_fs(&target) {
         return Err(StoreError::UnsupportedFs(target).into());
     }
+    let fs = StoreFs::new(Arc::clone(fs), &target);
     fs.create_dir_all(target.as_std_path())?;
     // A directory's entry lives in its parent: sync the parent of each directory just made,
     // outermost first, or of the root alone if it was there (a crashed create may have made it).
@@ -503,19 +517,32 @@ fn native_root(store: &Utf8Path, fs: &dyn FsOps) -> Result<Utf8PathBuf, RepoErro
             fs.fsync_dir(parent.as_std_path())?;
         }
     }
-    let canonical = target.canonicalize_utf8()?;
+    let canonical = target.canonicalize_utf8().map_err(resolving)?;
     if !is_native_linux_fs(&canonical) {
         return Err(StoreError::UnsupportedFs(canonical).into());
     }
     Ok(canonical)
 }
 
+/// `path` made absolute, against the working directory if it is relative; a failure is one of
+/// working out where the path leads ([`FileOp::Resolve`], no file).
+fn absolute(path: &Utf8Path) -> Result<Utf8PathBuf, IoFailure> {
+    camino::absolute_utf8(path).map_err(resolving)
+}
+
+/// The failure `e` of working out where a store's path leads: on no file of the store.
+fn resolving(e: io::Error) -> IoFailure {
+    IoFailure::new(FileOp::Resolve, None, e)
+}
+
 /// Where absolute path `path` leads once its missing directories are made, resolved as the
 /// kernel will resolve it then, with the directories in it that do not exist yet, outermost
 /// first. One component at a time: `..` takes back the one before it (resolved already, so no
 /// symlink); a symlink gives way to its target, whether that exists or not (a directory made
-/// through it lands where it points); a name that does not exist is kept as it is.
-fn resolve(path: &Utf8Path) -> io::Result<(Utf8PathBuf, Vec<Utf8PathBuf>)> {
+/// through it lands where it points); a name that does not exist is kept as it is. A failure is
+/// [`FileOp::Resolve`]'s, with no file; a symlink loop names `path` in its text, the path the
+/// caller gave.
+fn resolve(path: &Utf8Path) -> Result<(Utf8PathBuf, Vec<Utf8PathBuf>), IoFailure> {
     // Linux's MAXSYMLINKS: more symlinks than that on one path is a loop.
     const MAX_LINKS: usize = 40;
     let mut target = Utf8PathBuf::from("/");
@@ -531,12 +558,12 @@ fn resolve(path: &Utf8Path) -> io::Result<(Utf8PathBuf, Vec<Utf8PathBuf>)> {
             Ok(meta) if meta.file_type().is_symlink() => {
                 links += 1;
                 if links > MAX_LINKS {
-                    return Err(io::Error::other(format!(
+                    return Err(resolving(io::Error::other(format!(
                         "{path}: too many levels of symbolic links"
-                    )));
+                    ))));
                 }
-                let link = Utf8PathBuf::try_from(std::fs::read_link(&next)?)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                let link = Utf8PathBuf::try_from(std::fs::read_link(&next).map_err(resolving)?)
+                    .map_err(|e| resolving(io::Error::new(io::ErrorKind::InvalidData, e)))?;
                 if link.is_absolute() {
                     target = Utf8PathBuf::from("/");
                 }
@@ -544,7 +571,7 @@ fn resolve(path: &Utf8Path) -> io::Result<(Utf8PathBuf, Vec<Utf8PathBuf>)> {
             }
             Ok(_) => target = next,
             Err(e) if e.kind() == io::ErrorKind::NotFound => target = next,
-            Err(e) => return Err(e),
+            Err(e) => return Err(resolving(e)),
         }
     }
     // No symlink is left in it, so the directories it lacks are its last ones.
@@ -570,7 +597,7 @@ fn components(path: &Utf8Path) -> Vec<String> {
 }
 
 /// The identity `REPO` holds: a line with the id, then the name to the end of the file.
-fn read_identity(layout: &Layout, fs: &dyn FsOps) -> Result<Identity, RepoError> {
+fn read_identity(layout: &Layout, fs: &StoreFs) -> Result<Identity, RepoError> {
     let path = layout.repo_file();
     let bad = |what: &str| RepoError::from(StoreError::Format(format!("{path} {what}")));
     // A REPO longer than an id line and the longest name create writes holds no identity this

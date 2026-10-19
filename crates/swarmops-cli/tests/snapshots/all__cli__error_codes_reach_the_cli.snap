@@ -544,5 +544,57 @@ expression: s.transcript()
         "auth": "trust"
       }
     }
+  },
+  {
+    "args": "--repo [tmp]/store info",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "repo_info",
+      "api": 1,
+      "error": {
+        "code": "E_STORE_CORRUPT",
+        "message": "i/o error: read meta/journal.ckpt: holds 3 bytes, not a u64le",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "fs_op": "read",
+          "store_file": "meta/journal.ckpt"
+        },
+        "hint": "swarmops verify"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store info",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "repo_info",
+      "api": 1,
+      "error": {
+        "code": "E_IO",
+        "message": "i/o error: open meta/journal.off: No such file or directory (os error 2)",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "fs_op": "open",
+          "store_file": "meta/journal.off"
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
   }
 ]

@@ -3,7 +3,7 @@
 use std::io;
 
 use swarmops_core::{ChangesetId, CodecError, ObjectId, ObjectKind, RepoPath};
-use swarmops_store::{Recovered, StoreError};
+use swarmops_store::{IoFailure, Recovered, StoreError};
 use thiserror::Error;
 
 /// Why a repository operation failed.
@@ -102,8 +102,21 @@ pub enum RepoError {
     },
 }
 
-impl From<io::Error> for RepoError {
-    fn from(e: io::Error) -> Self {
+/// A filesystem failure of the store's, located ([`StoreError::Io`]).
+impl From<IoFailure> for RepoError {
+    fn from(e: IoFailure) -> Self {
         Self::Store(StoreError::Io(e))
     }
 }
+
+// Nothing turns a bare `io::Error` into a `RepoError`: a failure is located first, as the
+// store's are. This fails to compile if a `From<io::Error>` comes back: both impls below then
+// apply to `RepoError`, and the type `_` stands for is ambiguous.
+const _: fn() = || {
+    trait FromIoError<Marker> {
+        fn check() {}
+    }
+    impl<T: ?Sized> FromIoError<()> for T {}
+    impl<T: From<io::Error>> FromIoError<u8> for T {}
+    let _ = <RepoError as FromIoError<_>>::check;
+};

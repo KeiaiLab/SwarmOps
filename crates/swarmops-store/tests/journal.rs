@@ -2070,7 +2070,10 @@ fn fsync_failure_semantics_never_list_a_frame_not_on_disk() {
 /// The records of each frame the journal that a power loss would leave at `layout` recovers
 /// to (the model's durable image, its tail checked as the next writer checks it), in order.
 #[track_caller]
-fn recovered_after_a_power_loss(layout: &Layout, model: &FsyncModelFs) -> Vec<Vec<Record>> {
+fn recovered_after_a_power_loss<F: FsOps>(
+    layout: &Layout,
+    model: &FsyncModelFs<F>,
+) -> Vec<Vec<Record>> {
     let image_dir = tempfile::tempdir().unwrap();
     let image = Layout::new(Utf8PathBuf::from_path_buf(image_dir.path().join("store")).unwrap());
     model.write_durable_image(layout.root().as_std_path(), image.root().as_std_path());
@@ -2084,7 +2087,7 @@ fn recovered_after_a_power_loss(layout: &Layout, model: &FsyncModelFs) -> Vec<Ve
 
 /// Every frame `journal.off` at `layout` lists is durable, as `model` says.
 #[track_caller]
-fn assert_listed_frames_durable(layout: &Layout, model: &FsyncModelFs) {
+fn assert_listed_frames_durable<F: FsOps>(layout: &Layout, model: &FsyncModelFs<F>) {
     let log = layout.journal_log().into_std_path_buf();
     for (start, end) in listed_frames(layout) {
         assert!(
@@ -2175,6 +2178,177 @@ fn a_tail_check_whose_sync_fails_never_lists_a_frame_not_on_disk() {
         first.unwrap(),
         None,
         "the tail check wrote the frame afresh"
+    );
+}
+
+/// A journal at `layout` on `fs`: frame 0 listed, then `unlisted` frames a crashed writer left
+/// whole in `journal.log` (seqs 1 on, never synced, not listed: written raw through `model`),
+/// then `torn` bytes after them. Returns the journal and where frame 1 starts.
+fn crashed_with_unlisted_frames(
+    layout: &Layout,
+    fs: Arc<dyn FsOps>,
+    model: &dyn FsOps,
+    unlisted: u64,
+    torn: &[u8],
+) -> (Journal, u64) {
+    let journal = Journal::create(layout, fs).unwrap();
+    journal.append_frame(&[compacted(0)]).unwrap();
+    let log = layout.journal_log().into_std_path_buf();
+    let first = file_len(layout.journal_log());
+    for n in 1..=unlisted {
+        let frame = frame_bytes(&[&[1, 0][..], &encoded(&compacted(n))].concat());
+        model.append(&log, &frame).unwrap();
+    }
+    model.append(&log, torn).unwrap();
+    (journal, first)
+}
+
+/// What a writer that died in the middle of its append leaves: a header announcing 100 bytes,
+/// and 10 of them.
+fn torn_tail() -> Vec<u8> {
+    [&100_u32.to_le_bytes()[..], &[0; 4], &[0xee; 10]].concat()
+}
+
+/// A tail check whose sync of the unlisted frames fails writes them afresh: it cuts
+/// `journal.log` back to the first of them, which also cuts the torn tail behind them, and appends
+/// them again. It reports the torn tail as cut, and cuts nothing more: one `truncate
+/// journal.log`, the rewrite's (a second cut to the length the rewrite left, and its sync, did
+/// nothing). The frame is listed, and survives a power loss.
+#[test]
+fn a_rewrite_after_a_failed_tail_sync_cuts_the_torn_tail_once() {
+    let (_root, layout) = new_root();
+    let (recording, calls) = RecordingFs::new();
+    let log_syncs = AtomicU64::new(0);
+    let model_fs = Arc::new(FsyncModelFs::over(recording).failing(move |call| {
+        call.method == FsMethod::SyncData
+            && call.path.file_name().and_then(|name| name.to_str()) == Some("journal.log")
+            && log_syncs.fetch_add(1, Ordering::SeqCst) == 0
+    }));
+    let fs = checked(Arc::clone(&model_fs));
+    let (journal, first) = crashed_with_unlisted_frames(&layout, fs, &*model_fs, 1, &torn_tail());
+    let torn_at = file_len(layout.journal_log()) - 18;
+    calls();
+    let repair = journal.repair_tail().unwrap();
+    assert_eq!(
+        repair,
+        TailRepair {
+            cut: Some(LogCut {
+                at: torn_at,
+                bytes: 18
+            }),
+            frames_listed: 1,
+            frames_rewritten: 1,
+            off_bytes_dropped: 0,
+        }
+    );
+    assert!(first < torn_at, "frame 1 lies before the torn tail");
+    assert_eq!(
+        file_len(layout.journal_log()),
+        torn_at,
+        "the torn tail is gone"
+    );
+    let made = calls();
+    let cuts = made.iter().filter(|call| *call == "truncate journal.log");
+    assert_eq!(cuts.count(), 1, "one cut, the rewrite's: {made:?}");
+    assert_eq!(model_fs.failed().len(), 1, "{:?}", model_fs.failed());
+    assert_listed_frames_durable(&layout, &model_fs);
+    assert_eq!(
+        recovered_after_a_power_loss(&layout, &model_fs),
+        [[compacted(0)], [compacted(1)]],
+    );
+}
+
+/// When the rewrite of the unlisted frames fails too (its append to `journal.log`), they are cut
+/// back off the journal, the writer's own transaction did not commit, and the error names the
+/// frames it cut by seq: here frames 1 to 2. `journal.log` ends where frame 1 started, and
+/// nothing was listed.
+#[test]
+fn a_failed_rewrite_names_the_frames_it_cut() {
+    let (_root, layout) = new_root();
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let failing = Arc::clone(&armed);
+    let model_fs = Arc::new(FsyncModelFs::new().failing(move |call| {
+        let log = call.path.file_name().and_then(|name| name.to_str()) == Some("journal.log");
+        let syncs = call.method == FsMethod::SyncData || call.method == FsMethod::AppendDurable;
+        failing.load(Ordering::SeqCst) && log && syncs
+    }));
+    let fs = checked(Arc::clone(&model_fs));
+    let (journal, first) = crashed_with_unlisted_frames(&layout, fs, &*model_fs, 2, &[]);
+    let listed = file_len(layout.journal_off());
+    armed.store(true, Ordering::SeqCst);
+    let failure = match journal.repair_tail() {
+        Err(StoreError::NotCommitted { source }) => source,
+        other => panic!("expected NotCommitted, got {other:?}"),
+    };
+    armed.store(false, Ordering::SeqCst);
+    let text = failure.to_string();
+    assert!(text.contains("frames 1..=2"), "{text}");
+    assert_eq!(
+        (
+            file_len(layout.journal_log()),
+            file_len(layout.journal_off())
+        ),
+        (first, listed),
+        "cut back to frame 1's start, and nothing listed"
+    );
+    assert_eq!(model_fs.failed().len(), 2, "{:?}", model_fs.failed());
+}
+
+/// Writes `junk` to the end of `journal.log` right before the next `append_durable` of it, once
+/// armed: another writer's bytes landing between a cut and an append.
+struct Intrude {
+    armed: std::sync::atomic::AtomicBool,
+    junk: Vec<u8>,
+}
+
+impl Watch for Intrude {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        if call.named() == "append_durable journal.log" && self.armed.swap(false, Ordering::SeqCst)
+        {
+            append_bytes(call.path(), &self.junk);
+        }
+        Ok(())
+    }
+}
+
+/// A rewrite of the unlisted frames that does not land where they were (something wrote to
+/// `journal.log` between the rewrite's cut and its append: a writer without the lock, or a
+/// tail state gone wrong) is cut back to where they started and refused as
+/// [`StoreError::JournalCorrupt`] there, before anything is listed: listed at the offsets the
+/// check computed, the entries would point into other bytes.
+#[test]
+fn a_rewrite_that_lands_elsewhere_is_cut_back_and_reported_corrupt() {
+    let (_root, layout) = new_root();
+    let intrude = Arc::new(Watched(
+        Intrude {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            junk: vec![0xab; 7],
+        },
+        RealFs,
+    ));
+    let log_syncs = AtomicU64::new(0);
+    let model_fs = Arc::new(
+        FsyncModelFs::over(Arc::clone(&intrude)).failing(move |call| {
+            call.method == FsMethod::SyncData
+                && call.path.file_name().and_then(|name| name.to_str()) == Some("journal.log")
+                && log_syncs.fetch_add(1, Ordering::SeqCst) == 0
+        }),
+    );
+    let (journal, first) =
+        crashed_with_unlisted_frames(&layout, Arc::clone(&model_fs) as _, &*model_fs, 1, &[]);
+    let listed = file_len(layout.journal_off());
+    intrude.0.armed.store(true, Ordering::SeqCst);
+    match journal.repair_tail() {
+        Err(StoreError::JournalCorrupt { offset }) => assert_eq!(offset, first),
+        other => panic!("expected JournalCorrupt at {first}, got {other:?}"),
+    }
+    assert_eq!(
+        (
+            file_len(layout.journal_log()),
+            file_len(layout.journal_off())
+        ),
+        (first, listed),
+        "cut back to where the frames started, and nothing listed"
     );
 }
 
