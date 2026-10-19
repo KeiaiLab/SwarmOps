@@ -93,14 +93,22 @@ pub enum StoreError {
     /// in the caller; carries what the call asked for.
     #[error("a call the store does not take: {0}")]
     BadCall(String),
-    /// The changeset index files hold what no crash leaves behind, as `what` says: a sorted
-    /// view file that ends in a partial entry; sorted views out of order, out of step in a
-    /// way the order compaction renames them in cannot explain, or covering records the
-    /// columns do not hold; an id the index holds twice; a record whose parents lie off
-    /// `parents.log`'s 32-byte boundaries or past its end; an index file that changed
-    /// during an append (a writer without `meta/lock`); or an index file that is missing
-    /// (a store has them all from its creation, and nothing removes one). The journal can
-    /// rebuild the index.
+    /// The changeset index files hold what no crash leaves behind, as `what` says:
+    ///
+    /// - a sorted view file that ends in a partial entry;
+    /// - sorted views out of order, out of step in a way the order compaction renames them in
+    ///   cannot explain, or covering records the columns do not hold;
+    /// - a sorted-view entry that points at a record its view does not cover;
+    /// - an id the index holds twice;
+    /// - a record whose parents lie off `parents.log`'s 32-byte boundaries or past its end, or,
+    ///   where the index counts its records by their lengths, do not start where the record
+    ///   before it leaves off;
+    /// - records a handle counted that are no longer whole in every index file;
+    /// - an index file that changed during an append (a writer without `meta/lock`);
+    /// - an index file that is missing (a store has them all from its creation, and nothing
+    ///   removes one).
+    ///
+    /// The journal can rebuild the index.
     #[error("the changeset index is corrupt: {what}")]
     IndexCorrupt {
         /// What is wrong.

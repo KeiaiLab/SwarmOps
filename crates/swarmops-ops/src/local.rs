@@ -160,16 +160,19 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   never reaches here; and the store's `BadCall`, a call its API does not take, which only a
 ///   bug makes.
 ///
-/// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
-/// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does
-/// not exist), whose message says what to do next — to a `ref_set` that finds the ref moved, or
-/// created by another, to commit its change again on top of `actual` (`--parent <actual>`),
-/// re-applying its edits to the content there rather than re-sending its old files, then retry
-/// with `--expect <actual>`; to a `ref_delete`, to re-check before deleting; to a move of a ref
-/// that is gone, that it is gone — and whose hint only reads, `swarmops show <actual>` or
-/// `swarmops ref list`, so that an agent that runs it cannot undo the move that won; `E_TOO_LARGE`
-/// `{index, path, size, limit}` for a put over 512 MiB; and `E_INVALID_ARG` for limits, cursors
-/// and requests that break their own rules.
+/// The operations raise their own errors besides:
+///
+/// - `E_IS_DIR` and `E_PATH_NOT_FOUND` `{rev, path}` for reads;
+/// - `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does not exist), whose hint
+///   only reads, `swarmops show <actual>` or `swarmops ref list`, so that an agent that runs it
+///   cannot undo the move that won, and whose message says what to do next:
+///   - to a `ref_set` that finds the ref moved, or created by another: commit its change again
+///     on top of `actual` (`--parent <actual>`), re-applying its edits to the content there
+///     rather than re-sending its old files, then retry with `--expect <actual>`;
+///   - to a `ref_delete`: re-check before deleting;
+///   - to a move of a ref that is gone: that it is gone;
+/// - `E_TOO_LARGE` `{index, path, size, limit}` for a put over 512 MiB;
+/// - `E_INVALID_ARG` for limits, cursors and requests that break their own rules.
 pub struct LocalOps {
     repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.

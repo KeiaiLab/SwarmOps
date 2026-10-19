@@ -1,22 +1,24 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M1.5, and the milestone
-meant to change it. The items come from the M1 and M1.5 reviews: the carry-overs their tasks
-handed to later milestones, the deferred minors that are still open, and the rulings of M1's
-final review, which left 14 questions to the maintainer (the table at the end lists all 14).
-Each entry says where it was found; those pointers (an M1 or M1.5 task, a review, the 2026-10-16
-comparison) refer to the maintainer's local records, which are not in the repository. Code-level
-minors that change nothing a user or an agent can see (naming, comments, micro-optimizations,
-test labels) are not listed.
+What SwarmOps does not do yet, or does less well than it should, as of M1.6, and the milestone
+meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
+the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
+and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
+end lists all 14). Each entry says where it was found; those pointers (an M1 or M1.5 task, a
+review, the 2026-10-16 comparison or code review) refer to the maintainer's local records, which
+are not in the repository. Code-level minors that change nothing a user or an agent can see
+(naming, comments, micro-optimizations, test labels) are not listed.
 
 Targets are milestones of [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md)
-(§13): M2 diff, history and derived data · M3 git import · M4 merge and landing ·
-M8 git export · M5 workspaces · M6 verify, crash safety and fuzzing · M7 blame and review ·
-M9 simulation and benchmarks · M11 remote sync, offline-first · M10 RPC server. M1.5, the
-hardening milestone after M1 ([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)),
-closes a few, and M1.6, a second hardening plan after it (not yet in the umbrella spec), takes
-those marked for it. "Unscheduled" means no milestone has taken the item yet; "documented" means
-it is the intended behaviour.
+(§13): M1.6 the code-review follow-ups · M2 diff, history and derived data · M3 git import ·
+M4 merge and landing · M8 git export · M5 workspaces · M6 verify, crash safety and fuzzing ·
+M7 blame and review · M9 simulation and benchmarks · M11 remote sync, offline-first · M10 RPC
+server. M1.5, the hardening milestone after M1
+([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)), closed a few, and M1.6, the
+code-review follow-ups after it
+([its plan](superpowers/plans/2026-10-17-m1-6-review-followups.md)), closed more; the entry
+still marked M1.6 waits for its quiet-window measurements. "Unscheduled" means no milestone has
+taken the item yet; "documented" means it is the intended behaviour.
 
 When a change closes an item, it removes the entry here in the same commit (or says what is
 left).
@@ -172,6 +174,15 @@ left).
   repairs it. (A malformed `journal.ckpt`, or one that is not a frame boundary, fails every read
   and write with `E_STORE_CORRUPT` on its own; verify reports both.) *Target: M6 (fsck). Found:
   M1.5 minors (Task 3 review N1).*
+- **A zeroed index tail over a damaged journal can be counted when no record before it has
+  parents.** Where the journal cannot vouch for the index's records past the checkpoint (it is
+  damaged, or the index lacks the last changeset before the checkpoint), the index counts those
+  records by their lengths and checks only that each record's parents start in `parents.log`
+  where the record before it leaves off. Entries a power loss zeroed read "no parents, at 0":
+  after a record with parents the check refuses them (the entry above), but after records that
+  have none they pass, so the zeroed records are counted as they read, and the next write keeps
+  them. `verify` reports the journal's damage, not them. *Target: M6 (fsck). Found: M1.5
+  code-minors review (minor 2); M1.5 final review (D11).*
 - **Temp files of crashed writes stay.** `objects/tmp/` keeps what interrupted object writes left
   there. *Target: M6 (`gc`). Found: M1 final review, question 8.*
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
@@ -203,13 +214,15 @@ left).
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range
-  (`Column::entries`: the `ids.col` tail of every lookup, `by_length` over a damaged journal)
-  and a view range (`Sorted::recs`) are each read into one buffer sized from the file's length,
-  with an infallible allocation: a sparse or crafted file of gigabytes makes any command take
-  that much memory and abort when the allocation fails, instead of failing with an error, and
-  the abort is no panic, so `swarmops mcp` dies with it. SwarmOps never writes such a file.
-  *Target: M1.6 (bounded reads, beside Task 5's object reads). Found: M1.5 final review
-  (security-1).*
+  (`Column::entries`: the `ids.col` or `dh.col` tail of every lookup and of a compaction,
+  `by_length` over a damaged journal) and a view range (`Sorted::recs`: every match a prefix or
+  delta-hash lookup returns) are each read into one buffer sized from the file's length, with an
+  infallible allocation: a sparse or crafted file of gigabytes makes any command take that much
+  memory and abort when the allocation fails, instead of failing with an error, and the abort is
+  no panic, so `swarmops mcp` dies with it. SwarmOps never writes such a file. *Target: M6
+  (bounded reads, when M6 moves the metadata read path onto `FsOps` for fault injection: the
+  journal a frame at a time with a streaming CRC, `journal.off`, the index columns and the views
+  in windows, and a cap on what a lookup returns). Found: M1.5 final review (security-1).*
 - **Crafted `journal.off` entries can mis-number a read.** Entries crafted to agree with each
   other (one pointing into a payload whose bytes read as a frame header ending where the next
   entry starts), three or more links before the end, pass the two links recovery and readers
@@ -237,11 +250,12 @@ left).
   No protocol bytes are ever interleaved, because no server starts. *Unscheduled. Found: M1.5
   Task 5 review.*
 - **`{"file": "<path>"}` content is read by whoever serves the request.** That is the caller for
-  the CLI and the stdio MCP server; a network server must refuse such content, and a client must
-  turn it into bytes before the request leaves. Through MCP a relative path, a path that is the
-  server's own stdin or stdout, and anything that is not a regular file (a FIFO, a socket, a
-  device or a directory, or a symlink to one) are refused before anything is read. *Target: M10.
-  Found: M1 Task 4b.*
+  the CLI and the stdio MCP server; a server that takes requests from another host (M11's
+  `serve`, then M10's) must refuse such content, and a client must turn it into bytes before the
+  request leaves. Through MCP a relative path, a path that is the server's own stdin or stdout,
+  and anything that is not a regular file (a FIFO, a socket, a device or a directory, or a
+  symlink to one) are refused before anything is read. *Target: M11 (`serve`), M10. Found: M1
+  Task 4b; M1.5 Task 9 review (M11's `serve`).*
 - **Four error codes are not raised yet.** `E_REF_NOT_FOUND` (no operation looks a ref up by
   name), `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` (tokens, `policy.toml` and gc's
   maintenance lease come later) are in the schema, so that an agent can match them before any
@@ -321,9 +335,18 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `fs_ops.rs`, not tested: a `RealFs` that dropped one of those syncs would pass every gate. The
   tracer of `bench/compare` (`docs/perf.md`) counts a metadata commit's sync calls by file, but
   `just check` does not run it. *Unscheduled. Found: M1.5 final coverage review.*
+- **The index reads its vouching journal around the store's filesystem seam.** To vouch for the
+  records past the checkpoint, the index reads the journal through a `Journal` of its own on the
+  real filesystem: in `Index::open`, which `verify` uses, and in a snapshot's or a write's index
+  open that finds none of the changesets past the checkpoint among the index's last records
+  (`vouched` and `vouched_with` in `meta/index.rs`). No injected failure, recorded call or hook
+  reaches those reads' measurements of `journal.off` and `journal.log`, so their re-read of a
+  `journal.off` a writer cut is tested only at the journal's level. *Target: M6 (the metadata
+  read paths through `FsOps`, umbrella spec §14). Found: M1.5 Task 3 review (M3); M1.5 final
+  review (D5).*
 - **Golden envelopes cover 15 of the 24 error codes.** `error_codes_reach_the_cli` pins the
   envelope of 15; the other nine are in its `NOT_RAISED` list, each with why the test cannot raise
-  it (the four codes above among them). *Target: unscheduled (`E_IO` joined in M1.6). Found: the
+  it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6). Found: the
   2026-10-16 comparison.*
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are

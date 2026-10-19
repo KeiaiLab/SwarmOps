@@ -359,27 +359,30 @@ impl Journal {
 
     /// Every frame from `offset` to the end of `journal.log`, read with one `read_at`: what
     /// a reader applies past [`Journal::ckpt`]. `offset` must be a frame boundary: 0, a
-    /// listed frame's start, or the end of the last listed frame. The listed frame just before
-    /// the read (the last listed one, if the read starts past them all) must start where the
-    /// one listed before it ends (frame 0 at 0), as recovery checks it too: a zeroed or stale
-    /// entry there is [`StoreError::JournalCorrupt`]. Zeroed entries at the end of
+    /// listed frame's start, or the end of the last listed frame. Zeroed entries at the end of
     /// `journal.off`, past frame 0, are not listings: a power loss between an entry's append
     /// and its sync may keep the file's length and lose the bytes. They are dropped first, as
     /// recovery drops them, and the frames they would list read as whole frames not listed yet.
     ///
     /// `journal.off` is measured, and the entries read, before `journal.log`: every frame
     /// listed then was whole and durable before its entry was written, so it is whole in
-    /// `journal.log` as measured after, where its entry says. One that is not (cut short,
-    /// missing, failing its CRC, not decoding, or away from its entry, as a zeroed or stale
-    /// entry puts it) is [`StoreError::JournalCorrupt`]. Whole frames after the listed ones
-    /// are included: an append racing the read, which lists them later, or a crash between a
-    /// frame's two appends. The read stops silently at a torn tail: an unlisted frame cut
-    /// short (an append in progress looks the same), failing its CRC, or whose length reads 0
-    /// (zeros to the end of the file among them; see [`Journal::truncate_torn_tail`]). Anything
-    /// else, an `offset` that is not a frame boundary included, is
-    /// [`StoreError::JournalCorrupt`]. A `journal.off` that holds fewer entries when they are
-    /// read than it did when measured is no damage, as [`Journal::frames_from`] says: the read
-    /// starts over, up to three times, and a shrink every time is reported at `offset`.
+    /// `journal.log` as measured after, where its entry says. What the read meets is one of:
+    ///
+    /// - a whole frame, listed or not, which it returns. Whole frames after the listed ones are
+    ///   an append racing the read, which lists them later, or a crash between a frame's two
+    ///   appends;
+    /// - a torn tail, where it stops silently: an unlisted frame cut short (an append in
+    ///   progress looks the same), failing its CRC, or whose length reads 0 (zeros to the end
+    ///   of the file among them; see [`Journal::truncate_torn_tail`]);
+    /// - damage, [`StoreError::JournalCorrupt`]: a listed frame that is cut short, missing,
+    ///   failing its CRC, not decoding, or away from its entry, as a zeroed or stale entry puts
+    ///   it; a listed frame just before the read (the last listed one, if the read starts past
+    ///   them all) that does not start where the one listed before it ends (frame 0 at 0), as
+    ///   recovery checks it too; an `offset` that is not a frame boundary; anything else.
+    ///
+    /// A `journal.off` that holds fewer entries when they are read than it did when measured is
+    /// no damage, as [`Journal::frames_from`] says: the read starts over, up to three times, and
+    /// a shrink every time is reported at `offset`.
     pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
         reread(|| self.tail_frames_once(offset))
     }
