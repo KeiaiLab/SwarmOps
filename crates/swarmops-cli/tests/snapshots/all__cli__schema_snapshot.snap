@@ -2835,14 +2835,21 @@ expression: s.redact(&all)
           ]
         },
         "changeset": {
-          "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), or the one\nwhose root is not its first parent's root with its delta applied (`root_mismatch`).",
+          "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), or the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key (`external_id_mismatch`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key": {
+          "description": "The external id whose entry it is, in lowercase hex: a git commit's oid for system `git`\n(`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).",
           "type": [
             "string",
             "null"
           ]
         },
         "kind": {
-          "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt` or `meta_corrupt`. A\nstring, as `OpError.code` is, so that a client can read kinds newer than its own list.",
+          "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,\n`external_id_corrupt`, `external_id_dangling` or `external_id_mismatch`. A string, as\n`OpError.code` is, so that a client can read kinds newer than its own list.",
           "type": "string"
         },
         "object": {
@@ -2883,6 +2890,13 @@ expression: s.redact(&all)
             "integer",
             "null"
           ]
+        },
+        "system": {
+          "description": "The system of the external id index whose entry it is: `git`, whose keys are git commit\noids, or another (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2904,14 +2918,21 @@ expression: s.redact(&all)
               ]
             },
             "changeset": {
-              "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), or the one\nwhose root is not its first parent's root with its delta applied (`root_mismatch`).",
+              "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), or the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key (`external_id_mismatch`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "key": {
+              "description": "The external id whose entry it is, in lowercase hex: a git commit's oid for system `git`\n(`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).",
               "type": [
                 "string",
                 "null"
               ]
             },
             "kind": {
-              "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt` or `meta_corrupt`. A\nstring, as `OpError.code` is, so that a client can read kinds newer than its own list.",
+              "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,\n`external_id_corrupt`, `external_id_dangling` or `external_id_mismatch`. A string, as\n`OpError.code` is, so that a client can read kinds newer than its own list.",
               "type": "string"
             },
             "object": {
@@ -2950,6 +2971,13 @@ expression: s.redact(&all)
               "minimum": 0,
               "type": [
                 "integer",
+                "null"
+              ]
+            },
+            "system": {
+              "description": "The system of the external id index whose entry it is: `git`, whose keys are git commit\noids, or another (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).",
+              "type": [
+                "string",
                 "null"
               ]
             }

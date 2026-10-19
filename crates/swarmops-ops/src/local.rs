@@ -955,6 +955,8 @@ fn finding(problem: &VerifyProblem) -> VerifyFinding {
         offset: None,
         ref_name: None,
         cause: None,
+        system: None,
+        key: None,
     };
     match problem {
         VerifyProblem::CorruptObject(id) => VerifyFinding {
@@ -993,6 +995,31 @@ fn finding(problem: &VerifyProblem) -> VerifyFinding {
             ..of("journal_corrupt")
         },
         VerifyProblem::MetaCorrupt(_) => of("meta_corrupt"),
+        VerifyProblem::ExternalIdCorrupt { system, key } => VerifyFinding {
+            system: Some(system.clone()),
+            key: Some(key.clone()),
+            ..of("external_id_corrupt")
+        },
+        VerifyProblem::ExternalIdDangling {
+            system,
+            key,
+            changeset,
+        } => VerifyFinding {
+            changeset: Some(changeset.to_string()),
+            system: Some(system.clone()),
+            key: Some(key.clone()),
+            ..of("external_id_dangling")
+        },
+        VerifyProblem::ExternalIdMismatch {
+            system,
+            key,
+            changeset,
+        } => VerifyFinding {
+            changeset: Some(changeset.to_string()),
+            system: Some(system.clone()),
+            key: Some(key.clone()),
+            ..of("external_id_mismatch")
+        },
     }
 }
 
@@ -1076,6 +1103,37 @@ mod tests {
         assert!(warning.contains("committed"), "{warning}");
     }
 
+    /// The external id index's problems, the changeset `child` (whose hex is `hex`) named where
+    /// the problem names one, each with the finding it is: the entry named by `system` and `key`.
+    fn external_id_cases(hex: &str, child: ChangesetId) -> [(VerifyProblem, Value); 3] {
+        let (system, key) = ("git".to_owned(), "12".repeat(20));
+        [
+            (
+                VerifyProblem::ExternalIdCorrupt {
+                    system: system.clone(),
+                    key: key.clone(),
+                },
+                json!({"kind": "external_id_corrupt", "system": "git", "key": key}),
+            ),
+            (
+                VerifyProblem::ExternalIdDangling {
+                    system: system.clone(),
+                    key: key.clone(),
+                    changeset: child,
+                },
+                json!({"kind": "external_id_dangling", "changeset": hex, "system": "git", "key": key}),
+            ),
+            (
+                VerifyProblem::ExternalIdMismatch {
+                    system,
+                    key: key.clone(),
+                    changeset: child,
+                },
+                json!({"kind": "external_id_mismatch", "changeset": hex, "system": "git", "key": key}),
+            ),
+        ]
+    }
+
     /// Each problem `verify` can find, `IndexMismatch` once for each cause, is a finding of its
     /// own kind with exactly the keys that kind names, its ids in lowercase hex, so that a
     /// program reads what is damaged without parsing the line. No two problems share a kind but
@@ -1138,8 +1196,9 @@ mod tests {
                 json!({"kind": "meta_corrupt"}),
             ),
         ];
+        let external = external_id_cases(&child, changeset(&child));
         let mut kinds: BTreeMap<String, Vec<&VerifyProblem>> = BTreeMap::new();
-        for (problem, expected) in &cases {
+        for (problem, expected) in cases.iter().chain(&external) {
             let found = finding(problem);
             assert_eq!(
                 serde_json::to_value(&found).unwrap(),
@@ -1148,7 +1207,7 @@ mod tests {
             );
             kinds.entry(found.kind).or_default().push(problem);
         }
-        assert_eq!(kinds.len(), 9, "{kinds:?}");
+        assert_eq!(kinds.len(), 12, "{kinds:?}");
         for (kind, problems) in &kinds {
             let shared = problems.len() > 1;
             assert!(!shared || kind == "index_mismatch", "{kind}: {problems:?}");

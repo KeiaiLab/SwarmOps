@@ -7,9 +7,11 @@
 //!
 //! It reads in this order, so that a commit running meanwhile never looks like damage (one whose
 //! `journal.off` listing fails meanwhile and is cut back is the exception M1.5 keeps: it reads as
-//! a `JournalCorrupt` problem once): the checkpoint, the changeset index, the ref files, then the
-//! journal (whatever the index or a ref file shows had its frame in the journal before), then the
-//! objects (every object a recorded changeset references was durable before its frame).
+//! a `JournalCorrupt` problem once): the checkpoint, the changeset index, the ref files and the
+//! external id index's entries, then the journal (whatever the index, a ref file or an entry shows
+//! had its frame in the journal before: an entry is linked only once the frame that records its
+//! changeset is durable, W8), then the objects (every object a recorded changeset references was
+//! durable before its frame).
 //!
 //! - The metadata. The index's records are compared with the journal's changeset records, place
 //!   by place: a record unlike the journal's at its seq, one the journal does not hold, and a
@@ -39,6 +41,12 @@
 //!   hash) and its parents' generations, its parents ([`VerifyProblem::MissingParent`]), every
 //!   tree under its root, and its root against its first parent's root with its delta applied
 //!   ([`VerifyProblem::RootMismatch`]).
+//! - The external id index (storage spec §7), once the changesets are checked: an entry whose file
+//!   is not one is a [`VerifyProblem::ExternalIdCorrupt`]; one that names a changeset the store
+//!   does not hold a [`VerifyProblem::ExternalIdDangling`] (checked only if the journal reads
+//!   whole or the index opens, as a ref's target is); and one of system `git` whose changeset has
+//!   a `git.oid` that is not the entry's key a [`VerifyProblem::ExternalIdMismatch`]. A name
+//!   under `meta/external_ids/` that is no entry's is passed over.
 //! - The objects. A blob a tree names that no object file holds is a
 //!   [`VerifyProblem::MissingObject`]. Objects live in the fan-out directories only
 //!   (`ObjectStore::list`): the temp files a crash leaves in `objects/tmp/`, and any stray
@@ -60,8 +68,10 @@ use std::sync::Arc;
 
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, EntryTarget, ObjectId, ObjectKind, Tree, TreeId};
+use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{
-    ChangesetMeta, Frame, Index, Journal, ObjectStore, Record, RefFile, SortedView, StoreError,
+    ChangesetMeta, ExternalEntry, Frame, Index, Journal, ListedEntry, ObjectStore, Record, RefFile,
+    SYSTEM_GIT, SortedView, StoreError,
 };
 
 use crate::error::RepoError;
@@ -80,8 +90,8 @@ pub struct VerifyReport {
     /// How many changesets it checked.
     pub changesets_checked: u64,
     /// What is damaged: metadata files that do not read first, then the journal, the index
-    /// records, the refs, the changesets in seq order, and the objects. Empty for a sound
-    /// store.
+    /// records, the refs, the changesets in seq order, the objects, and last the external id
+    /// index's entries, by system and key. Empty for a sound store.
     pub problems: Vec<VerifyProblem>,
 }
 
@@ -131,6 +141,33 @@ pub enum VerifyProblem {
     /// unchecked: a journal file missing, `journal.ckpt` malformed or not a frame boundary, or
     /// index files that do not open. Carries what is damaged and what is not checked for it.
     MetaCorrupt(String),
+    /// An entry of the external id index (storage spec §7) that is not one: its file is not 44
+    /// bytes of a version-1 entry with a CRC that matches, or not a regular file.
+    ExternalIdCorrupt {
+        /// The entry's system.
+        system: String,
+        /// The entry's key, in lowercase hex.
+        key: String,
+    },
+    /// An entry of the external id index that names a changeset the store does not hold.
+    ExternalIdDangling {
+        /// The entry's system.
+        system: String,
+        /// The entry's key, in lowercase hex.
+        key: String,
+        /// The changeset it names.
+        changeset: ChangesetId,
+    },
+    /// An entry of system `git` whose changeset's `git.oid` metadata is another oid than the
+    /// entry's key.
+    ExternalIdMismatch {
+        /// The entry's system: `git`.
+        system: String,
+        /// The entry's key, in lowercase hex: a git commit's oid.
+        key: String,
+        /// The changeset it names.
+        changeset: ChangesetId,
+    },
 }
 
 /// What an [`VerifyProblem::IndexMismatch`] found disagreeing, which says what can mend it.
@@ -194,6 +231,30 @@ impl fmt::Display for VerifyProblem {
                 write!(f, "the journal is corrupt at offset {offset}")
             }
             Self::MetaCorrupt(what) => write!(f, "damaged metadata: {what}"),
+            Self::ExternalIdCorrupt { system, key } => {
+                write!(
+                    f,
+                    "the entry of external id {key} of system {system} is corrupt"
+                )
+            }
+            Self::ExternalIdDangling {
+                system,
+                key,
+                changeset,
+            } => write!(
+                f,
+                "external id {key} of system {system} names changeset {changeset}, which the \
+                 store does not hold"
+            ),
+            Self::ExternalIdMismatch {
+                system,
+                key,
+                changeset,
+            } => write!(
+                f,
+                "external id {key} of system {system} names changeset {changeset}, whose git.oid \
+                 is another oid"
+            ),
         }
     }
 }
@@ -209,6 +270,7 @@ impl<O: ObjectStore> Repo<O> {
         for meta in &changesets {
             check.changeset(meta)?;
         }
+        check.external_entries()?;
         check.objects()?;
         Ok(check.report())
     }
@@ -241,6 +303,19 @@ struct Check<'r, O: ObjectStore> {
     /// Every blob a tree names, with the first changeset whose tree does.
     blobs: BTreeMap<ObjectId, ChangesetId>,
     changesets_checked: u64,
+    /// Whether the journal read whole or the index opened: what tells which changesets the store
+    /// holds, so that what names another (a ref, an external id) is dangling.
+    targets_known: bool,
+    /// Every entry of the external id index, system by system, listed before the journal is
+    /// read.
+    external: Vec<(String, Vec<ListedEntry>)>,
+    /// Whether the changesets' `git.oid` values are wanted: the index has entries of system
+    /// `git`.
+    wants_git_oids: bool,
+    /// The `git.oid` metadata of each changeset checked whose object decoded and has one.
+    git_oids: HashMap<ChangesetId, Vec<u8>>,
+    /// The external id index's problems, by system and key.
+    external_problems: Vec<VerifyProblem>,
 }
 
 impl<'r, O: ObjectStore> Check<'r, O> {
@@ -260,6 +335,11 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             walked: HashSet::new(),
             blobs: BTreeMap::new(),
             changesets_checked: 0,
+            targets_known: false,
+            external: Vec::new(),
+            wants_git_oids: false,
+            git_oids: HashMap::new(),
+            external_problems: Vec::new(),
         }
     }
 
@@ -284,6 +364,12 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             None => 0,
         };
         let ref_files = self.repo.meta.ref_files()?;
+        // Before the journal too: an entry is linked only once the frame that records its
+        // changeset is durable (W8), so an entry listed now that names a changeset the store
+        // holds names one of a frame read below.
+        self.external = self.external_ids()?;
+        self.wants_git_oids = (self.external.iter())
+            .any(|(system, entries)| system == SYSTEM_GIT && !entries.is_empty());
         let (frames, whole) = match &journal {
             Some(journal) => {
                 let (frames, corrupt) = read_frames(journal)?;
@@ -326,6 +412,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         }
         // Without them, a ref's target could be a changeset no readable file lists.
         let targets_known = whole || index.is_some();
+        self.targets_known = targets_known;
 
         let journaled = journal_changesets(&frames);
         let mut records = Vec::new();
@@ -368,6 +455,18 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             }
         }
         Ok(changesets)
+    }
+
+    /// Every entry of the external id index, system by system: what
+    /// [`Check::external_entries`] checks once the changesets are.
+    fn external_ids(&self) -> Result<Vec<(String, Vec<ListedEntry>)>, RepoError> {
+        let index = &self.repo.external_ids;
+        let mut listed = Vec::new();
+        for system in index.systems()? {
+            let entries = index.list(&system)?;
+            listed.push((system, entries));
+        }
+        Ok(listed)
     }
 
     /// A handle on the journal, or what is wrong with it if one of its files is missing: the
@@ -543,6 +642,11 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             self.corrupt(id.0);
             return Ok(());
         };
+        if self.wants_git_oids
+            && let Some((_, oid)) = cs.metadata.iter().find(|(key, _)| key == "git.oid")
+        {
+            self.git_oids.insert(id, oid.clone());
+        }
         // 1 + the largest parent generation, if the metadata holds every parent.
         let generation = meta
             .parents
@@ -626,6 +730,49 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             ) => Ok(()),
             Err(e) => Err(e),
         }
+    }
+
+    /// Checks each entry of the external id index listed before the journal was read: its file
+    /// ([`VerifyProblem::ExternalIdCorrupt`]); that the store holds its changeset
+    /// ([`VerifyProblem::ExternalIdDangling`]), when the journal or the index tells which it
+    /// holds; and, for system `git`, that the changeset's `git.oid`, if it has one, is the
+    /// entry's key ([`VerifyProblem::ExternalIdMismatch`]).
+    fn external_entries(&mut self) -> Result<(), RepoError> {
+        for (system, entries) in std::mem::take(&mut self.external) {
+            for (key, entry) in entries {
+                let key = lower_hex(&key);
+                let problem = match entry {
+                    Err(StoreError::ExternalIdCorrupt { .. }) => VerifyProblem::ExternalIdCorrupt {
+                        system: system.clone(),
+                        key,
+                    },
+                    Err(e) => return Err(e.into()),
+                    Ok(ExternalEntry { changeset, .. })
+                        if self.targets_known && !self.generations.contains_key(&changeset) =>
+                    {
+                        VerifyProblem::ExternalIdDangling {
+                            system: system.clone(),
+                            key,
+                            changeset,
+                        }
+                    }
+                    Ok(ExternalEntry { changeset, .. })
+                        if system == SYSTEM_GIT
+                            && (self.git_oids.get(&changeset))
+                                .is_some_and(|oid| *oid != key.as_bytes()) =>
+                    {
+                        VerifyProblem::ExternalIdMismatch {
+                            system: system.clone(),
+                            key,
+                            changeset,
+                        }
+                    }
+                    Ok(_) => continue,
+                };
+                self.external_problems.push(problem);
+            }
+        }
+        Ok(())
     }
 
     /// Reports the blobs the trees name that no object file holds; a deep check re-hashes
@@ -737,6 +884,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         );
         problems.extend(self.refs);
         problems.extend(self.problems);
+        problems.extend(self.external_problems);
         VerifyReport {
             objects_checked: to_u64(self.hashed.len() + looked_for),
             changesets_checked: self.changesets_checked,

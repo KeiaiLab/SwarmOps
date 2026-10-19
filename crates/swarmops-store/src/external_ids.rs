@@ -443,8 +443,9 @@ fn decode(bytes: &[u8]) -> Option<ExternalEntry> {
     })
 }
 
-/// The lowercase hex digits of `bytes`, two to a byte: how an entry's key names its file.
-pub(crate) fn lower_hex(bytes: &[u8]) -> String {
+/// The lowercase hex digits of `bytes`, two to a byte: how an entry's key names its file, and how
+/// [`StoreError::ExternalIdCorrupt`] and verify name a key.
+pub fn lower_hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut hex = String::with_capacity(bytes.len() * 2);
     for &byte in bytes {

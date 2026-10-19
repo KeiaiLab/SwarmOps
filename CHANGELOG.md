@@ -296,6 +296,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   journal, so `FORMAT` stays 1. A new write-order rule, W8 (storage spec §2 rule 4), links an
   entry only once every byte its process wrote to `journal.log` is durable, so that no entry
   names a changeset a power loss can take back; the order checker enforces it.
+- `verify` checks the external id index, once the changesets are: an entry whose file is not one
+  (`external_id_corrupt`), one that names a changeset the store does not hold
+  (`external_id_dangling`), and one of system `git` whose changeset's `git.oid` is another oid
+  (`external_id_mismatch`) are findings of their own, naming the entry by `system` and `key`
+  (lowercase hex), which `VerifyFinding` gains; `swarmops schema` shows them. In the library,
+  `Repo::external_id` and `Repo::record_external_ids` read and write the index, and
+  `VerifyProblem` has the three variants. The power-loss run records two external ids after
+  their commits' frames: in every image each is whole or absent, and there once its put
+  returned.
 
 ### Changed
 

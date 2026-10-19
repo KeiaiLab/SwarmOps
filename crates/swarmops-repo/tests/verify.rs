@@ -1005,3 +1005,108 @@ fn verify_detects_generation_and_delta_hash_drift() {
     }
     assert_problems(&repo, vec![mismatch(1, MismatchCause::Object)]);
 }
+
+/// The external id index (storage spec §7), checked after the changesets: an entry whose file is
+/// damaged, one that names a changeset the store does not hold, and one of system `git` keyed by
+/// another oid than its changeset's `git.oid` are each a problem of their own, listed by system
+/// and key; a sound entry, one whose changeset has no `git.oid` (a native one), one of another
+/// system, and a name under the index that is no entry's are none.
+#[test]
+fn verify_reports_external_ids_that_are_damaged_dangling_or_mismatched() {
+    use swarmops_store::external_ids::lower_hex;
+    use swarmops_store::{ExternalEntry, SYSTEM_GIT};
+    use swarmops_testkit::repo::request;
+
+    let (_dir, root, repo) = new_repo();
+    let oid = |n: u8| vec![n; 20];
+    let mut imported = request(&[], vec![put("f", b"1")], "imported from git");
+    imported.metadata = vec![("git.oid".to_owned(), lower_hex(&oid(0xaa)).into_bytes())];
+    let imported = repo.commit(imported).unwrap().id;
+    let native = commit(&repo, &[imported], vec![put("f", b"2")]);
+    let missing = ChangesetId(hash_object(ObjectKind::Changeset, b"in no store"));
+    let entry = |changeset| ExternalEntry {
+        changeset,
+        faithful: true,
+    };
+    let sound = [(oid(0xaa), entry(imported)), (oid(0xee), entry(native))];
+    assert_eq!(
+        repo.record_external_ids(SYSTEM_GIT, &sound)
+            .unwrap()
+            .written,
+        2
+    );
+    assert_eq!(
+        repo.external_id(SYSTEM_GIT, &oid(0xaa)).unwrap(),
+        Some(entry(imported))
+    );
+    assert_eq!(repo.external_id(SYSTEM_GIT, &oid(0x11)).unwrap(), None);
+    repo.record_external_ids("swarmops-0a1b", &[(vec![0xbb; 32], entry(native))])
+        .unwrap();
+    assert_problems(&repo, Vec::new());
+
+    // Keyed by another oid than its changeset's, naming a changeset in no store, and one whose
+    // CRC is then damaged; and stray names beside the entries.
+    let unsound = [
+        (oid(0xbb), entry(imported)),
+        (oid(0xcc), entry(missing)),
+        (oid(0xdd), entry(native)),
+    ];
+    assert_eq!(
+        repo.record_external_ids(SYSTEM_GIT, &unsound)
+            .unwrap()
+            .written,
+        3
+    );
+    let layout = Layout::new(&root);
+    let damaged = layout.external_id_path(SYSTEM_GIT, &oid(0xdd));
+    let mut bytes = fs::read(&damaged).unwrap();
+    bytes[43] ^= 0x01;
+    fs::write(&damaged, bytes).unwrap();
+    let git = layout.external_ids_dir().join("git");
+    fs::write(git.join("aa/stray"), b"junk").unwrap();
+    fs::create_dir(git.join("zz")).unwrap();
+    fs::write(layout.external_ids_dir().join("stray"), b"junk").unwrap();
+
+    let key = |n: u8| lower_hex(&oid(n));
+    let want = vec![
+        VerifyProblem::ExternalIdMismatch {
+            system: "git".to_owned(),
+            key: key(0xbb),
+            changeset: imported,
+        },
+        VerifyProblem::ExternalIdDangling {
+            system: "git".to_owned(),
+            key: key(0xcc),
+            changeset: missing,
+        },
+        VerifyProblem::ExternalIdCorrupt {
+            system: "git".to_owned(),
+            key: key(0xdd),
+        },
+    ];
+    let report = assert_problems(&repo, want.clone());
+    assert_eq!(
+        report.problems, want,
+        "after the changesets', by system and key"
+    );
+    let lines: Vec<String> = want.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        lines,
+        [
+            format!(
+                "external id {} of system git names changeset {imported}, whose git.oid is \
+                 another oid",
+                key(0xbb)
+            ),
+            format!(
+                "external id {} of system git names changeset {missing}, which the store does \
+                 not hold",
+                key(0xcc)
+            ),
+            format!(
+                "the entry of external id {} of system git is corrupt",
+                key(0xdd)
+            ),
+        ]
+    );
+}

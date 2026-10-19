@@ -618,8 +618,9 @@ pub struct VerifyReport {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct VerifyFinding {
     /// What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,
-    /// `dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt` or `meta_corrupt`. A
-    /// string, as `OpError.code` is, so that a client can read kinds newer than its own list.
+    /// `dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,
+    /// `external_id_corrupt`, `external_id_dangling` or `external_id_mismatch`. A string, as
+    /// `OpError.code` is, so that a client can read kinds newer than its own list.
     pub kind: String,
     /// The object: one whose content does not hash to its id or does not decode
     /// (`corrupt_object`), or one a changeset references that the store lacks
@@ -627,8 +628,10 @@ pub struct VerifyFinding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object: Option<String>,
     /// The changeset: the first, in seq order, that references the missing object
-    /// (`missing_object`), the one that names a missing parent (`missing_parent`), or the one
-    /// whose root is not its first parent's root with its delta applied (`root_mismatch`).
+    /// (`missing_object`), the one that names a missing parent (`missing_parent`), the one whose
+    /// root is not its first parent's root with its delta applied (`root_mismatch`), or the one
+    /// an external id's entry names: not in the store (`external_id_dangling`), or with a
+    /// `git.oid` that is another oid than the entry's key (`external_id_mismatch`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changeset: Option<String>,
     /// The parent the changeset names, which the store does not hold (`missing_parent`).
@@ -650,6 +653,14 @@ pub struct VerifyFinding {
     /// index columns) or `object` (derive the record from its object again).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
+    /// The system of the external id index whose entry it is: `git`, whose keys are git commit
+    /// oids, or another (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    /// The external id whose entry it is, in lowercase hex: a git commit's oid for system `git`
+    /// (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 fn default_git_ref() -> String {

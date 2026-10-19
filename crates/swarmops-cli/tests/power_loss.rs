@@ -20,6 +20,10 @@
 //!   (the temp files a crash leaves in `objects/tmp/` are no objects); and a new commit lands on
 //!   it, after which `verify --deep` is clean again and the history is whole.
 //!
+//! The run ends by recording two external ids (`meta/external_ids/`) of commits whose frames are
+//! durable ([`Op::ExternalIds`]): in every image each is whole and names its commit, or is
+//! absent, and it is absent from no image of a power failure after its put returned.
+//!
 //! Images that hold the same files are checked once.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -85,6 +89,13 @@ enum Op {
         puts: &'static [(&'static str, &'static str)],
         name: &'static str,
     },
+    /// External ids of system `git` recorded with `Repo::record_external_ids`, after the frames
+    /// of the commits they name: each a key (20 bytes in hex, as a git oid is) and the commit
+    /// number its entry names. No frame: each entry's file, and the directories it makes,
+    /// durable before the put returns.
+    ExternalIds {
+        entries: &'static [(&'static str, usize)],
+    },
 }
 
 /// How many changesets [`Op::Bulk`] records in its one frame: more than the index's compaction
@@ -98,7 +109,8 @@ const BULK: u64 = Index::COMPACT_THRESHOLD + 1;
 /// sector boundary, its low byte alone in the first sector, its payload over 255 bytes, so that a
 /// lost first sector leaves it a length that is not 0 but wrong (the long actors of frames 12 and
 /// 13 place it).
-/// Frame 14, the last, holds a changeset and main's move to it ([`Op::CommitAdvance`]).
+/// Frame 14, the last, holds a changeset and main's move to it ([`Op::CommitAdvance`]); after it,
+/// [`Op::ExternalIds`] records external ids of commits 0 and 4, in two fan-out directories.
 const RUN: &[Op] = &[
     Op::Commit {
         parent: None,
@@ -193,6 +205,12 @@ const RUN: &[Op] = &[
         puts: &[("src/lib.rs", "pub fn f() -> u8 { 6 }\n")],
         name: "main",
     },
+    Op::ExternalIds {
+        entries: &[
+            ("0a1b2c3d4e5f60718293a4b5c6d7e8f901234567", 0),
+            ("fedcba9876543210fedcba9876543210fedcba98", 4),
+        ],
+    },
 ];
 
 /// What one transaction of the run records in its frame.
@@ -235,8 +253,29 @@ struct Recorded {
     compacted: Vec<usize>,
     /// How many steps came before `init` returned.
     init: usize,
+    /// The external ids [`Op::ExternalIds`] recorded.
+    external: Vec<External>,
     /// The calls, as recorded.
     calls: Vec<RecordedCall>,
+}
+
+/// An external id the run recorded ([`Op::ExternalIds`]).
+#[derive(Debug, Clone)]
+struct External {
+    /// Its key.
+    key: Vec<u8>,
+    /// The number of the commit its entry names.
+    commit: usize,
+    /// How many steps came before its put returned.
+    returned: usize,
+}
+
+/// The bytes the hex digits `hex` spell.
+fn key_bytes(hex: &str) -> Vec<u8> {
+    (0..hex.len())
+        .step_by(2)
+        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex digits"))
+        .collect()
 }
 
 /// A fixed signature, so that a commit makes the same changeset in every run.
@@ -289,7 +328,7 @@ fn record_ops(ops: &[Op]) -> Recorded {
         Op::Cas { name, new, .. } => vec![Some(Txn::Cas { name, new })],
         Op::Bulk => vec![Some(Txn::Bulk), None],
         Op::CommitAdvance { name, .. } => vec![Some(Txn::CommitAdvance { name })],
-        Op::Compact | Op::Flush => Vec::new(),
+        Op::Compact | Op::Flush | Op::ExternalIds { .. } => Vec::new(),
     });
     let (mut frames, mut compacted) = (Vec::new(), Vec::new());
     for (at, call) in calls.iter().enumerate() {
@@ -307,9 +346,21 @@ fn record_ops(ops: &[Op]) -> Recorded {
         }
     }
     assert!(whats.next().is_none(), "a frame per commit and ref move");
+    let mut external = Vec::new();
+    for (n, op) in ops.iter().enumerate() {
+        if let Op::ExternalIds { entries } = *op {
+            let returned = timeline.mark(&format!("op {n}"));
+            external.extend(entries.iter().map(|&(key, commit)| External {
+                key: key_bytes(key),
+                commit,
+                returned,
+            }));
+        }
+    }
     Recorded {
         base,
         init: timeline.mark("init"),
+        external,
         timeline,
         commits: commits.iter().map(ToString::to_string).collect(),
         parents,
@@ -395,6 +446,22 @@ fn run(
                 let ids = bulk(root, &shared, fs);
                 parents.extend(ids.iter().map(|_| None));
                 commits.extend(ids);
+            }
+            Op::ExternalIds { entries } => {
+                let entries: Vec<(Vec<u8>, swarmops_store::ExternalEntry)> = entries
+                    .iter()
+                    .map(|&(key, commit)| {
+                        let entry = swarmops_store::ExternalEntry {
+                            changeset: commits[commit],
+                            faithful: true,
+                        };
+                        (key_bytes(key), entry)
+                    })
+                    .collect();
+                let put = repo
+                    .record_external_ids(swarmops_store::SYSTEM_GIT, &entries)
+                    .expect("record_external_ids");
+                assert_eq!(put.written, to_u64(entries.len()), "{put:?}");
             }
         }
         fs.mark(&format!("op {n}"));
@@ -800,6 +867,41 @@ fn recovered_as_imaged(
     Ok(())
 }
 
+/// `Ok` if the external ids the run recorded are in the store at `store`, in state `state`, as
+/// the image of a power failure after the first `cut` steps may hold them: each whole and naming
+/// its commit, which the store holds; or absent, but only if the power failed before its put
+/// returned.
+fn external_ids_as_imaged(
+    rec: &Recorded,
+    store: &str,
+    state: &State,
+    cut: usize,
+) -> Result<(), String> {
+    let layout = Layout::new(Utf8PathBuf::from(store));
+    let index = swarmops_store::ExternalIds::new(layout, Arc::new(RealFs));
+    for External {
+        key,
+        commit,
+        returned,
+    } in &rec.external
+    {
+        let named = &rec.commits[*commit];
+        match index.get(swarmops_store::SYSTEM_GIT, key) {
+            Ok(Some(entry))
+                if entry.changeset.to_string() == *named && *commit < state.changesets => {}
+            Ok(None) if cut < *returned => {}
+            found => {
+                return Err(format!(
+                    "the external id of commit {commit} ({named}), whose put returned after step \
+                     {returned}: {found:?}, in a store of {} changesets",
+                    state.changesets
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// [`found_in`] a store, whose `info` gave `info`, in the image of a power failure after the
 /// first `cut` steps; `tmp` takes a change list.
 fn a_store(
@@ -814,6 +916,7 @@ fn a_store(
         .find(|&frames| seen.is_after(rec, frames))
         .ok_or_else(|| format!("the state of no prefix of the run: {seen:#?}"))?;
     clean(store, "after the power loss")?;
+    external_ids_as_imaged(rec, store, &seen.state, cut)?;
     // The journal as the image holds it, which the next commit's write repairs.
     let journal = journal_of(store)?;
     let whole = journal
