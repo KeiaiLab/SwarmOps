@@ -1058,7 +1058,9 @@ fn verify_report_carries_findings_beside_problems() {
             "seq",
             "offset",
             "ref",
-            "cause"
+            "cause",
+            "system",
+            "key"
         ])
     );
 
@@ -1076,6 +1078,8 @@ fn verify_report_carries_findings_beside_problems() {
         offset: None,
         ref_name: Some("main".to_owned()),
         cause: None,
+        system: None,
+        key: None,
     };
     let report = VerifyReport {
         objects_checked: 3,

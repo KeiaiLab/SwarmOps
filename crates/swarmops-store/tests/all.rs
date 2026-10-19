@@ -5,6 +5,7 @@
 
 mod contention;
 mod derived;
+mod external_ids;
 mod fsync_percentiles;
 mod index;
 mod journal;

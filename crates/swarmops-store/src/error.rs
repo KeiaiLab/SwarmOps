@@ -106,6 +106,17 @@ pub enum StoreError {
         /// What is wrong.
         what: &'static str,
     },
+    /// An entry of the external id index (storage spec §7) that is not one: not 44 bytes of
+    /// magic `SXID`, version 1, flags of no bit but `faithful`'s, reserved 0 and a CRC that
+    /// matches. The index is a cache: once the file is removed, whatever wrote the entry writes
+    /// it again (a put never replaces a file).
+    #[error("the entry of external id {key} of system {system} is corrupt")]
+    ExternalIdCorrupt {
+        /// The system.
+        system: String,
+        /// The key, in lowercase hex.
+        key: String,
+    },
     /// The changeset index disagrees with the journal about record `seq` (found by verify).
     #[error("the changeset index disagrees with the journal at seq {seq}")]
     IndexMismatch {

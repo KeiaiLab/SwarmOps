@@ -66,8 +66,9 @@ use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
-    CasResult, FileOp, FsObjectStore, FsOps, HookedFs, IoFailure, Layout, LinkOutcome, MetaStore,
-    ObjectStore, RealFs, Recovered, RefState, StoreError, StoreFs, is_native_linux_fs,
+    CasResult, ExternalEntry, ExternalIds, ExternalPut, FileOp, FsObjectStore, FsOps, HookedFs,
+    IoFailure, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs, Recovered, RefState,
+    StoreError, StoreFs, is_native_linux_fs,
 };
 
 use crate::error::RepoError;
@@ -94,6 +95,8 @@ pub struct Repo<O: ObjectStore> {
     pub(crate) layout: Layout,
     /// What both stores write through; verify's own handles on the metadata use it too.
     pub(crate) fs: Arc<dyn FsOps>,
+    /// The external id index (storage spec §7), on the same filesystem.
+    pub(crate) external_ids: ExternalIds,
     identity: Identity,
 }
 
@@ -321,15 +324,18 @@ impl LocalRepo {
         one_thread: bool,
     ) -> LocalRepo {
         let mut objects = FsObjectStore::open_shared(layout.clone(), Arc::clone(&fs));
+        let mut external_ids = ExternalIds::new(layout.clone(), Arc::clone(&fs));
         if one_thread {
             objects.set_parallelism(1);
             meta.set_parallelism(1);
+            external_ids.set_parallelism(1);
         }
         Repo {
             objects,
             meta,
             layout,
             fs,
+            external_ids,
             identity,
         }
     }
@@ -439,6 +445,33 @@ impl<O: ObjectStore> Repo<O> {
             warnings,
             recovered,
         })
+    }
+
+    /// What external id `key` of `system` names in the external id index (storage spec §7): a
+    /// changeset, and whether it holds the external object faithfully; `None` if the index has
+    /// no entry for it. [`StoreError::ExternalIdCorrupt`] for a file there that is no entry;
+    /// [`StoreError::BadCall`] for a system name or a key the index does not take
+    /// ([`ExternalIds`]).
+    pub fn external_id(
+        &self,
+        system: &str,
+        key: &[u8],
+    ) -> Result<Option<ExternalEntry>, RepoError> {
+        Ok(self.external_ids.get(system, key)?)
+    }
+
+    /// Records `entries` of `system` in the external id index ([`ExternalIds::put_batch`]): each
+    /// not there yet is written by the object rules, every name it relies on is durable when it
+    /// returns, and one there with other bytes is left as it is and named in
+    /// [`ExternalPut::conflicts`]. Every changeset an entry names must be committed already, its
+    /// journal frame durable (storage spec §2 rule 4, W8): record the entries after the commit
+    /// that records their changesets returns, never before.
+    pub fn record_external_ids(
+        &self,
+        system: &str,
+        entries: &[(Vec<u8>, ExternalEntry)],
+    ) -> Result<ExternalPut, RepoError> {
+        Ok(self.external_ids.put_batch(system, entries)?)
     }
 
     /// Changeset `id`'s object, decoded.

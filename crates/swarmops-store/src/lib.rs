@@ -5,13 +5,15 @@
 //! [`MetaStore`] facade: a CRC-framed, append-only [`Journal`] is its source of truth,
 //! [`MetaLock`] serializes its writers, the columnar changeset [`Index`] answers lookups by
 //! id, id prefix and delta hash, and ref files hold the refs. Values derived from the objects
-//! are cached beside them in `meta/derived/` ([`DerivedStore`]), outside the journal. The object
-//! store's filesystem access, the metadata store's writes and the derived values' reads and
-//! writes go through [`FsOps`], so tests can count calls and, in a build with the `test-hooks`
-//! feature, crash the process mid-write (`CrashAtFs`), fail calls (`FailAtFs`) or check the
-//! order of the writes (`OrderCheckFs`).
+//! are cached beside them in `meta/derived/` ([`DerivedStore`]), outside the journal. Outside the
+//! journal, the external id index ([`ExternalIds`]) tells which changeset an id of another system
+//! names, a git commit's oid say. The object store's filesystem access, the metadata store's writes
+//! and the derived values' reads and writes go through [`FsOps`], so tests can count calls and, in
+//! a build with the `test-hooks` feature, crash the process mid-write (`CrashAtFs`), fail calls
+//! (`FailAtFs`) or check the order of the writes (`OrderCheckFs`).
 
 pub mod error;
+pub mod external_ids;
 pub mod fs_objects;
 pub mod fs_ops;
 pub mod layout;
@@ -20,6 +22,7 @@ pub mod meta;
 pub mod order_check;
 
 pub use error::{FileOp, IoFailure, LimitKind, StoreError};
+pub use external_ids::{ExternalEntry, ExternalIds, ExternalPut, ListedEntry, SYSTEM_GIT};
 pub use fs_objects::{FsObjectStore, MAX_OBJECT_LEN, ObjectStore};
 pub use fs_ops::{
     CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, FsMethod, FsOps, HookedFs, LinkOutcome,
