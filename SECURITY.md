@@ -90,11 +90,13 @@ filesystem permissions are the access boundary. Within that model, these are vul
   preventing it is not.
 - **Reading files the caller can read.** A change list's `{"file": "<path>"}` content is read
   on the client, with the caller's own permissions, as any program the caller runs could read
-  it; the stdio MCP server runs as its caller and reads it the same way. A network server (M10)
-  must refuse such content, and will.
+  it; the stdio MCP server runs as its caller and reads it the same way. A server that takes
+  requests from another host, M11's `swarmops serve --stdio` over ssh and then M10's network
+  server, must refuse such content, and will (operations spec §7).
 - **Durability failures.** Data lost after a crash, a power loss or a disk error is a serious
   bug, not a vulnerability: report it as an issue. [docs/architecture.md](docs/architecture.md)
   describes the durability model and its tests.
 - **Builds with the `test-hooks` feature**, which exist for the test suite only.
 
-When SwarmOps gains a network server (M10), the trust model changes, and this policy with it.
+When SwarmOps gains a server that takes requests from another host (M11's `serve`, then M10's
+network server), the trust model changes, and this policy with it.

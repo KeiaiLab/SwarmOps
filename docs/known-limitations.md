@@ -237,11 +237,12 @@ left).
   No protocol bytes are ever interleaved, because no server starts. *Unscheduled. Found: M1.5
   Task 5 review.*
 - **`{"file": "<path>"}` content is read by whoever serves the request.** That is the caller for
-  the CLI and the stdio MCP server; a network server must refuse such content, and a client must
-  turn it into bytes before the request leaves. Through MCP a relative path, a path that is the
-  server's own stdin or stdout, and anything that is not a regular file (a FIFO, a socket, a
-  device or a directory, or a symlink to one) are refused before anything is read. *Target: M10.
-  Found: M1 Task 4b.*
+  the CLI and the stdio MCP server; a server that takes requests from another host (M11's
+  `serve`, then M10's) must refuse such content, and a client must turn it into bytes before the
+  request leaves. Through MCP a relative path, a path that is the server's own stdin or stdout,
+  and anything that is not a regular file (a FIFO, a socket, a device or a directory, or a
+  symlink to one) are refused before anything is read. *Target: M11 (`serve`), M10. Found: M1
+  Task 4b; M1.5 Task 9 review (M11's `serve`).*
 - **Four error codes are not raised yet.** `E_REF_NOT_FOUND` (no operation looks a ref up by
   name), `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` (tokens, `policy.toml` and gc's
   maintenance lease come later) are in the schema, so that an agent can match them before any
