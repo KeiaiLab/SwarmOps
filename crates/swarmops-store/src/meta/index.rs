@@ -226,6 +226,22 @@ impl Index {
         self.len == 0
     }
 
+    /// How many records the four columns hold whole by their lengths, measured now (one
+    /// `fstat` each, `ids.col` first, as an open measures them), whether or not this handle,
+    /// or any, counts them: past the checkpoint and the sorted views a handle counts only the
+    /// records the journal vouches for, so a record that no frame holds, past the journal's last
+    /// changeset, is counted by none. What verify compares with the journal's changeset count:
+    /// a writer appends a record only once its frame is durable and listed, so measured before
+    /// the journal is read, the files hold no more records than the journal read then has
+    /// changesets.
+    pub fn held(&self) -> Result<u64, StoreError> {
+        let ids = AppendOnlyColumn::<32>::whole(self.ids.len()?);
+        let dhs = AppendOnlyColumn::<32>::whole(self.dhs.len()?);
+        let gens = AppendOnlyColumn::<8>::whole(self.gens.len()?);
+        let pars = AppendOnlyColumn::<8>::whole(self.pars.len()?);
+        Ok(ids.min(dhs).min(gens).min(pars))
+    }
+
     /// How many records both sorted views cover: the first `sorted_count()` records.
     pub fn sorted_count(&self) -> u64 {
         self.views.sorted_count()

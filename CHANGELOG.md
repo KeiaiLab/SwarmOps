@@ -253,6 +253,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   replacement of a ref file or of `journal.ckpt`) fails with the operating system's own error,
   errno included, where tempfile's wrapper named the temp file's absolute path and dropped the
   errno.
+- `verify` reports an index record that no journal frame holds, past the journal's last
+  changeset, as an `IndexMismatch` (cause `Journal`) while changeset frames follow the
+  checkpoint too. The index does not count such a record there, so verify reported nothing, and
+  the next write cut it without a word.
 
 ### Security
 
