@@ -12,4 +12,4 @@ pub mod varint;
 
 pub use changeset::{Changeset, DeltaEntry, DeltaOp, Signature};
 pub use codec::CodecError;
-pub use tree::{EntryKind, Tree, TreeEntry};
+pub use tree::{EntryKind, EntryTarget, LeafKind, Tree, TreeEntry};

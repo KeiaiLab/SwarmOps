@@ -15,8 +15,8 @@
 use std::collections::{BTreeMap, HashSet};
 
 use swarmops_core::{
-    DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath, Tree, TreeEntry, TreeId,
-    hash_object,
+    BlobId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectKind, RepoPath, Tree, TreeEntry,
+    TreeId, hash_object,
 };
 use swarmops_store::ObjectStore;
 
@@ -51,7 +51,7 @@ struct Dir {
 #[derive(Debug, Clone, Copy)]
 enum Slot {
     /// A file, an executable or a symlink.
-    Leaf { kind: EntryKind, id: ObjectId },
+    Leaf { kind: LeafKind, id: BlobId },
     /// A directory no change has reached into: its tree, unread.
     Unread(TreeId),
     /// A directory a change has reached into: its place in the arena.
@@ -96,7 +96,7 @@ impl<'o, O: ObjectStore> TreeEdit<'o, O> {
         }
         for (at, entry) in delta.iter().enumerate() {
             if let DeltaOp::Put { kind, id } = entry.op {
-                changed[at] = self.put(&entry.path, kind, id.0)?;
+                changed[at] = self.put(&entry.path, kind, id)?;
             }
         }
         Ok(changed)
@@ -128,14 +128,14 @@ impl<'o, O: ObjectStore> TreeEdit<'o, O> {
                 .entries
                 .iter()
                 .filter_map(|(name, slot)| {
-                    let (kind, id) = match *slot {
-                        Slot::Leaf { kind, id } => (kind, id),
-                        Slot::Unread(tree) => (EntryKind::Dir, tree.0),
+                    let target = match *slot {
+                        Slot::Leaf { kind, id } => EntryTarget::Leaf(kind, id),
+                        Slot::Unread(tree) => EntryTarget::Dir(tree),
                         // Children come later in the arena: encoded already, or left out.
-                        Slot::Edited(child) => (EntryKind::Dir, ids[child]?.0),
+                        Slot::Edited(child) => EntryTarget::Dir(ids[child]?),
                     };
                     let name = name.clone();
-                    Some(TreeEntry { name, kind, id })
+                    Some(TreeEntry { name, target })
                 })
                 .collect();
             let tree = match (entries.is_empty(), at) {
@@ -156,7 +156,7 @@ impl<'o, O: ObjectStore> TreeEdit<'o, O> {
 
     /// Puts leaf `kind`/`id` at `path`, making the directories on the way that are missing.
     /// Returns whether that changed anything.
-    fn put(&mut self, path: &RepoPath, kind: EntryKind, id: ObjectId) -> Result<bool, RepoError> {
+    fn put(&mut self, path: &RepoPath, kind: LeafKind, id: BlobId) -> Result<bool, RepoError> {
         let conflict = || RepoError::TypeConflict { path: path.clone() };
         let components: Vec<&str> = path.components().collect();
         let (&name, dirs) = components.split_last().expect("a path has a component");
@@ -248,9 +248,9 @@ impl Dir {
             .entries()
             .iter()
             .map(|entry| {
-                let slot = match entry.kind {
-                    EntryKind::Dir => Slot::Unread(TreeId(entry.id)),
-                    kind => Slot::Leaf { kind, id: entry.id },
+                let slot = match entry.target {
+                    EntryTarget::Leaf(kind, id) => Slot::Leaf { kind, id },
+                    EntryTarget::Dir(tree) => Slot::Unread(tree),
                 };
                 (entry.name.clone(), slot)
             })

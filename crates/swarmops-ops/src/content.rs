@@ -46,7 +46,7 @@ use swarmops_api::{
     ChangeInput, ChangeOp, ContentEncoding, ContentInput, ErrorCode, ModeInput, OpError,
 };
 use swarmops_core::bytes::to_u64;
-use swarmops_core::{EntryKind, RepoPath};
+use swarmops_core::{LeafKind, RepoPath};
 use swarmops_repo::Change;
 
 /// The most bytes a put's content may hold: 512 MiB.
@@ -153,7 +153,7 @@ pub(crate) fn changes(inputs: Vec<ChangeInput>) -> Result<Vec<Change>, OpError> 
         let repo_path = RepoPath::new(path.as_str())
             .map_err(|e| refuse(&format!("not a repository path: {e}")))?;
         let content = match (op, content, mode) {
-            (ChangeOp::Put, Some(content), mode) => Some((entry_kind(mode), content)),
+            (ChangeOp::Put, Some(content), mode) => Some((leaf_kind(mode), content)),
             (ChangeOp::Put, None, _) => return Err(refuse("a put needs content")),
             (ChangeOp::Delete, None, None) => None,
             (ChangeOp::Delete, Some(_), _) => return Err(refuse("a delete takes no content")),
@@ -248,12 +248,13 @@ pub(crate) fn metadata_entry(key: &str, value: &[u8]) -> (String, String) {
     }
 }
 
-/// The kind of entry a put of `mode` writes: a regular file when it names none.
-fn entry_kind(mode: Option<ModeInput>) -> EntryKind {
+/// The kind of leaf a put of `mode` writes: a regular file when it names none. Every mode is a
+/// leaf's, so no put is a directory's.
+fn leaf_kind(mode: Option<ModeInput>) -> LeafKind {
     match mode {
-        None | Some(ModeInput::File) => EntryKind::File,
-        Some(ModeInput::Exec) => EntryKind::Exec,
-        Some(ModeInput::Symlink) => EntryKind::Symlink,
+        None | Some(ModeInput::File) => LeafKind::File,
+        Some(ModeInput::Exec) => LeafKind::Exec,
+        Some(ModeInput::Symlink) => LeafKind::Symlink,
     }
 }
 

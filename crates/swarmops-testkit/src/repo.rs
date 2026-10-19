@@ -2,7 +2,7 @@
 //! make on it.
 
 use camino::Utf8PathBuf;
-use swarmops_core::{BlobId, ChangesetId, EntryKind, ObjectKind, RepoPath, Signature, hash_object};
+use swarmops_core::{BlobId, ChangesetId, LeafKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
 use tempfile::TempDir;
 
@@ -26,11 +26,11 @@ pub fn blob(content: &[u8]) -> BlobId {
 
 /// A change that puts a regular file holding `content` at `p`.
 pub fn put(p: &str, content: &[u8]) -> Change {
-    put_as(p, EntryKind::File, content)
+    put_as(p, LeafKind::File, content)
 }
 
-/// A change that puts an entry of `kind` holding `content` at `p`.
-pub fn put_as(p: &str, kind: EntryKind, content: &[u8]) -> Change {
+/// A change that puts a leaf of `kind` holding `content` at `p`.
+pub fn put_as(p: &str, kind: LeafKind, content: &[u8]) -> Change {
     Change {
         path: path(p),
         op: ChangeOp::Put {

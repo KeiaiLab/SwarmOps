@@ -59,7 +59,7 @@ use std::io;
 use std::sync::Arc;
 
 use swarmops_core::bytes::to_u64;
-use swarmops_core::{Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, Tree, TreeId};
+use swarmops_core::{Changeset, ChangesetId, EntryTarget, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
     ChangesetMeta, Frame, Index, Journal, ObjectStore, Record, RefFile, SortedView, StoreError,
 };
@@ -585,10 +585,11 @@ impl<'r, O: ObjectStore> Check<'r, O> {
                 continue;
             };
             for entry in tree.entries() {
-                if entry.kind == EntryKind::Dir {
-                    stack.push(entry.id);
-                } else {
-                    self.blobs.entry(entry.id).or_insert(by);
+                match entry.target {
+                    EntryTarget::Dir(tree) => stack.push(tree.0),
+                    EntryTarget::Leaf(_, blob) => {
+                        self.blobs.entry(blob.0).or_insert(by);
+                    }
                 }
             }
         }

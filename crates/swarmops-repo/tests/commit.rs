@@ -21,8 +21,8 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{
-    Changeset, ChangesetId, CodecError, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, Tree,
-    TreeEntry, hash_object,
+    Changeset, ChangesetId, CodecError, DeltaEntry, DeltaOp, EntryKind, LeafKind, ObjectId,
+    ObjectKind, Tree, TreeEntry, hash_object,
 };
 use swarmops_repo::{
     CasResult, Change, ChangeOp, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
@@ -71,7 +71,7 @@ fn commit(repo: &LocalRepo, parents: &[ChangesetId], changes: Vec<Change>) -> Co
 
 fn file_put(content: &[u8]) -> DeltaOp {
     DeltaOp::Put {
-        kind: EntryKind::File,
+        kind: LeafKind::File,
         id: blob(content),
     }
 }
@@ -100,9 +100,12 @@ fn listing(
     dir: Option<&str>,
 ) -> Option<Vec<(String, EntryKind)>> {
     let dir = dir.map(path);
-    repo.list_tree(id, dir.as_ref())
-        .unwrap()
-        .map(|entries| entries.into_iter().map(|e| (e.name, e.kind)).collect())
+    repo.list_tree(id, dir.as_ref()).unwrap().map(|entries| {
+        entries
+            .into_iter()
+            .map(|e| (e.name, e.target.kind()))
+            .collect()
+    })
 }
 
 fn names(entries: &[(&str, EntryKind)]) -> Vec<(String, EntryKind)> {
@@ -117,14 +120,6 @@ fn content(repo: &LocalRepo, id: ChangesetId, p: &str) -> Option<Vec<u8>> {
     repo.read_blob_at(id, &path(p))
         .unwrap()
         .map(|(_, _, bytes)| bytes)
-}
-
-fn entry(name: &str, kind: EntryKind, id: ObjectId) -> TreeEntry {
-    TreeEntry {
-        name: name.to_owned(),
-        kind,
-        id,
-    }
 }
 
 fn tree(entries: Vec<TreeEntry>) -> Tree {
@@ -182,14 +177,14 @@ fn root_commit_from_change_list_builds_trees_and_delta() {
     assert_eq!(out.warnings, Vec::<String>::new());
 
     // The trees as their canonical objects, bottom-up: the root holds a.rs and src.
-    let x = tree(vec![entry("y.txt", EntryKind::File, blob(b"y\n").0)]);
+    let x = tree(vec![TreeEntry::leaf("y.txt", LeafKind::File, blob(b"y\n"))]);
     let src = tree(vec![
-        entry("lib.rs", EntryKind::File, blob(b"pub mod x;\n").0),
-        entry("x", EntryKind::Dir, x.id().0),
+        TreeEntry::leaf("lib.rs", LeafKind::File, blob(b"pub mod x;\n")),
+        TreeEntry::dir("x", x.id()),
     ]);
     let root = tree(vec![
-        entry("a.rs", EntryKind::File, blob(b"fn a() {}\n").0),
-        entry("src", EntryKind::Dir, src.id().0),
+        TreeEntry::leaf("a.rs", LeafKind::File, blob(b"fn a() {}\n")),
+        TreeEntry::dir("src", src.id()),
     ]);
     assert_eq!(out.root, root.id());
     assert_eq!(
@@ -345,15 +340,8 @@ fn commit_rejects_file_dir_type_conflict() {
 }
 
 #[test]
-fn commit_rejects_dir_put_and_empty_changes() {
+fn commit_rejects_empty_changes() {
     let (_dir, root, repo) = new_repo();
-    match repo.commit(request(
-        &[],
-        vec![put("a", b"a"), put_as("d", EntryKind::Dir, b"")],
-    )) {
-        Err(RepoError::DirPut { path: dir }) => assert_eq!(dir, path("d")),
-        other => panic!("expected DirPut, got {other:?}"),
-    }
     let empty = repo.commit(request(&[], Vec::new()));
     assert!(matches!(empty, Err(RepoError::EmptyChanges)), "{empty:?}");
 
@@ -478,7 +466,7 @@ fn commit_root_matches_a_root_commit_of_the_same_files() {
             delete("src/x/y.txt"),
             delete("old/gone.txt"),
             put("src/x/z.txt", b"z"),
-            put_as("bin/run", EntryKind::Exec, b"#!/bin/sh\n"),
+            put_as("bin/run", LeafKind::Exec, b"#!/bin/sh\n"),
         ],
     );
     let (_other_dir, _other_root, fresh) = new_repo();
@@ -489,7 +477,7 @@ fn commit_root_matches_a_root_commit_of_the_same_files() {
             put("a.rs", b"a"),
             put("src/lib.rs", b"v2"),
             put("src/x/z.txt", b"z"),
-            put_as("bin/run", EntryKind::Exec, b"#!/bin/sh\n"),
+            put_as("bin/run", LeafKind::Exec, b"#!/bin/sh\n"),
         ],
     );
     assert_eq!(child.root, direct.root);
@@ -1145,7 +1133,7 @@ fn commit_records_only_what_changes() {
         &[base.id],
         vec![
             put("same.txt", b"same"),
-            put_as("tool", EntryKind::Exec, script),
+            put_as("tool", LeafKind::Exec, script),
             put("new.txt", b"new"),
             put("twin.txt", b"new"),
         ],
@@ -1157,7 +1145,7 @@ fn commit_records_only_what_changes() {
             (
                 "tool".to_owned(),
                 DeltaOp::Put {
-                    kind: EntryKind::Exec,
+                    kind: LeafKind::Exec,
                     id: blob(script),
                 }
             ),
@@ -1175,7 +1163,7 @@ fn commit_records_only_what_changes() {
     );
     assert_eq!(
         repo.read_blob_at(out.id, &path("tool")).unwrap(),
-        Some((EntryKind::Exec, blob(script), script.to_vec()))
+        Some((LeafKind::Exec, blob(script), script.to_vec()))
     );
 }
 
@@ -1221,7 +1209,7 @@ fn root_commit_objects(req: &CommitRequest) -> [ObjectId; 3] {
         panic!("a request of one put: {:?}", req.changes);
     };
     let blob = blob(content);
-    let root = tree(vec![entry(file.as_str(), *kind, blob.0)]).id();
+    let root = tree(vec![TreeEntry::leaf(file.as_str(), *kind, blob)]).id();
     let changeset = Changeset {
         parents: Vec::new(),
         root,

@@ -29,13 +29,6 @@ pub enum RepoError {
         /// The path of the change that conflicts.
         path: RepoPath,
     },
-    /// A change puts a directory. Changes put files, executables and symlinks; directories
-    /// follow from the paths.
-    #[error("{path}: a change cannot put a directory")]
-    DirPut {
-        /// The path of the change.
-        path: RepoPath,
-    },
     /// The change list is empty, or changes nothing (every change puts what its path holds
     /// already), and the request does not allow an empty changeset.
     #[error("the change list changes nothing")]

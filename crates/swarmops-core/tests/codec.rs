@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use proptest::prelude::*;
 use swarmops_core::object::varint;
 use swarmops_core::{
-    BlobId, Changeset, ChangesetId, CodecError, DeltaEntry, DeltaOp, EntryKind, ObjectId,
-    ObjectKind, RepoPath, Signature, Tree, TreeEntry, TreeId, hash_object,
+    BlobId, Changeset, ChangesetId, CodecError, DeltaEntry, DeltaOp, EntryKind, EntryTarget,
+    LeafKind, ObjectId, ObjectKind, RepoPath, Signature, Tree, TreeEntry, TreeId, hash_object,
 };
 
 fn golden_dir() -> PathBuf {
@@ -44,12 +44,7 @@ fn sig(name: &[u8], email: &[u8], secs: i64, offset_secs: i32, negative_zero: bo
 }
 
 fn one_file_tree() -> Tree {
-    Tree::new(vec![TreeEntry {
-        name: "a.rs".into(),
-        kind: EntryKind::File,
-        id: blob_id(b"x").as_object_id(),
-    }])
-    .unwrap()
+    Tree::new(vec![TreeEntry::leaf("a.rs", LeafKind::File, blob_id(b"x"))]).unwrap()
 }
 
 fn minimal_changeset() -> Changeset {
@@ -75,7 +70,7 @@ fn full_changeset() -> Changeset {
             DeltaEntry {
                 path: RepoPath::new("a.rs").unwrap(),
                 op: DeltaOp::Put {
-                    kind: EntryKind::File,
+                    kind: LeafKind::File,
                     id: blob_id(b"x"),
                 },
                 renamed_from: None,
@@ -83,7 +78,7 @@ fn full_changeset() -> Changeset {
             DeltaEntry {
                 path: RepoPath::new("bin/run").unwrap(),
                 op: DeltaOp::Put {
-                    kind: EntryKind::Exec,
+                    kind: LeafKind::Exec,
                     id: blob_id(b"#!/bin/sh\n"),
                 },
                 renamed_from: Some(RepoPath::new("run.sh").unwrap()),
@@ -144,13 +139,65 @@ fn tree_encode_matches_spec_layout() {
     assert_eq!(t.id(), TreeId(hash_object(ObjectKind::Tree, &want)));
 }
 
+/// An entry's target is laid out as the `(kind, id)` pair it replaced: the kind byte, then the
+/// blob's or the tree's id. A one-entry tree of each target encodes to
+/// `SWTR | 01 | 01 | kind | 01 'a' | id`, has the id of those bytes and decodes back to the same
+/// entry; the golden trees decode to the targets they were made of.
+#[test]
+fn a_tree_entry_target_round_trips_through_the_byte_layout() {
+    let blob = blob_id(b"x");
+    let dir = one_file_tree().id();
+    for (target, kind, byte) in [
+        (EntryTarget::Leaf(LeafKind::File, blob), EntryKind::File, 0),
+        (EntryTarget::Leaf(LeafKind::Exec, blob), EntryKind::Exec, 1),
+        (
+            EntryTarget::Leaf(LeafKind::Symlink, blob),
+            EntryKind::Symlink,
+            2,
+        ),
+        (EntryTarget::Dir(dir), EntryKind::Dir, 3),
+    ] {
+        assert_eq!((target.kind(), target.kind().as_u8()), (kind, byte));
+        let entry = TreeEntry {
+            name: "a".into(),
+            target,
+        };
+        let tree = Tree::new(vec![entry.clone()]).unwrap();
+        let mut want = b"SWTR\x01\x01".to_vec();
+        want.extend_from_slice(&[byte, 1, b'a']);
+        want.extend_from_slice(&target.id().0);
+        assert_eq!(tree.encode(), want, "{kind:?}");
+        let id = TreeId(hash_object(ObjectKind::Tree, &want));
+        assert_eq!(tree.id(), id, "{kind:?}");
+        assert_eq!(Tree::decode(&want).unwrap().entries(), [entry], "{kind:?}");
+    }
+    assert_eq!(EntryTarget::Leaf(LeafKind::Exec, blob).id(), blob.0);
+    assert_eq!(EntryTarget::Dir(dir).id(), dir.0);
+    for (leaf, kind) in [
+        (LeafKind::File, EntryKind::File),
+        (LeafKind::Exec, EntryKind::Exec),
+        (LeafKind::Symlink, EntryKind::Symlink),
+    ] {
+        assert_eq!(leaf.entry_kind(), kind);
+        assert_eq!(leaf.as_u8(), kind.as_u8());
+        assert_eq!(LeafKind::from_u8(kind.as_u8()), Ok(leaf));
+    }
+    let (bytes, _, _) = read_golden("one_file_tree");
+    assert_eq!(
+        Tree::decode(&bytes).unwrap().entries(),
+        [TreeEntry::leaf("a.rs", LeafKind::File, blob)]
+    );
+    assert_eq!(
+        Tree::decode(&bytes).unwrap().entries()[0].target,
+        EntryTarget::Leaf(LeafKind::File, blob)
+    );
+    let (bytes, _, _) = read_golden("empty_tree");
+    assert_eq!(Tree::decode(&bytes).unwrap(), Tree::empty_root());
+}
+
 #[test]
 fn tree_new_rejects_unsorted_duplicate_and_empty() {
-    let e = |name: &str| TreeEntry {
-        name: name.into(),
-        kind: EntryKind::File,
-        id: blob_id(b"x").as_object_id(),
-    };
+    let e = |name: &str| TreeEntry::leaf(name, LeafKind::File, blob_id(b"x"));
     assert_eq!(
         Tree::new(vec![e("b"), e("a")]).unwrap_err(),
         CodecError::Unsorted
@@ -272,12 +319,38 @@ fn changeset_rejects_unsorted_delta_and_metadata() {
     let mut cs = full_changeset();
     cs.metadata = vec![("z".to_owned(), vec![]), ("a".to_owned(), vec![])];
     assert_eq!(cs.encode().unwrap_err(), CodecError::UnsortedMetadata);
-    let mut cs = full_changeset();
-    cs.delta[0].op = DeltaOp::Put {
-        kind: EntryKind::Dir,
-        id: blob_id(b"x"),
-    };
-    assert_eq!(cs.encode().unwrap_err(), CodecError::BadKind(3));
+}
+
+/// A delta put names a leaf, never a directory: its kind is a `LeafKind`, which cannot say
+/// `Dir`, so no encoder writes one, and a put whose kind byte is 3 (`Dir`), or any byte past
+/// the leaf kinds, does not decode.
+#[test]
+fn a_delta_put_of_a_directory_does_not_decode() {
+    let mut cs = minimal_changeset();
+    cs.delta = vec![DeltaEntry {
+        path: RepoPath::new("a.rs").unwrap(),
+        op: DeltaOp::Put {
+            kind: LeafKind::File,
+            id: blob_id(b"x"),
+        },
+        renamed_from: None,
+    }];
+    // Control: the put of a file is canonical and round-trips.
+    let valid = cs.encode().unwrap();
+    assert_eq!(Changeset::decode(&valid).unwrap(), cs);
+
+    // The layout is `len|path | op | kind | id | has_rename`: a put's kind byte follows its op
+    // byte (0).
+    let put = |kind: u8| [len_prefixed("a.rs").as_slice(), &[0, kind]].concat();
+    for byte in [EntryKind::Dir.as_u8(), 4, u8::MAX] {
+        assert_eq!(LeafKind::from_u8(byte), Err(CodecError::BadKind(byte)));
+        let tampered = splice_once(&valid, &put(LeafKind::File.as_u8()), &put(byte));
+        assert_eq!(
+            Changeset::decode(&tampered).unwrap_err(),
+            CodecError::BadKind(byte),
+            "kind byte {byte}"
+        );
+    }
 }
 
 /// `varint len | bytes` as the layout writes a string; every string used with it
@@ -335,7 +408,7 @@ fn changeset_rejects_rename_from_self() {
     cs.delta = vec![DeltaEntry {
         path: path.clone(),
         op: DeltaOp::Put {
-            kind: EntryKind::File,
+            kind: LeafKind::File,
             id: blob_id(b"x"),
         },
         renamed_from: Some(RepoPath::new("b.rs").unwrap()),
@@ -373,12 +446,13 @@ fn arb_name() -> impl Strategy<Value = String> {
     "[a-z0-9._-]{1,8}".prop_filter("no dot components", |s| s != "." && s != "..")
 }
 
-fn arb_kind() -> impl Strategy<Value = EntryKind> {
+/// One of the four targets an entry can name, each as likely as the others.
+fn arb_target() -> impl Strategy<Value = EntryTarget> {
     prop_oneof![
-        Just(EntryKind::File),
-        Just(EntryKind::Exec),
-        Just(EntryKind::Symlink),
-        Just(EntryKind::Dir)
+        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::File, BlobId(id))),
+        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::Exec, BlobId(id))),
+        arb_id().prop_map(|id| EntryTarget::Leaf(LeafKind::Symlink, BlobId(id))),
+        arb_id().prop_map(|id| EntryTarget::Dir(TreeId(id)))
     ]
 }
 
@@ -387,10 +461,10 @@ fn arb_id() -> impl Strategy<Value = ObjectId> {
 }
 
 fn arb_sorted_entries() -> impl Strategy<Value = Vec<TreeEntry>> {
-    proptest::collection::vec((arb_name(), arb_kind(), arb_id()), 1..6).prop_map(|v| {
+    proptest::collection::vec((arb_name(), arb_target()), 1..6).prop_map(|v| {
         let mut entries: Vec<TreeEntry> = v
             .into_iter()
-            .map(|(name, kind, id)| TreeEntry { name, kind, id })
+            .map(|(name, target)| TreeEntry { name, target })
             .collect();
         entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
         entries.dedup_by(|a, b| a.name == b.name);
@@ -421,9 +495,9 @@ fn arb_signature() -> impl Strategy<Value = Signature> {
 
 fn arb_delta() -> impl Strategy<Value = Vec<DeltaEntry>> {
     let leaf_kind = prop_oneof![
-        Just(EntryKind::File),
-        Just(EntryKind::Exec),
-        Just(EntryKind::Symlink)
+        Just(LeafKind::File),
+        Just(LeafKind::Exec),
+        Just(LeafKind::Symlink)
     ];
     let op = prop_oneof![
         (leaf_kind, arb_id()).prop_map(|(kind, id)| DeltaOp::Put {
