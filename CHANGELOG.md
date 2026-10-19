@@ -328,8 +328,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   name the file operation that failed and the store file it was on: `details.fs_op` (one of 22
   names, such as `"open"` or `"append_durable"`) and `details.store_file` (relative to the
   store's root, such as `meta/journal.off`; absent for a path outside it). Their messages say
-  the same before the operating system's text, no error carries the store's host path, and the
-  schema's descriptions of the three codes say so. A missing index file's `E_STORE_CORRUPT`
+  the same before the operating system's text, none of them carries the store's host path but
+  two `E_IO`s that operations spec §0 names (a symlink loop met while working out where that
+  path leads, and tempfile's giving up after 65,536 taken temp-file names), and the schema's
+  descriptions of the three codes say so. A missing index file's `E_STORE_CORRUPT`
   names it (`meta/idx/ids.col is missing`). In the Rust API, `StoreError::Io` and
   `NotCommitted` carry an `IoFailure` (`op`, `file`, `source`, `also`) in place of an
   `io::Error`, the new `StoreFs` locates the failure of every filesystem call the stores make,
@@ -371,7 +373,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (`IndexCorrupt`) on every lookup that reads it. Before, a lookup by id, prefix or delta hash
   answered with another changeset's record where the entry pointed into the unsorted tail, and
   failed with `E_IO` past the index's end.
-- No error from the store carries the store's absolute path any more. A malformed
+- No failure of the store's filesystem calls carries the store's absolute path any more, but
+  tempfile's giving up after 65,536 taken temp-file names, which is not met in practice
+  ([docs/known-limitations.md](docs/known-limitations.md), "One temp-file error names a host
+  path"); the errors that answer for the path a command was given still name it, most of them
+  made absolute (`E_NOT_A_REPO`, `E_UNSUPPORTED_FS`, a symlink loop met while working out where
+  it leads; operations spec §0). A malformed
   `journal.ckpt` or ref file, and a ref file over its size cap, are named by their place in the
   store (`meta/journal.ckpt`, `meta/refs/<name>`), and a store file that is not a regular file
   by its name. A temp file that the store cannot create or write (an object write, or the

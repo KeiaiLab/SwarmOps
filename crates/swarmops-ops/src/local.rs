@@ -150,7 +150,10 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_IO` `{fs_op, store_file}`: any other `Io` error, whatever its kind (an OS `EINVAL` among
 ///   them). `fs_op` names the file operation that failed; `store_file` the file of the store it
 ///   was on, relative to the store's root (`.` for the root itself), and is absent for a path
-///   outside it; no error carries a host path. Also the store's `NotCommitted` (below) whose
+///   outside it; no such error carries a host path but the two operations spec §0 names: a
+///   symlink loop met while working out where the store's path leads (`fs_op` `resolve`, no
+///   `store_file`), whose message names that path, and tempfile's giving up after 65,536 taken
+///   temp-file names. Also the store's `NotCommitted` (below) whose
 ///   append the filesystem refused for want of permission or as a read-only filesystem
 ///   (`PermissionDenied`, `ReadOnlyFilesystem`), `{committed, fs_op, store_file}`: running the
 ///   same command again meets the same refusal until its cause is fixed, which the hint names.

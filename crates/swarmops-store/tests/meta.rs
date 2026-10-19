@@ -561,9 +561,9 @@ fn a_huge_ref_file_is_not_a_ref_file_and_is_not_read_whole() {
 
 #[test]
 fn a_malformed_checkpoint_or_ref_file_is_reported_without_the_store_path() {
-    // The store's root is a host path, which no error carries to an agent (operations spec
-    // §0): a metadata file that does not read as one, or that is not a regular file, is named
-    // by its place in the store, as the read that failed.
+    // The store's root is a host path, which no filesystem failure carries to an agent
+    // (operations spec §0): a metadata file that does not read as one, or that is not a regular
+    // file, is named by its place in the store, as the read that failed.
     let (_dir, root, store) = new_store();
     insert(&store, &[cs(1, &[])]);
     cas(&store, "main", None, Some(1));

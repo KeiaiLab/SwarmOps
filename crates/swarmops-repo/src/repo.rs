@@ -540,8 +540,8 @@ fn resolving(e: io::Error) -> IoFailure {
 /// first. One component at a time: `..` takes back the one before it (resolved already, so no
 /// symlink); a symlink gives way to its target, whether that exists or not (a directory made
 /// through it lands where it points); a name that does not exist is kept as it is. A failure is
-/// [`FileOp::Resolve`]'s, with no file; a symlink loop names `path` in its text, the path the
-/// caller gave.
+/// [`FileOp::Resolve`]'s, with no file; a symlink loop names `path` in its text: the store's path
+/// made absolute (against the working directory, if the caller gave it relative).
 fn resolve(path: &Utf8Path) -> Result<(Utf8PathBuf, Vec<Utf8PathBuf>), IoFailure> {
     // Linux's MAXSYMLINKS: more symlinks than that on one path is a loop.
     const MAX_LINKS: usize = 40;

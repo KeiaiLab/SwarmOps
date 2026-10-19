@@ -440,7 +440,13 @@ it repaired, in offsets and counts; it is no warning (operations §0).
 
 An I/O failure (`E_IO`, `E_IO_TRANSIENT`, and the `E_STORE_CORRUPT` of a metadata file that does
 not parse) names the file operation that failed and the store file it was on (`details.fs_op`,
-`details.store_file`, relative to the store's root), never a host path.
+`details.store_file`, relative to the store's root), never a host path but in two `E_IO`s that
+operations §0 names: a symlink loop met while working out where the store's path leads
+(`fs_op: "resolve"`), whose message names that path, and tempfile's giving up after 65,536
+taken temp-file names, not met in practice. The errors that answer for the path a command was
+given name it too, most of them made absolute against the working directory: `E_NOT_A_REPO` (no
+store there, or a `FORMAT` or `REPO` this build does not read), `E_UNSUPPORTED_FS` (its message
+and `details.path`), and `init`'s `E_EXISTS`.
 
 A mutation needs an identity, `<family>/<instance>` (for example `agent/worker-17`), from
 `--as` or `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID` for the agent's run; without one it fails with

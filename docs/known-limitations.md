@@ -264,6 +264,13 @@ left).
   name), `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` (tokens, `policy.toml` and gc's
   maintenance lease come later) are in the schema, so that an agent can match them before any
   operation raises them. *Documented. Found: the 2026-10-16 comparison; M1.5 Task 9 review.*
+- **One temp-file error names a host path.** When 65,536 temp-file names in a row are taken in
+  a directory of the store, the `tempfile` crate gives up with `too many temporary files exist`
+  and the directory's absolute path, which an `E_IO` then carries; the names are random, so it
+  is not met in practice. The other errors that name the store's own path answer for the path a
+  command was given (operations spec §0). A server that takes requests from another host must
+  not pass either on as it is. *Target: M11 (`serve`), M10. Found: the M1.6 consolidated review
+  (error contract).*
 
 ## Git import and export
 
