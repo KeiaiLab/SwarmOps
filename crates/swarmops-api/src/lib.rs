@@ -20,11 +20,11 @@ pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
     CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
     DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, EntryKindOut,
-    FileContent, FileKind, GitImportReq, GitImportResp, IdentityInfo, InfoReq, InitReq, LogPage,
-    LogReq, LossyClass, LossyCommitOut, ModeInput, PathHistoryEntry, PathHistoryPage,
-    PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefOut,
-    RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut,
-    TreeListing, VerifyFinding, VerifyReport, VerifyReq,
+    FileContent, FileKind, GitExportReq, GitExportResp, GitImportReq, GitImportResp, IdentityInfo,
+    InfoReq, InitReq, LogPage, LogReq, LossyClass, LossyCommitOut, ModeInput, PathHistoryEntry,
+    PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq,
+    RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures,
+    StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 pub use rev::Rev;
@@ -110,5 +110,8 @@ pub fn schema_for_all() -> serde_json::Value {
         LossyClass,
         GitImportResp,
         LossyCommitOut,
+        // git export, which runs on the client too.
+        GitExportReq,
+        GitExportResp,
     ]
 }
