@@ -1175,3 +1175,170 @@ mod hashed {
         assert_eq!(made(calls()), 1, "once a batch, not once a store");
     }
 }
+
+/// An object's kind and length from its file's header alone ([`ObjectStore::stat`]), and an
+/// object a caller relies on without writing it ([`ObjectStore::retain`]).
+mod stat {
+    use swarmops_store::{FileOp, ObjectStat};
+    use swarmops_testkit::fs::RecordingFs;
+
+    use super::*;
+
+    /// A store of `layout` on a [`RecordingFs`] that names each call by its path in the store,
+    /// and the function that returns the calls made since it last ran.
+    fn recording_store(layout: &Layout) -> (FsObjectStore, impl Fn() -> Vec<String>) {
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(layout.root().as_std_path().to_path_buf());
+        (FsObjectStore::open(layout.clone(), Box::new(fs)), calls)
+    }
+
+    /// Applies `damage` to the file of `id`, stats `id`, and restores the file.
+    fn stat_damaged(
+        store: &FsObjectStore,
+        layout: &Layout,
+        id: ObjectId,
+        damage: fn(&mut Vec<u8>),
+    ) -> Result<Option<ObjectStat>, StoreError> {
+        let path = layout.object_path(id);
+        let pristine = fs::read(&path).unwrap();
+        let mut damaged = pristine.clone();
+        damage(&mut damaged);
+        fs::write(&path, &damaged).unwrap();
+        let got = store.stat(id);
+        fs::write(&path, &pristine).unwrap();
+        got
+    }
+
+    /// A damage that leaves the header whole, and the length `stat` reports through it.
+    type PastTheHeader = (&'static str, fn(&mut Vec<u8>), u64);
+
+    /// What `stat` gives for a stored object of `kind` whose header records `size`.
+    fn stat_of(kind: ObjectKind, size: u64) -> ObjectStat {
+        ObjectStat { kind, size }
+    }
+
+    #[test]
+    fn stat_reads_the_header_only() {
+        let (_root, layout) = new_root();
+        let (store, calls) = recording_store(&layout);
+        let large = store
+            .put(ObjectKind::Blob, &random_bytes(10 << 20))
+            .unwrap();
+        let zstd = store.put(ObjectKind::Blob, &[b'a'; 4096]).unwrap();
+        let tree = store.put(ObjectKind::Tree, b"a tree's bytes").unwrap();
+        let raw = store.put(ObjectKind::Changeset, &[7; 100]).unwrap();
+        assert_eq!(fs::read(layout.object_path(large)).unwrap()[5], ENC_RAW);
+        assert_eq!(fs::read(layout.object_path(zstd)).unwrap()[5], ENC_ZSTD);
+        calls();
+
+        let stat = |id| store.stat(id).unwrap();
+        assert_eq!(stat(large), Some(stat_of(ObjectKind::Blob, 10 << 20)));
+        assert_eq!(
+            stat(zstd),
+            Some(stat_of(ObjectKind::Blob, 4096)),
+            "the payload's length, not the file's"
+        );
+        assert_eq!(stat(tree), Some(stat_of(ObjectKind::Tree, 14)));
+        assert_eq!(stat(raw), Some(stat_of(ObjectKind::Changeset, 100)));
+        assert_eq!(stat(hash_object(ObjectKind::Blob, b"never stored")), None);
+        assert_eq!(
+            calls(),
+            Vec::<String>::new(),
+            "no FsOps call: the header is read through std::fs"
+        );
+
+        // A header this store does not write is `BadHeader`, as `get` finds it.
+        let cases: [Damage; 6] = [
+            ("bad magic", raw, |file| file[0] = b'X'),
+            ("unknown kind", raw, |file| file[4] = 3),
+            ("unknown encoding", raw, |file| file[5] = 2),
+            ("nonzero reserved bytes", raw, |file| file[7] = 1),
+            ("header cut short", raw, |file| {
+                file.truncate(HEADER_LEN - 1);
+            }),
+            ("an empty file", raw, Vec::clear),
+        ];
+        for (what, id, damage) in cases {
+            let got = stat_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+                "{what}: {got:?}"
+            );
+        }
+        // Nothing past the header is read: the payload's damage is `get`'s to find, and the
+        // length is the header's own, however large, since nothing is allocated by it.
+        let past_the_header: [PastTheHeader; 2] = [
+            (
+                "raw payload cut short",
+                |file| {
+                    file.pop();
+                },
+                100,
+            ),
+            (
+                "a length no payload has",
+                |file| file[8..16].copy_from_slice(&u64::MAX.to_le_bytes()),
+                u64::MAX,
+            ),
+        ];
+        for (what, damage, size) in past_the_header {
+            let got = stat_damaged(&store, &layout, raw, damage);
+            let want = stat_of(ObjectKind::Changeset, size);
+            assert_eq!(got.unwrap(), Some(want), "{what}");
+        }
+
+        // A path that is no regular file fails as `get` fails, named by its place in the store.
+        let path = layout.object_path(raw);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        match store.stat(raw) {
+            Err(StoreError::Io(failure)) => {
+                let file = path.strip_prefix(layout.root()).unwrap();
+                assert_eq!(
+                    (failure.op, failure.file.as_deref(), failure.kind()),
+                    (FileOp::Open, Some(file), io::ErrorKind::InvalidData),
+                    "{failure}"
+                );
+            }
+            other => panic!("expected an I/O failure, got {other:?}"),
+        }
+        assert_eq!(calls(), Vec::<String>::new(), "still no FsOps call");
+    }
+
+    #[test]
+    fn retain_makes_the_next_flush_sync_the_fan_out() {
+        let (_root, layout) = new_root();
+        // Another writer, in another process say, linked the object and has not flushed yet.
+        let id = real_store(&layout)
+            .put(ObjectKind::Blob, b"stored elsewhere")
+            .unwrap();
+        let fanout = format!("fsync_dir objects/{:02x}", id.0[0]);
+        let (store, calls) = recording_store(&layout);
+
+        assert_eq!(
+            store.retain(id).unwrap(),
+            Some(stat_of(ObjectKind::Blob, 16)),
+            "what stat gives"
+        );
+        assert_eq!(calls(), Vec::<String>::new(), "retain makes no FsOps call");
+        store.flush().unwrap();
+        assert_eq!(
+            calls(),
+            [fanout],
+            "one fsync, of the object's fan-out directory"
+        );
+        store.flush().unwrap();
+        assert_eq!(calls(), Vec::<String>::new(), "the flush took it");
+
+        // An object that is not stored, or whose header is damaged, leaves nothing to flush.
+        let missing = hash_object(ObjectKind::Blob, b"never stored");
+        assert_eq!(store.retain(missing).unwrap(), None);
+        let path = layout.object_path(id);
+        let mut file = fs::read(&path).unwrap();
+        file[0] = b'X';
+        fs::write(&path, &file).unwrap();
+        assert!(matches!(store.retain(id), Err(StoreError::BadHeader { id: bad }) if bad == id));
+        store.flush().unwrap();
+        assert_eq!(calls(), Vec::<String>::new(), "nothing to fsync");
+    }
+}

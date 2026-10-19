@@ -2,7 +2,8 @@
 //!
 //! An object file is `"SOB1" | kind u8 {0 blob, 1 tree, 2 changeset} | enc u8 {0 raw,
 //! 1 zstd} | u16le 0 | u64le ulen | payload`; the id is always the hash of the decoded
-//! payload, so every read is verified.
+//! payload, so every read of an object is verified. [`ObjectStore::stat`] reads the header
+//! alone, for the kind and the length it records, and verifies nothing.
 //!
 //! A write takes the payload with its id ([`Hashed`]: its caller hashed it, once;
 //! [`ObjectStore::put`] hashes its own), skips the work if the object file exists, writes and
@@ -16,6 +17,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{self, Read};
+use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -25,7 +27,7 @@ use swarmops_core::bytes::to_u64;
 use swarmops_core::{Hashed, ObjectId, ObjectKind, hash_object};
 
 use crate::error::{FileOp, IoFailure, StoreError};
-use crate::fs_ops::{FsMethod, FsOps, HookedFs, LinkOutcome, RealFs, StoreFs};
+use crate::fs_ops::{FsMethod, FsOps, HookedFs, LinkOutcome, RealFs, StoreFs, open_regular};
 use crate::layout::Layout;
 
 const MAGIC: [u8; 4] = *b"SOB1";
@@ -63,8 +65,23 @@ pub trait ObjectStore: Send + Sync {
     /// Whether an object file for `id` exists (not verified).
     fn contains(&self, id: ObjectId) -> Result<bool, StoreError>;
 
-    /// Makes every object put since the last flush durable. An implementation may wait on a
-    /// thread pool meanwhile, as [`FsObjectStore`]'s does: see there what that rules out.
+    /// The kind and the payload length of object `id`, as its file's 16-byte header records
+    /// them; `None` if it is not stored. Reads the header alone ([`FsObjectStore`]: through
+    /// `std::fs`, with no [`FsOps`] call), so it neither reads the payload nor verifies it
+    /// ([`ObjectStore::get`] does): the length is the header's own, however large, since nothing
+    /// is allocated by it. A header this store does not write (its magic, kind, encoding or
+    /// reserved bytes), or a file shorter than one, is [`StoreError::BadHeader`].
+    fn stat(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError>;
+
+    /// [`ObjectStore::stat`]; and when the object is stored, its fan-out directory joins the next
+    /// [`ObjectStore::flush`]'s fsyncs, as a put of an object stored already does: for a caller
+    /// about to rely on an object it did not write, which another writer may have linked without
+    /// having fsynced its directory yet.
+    fn retain(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError>;
+
+    /// Makes every object put or retained since the last flush durable. An implementation may
+    /// wait on a thread pool meanwhile, as [`FsObjectStore`]'s does: see there what that rules
+    /// out.
     fn flush(&self) -> Result<(), StoreError>;
 
     /// The id of every object stored, in ascending order. Reads no object, so it verifies
@@ -81,6 +98,17 @@ pub struct PutOutcome {
     /// ([`LinkOutcome::Placed`]). Not when the object was stored already, nor when a writer
     /// racing this one linked it first (the file then holds the same bytes all the same).
     pub written: bool,
+}
+
+/// An object's kind and payload length, as its file's header records them
+/// ([`ObjectStore::stat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectStat {
+    /// The object's kind.
+    pub kind: ObjectKind,
+    /// The length of its payload, decoded: of what [`ObjectStore::get`] returns, if the file is
+    /// whole.
+    pub size: u64,
 }
 
 /// `objects/tmp`, made at most once a batch: by the batch's first put that writes a file, and not
@@ -121,16 +149,18 @@ impl TmpOnce {
 /// store while another flush waited, the two would deadlock.
 pub struct FsObjectStore {
     layout: Layout,
-    /// Every filesystem call goes through it, its failure located in the store.
+    /// Every filesystem call but those of `list` and `stat` goes through it, its failure located
+    /// in the store; theirs are located through it too.
     fs: StoreFs,
-    /// Directories `flush` must fsync: the fan-out directory of every object put since
-    /// the last flush, and `objects/` if one of those fan-out directories was created.
+    /// Directories `flush` must fsync: the fan-out directory of every object put or retained
+    /// since the last flush, and `objects/` if one of those fan-out directories was created.
     touched: Mutex<BTreeSet<Utf8PathBuf>>,
     /// Held by `flush` from taking the touched set through its last fsync, so that no
     /// flush returns while an earlier one is still fsyncing directories the caller's
-    /// objects rely on. Lock order: `flush_lock`, then `touched`; `put` takes only `touched`.
+    /// objects rely on. Lock order: `flush_lock`, then `touched`; `put` and `retain` take only
+    /// `touched`.
     flush_lock: Mutex<()>,
-    /// The pool of `put_batch` and of `flush`'s fsyncs once
+    /// The pool of `put_batch`, `put_hashed_batch` and `flush`'s fsyncs once
     /// [`FsObjectStore::set_parallelism`] is called; until then, rayon's global pool.
     pool: Option<ThreadPool>,
 }
@@ -340,6 +370,42 @@ impl ObjectStore for FsObjectStore {
         Ok(self.fs.exists(self.layout.object_path(id).as_std_path())?)
     }
 
+    /// Opens the object's file as every store file is read on a handle of its own
+    /// (`open_regular`: a path that is no regular file is refused before it is opened, as
+    /// [`ObjectStore::get`] refuses it), and reads its first 16 bytes.
+    fn stat(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError> {
+        let path = self.layout.object_path(id);
+        let file = match open_regular(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(self.fs.locate(FileOp::Open, &path, e).into()),
+        };
+        let mut header = [0; HEADER_LEN];
+        if let Err(e) = file.read_exact_at(&mut header, 0) {
+            return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                // Shorter than a header: no object file this store writes.
+                StoreError::BadHeader { id }
+            } else {
+                self.fs.locate(FileOp::ReadAt, &path, e).into()
+            });
+        }
+        let (kind, _, size) = header_fields(&header).ok_or(StoreError::BadHeader { id })?;
+        Ok(Some(ObjectStat { kind, size }))
+    }
+
+    fn retain(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError> {
+        let stat = self.stat(id)?;
+        if stat.is_some() {
+            let path = self.layout.object_path(id);
+            let fanout = path
+                .parent()
+                .expect("an object path has a fan-out directory");
+            // As `put_object` touches the fan-out directory of an object stored already.
+            self.touched().insert(fanout.to_owned());
+        }
+        Ok(stat)
+    }
+
     /// The files of the 256 fan-out directories whose names are object ids (62 lowercase hex
     /// digits). Everything else under `objects/` is passed over: `objects/tmp/`, where the
     /// temp files a crash left behind lie, and stray entries. Lists the directories with
@@ -427,6 +493,18 @@ fn kind_from_byte(byte: u8) -> Option<ObjectKind> {
     }
 }
 
+/// The kind, the encoding and the payload length an object file's header records; `None` if its
+/// magic, kind, encoding or reserved bytes are not ones this store writes.
+fn header_fields(header: &[u8; HEADER_LEN]) -> Option<(ObjectKind, u8, u64)> {
+    let enc = header[5];
+    if header[..4] != MAGIC || header[6..8] != [0, 0] || !matches!(enc, ENC_RAW | ENC_ZSTD) {
+        return None;
+    }
+    let kind = kind_from_byte(header[4])?;
+    let ulen = u64::from_le_bytes(header[8..].try_into().expect("8 bytes"));
+    Some((kind, enc, ulen))
+}
+
 /// The object file for `payload`: zstd when the payload has at least 128 bytes and
 /// compresses smaller, raw otherwise.
 fn encode(kind: ObjectKind, payload: &[u8]) -> io::Result<Vec<u8>> {
@@ -478,13 +556,9 @@ fn decode_capped(
     let (header, body) = file
         .split_first_chunk::<HEADER_LEN>()
         .ok_or_else(bad_header)?;
-    if header[..4] != MAGIC || header[6..8] != [0, 0] {
-        return Err(bad_header());
-    }
-    let kind = kind_from_byte(header[4]).ok_or_else(bad_header)?;
-    let ulen = u64::from_le_bytes(header[8..].try_into().expect("8 bytes"));
+    let (kind, enc, ulen) = header_fields(header).ok_or_else(bad_header)?;
     let ulen = usize::try_from(ulen).map_err(|_| bad_header())?;
-    let payload = match header[5] {
+    let payload = match enc {
         ENC_RAW if body.len() == ulen => {
             // One move of the payload to the front of the buffer it was read into.
             file.drain(..HEADER_LEN);

@@ -265,6 +265,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   1,024 records in the index's unsorted tail, and `reflog("main", 100)` with 31 frames past the
   checkpoint, each with its percentiles. `SWARMOPS_BENCH_HISTORY_CHANGESETS` sets other sizes
   for a quick check.
+- `swarmops-store`: `ObjectStore::stat` gives an object's kind and payload length
+  (`ObjectStat`) from its file's 16-byte header alone: the payload is neither read nor verified,
+  the length is the header's own, and a header the store does not write is `BadHeader`.
+  `ObjectStore::retain` stats an object that a caller relies on without writing it and, when it
+  is stored, has the next `flush` fsync its fan-out directory, as a put of a stored object does.
 
 ### Changed
 
