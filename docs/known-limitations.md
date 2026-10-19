@@ -56,7 +56,11 @@ left).
   cut failed stays listed though it may be lost. A crash between the cut and the rewrite of
   unlisted frames, or a rewrite that fails (its error names them by seq), loses those frames,
   and one of them may be a commit acknowledged with a warning, or one whose `journal.off` entry
-  a power loss zeroed. A crash inside a frame's append, between the write and its `fdatasync`,
+  a power loss zeroed. A rewrite that lands anywhere but where the frames were (another writer's
+  bytes came in between: one that writes without the lock) is cut back there and refused as
+  damage, which loses the rewritten frames, one of which may be a commit acknowledged with a
+  warning, and the intruding bytes, with no trace but that one error. A crash inside a frame's
+  append, between the write and its `fdatasync`,
   may leave no one to receive the frame's writeback error. *Target: M6 (the next `FORMAT`'s
   frame header, with the frame's sequence number and the previous frame's CRC, and fsck).
   Found: M1.5 Task 2.*
