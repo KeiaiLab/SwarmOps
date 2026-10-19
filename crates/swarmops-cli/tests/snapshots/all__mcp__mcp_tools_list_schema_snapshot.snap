@@ -31,6 +31,32 @@ expression: listed
       "title": "Describe the store"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The full id of the changeset a revision names (a ref name, a full id or a unique prefix of 12 or more hex digits, then any ~N suffixes), resolved as every tool resolves one, and its kind: ref when the revision is exactly a ref's name, whose target moves with the ref, changeset otherwise. Its CLI command is swarmops resolve.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it.",
+        "properties": {
+          "rev": {
+            "description": "The revision to resolve. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rev"
+        ],
+        "title": "ResolveRevReq",
+        "type": "object"
+      },
+      "name": "resolve_rev",
+      "title": "Resolve a revision"
+    },
+    {
       "_meta": {
         "anthropic/maxResultSizeChars": 200000
       },

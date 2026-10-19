@@ -340,6 +340,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (the first derivation of a list derives the whole chain below it, once). A revision's `~N` walks
   through `ancestor`, so a long one takes a few lookups, and one that reaches past a root by more
   than its changeset's generation is `E_REV_NOT_FOUND` without a walk.
+- `resolve_rev`, as `swarmops resolve <rev>` and the MCP tool `resolve_rev`: the full id of the
+  changeset a revision names, resolved as every operation resolves one, and its kind, `ref` when
+  the revision is exactly a ref's name and `changeset` otherwise (M5 adds `workspace`). The schema
+  gains `ResolveRevReq`, `ResolvedRev` and `RevKind`, and `StoreOps` gains `resolve_rev`.
 
 ### Changed
 

@@ -296,6 +296,41 @@ fn ls_show_log(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
     assert_eq!(older["result"]["entries"][0]["id"], c1);
 }
 
+/// `resolve`: the full id of the changeset a revision names and its kind, `ref` for exactly a
+/// ref's name and `changeset` for a `~N` walk, a prefix or a full id, with the revision in
+/// `meta.resolved`; a revision that names nothing is `E_REV_NOT_FOUND` (exit 6), and one that is
+/// no revision `E_INVALID_ARG` (exit 2).
+#[test]
+fn resolve_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store, "--name", "acme"]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+    let [c1, c2] = commit_twice(&mut s, &store);
+    let resolve = |s: &mut Session, rev: &str| s.run(&["--repo", &store, "resolve", rev]);
+
+    let main = resolve(&mut s, "main");
+    assert_eq!(main["result"], json!({"id": c2, "kind": "ref"}));
+    assert_eq!(main["meta"]["resolved"], json!({"main": c2}));
+    let back = resolve(&mut s, "main~1");
+    assert_eq!(back["result"], json!({"id": c1, "kind": "changeset"}));
+    let prefix = &c1[..12];
+    s.name(prefix, "c1:12");
+    let by_prefix = resolve(&mut s, prefix);
+    assert_eq!(by_prefix["result"], json!({"id": c1, "kind": "changeset"}));
+    assert_eq!(by_prefix["meta"]["resolved"], json!({prefix: c1}));
+    let full = resolve(&mut s, &c2);
+    assert_eq!(full["result"], json!({"id": c2, "kind": "changeset"}));
+
+    let missing = resolve(&mut s, "release/none");
+    assert_eq!((missing.exit, missing.code()), (6, "E_REV_NOT_FOUND"));
+    let past_root = resolve(&mut s, "main~2");
+    assert_eq!((past_root.exit, past_root.code()), (6, "E_REV_NOT_FOUND"));
+    let bad = resolve(&mut s, "HEAD");
+    assert_eq!((bad.exit, bad.code()), (2, "E_INVALID_ARG"));
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 /// `history` and `log --path`: a file's history and a directory's, a page at a time with its
 /// cursor (a directory may end in `/`); the log of the changesets that change some paths; and the
 /// errors: a path nothing ever touched (`E_PATH_NOT_FOUND`), a target without a path and a limit
