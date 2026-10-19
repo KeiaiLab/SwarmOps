@@ -369,6 +369,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   longer from a snapshot that can show another writer's frame before that frame's sync, which a
   failed sync or a power loss could then take back. It can now wait for the lock (`E_BUSY` after
   10 s) and repair what a crashed writer left; it still writes no journal frame.
+- When the tail check's rewrite of the frames `journal.off` does not list yet fails, its error
+  names those frames by seq; a tail check that rewrote them no longer cuts and syncs
+  `journal.log` again to the length the rewrite left; and a rewrite that does not land where the
+  frames were (another writer's bytes in between) is cut back and refused as damage
+  (`JournalCorrupt` at the frames' offset, `E_STORE_CORRUPT`) before anything is listed, where it
+  used to list entries that pointed into other bytes.
 
 ### Security
 

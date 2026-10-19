@@ -37,6 +37,7 @@
 use std::fmt;
 use std::fs::File;
 use std::io::{self, Write};
+use std::ops::RangeInclusive;
 use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -655,18 +656,29 @@ impl Journal {
     }
 
     /// What the tail check does when the sync that would make the whole frames `journal.off`
-    /// does not list yet durable (`frames`, from offset `from` to the end of the last of them)
-    /// fails with `e`. Linux reports a failed writeback once, to the sync that meets it, and may
-    /// drop the pages it could not write: no later sync can vouch for those frames, and one
-    /// that succeeds would let them be listed while they are not on disk. Nor may they simply
-    /// be cut: one may be a committed frame whose listing failed ([`StoreError::PostCommit`]),
-    /// durable since its own sync, or frames whose entries a power loss zeroed. So they are
-    /// written afresh, from the bytes the tail check read: `journal.log` is cut back to `from`
-    /// (the cut synced) and they are appended again and synced, at the offsets they had, and
-    /// the tail check lists them then. If that append fails, they are cut back off as a failed
-    /// frame append is, and the error is [`StoreError::NotCommitted`]: the writer's own
-    /// transaction did not commit. A cut that fails aborts the process, saying why on stderr.
-    fn write_afresh(&self, from: u64, frames: &[u8], e: &IoFailure) -> Result<(), StoreError> {
+    /// does not list yet durable (`frames`, the frames `seqs`, from offset `from` to the end of
+    /// the last of them) fails with `e`. Linux reports a failed writeback once, to the sync that
+    /// meets it, and may drop the pages it could not write: no later sync can vouch for those
+    /// frames, and one that succeeds would let them be listed while they are not on disk. Nor
+    /// may they simply be cut: one may be a committed frame whose listing failed
+    /// ([`StoreError::PostCommit`]), durable since its own sync, or frames whose entries a power
+    /// loss zeroed. So they are written afresh, from the bytes the tail check read:
+    /// `journal.log` is cut back to `from` (the cut synced; it takes a torn tail behind them too)
+    /// and they are appended again and synced, at the offsets they had, and the tail check lists
+    /// them then. If that append fails, they are cut back off as a failed frame append is, and
+    /// the error is [`StoreError::NotCommitted`], naming them by seq: the writer's own
+    /// transaction did not commit. If they land anywhere but `from` (another writer's bytes came
+    /// in between: one without the lock, or a tail state gone wrong), they are cut back to
+    /// `from` and the error is [`StoreError::JournalCorrupt`] at `from`, before anything is
+    /// listed: entries at the offsets the check computed would point into other bytes. A cut
+    /// that fails aborts the process, saying why on stderr.
+    fn write_afresh(
+        &self,
+        from: u64,
+        seqs: RangeInclusive<u64>,
+        frames: &[u8],
+        e: &IoFailure,
+    ) -> Result<(), StoreError> {
         if let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), from) {
             let _ = writeln!(
                 io::stderr(),
@@ -679,11 +691,26 @@ impl Journal {
             std::process::abort();
         }
         match self.fs.append_durable(self.log_path.as_std_path(), frames) {
-            Ok(_) => Ok(()),
+            Ok(landed) if landed == from => Ok(()),
+            Ok(landed) => {
+                if let Err(cut) = self.fs.truncate(self.log_path.as_std_path(), from) {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "swarmops: fatal: the frames of {} that journal.off does not list yet, \
+                         written afresh, landed at {landed} and not at {from}, and they could not \
+                         be cut back off it ({cut}): aborting, so that no later write of this \
+                         process lists a frame where it is not",
+                        self.log_path
+                    );
+                    std::process::abort();
+                }
+                Err(StoreError::JournalCorrupt { offset: from })
+            }
             Err(again) => {
+                let (first, last) = seqs.into_inner();
                 let again = again.with_also(format!(
-                    "it was writing afresh the frames journal.off does not list yet, after \
-                     syncing them failed: {e}"
+                    "it was writing afresh frames {first}..={last}, which journal.off does not \
+                     list yet, after syncing them failed: {e}; they were cut back off the journal"
                 ));
                 Err(self.cut_failed_frame(from, again))
             }
@@ -785,7 +812,8 @@ impl Journal {
             // may still be only in the page cache: a listed frame must be durable. If the sync
             // fails, no later one can vouch for them: they are written afresh.
             if let Err(e) = self.fs.sync_data(self.log_path.as_std_path()) {
-                self.write_afresh(from, &buf[unlisted_at..at], &e)?;
+                let seqs = listed..=listed + to_u64(unlisted.len()) - 1;
+                self.write_afresh(from, seqs, &buf[unlisted_at..at], &e)?;
                 rewritten = true;
             }
         }
@@ -795,7 +823,12 @@ impl Journal {
                 return Err(self.cut_failed_entries(at, e).into());
             }
         }
-        if let Some(cut) = cut {
+        // A rewrite cut journal.log back to the first unlisted frame, and the torn tail behind
+        // them with it: then there is nothing left to cut, though the report still says the
+        // torn tail went.
+        if let Some(cut) = cut
+            && !rewritten
+        {
             self.fs.truncate(self.log_path.as_std_path(), cut)?;
         }
         let tail = Tail {

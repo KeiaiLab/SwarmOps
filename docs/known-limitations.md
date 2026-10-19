@@ -50,11 +50,12 @@ left).
   filesystem that recovers with its page cache intact: a cut fails in practice because the
   filesystem takes no more writes, and then that listing fails too). A `journal.off` entry whose
   cut failed stays listed though it may be lost. A crash between the cut and the rewrite of
-  unlisted frames, or a rewrite that fails, loses those frames, and one of them may be a commit
-  acknowledged with a warning, or one whose `journal.off` entry a power loss zeroed. A crash
-  inside a frame's append, between the write and its `fdatasync`, may leave no one to receive
-  the frame's writeback error. *Target: M6 (the next `FORMAT`'s frame header, with the frame's
-  sequence number and the previous frame's CRC, and fsck). Found: M1.5 Task 2.*
+  unlisted frames, or a rewrite that fails (its error names them by seq), loses those frames,
+  and one of them may be a commit acknowledged with a warning, or one whose `journal.off` entry
+  a power loss zeroed. A crash inside a frame's append, between the write and its `fdatasync`,
+  may leave no one to receive the frame's writeback error. *Target: M6 (the next `FORMAT`'s
+  frame header, with the frame's sequence number and the previous frame's CRC, and fsck).
+  Found: M1.5 Task 2.*
 - **A failed directory fsync in the object store is retried, not taken back.**
   `FsObjectStore::flush` keeps a fan-out directory whose fsync failed and fsyncs it again on a
   later flush; the commit whose flush failed fails. The retry is for an fsync that never ran (the
