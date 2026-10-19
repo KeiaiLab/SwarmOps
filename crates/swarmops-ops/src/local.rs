@@ -2,7 +2,7 @@
 //! local filesystem through `swarmops-repo` (operations spec §1, §7). Its documentation says
 //! what each operation does and how failures map to error codes.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -11,10 +11,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{
     Attribution, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp,
-    EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq, LogPage, LogReq, OpError,
-    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp,
-    RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
-    VerifyFinding, VerifyReport, VerifyReq,
+    EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq, LogCutOut, LogPage, LogReq,
+    OpError, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefListResp, RefOut,
+    RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps,
+    TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
@@ -23,6 +23,7 @@ use swarmops_core::{
 use swarmops_repo::{
     CasResult, CommitRequest, LocalRepo, MismatchCause, RepoError, StoredChangeset, VerifyProblem,
 };
+use swarmops_store::{LogCut, Recovered};
 
 use crate::content;
 use crate::error::{During, details, error, hint, one_line, op, repo_error, shell_word};
@@ -43,6 +44,15 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// the MCP server report as `meta.resolved`: requests that share a `LocalOps`, from one thread
 /// or from several, never see each other's. An operation called on `LocalOps` itself records
 /// nothing.
+///
+/// # Recovery
+///
+/// A write first repairs what earlier writers left when they crashed or failed after their
+/// commit point (storage spec §3). `commit`, `ref_set` and `ref_delete` made through
+/// [`LocalOps::recording`] record what their write repaired, when it repaired anything, in the
+/// request's [`Resolved`], which the CLI and the MCP server report as `meta.recovered`: on
+/// success and on `E_CAS_MISMATCH` alike, never as a warning, and not when the operation then
+/// fails otherwise.
 ///
 /// # Operations
 ///
@@ -267,23 +277,67 @@ impl LocalOps {
 }
 
 /// The revisions one request resolved: each as given, and the full changeset id it named. The
-/// CLI and the MCP server report it as `meta.resolved`.
+/// CLI and the MCP server report it as `meta.resolved`. And what the request's write repaired
+/// before its own work, if it repaired anything (`commit`, `ref_set` and `ref_delete` record it,
+/// on success and on `E_CAS_MISMATCH` alike), which they report as `meta.recovered`.
 ///
 /// Each request has its own: [`LocalOps::recording`] records into it what that request's
-/// operations resolve, and nothing else does, so that what one request resolved never shows in
-/// another's, also when the two share a `LocalOps` across threads.
+/// operations resolve and repair, and nothing else does, so that what one request resolved or
+/// repaired never shows in another's, also when the two share a `LocalOps` across threads.
 #[derive(Debug, Default)]
-pub struct Resolved(RefCell<BTreeMap<String, String>>);
+pub struct Resolved {
+    revs: RefCell<BTreeMap<String, String>>,
+    recovered: Cell<Option<Recovered>>,
+}
 
 impl Resolved {
     /// What has been recorded, each revision as given and the id it named; taking it empties
     /// the record.
     pub fn take(&self) -> BTreeMap<String, String> {
-        self.0.take()
+        self.revs.take()
+    }
+
+    /// What the request's write repaired before its own work, if it repaired anything; taking
+    /// it empties the record.
+    pub fn take_recovered(&self) -> Option<RecoveredOut> {
+        self.recovered.take().map(recovered_out)
     }
 
     fn record(&self, rev: &str, id: ChangesetId) {
-        self.0.borrow_mut().insert(rev.to_owned(), id.to_string());
+        self.revs
+            .borrow_mut()
+            .insert(rev.to_owned(), id.to_string());
+    }
+
+    /// Records `recovered`, what the request's write repaired, unless it repaired nothing.
+    fn record_recovered(&self, recovered: Recovered) {
+        if !recovered.is_empty() {
+            self.recovered.set(Some(recovered));
+        }
+    }
+}
+
+/// `recovered` as the envelope's `meta.recovered` gives it.
+fn recovered_out(recovered: Recovered) -> RecoveredOut {
+    let Recovered {
+        log_cut,
+        frames_listed,
+        frames_rewritten,
+        off_bytes_dropped,
+        index_records_dropped,
+        views_rebuilt,
+        records_replayed,
+        refs_replayed,
+    } = recovered;
+    RecoveredOut {
+        log_cut: log_cut.map(|LogCut { at, bytes }| LogCutOut { at, bytes }),
+        frames_listed,
+        frames_rewritten,
+        off_bytes_dropped,
+        index_records_dropped,
+        views_rebuilt,
+        records_replayed,
+        refs_replayed,
     }
 }
 
@@ -363,6 +417,7 @@ impl StoreOps for Recording<'_> {
                 allow_empty,
             })
             .map_err(op)?;
+        self.resolved.record_recovered(outcome.recovered);
         Ok(CommitResp {
             changeset: outcome.id.to_string(),
             parent: parent.map(|id| id.to_string()),
@@ -557,6 +612,7 @@ impl StoreOps for Recording<'_> {
             .repo
             .cas_ref(&name, expected, Some(new), who.agent())
             .map_err(op)?;
+        self.resolved.record_recovered(outcome.recovered);
         let replay = match outcome.result {
             CasResult::Applied { old } => old == Some(new),
             CasResult::Mismatch { actual } if actual == Some(new) => true,
@@ -594,6 +650,7 @@ impl StoreOps for Recording<'_> {
             .repo
             .cas_ref(&name, Some(expected), None, who.agent())
             .map_err(op)?;
+        self.resolved.record_recovered(outcome.recovered);
         let replay = match outcome.result {
             CasResult::Applied { .. } => false,
             // Gone already, as the delete asks: a replay of it, or of another's.
@@ -937,7 +994,7 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::json;
-    use swarmops_api::{ChangeInput, ContentInput, RefSetReq};
+    use swarmops_api::{ChangeInput, ContentInput, RecoveredOut, RefSetReq};
     use swarmops_store::FsOps;
     use swarmops_testkit::faults::FsyncModelFs;
     use swarmops_testkit::fs::FailingFs;
@@ -1127,6 +1184,63 @@ mod tests {
 
         let fresh = LocalOps::open(&root).unwrap();
         assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 0);
+    }
+
+    /// What a request's write repaired first goes into that request's record alone, which the
+    /// CLI and the MCP server report as `meta.recovered`, on `E_CAS_MISMATCH` too: after a ref
+    /// move whose listing in `journal.off` failed, a mismatching `ref_set`'s write lists the
+    /// frame and writes the ref file, and records that; another request on the same `LocalOps`,
+    /// whose write repairs nothing, records nothing.
+    #[test]
+    fn a_request_records_what_its_own_write_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let commit = |content: &str| {
+            let put = ChangeInput {
+                path: "f".to_owned(),
+                op: ChangeOp::Put,
+                content: Some(ContentInput::Inline(content.to_owned())),
+                mode: None,
+            };
+            let req = CommitReq {
+                parent: None,
+                changes: vec![put],
+                message: "m".to_owned(),
+                allow_empty: false,
+            };
+            ops.commit(&who, req).unwrap().changeset
+        };
+        let (c1, c2) = (commit("1"), commit("2"));
+        let set = |new: &str, expected_old: Option<&str>| RefSetReq {
+            name: "main".to_owned(),
+            new: new.into(),
+            expected_old: expected_old.map(Rev::from),
+            create: expected_old.is_none(),
+        };
+        let created = ops_on(&root, failing("append_durable", "journal.off"))
+            .ref_set(&who, set(&c1, None))
+            .unwrap();
+        one_injected(&created.warnings);
+
+        let (first, second) = (Resolved::default(), Resolved::default());
+        // main holds c1, not c2.
+        let stale = ops
+            .recording(&first)
+            .ref_set(&who, set(&c2, Some(&c2)))
+            .unwrap_err();
+        assert_eq!(stale.code.as_str(), "E_CAS_MISMATCH", "{stale:?}");
+        let listed_and_written = RecoveredOut {
+            frames_listed: 1,
+            refs_replayed: 1,
+            ..RecoveredOut::default()
+        };
+        assert_eq!(first.take_recovered(), Some(listed_and_written));
+        assert_eq!(first.take_recovered(), None, "taking it empties the record");
+        let replay = ops.recording(&second).ref_set(&who, set(&c1, Some(&c1)));
+        assert!(replay.unwrap().already_applied);
+        assert_eq!(second.take_recovered(), None, "its write repaired nothing");
     }
 
     /// A `ref_set` to the target it expects is decided under the lock, after its write's tail

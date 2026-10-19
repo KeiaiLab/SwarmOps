@@ -218,6 +218,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   variant ends with a transaction of more than 1,024 changesets, so that its images hold the
   compaction a writer makes past that many records (an index sync, the compaction, the
   `Compacted` frame, the checkpoint), which the run's own compaction did not.
+- `meta.recovered` in the envelope of `commit`, `ref set` and `ref delete` (the CLI's and the MCP
+  server's alike): what the command's write repaired before its own work, of what earlier
+  writers left when they crashed or failed after their commit point (a torn journal tail cut,
+  frames listed or written afresh, `journal.off` bytes dropped, index records cut, a compaction
+  finished, changesets and ref files replayed), in offsets and counts, on success and on
+  `E_CAS_MISMATCH`; omitted when there was nothing to repair. It is no warning: `warnings` still
+  names only the steps after the command's own commit point that failed. `swarmops schema`
+  gains `RecoveredOut` and `LogCutOut`. In the library, `MetaWrite::recovered()`,
+  `Journal::repair_tail()` (a `TailRepair`) and `recovered` on every `CommitOutcome` and
+  `CasOutcome` report the same.
 
 ### Changed
 

@@ -37,12 +37,12 @@ pub mod store;
 
 pub use frame::{BadRecord, Frame, Record};
 pub use index::{ChangesetMeta, Index};
-pub use journal::Journal;
+pub use journal::{Journal, LogCut, TailRepair};
 pub use lock::MetaLock;
 pub use refs::{RefFile, RefState};
 pub use sorted::SortedView;
 pub use store::{
-    CasResult, CommitInfo, InsertOutcome, JournalEntry, MetaRead, MetaStore, MetaWrite,
+    CasResult, CommitInfo, InsertOutcome, JournalEntry, MetaRead, MetaStore, MetaWrite, Recovered,
     RefMoveEntry,
 };
 

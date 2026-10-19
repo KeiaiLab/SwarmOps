@@ -30,12 +30,13 @@ use std::thread;
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use serde_json::Value;
+use serde_json::{Value, json};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, EntryKind, ObjectKind, RepoPath, Signature, Tree};
 use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{
-    ChangesetMeta, FsObjectStore, FsOps, Index, Layout, MetaLock, MetaStore, ObjectStore,
+    ChangesetMeta, FsObjectStore, FsOps, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore,
+    RealFs, Record,
 };
 use swarmops_testkit::power::{
     Chooser, Image, ImageRecordingFs, Keep, KeepAllBut, PAGE, RecordedCall, SECTOR, Seeded,
@@ -214,6 +215,9 @@ struct Recorded {
     /// The first parent of each commit, by number.
     parents: Vec<Option<usize>>,
     frames: Vec<Frame>,
+    /// The step that writes each `Compacted` frame, which is no transaction's, so not one of
+    /// `frames`.
+    compacted: Vec<usize>,
     /// How many steps came before `init` returned.
     init: usize,
     /// The calls, as recorded.
@@ -271,7 +275,7 @@ fn record_ops(ops: &[Op]) -> Recorded {
         Op::Bulk => vec![Some(Txn::Bulk), None],
         Op::Compact | Op::Flush => Vec::new(),
     });
-    let mut frames = Vec::new();
+    let (mut frames, mut compacted) = (Vec::new(), Vec::new());
     for (at, call) in calls.iter().enumerate() {
         if let RecordedCall::AppendDurable { path, bytes } = call
             && *path == log
@@ -281,6 +285,8 @@ fn record_ops(ops: &[Op]) -> Recorded {
             if let Some(what) = what {
                 let write = timeline.steps_of(at).start;
                 frames.push(Frame { what, write });
+            } else {
+                compacted.push(timeline.steps_of(at).start);
             }
         }
     }
@@ -292,6 +298,7 @@ fn record_ops(ops: &[Op]) -> Recorded {
         commits: commits.iter().map(ToString::to_string).collect(),
         parents,
         frames,
+        compacted,
         calls,
     }
 }
@@ -483,6 +490,12 @@ impl Recorded {
         self.frames.iter().filter(|frame| frame.write < cut).count()
     }
 
+    /// How many frames of `journal.log` the first `cut` steps began to write, the `Compacted`
+    /// ones too: an image holds no other whole frame.
+    fn frames_begun(&self, cut: usize) -> usize {
+        self.begun(cut) + self.compacted.iter().filter(|&&write| write < cut).count()
+    }
+
     /// How many filesystem calls the run made that change something (marks aside).
     fn calls(&self) -> usize {
         (self.calls.iter())
@@ -649,8 +662,9 @@ fn seen(rec: &Recorded, store: &str, info: &Value) -> Result<Seen, String> {
     })
 }
 
-/// Writes `image` to a fresh temp dir and finds out what the binary makes of it.
-fn found_in(rec: &Recorded, image: &Image) -> Result<Found, String> {
+/// Writes `image`, of a power failure after the first `cut` steps, to a fresh temp dir and finds
+/// out what the binary makes of it.
+fn found_in(rec: &Recorded, image: &Image, cut: usize) -> Result<Found, String> {
     let dir = tempfile::tempdir().map_err(|e| format!("a temp dir: {e}"))?;
     image
         .materialize(dir.path())
@@ -661,7 +675,7 @@ fn found_in(rec: &Recorded, image: &Image) -> Result<Found, String> {
     let formatted = image.file(Path::new("store/FORMAT")).is_some();
     match (info.exit, info.code()) {
         (_, Some("E_NOT_A_REPO")) if !formatted => no_store(store),
-        (0, _) if formatted => a_store(rec, store, info.ok()?, dir.path()),
+        (0, _) if formatted => a_store(rec, store, info.ok()?, dir.path(), cut),
         _ => Err(format!("info, with FORMAT {formatted}: {}", info.run)),
     }
 }
@@ -677,13 +691,105 @@ fn no_store(store: &str) -> Result<Found, String> {
     Ok(Found::NoStore)
 }
 
-/// [`found_in`] a store, whose `info` gave `info`; `tmp` takes a change list.
-fn a_store(rec: &Recorded, store: &str, info: &Value, tmp: &Path) -> Result<Found, String> {
+/// The journal of the store at `store`, on the real filesystem.
+fn journal_of(store: &str) -> Result<Journal, String> {
+    let layout = Layout::new(Utf8PathBuf::from(store));
+    Journal::open(&layout, Arc::new(RealFs)).map_err(|e| format!("open the journal: {e}"))
+}
+
+/// Where the frame that records changeset `id` (in hex) starts in the journal of the store at
+/// `store`.
+fn frame_of(store: &str, id: &str) -> Result<u64, String> {
+    let frames = journal_of(store)?
+        .tail_frames_from(0)
+        .map_err(|e| format!("read the journal: {e}"))?;
+    let records_it = |records: &[Record]| {
+        records.iter().any(|record| {
+            matches!(record, Record::Changeset { id: recorded, .. } if recorded.to_string() == id)
+        })
+    };
+    frames
+        .iter()
+        .find(|frame| records_it(&frame.records))
+        .map(|frame| frame.offset)
+        .ok_or_else(|| format!("no frame records {id}"))
+}
+
+/// The journal an image holds, before the first commit on it repairs it.
+#[derive(Debug, Clone, Copy)]
+struct Imaged {
+    /// The length of its `journal.log`.
+    log_len: u64,
+    /// The whole frames in it, as a reader reads them: the listed ones, and the whole ones after
+    /// them that `journal.off` does not list, up to a torn tail.
+    whole: u64,
+    /// How many frames its `journal.off` lists, as readers count them (zeroed entries at its end
+    /// dropped).
+    entries: u64,
+}
+
+/// `Ok` if `recovered`, the `meta.recovered` of the first commit on the image of a power failure
+/// after the first `cut` steps, says what that commit's write repaired of `imaged`: where the
+/// commit's frame landed (`landed`) is where the journal ended after the repair, so a cut is
+/// reported exactly when that is short of the image's `journal.log` end, from there to that end;
+/// and the frames listed are the whole ones `journal.off` did not list, no more than the run had
+/// begun to write, a `Compacted` frame counted too, past those it listed.
+fn recovered_as_imaged(
+    rec: &Recorded,
+    cut: usize,
+    recovered: &Value,
+    imaged: Imaged,
+    landed: u64,
+) -> Result<(), String> {
+    let Imaged {
+        log_len,
+        whole,
+        entries,
+    } = imaged;
+    let log_cut = (landed < log_len).then(|| json!({"at": landed, "bytes": log_len - landed}));
+    if recovered.get("log_cut") != log_cut.as_ref() {
+        return Err(format!(
+            "the next commit's frame landed at {landed} of a journal.log {log_len} bytes long, \
+             and it reported {recovered}"
+        ));
+    }
+    let listed = recovered["frames_listed"].as_u64().unwrap_or(0);
+    let begun = to_u64(rec.frames_begun(cut));
+    if Some(listed) != whole.checked_sub(entries) || Some(listed) > begun.checked_sub(entries) {
+        return Err(format!(
+            "the next commit listed {listed} frames, the image holding {whole} whole of which \
+             {entries} listed, of the {begun} the run began: {recovered}"
+        ));
+    }
+    Ok(())
+}
+
+/// [`found_in`] a store, whose `info` gave `info`, in the image of a power failure after the
+/// first `cut` steps; `tmp` takes a change list.
+fn a_store(
+    rec: &Recorded,
+    store: &str,
+    info: &Value,
+    tmp: &Path,
+    cut: usize,
+) -> Result<Found, String> {
     let seen = seen(rec, store, info)?;
     let frames = (0..=rec.frames.len())
         .find(|&frames| seen.is_after(rec, frames))
         .ok_or_else(|| format!("the state of no prefix of the run: {seen:#?}"))?;
     clean(store, "after the power loss")?;
+    // The journal as the image holds it, which the next commit's write repairs.
+    let journal = journal_of(store)?;
+    let whole = journal
+        .tail_frames_from(0)
+        .map_err(|e| format!("read the journal: {e}"))?;
+    let imaged = Imaged {
+        log_len: journal.len(),
+        whole: to_u64(whole.len()),
+        entries: journal
+            .frame_count()
+            .map_err(|e| format!("count the listed frames: {e}"))?,
+    };
 
     // A commit lands on it, and leaves it clean, its history whole.
     let changes = tmp.join("after.json");
@@ -697,6 +803,9 @@ fn a_store(rec: &Recorded, store: &str, info: &Value, tmp: &Path) -> Result<Foun
         return Err(format!("the next commit warned: {}", commit.run));
     }
     let new = result["changeset"].as_str().ok_or("no changeset")?;
+    let recovered = &commit.envelope["meta"]["recovered"];
+    recovered_as_imaged(rec, cut, recovered, imaged, frame_of(store, new)?)
+        .map_err(|why| format!("{why}: {}", commit.run))?;
     clean(store, "after the next commit")?;
     let state = rec.state_after(frames);
     let mut history = vec![new.to_owned()];
@@ -752,7 +861,7 @@ fn sweep(rec: &Recorded, cuts: &[usize], seeds: &[u64]) -> Swept {
                     scope.spawn(move || {
                         let (cut, seed) = uses[0];
                         let image = rec.timeline.image(cut, &mut Seeded::new(seed, cut));
-                        found_in(rec, &image)
+                        found_in(rec, &image, cut)
                     })
                 })
                 .collect();
@@ -934,7 +1043,7 @@ fn zero_filled_index_tail_after_power_loss_is_replayed_not_counted() {
                 "{file}: the records past the checkpoint are zeros now"
             );
         }
-        match found_in(&rec, &image) {
+        match found_in(&rec, &image, cut) {
             Ok(Found::Prefix(frames)) if frames == rec.frames.len() => {}
             other => failures.push(format!("{lost:?} zero-filled: {other:?}")),
         }
@@ -980,7 +1089,7 @@ fn a_lost_header_sector_is_a_torn_tail() {
             "frame {n}: a later sector kept"
         );
         torn.push((n, boundary - at));
-        match found_in(&rec, &image) {
+        match found_in(&rec, &image, frame.write + 1) {
             Ok(Found::Prefix(frames)) if frames == n => {}
             other => failures.push(format!(
                 "frame {n} at {at}..{}, its first {} bytes lost: {other:?}",
@@ -1034,7 +1143,7 @@ fn a_frame_kept_up_to_a_sector_boundary_is_a_torn_tail() {
             "frame {n}: kept up to the boundary"
         );
         kept.push((n, boundary - at));
-        match found_in(&rec, &image) {
+        match found_in(&rec, &image, frame.write + 1) {
             Ok(Found::Prefix(frames)) if frames == n => {}
             other => failures.push(format!(
                 "frame {n} at {at}..{}, kept up to {boundary}: {other:?}",
@@ -1147,7 +1256,7 @@ fn objects_referenced_by_a_durable_frame_survive_power_loss() {
         }
     }
     for &(n, durable, _) in &commits {
-        let found = found_in(&rec, &least(durable));
+        let found = found_in(&rec, &least(durable), durable);
         assert_eq!(found, Ok(Found::Prefix(n + 1)), "frame {n} just durable");
     }
 }

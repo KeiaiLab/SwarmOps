@@ -158,18 +158,18 @@ pub(crate) fn moved(current: Option<RefState>, target: Option<ChangesetId>) -> O
 /// on storage spec §2 rule 5: the file may say it because of a replace whose directory fsync
 /// failed, and on the filesystems the store supports a failed directory fsync is fail-stop, so
 /// every later sync fails too and nothing that relies on the file (a checkpoint past its frame)
-/// is written after it.
+/// is written after it. Returns whether it replaced or removed the file.
 pub(crate) fn write(
     layout: &Layout,
     fs: &dyn FsOps,
     name: &str,
     target: Option<ChangesetId>,
-) -> Result<(), StoreError> {
+) -> Result<bool, StoreError> {
     let path = path(layout, name);
     let current = read_file(fs, &path, name)?;
     match moved(current, target) {
         // It says that already: see above for why that is enough (rule 5).
-        next if next == current => {}
+        next if next == current => return Ok(false),
         Some(state) => {
             let refs = layout.meta_path("refs");
             make_dir(fs, &refs, &layout.meta_dir())?;
@@ -187,7 +187,7 @@ pub(crate) fn write(
             fs.fsync_dir(dir.as_std_path())?;
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// The file of ref `name`.

@@ -66,7 +66,7 @@ use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
     CasResult, FsObjectStore, FsOps, HookedFs, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs,
-    RefState, StoreError, is_native_linux_fs,
+    Recovered, RefState, StoreError, is_native_linux_fs,
 };
 
 use crate::error::RepoError;
@@ -118,6 +118,11 @@ pub struct CasOutcome {
     /// Steps after the commit point that failed, one line each: the move is committed all
     /// the same.
     pub warnings: Vec<String>,
+    /// What the write transaction's recovery repaired before the compare-and-swap, of what
+    /// earlier writers left ([`swarmops_store::MetaWrite::recovered`]): on every outcome,
+    /// [`CasResult::Mismatch`] included. It is no warning, and it is lost when the call fails
+    /// after the repair.
+    pub recovered: Recovered,
 }
 
 /// What `REPO` holds.
@@ -336,6 +341,7 @@ impl<O: ObjectStore> Repo<O> {
         actor: &str,
     ) -> Result<CasOutcome, RepoError> {
         let mut write = self.meta.write()?;
+        let recovered = write.recovered();
         let result = write
             .cas_ref(name, expected, new, actor)
             .map_err(ref_error)?;
@@ -353,7 +359,11 @@ impl<O: ObjectStore> Repo<O> {
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok(CasOutcome { result, warnings })
+        Ok(CasOutcome {
+            result,
+            warnings,
+            recovered,
+        })
     }
 
     /// Changeset `id`'s object, decoded.

@@ -22,8 +22,8 @@ use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
 use swarmops_store::{
     CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
-    JournalEntry, Layout, LimitKind, MetaLock, MetaRead, MetaStore, RealFs, Record, RefMoveEntry,
-    RefState, StoreError,
+    JournalEntry, Layout, LimitKind, LogCut, MetaLock, MetaRead, MetaStore, RealFs, Record,
+    Recovered, RefMoveEntry, RefState, StoreError,
 };
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
 use swarmops_testkit::faults::checked;
@@ -2432,6 +2432,219 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
         assert_eq!(read.count_changesets().unwrap(), 2);
         assert_eq!(ref_file(&root, "main"), Some(ref_content(1, 1)));
     }
+}
+
+/// What a write transaction on `store` repaired, as it reports it once open; the write is dropped
+/// uncommitted (its repairs stay made). Then the next write repairs nothing.
+#[track_caller]
+fn recovered_by_a_write(store: &MetaStore) -> Recovered {
+    let recovered = store.write().unwrap().recovered();
+    assert_eq!(
+        store.write().unwrap().recovered(),
+        Recovered::default(),
+        "the write after one that repaired {recovered:?}"
+    );
+    recovered
+}
+
+/// A [`failing_store`] holding changeset 0, whose last transaction committed and then failed at
+/// the call `failing` names ([`StoreError::PostCommit`]): one that inserts changeset 1, or with
+/// `moves`, one that moves main to changeset 0. The call fails no more.
+fn committed_then_failed(
+    failing: &'static str,
+    moves: bool,
+) -> (TempDir, Utf8PathBuf, MetaStore, Failing) {
+    let (dir, root) = new_root();
+    let (store, fail) = failing_store(&root);
+    insert(&store, &[cs(0, &[])]);
+    fail.set(failing);
+    let mut write = store.write().unwrap();
+    if moves {
+        write.cas_ref("main", None, Some(id(0)), ACTOR).unwrap();
+    } else {
+        write.insert_changeset(cs(1, &[0])).unwrap();
+    }
+    let committed = write.commit();
+    assert!(
+        matches!(committed, Err(StoreError::PostCommit { .. })),
+        "{failing}: {committed:?}"
+    );
+    fail.clear();
+    (dir, root, store, fail)
+}
+
+/// A write transaction reports each repair its recovery makes (`MetaWrite::recovered`), what
+/// the writers before it left when they crashed or failed after their commit point, and
+/// nothing else: a torn tail cut off `journal.log`; a frame whose listing failed, listed and
+/// replayed; index records a failed append left torn, cut and replayed; a ref file a failed
+/// replace never wrote, replayed; a compaction a crash interrupted, finished; a frame whose sync
+/// failed in the tail check, written afresh and listed; zeroed entries at the end of
+/// `journal.off`, dropped, and their frames listed again. The write after each repairs nothing.
+#[test]
+fn a_write_reports_each_repair_it_makes() {
+    let none = Recovered::default();
+
+    // A hand-torn frame at the end of journal.log: a header announcing 100 bytes, and 10.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    let clean = log_len(&root);
+    let torn = [&100_u32.to_le_bytes()[..], &[0; 4], &[0xee; 10]].concat();
+    append_bytes(Layout::new(&root).journal_log(), &torn);
+    let cut = Some(LogCut {
+        at: clean,
+        bytes: 18,
+    });
+    let want = Recovered {
+        log_cut: cut,
+        ..none
+    };
+    assert_eq!(recovered_by_a_write(&store), want, "a torn tail");
+
+    // A step after the commit point that failed (PostCommit), in a transaction that inserts
+    // changeset 1 or, with `moves`, moves main to changeset 0: the listing in journal.off
+    // (nothing materialized), listed and its changeset replayed; the append of ids.col (the
+    // record whole in the four files written before it), cut and replayed; the replace of
+    // refs/main, replayed.
+    let failed_after_the_commit_point = [
+        (
+            "append_durable journal.off",
+            false,
+            Recovered {
+                frames_listed: 1,
+                records_replayed: 1,
+                ..none
+            },
+        ),
+        (
+            "append ids.col",
+            false,
+            Recovered {
+                index_records_dropped: 1,
+                records_replayed: 1,
+                ..none
+            },
+        ),
+        (
+            "atomic_replace main",
+            true,
+            Recovered {
+                refs_replayed: 1,
+                ..none
+            },
+        ),
+    ];
+    for (failing, moves, want) in failed_after_the_commit_point {
+        let (_dir, root, store, _) = committed_then_failed(failing, moves);
+        assert_eq!(recovered_by_a_write(&store), want, "{failing}");
+        if moves {
+            assert_eq!(ref_file(&root, "main"), Some(ref_content(0, 1)));
+        }
+    }
+
+    // A crash between two view renames of a compaction: dh.key and dh.rec still the empty files
+    // the store was created with. The compaction is finished.
+    let (_dir, root, store) = new_store();
+    let all: Vec<ChangesetMeta> = (0..1100).map(|n| cs(n, &[])).collect();
+    assert!(insert(&store, &all).checkpointed, "the write compacts");
+    let sorted = Layout::new(&root).meta_path("sorted");
+    fs::write(sorted.join("dh.key"), []).unwrap();
+    fs::write(sorted.join("dh.rec"), []).unwrap();
+    let want = Recovered {
+        views_rebuilt: true,
+        ..none
+    };
+    assert_eq!(recovered_by_a_write(&store), want, "a compaction cut short");
+
+    // The tail check's sync of a frame whose listing failed fails too (storage spec §2 rule 3
+    // (c)): the frame is written afresh, listed, and replayed.
+    let (_dir, _root, store, fail) = committed_then_failed("append_durable journal.off", false);
+    fail.set("sync_data journal.log");
+    let recovered = store.write().unwrap().recovered();
+    fail.clear();
+    let want = Recovered {
+        frames_listed: 1,
+        frames_rewritten: 1,
+        records_replayed: 1,
+        ..none
+    };
+    assert_eq!(recovered, want, "a failed sync in the tail check");
+    assert_eq!(recovered_by_a_write(&store), none, "after the rewrite");
+
+    // The entries of frames 1 and 2 zeroed at the end of journal.off, its length kept: what a
+    // power loss leaves of entries appended and never synced. They are dropped, and the frames
+    // listed again. A process that opens the store after the power loss repairs it, on the real
+    // filesystem.
+    let (_dir, root, store) = new_store();
+    for n in 0..3 {
+        insert(&store, &[cs(n, &[])]); // frames 0..=2
+    }
+    drop(store);
+    let off = Layout::new(&root).journal_off();
+    let mut entries = fs::read(&off).unwrap();
+    entries[8..].fill(0);
+    fs::write(&off, entries).unwrap();
+    let after_power_loss = MetaStore::open(&root).unwrap();
+    let want = Recovered {
+        frames_listed: 2,
+        off_bytes_dropped: 16,
+        ..none
+    };
+    assert_eq!(
+        recovered_by_a_write(&after_power_loss),
+        want,
+        "zeroed entries"
+    );
+    assert_eq!(listed(&root), 3);
+}
+
+/// [`steady_writes_report_no_recovery`] on the filesystem `fs` makes for each handle.
+fn steady_writes(fs: impl Fn() -> Arc<dyn FsOps>) {
+    const COMMITS: u64 = 1100;
+    let (_dir, root) = new_root();
+    let first = MetaStore::create_with_fs(&root, fs()).unwrap();
+    let second = MetaStore::open_with_fs(&root, fs()).unwrap();
+    let mut checkpoints = 0;
+    for n in 0..COMMITS {
+        let store = if n % 2 == 0 { &first } else { &second };
+        let mut write = store.write().unwrap();
+        assert_eq!(write.recovered(), Recovered::default(), "commit {n}");
+        write.insert_changeset(chained(n)).unwrap();
+        let expected = n.checked_sub(1).map(id);
+        let moved = write.cas_ref("main", expected, Some(id(n)), ACTOR).unwrap();
+        assert_eq!(moved, CasResult::Applied { old: expected }, "commit {n}");
+        checkpoints += u64::from(write.commit().unwrap().checkpointed);
+    }
+    for store in [&first, &second] {
+        assert_eq!(store.write().unwrap().recovered(), Recovered::default());
+    }
+    // Every 32nd commit before the compaction (32), the compaction's at the 1,025th, and every
+    // 32nd after it (2).
+    assert_eq!(checkpoints, 35);
+    assert_eq!(compacted_frames(&first).len(), 1, "one compaction");
+    let read = first.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), COMMITS);
+    assert_eq!(
+        read.get_ref("main").unwrap(),
+        Some(ref_state(COMMITS - 1, COMMITS))
+    );
+}
+
+/// In steady state no write repairs anything: two handles on one store alternate 1,100 commits
+/// (a changeset each, and main moved to it), across 35 checkpoints and one compaction, and
+/// every write's recovery reports nothing. Replay reads the frames past the checkpoint again at
+/// every write, a ref move among them each time, and none of that counts: a field that grew in
+/// steady state would make the report worthless. The filesystem skips every flush, which the
+/// report does not depend on; the next test runs the same on the real filesystem.
+#[test]
+fn steady_writes_report_no_recovery() {
+    steady_writes(|| checked(NoSyncFs));
+}
+
+/// [`steady_writes_report_no_recovery`] on the real filesystem, every flush made.
+#[test]
+#[ignore = "slow, ~20 s: 1,100 fsync'd commits; just check-slow runs it"]
+fn steady_writes_on_the_real_filesystem_report_no_recovery() {
+    steady_writes(|| checked(RealFs));
 }
 
 /// An injected I/O error at any filesystem call of a write transaction, and of one that

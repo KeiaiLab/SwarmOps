@@ -19,7 +19,7 @@ use swarmops_core::{ChangesetId, EntryKind, ObjectId, ObjectKind, hash_object};
 use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV, RealFs};
-use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
+use swarmops_store::{ChangesetMeta, MetaStore, Recovered, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 #[cfg(feature = "test-hooks")]
@@ -326,8 +326,9 @@ fn cas_ref_through_repo_records_reflog() {
         CasOutcome {
             result: CasResult::Applied { old: None },
             warnings: Vec::new(),
+            recovered: Recovered::default(),
         },
-        "a move whose every step succeeds has no warnings"
+        "a move whose every step succeeds has no warnings, and repaired nothing first"
     );
     assert_eq!(
         repo.cas_ref("main", Some(c1), Some(c2), "agent/two")

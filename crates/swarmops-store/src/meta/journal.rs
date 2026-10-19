@@ -82,6 +82,33 @@ impl fmt::Debug for Journal {
     }
 }
 
+/// A torn tail cut off `journal.log`: the bytes of a frame that never reached its commit point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogCut {
+    /// Where the file was cut: where the torn tail started, and the file ends now.
+    pub at: u64,
+    /// How many bytes were cut, from `at` to where the file ended.
+    pub bytes: u64,
+}
+
+/// What [`Journal::repair_tail`] changed to bring the journal to a clean end; all zero when it
+/// ended cleanly.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TailRepair {
+    /// The torn tail cut off `journal.log`, if there was one.
+    pub cut: Option<LogCut>,
+    /// How many whole frames `journal.off` did not list were listed: transactions that committed
+    /// and that their writer never listed (it crashed between a frame's two appends, or the
+    /// listing failed), and frames whose entries a power loss zeroed.
+    pub frames_listed: u64,
+    /// How many of those were written afresh before they were listed, because the sync that would
+    /// have made them durable failed (storage spec §2 rule 3 (c)).
+    pub frames_rewritten: u64,
+    /// How many bytes were dropped from the end of `journal.off`: a partial entry, and zeroed
+    /// entries past frame 0.
+    pub off_bytes_dropped: u64,
+}
+
 /// Where this handle last saw the journal end.
 #[derive(Debug, Clone, Copy)]
 struct Tail {
@@ -153,7 +180,9 @@ impl Journal {
     /// The caller must hold [`crate::MetaLock`]: this takes no lock. If the journal does
     /// not end where this handle last saw it end, or the handle never checked its tail,
     /// the tail is checked first, as [`Journal::truncate_torn_tail`] does, so that a frame
-    /// never lands after a torn one. Records the layout cannot hold are refused before
+    /// never lands after a torn one; what that check repairs goes unreported. Under
+    /// [`crate::MetaStore::write`], which checked the tail under the same lock, it finds nothing
+    /// to repair. Records the layout cannot hold are refused before
     /// anything is written: more than 65,535, or a record whose lengths do not fit, with
     /// [`StoreError::Limit`]; none at all, with [`StoreError::BadCall`].
     ///
@@ -178,6 +207,7 @@ impl Journal {
         let mut tail = self.tail();
         if !self.still_ends_at(&tail)? {
             tail.checked = false;
+            // Unreported: see above.
             (*tail, _) = self.check_tail()?;
         }
         tail.checked = false; // a failed append can leave part of a frame or an entry behind
@@ -468,12 +498,24 @@ impl Journal {
     /// are read, unless there is something to cut or list: then every listed frame is.
     /// `journal.off` is repaired before `journal.log` is cut, so a crash in between leaves a torn
     /// frame the next call cuts. The caller must hold [`crate::MetaLock`].
+    ///
+    /// [`Journal::repair_tail`] does the same, and reports everything it changed.
     pub fn truncate_torn_tail(&self) -> Result<Option<u64>, StoreError> {
+        Ok(self.repair_tail()?.cut.map(|cut| cut.at))
+    }
+
+    /// [`Journal::truncate_torn_tail`], returning what it changed: the torn tail it cut off
+    /// `journal.log`, the whole frames it listed (and of those, the ones it wrote afresh first),
+    /// and the bytes it dropped from the end of `journal.off`. [`TailRepair::default`] when the
+    /// journal ended cleanly. The report is made of what the check knows already: it makes no
+    /// filesystem call of its own. On an error the repairs made before it stay made, and the
+    /// report is lost. The caller must hold [`crate::MetaLock`].
+    pub fn repair_tail(&self) -> Result<TailRepair, StoreError> {
         let mut tail = self.tail();
         tail.checked = false;
-        let (checked, cut) = self.check_tail()?;
+        let (checked, repair) = self.check_tail()?;
         *tail = checked;
-        Ok(cut)
+        Ok(repair)
     }
 
     /// The length of `journal.log` as this handle last saw it: when it opened, then after
@@ -638,9 +680,8 @@ impl Journal {
             && self.off.metadata()?.len() == tail.frames * ENTRY_LEN)
     }
 
-    /// The work of [`Journal::truncate_torn_tail`]: returns the journal's new end and
-    /// where `journal.log` was cut.
-    fn check_tail(&self) -> Result<(Tail, Option<u64>), StoreError> {
+    /// The work of [`Journal::repair_tail`]: returns the journal's new end and what it changed.
+    fn check_tail(&self) -> Result<(Tail, TailRepair), StoreError> {
         let log_len = self.fs.file_len(self.log_path.as_std_path())?;
         let off_len = self.fs.file_len(self.off_path.as_std_path())?;
         let mut listed = off_len / ENTRY_LEN;
@@ -707,12 +748,14 @@ impl Journal {
             self.fs
                 .truncate(self.off_path.as_std_path(), listed * ENTRY_LEN)?;
         }
+        let mut rewritten = false;
         if let Some(&from) = unlisted.first() {
             // Their writer may have died after its write and before its sync, so their bytes
             // may still be only in the page cache: a listed frame must be durable. If the sync
             // fails, no later one can vouch for them: they are written afresh.
             if let Err(e) = self.fs.sync_data(self.log_path.as_std_path()) {
                 self.write_afresh(from, &buf[unlisted_at..at], &e)?;
+                rewritten = true;
             }
         }
         for (at, offset) in (listed..).zip(&unlisted) {
@@ -729,7 +772,17 @@ impl Journal {
             frames: listed + to_u64(unlisted.len()),
             checked: true,
         };
-        Ok((tail, cut))
+        let frames_listed = to_u64(unlisted.len());
+        let repair = TailRepair {
+            cut: cut.map(|cut| LogCut {
+                at: cut,
+                bytes: log_len - cut,
+            }),
+            frames_listed,
+            frames_rewritten: if rewritten { frames_listed } else { 0 },
+            off_bytes_dropped: off_len - listed * ENTRY_LEN,
+        };
+        Ok((tail, repair))
     }
 
     /// Checks that the first `listed` entries list sound frames: each starts where the one

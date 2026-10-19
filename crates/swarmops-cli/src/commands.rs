@@ -11,10 +11,12 @@
 //! `elapsed_ms` spans the whole command but its printing: reading the command line, opening
 //! the store and the operation; `resolved` is every revision the operation resolved, as the
 //! command's own `Resolved` records them (`LocalOps::recording`), also when it failed; `auth` is
-//! the store's authentication mode, `trust` in M1.
+//! the store's authentication mode, `trust` in M1; `recovered`, only when there is something to
+//! say, is what the operation's write repaired before its own work, as the same record has it
+//! (on success and on `E_CAS_MISMATCH`).
 //!
-//! A panic's envelope has the same `repo` and `resolved` (see [`Used`]), or neither when it
-//! came before a store was named.
+//! A panic's envelope has the same `repo`, `resolved` and `recovered` (see [`Used`]), or none of
+//! them when it came before a store was named.
 //!
 //! `whoami` prints `IdentityInfo` as the API writes it: for a caller without an identity,
 //! `{"auth":"anonymous"}`, with `agent` omitted rather than null.
@@ -35,8 +37,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, InfoReq, LogReq, Meta, OpError,
-    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev, ShowReq,
-    StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev,
+    ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Resolved, shell_word};
@@ -65,21 +67,33 @@ pub struct Ctx<'a> {
 }
 
 /// What a command has used so far: the store the user named, and the revisions its operation
-/// resolved. It lives outside the code that can panic, so that a panic's envelope can report
-/// what the command's own would: `meta.repo` and `meta.resolved`.
+/// resolved and what its write repaired. It lives outside the code that can panic, so that a
+/// panic's envelope can report what the command's own would: `meta.repo`, `meta.resolved` and
+/// `meta.recovered`.
 #[derive(Default)]
 pub struct Used {
     /// The store as the user named it.
     repo: RefCell<Option<String>>,
-    /// What the command's operation resolved: its request's record, and no other's.
+    /// What the command's operation resolved and repaired: its request's record, and no
+    /// other's.
     resolved: Resolved,
 }
 
 impl Used {
-    /// `meta.repo` and `meta.resolved` as far as the command got: the store named, and what its
-    /// operation resolved since this was last asked.
-    pub fn meta(&self) -> (Option<String>, BTreeMap<String, String>) {
-        (self.repo.borrow().clone(), self.resolved.take())
+    /// `meta.repo`, `meta.resolved` and `meta.recovered` as far as the command got: the store
+    /// named, and what its operation resolved, and its write repaired, since this was last asked.
+    pub fn meta(
+        &self,
+    ) -> (
+        Option<String>,
+        BTreeMap<String, String>,
+        Option<RecoveredOut>,
+    ) {
+        (
+            self.repo.borrow().clone(),
+            self.resolved.take(),
+            self.resolved.take_recovered(),
+        )
     }
 }
 
@@ -92,15 +106,17 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                 ctx.used.repo.replace(Some(dir.clone()));
             }
             let result = init(&dir, name.as_deref());
-            let (repo, resolved) = ctx.used.meta();
-            ctx.finish(op, repo, resolved, result)
+            let (repo, resolved, recovered) = ctx.used.meta();
+            ctx.finish(op, (repo, resolved, recovered), result)
         }
         Command::Info => ctx.on_store(op, || Ok(InfoReq {}), |ops, req| ops.repo_info(req)),
         Command::Whoami => {
             let result = context::identity(agent, ctx.env).map(|who| identity_info(who.as_ref()));
-            ctx.finish(op, None, BTreeMap::new(), result)
+            ctx.finish(op, (None, BTreeMap::new(), None), result)
         }
-        Command::Schema { name } => ctx.finish(op, None, BTreeMap::new(), schema(name.as_deref())),
+        Command::Schema { name } => {
+            ctx.finish(op, (None, BTreeMap::new(), None), schema(name.as_deref()))
+        }
         Command::Commit {
             message,
             changes,
@@ -248,28 +264,31 @@ impl Ctx<'_> {
             let ops = LocalOps::open(Utf8Path::new(&store))?;
             call(&ops.recording(&self.used.resolved), input)
         });
-        let (repo, resolved) = self.used.meta();
-        envelope(op, repo, resolved, result, self.started)
+        envelope(op, self.used.meta(), result, self.started)
     }
 
-    /// `op`'s envelope for `result`, with `meta` from `repo`, `resolved` and the clock.
+    /// `op`'s envelope for `result`, with `meta` from `used` (what [`Used::meta`] gives) and the
+    /// clock.
     fn finish<T: Serialize>(
         &self,
         op: &str,
-        repo: Option<String>,
-        resolved: BTreeMap<String, String>,
+        used: UsedMeta,
         result: Result<T, OpError>,
     ) -> Printed {
-        output::render(
-            &envelope(op, repo, resolved, result, self.started),
-            self.format,
-        )
+        output::render(&envelope(op, used, result, self.started), self.format)
     }
 }
 
+/// What [`Used::meta`] gives: `meta.repo`, `meta.resolved` and `meta.recovered`.
+type UsedMeta = (
+    Option<String>,
+    BTreeMap<String, String>,
+    Option<RecoveredOut>,
+);
+
 /// The envelope of `op` failing with `error` before it could use a store.
 pub fn failed(op: &str, error: OpError, format: Format, started: Instant) -> Printed {
-    let envelope = envelope::<()>(op, None, BTreeMap::new(), Err(error), started);
+    let envelope = envelope::<()>(op, (None, BTreeMap::new(), None), Err(error), started);
     output::render(&envelope, format)
 }
 
@@ -287,8 +306,7 @@ pub fn failed_after(
 
 /// [`failed_after`]'s envelope, before it is printed.
 pub fn failed_envelope(op: &str, error: OpError, used: &Used, started: Instant) -> Envelope<()> {
-    let (repo, resolved) = used.meta();
-    envelope(op, repo, resolved, Err(error), started)
+    envelope(op, used.meta(), Err(error), started)
 }
 
 /// The error a panic with `payload` stands for: `E_INTERNAL`, a bug, with the panic's message
@@ -349,12 +367,11 @@ pub fn usage(
     )
 }
 
-/// `op`'s envelope for `result`, its `meta` from `repo`, `resolved` and the time since
-/// `started`.
+/// `op`'s envelope for `result`, its `meta` from `used` (`repo`, `resolved` and `recovered`)
+/// and the time since `started`.
 fn envelope<T>(
     op: &str,
-    repo: Option<String>,
-    resolved: BTreeMap<String, String>,
+    (repo, resolved, recovered): UsedMeta,
     result: Result<T, OpError>,
     started: Instant,
 ) -> Envelope<T> {
@@ -363,6 +380,7 @@ fn envelope<T>(
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
         resolved,
         auth: AUTH_TRUST.to_owned(),
+        recovered,
     };
     match result {
         Ok(result) => Envelope::ok(op, result, meta),
