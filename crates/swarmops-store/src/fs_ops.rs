@@ -20,7 +20,8 @@
 //! a commit then writes the same objects in every run, so call k is the same call in every run.
 //!
 //! The hooks act only in a build with the `test-hooks` feature (this crate's, which the
-//! `test-hooks` features of `swarmops-repo`, `swarmops-ops` and `swarmops-cli` turn on): any
+//! `test-hooks` features of `swarmops-repo`, `swarmops-ops`, `swarmops-cli` and
+//! `swarmops-testkit` turn on; the test kit's is not a default): any
 //! other build, a release build among them, ignores the variables, and holds no fault double
 //! at all: `CrashAtFs`, `FailAtFs` and `OrderCheckFs` compile only with the feature, so a
 //! reference to one outside it does not compile. The workspace's gates build the tests with it.
@@ -619,6 +620,21 @@ impl HookedFs {
     ///
     /// `None` when none of them is set (or each is empty), and always `None` in a build without
     /// the `test-hooks` feature, which ignores the variables.
+    ///
+    /// The stores open on it by default: [`crate::FsObjectStore::open_default`], and
+    /// `swarmops-repo`'s `LocalRepo::open` and `create`, which hand the same filesystem to
+    /// `MetaStore::create_with_fs` or `open_with_fs` too, so that the two stores count their
+    /// calls together; on the real filesystem when it is `None`. With a hook that counts calls
+    /// ([`HookedFs::counts_calls`]) both stores run at parallelism 1, the object writes, the
+    /// flush's directory fsyncs and the index syncs one at a time, and with `SWARMOPS_TEST_NOW`
+    /// fixing the time `swarmops-ops` signs at, call k is the same call in every run.
+    ///
+    /// The gates (`just check`, `scripts/check.sh` and `just check-slow`) build the tests with
+    /// `--all-features`, the hooks with them. A test that needs one is marked
+    /// `#[cfg(feature = "test-hooks")]` (the CLI marks its `crash` and `faults` modules so in
+    /// its `tests/all.rs`), so that a plain `cargo test` skips it, and `just check` runs
+    /// `swarmops-cli`'s `test_hooks` in a release build without the feature, which ignores the
+    /// variables and holds none of the doubles (CONTRIBUTING.md, "Tests").
     pub fn from_env() -> Option<HookedFs> {
         hooked_fs()
     }
