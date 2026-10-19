@@ -13,6 +13,7 @@ pub mod path;
 pub use error::{IdError, PathError};
 pub use id::{BlobId, ChangesetId, ObjectId, ObjectKind, TreeId, hash_object};
 pub use object::{
-    Changeset, CodecError, DeltaEntry, DeltaOp, EntryKind, Signature, Tree, TreeEntry,
+    Changeset, CodecError, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, Signature, Tree,
+    TreeEntry,
 };
 pub use path::RepoPath;

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use std::thread;
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_core::{ChangesetId, EntryKind, ObjectId, ObjectKind, hash_object};
+use swarmops_core::{ChangesetId, EntryKind, LeafKind, ObjectId, ObjectKind, hash_object};
 use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV, RealFs};
@@ -47,7 +47,7 @@ fn listing(
     repo.list_tree(id, dir.as_ref()).unwrap().map(|entries| {
         entries
             .into_iter()
-            .map(|e| (e.name, e.kind, e.id))
+            .map(|e| (e.name, e.target.kind(), e.target.id()))
             .collect()
     })
 }
@@ -69,22 +69,19 @@ fn read_blob_at_and_list_tree_without_checkout() {
         &[],
         vec![
             put("README.md", b"# demo\n"),
-            put_as("bin/run", EntryKind::Exec, script),
-            put_as("bin/link", EntryKind::Symlink, b"run"),
+            put_as("bin/run", LeafKind::Exec, script),
+            put_as("bin/link", LeafKind::Symlink, b"run"),
             put("src/lib.rs", b"pub fn f() {}\n"),
         ],
     );
 
     // Each file with its kind, its blob's id and its bytes, read from the objects alone.
     let read = |p: &str| repo.read_blob_at(id, &path(p)).unwrap();
-    let file = |kind: EntryKind, content: &[u8]| Some((kind, blob(content), content.to_vec()));
-    assert_eq!(read("README.md"), file(EntryKind::File, b"# demo\n"));
-    assert_eq!(read("bin/run"), file(EntryKind::Exec, script));
-    assert_eq!(read("bin/link"), file(EntryKind::Symlink, b"run"));
-    assert_eq!(
-        read("src/lib.rs"),
-        file(EntryKind::File, b"pub fn f() {}\n")
-    );
+    let file = |kind: LeafKind, content: &[u8]| Some((kind, blob(content), content.to_vec()));
+    assert_eq!(read("README.md"), file(LeafKind::File, b"# demo\n"));
+    assert_eq!(read("bin/run"), file(LeafKind::Exec, script));
+    assert_eq!(read("bin/link"), file(LeafKind::Symlink, b"run"));
+    assert_eq!(read("src/lib.rs"), file(LeafKind::File, b"pub fn f() {}\n"));
     assert_eq!(read("bin"), None, "a directory is no file");
 
     // Directories list in canonical order, each entry with its object id.
@@ -367,11 +364,7 @@ fn put_objects_then_contains_object() {
     let (_dir, root, repo) = new_repo();
     let content = b"stored before any changeset names it\n".to_vec();
     let file = blob(&content);
-    let entry = TreeEntry {
-        name: "file".to_owned(),
-        kind: EntryKind::File,
-        id: file.0,
-    };
+    let entry = TreeEntry::leaf("file", LeafKind::File, file);
     let tree = Tree::new(vec![entry]).unwrap();
     let objects = vec![
         (ObjectKind::Blob, content),

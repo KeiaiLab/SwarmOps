@@ -32,7 +32,7 @@ use std::time::Duration;
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use swarmops_core::bytes::to_u64;
-use swarmops_core::{Changeset, ChangesetId, EntryKind, ObjectKind, RepoPath, Signature, Tree};
+use swarmops_core::{Changeset, ChangesetId, LeafKind, ObjectKind, RepoPath, Signature, Tree};
 use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{
     ChangesetMeta, FsObjectStore, FsOps, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore,
@@ -345,7 +345,7 @@ fn run(
                     .map(|(path, content)| Change {
                         path: RepoPath::new(*path).expect("a repo path"),
                         op: ChangeOp::Put {
-                            kind: EntryKind::File,
+                            kind: LeafKind::File,
                             content: content.as_bytes().to_vec(),
                         },
                     })

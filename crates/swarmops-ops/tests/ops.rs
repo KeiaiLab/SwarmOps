@@ -27,7 +27,7 @@ use swarmops_api::{
     TreeEntryOut, VerifyReq,
 };
 use swarmops_core::{
-    ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
+    ChangesetId, LeafKind, ObjectId, ObjectKind, RepoPath, Signature, hash_object,
 };
 use swarmops_ops::identity::{
     AGENT_ENV, RUN_ID_ENV, identity_info, require_identity, resolve_identity_from,
@@ -1700,7 +1700,7 @@ fn show_and_log_decode_what_native_commits_do_not_write() {
             changes: vec![Change {
                 path: RepoPath::new("f").unwrap(),
                 op: swarmops_repo::ChangeOp::Put {
-                    kind: EntryKind::File,
+                    kind: LeafKind::File,
                     content: b"x".to_vec(),
                 },
             }],

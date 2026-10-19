@@ -72,7 +72,7 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         RepoError::TypeConflict { path: at } => {
             error(ErrorCode::TypeConflict, message).with_details(path(&at))
         }
-        RepoError::DirPut { path: at } | RepoError::DuplicatePath { path: at } => {
+        RepoError::DuplicatePath { path: at } => {
             error(ErrorCode::InvalidArg, message).with_details(path(&at))
         }
         RepoError::ReservedMetadataKey { key } => {
@@ -354,11 +354,6 @@ mod tests {
             RepoError::TypeConflict { path: path() },
             op,
             ErrorCode::TypeConflict,
-        );
-        maps(
-            RepoError::DirPut { path: path() },
-            op,
-            ErrorCode::InvalidArg,
         );
         maps(
             RepoError::DuplicatePath { path: path() },

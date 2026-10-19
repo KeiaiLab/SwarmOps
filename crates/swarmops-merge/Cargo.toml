@@ -1,0 +1,27 @@
+[package]
+name = "swarmops-merge"
+description = "SwarmOps merge algorithms over trees and lines: tree diff and line diff, later three-way merge (no I/O)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+# The integration tests are one test binary, `tests/all.rs` (see `[[test]]`).
+autotests = false
+
+[lints]
+workspace = true
+
+[dependencies]
+swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+imara-diff.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+# One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
+# its tests named `<file>::<test>`. Cargo builds no other test target from `tests/`
+# (`autotests = false`), so a new test file is a `mod` line there.
+[[test]]
+name = "all"

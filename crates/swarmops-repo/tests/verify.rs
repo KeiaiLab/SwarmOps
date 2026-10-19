@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{
-    Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, Tree, TreeId,
+    Changeset, ChangesetId, DeltaEntry, DeltaOp, LeafKind, ObjectId, ObjectKind, Tree, TreeId,
     hash_object,
 };
 use swarmops_repo::{LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem, VerifyReport};
@@ -185,7 +185,7 @@ fn verify_clean_store_zero_problems() {
     let side = commit(
         &repo,
         &[c1],
-        vec![put_as("bin/tool", EntryKind::Exec, b"#!/bin/sh\n")],
+        vec![put_as("bin/tool", LeafKind::Exec, b"#!/bin/sh\n")],
     );
     let merge = commit(&repo, &[c2, side], vec![put("merged.txt", b"m")]);
     let empty = commit(
@@ -266,7 +266,8 @@ fn verify_detects_corrupt_blob_and_missing_object() {
         .into_iter()
         .find(|entry| entry.name == "b")
         .unwrap()
-        .id;
+        .target
+        .id();
     fs::remove_file(object_file(&root, b_tree)).unwrap();
     let lost_b = VerifyProblem::MissingObject {
         referenced_by: c1,
@@ -921,7 +922,7 @@ fn verify_detects_missing_parents_root_mismatches_and_metadata_drift() {
     let put_b = vec![DeltaEntry {
         path: path("b"),
         op: DeltaOp::Put {
-            kind: EntryKind::File,
+            kind: LeafKind::File,
             id: blob(b"b"),
         },
         renamed_from: None,
