@@ -1,4 +1,8 @@
-//! Fresh store roots and the file helpers the store's tests use on them.
+//! Fresh store roots and the file helpers the store's tests use on them; and, with the
+//! `test-hooks` feature, the store-level error and crash sweeps' harness (`sweep`).
+
+#[cfg(feature = "test-hooks")]
+pub mod sweep;
 
 use std::fs::{self as stdfs, OpenOptions};
 use std::io::Write;

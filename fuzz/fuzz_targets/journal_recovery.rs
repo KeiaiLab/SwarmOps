@@ -45,9 +45,7 @@
 //! Every loop runs over the input's bytes, entries, frames or edits, so a case cannot hang.
 #![no_main]
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::fs;
 use std::sync::Arc;
 
 use arbitrary::Arbitrary;
@@ -56,7 +54,8 @@ use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_fuzz::{
     ENTRY_LEN, HEADER_LEN, Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_length,
 };
-use swarmops_store::{Frame, FsOps, Journal, Layout, LinkOutcome, RealFs, Record, StoreError};
+use swarmops_store::{Frame, FsOps, Journal, Layout, Record, StoreError};
+use swarmops_testkit::fs::NoSyncFs;
 
 /// The most frames mode 1 appends, and the most records in each, to keep a case quick.
 const MAX_FRAMES: usize = 16;
@@ -1138,70 +1137,4 @@ fn cut(bytes: &mut Vec<u8>, len: u16) {
 
 fn to_usize(n: u64) -> usize {
     usize::try_from(n).expect("u64 fits in usize")
-}
-
-/// The real filesystem without the syncs: they decide what survives a crash, which this target
-/// does not simulate, and each costs milliseconds on a real disk. Every effect on the files'
-/// contents is `RealFs`'s.
-struct NoSyncFs;
-
-impl FsOps for NoSyncFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        File::open(p).map(drop)
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        OpenOptions::new().write(true).open(path)?.set_len(len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let dir = path.parent().unwrap_or(Path::new("."));
-        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
-        temp.write_all(bytes)?;
-        temp.persist(path).map(drop).map_err(|e| e.error)
-    }
-
-    fn sync_data(&self, path: &Path) -> io::Result<()> {
-        File::open(path).map(drop)
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)
-    }
 }

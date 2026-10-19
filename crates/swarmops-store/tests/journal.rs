@@ -27,7 +27,8 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    BadRecord, Frame, FsOps, Journal, Layout, LimitKind, MetaLock, RealFs, Record, StoreError,
+    BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, MetaLock, RealFs, Record,
+    StoreError,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
@@ -54,6 +55,13 @@ fn new_journal(layout: &Layout) -> Journal {
 /// A second handle on the journal, as another process would open it.
 fn reopen(layout: &Layout) -> Journal {
     Journal::open(layout, real_fs()).unwrap()
+}
+
+/// [`reopen`] under the order checker ([`checked`]): the crash sweeps recover so, every write
+/// of their recovery checked against the write-ordering rules.
+#[cfg(feature = "test-hooks")]
+fn reopen_checked(layout: &Layout) -> Journal {
+    Journal::open(layout, checked(RealFs)).unwrap()
 }
 
 fn id(byte: u8) -> ChangesetId {
@@ -1016,10 +1024,13 @@ fn journal_off_cut_after_a_reader_measured_it_is_read_again() {
     // three times more, then reports the journal corrupt where the shrink would have, before it
     // ever measures journal.log.
     let entries: Vec<u8> = [0_u64, 84].iter().flat_map(|e| e.to_le_bytes()).collect();
-    let cutting = Arc::new(Watched(CutAfterEachMeasurement {
-        entries,
-        calls: Mutex::new(Vec::new()),
-    }));
+    let cutting = Arc::new(Watched(
+        CutAfterEachMeasurement {
+            entries,
+            calls: Mutex::new(Vec::new()),
+        },
+        RealFs,
+    ));
     let reader = Journal::open(&layout, Arc::clone(&cutting) as Arc<dyn FsOps>).unwrap();
     for (what, read, _, _) in reads {
         assert_corrupt_at(read(&reader), 0, what);
@@ -1828,7 +1839,7 @@ fn crash_at_any_journal_write_recovers_to_whole_frames() {
 
         // Recovery keeps exactly the whole frames: the child's frame once its bytes were
         // durable (k >= 5), even though its journal.off entry may be missing.
-        let journal = reopen(&layout);
+        let journal = reopen_checked(&layout);
         assert_eq!(journal.truncate_torn_tail().unwrap(), cut, "k={k}");
         let mut want = vec![first.clone()];
         if k >= 5 {
@@ -1883,7 +1894,7 @@ fn crash_while_recovery_lists_a_frame_recovers_to_whole_frames() {
 
         // Frame 1 was committed all along; the child's frame is once its bytes were
         // durable (k >= 6).
-        let journal = reopen(&layout);
+        let journal = reopen_checked(&layout);
         assert_eq!(journal.truncate_torn_tail().unwrap(), None, "k={k}");
         let mut want = vec![first.clone(), second.clone()];
         let mut offsets = vec![0, 84];
@@ -2002,11 +2013,14 @@ fn listed_frames(layout: &Layout) -> Vec<(u64, u64)> {
 /// - the journal a power loss would leave (the model's durable image) recovers, without
 ///   damage, to exactly the acknowledged frames in order: none of them is lost, and none is
 ///   there that was not acknowledged.
+///
+/// Every run, the dry run's included, is under the order checker ([`checked`]), outside the
+/// model, so that it judges the failed syncs as real ones.
 #[test]
 fn fsync_failure_semantics_never_list_a_frame_not_on_disk() {
     let (_root, layout) = new_root();
     let dry = Arc::new(FsyncModelFs::new());
-    let all = fsync_failure_run(&layout, Arc::clone(&dry) as Arc<dyn FsOps>).unwrap();
+    let all = fsync_failure_run(&layout, checked(Arc::clone(&dry))).unwrap();
     assert_eq!(
         all.len(),
         5,
@@ -2020,7 +2034,7 @@ fn fsync_failure_semantics_never_list_a_frame_not_on_disk() {
     for k in 1..=syncs {
         let (_root, layout) = new_root();
         let model = Arc::new(FsyncModelFs::failing_sync(k));
-        let Some(acked) = fsync_failure_run(&layout, Arc::clone(&model) as Arc<dyn FsOps>) else {
+        let Some(acked) = fsync_failure_run(&layout, checked(Arc::clone(&model))) else {
             continue; // the journal's creation failed: no frame to judge
         };
         let failed = model.failed();
@@ -2104,8 +2118,10 @@ fn a_tail_check_whose_sync_fails_never_lists_a_frame_not_on_disk() {
                 call.method,
                 call.path.file_name().and_then(|name| name.to_str()),
             ) {
-                ("sync_data", Some("journal.log")) => nth(&log_syncs) == 1,
-                ("append_durable", Some("journal.off")) => off_listing && nth(&off_appends) == 3,
+                (FsMethod::SyncData, Some("journal.log")) => nth(&log_syncs) == 1,
+                (FsMethod::AppendDurable, Some("journal.off")) => {
+                    off_listing && nth(&off_appends) == 3
+                }
                 _ => false,
             }
         }))

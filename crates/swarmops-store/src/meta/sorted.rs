@@ -40,8 +40,11 @@ const REC_LEN: usize = 8;
 /// One sorted view: `len()` keys of `K` bytes in ascending order in one file, and in another
 /// the index record (rec) each key belongs to, in the same order.
 ///
-/// It counts its reads, for tests and diagnostics: [`SortedView::probes`] the reads of the
-/// key file, [`SortedView::rec_reads`] those of the rec file.
+/// It counts its reads, one relaxed atomic add per `read_at`, in every build:
+/// [`SortedView::probes`] the reads of the key file, [`SortedView::rec_reads`] those of the rec
+/// file. They are the instrument that checks the lookup cost model of storage spec §3
+/// (`read_at_binary_search_touches_only_key_column`), since §8 keeps the metadata store's reads
+/// off `FsOps`: diagnostics, not a test double.
 #[derive(Debug)]
 pub struct SortedView<const K: usize> {
     /// The key file and the rec file, read-only; `None` exactly when `len` is 0.

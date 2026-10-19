@@ -20,7 +20,8 @@ pub mod order_check;
 pub use error::{LimitKind, StoreError};
 pub use fs_objects::{FsObjectStore, ObjectStore};
 pub use fs_ops::{
-    CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, FsOps, HookedFs, LinkOutcome, ORDER_CHECK_ENV, RealFs,
+    CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, FsMethod, FsOps, HookedFs, LinkOutcome,
+    ORDER_CHECK_ENV, RealFs,
 };
 #[cfg(feature = "test-hooks")]
 pub use fs_ops::{CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};

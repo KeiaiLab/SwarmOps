@@ -577,8 +577,9 @@ fn sweep(run: impl Fn(u64) -> bool + Sync) -> u64 {
 
 /// One run of the commit crash sweep: a child commits [`crash_request`] on a copy of
 /// `template` until its k-th filesystem call aborts it. The store must then hold nothing or
-/// the whole changeset `want`, verify clean, and take the commit again. Returns whether the
-/// child finished (k was past its last call), and whether the changeset was committed.
+/// the whole changeset `want`, verify clean, and take the commit again, which recovers from the
+/// crash under the order checker ([`checked`]), as the child ran. Returns whether the child
+/// finished (k was past its last call), and whether the changeset was committed.
 #[cfg(feature = "test-hooks")]
 fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, bool) {
     let dir = tempfile::tempdir().unwrap();
@@ -599,7 +600,7 @@ fn commit_crashing_at(template: &Utf8Path, want: ChangesetId, k: u64) -> (bool, 
     );
 
     // Either nothing is committed, or all of it is, every object there.
-    let repo = LocalRepo::open(&root).unwrap();
+    let repo = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
     let committed = match repo.info().unwrap().changesets {
         0 => false,
         1 => true,

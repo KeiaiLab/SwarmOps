@@ -23,7 +23,7 @@ use proptest::test_runner::{RngAlgorithm, TestRng};
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FS_CALLS_ENV, FsOps};
-use swarmops_store::{FsObjectStore, Layout, ObjectStore, RealFs, StoreError};
+use swarmops_store::{FsMethod, FsObjectStore, Layout, ObjectStore, RealFs, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{self, SIGABRT, this_test};
 use swarmops_testkit::fs::{Call, Rendezvous, Watch, Watched};
@@ -39,6 +39,11 @@ const ENC_ZSTD: u8 = 1;
 /// Set only in the child that `crash_at_fs_aborts_child_at_call_k` spawns: the store root.
 #[cfg(feature = "test-hooks")]
 const CRASH_CHILD_ROOT: &str = "SWARMOPS_TEST_CRASH_CHILD_ROOT";
+
+/// Set only in the children that `crash_at_k_aborts_before_call_k_runs` spawns: the file they
+/// append to.
+#[cfg(feature = "test-hooks")]
+const APPENDS_FILE: &str = "SWARMOPS_TEST_CRASH_APPENDS_FILE";
 
 /// Set only in the children that `fs_calls_hook_reports_how_many_calls_a_process_made`
 /// spawns: the store root.
@@ -117,13 +122,13 @@ impl Calls {
 impl Watch for Calls {
     fn before(&self, call: &Call<'_>) -> io::Result<()> {
         match call.method {
-            "write_durable_temp" => {
+            FsMethod::WriteDurableTemp => {
                 self.write_durable_temp.fetch_add(1, Ordering::SeqCst);
             }
-            "link_noclobber" => {
+            FsMethod::LinkNoclobber => {
                 self.link_noclobber.fetch_add(1, Ordering::SeqCst);
             }
-            "fsync_dir" => {
+            FsMethod::FsyncDir => {
                 let p = call.path();
                 self.fsynced_dirs.lock().unwrap().push(p.to_path_buf());
                 if self.failing_dirs.lock().unwrap().iter().any(|dir| dir == p) {
@@ -187,7 +192,7 @@ impl Watch for ParkFsyncs {
 
 fn counting_store(layout: &Layout) -> (FsObjectStore, Arc<Calls>) {
     let calls = Arc::new(Calls::default());
-    let fs = Watched(Arc::clone(&calls));
+    let fs = Watched(Arc::clone(&calls), RealFs);
     (FsObjectStore::open(layout.clone(), Box::new(fs)), calls)
 }
 
@@ -685,10 +690,13 @@ fn concurrent_flush_waits_for_the_one_in_progress() {
     let (_root, layout) = new_root();
     let gate = Arc::new(Gate::default());
     let (parked_tx, parked_rx) = mpsc::channel();
-    let fs = Watched(ParkFsyncs {
-        parked: parked_tx,
-        gate: Arc::clone(&gate),
-    });
+    let fs = Watched(
+        ParkFsyncs {
+            parked: parked_tx,
+            gate: Arc::clone(&gate),
+        },
+        RealFs,
+    );
     let store = FsObjectStore::open(layout.clone(), Box::new(fs));
     // Two puts (two callers, say) into one existing fan-out dir: the touched set is {F}.
     let [a, b, _] = three_blobs_in_two_fanout_dirs();
@@ -893,6 +901,45 @@ fn crash_at_fs_aborts_child_at_call_k() {
         Vec::<PathBuf>::new(),
         "no object file is visible after the crash"
     );
+}
+
+/// A [`CrashAtFs`] aborts at call k before that call runs, and not before: a child that makes
+/// three appends to one file, crashed at k = 1, 2 and 3, leaves the first k - 1 of them, and at
+/// k = 4, past its last call, ends normally with all three.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn crash_at_k_aborts_before_call_k_runs() {
+    if let Some(file) = std::env::var_os(APPENDS_FILE) {
+        let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
+        let fs = CrashAtFs::new(RealFs, k);
+        for append in [b"1", b"2", b"3"] {
+            fs.append(Path::new(&file), append).unwrap();
+        }
+        return;
+    }
+    for k in 1..=4_u64 {
+        let (_root, layout) = new_root();
+        let file = layout.root().join("appends");
+        let child = child::run(
+            this_test(&test_name!("crash_at_k_aborts_before_call_k_runs"))
+                .env(APPENDS_FILE, &file)
+                .env(CRASH_AT_ENV, k.to_string()),
+        );
+        let ended_as_expected = if k <= 3 {
+            child.status.signal() == Some(SIGABRT)
+        } else {
+            child.status.success()
+        };
+        assert!(
+            ended_as_expected,
+            "k={k}: {:?}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr)
+        );
+        let held = fs::read(&file).unwrap_or_default();
+        let appended = usize::try_from(k - 1).unwrap().min(3);
+        assert_eq!(held, b"123"[..appended], "k={k}: the appends before call k");
+    }
 }
 
 /// A [`CrashAtFs`] counts every call, and with a report file writes the count there when it

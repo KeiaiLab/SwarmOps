@@ -16,7 +16,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use swarmops_store::{FsOps, LinkOutcome, RealFs};
+use swarmops_core::bytes::to_u64;
+use swarmops_store::{FsMethod, FsOps, LinkOutcome, RealFs};
 
 /// `fs` with the store's write-ordering rules checked on every call
 /// (`swarmops_store::OrderCheckFs`, which panics at a call that breaks one), in a build with
@@ -38,8 +39,9 @@ pub fn checked(fs: impl FsOps + 'static) -> Arc<dyn FsOps> {
 pub struct SyncCall<'a> {
     /// Its number among the model's sync-class calls, from 1.
     pub n: u64,
-    /// The method's name, `"append_durable"` say.
-    pub method: &'static str,
+    /// The method, which compares equal to its name (`call.method == "append_durable"`): one
+    /// that flushes ([`FsMethod::flushes`]).
+    pub method: FsMethod,
     /// The path it acts on: a rename's target; a directory for `fsync_dir` and
     /// `write_durable_temp`.
     pub path: &'a Path,
@@ -253,7 +255,8 @@ impl<F: FsOps> FsyncModelFs<F> {
     }
 
     /// Counts sync-class call `method` on `path`, and says whether it fails.
-    fn fails(&self, method: &'static str, path: &Path) -> bool {
+    fn fails(&self, method: FsMethod, path: &Path) -> bool {
+        debug_assert!(method.flushes(), "{method} is no sync-class call");
         let mut state = self.state();
         state.syncs += 1;
         let call = SyncCall {
@@ -273,7 +276,7 @@ impl<F: FsOps> FsyncModelFs<F> {
     /// model follows: what the call wrote is durable if it succeeded, lost if it failed.
     fn flush<T>(
         &self,
-        method: &'static str,
+        method: FsMethod,
         path: &Path,
         file: Option<&Path>,
         call: impl FnOnce() -> io::Result<T>,
@@ -307,7 +310,7 @@ impl Default for FsyncModelFs<RealFs> {
 }
 
 /// The error a failed sync-class call reports.
-fn injected(method: &str, path: &Path) -> io::Error {
+fn injected(method: FsMethod, path: &Path) -> io::Error {
     io::Error::other(format!(
         "injected EIO: the writeback of {method} {} failed",
         path.display()
@@ -319,18 +322,13 @@ fn len_of(path: &Path) -> u64 {
     fs::metadata(path).map_or(0, |meta| meta.len())
 }
 
-/// `n`, which fits.
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
-}
-
 impl<F: FsOps> FsOps for FsyncModelFs<F> {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
         self.inner.create_dir_all(p)
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        let fails = self.fails("write_durable_temp", dir);
+        let fails = self.fails(FsMethod::WriteDurableTemp, dir);
         let path = self.inner.write_durable_temp(dir, bytes)?;
         let mut state = self.state();
         let mut model = ModelFile::durable(bytes.to_vec());
@@ -342,7 +340,7 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
         state.files.insert(path.clone(), model);
         drop(state);
         if fails {
-            Err(injected("write_durable_temp", dir))
+            Err(injected(FsMethod::WriteDurableTemp, dir))
         } else {
             Ok(path)
         }
@@ -360,7 +358,7 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.flush("fsync_dir", p, None, || self.inner.fsync_dir(p))
+        self.flush(FsMethod::FsyncDir, p, None, || self.inner.fsync_dir(p))
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -378,7 +376,7 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.flush("append_durable", path, Some(path), || {
+        self.flush(FsMethod::AppendDurable, path, Some(path), || {
             self.inner.append_durable(path, bytes)
         })
     }
@@ -389,7 +387,7 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
         Self::track(&mut self.state(), path);
-        let fails = self.fails("truncate", path);
+        let fails = self.fails(FsMethod::Truncate, path);
         let result = self.inner.truncate(path, len);
         let mut state = self.state();
         let model = Self::track(&mut state, path);
@@ -403,13 +401,13 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
         }
         drop(state);
         match result {
-            Ok(()) if fails => Err(injected("truncate", path)),
+            Ok(()) if fails => Err(injected(FsMethod::Truncate, path)),
             result => result,
         }
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let fails = self.fails("atomic_replace", path);
+        let fails = self.fails(FsMethod::AtomicReplace, path);
         self.inner.atomic_replace(path, bytes)?;
         // The new content was synced before its rename: whatever the directory's fsync did,
         // the data is durable.
@@ -417,14 +415,16 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
             .files
             .insert(path.to_path_buf(), ModelFile::durable(bytes.to_vec()));
         if fails {
-            Err(injected("atomic_replace", path))
+            Err(injected(FsMethod::AtomicReplace, path))
         } else {
             Ok(())
         }
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.flush("sync_data", path, Some(path), || self.inner.sync_data(path))
+        self.flush(FsMethod::SyncData, path, Some(path), || {
+            self.inner.sync_data(path)
+        })
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -433,7 +433,7 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        let fails = self.fails("rename_durable", to);
+        let fails = self.fails(FsMethod::RenameDurable, to);
         self.inner.rename_durable(from, to)?;
         // The data moves with the name (a directory's files with it): a failed fsync of the
         // directory loses no data here.
@@ -456,7 +456,7 @@ impl<F: FsOps> FsOps for FsyncModelFs<F> {
         }
         drop(state);
         if fails {
-            Err(injected("rename_durable", to))
+            Err(injected(FsMethod::RenameDurable, to))
         } else {
             Ok(())
         }

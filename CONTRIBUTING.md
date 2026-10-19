@@ -89,15 +89,34 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
   `SWARMOPS_TEST_NOW`), read only under
   `#[cfg(feature = "test-hooks")]`. A test that needs them is marked
   `#[cfg(feature = "test-hooks")]`, or, for a whole file, its `mod` line in `tests/all.rs`
-  is (the CLI's `crash` and `faults` modules), so that a plain `cargo test` skips it. Step 4
-  of `just check` keeps this honest.
+  is (the CLI's `crash` and `faults` modules), so that a plain `cargo test` skips it; the
+  gates (`just check`, `scripts/check.sh`, `just check-slow`) build the tests with
+  `--all-features`. Step 4 of `just check` keeps this honest. The test kit's own `test-hooks`
+  feature (`swarmops-testkit`'s, which turns on the store's) is not a default, and must not
+  become one: the crates take the test kit as a dev-dependency, and by feature unification a
+  default would build the hooks into the `swarmops` of that release proof. Its default
+  features, `cli` and `repo`, hold the helpers that need `serde_json` and `swarmops-repo`; the
+  fuzz crate takes it without them.
 - **Crash and fault tests are deterministic.** A crash sweep aborts the process at its k-th
   filesystem call (`SWARMOPS_TEST_CRASH_AT=k`) for every k a dry run counted
   (`SWARMOPS_TEST_FS_CALLS`), and an I/O-error sweep fails that call instead
   (`SWARMOPS_TEST_FAIL_AT=k`). Both run the stores at parallelism 1 and pin the signing time
   (`SWARMOPS_TEST_NOW`), so that call k is the same call in every run.
+  `SWARMOPS_TEST_FAIL_AT=<k>[:<mode>[:<errno>]]` takes the mode `once` (the default) or
+  `persistent` (every mutating call from k on fails too, reads aside) and the errno `eio` (the
+  default: a call that flushes runs, then fails, as a failed writeback does) or `enospc` (the
+  call does nothing); an I/O error during recovery is two runs, a crash at k1, then a failure
+  at the k2-th call of the run that recovers. `HookedFs::from_env` stacks the doubles from the
+  inside out, `FailAtFs`, `CrashAtFs`, then `OrderCheckFs`, outermost so that it judges the
+  injected failures as real ones; its rustdoc says which stores open on what it gives.
+- **Counters that measure a spec cost model are diagnostics, not test doubles.** `SortedView`'s
+  `probes` and `rec_reads` count reads in every build, one relaxed atomic add per `read_at`:
+  they check storage spec §3's lookup cost model
+  (`read_at_binary_search_touches_only_key_column`), since the metadata store's reads do not go
+  through `FsOps`.
 - **Writes are checked against the ordering rules.** Every run of the binary in the CLI tests,
-  and the store's and the repository's crash sweeps, check each filesystem call against the
+  and the store's and the repository's crash sweeps (their recovery after the crash included),
+  check each filesystem call against the
   store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`; rules W1 to W7, stated in
   storage spec §2 rule 4 and checked by `crates/swarmops-store/src/order_check.rs`), and panic
   at the first call that breaks one.
@@ -109,7 +128,8 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
   through `assert_cmd`, set its `timeout` to the runner's deadline.
 - **One integration-test binary per crate.** Where a crate has several test files, they are the
   modules of its `tests/all.rs`, their tests named `<file>::<test>`; Cargo builds no other test
-  target from `tests/` there (`autotests = false`), so a new test file needs its `mod` line. The
+  target from `tests/` there (`autotests = false`), so a new test file needs its `mod` line, and
+  `every_test_file_is_a_module_of_all_rs`, in each `tests/all.rs`, fails until it has one. The
   CLI's release proof, `test_hooks.rs` (step 4 of `just check`), stays a binary of its own.
 - **Slow tests are ignored by default** with a reason that names their cost
   (`#[ignore = "slow, ~20 s: ~90 crashed commits"]`), and run in the slow suite below.
@@ -119,7 +139,11 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
   instructions it gives the model) have snapshots of their own. A snapshot changes only with an
   intended contract change: review the diff (`cargo insta review`), and say what changed
   in the commit and in `CHANGELOG.md`. Likewise, tests that pin a sequence of filesystem calls
-  change only where behaviour changes, and the change names each one.
+  change only where behaviour changes, and the change names each one. Pin an exact
+  filesystem-call sequence only where the spec states a cost or an order (the per-transaction
+  syncs, the rule that queueing writes nothing, the readers' call sequences in
+  `crates/swarmops-store/tests/journal.rs`); elsewhere assert the call classes and orderings,
+  and let `OrderCheckFs` check the write-ordering rules.
 
 ## The slow suite, measurements and fuzzing
 

@@ -207,6 +207,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `_meta: {"anthropic/maxResultSizeChars": 200000}`, which Claude Code reads to keep a
   `read_file` result of up to 200,000 characters in the conversation instead of saving one over
   50,000 to a file. No other tool carries `_meta`.
+- `swarmops_store::FsMethod` names the 14 methods of the `FsOps` seam (`FsMethod::ALL`,
+  `as_str`, `is_mutating`, `flushes`): the one list the fault doubles and the test kit's
+  watchers classify calls with. It compares equal to the method's name.
+- Test infrastructure: where a crate's integration tests are the modules of `tests/all.rs` (core,
+  api, store, repo and the CLI), `every_test_file_is_a_module_of_all_rs` fails on a file of
+  `tests/` that no `mod` line names, which `autotests = false` would leave unbuilt.
+- Test infrastructure: the power-loss run places a frame whose length field straddles a 512 B
+  sector boundary, which a lost first sector leaves a wrong length that is not 0, and its slow
+  variant ends with a transaction of more than 1,024 changesets, so that its images hold the
+  compaction a writer makes past that many records (an index sync, the compaction, the
+  `Compacted` frame, the checkpoint), which the run's own compaction did not.
 
 ### Changed
 
@@ -260,6 +271,21 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   building on it; they drop the revision grammar, which each tool's schema and a bad
   revision's hint give, and the parenthesis on Claude Code's result limits (1,990 of Claude
   Code's 2,048 characters; they were 2,043).
+- Test infrastructure: one `NoSyncFs` in `swarmops-testkit`, the real filesystem without its
+  flushes that fails where it fails (a sync of a missing path is `NotFound`), replaces the test
+  kit's `FastFs` and the copies in the `read_snapshot` bench and the `journal_recovery` fuzz
+  target, which had drifted apart (two of the three answered `Ok` to a sync of a missing path).
+  `Watched(watcher, fs)` runs its watcher over any filesystem, and a watcher sees a call's
+  method as an `FsMethod`. The test kit's CLI and repository helpers sit behind its default
+  features `cli` and `repo`, so the fuzz crate takes it with `default-features = false`.
+- The order checker's W1 also refuses a cut below what the journal vouches for: of
+  `journal.log` into the frames `journal.off` lists, or of `journal.off` below an entry the
+  process synced or found there (the zeroed entries past frame 0 at its end aside, which list no
+  frame). Before, `truncate` was only followed, and a wrong cut showed only when a sweep's oracle
+  found the frames lost.
+- Test infrastructure: the crash sweeps of the journal, the index and the repository recover
+  under the order checker too, as the sweeps through the binary did (they recovered on the real
+  filesystem, unchecked), and so does the fsync-failure model's sweep of the journal, every run.
 
 ### Fixed
 

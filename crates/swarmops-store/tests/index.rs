@@ -32,7 +32,7 @@ use swarmops_store::{
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::faults::checked;
-use swarmops_testkit::fs::{FastFs, RecordingFs};
+use swarmops_testkit::fs::{NoSyncFs, RecordingFs};
 use swarmops_testkit::measure::{mix, percentile};
 use swarmops_testkit::store::new_root as bare_root;
 use swarmops_testkit::store::{append_bytes, file_len, real_fs, set_len};
@@ -495,7 +495,7 @@ proptest! {
         probes in prop::collection::vec((arb_key(), 1..=16_usize), 0..16),
     ) {
         let (_root, layout) = new_root();
-        let fast = || -> Arc<dyn FsOps> { Arc::new(FastFs) };
+        let fast = || -> Arc<dyn FsOps> { Arc::new(NoSyncFs) };
         let mut index = Index::open(&layout, fast()).unwrap();
         let mut model: Vec<ChangesetMeta> = Vec::new();
         for op in ops {
@@ -1033,7 +1033,7 @@ fn readers_opening_during_compactions_see_whole_views() {
     let readers = 2 * thread::available_parallelism().map_or(4, NonZero::get);
     let (_root, layout) = new_root();
     let metas: Vec<ChangesetMeta> = (0..600).map(spread_meta).collect();
-    let mut index = Index::open(&layout, Arc::new(FastFs)).unwrap();
+    let mut index = Index::open(&layout, Arc::new(NoSyncFs)).unwrap();
     append_all(&mut index, &metas[..4]);
     index.compact().unwrap();
     let writing = AtomicBool::new(true);
@@ -1050,7 +1050,7 @@ fn readers_opening_during_compactions_see_whole_views() {
             scope.spawn(move || {
                 let mut opens = 0_u64;
                 while writing.load(Ordering::SeqCst) {
-                    let index = Index::open(layout, Arc::new(FastFs)).unwrap();
+                    let index = Index::open(layout, Arc::new(NoSyncFs)).unwrap();
                     let rec = mix((reader << 32) | opens) % index.len();
                     let meta = &metas[usize::try_from(rec).unwrap()];
                     assert_eq!(index.find(meta.id).unwrap(), Some(rec));
@@ -1402,7 +1402,7 @@ fn crash_metas() -> Vec<ChangesetMeta> {
 fn crash_child(root: OsString) {
     let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
     let layout = Layout::new(Utf8PathBuf::from_path_buf(root.into()).unwrap());
-    let fs = checked(CrashAtFs::new(FastFs, k));
+    let fs = checked(CrashAtFs::new(NoSyncFs, k));
     let mut index = Index::open(&layout, fs).unwrap();
     index.repair_tail().unwrap();
     for meta in &crash_metas()[5..] {
@@ -1423,7 +1423,7 @@ fn crash_at_any_index_write_recovers_to_whole_records() {
     let metas = crash_metas();
     for k in 1..=CRASH_CHILD_CALLS + 1 {
         let (_root, layout) = new_root();
-        let mut index = Index::open(&layout, Arc::new(FastFs)).unwrap();
+        let mut index = Index::open(&layout, Arc::new(NoSyncFs)).unwrap();
         append_all(&mut index, &metas[..5]);
         index.compact().unwrap();
         drop(index);
@@ -1456,8 +1456,9 @@ fn crash_at_any_index_write_recovers_to_whole_records() {
                 assert_eq!(reader.get(rec).unwrap(), at_seq(meta, rec), "k={k}");
             }
         }
-        // The next writer repairs, appends what is missing (as replay would) and compacts.
-        let mut writer = open(&layout);
+        // The next writer repairs, appends what is missing (as replay would) and compacts,
+        // under the order checker as the crashed one was.
+        let mut writer = Index::open(&layout, checked(RealFs)).unwrap();
         writer.repair_tail().unwrap();
         assert_eq!(writer.len(), have, "k={k}");
         append_all(&mut writer, &metas[usize::try_from(have).unwrap()..]);

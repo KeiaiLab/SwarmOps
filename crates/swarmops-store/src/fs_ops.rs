@@ -20,13 +20,15 @@
 //! a commit then writes the same objects in every run, so call k is the same call in every run.
 //!
 //! The hooks act only in a build with the `test-hooks` feature (this crate's, which the
-//! `test-hooks` features of `swarmops-repo`, `swarmops-ops` and `swarmops-cli` turn on): any
+//! `test-hooks` features of `swarmops-repo`, `swarmops-ops`, `swarmops-cli` and
+//! `swarmops-testkit` turn on; the test kit's is not a default): any
 //! other build, a release build among them, ignores the variables, and holds no fault double
 //! at all: `CrashAtFs`, `FailAtFs` and `OrderCheckFs` compile only with the feature, so a
 //! reference to one outside it does not compile. The workspace's gates build the tests with it.
 //! [`HookedFs`] is in every build, since the stores ask it for their filesystem: without the
 //! feature it has none to give.
 
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -100,6 +102,180 @@ pub enum LinkOutcome {
     Placed,
     /// The target already existed and was left untouched.
     AlreadyExists,
+}
+
+/// One method of [`FsOps`], by name: the seam's vocabulary, which every double classifies
+/// calls with ([`FsMethod::is_mutating`], [`FsMethod::flushes`]) so that one list names the 14
+/// methods. It compares equal to the method's name ([`FsMethod::as_str`]), so a test's
+/// `call.method == "append"` reads as before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum FsMethod {
+    /// [`FsOps::create_dir_all`].
+    CreateDirAll,
+    /// [`FsOps::write_durable_temp`].
+    WriteDurableTemp,
+    /// [`FsOps::link_noclobber`].
+    LinkNoclobber,
+    /// [`FsOps::fsync_dir`].
+    FsyncDir,
+    /// [`FsOps::read`].
+    Read,
+    /// [`FsOps::exists`].
+    Exists,
+    /// [`FsOps::remove`].
+    Remove,
+    /// [`FsOps::append_durable`].
+    AppendDurable,
+    /// [`FsOps::file_len`].
+    FileLen,
+    /// [`FsOps::truncate`].
+    Truncate,
+    /// [`FsOps::atomic_replace`].
+    AtomicReplace,
+    /// [`FsOps::sync_data`].
+    SyncData,
+    /// [`FsOps::append`].
+    Append,
+    /// [`FsOps::rename_durable`].
+    RenameDurable,
+}
+
+impl FsMethod {
+    /// Every method, in the order the trait declares them.
+    pub const ALL: [FsMethod; 14] = [
+        FsMethod::CreateDirAll,
+        FsMethod::WriteDurableTemp,
+        FsMethod::LinkNoclobber,
+        FsMethod::FsyncDir,
+        FsMethod::Read,
+        FsMethod::Exists,
+        FsMethod::Remove,
+        FsMethod::AppendDurable,
+        FsMethod::FileLen,
+        FsMethod::Truncate,
+        FsMethod::AtomicReplace,
+        FsMethod::SyncData,
+        FsMethod::Append,
+        FsMethod::RenameDurable,
+    ];
+
+    /// The method's name, as the trait spells it: `"append_durable"`, say.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            FsMethod::CreateDirAll => "create_dir_all",
+            FsMethod::WriteDurableTemp => "write_durable_temp",
+            FsMethod::LinkNoclobber => "link_noclobber",
+            FsMethod::FsyncDir => "fsync_dir",
+            FsMethod::Read => "read",
+            FsMethod::Exists => "exists",
+            FsMethod::Remove => "remove",
+            FsMethod::AppendDurable => "append_durable",
+            FsMethod::FileLen => "file_len",
+            FsMethod::Truncate => "truncate",
+            FsMethod::AtomicReplace => "atomic_replace",
+            FsMethod::SyncData => "sync_data",
+            FsMethod::Append => "append",
+            FsMethod::RenameDurable => "rename_durable",
+        }
+    }
+
+    /// Whether the method may change a file or a directory: every one but the three reads,
+    /// `read`, `exists` and `file_len`.
+    pub const fn is_mutating(self) -> bool {
+        !matches!(self, FsMethod::Read | FsMethod::Exists | FsMethod::FileLen)
+    }
+
+    /// Whether the method flushes to stable storage, as [`FsOps`] documents it:
+    /// `append_durable`, `truncate`, `sync_data`, `fsync_dir`, `atomic_replace`,
+    /// `write_durable_temp` and `rename_durable`.
+    pub const fn flushes(self) -> bool {
+        matches!(
+            self,
+            FsMethod::AppendDurable
+                | FsMethod::Truncate
+                | FsMethod::SyncData
+                | FsMethod::FsyncDir
+                | FsMethod::AtomicReplace
+                | FsMethod::WriteDurableTemp
+                | FsMethod::RenameDurable
+        )
+    }
+}
+
+/// The method's name ([`FsMethod::as_str`]).
+impl fmt::Display for FsMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A method is equal to its name ([`FsMethod::as_str`]).
+impl PartialEq<&str> for FsMethod {
+    fn eq(&self, name: &&str) -> bool {
+        self.as_str() == *name
+    }
+}
+
+#[cfg(test)]
+mod fs_method_tests {
+    use super::FsMethod;
+
+    /// The method names, as the trait declares them, and the two classes the fault doubles
+    /// sorted them into with string lists before `FsMethod` (`FailAtFs::call`): the calls that
+    /// change nothing, and those that flush to stable storage.
+    #[test]
+    fn fs_method_classifies_as_the_doubles_did() {
+        let names: Vec<&str> = FsMethod::ALL.iter().map(|method| method.as_str()).collect();
+        assert_eq!(
+            names,
+            [
+                "create_dir_all",
+                "write_durable_temp",
+                "link_noclobber",
+                "fsync_dir",
+                "read",
+                "exists",
+                "remove",
+                "append_durable",
+                "file_len",
+                "truncate",
+                "atomic_replace",
+                "sync_data",
+                "append",
+                "rename_durable",
+            ]
+        );
+        let mut distinct = names.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), 14, "14 distinct names");
+        let reading: Vec<&str> = (FsMethod::ALL.iter())
+            .filter(|method| !method.is_mutating())
+            .map(|method| method.as_str())
+            .collect();
+        assert_eq!(reading, ["read", "exists", "file_len"]);
+        let flushing: Vec<&str> = (FsMethod::ALL.iter())
+            .filter(|method| method.flushes())
+            .map(|method| method.as_str())
+            .collect();
+        assert_eq!(
+            flushing,
+            [
+                "write_durable_temp",
+                "fsync_dir",
+                "append_durable",
+                "truncate",
+                "atomic_replace",
+                "sync_data",
+                "rename_durable",
+            ]
+        );
+        for method in FsMethod::ALL {
+            assert!(method == method.as_str(), "{method} is its name");
+            assert_eq!(method.to_string(), method.as_str());
+        }
+        assert!(FsMethod::AppendDurable != "append");
+    }
 }
 
 /// The filesystem operations of the object store and the metadata store.
@@ -444,6 +620,21 @@ impl HookedFs {
     ///
     /// `None` when none of them is set (or each is empty), and always `None` in a build without
     /// the `test-hooks` feature, which ignores the variables.
+    ///
+    /// The stores open on it by default: [`crate::FsObjectStore::open_default`], and
+    /// `swarmops-repo`'s `LocalRepo::open` and `create`, which hand the same filesystem to
+    /// `MetaStore::create_with_fs` or `open_with_fs` too, so that the two stores count their
+    /// calls together; on the real filesystem when it is `None`. With a hook that counts calls
+    /// ([`HookedFs::counts_calls`]) both stores run at parallelism 1, the object writes, the
+    /// flush's directory fsyncs and the index syncs one at a time, and with `SWARMOPS_TEST_NOW`
+    /// fixing the time `swarmops-ops` signs at, call k is the same call in every run.
+    ///
+    /// The gates (`just check`, `scripts/check.sh` and `just check-slow`) build the tests with
+    /// `--all-features`, the hooks with them. A test that needs one is marked
+    /// `#[cfg(feature = "test-hooks")]` (the CLI marks its `crash` and `faults` modules so in
+    /// its `tests/all.rs`), so that a plain `cargo test` skips it, and `just check` runs
+    /// `swarmops-cli`'s `test_hooks` in a release build without the feature, which ignores the
+    /// variables and holds none of the doubles (CONTRIBUTING.md, "Tests").
     pub fn from_env() -> Option<HookedFs> {
         hooked_fs()
     }
@@ -763,28 +954,16 @@ impl<F: FsOps> FailAtFs<F> {
 
     /// Counts one call of `method`, and runs it as [`FailAt`] says: `call` runs unless the call
     /// fails before it, and an injected error replaces its result if the call fails.
-    fn call<T>(&self, method: &str, call: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    fn call<T>(&self, method: FsMethod, call: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         let fails = n == self.fail.at
-            || (self.fail.mode == FailMode::Persistent
-                && n > self.fail.at
-                && !matches!(method, "read" | "exists" | "file_len"));
+            || (self.fail.mode == FailMode::Persistent && n > self.fail.at && method.is_mutating());
         if !fails {
             return call();
         }
         self.failures.fetch_add(1, Ordering::SeqCst);
-        let flushes = matches!(
-            method,
-            "append_durable"
-                | "truncate"
-                | "sync_data"
-                | "fsync_dir"
-                | "atomic_replace"
-                | "write_durable_temp"
-                | "rename_durable"
-        );
         let strike = match self.fail.error {
-            InjectedError::Eio if flushes => Strike::After,
+            InjectedError::Eio if method.flushes() => Strike::After,
             InjectedError::Eio | InjectedError::Enospc => Strike::Before,
         };
         match strike {
@@ -800,61 +979,69 @@ impl<F: FsOps> FailAtFs<F> {
 #[cfg(feature = "test-hooks")]
 impl<F: FsOps> FsOps for FailAtFs<F> {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.call("create_dir_all", || self.inner.create_dir_all(p))
+        self.call(FsMethod::CreateDirAll, || self.inner.create_dir_all(p))
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.call("write_durable_temp", || {
+        self.call(FsMethod::WriteDurableTemp, || {
             self.inner.write_durable_temp(dir, bytes)
         })
     }
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.call("link_noclobber", || self.inner.link_noclobber(from, to))
+        self.call(FsMethod::LinkNoclobber, || {
+            self.inner.link_noclobber(from, to)
+        })
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.call("fsync_dir", || self.inner.fsync_dir(p))
+        self.call(FsMethod::FsyncDir, || self.inner.fsync_dir(p))
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.call("read", || self.inner.read(p))
+        self.call(FsMethod::Read, || self.inner.read(p))
     }
 
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.call("exists", || self.inner.exists(p))
+        self.call(FsMethod::Exists, || self.inner.exists(p))
     }
 
     fn remove(&self, p: &Path) -> io::Result<()> {
-        self.call("remove", || self.inner.remove(p))
+        self.call(FsMethod::Remove, || self.inner.remove(p))
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.call("append_durable", || self.inner.append_durable(path, bytes))
+        self.call(FsMethod::AppendDurable, || {
+            self.inner.append_durable(path, bytes)
+        })
     }
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.call("file_len", || self.inner.file_len(path))
+        self.call(FsMethod::FileLen, || self.inner.file_len(path))
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.call("truncate", || self.inner.truncate(path, len))
+        self.call(FsMethod::Truncate, || self.inner.truncate(path, len))
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.call("atomic_replace", || self.inner.atomic_replace(path, bytes))
+        self.call(FsMethod::AtomicReplace, || {
+            self.inner.atomic_replace(path, bytes)
+        })
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.call("sync_data", || self.inner.sync_data(path))
+        self.call(FsMethod::SyncData, || self.inner.sync_data(path))
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.call("append", || self.inner.append(path, bytes))
+        self.call(FsMethod::Append, || self.inner.append(path, bytes))
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.call("rename_durable", || self.inner.rename_durable(from, to))
+        self.call(FsMethod::RenameDurable, || {
+            self.inner.rename_durable(from, to)
+        })
     }
 }
 

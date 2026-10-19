@@ -5,9 +5,10 @@
 //! tests), never a dependency of a product crate.
 //!
 //! - [`fs`]: [`FsOps`](swarmops_store::FsOps) doubles on real files, to record, fail or hold
-//!   calls ([`fs::Watched`], [`fs::RecordingFs`], [`fs::FailingFs`]), skip every flush
-//!   ([`fs::FastFs`]), or tell calls made at once from calls made one after another
-//!   ([`fs::Rendezvous`]).
+//!   calls over any filesystem ([`fs::Watched`], [`fs::RecordingFs`], [`fs::FailingFs`]), skip
+//!   every flush while failing where the real filesystem fails ([`fs::NoSyncFs`]), or tell calls
+//!   made at once from calls made one after another ([`fs::Rendezvous`]); each names a call's
+//!   method with [`FsMethod`](swarmops_store::FsMethod).
 //! - [`faults`]: Linux's fsync-failure semantics, modelled ([`faults::FsyncModelFs`]), and a
 //!   filesystem under the store's order checker ([`faults::checked`]).
 //! - [`power`]: what a power loss can leave of a recorded run ([`power::ImageRecordingFs`],
@@ -25,13 +26,17 @@
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
 //! dependency on `swarmops-ops` would build a second copy of the crate under test there. No
 //! store unit test uses it, for the same reason. Its `test-hooks` feature (not a default: see
-//! `Cargo.toml`) turns on the store's.
+//! `Cargo.toml`) turns on the store's. Its default features, `cli` and `repo`, hold [`cli`]
+//! (and its `serde_json`) and [`repo`] (and `swarmops-repo`): without them, as the fuzz crate
+//! takes it, the rest depends on nothing above `swarmops-store`.
 
 pub mod child;
+#[cfg(feature = "cli")]
 pub mod cli;
 pub mod faults;
 pub mod fs;
 pub mod measure;
 pub mod power;
+#[cfg(feature = "repo")]
 pub mod repo;
 pub mod store;

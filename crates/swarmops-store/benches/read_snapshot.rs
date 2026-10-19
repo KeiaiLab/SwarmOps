@@ -29,11 +29,9 @@
 //! for comparison with Task 2b's per-lookup `find` percentiles (`tests/index.rs`,
 //! `index_on_wide_history_is_fast`).
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::hint::black_box;
-use std::io::{self, Write};
 use std::os::unix::fs::FileExt;
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -41,9 +39,8 @@ use camino::{Utf8Path, Utf8PathBuf};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
-use swarmops_store::{
-    ChangesetMeta, FsOps, Journal, Layout, LinkOutcome, MetaStore, RealFs, StoreError,
-};
+use swarmops_store::{ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
+use swarmops_testkit::fs::NoSyncFs;
 use swarmops_testkit::measure::{base_dir, mix};
 
 /// How many changesets the stores hold before the 31 more of `tail31`.
@@ -57,71 +54,6 @@ const TARGETS: usize = 1_024;
 
 /// The size of one `journal.off` entry.
 const ENTRY_LEN: u64 = 8;
-
-/// The real filesystem without a single flush to stable storage: for building the stores,
-/// whose reads do not depend on the fsyncs a crash would need.
-struct NoSyncFs;
-
-impl FsOps for NoSyncFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, _: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        OpenOptions::new().write(true).open(path)?.set_len(len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let dir = path.parent().expect("a file in a directory");
-        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
-        temp.write_all(bytes)?;
-        temp.persist(path).map(drop).map_err(|e| e.error)
-    }
-
-    fn sync_data(&self, _: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)
-    }
-}
 
 /// The id of changeset `n`: a real hash, so the ids are spread as a store's are.
 fn id(n: u64) -> ChangesetId {

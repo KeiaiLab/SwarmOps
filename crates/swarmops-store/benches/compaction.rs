@@ -26,16 +26,16 @@
 //! `SWARMOPS_BENCH_COMPACTION_RECORDS=<n>[,<n>…]` measures other sizes (each above [`TAIL`]
 //! records), for a quick check of the bench.
 
-use std::fs::{self, OpenOptions};
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::fs;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use camino::Utf8PathBuf;
 use criterion::{BatchSize, BenchmarkId, Criterion, SamplingMode, criterion_group, criterion_main};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
-use swarmops_store::{ChangesetMeta, FsOps, Index, Layout, LinkOutcome, RealFs};
+use swarmops_store::{ChangesetMeta, FsOps, Index, Layout, RealFs};
+use swarmops_testkit::fs::NoSyncFs;
 use swarmops_testkit::measure::{base_dir, percentile};
 use tempfile::TempDir;
 
@@ -54,72 +54,6 @@ const VIEW_FILES: [&str; 4] = ["ids.key", "ids.rec", "dh.key", "dh.rec"];
 
 /// What the two views hold per record: a 32-byte key and an 8-byte rec each.
 const VIEW_BYTES_PER_RECORD: u64 = 2 * (32 + 8);
-
-/// The real filesystem without a single flush to stable storage: for building the index, which
-/// is setup, not what is timed. A copy of `read_snapshot.rs`'s (each bench is a crate of its
-/// own).
-struct NoSyncFs;
-
-impl FsOps for NoSyncFs {
-    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        RealFs.create_dir_all(p)
-    }
-
-    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        RealFs.write_durable_temp(dir, bytes)
-    }
-
-    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        RealFs.link_noclobber(from, to)
-    }
-
-    fn fsync_dir(&self, _: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
-    }
-
-    fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
-    }
-
-    fn remove(&self, p: &Path) -> io::Result<()> {
-        RealFs.remove(p)
-    }
-
-    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
-    }
-
-    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        OpenOptions::new().write(true).open(path)?.set_len(len)
-    }
-
-    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let dir = path.parent().expect("a file in a directory");
-        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
-        temp.write_all(bytes)?;
-        temp.persist(path).map(drop).map_err(|e| e.error)
-    }
-
-    fn sync_data(&self, _: &Path) -> io::Result<()> {
-        Ok(())
-    }
-
-    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
-    }
-
-    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)
-    }
-}
 
 /// The id of changeset `n`: a real hash, so the ids are spread as a store's are.
 fn id(n: u64) -> ChangesetId {

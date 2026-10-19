@@ -21,6 +21,9 @@ arbitrary = { version = "1.5.0", features = ["derive"] }
 crc32fast = "1.5.2"
 swarmops-core = { path = "../crates/swarmops-core", features = ["arbitrary"] }
 swarmops-store = { path = "../crates/swarmops-store" }
+# The filesystem doubles only (`NoSyncFs`): without its default features, which hold the CLI
+# and repository helpers, it adds no dependency the store does not have.
+swarmops-testkit = { path = "../crates/swarmops-testkit", default-features = false }
 tempfile = "3.27.0"
 
 [[bin]]

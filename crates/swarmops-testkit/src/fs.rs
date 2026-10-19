@@ -1,27 +1,30 @@
 //! [`FsOps`] doubles for the tests, on real files:
 //!
-//! - [`Watched`]: the real filesystem with a [`Watch`] run around each call, to record calls,
-//!   fail them (before they run, or after), or hold them; [`RecordingFs`] records, fails the
-//!   calls a [`Failing`] names, and runs a [`Hook`] once; [`FailingFs`] fails the calls a
-//!   predicate picks.
-//! - [`FastFs`]: the real filesystem without a single flush to stable storage.
+//! - [`Watched`]: a filesystem (the real one unless said otherwise) with a [`Watch`] run around
+//!   each call, to record calls, fail them (before they run, or after), or hold them;
+//!   [`RecordingFs`] records, fails the calls a [`Failing`] names, and runs a [`Hook`] once;
+//!   [`FailingFs`] fails the calls a predicate picks.
+//! - [`NoSyncFs`]: the real filesystem without a single flush to stable storage, failing where
+//!   it fails.
 //! - [`Rendezvous`]: tells calls made at once from calls made one after another.
 //!
-//! The store's tests use them, and so do the repository's, the operations' and the CLI's.
+//! Each names a call's method with [`FsMethod`], the store's one list of the 14. The store's
+//! tests and benches use them, and so do the repository's, the operations' and the CLI's tests
+//! and the journal's fuzz target.
 
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use swarmops_store::{FsOps, LinkOutcome, RealFs};
+use swarmops_store::{FsMethod, FsOps, LinkOutcome, RealFs};
 
 /// One call of an [`FsOps`] method, as a [`Watched`] filesystem shows it to its watcher.
 pub struct Call<'a> {
-    /// The method's name, `"append"` say.
-    pub method: &'static str,
+    /// The method, which compares equal to its name (`call.method == "append"`).
+    pub method: FsMethod,
     /// The paths it names: one, or a link's or a rename's source and then its target.
     pub paths: &'a [&'a Path],
 }
@@ -39,7 +42,7 @@ impl Call<'_> {
 
     /// `"<method> <file name of each path>"`.
     pub fn named_all(&self) -> String {
-        let mut call = self.method.to_owned();
+        let mut call = self.method.as_str().to_owned();
         for path in self.paths {
             call.push(' ');
             call.push_str(&file_name(path));
@@ -87,14 +90,17 @@ impl<W: Watch + ?Sized> Watch for Arc<W> {
     }
 }
 
-/// The real filesystem ([`RealFs`]), its watcher run around each call. It dereferences to the
-/// watcher.
-pub struct Watched<W>(
+/// A filesystem, the real one ([`RealFs`]) unless the type says otherwise, its watcher run
+/// around each call: `Watched(watcher, RealFs)`, or `Watched(watcher, NoSyncFs)` say, any
+/// [`FsOps`] inside. It dereferences to the watcher.
+pub struct Watched<W, F = RealFs>(
     /// The watcher.
     pub W,
+    /// The filesystem the calls run on.
+    pub F,
 );
 
-impl<W> Deref for Watched<W> {
+impl<W, F> Deref for Watched<W, F> {
     type Target = W;
 
     fn deref(&self) -> &W {
@@ -102,11 +108,11 @@ impl<W> Deref for Watched<W> {
     }
 }
 
-impl<W: Watch> Watched<W> {
+impl<W: Watch, F: FsOps> Watched<W, F> {
     /// Runs `call`, the call of `method` on `paths`, with the watcher around it.
     fn around<T>(
         &self,
-        method: &'static str,
+        method: FsMethod,
         paths: &[&Path],
         call: impl FnOnce() -> io::Result<T>,
     ) -> io::Result<T> {
@@ -120,70 +126,70 @@ impl<W: Watch> Watched<W> {
     }
 }
 
-impl<W: Watch> FsOps for Watched<W> {
+impl<W: Watch, F: FsOps> FsOps for Watched<W, F> {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.around("create_dir_all", &[p], || RealFs.create_dir_all(p))
+        self.around(FsMethod::CreateDirAll, &[p], || self.1.create_dir_all(p))
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.around("write_durable_temp", &[dir], || {
-            RealFs.write_durable_temp(dir, bytes)
+        self.around(FsMethod::WriteDurableTemp, &[dir], || {
+            self.1.write_durable_temp(dir, bytes)
         })
     }
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.around("link_noclobber", &[from, to], || {
-            RealFs.link_noclobber(from, to)
+        self.around(FsMethod::LinkNoclobber, &[from, to], || {
+            self.1.link_noclobber(from, to)
         })
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.around("fsync_dir", &[p], || RealFs.fsync_dir(p))
+        self.around(FsMethod::FsyncDir, &[p], || self.1.fsync_dir(p))
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        self.around("read", &[p], || RealFs.read(p))
+        self.around(FsMethod::Read, &[p], || self.1.read(p))
     }
 
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        self.around("exists", &[p], || RealFs.exists(p))
+        self.around(FsMethod::Exists, &[p], || self.1.exists(p))
     }
 
     fn remove(&self, p: &Path) -> io::Result<()> {
-        self.around("remove", &[p], || RealFs.remove(p))
+        self.around(FsMethod::Remove, &[p], || self.1.remove(p))
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.around("append_durable", &[path], || {
-            RealFs.append_durable(path, bytes)
+        self.around(FsMethod::AppendDurable, &[path], || {
+            self.1.append_durable(path, bytes)
         })
     }
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
-        self.around("file_len", &[path], || RealFs.file_len(path))
+        self.around(FsMethod::FileLen, &[path], || self.1.file_len(path))
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.around("truncate", &[path], || RealFs.truncate(path, len))
+        self.around(FsMethod::Truncate, &[path], || self.1.truncate(path, len))
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.around("atomic_replace", &[path], || {
-            RealFs.atomic_replace(path, bytes)
+        self.around(FsMethod::AtomicReplace, &[path], || {
+            self.1.atomic_replace(path, bytes)
         })
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.around("sync_data", &[path], || RealFs.sync_data(path))
+        self.around(FsMethod::SyncData, &[path], || self.1.sync_data(path))
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.around("append", &[path], || RealFs.append(path, bytes))
+        self.around(FsMethod::Append, &[path], || self.1.append(path, bytes))
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.around("rename_durable", &[from, to], || {
-            RealFs.rename_durable(from, to)
+        self.around(FsMethod::RenameDurable, &[from, to], || {
+            self.1.rename_durable(from, to)
         })
     }
 }
@@ -224,13 +230,14 @@ impl RecordingFs {
     /// A recorder, and a function that returns the calls made since it last ran.
     pub fn new() -> (RecordingFs, impl Fn() -> Vec<String>) {
         let calls = Arc::new(Mutex::new(Vec::new()));
-        let fs = Watched(Recorder {
+        let recorder = Recorder {
             calls: Arc::clone(&calls),
             name: Box::new(|call: &Call<'_>| call.named()),
             hook: Mutex::new(None),
             failing: Failing::default(),
             syncs: Rendezvous::default(),
-        });
+        };
+        let fs = Watched(recorder, RealFs);
         (fs, move || std::mem::take(&mut *calls.lock().unwrap()))
     }
 
@@ -303,14 +310,14 @@ impl Watch for Recorder {
         self.calls.lock().unwrap().push(named.clone());
         self.failing.check(&named)?;
         self.run_hook(&named, When::Before);
-        if call.method == "sync_data" {
+        if call.method == FsMethod::SyncData {
             self.syncs.arrive();
         }
         Ok(())
     }
 
     fn after(&self, call: &Call<'_>) {
-        if call.method == "sync_data" {
+        if call.method == FsMethod::SyncData {
             self.syncs.depart();
         }
         self.run_hook(&(self.name)(call), When::After);
@@ -348,21 +355,29 @@ impl Failing {
     }
 }
 
-/// The real filesystem, except that the calls its predicate picks, given the method's name and
-/// the path it acts on ([`Call::path`]), fail with an injected error.
+/// The real filesystem, except that the calls its predicate picks, given the method (which
+/// compares equal to its name) and the path it acts on ([`Call::path`]), fail with an injected
+/// error. `Watched(FailWhen::new(..), fs)` fails them on any other filesystem `fs`.
 pub type FailingFs = Watched<FailWhen>;
 
-/// Which calls a [`FailingFs`] fails: given the method's name and the path it acts on.
-type Predicate = dyn Fn(&str, &Path) -> bool + Send + Sync;
+/// Which calls a [`FailingFs`] fails: given the method and the path it acts on.
+type Predicate = dyn Fn(FsMethod, &Path) -> bool + Send + Sync;
 
-/// The watcher of a [`FailingFs`].
+/// The watcher of a [`FailingFs`]: fails the calls its predicate picks, before they run.
 pub struct FailWhen(Box<Predicate>);
 
+impl FailWhen {
+    /// Fails the calls `fail` picks, given the method and the path the call acts on.
+    pub fn new(fail: impl Fn(FsMethod, &Path) -> bool + Send + Sync + 'static) -> Self {
+        FailWhen(Box::new(fail))
+    }
+}
+
 impl FailingFs {
-    /// The real filesystem, failing the calls `fail` picks, given the method's name and the
-    /// path the call acts on.
-    pub fn new(fail: impl Fn(&str, &Path) -> bool + Send + Sync + 'static) -> Self {
-        Watched(FailWhen(Box::new(fail)))
+    /// The real filesystem, failing the calls `fail` picks, given the method and the path the
+    /// call acts on.
+    pub fn new(fail: impl Fn(FsMethod, &Path) -> bool + Send + Sync + 'static) -> Self {
+        Watched(FailWhen::new(fail), RealFs)
     }
 }
 
@@ -380,12 +395,17 @@ impl Watch for FailWhen {
     }
 }
 
-/// [`RealFs`] without a single flush to stable storage: for tests whose subject is what the
-/// files hold and what readers see, which a skipped fsync does not change, and that make too
-/// many writes to pay for their fsyncs.
-pub struct FastFs;
+/// [`RealFs`] without a single flush to stable storage: every effect on the files' contents and
+/// names is `RealFs`'s, and only its `sync_all` and `sync_data` are left out. Where `RealFs` opens
+/// a path to sync it (`sync_data`, `fsync_dir`, the directory of an `atomic_replace` and of a
+/// `rename_durable`), it opens it all the same, so that a missing path fails as there
+/// (`NotFound`). For the tests, benches and fuzz targets whose subject is what the files hold and
+/// what readers see, which a flush left out does not change, and that make too many writes to pay
+/// for their flushes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct NoSyncFs;
 
-impl FsOps for FastFs {
+impl FsOps for NoSyncFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
         RealFs.create_dir_all(p)
     }
@@ -401,8 +421,8 @@ impl FsOps for FastFs {
         RealFs.link_noclobber(from, to)
     }
 
-    fn fsync_dir(&self, _p: &Path) -> io::Result<()> {
-        Ok(())
+    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+        File::open(p).map(drop)
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
@@ -430,15 +450,16 @@ impl FsOps for FastFs {
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        let dir = path.parent().expect("a file in a directory");
+        let dir = parent_dir(path);
         let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
         temp.write_all(bytes)?;
+        // On failure the temp file is removed when the returned `NamedTempFile` drops.
         temp.persist(path).map_err(|e| e.error)?;
-        Ok(())
+        self.fsync_dir(dir)
     }
 
-    fn sync_data(&self, _path: &Path) -> io::Result<()> {
-        Ok(())
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        File::open(path).map(drop)
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
@@ -446,7 +467,16 @@ impl FsOps for FastFs {
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        fs::rename(from, to)
+        fs::rename(from, to)?;
+        self.fsync_dir(parent_dir(to))
+    }
+}
+
+/// The directory that holds `path`, as `RealFs` takes it: `.` for a bare file name.
+fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
     }
 }
 
@@ -519,5 +549,176 @@ pub fn copy_dir(from: &Path, to: &Path) {
         } else {
             fs::copy(entry.path(), target).expect("copy a file");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::io;
+    use std::path::Path;
+
+    use swarmops_store::{FsMethod, FsOps, LinkOutcome, RealFs};
+
+    use super::*;
+
+    /// What a call gave, its value as two filesystems can share it: an error's kind, or the
+    /// value (a temp file's path only as made).
+    #[derive(Debug, PartialEq, Eq)]
+    enum Outcome {
+        Done,
+        Read(Option<Vec<u8>>),
+        Exists(bool),
+        Len(u64),
+        Linked(LinkOutcome),
+        TempMade,
+        Failed(io::ErrorKind),
+    }
+
+    /// Calls `method` of `fs` on `path`, with `to` as a link's or a rename's target and
+    /// `b"bytes"` for what it writes.
+    fn call(fs: &dyn FsOps, method: FsMethod, path: &Path, to: &Path) -> Outcome {
+        fn of<T>(result: io::Result<T>, ok: impl FnOnce(T) -> Outcome) -> Outcome {
+            result.map_or_else(|e| Outcome::Failed(e.kind()), ok)
+        }
+        let bytes = b"bytes";
+        match method {
+            FsMethod::CreateDirAll => of(fs.create_dir_all(path), |()| Outcome::Done),
+            FsMethod::WriteDurableTemp => {
+                of(fs.write_durable_temp(path, bytes), |_| Outcome::TempMade)
+            }
+            FsMethod::LinkNoclobber => of(fs.link_noclobber(path, to), Outcome::Linked),
+            FsMethod::FsyncDir => of(fs.fsync_dir(path), |()| Outcome::Done),
+            FsMethod::Read => of(fs.read(path), Outcome::Read),
+            FsMethod::Exists => of(fs.exists(path), Outcome::Exists),
+            FsMethod::Remove => of(fs.remove(path), |()| Outcome::Done),
+            FsMethod::AppendDurable => of(fs.append_durable(path, bytes), Outcome::Len),
+            FsMethod::FileLen => of(fs.file_len(path), Outcome::Len),
+            FsMethod::Truncate => of(fs.truncate(path, 1), |()| Outcome::Done),
+            FsMethod::AtomicReplace => of(fs.atomic_replace(path, bytes), |()| Outcome::Done),
+            FsMethod::SyncData => of(fs.sync_data(path), |()| Outcome::Done),
+            FsMethod::Append => of(fs.append(path, bytes), Outcome::Len),
+            FsMethod::RenameDurable => of(fs.rename_durable(path, to), |()| Outcome::Done),
+        }
+    }
+
+    /// Every method of the double gives what `RealFs` gives where a path is missing (in a
+    /// directory that exists, or in one that does not) and where a link's or a rename's target
+    /// lies in a missing directory: the same error kind, or the same value. A sync of a path
+    /// that does not exist fails, as it does on the real filesystem.
+    #[test]
+    fn no_sync_fs_fails_where_real_fs_fails() {
+        let cases = [
+            ("missing", "to"),
+            ("no-dir/missing", "to"),
+            ("file", "no-dir/to"),
+        ];
+        for method in FsMethod::ALL {
+            for (path, to) in cases {
+                let outcomes = [&RealFs as &dyn FsOps, &NoSyncFs].map(|fs| {
+                    let dir = tempfile::tempdir().unwrap();
+                    fs::write(dir.path().join("file"), b"a file").unwrap();
+                    call(fs, method, &dir.path().join(path), &dir.path().join(to))
+                });
+                assert_eq!(outcomes[0], outcomes[1], "{method} {path} {to}");
+            }
+        }
+    }
+
+    /// A script of every method on `fs` in `dir`, two links of the same name and a temp file
+    /// left behind among them: what each call gave.
+    fn script(fs: &dyn FsOps, dir: &Path) -> Vec<Outcome> {
+        let (sub, log, ckpt) = (dir.join("sub"), dir.join("log"), dir.join("ckpt"));
+        let object = sub.join("object");
+        let mut outcomes = vec![call(fs, FsMethod::CreateDirAll, &sub.join("deeper"), dir)];
+        for _ in 0..2 {
+            let temp = fs.write_durable_temp(&sub, b"object").unwrap();
+            outcomes.push(call(fs, FsMethod::LinkNoclobber, &temp, &object));
+        }
+        outcomes.extend([
+            call(fs, FsMethod::WriteDurableTemp, dir, dir),
+            call(fs, FsMethod::FsyncDir, &sub, dir),
+            call(fs, FsMethod::Read, &object, dir),
+            call(fs, FsMethod::Exists, &object, dir),
+            call(fs, FsMethod::AppendDurable, &log, dir),
+            call(fs, FsMethod::Append, &log, dir),
+            call(fs, FsMethod::FileLen, &log, dir),
+            call(fs, FsMethod::Truncate, &log, dir),
+            call(fs, FsMethod::SyncData, &log, dir),
+            call(fs, FsMethod::AtomicReplace, &ckpt, dir),
+            call(fs, FsMethod::AtomicReplace, &ckpt, dir),
+            call(fs, FsMethod::RenameDurable, &object, &dir.join("renamed")),
+            call(fs, FsMethod::Append, &dir.join("gone"), dir),
+            call(fs, FsMethod::Remove, &dir.join("gone"), dir),
+        ]);
+        outcomes
+    }
+
+    /// The tree under `dir`: each path in it, a temp file's name normalized, with the file's
+    /// content (`None` for a directory).
+    fn tree(dir: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+        let mut tree = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(at) = stack.pop() {
+            for entry in fs::read_dir(&at).unwrap() {
+                let path = entry.unwrap().path();
+                let rel = path
+                    .strip_prefix(dir)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned();
+                let name = path.file_name().unwrap().to_string_lossy();
+                let rel = if name.starts_with(".tmp") {
+                    rel.replace(&*name, ".tmp*")
+                } else {
+                    rel
+                };
+                if path.is_dir() {
+                    tree.push((rel, None));
+                    stack.push(path);
+                } else {
+                    tree.push((rel, Some(fs::read(&path).unwrap())));
+                }
+            }
+        }
+        tree.sort();
+        tree
+    }
+
+    /// The same calls of all 14 methods leave the same files, with the same contents, on the
+    /// double as on the real filesystem, and give the same results.
+    #[test]
+    fn no_sync_fs_leaves_what_real_fs_leaves() {
+        let (real, no_sync) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let ran = script(&RealFs, real.path());
+        assert_eq!(script(&NoSyncFs, no_sync.path()), ran);
+        assert!(ran.contains(&Outcome::Linked(LinkOutcome::AlreadyExists)));
+        let left = tree(real.path());
+        assert_eq!(tree(no_sync.path()), left);
+        assert!(left.iter().any(|(path, _)| path == ".tmp*"), "{left:?}");
+    }
+
+    /// A watched double runs over any filesystem: a [`FailWhen`] over [`NoSyncFs`] fails the
+    /// call it picks, before it runs, and the others run on the double, which fails a sync of a
+    /// missing path as the real filesystem does.
+    #[test]
+    fn failing_fs_over_any_inner_filesystem() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        let failing: Watched<FailWhen, NoSyncFs> = Watched(
+            FailWhen::new(|method, path| method == "sync_data" && path.ends_with("f")),
+            NoSyncFs,
+        );
+        let fs: Arc<dyn FsOps> = Arc::new(failing);
+        assert_eq!(fs.append_durable(&file, b"ab").unwrap(), 0);
+        let failed = fs.sync_data(&file).unwrap_err();
+        assert_eq!(
+            failed.to_string(),
+            format!("injected failure: sync_data {}", file.display())
+        );
+        assert_eq!(fs.append(&file, b"cd").unwrap(), 2);
+        assert_eq!(fs::read(&file).unwrap(), b"abcd");
+        let missing = fs.fsync_dir(&dir.path().join("missing")).unwrap_err();
+        assert_eq!(missing.kind(), io::ErrorKind::NotFound, "{missing}");
     }
 }

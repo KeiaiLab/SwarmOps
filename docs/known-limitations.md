@@ -318,13 +318,6 @@ These do not change what SwarmOps does, only how well the tests can see it.
   the library crates it builds; the other targets (unit tests, binaries, benches, the other test
   files) are linted only with the features on. *Unscheduled. Found: M1 final fix pass; narrowed by
   the M1.5 final review.*
-- **The journal's, the index's and the repository's crash sweeps recover unchecked.** They run
-  their crashing child under the order checker (`checked(...)` in the store's,
-  `SWARMOPS_TEST_ORDER_CHECK=1` in the repository's) but recover in the parent on the real
-  filesystem (`reopen()`/`open()` in the journal and index sweeps, `LocalRepo::open`/`create` in
-  the repository sweeps), so a rule broken only during recovery would go unnoticed; the sweeps
-  through the binary and the metadata store's own recover under the checker. *Target: M1.6.
-  Found: M1.5 final review.*
 - **Coverage is not measured by the gate.** It was measured once, part-way through M1, for core
   and store only: 94.61 % of lines. *Unscheduled.*
 - **No test watches what a `RealFs` call does inside.** The order checker judges the order of
@@ -339,10 +332,6 @@ These do not change what SwarmOps does, only how well the tests can see it.
   envelope of 14; the other ten are in its `NOT_RAISED` list, each with why the test cannot raise
   it (the four codes above among them). *Target: M1.6 (`E_IO` first). Found: the 2026-10-16
   comparison.*
-- **A test file `tests/all.rs` does not declare is not built.** Where a crate's integration tests
-  are the modules of its `tests/all.rs` (`autotests = false`: core, api, store, repo and the
-  CLI), nothing fails when a new file lacks its `mod` line. A test that lists `tests/` against
-  `all.rs` (jj's `no_forgotten_test_files`) would catch it. *Target: M1.6. Found: M1.5 Task 6.*
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its

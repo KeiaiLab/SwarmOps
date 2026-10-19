@@ -38,7 +38,8 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use swarmops_store::{FsOps, LinkOutcome, RealFs};
+use swarmops_core::bytes::to_u64;
+use swarmops_store::{FsMethod, FsOps, LinkOutcome, RealFs};
 
 /// The sector a power loss tears writes at.
 pub const SECTOR: u64 = 512;
@@ -112,6 +113,27 @@ pub enum RecordedCall {
     Mark(String),
 }
 
+impl RecordedCall {
+    /// The method that made the call, one that mutates ([`FsMethod::is_mutating`]); `None` for
+    /// a mark.
+    pub fn method(&self) -> Option<FsMethod> {
+        Some(match self {
+            RecordedCall::CreateDirAll(_) => FsMethod::CreateDirAll,
+            RecordedCall::WriteDurableTemp { .. } => FsMethod::WriteDurableTemp,
+            RecordedCall::LinkNoclobber { .. } => FsMethod::LinkNoclobber,
+            RecordedCall::FsyncDir(_) => FsMethod::FsyncDir,
+            RecordedCall::Remove(_) => FsMethod::Remove,
+            RecordedCall::AppendDurable { .. } => FsMethod::AppendDurable,
+            RecordedCall::Truncate { .. } => FsMethod::Truncate,
+            RecordedCall::AtomicReplace { .. } => FsMethod::AtomicReplace,
+            RecordedCall::SyncData(_) => FsMethod::SyncData,
+            RecordedCall::Append { .. } => FsMethod::Append,
+            RecordedCall::RenameDurable { .. } => FsMethod::RenameDurable,
+            RecordedCall::Mark(_) => return None,
+        })
+    }
+}
+
 /// The real filesystem without a flush to stable storage, each mutating call recorded with its
 /// data ([`RecordedCall`]); reads go to [`RealFs`] unrecorded. Calls from several threads are run
 /// and recorded one at a time, so the record is the order they took effect in.
@@ -142,13 +164,21 @@ impl ImageRecordingFs {
         self.calls.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Runs `call` with the record locked, and records what it returns to record.
+    /// Runs `call`, a call of `method` (one that mutates), with the record locked, and records
+    /// what it returns to record.
     fn run<T>(
         &self,
+        method: FsMethod,
         call: impl FnOnce() -> io::Result<(T, Option<RecordedCall>)>,
     ) -> io::Result<T> {
+        debug_assert!(method.is_mutating(), "{method} records nothing");
         let mut log = self.log();
         let (out, recorded) = call()?;
+        debug_assert!(
+            recorded
+                .as_ref()
+                .is_none_or(|call| call.method() == Some(method))
+        );
         log.extend(recorded);
         Ok(out)
     }
@@ -156,7 +186,7 @@ impl ImageRecordingFs {
 
 impl FsOps for ImageRecordingFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        self.run(|| {
+        self.run(FsMethod::CreateDirAll, || {
             let mut made: Vec<PathBuf> = p
                 .ancestors()
                 .take_while(|dir| !dir.exists())
@@ -172,7 +202,7 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        self.run(|| {
+        self.run(FsMethod::WriteDurableTemp, || {
             let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
             temp.write_all(bytes)?;
             let (_file, path) = temp.keep().map_err(|e| e.error)?;
@@ -185,7 +215,7 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        self.run(|| {
+        self.run(FsMethod::LinkNoclobber, || {
             let placed = match fs::hard_link(from, to) {
                 Ok(()) => true,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
@@ -207,7 +237,7 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
-        self.run(|| {
+        self.run(FsMethod::FsyncDir, || {
             File::open(p)?;
             Ok(((), Some(RecordedCall::FsyncDir(p.to_owned()))))
         })
@@ -222,14 +252,14 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn remove(&self, p: &Path) -> io::Result<()> {
-        self.run(|| {
+        self.run(FsMethod::Remove, || {
             fs::remove_file(p)?;
             Ok(((), Some(RecordedCall::Remove(p.to_owned()))))
         })
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.run(|| {
+        self.run(FsMethod::AppendDurable, || {
             let offset = append_to(path, bytes)?;
             let call = RecordedCall::AppendDurable {
                 path: path.to_owned(),
@@ -244,7 +274,7 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.run(|| {
+        self.run(FsMethod::Truncate, || {
             OpenOptions::new().write(true).open(path)?.set_len(len)?;
             let call = RecordedCall::Truncate {
                 path: path.to_owned(),
@@ -255,7 +285,7 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
-        self.run(|| {
+        self.run(FsMethod::AtomicReplace, || {
             let dir = path.parent().expect("a file in a directory");
             let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
             temp.write_all(bytes)?;
@@ -269,14 +299,14 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        self.run(|| {
+        self.run(FsMethod::SyncData, || {
             File::open(path)?;
             Ok(((), Some(RecordedCall::SyncData(path.to_owned()))))
         })
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        self.run(|| {
+        self.run(FsMethod::Append, || {
             let offset = append_to(path, bytes)?;
             let call = RecordedCall::Append {
                 path: path.to_owned(),
@@ -287,7 +317,7 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
-        self.run(|| {
+        self.run(FsMethod::RenameDurable, || {
             fs::rename(from, to)?;
             let call = RecordedCall::RenameDurable {
                 from: from.to_owned(),
@@ -621,8 +651,15 @@ fn walk(
 }
 
 impl Builder<'_> {
-    /// Adds the steps of `call`.
+    /// Adds the steps of `call`, each labelled by its method's name.
     fn call(&mut self, call: &RecordedCall) {
+        let Some(method) = call.method() else {
+            if let RecordedCall::Mark(label) = call {
+                let at = self.timeline.steps.len();
+                self.timeline.marks.push((label.clone(), at));
+            }
+            return;
+        };
         match call {
             RecordedCall::CreateDirAll(made) => {
                 for dir in made {
@@ -630,13 +667,13 @@ impl Builder<'_> {
                     let new = self.tree.len();
                     self.tree.push(BTreeMap::new());
                     let add = self.add(parent, name, Node::Dir(new));
-                    self.step(format!("create_dir_all {}", self.rel(dir)), vec![add]);
+                    self.step(format!("{method} {}", self.rel(dir)), vec![add]);
                 }
             }
             RecordedCall::WriteDurableTemp { path, bytes } => {
-                let inode = self.new_file("write_durable_temp", path, bytes);
+                let inode = self.new_file(method, path, bytes);
                 self.step(
-                    format!("write_durable_temp {} (sync)", self.rel(path)),
+                    format!("{method} {} (sync)", self.rel(path)),
                     vec![Effect::DataSync(inode)],
                 );
             }
@@ -645,27 +682,27 @@ impl Builder<'_> {
                     let inode = self.file(from);
                     let (dir, name) = self.place(to);
                     let add = self.add(dir, name, Node::File(inode));
-                    let label = format!("link_noclobber {} (link)", self.rel(to));
+                    let label = format!("{method} {} (link)", self.rel(to));
                     self.step(label, vec![add]);
                 }
                 let remove = self.remove(from);
-                let label = format!("link_noclobber {} (remove the temp)", self.rel(from));
+                let label = format!("{method} {} (remove the temp)", self.rel(from));
                 self.step(label, vec![remove]);
             }
             RecordedCall::FsyncDir(path) => {
                 let dir = self.dir(path);
                 self.step(
-                    format!("fsync_dir {}", self.rel(path)),
+                    format!("{method} {}", self.rel(path)),
                     vec![Effect::DirSync(dir)],
                 );
             }
             RecordedCall::Remove(path) => {
                 let remove = self.remove(path);
-                self.step(format!("remove {}", self.rel(path)), vec![remove]);
+                self.step(format!("{method} {}", self.rel(path)), vec![remove]);
             }
             RecordedCall::AppendDurable { path, bytes } => {
-                let inode = self.append(path, bytes, "append_durable");
-                let label = format!("append_durable {} (sync)", self.rel(path));
+                let inode = self.append(path, bytes, method);
+                let label = format!("{method} {} (sync)", self.rel(path));
                 self.step(label, vec![Effect::DataSync(inode)]);
             }
             RecordedCall::Truncate { path, len } => {
@@ -673,63 +710,61 @@ impl Builder<'_> {
                 self.lens[inode] = *len;
                 let rel = self.rel(path);
                 self.step(
-                    format!("truncate {rel} (cut)"),
+                    format!("{method} {rel} (cut)"),
                     vec![Effect::SetLen { inode, len: *len }],
                 );
                 self.step(
-                    format!("truncate {rel} (sync)"),
+                    format!("{method} {rel} (sync)"),
                     vec![Effect::DataSync(inode)],
                 );
             }
-            RecordedCall::AtomicReplace { path, bytes } => self.atomic_replace(path, bytes),
+            RecordedCall::AtomicReplace { path, bytes } => self.atomic_replace(method, path, bytes),
             RecordedCall::SyncData(path) => {
                 let inode = self.file(path);
                 self.step(
-                    format!("sync_data {}", self.rel(path)),
+                    format!("{method} {}", self.rel(path)),
                     vec![Effect::DataSync(inode)],
                 );
             }
             RecordedCall::Append { path, bytes } => {
-                self.append(path, bytes, "append");
+                self.append(path, bytes, method);
             }
             RecordedCall::RenameDurable { from, to } => {
                 let rename = self.rename(from, to);
                 let rel = self.rel(to);
-                self.step(format!("rename_durable {rel} (rename)"), vec![rename]);
+                self.step(format!("{method} {rel} (rename)"), vec![rename]);
                 let dir = self.place(to).0;
                 self.step(
-                    format!("rename_durable {rel} (sync the directory)"),
+                    format!("{method} {rel} (sync the directory)"),
                     vec![Effect::DirSync(dir)],
                 );
             }
-            RecordedCall::Mark(label) => {
-                let at = self.timeline.steps.len();
-                self.timeline.marks.push((label.clone(), at));
-            }
+            RecordedCall::Mark(_) => {}
         }
     }
 
-    /// `atomic_replace`: a temp file written, synced, renamed over `path`, the directory synced.
-    fn atomic_replace(&mut self, path: &Path, bytes: &[u8]) {
+    /// `atomic_replace` (`method`): a temp file written, synced, renamed over `path`, the
+    /// directory synced.
+    fn atomic_replace(&mut self, method: FsMethod, path: &Path, bytes: &[u8]) {
         self.temps += 1;
         let temp = path.with_file_name(format!(".tmp-power-{}", self.temps));
-        let inode = self.new_file("atomic_replace", &temp, bytes);
+        let inode = self.new_file(method, &temp, bytes);
         let rel = self.rel(path);
         self.step(
-            format!("atomic_replace {rel} (sync the temp file)"),
+            format!("{method} {rel} (sync the temp file)"),
             vec![Effect::DataSync(inode)],
         );
         let rename = self.rename(&temp, path);
-        self.step(format!("atomic_replace {rel} (rename)"), vec![rename]);
+        self.step(format!("{method} {rel} (rename)"), vec![rename]);
         let dir = self.place(path).0;
         self.step(
-            format!("atomic_replace {rel} (sync the directory)"),
+            format!("{method} {rel} (sync the directory)"),
             vec![Effect::DirSync(dir)],
         );
     }
 
-    /// A new file at `path` holding `bytes`, made by `call` in one step; its inode.
-    fn new_file(&mut self, call: &str, path: &Path, bytes: &[u8]) -> usize {
+    /// A new file at `path` holding `bytes`, made by a call of `method` in one step; its inode.
+    fn new_file(&mut self, method: FsMethod, path: &Path, bytes: &[u8]) -> usize {
         let inode = self.lens.len();
         self.lens.push(to_u64(bytes.len()));
         let (dir, name) = self.place(path);
@@ -739,13 +774,14 @@ impl Builder<'_> {
             at: 0,
             bytes: bytes.to_vec(),
         };
-        let label = format!("{call} {} (write)", self.rel(path));
+        let label = format!("{method} {} (write)", self.rel(path));
         self.step(label, vec![add, write]);
         inode
     }
 
-    /// `bytes` appended to `path`, made if missing, in one step; its inode.
-    fn append(&mut self, path: &Path, bytes: &[u8], call: &str) -> usize {
+    /// `bytes` appended to `path` by a call of `method`, made if missing, in one step; its
+    /// inode.
+    fn append(&mut self, path: &Path, bytes: &[u8], method: FsMethod) -> usize {
         let mut effects = Vec::new();
         let inode = match self.find(path) {
             Some(Node::File(inode)) => inode,
@@ -765,7 +801,7 @@ impl Builder<'_> {
             at,
             bytes: bytes.to_vec(),
         });
-        self.step(format!("{call} {} (write)", self.rel(path)), effects);
+        self.step(format!("{method} {} (write)", self.rel(path)), effects);
         inode
     }
 
@@ -1114,11 +1150,6 @@ impl Image {
         }
         Ok(())
     }
-}
-
-/// `n`, which fits.
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
 }
 
 /// `n`, a length in memory, which fits.
