@@ -378,6 +378,111 @@ fn a_move_to_the_current_target_is_a_replay() {
     assert!(fs::metadata(&journal).unwrap().len() > written);
 }
 
+/// `commit --advance REF` publishes in one call: the changeset and the move of REF to it in one
+/// transaction, which `result.advanced` reports. A root commit creates the ref; on `--parent`, by
+/// its full id, it moves the ref one step on; against a stale `--parent` it records nothing
+/// (`E_CAS_MISMATCH`, exit 4, `committed: false`); without `--parent` it builds on REF's head,
+/// which `meta.resolved` names; and `--human` prints the move.
+#[test]
+fn commit_advance_publishes_the_changeset_and_moves_the_ref() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let publish = |s: &mut Session, name: &str, parent: Option<&str>| {
+        let list =
+            json!([{"path": format!("{name}.txt"), "op": "put", "content": {"inline": name}}]);
+        let changes = s.file(&format!("{name}.json"), &list.to_string());
+        let mut args = vec![
+            "--repo",
+            &store,
+            "--as",
+            AGENT,
+            "commit",
+            "-m",
+            name,
+            "--changes",
+            &changes,
+            "--advance",
+            "main",
+        ];
+        if let Some(parent) = parent {
+            args.extend(["--parent", parent]);
+        }
+        s.run(&args)
+    };
+
+    let created = publish(&mut s, "c1", None);
+    let c1 = s.name_at(&created, "/result/changeset", "c1");
+    assert_eq!(
+        created["result"]["advanced"],
+        json!({"name": "main", "new": c1, "already_applied": false})
+    );
+    let moved = publish(&mut s, "c2", Some(&c1));
+    let c2 = s.name_at(&moved, "/result/changeset", "c2");
+    assert_eq!(
+        moved["result"]["advanced"],
+        json!({"name": "main", "old": c1, "new": c2, "already_applied": false})
+    );
+    let list = s.run(&["--repo", &store, "ref", "list"]);
+    assert_eq!(
+        list["result"]["refs"],
+        json!([{"name": "main", "target": c2, "version": 2}])
+    );
+
+    let stale = publish(&mut s, "c3", Some(&c1));
+    assert_eq!((stale.exit, stale.code()), (4, "E_CAS_MISMATCH"));
+    assert_eq!(
+        stale["error"]["details"],
+        json!({"name": "main", "actual": c2, "committed": false})
+    );
+    let message = stale["error"]["message"].as_str().unwrap();
+    let advice = format!("--parent {c2} --advance main");
+    assert!(message.contains(&advice), "{message}");
+    let info = s.run(&["--repo", &store, "info"]);
+    assert_eq!(
+        info["result"]["changesets"], 2,
+        "the stale commit recorded nothing"
+    );
+
+    let on_head = publish(&mut s, "c4", None);
+    let c4 = s.name_at(&on_head, "/result/changeset", "c4");
+    assert_eq!(on_head["result"]["parent"], c2.as_str());
+    assert_eq!(on_head["meta"]["resolved"], json!({"main": c2}));
+    assert_eq!(on_head["result"]["advanced"]["old"], c2.as_str());
+
+    let list = json!([{"path": "c5.txt", "op": "put", "content": {"inline": "c5"}}]);
+    let changes = s.file("c5.json", &list.to_string());
+    let args = [
+        "--human",
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "c5",
+        "--changes",
+        &changes,
+        "--parent",
+        &c4,
+        "--advance",
+        "main",
+    ];
+    let human = Session::run_raw(&[], &args, None);
+    assert_eq!(human.exit, 0, "{}", human.stdout);
+    for line in [
+        "advanced.name: main".to_owned(),
+        format!("advanced.old: {c4}"),
+        "advanced.already_applied: false".to_owned(),
+    ] {
+        assert!(
+            human.stdout.lines().any(|l| l == line),
+            "{line}: {}",
+            human.stdout
+        );
+    }
+}
+
 #[test]
 fn missing_identity_exits_5() {
     let mut s = Session::new();
@@ -894,7 +999,7 @@ fn error_codes_reach_the_cli() {
     s.run(&[
         "--repo", &store, "--as", AGENT, "ref", "set", "main", &c1, "--create",
     ]);
-    // On main's head, but main stays where it is: a commit moves no ref.
+    // On main's head, but main stays where it is: a commit without --advance moves no ref.
     let c2 = s.commit(&store, None, "src/main.rs", "fn main() {}\n", "c2");
 
     let mut raised = Vec::new();
@@ -934,6 +1039,10 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
         r#"[{"path": "src/lib.rs/x", "op": "put", "content": {"inline": "x"}}]"#,
     );
     let not_json = s.file("not-json.json", "{\"path\": ");
+    let advance = s.file(
+        "advance.json",
+        r#"[{"path": "src/new.rs", "op": "put", "content": {"inline": "x"}}]"#,
+    );
     let huge = format!("{}/huge.bin", s.tmp());
     fs::File::create(&huge)
         .unwrap()
@@ -977,6 +1086,20 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
         (
             "E_CAS_MISMATCH",
             on(&["ref", "set", "main", c2, "--create"]),
+        ),
+        (
+            "E_CAS_MISMATCH",
+            on(&[
+                "commit",
+                "-m",
+                "x",
+                "--changes",
+                &advance,
+                "--parent",
+                c2,
+                "--advance",
+                "main",
+            ]),
         ),
         (
             "E_REF_NAME_INVALID",

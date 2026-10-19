@@ -122,6 +122,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             changes,
             parent,
             allow_empty,
+            advance,
         } => ctx.on_store(
             op,
             || {
@@ -130,6 +131,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                     parent: parent.map(Rev::from),
                     changes: read_changes(&changes)?,
                     message,
+                    advance,
                     allow_empty,
                 };
                 Ok((who, req))

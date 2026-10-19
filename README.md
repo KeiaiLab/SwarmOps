@@ -166,14 +166,20 @@ cat > changes.json <<'EOF'
 [{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() {}\n"}},
  {"path": "run.sh", "op": "put", "content": {"file": "./run.sh"}, "mode": "exec"}]
 EOF
-so commit -m "first" --changes changes.json     # result.changeset: the new id
-so ref set main <id> --create                   # later: ref set main <new> --expect <old>
+so commit -m "first" --changes changes.json --advance main  # creates main at the new changeset
 so cat main:src/lib.rs
 so ls main:src
 so show main
 so log -n 20
 so verify --deep
 ```
+
+`--advance main` publishes the commit: the same transaction moves `main` to the new changeset,
+only if `main` still names `--parent` (for a root commit, as here, only if `main` does not exist
+yet), and otherwise the commit records nothing and fails with `E_CAS_MISMATCH`. A later publish
+is `so commit -m … --changes … --parent <the id main held when you read it> --advance main`. To
+move a ref past several changesets at once, commit them with `--parent`, then move it once with
+`so ref set main <last> --expect <old>` (or `--create`).
 
 Every command, its revisions and change lists, and its output are in [Commands](#commands).
 
@@ -255,7 +261,8 @@ Two rules matter more to an agent than to a person at the CLI:
   the agent saw, so the compare-and-swap protects nothing (the ref's own name always matches,
   and `main~1` on `main` never does), and an id prefix stops resolving (`E_AMBIGUOUS_ID`) once
   another changeset shares it: the server refuses all three with `E_INVALID_ARG`. The CLI's
-  `--expect` still takes any revision, and its help says why not to.
+  `--expect` still takes any revision, and its help says why not to. A `commit` with `advance`
+  takes its `parent` by the same rule, since the move expects the ref to name it.
 - Clients limit long tool results. Claude Code saves a successful one over 25,000 tokens by
   default, or over 50,000 characters whatever its token count, to a file and gives the agent its
   path instead; it cuts only the text of an error. Each result holds its envelope twice, so an
@@ -281,7 +288,7 @@ and starts no server either.
 | `init <dir> [--name N]` | Create a store in `<dir>` (made if missing) and describe it. The name `N` (by default the directory's name) takes at most 255 bytes. |
 | `info` | Describe the store: its id, name, `main`, and how many changesets and refs it holds. |
 | `whoami` | The identity this caller's changes carry. |
-| `commit -m MSG --changes FILE\|- [--parent REV] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head. It moves no ref. |
+| `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. |
 | `cat REV:PATH [--max-bytes N]` | One file at a revision: UTF-8 text, or base64. |
 | `ls REV[:PATH] [--limit N] [--cursor C]` | One directory at a revision, a page at a time. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
@@ -299,10 +306,12 @@ hex digits, then any number of `~N` (the N-th first parent). A change list is a 
 text>"}`, `{"base64": "<bytes>"}` or `{"file": "<path>"}` (read by the CLI, on the client), at
 most 512 MiB, and its `mode` is `file` (the default), `exec` or `symlink`; directories follow
 from the paths. A ref moves only by compare-and-swap: when another agent moved it first,
-`ref set` fails with `E_CAS_MISMATCH` (exit 4) and the ref's target in `details.actual`. Then
-read the files you changed at `<actual>`, re-apply your edits to them (M1 has no merge, so
-re-sending your old whole-file puts would revert the winner's edits to shared files), commit
-with `--parent <actual>` and retry with `--expect <actual>`.
+`ref set` and `commit --advance` fail with `E_CAS_MISMATCH` (exit 4) and the ref's target in
+`details.actual` (a `commit --advance` that fails so records nothing). Then read the files you
+changed at `<actual>`, re-apply your edits to them (M1 has no merge, so re-sending your old
+whole-file puts would revert the winner's edits to shared files), and publish with
+`commit --parent <actual> --advance <ref>`, or commit with `--parent <actual>` and retry
+`ref set` with `--expect <actual>`.
 
 ### The store and the identity
 

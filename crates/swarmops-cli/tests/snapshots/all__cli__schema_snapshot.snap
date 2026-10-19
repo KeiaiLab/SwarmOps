@@ -7,6 +7,38 @@ expression: s.redact(&all)
   "op": "schema",
   "api": 1,
   "result": {
+    "Advanced": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`commit` with `advance`: the ref's move, made in the commit's own transaction.",
+      "properties": {
+        "already_applied": {
+          "description": "The ref held the changeset already, from an identical request before, so nothing was\nwritten and a replay is safe.",
+          "type": "boolean"
+        },
+        "name": {
+          "description": "The ref.",
+          "type": "string"
+        },
+        "new": {
+          "description": "What it holds now: the changeset.",
+          "type": "string"
+        },
+        "old": {
+          "description": "What the ref held before: the changeset's parent; omitted for a root commit, whose move\ncreated the ref.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "new",
+        "already_applied"
+      ],
+      "title": "Advanced",
+      "type": "object"
+    },
     "Attribution": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Whom a changeset is attributed to (operations spec §5).",
@@ -651,8 +683,15 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`commit`: record a changeset from an explicit change list. It moves no ref.",
+      "description": "`commit`: record a changeset from an explicit change list. It moves no ref, unless\n`advance` names one.",
       "properties": {
+        "advance": {
+          "description": "Also move this ref (`main` or `release/<name>`) to the new changeset, in the same\ntransaction as the changeset itself, so that both are recorded or neither. The move\nhappens only if the ref still names the changeset's parent (for a root commit, only if the\nref does not exist yet): it is always a one-step fast-forward. Otherwise nothing is\nrecorded and the commit fails with `E_CAS_MISMATCH` (`details.committed: false`,\n`details.actual` what the ref names). Give as `parent` the full id the ref held when you\nread it: without `parent` the commit builds on the ref's head when it runs, so the move\ncatches a race from there on, not a change made since you read the ref (M1 has no\nmerge). `swarmops mcp` refuses `advance` without a full 64-hex `parent` (`E_INVALID_ARG`).\nA store that does not know this field ignores it and moves no ref: its response has no\n`advanced`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "allow_empty": {
           "default": false,
           "description": "Record the changeset even if it changes nothing.",
@@ -678,7 +717,7 @@ expression: s.redact(&all)
               "type": "null"
             }
           ],
-          "description": "The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,\nthe current head of `main` is used if `main` exists, and otherwise the commit is a root\ncommit. `null` is the same as omitting it. Once `main` exists, this API cannot express a\nroot commit (a known M1 limitation)."
+          "description": "The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,\nthe current head of the ref `advance` names is used, else of `main`, if that ref exists,\nand otherwise the commit is a root commit. `null` is the same as omitting it. Once `main`\nexists, a root commit needs an `advance` naming a ref that does not exist yet (a known M1\nlimitation)."
         }
       },
       "required": [
@@ -689,9 +728,52 @@ expression: s.redact(&all)
       "type": "object"
     },
     "CommitResp": {
+      "$defs": {
+        "Advanced": {
+          "description": "`commit` with `advance`: the ref's move, made in the commit's own transaction.",
+          "properties": {
+            "already_applied": {
+              "description": "The ref held the changeset already, from an identical request before, so nothing was\nwritten and a replay is safe.",
+              "type": "boolean"
+            },
+            "name": {
+              "description": "The ref.",
+              "type": "string"
+            },
+            "new": {
+              "description": "What it holds now: the changeset.",
+              "type": "string"
+            },
+            "old": {
+              "description": "What the ref held before: the changeset's parent; omitted for a root commit, whose move\ncreated the ref.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "new",
+            "already_applied"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`commit`: the changeset that was recorded.",
       "properties": {
+        "advanced": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Advanced"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The move of the ref the request's `advance` named: present exactly when the ref names\n`changeset` because of this request, or of an identical one before it\n(`already_applied`). A request with `advance` whose response lacks it went to a store\nthat ignores the field, and moved no ref."
+        },
         "blobs_written": {
           "description": "How many blobs the commit wrote to the object store.",
           "format": "uint64",

@@ -26,6 +26,7 @@ pub use fs_ops::{
 #[cfg(feature = "test-hooks")]
 pub use fs_ops::{CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
 pub use layout::{Layout, is_native_linux_fs};
+pub use meta::refs::check_ref_name;
 pub use meta::{
     BadRecord, CasResult, ChangesetMeta, CommitInfo, Frame, Index, InsertOutcome, Journal,
     JournalEntry, LogCut, MetaLock, MetaRead, MetaStore, MetaWrite, Record, Recovered, RefFile,

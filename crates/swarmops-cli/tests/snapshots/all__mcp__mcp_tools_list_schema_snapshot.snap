@@ -300,11 +300,18 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Records a changeset from an explicit change list, on parent or else on main's head; it moves no ref. A {\"file\": path} content is read by this server: give an absolute path.",
+      "description": "Records a changeset from an explicit change list, on parent or else on main's head. With advance it also moves that ref to the changeset in the same transaction, only if the ref still names parent, which must then be the full 64-hex id you read; otherwise it records nothing (E_CAS_MISMATCH, details.committed false). Check result.advanced: a server that does not know advance moves no ref. A {\"file\": path} content is read by this server: give an absolute path.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "`commit`: record a changeset from an explicit change list. It moves no ref.",
+        "description": "`commit`: record a changeset from an explicit change list. It moves no ref, unless\n`advance` names one.",
         "properties": {
+          "advance": {
+            "description": "Also move this ref (`main` or `release/<name>`) to the new changeset, in the same\ntransaction as the changeset itself, so that both are recorded or neither. The move\nhappens only if the ref still names the changeset's parent (for a root commit, only if the\nref does not exist yet): it is always a one-step fast-forward. Otherwise nothing is\nrecorded and the commit fails with `E_CAS_MISMATCH` (`details.committed: false`,\n`details.actual` what the ref names). Give as `parent` the full id the ref held when you\nread it: without `parent` the commit builds on the ref's head when it runs, so the move\ncatches a race from there on, not a change made since you read the ref (M1 has no\nmerge). `swarmops mcp` refuses `advance` without a full 64-hex `parent` (`E_INVALID_ARG`).\nA store that does not know this field ignores it and moves no ref: its response has no\n`advanced`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "allow_empty": {
             "default": false,
             "description": "Record the changeset even if it changes nothing.",
@@ -437,7 +444,7 @@ expression: listed
                 "type": "null"
               }
             ],
-            "description": "The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,\nthe current head of `main` is used if `main` exists, and otherwise the commit is a root\ncommit. `null` is the same as omitting it. Once `main` exists, this API cannot express a\nroot commit (a known M1 limitation)."
+            "description": "The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,\nthe current head of the ref `advance` names is used, else of `main`, if that ref exists,\nand otherwise the commit is a root commit. `null` is the same as omitting it. Once `main`\nexists, a root commit needs an `advance` naming a ref that does not exist yet (a known M1\nlimitation)."
           }
         },
         "required": [

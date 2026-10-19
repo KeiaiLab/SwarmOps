@@ -107,19 +107,34 @@ pub struct IdentityInfo {
     pub auth: String,
 }
 
-/// `commit`: record a changeset from an explicit change list. It moves no ref.
+/// `commit`: record a changeset from an explicit change list. It moves no ref, unless
+/// `advance` names one.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct CommitReq {
     /// The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,
-    /// the current head of `main` is used if `main` exists, and otherwise the commit is a root
-    /// commit. `null` is the same as omitting it. Once `main` exists, this API cannot express a
-    /// root commit (a known M1 limitation).
+    /// the current head of the ref `advance` names is used, else of `main`, if that ref exists,
+    /// and otherwise the commit is a root commit. `null` is the same as omitting it. Once `main`
+    /// exists, a root commit needs an `advance` naming a ref that does not exist yet (a known M1
+    /// limitation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<Rev>,
     /// What to change, relative to the parent.
     pub changes: Vec<ChangeInput>,
     /// The commit message.
     pub message: String,
+    /// Also move this ref (`main` or `release/<name>`) to the new changeset, in the same
+    /// transaction as the changeset itself, so that both are recorded or neither. The move
+    /// happens only if the ref still names the changeset's parent (for a root commit, only if the
+    /// ref does not exist yet): it is always a one-step fast-forward. Otherwise nothing is
+    /// recorded and the commit fails with `E_CAS_MISMATCH` (`details.committed: false`,
+    /// `details.actual` what the ref names). Give as `parent` the full id the ref held when you
+    /// read it: without `parent` the commit builds on the ref's head when it runs, so the move
+    /// catches a race from there on, not a change made since you read the ref (M1 has no
+    /// merge). `swarmops mcp` refuses `advance` without a full 64-hex `parent` (`E_INVALID_ARG`).
+    /// A store that does not know this field ignores it and moves no ref: its response has no
+    /// `advanced`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advance: Option<String>,
     /// Record the changeset even if it changes nothing.
     #[serde(default)]
     pub allow_empty: bool,
@@ -190,10 +205,32 @@ pub struct CommitResp {
     pub files_changed: u64,
     /// How many blobs the commit wrote to the object store.
     pub blobs_written: u64,
+    /// The move of the ref the request's `advance` named: present exactly when the ref names
+    /// `changeset` because of this request, or of an identical one before it
+    /// (`already_applied`). A request with `advance` whose response lacks it went to a store
+    /// that ignores the field, and moved no ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub advanced: Option<Advanced>,
     /// Problems found after the commit became durable, such as failed housekeeping; the commit
     /// itself succeeded. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+}
+
+/// `commit` with `advance`: the ref's move, made in the commit's own transaction.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct Advanced {
+    /// The ref.
+    pub name: String,
+    /// What the ref held before: the changeset's parent; omitted for a root commit, whose move
+    /// created the ref.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old: Option<String>,
+    /// What it holds now: the changeset.
+    pub new: String,
+    /// The ref held the changeset already, from an identical request before, so nothing was
+    /// written and a replay is safe.
+    pub already_applied: bool,
 }
 
 /// `read_file` (CLI `cat`): read one file at a revision, without a checkout.
@@ -622,7 +659,8 @@ pub trait StoreOps {
     /// What the store is and holds (CLI `info`).
     fn repo_info(&self, req: InfoReq) -> Result<RepoInfo, OpError>;
 
-    /// Records a changeset from an explicit change list; moves no ref (CLI `commit`).
+    /// Records a changeset from an explicit change list (CLI `commit`); with `advance`, also
+    /// moves that ref to it in the same transaction, and otherwise moves no ref.
     ///
     /// [`ContentInput::File`] names a file on the caller's machine, so it is resolved on the
     /// client: a store that runs in the caller's process reads the file there, and a store that

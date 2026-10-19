@@ -256,6 +256,14 @@ goes into the transaction's frame, and the ref file is replaced after the commit
 expects is compared the same way, under the lock, and records nothing either way: the ref holds
 that target (a replay) or another (`E_CAS_MISMATCH`).
 
+A move may share a commit's transaction (`commit --advance`, storage §4): the changeset and the
+move of its ref are then one frame, one commit point, recorded together or not at all. The move
+expects the commit's first parent (no ref at all, for a root commit), so it is always a one-step
+fast-forward; when the ref names anything else, the transaction is dropped and nothing is
+recorded (`E_CAS_MISMATCH`, `details.committed: false`), only the flushed objects remaining, for
+GC. A publish so takes one lock pass and four syncs, where a commit and then a move take two and
+six.
+
 ## Reading
 
 Readers take no lock (storage §3, "읽기"). `MetaStore::read()` takes a snapshot: it reads
@@ -380,7 +388,9 @@ What an agent sees (operations §4):
 
 - `commit` only appends, and does not fail because of another agent: concurrent commits both
   succeed (short of a lock wait past `lock_timeout`, or a snapshot of its parents that meets a
-  new commit in every one of its 32 rounds: the retryable `E_BUSY`).
+  new commit in every one of its 32 rounds: the retryable `E_BUSY`). A commit with `advance`
+  publishes, and so fails with `E_CAS_MISMATCH`, recording nothing, when its ref no longer names
+  its parent.
 - Refs move only by compare-and-swap. When several agents expect the same target, exactly one
   wins each round; the others get `E_CAS_MISMATCH` and `details.actual`.
 - A read by changeset id is immutable, lock-free and cacheable. A ref named in a request is

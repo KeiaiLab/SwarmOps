@@ -46,6 +46,25 @@ prefix pins the id you read only until another changeset shares it; then it is E
 After E_CAS_MISMATCH, the ref holds the error's `actual`, which someone else moved it to: look \
 at it (swarmops show <actual>) before you delete it with --expect <actual>.";
 
+/// `commit --advance`'s short help.
+const ADVANCE_HELP: &str =
+    "Also move REF to the new changeset, in the same transaction, if REF still names --parent";
+
+/// `commit --advance`'s long help.
+const ADVANCE_LONG_HELP: &str = "Also move REF (main or release/<name>) to the new changeset, in \
+the same transaction: both are recorded, or neither.
+
+The move happens only if REF still names --parent (for a root commit, only if REF does not exist \
+yet), so it is always a one-step fast-forward. Give --parent as the full changeset id you read \
+REF at (from ref list, show, log or a commit's result): a ref name resolves when the command \
+runs, and without --parent the commit builds on REF's head as it is then, so the move catches \
+only a race from that moment on.
+
+After E_CAS_MISMATCH nothing was recorded, neither the changeset nor the move: re-apply your \
+edits to the content at the error's `actual` and commit with --parent <actual> --advance REF. \
+Do not re-send your old whole-file puts: M1 has no merge, so they would revert the winner's \
+edits to shared files.";
+
 /// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
 /// on stdout.
 #[derive(Parser, Debug)]
@@ -113,7 +132,7 @@ pub enum Command {
         #[arg(value_name = "TYPE")]
         name: Option<String>,
     },
-    /// Record a changeset from a list of changes; it moves no ref.
+    /// Record a changeset from a list of changes; with --advance, also move that ref to it.
     Commit {
         /// The commit message.
         #[arg(short, long)]
@@ -127,6 +146,8 @@ pub enum Command {
         /// Record the changeset even if it changes nothing.
         #[arg(long)]
         allow_empty: bool,
+        #[arg(long, value_name = "REF", help = ADVANCE_HELP, long_help = ADVANCE_LONG_HELP)]
+        advance: Option<String>,
     },
     /// Print one file at a revision.
     Cat {

@@ -32,10 +32,10 @@ use crate::support::{BIN, Racers, Run, Store, agent, retry_busy, run, run_bin_wi
 /// How many children the commit tests race.
 const COMMITTERS: usize = 8;
 
-/// How many children race each round of the ref test.
+/// How many children race each round of the ref tests.
 const RACERS: usize = 16;
 
-/// How many rounds the ref test races: the first creates main, each other one moves it.
+/// How many rounds the ref tests race: the first creates main, each other one moves it.
 const ROUNDS: u64 = 4;
 
 // ---------------------------------------------------------------------------------------------
@@ -266,6 +266,111 @@ fn sixteen_processes_race_ref_set_exactly_one_wins_per_round() {
     store.assert_clean("after the races");
 }
 
+/// Sixteen processes race to publish on main with one call each, `commit --advance main` on
+/// main as they read it (on nothing in the first round, which creates main): each round exactly
+/// one exits 0 with `advanced`, and every other one exits 4 with `E_CAS_MISMATCH`, the winner as
+/// `actual` and `committed: false`, having recorded nothing, so the store gains one changeset a
+/// round, not sixteen as when each racer commits and then runs `ref set`. main's history is then
+/// the winners, its version counts the rounds, and the store verifies clean. A racer that meets
+/// `E_BUSY` (a lock wait a loaded host stretched past its 10 s) runs again, as an agent's would
+/// ([`retry_busy`]): it recorded nothing, and meets the winner's move then.
+#[test]
+#[ignore = "slow, ~5 s: 16 processes race 4 rounds of commit --advance; just check-slow runs it"]
+fn sixteen_processes_race_commit_advance_exactly_one_wins_per_round() {
+    let store = Store::init();
+    let mut main: Option<String> = None;
+    let mut winners = Vec::new();
+    for round in 0..ROUNDS {
+        let mut racers = Racers::new(store.tmp());
+        let mut publishes = Vec::with_capacity(RACERS);
+        for racer in 0..RACERS {
+            let changes = store.changes(
+                &format!("round-{round}-racer-{racer}"),
+                &format!("racer-{racer}.txt"),
+                &format!("round {round}\n"),
+            );
+            let mut args = vec![
+                "commit",
+                "-m",
+                "mine",
+                "--changes",
+                &changes,
+                "--advance",
+                "main",
+            ];
+            if let Some(main) = &main {
+                args.extend(["--parent", main]);
+            }
+            let run_id = format!("round-{round}-racer-{racer}");
+            let args = store.args(&agent(racer), &args);
+            racers.spawn(&args, &[("SWARMOPS_RUN_ID", &run_id)]);
+            publishes.push((args, run_id));
+        }
+        let runs: Vec<Run> = racers
+            .race()
+            .into_iter()
+            .zip(&publishes)
+            .map(|(first, (args, run_id))| {
+                retry_busy(first, || run(args, &[("SWARMOPS_RUN_ID", run_id)]))
+            })
+            .collect();
+        let won: Vec<usize> = (0..RACERS).filter(|&r| runs[r].exit() == 0).collect();
+        let [winner] = won[..] else {
+            let shown: Vec<String> = runs.iter().map(ToString::to_string).collect();
+            panic!(
+                "round {round}: {} winners {won:?}:\n{}",
+                won.len(),
+                shown.join("\n")
+            );
+        };
+        let result = runs[winner].ok();
+        let new = result["changeset"].as_str().unwrap().to_owned();
+        let mut want = json!({"name": "main", "new": new, "already_applied": false});
+        if let Some(old) = &main {
+            want["old"] = json!(old);
+        }
+        assert_eq!(result["advanced"], want, "round {round}");
+        for (racer, run) in runs
+            .iter()
+            .enumerate()
+            .filter(|&(racer, _)| racer != winner)
+        {
+            let error = run.err("E_CAS_MISMATCH");
+            assert_eq!(
+                (run.exit(), &error["retryable"]),
+                (4, &json!(true)),
+                "{run}"
+            );
+            let details = json!({"name": "main", "actual": new, "committed": false});
+            assert_eq!(error["details"], details, "round {round}, racer {racer}");
+        }
+        assert_eq!(
+            store.info()["changesets"],
+            round + 1,
+            "round {round}: the losers recorded nothing"
+        );
+        let refs = store.read(&["ref", "list"]).ok();
+        let main_ref = json!([{"name": "main", "target": new, "version": round + 1}]);
+        assert_eq!(refs["refs"], main_ref, "round {round}");
+        winners.push(new.clone());
+        main = Some(new);
+    }
+
+    let log = store.read(&["log"]).ok();
+    let history: Vec<&str> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    let newest_first: Vec<&str> = winners.iter().rev().map(String::as_str).collect();
+    assert_eq!(
+        history, newest_first,
+        "main's first parents are the winners"
+    );
+    store.assert_clean("after the races");
+}
+
 // ---------------------------------------------------------------------------------------------
 // The harness's own deadlines.
 // ---------------------------------------------------------------------------------------------
@@ -431,6 +536,7 @@ fn one_file_commit(path: &str, content: &str) -> CommitRequest {
         message: b"in process".to_vec(),
         metadata: vec![("agent".to_owned(), who.into_bytes())],
         allow_empty: false,
+        advance: None,
     }
 }
 

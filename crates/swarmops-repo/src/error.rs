@@ -3,7 +3,7 @@
 use std::io;
 
 use swarmops_core::{ChangesetId, CodecError, ObjectId, ObjectKind, RepoPath};
-use swarmops_store::StoreError;
+use swarmops_store::{Recovered, StoreError};
 use thiserror::Error;
 
 /// Why a repository operation failed.
@@ -61,6 +61,24 @@ pub enum RepoError {
     /// A ref name that is not `main` or `release/<x>`.
     #[error("invalid ref name {0:?}")]
     RefName(String),
+    /// A commit with `advance` found its ref naming something other than the changeset's first
+    /// parent, or, for a root changeset, found the ref there: another move came first. Nothing
+    /// was recorded, neither the changeset nor the move; only the objects the commit flushed
+    /// remain, unreferenced, for GC. Re-read the ref before committing on what it names.
+    #[error(
+        "ref {name} does not name the commit's first parent (it names {}): nothing was recorded",
+        .actual.map_or_else(|| "nothing".to_owned(), |id| id.to_string())
+    )]
+    RefMoved {
+        /// The ref.
+        name: String,
+        /// What it names; `None` if it does not exist.
+        actual: Option<ChangesetId>,
+        /// What the write transaction's recovery repaired before the move was refused, of what
+        /// earlier writers left ([`swarmops_store::MetaWrite::recovered`]): those repairs stay
+        /// made. Boxed, as the variant would otherwise make every result this large.
+        recovered: Box<Recovered>,
+    },
     /// A change deletes a path that is no file in the first parent's tree.
     #[error("{path}: there is no file to delete there")]
     PathNotFound {
