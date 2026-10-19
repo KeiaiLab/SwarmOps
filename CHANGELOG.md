@@ -181,6 +181,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 
 #### M1.6: the code-review follow-ups (2026-10-19)
 
+- `missing_docs` joins the workspace lints (M0's set was `unsafe` forbidden, clippy's `all`
+  denied and `pedantic` warned): every exported item needs a `///` comment, and `just check`
+  fails on one that lacks it. The lint is a warning, as `pedantic` is, so the gate's
+  `-D warnings` in clippy and in rustdoc makes it an error while a local build of a draft
+  still runs. A test fails if the root `Cargo.toml` drops the lint or a crate drops
+  `[lints] workspace = true`.
 - The write-ordering rules that `SWARMOPS_TEST_ORDER_CHECK=1` checks are W1–W7, stated in
   storage spec §2 rule 4, and a violation panics with `order check: W<n> violated by …`. They
   were R1–R7, defined only in `crates/swarmops-store/src/order_check.rs`, under the names the
