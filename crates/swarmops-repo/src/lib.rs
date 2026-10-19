@@ -10,7 +10,8 @@
 //! resolved there ([`Repo::commit_in`]); [`Repo`]'s read methods each take a snapshot of their
 //! own. A snapshot also reads part of a file, keeping only that part while it verifies the whole
 //! blob ([`RepoRead::read_file_span`]), and lists the directories below one to a depth, with each
-//! leaf's size ([`RepoRead::list_tree_depth`]).
+//! leaf's size ([`RepoRead::list_tree_depth`]). A diff of two changesets reads both their trees in
+//! one ([`RepoRead::diff`]).
 //!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
@@ -23,6 +24,7 @@
 
 pub mod commit;
 pub mod derive;
+pub mod diff;
 pub mod error;
 pub mod log;
 pub mod path_history;
