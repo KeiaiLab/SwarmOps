@@ -9,7 +9,7 @@
 //!
 //! # The rules
 //!
-//! W1 to W7, which storage spec §2 rule 4 states: the write protocol of the spec's §2 and §3,
+//! W1 to W8, which storage spec §2 rule 4 states: the write protocol of the spec's §2, §3 and §7,
 //! restated as this checker judges it, call by call. They add no protocol of their own.
 //!
 //! - **W1, the journal.** A frame is listed in `journal.off` only once it is durable in
@@ -51,6 +51,11 @@
 //!   not completeness: it does not check that `meta/`, `REPO` and the fan-out directories exist.
 //!   The pinned call sequence of `LocalRepo::create` and the create sweeps' oracle hold that
 //!   they are made before `FORMAT`.
+//! - **W8, the external ids.** An entry of the external id index (`meta/external_ids/`) is linked
+//!   only from data synced first, and only while every byte this process wrote to `journal.log`
+//!   is durable: the frame that records the entry's changeset is durable before the entry. W2
+//!   asks more of a ref change, every byte of `journal.log`; a put of entries takes no lock, so
+//!   another process's frame may be on its way meanwhile.
 //!
 //! # What it knows
 //!
@@ -473,6 +478,26 @@ impl State {
         None
     }
 
+    /// W8 for the link of an external id entry of `meta`: every byte this process wrote to its
+    /// `journal.log` is durable (written by `append`, it is not until a sync covers it; a failed
+    /// sync leaves it not durable for good), so the frame that records the entry's changeset is.
+    fn external_id(&self, meta: &Path) -> Option<String> {
+        let log = meta.join("journal.log");
+        let file = self.files.get(&log)?;
+        if let Some(lost) = file.lost_from
+            && real_len(&log) > lost
+        {
+            return Some(format!(
+                "journal.log holds bytes from {lost} on that a failed sync left not durable"
+            ));
+        }
+        file.dirty.then(|| {
+            "journal.log holds bytes this process wrote and has not synced: the frame that \
+             records the entry's changeset may not be durable yet"
+                .to_owned()
+        })
+    }
+
     /// W2 for a change of a ref file of `meta`.
     fn ref_change(&self, meta: &Path) -> Option<String> {
         let len = real_len(&meta.join("journal.log"));
@@ -583,7 +608,7 @@ impl State {
         })
     }
 
-    /// W5 and W7: the data of `from`, about to be linked into place, must be durable.
+    /// W5, W7 and W8: the data of `from`, about to be linked into place, must be durable.
     fn linked_data(&self, from: &Path) -> Option<String> {
         match self.files.get(from) {
             Some(file) if file.synced_whole(real_len(from)) => None,
@@ -637,12 +662,14 @@ enum Rule {
     W6,
     /// `FORMAT`.
     W7,
+    /// The external ids.
+    W8,
 }
 
 #[cfg(test)]
 impl Rule {
     /// Every rule, in order.
-    const ALL: [Rule; 7] = [
+    const ALL: [Rule; 8] = [
         Rule::W1,
         Rule::W2,
         Rule::W3,
@@ -650,6 +677,7 @@ impl Rule {
         Rule::W5,
         Rule::W6,
         Rule::W7,
+        Rule::W8,
     ];
 }
 
@@ -663,6 +691,7 @@ impl fmt::Display for Rule {
             Rule::W5 => "W5",
             Rule::W6 => "W6",
             Rule::W7 => "W7",
+            Rule::W8 => "W8",
         })
     }
 }
@@ -780,6 +809,14 @@ fn ref_meta(path: &Path) -> Option<&Path> {
         .and_then(Path::parent)
 }
 
+/// The `meta/` directory of `path`, if it is an entry of the external id index,
+/// `meta/external_ids/<system>/<fan-out>/<name>`.
+fn external_id_meta(path: &Path) -> Option<&Path> {
+    let ids = path.parent()?.parent()?.parent()?;
+    let meta = ids.parent()?;
+    (name(ids)? == "external_ids" && name(meta)? == "meta").then_some(meta)
+}
+
 /// Whether `path` is an object file, `objects/<2 hex>/<name>`.
 fn is_object(path: &Path) -> bool {
     let Some(fanout) = path.parent() else {
@@ -838,6 +875,11 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
                     .linked_data(from)
                     .or_else(|| state.store_complete(root))
                     .map(|why| (Rule::W7, why))
+            } else if let Some(meta) = external_id_meta(to) {
+                state
+                    .linked_data(from)
+                    .or_else(|| state.external_id(meta))
+                    .map(|why| (Rule::W8, why))
             } else if is_object(to) {
                 state.linked_data(from).map(|why| (Rule::W5, why))
             } else {

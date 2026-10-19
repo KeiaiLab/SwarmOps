@@ -125,7 +125,8 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         | StoreError::JournalCorrupt { .. }
         | StoreError::IndexCorrupt { .. }
         | StoreError::IndexMismatch { .. }
-        | StoreError::MissingParent(_) => corrupt(message, during, "swarmops verify"),
+        | StoreError::MissingParent(_)
+        | StoreError::ExternalIdCorrupt { .. } => corrupt(message, during, "swarmops verify"),
         StoreError::RefName(name) => ref_name_invalid(name, message),
         StoreError::UnknownRefTarget(id) => repo_error(RepoError::NotFound(id.to_string()), during),
         StoreError::DuplicateParent(id) => error(ErrorCode::InvalidArg, message)
@@ -466,6 +467,10 @@ mod tests {
             StoreError::IndexCorrupt { what: "x" },
             StoreError::IndexMismatch { seq: 3 },
             StoreError::MissingParent(id()),
+            StoreError::ExternalIdCorrupt {
+                system: "git".into(),
+                key: "ab".repeat(20),
+            },
         ];
         for e in damage {
             maps(store(e), op, ErrorCode::StoreCorrupt);

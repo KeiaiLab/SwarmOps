@@ -11,6 +11,7 @@
 //! <root>/meta/derived/<name>/<version>/<2hex>/<62hex>[.<16hex>]
 //!                               one derived value: a cache, outside the journal, never synced
 //! <root>/meta/derived/tmp/      temp files of derived values, written before they are linked
+//! <root>/meta/external_ids/     the external id index: <system>/<2hex>/<the key's other hex>
 //! <root>/objects/tmp/           temp files staged before they are linked into place
 //! <root>/objects/<2hex>/<62hex> loose objects, one fan-out directory per first id byte
 //! ```
@@ -120,6 +121,21 @@ impl Layout {
             .join(slot.version.to_string())
             .join(fanout)
             .join(file)
+    }
+
+    /// `<root>/meta/external_ids`, the external id index (storage spec §7): a directory per
+    /// system.
+    pub fn external_ids_dir(&self) -> Utf8PathBuf {
+        self.meta_path("external_ids")
+    }
+
+    /// `<root>/meta/external_ids/<system>/<first 2 hex>/<remaining hex>`: the entry of the
+    /// external id `key` of `system`, named by the key's lowercase hex. Computes the path only:
+    /// [`crate::ExternalIds`] checks the system's name, and that the key has 2 to 64 bytes, first.
+    pub fn external_id_path(&self, system: &str, key: &[u8]) -> Utf8PathBuf {
+        let hex = crate::external_ids::lower_hex(key);
+        let (fanout, rest) = hex.split_at(hex.len().min(2));
+        self.external_ids_dir().join(system).join(fanout).join(rest)
     }
 
     /// `<root>/objects`, the parent of the fan-out directories and `tmp`.

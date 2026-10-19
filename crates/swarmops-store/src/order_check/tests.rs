@@ -70,12 +70,12 @@ fn assert_breaks(rule: &str, run: impl FnOnce()) {
     assert_eq!(broken(run).as_deref(), Some(rule));
 }
 
-/// The rule ids are W1 to W7, the names storage spec §2 rule 4 states the rules under, and
+/// The rule ids are W1 to W8, the names storage spec §2 rule 4 states the rules under, and
 /// a violation's panic starts with its rule's id.
 #[test]
-fn rule_ids_are_w1_to_w7() {
+fn rule_ids_are_w1_to_w8() {
     let ids: Vec<String> = Rule::ALL.iter().map(ToString::to_string).collect();
-    assert_eq!(ids, ["W1", "W2", "W3", "W4", "W5", "W6", "W7"]);
+    assert_eq!(ids, ["W1", "W2", "W3", "W4", "W5", "W6", "W7", "W8"]);
     let off = Path::new("meta/journal.off");
     for (n, rule) in (1..).zip(Rule::ALL) {
         let message = panic_message(|| {
@@ -403,6 +403,53 @@ fn w7_format_is_linked_last() {
         fs.link_noclobber(&unsynced, &format).unwrap();
     });
     link(&fs);
+}
+
+/// An external id entry is linked only from synced data, and only while every byte this
+/// process wrote to `journal.log` is durable, the frame that records the entry's changeset among
+/// them; bytes another process wrote, which may be another writer's frame on its way, do not
+/// hold it back.
+#[test]
+fn w8_an_external_id_is_linked_only_once_the_journal_is_durable() {
+    use std::io::Write as _;
+
+    let (_dir, root) = root();
+    let (log, staging) = (root.join("meta/journal.log"), root.join("objects/tmp"));
+    let fanout = root.join("meta/external_ids/git/ab");
+    fs::create_dir_all(&fanout).unwrap();
+    let fs = OrderCheckFs::new(RealFs);
+    let temp = fs.write_durable_temp(&staging, b"entry").unwrap();
+    fs.append(&log, &changeset()).unwrap();
+    let message = panic_message(|| {
+        fs.link_noclobber(&temp, &fanout.join("cdef")).unwrap();
+    });
+    assert!(
+        message.as_deref().is_some_and(
+            |message| message.starts_with("order check: W8 violated by link_noclobber")
+        ),
+        "{message:?}"
+    );
+    fs.sync_data(&log).unwrap();
+    fs.link_noclobber(&temp, &fanout.join("cdef")).unwrap();
+    // A temp file written but not synced breaks it too.
+    let unsynced = staging.join("unsynced");
+    fs.append(&unsynced, b"entry").unwrap();
+    assert_breaks("W8", || {
+        fs.link_noclobber(&unsynced, &fanout.join("0123")).unwrap();
+    });
+
+    // Another process's frame, written and not synced yet: no frame of this one's.
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&log)
+        .unwrap()
+        .write_all(&changeset())
+        .unwrap();
+    let temp = fs.write_durable_temp(&staging, b"entry").unwrap();
+    fs.link_noclobber(&temp, &fanout.join("4567")).unwrap();
+    let other = OrderCheckFs::new(RealFs);
+    let temp = other.write_durable_temp(&staging, b"entry").unwrap();
+    other.link_noclobber(&temp, &fanout.join("89ab")).unwrap();
 }
 
 fn to_u64(n: usize) -> u64 {

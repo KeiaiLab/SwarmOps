@@ -128,6 +128,7 @@ A store is one directory (storage §2, §3):
   meta/refs/main             one file per ref ("<64 hex>\n<version>\n"); also meta/refs/release/<name>
   meta/derived/<name>/...    derived values, one file each: a cache beside the journal, never synced (M2)
   meta/derived/tmp/          where new derived values are staged
+  meta/external_ids/         the external id index (M3): <system>/<2 hex>/<rest of the hex>, one 44-byte file per id
 ```
 
 Objects are compressed one at a time with zstd at level 3, with zstd's content checksum, when
@@ -139,8 +140,11 @@ The index and the ref files are projections of the journal. A journal frame is
 records: a changeset entering the index, a ref move, a compaction marker. The frame layout and
 the record layouts are the disk contract of `FORMAT 1`: not part of the hash contract, but
 changed only with a new `FORMAT` (storage §3). Derived values (M2) are no projection of the
-journal but a cache beside it, with a header of their own (below). Later milestones add the git
-id mapping (M3), workspaces (M5) and reviews (M7) to `meta/`.
+journal but a cache beside it, with a header of their own (below). The external id index (M3,
+storage §7) says which changeset an id of another system names, a git commit's oid say: an immutable
+file per id, written as an object is and only once the frame that records its changeset is durable.
+It is a cache outside the journal, not a projection of it, so it leaves `FORMAT 1` as it is. Later
+milestones add workspaces (M5) and reviews (M7) to `meta/`.
 
 How the files depend on one another:
 
@@ -155,6 +159,7 @@ flowchart TB
     log["journal.log<br/>append-only, CRC-framed:<br/>the source of truth"]
     idx["idx/*.col, parents.log, sorted/*<br/>the changeset index"]
     refs["refs/main, refs/release/*<br/>one file per ref"]
+    ext["external_ids/*<br/>the external id index:<br/>a cache outside the journal"]
     off -. "points into" .-> log
     ckpt -. "marks a point in" .-> log
     log -- "projected into" --> idx
@@ -166,6 +171,7 @@ flowchart TB
   end
   idx -- "names" --> cs
   refs -- "name" --> cs
+  ext -- "name" --> cs
 ```
 
 ## Writing
@@ -362,10 +368,11 @@ lock (I4). The tests that hold the code to them:
   `E_IO_TRANSIENT` says `details.committed = false`, an abort is one of the documented ones, and
   the store takes the next write;
 - **write-ordering checks** (M1.5): `SWARMOPS_TEST_ORDER_CHECK=1` checks every filesystem call
-  against the store's write-ordering rules, W1 to W7 of storage §2 rule 4 (a frame is listed
+  against the store's write-ordering rules, W1 to W8 of storage §2 rule 4 (a frame is listed
   only once it is durable, a ref file changes only after its frame is durable, the checkpoint
   moves only over synced index records, objects are durable before a frame names them,
-  `FORMAT` is linked last, and more), and panics at the first call that breaks one. Every run
+  `FORMAT` is linked last, an external id entry only once its changeset's frame is durable, and
+  more), and panics at the first call that breaks one. Every run
   of the binary in the CLI tests has it on, and so do the store's and the repository's crash
   sweeps;
 - **a model of fsync failures on Linux** (M1.5): the bytes a failed sync did not cover stay

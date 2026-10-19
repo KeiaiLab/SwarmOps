@@ -286,6 +286,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `AlreadyPresent`. The index appends a frame's changesets with one write to each of its five
   files (`Index::append_batch`), as a commit materializes them and as replay restores them, where
   it made five writes for each changeset.
+- The external id index (`swarmops_store::ExternalIds`, storage spec §7): which changeset of the
+  store an id of another system names, a git commit's oid for the import, as one immutable
+  44-byte file per id under `meta/external_ids/<system>/<2 hex>/<rest of the hex>` (magic
+  `SXID`, version 1, a faithful flag, the changeset's id and a CRC). An entry is written as an
+  object is, from a synced temp file in `objects/tmp/` linked without replacing anything, and
+  `put_batch` makes its names durable before it returns; an entry already there is left as it
+  is, and one with other bytes is reported as a conflict. The index is a cache outside the
+  journal, so `FORMAT` stays 1. A new write-order rule, W8 (storage spec §2 rule 4), links an
+  entry only once every byte its process wrote to `journal.log` is durable, so that no entry
+  names a changeset a power loss can take back; the order checker enforces it.
 
 ### Changed
 
