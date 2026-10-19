@@ -23,7 +23,8 @@
 //!    changeset committed, and is reported as a warning; the next write to the store repairs
 //!    what is missing. A journal append that fails ([`StoreError::NotCommitted`]) is returned
 //!    as it is: the frame was cut back off the journal, so the changeset is not recorded, and
-//!    the same request made again records it.
+//!    the same request made again records it. What the transaction's recovery repaired first,
+//!    of what earlier writers left, comes back in [`CommitOutcome::recovered`].
 //!
 //! An identical request computes the same objects and the same changeset: the store has them
 //! all, so nothing is written, and the insert finds the changeset
@@ -36,7 +37,7 @@ use swarmops_core::{
     BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath,
     Signature, TreeId, hash_object,
 };
-use swarmops_store::{ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, StoreError};
+use swarmops_store::{ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, Recovered, StoreError};
 
 use crate::error::RepoError;
 use crate::repo::{Repo, post_commit_warning};
@@ -111,6 +112,12 @@ pub struct CommitOutcome {
     /// Steps after the commit point that failed, one line each: the changeset is committed
     /// all the same.
     pub warnings: Vec<String>,
+    /// What the write transaction's recovery repaired before the insert, of what earlier writers
+    /// left ([`swarmops_store::MetaWrite::recovered`]): on every outcome,
+    /// [`InsertOutcome::AlreadyPresent`] included, which is what the same request made again
+    /// after a crash or a warning finds. It is no warning, and it is lost when the call fails
+    /// after the repair.
+    pub recovered: Recovered,
 }
 
 impl<O: ObjectStore> Repo<O> {
@@ -194,7 +201,7 @@ impl<O: ObjectStore> Repo<O> {
         );
         self.objects.flush()?;
 
-        let (insert, warnings) = self.record(meta)?;
+        let (insert, warnings, recovered) = self.record(meta)?;
         Ok(CommitOutcome {
             id,
             root,
@@ -203,6 +210,7 @@ impl<O: ObjectStore> Repo<O> {
             trees_written,
             insert,
             warnings,
+            recovered,
         })
     }
 
@@ -247,10 +255,14 @@ impl<O: ObjectStore> Repo<O> {
     }
 
     /// Inserts `meta` in a write transaction of its own and commits it, if the store does
-    /// not hold the changeset yet. Returns what the insert did, and a warning if a step after
-    /// the commit point failed.
-    fn record(&self, meta: ChangesetMeta) -> Result<(InsertOutcome, Vec<String>), RepoError> {
+    /// not hold the changeset yet. Returns what the insert did, a warning if a step after
+    /// the commit point failed, and what the transaction's recovery repaired.
+    fn record(
+        &self,
+        meta: ChangesetMeta,
+    ) -> Result<(InsertOutcome, Vec<String>, Recovered), RepoError> {
         let mut write = self.meta.write()?;
+        let recovered = write.recovered();
         let insert = write.insert_changeset(meta).map_err(|e| match e {
             StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
             other => other.into(),
@@ -267,7 +279,7 @@ impl<O: ObjectStore> Repo<O> {
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok((insert, warnings))
+        Ok((insert, warnings, recovered))
     }
 }
 

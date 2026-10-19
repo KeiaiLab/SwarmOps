@@ -28,8 +28,8 @@ pub use fs_ops::{CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
 pub use layout::{Layout, is_native_linux_fs};
 pub use meta::{
     BadRecord, CasResult, ChangesetMeta, CommitInfo, Frame, Index, InsertOutcome, Journal,
-    JournalEntry, MetaLock, MetaRead, MetaStore, MetaWrite, Record, RefFile, RefMoveEntry,
-    RefState, SortedView,
+    JournalEntry, LogCut, MetaLock, MetaRead, MetaStore, MetaWrite, Record, Recovered, RefFile,
+    RefMoveEntry, RefState, SortedView, TailRepair,
 };
 #[cfg(feature = "test-hooks")]
 pub use order_check::OrderCheckFs;

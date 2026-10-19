@@ -13,7 +13,7 @@ pub mod identity;
 pub mod ops;
 pub mod rev;
 
-pub use envelope::{API_VERSION, Envelope, Meta};
+pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
@@ -50,6 +50,8 @@ pub fn schema_for_all() -> serde_json::Value {
         ErrorCode,
         OpError,
         Meta,
+        RecoveredOut,
+        LogCutOut,
         // init, info, whoami.
         InitReq,
         InfoReq,

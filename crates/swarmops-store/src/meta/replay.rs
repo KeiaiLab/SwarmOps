@@ -23,39 +23,58 @@ use swarmops_core::ChangesetId;
 use super::frame::{Frame, Record};
 use super::index::{ChangesetMeta, Index};
 use super::refs::{self, RefState};
+use super::to_u64;
 use crate::error::StoreError;
 use crate::fs_ops::FsOps;
 use crate::layout::Layout;
 
+/// What [`replay`] changed: what the frames it applied hold that the index and the ref files
+/// lacked. Frames it only reads again, whose records are there already, count for nothing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Replayed {
+    /// The changesets it appended to the index.
+    pub(crate) records: u64,
+    /// The ref files it replaced or removed.
+    pub(crate) refs: u64,
+}
+
 /// Brings the index and the ref files up to date with `frames`, the frames past the
-/// checkpoint in journal order, appending only what they lack. The caller holds
-/// [`crate::MetaLock`] and has repaired the journal's and the index's tails.
+/// checkpoint in journal order, appending only what they lack, and returns what it changed.
+/// The caller holds [`crate::MetaLock`] and has repaired the journal's and the index's tails.
 pub(crate) fn replay(
     index: &mut Index,
     layout: &Layout,
     fs: &dyn FsOps,
     frames: &[Frame],
-) -> Result<(), StoreError> {
+) -> Result<Replayed, StoreError> {
     // The ref names first: frames this version cannot apply change nothing at all.
     let targets = ref_targets(frames)?;
     let changesets = changesets(frames);
-    for record in &changesets[held(index, &changesets)?..] {
+    let held = held(index, &changesets)?;
+    for record in &changesets[held..] {
         index.append(&record.meta(0))?;
     }
+    let mut files = 0;
     for (name, target) in targets {
-        refs::write(layout, fs, name, target)?;
+        if refs::write(layout, fs, name, target)? {
+            files += 1;
+        }
     }
-    Ok(())
+    Ok(Replayed {
+        records: to_u64(changesets.len() - held),
+        refs: files,
+    })
 }
 
-/// [`replay`] of the one frame a writer has just appended: its materialization.
+/// [`replay`] of the one frame a writer has just appended: its materialization, which is no
+/// recovery, so what it changed goes unreported.
 pub(crate) fn materialize(
     index: &mut Index,
     layout: &Layout,
     fs: &dyn FsOps,
     frame: &Frame,
 ) -> Result<(), StoreError> {
-    replay(index, layout, fs, slice::from_ref(frame))
+    replay(index, layout, fs, slice::from_ref(frame)).map(drop)
 }
 
 /// What a reader's snapshot adds to an index handle and the ref files: the frames past the

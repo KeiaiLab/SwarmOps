@@ -828,6 +828,28 @@ expression: s.redact(&all)
     },
     "Envelope": {
       "$defs": {
+        "LogCutOut": {
+          "description": "Where the journal was cut (`meta.recovered.log_cut`).",
+          "properties": {
+            "at": {
+              "description": "The journal's byte offset where the torn tail started, and where the journal ends now.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "bytes": {
+              "description": "How many bytes were cut, to where the journal ended.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "at",
+            "bytes"
+          ],
+          "type": "object"
+        },
         "Meta": {
           "description": "What the envelope reports besides the outcome.",
           "properties": {
@@ -840,6 +862,17 @@ expression: s.redact(&all)
               "format": "uint64",
               "minimum": 0,
               "type": "integer"
+            },
+            "recovered": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RecoveredOut"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What the command's write repaired before its own work, of what earlier writers left when\nthey crashed or failed after their commit point; omitted when there was nothing to repair,\nand for a command that writes nothing. `commit`, `ref_set` and `ref_delete` report it on\nsuccess and on `E_CAS_MISMATCH` alike, and lose it when they fail otherwise. Whoever\nwrites next gets it, not the agent whose process crashed, and it is no failure: `warnings`\nstill names only the steps after this command's own commit point that failed."
             },
             "repo": {
               "description": "The store as the user named it, for display; omitted when the command used no store.",
@@ -904,6 +937,72 @@ expression: s.redact(&all)
             "exit",
             "details",
             "hint"
+          ],
+          "type": "object"
+        },
+        "RecoveredOut": {
+          "description": "What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's\nmetadata files, with no paths: the storage spec (§2 rule 3, §3) says what each repair is.",
+          "properties": {
+            "frames_listed": {
+              "description": "The journal frames listed that their writer never listed: transactions that committed,\ntheir writer having crashed between the frame's sync and its listing, or failed to list\nit (a warning then); and frames listed again whose entries a power loss zeroed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "frames_rewritten": {
+              "description": "Of those, the frames written to the journal afresh first, because the sync that would\nhave made them durable failed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "index_records_dropped": {
+              "description": "The changeset index records cut, counted in its longest column: records a crash left torn,\nor a power loss emptied.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "log_cut": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LogCutOut"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The torn tail cut off the end of the journal, if there was one: the bytes of a transaction\nthat never reached its commit point; omitted when nothing was cut."
+            },
+            "off_bytes_dropped": {
+              "description": "The bytes dropped from the end of the journal's list of frames: part of an entry, or\nentries a power loss zeroed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "records_replayed": {
+              "description": "The changesets replayed from the journal into the index.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "refs_replayed": {
+              "description": "The ref files replayed from the journal: replaced, or removed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "views_rebuilt": {
+              "description": "Whether a compaction of the changeset index that a crash interrupted was finished.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "frames_listed",
+            "frames_rewritten",
+            "off_bytes_dropped",
+            "index_records_dropped",
+            "views_rebuilt",
+            "records_replayed",
+            "refs_replayed"
           ],
           "type": "object"
         }
@@ -1285,6 +1384,30 @@ expression: s.redact(&all)
       "title": "InitReq",
       "type": "object"
     },
+    "LogCutOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Where the journal was cut (`meta.recovered.log_cut`).",
+      "properties": {
+        "at": {
+          "description": "The journal's byte offset where the torn tail started, and where the journal ends now.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "bytes": {
+          "description": "How many bytes were cut, to where the journal ended.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "at",
+        "bytes"
+      ],
+      "title": "LogCutOut",
+      "type": "object"
+    },
     "LogPage": {
       "$defs": {
         "ChangesetSummary": {
@@ -1395,6 +1518,96 @@ expression: s.redact(&all)
       "type": "object"
     },
     "Meta": {
+      "$defs": {
+        "LogCutOut": {
+          "description": "Where the journal was cut (`meta.recovered.log_cut`).",
+          "properties": {
+            "at": {
+              "description": "The journal's byte offset where the torn tail started, and where the journal ends now.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "bytes": {
+              "description": "How many bytes were cut, to where the journal ended.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "at",
+            "bytes"
+          ],
+          "type": "object"
+        },
+        "RecoveredOut": {
+          "description": "What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's\nmetadata files, with no paths: the storage spec (§2 rule 3, §3) says what each repair is.",
+          "properties": {
+            "frames_listed": {
+              "description": "The journal frames listed that their writer never listed: transactions that committed,\ntheir writer having crashed between the frame's sync and its listing, or failed to list\nit (a warning then); and frames listed again whose entries a power loss zeroed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "frames_rewritten": {
+              "description": "Of those, the frames written to the journal afresh first, because the sync that would\nhave made them durable failed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "index_records_dropped": {
+              "description": "The changeset index records cut, counted in its longest column: records a crash left torn,\nor a power loss emptied.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "log_cut": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/LogCutOut"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The torn tail cut off the end of the journal, if there was one: the bytes of a transaction\nthat never reached its commit point; omitted when nothing was cut."
+            },
+            "off_bytes_dropped": {
+              "description": "The bytes dropped from the end of the journal's list of frames: part of an entry, or\nentries a power loss zeroed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "records_replayed": {
+              "description": "The changesets replayed from the journal into the index.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "refs_replayed": {
+              "description": "The ref files replayed from the journal: replaced, or removed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "views_rebuilt": {
+              "description": "Whether a compaction of the changeset index that a crash interrupted was finished.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "frames_listed",
+            "frames_rewritten",
+            "off_bytes_dropped",
+            "index_records_dropped",
+            "views_rebuilt",
+            "records_replayed",
+            "refs_replayed"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "What the envelope reports besides the outcome.",
       "properties": {
@@ -1407,6 +1620,17 @@ expression: s.redact(&all)
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
+        },
+        "recovered": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RecoveredOut"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What the command's write repaired before its own work, of what earlier writers left when\nthey crashed or failed after their commit point; omitted when there was nothing to repair,\nand for a command that writes nothing. `commit`, `ref_set` and `ref_delete` report it on\nsuccess and on `E_CAS_MISMATCH` alike, and lose it when they fail otherwise. Whoever\nwrites next gets it, not the agent whose process crashed, and it is no failure: `warnings`\nstill names only the steps after this command's own commit point that failed."
         },
         "repo": {
           "description": "The store as the user named it, for display; omitted when the command used no store.",
@@ -1572,6 +1796,98 @@ expression: s.redact(&all)
         "rev"
       ],
       "title": "ReadTreeReq",
+      "type": "object"
+    },
+    "RecoveredOut": {
+      "$defs": {
+        "LogCutOut": {
+          "description": "Where the journal was cut (`meta.recovered.log_cut`).",
+          "properties": {
+            "at": {
+              "description": "The journal's byte offset where the torn tail started, and where the journal ends now.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "bytes": {
+              "description": "How many bytes were cut, to where the journal ended.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "at",
+            "bytes"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's\nmetadata files, with no paths: the storage spec (§2 rule 3, §3) says what each repair is.",
+      "properties": {
+        "frames_listed": {
+          "description": "The journal frames listed that their writer never listed: transactions that committed,\ntheir writer having crashed between the frame's sync and its listing, or failed to list\nit (a warning then); and frames listed again whose entries a power loss zeroed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "frames_rewritten": {
+          "description": "Of those, the frames written to the journal afresh first, because the sync that would\nhave made them durable failed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "index_records_dropped": {
+          "description": "The changeset index records cut, counted in its longest column: records a crash left torn,\nor a power loss emptied.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "log_cut": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LogCutOut"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The torn tail cut off the end of the journal, if there was one: the bytes of a transaction\nthat never reached its commit point; omitted when nothing was cut."
+        },
+        "off_bytes_dropped": {
+          "description": "The bytes dropped from the end of the journal's list of frames: part of an entry, or\nentries a power loss zeroed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "records_replayed": {
+          "description": "The changesets replayed from the journal into the index.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "refs_replayed": {
+          "description": "The ref files replayed from the journal: replaced, or removed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "views_rebuilt": {
+          "description": "Whether a compaction of the changeset index that a crash interrupted was finished.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "frames_listed",
+        "frames_rewritten",
+        "off_bytes_dropped",
+        "index_records_dropped",
+        "views_rebuilt",
+        "records_replayed",
+        "refs_replayed"
+      ],
+      "title": "RecoveredOut",
       "type": "object"
     },
     "RefDeleteReq": {

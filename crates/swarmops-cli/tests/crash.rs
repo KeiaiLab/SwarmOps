@@ -22,11 +22,13 @@
 use std::fs::{self, OpenOptions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde_json::{Value, json};
 use swarmops_ops::NOW_ENV;
-use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV};
+use swarmops_store::{CRASH_AT_ENV, FS_CALLS_ENV, Journal, RealFs};
 
 use crate::support::sweep::{
     DryRun, NOW, SWEPT_PUTS, TEMPLATE_FRAMES, calls_file, commit_template, dry_commit, dry_init,
@@ -93,8 +95,19 @@ struct Crashed {
     finished: bool,
     /// The store holds its changeset.
     committed: bool,
+    /// The crash left its frame whole in `journal.log` and not listed in `journal.off`, and the
+    /// next commit listed it.
+    unlisted: bool,
     /// The temp files the crash left in `objects/tmp/`.
     leftovers: usize,
+}
+
+/// How many whole frames the `journal.log` of `store` holds that its `journal.off` does not list:
+/// what a crash between a frame's two appends leaves, which the next write lists.
+fn unlisted_frames(store: &Store) -> u64 {
+    let journal = Journal::open(&store.layout(), Arc::new(RealFs)).unwrap();
+    let whole = u64::try_from(journal.tail_frames_from(0).unwrap().len()).unwrap();
+    whole - journal.frame_count().unwrap()
 }
 
 /// One run of the commit sweep: the swept commit on a copy of `template`, its k-th filesystem
@@ -149,15 +162,32 @@ fn crash_commit_at(template: &Store, k: u64, dry: &DryRun) -> Crashed {
         shown.err("E_REV_NOT_FOUND");
     }
 
+    // The next commit's write lists a frame the crash left whole and unlisted, and says so.
+    let unlisted = unlisted_frames(&store);
     let next = format!("after a crash at call {k}\n");
-    let fresh = store.commit(&agent(2), "after-crash.txt", &next, None);
-    let shown = store.show(&fresh);
+    let changes = store.changes("after-crash", "after-crash.txt", &next);
+    let args = [
+        "commit",
+        "-m",
+        "after-crash.txt",
+        "--changes",
+        changes.as_str(),
+    ];
+    let run = store.run_as(&agent(2), &args, &[]);
+    let result = run.ok();
+    assert!(result.get("warnings").is_none(), "k={k}: {run}");
+    let recovered = &run.envelope()["meta"]["recovered"];
+    let listed = recovered["frames_listed"].as_u64().unwrap_or(0);
+    assert_eq!(listed, unlisted, "k={k}: {run}");
+    let fresh = result["changeset"].as_str().unwrap();
+    let shown = store.show(fresh);
     assert_eq!(shown["changes"][0]["path"], "after-crash.txt", "k={k}");
     assert_eq!(store.info()["changesets"], changesets + 1, "k={k}");
     store.assert_clean(&format!("k={k}: after the next commit"));
     Crashed {
         finished,
         committed,
+        unlisted: unlisted > 0,
         leftovers,
     }
 }
@@ -192,6 +222,11 @@ fn kill9_during_commit_store_verifies_and_next_commit_succeeds() {
     assert!(
         crashes.iter().any(|crash| !crash.committed),
         "some before it"
+    );
+    assert!(
+        crashes.iter().any(|crash| crash.unlisted),
+        "some crash came between the frame's journal.log append and its listing, which the next \
+         commit made and reported (meta.recovered.frames_listed)"
     );
     assert!(
         crashes.iter().any(|crash| crash.leftovers > 0),
@@ -319,12 +354,27 @@ fn set_read_only(path: &Path, read_only: bool) {
     fs::set_permissions(path, permissions).unwrap();
 }
 
+/// `meta.recovered` of a write whose recovery listed one frame, replayed `records` changesets
+/// and wrote `refs` ref files, and repaired nothing else.
+fn listed_one(records: u64, refs: u64) -> Value {
+    json!({
+        "frames_listed": 1,
+        "frames_rewritten": 0,
+        "off_bytes_dropped": 0,
+        "index_records_dropped": 0,
+        "views_rebuilt": false,
+        "records_replayed": records,
+        "refs_replayed": refs,
+    })
+}
+
 /// A commit, then a ref move, whose journal frame is durable in `journal.log` but whose listing
 /// in `journal.off` fails (the file made read-only) has committed: the frame is its commit point.
 /// Each exits 0 with a warning that names `journal.off`, and readers see it already; while
-/// `journal.off` refuses writes, the next write fails, unable to list the frame. Once
-/// `journal.off` takes writes, the same commit run again finds its changeset (the store holds it
-/// once), the same move finds it applied, and the store verifies clean.
+/// `journal.off` refuses writes, the next write fails, unable to list the frame, and reports no
+/// recovery. Once `journal.off` takes writes, the same commit run again finds its changeset (the
+/// store holds it once), the same move finds it applied, each reporting in `meta.recovered` the
+/// listing its write made and what it replayed, not as a warning; and the store verifies clean.
 #[test]
 fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
     let store = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
@@ -354,9 +404,18 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
     assert_eq!(store.info()["changesets"], 1, "readers see its frame");
     let other = store.changes("other", "other.txt", "another change\n");
     let blocked = ["commit", "-m", "other", "--changes", other.as_str()];
-    store.run_as(&agent(0), &blocked, &[]).err("E_IO");
+    let blocked = store.run_as(&agent(0), &blocked, &[]);
+    blocked.err("E_IO");
+    let reported = blocked.envelope()["meta"].get("recovered").cloned();
+    assert_eq!(
+        reported, None,
+        "a write that failed reports nothing: {blocked}"
+    );
     set_read_only(&off, false);
-    let again = store.run_as(&agent(0), &commit, &[]).ok();
+    let again = store.run_as(&agent(0), &commit, &[]);
+    let recovered = again.envelope()["meta"]["recovered"].clone();
+    assert_eq!(recovered, listed_one(1, 0), "{again}");
+    let again = again.ok();
     assert_eq!(again["changeset"], id.as_str(), "{again}");
     assert_eq!(
         again["blobs_written"], 0,
@@ -371,8 +430,12 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
     assert_eq!(moved["already_applied"], false, "{moved}");
     assert_eq!(store.info()["main"], id.as_str(), "readers see the move");
     set_read_only(&off, false);
-    let again = store.run_as(&agent(0), &create, &[]).ok();
+    let again = store.run_as(&agent(0), &create, &[]);
+    let recovered = again.envelope()["meta"]["recovered"].clone();
+    assert_eq!(recovered, listed_one(0, 1), "{again}");
+    let again = again.ok();
     assert_eq!(again["already_applied"], true, "{again}");
+    assert!(again.get("warnings").is_none(), "{again}");
     assert_eq!(store.info()["main"], id.as_str());
     store.assert_clean("after the listings that failed");
 }

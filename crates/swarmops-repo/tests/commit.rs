@@ -29,7 +29,9 @@ use swarmops_repo::{
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FailAt, FailAtFs, FailMode, InjectedError, ORDER_CHECK_ENV};
-use swarmops_store::{ChangesetMeta, Journal, Layout, LimitKind, MetaStore, RealFs, StoreError};
+use swarmops_store::{
+    ChangesetMeta, Journal, Layout, LimitKind, MetaStore, RealFs, Recovered, StoreError,
+};
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, this_test};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run};
@@ -1143,6 +1145,97 @@ fn a_ref_move_whose_file_write_fails_is_applied_with_a_warning() {
         format!("{}\n1\n", base.id)
     );
     assert_eq!(fresh.verify(true).unwrap().problems, []);
+}
+
+/// The repository at `root`, its listings in `journal.off` failing: a commit or a ref move made
+/// through it commits, its frame whole and durable in `journal.log` but not listed, with one
+/// warning, and nothing materialized.
+fn listing_fails(root: &Utf8Path) -> LocalRepo {
+    let fs = FailingFs::new(|method, p| method == "append_durable" && p.ends_with("journal.off"));
+    LocalRepo::open_with_fs(root, Arc::new(fs)).unwrap()
+}
+
+/// Every outcome of a commit and of a ref move carries what its write's recovery repaired
+/// first: here, the frame of a commit or a move whose listing in `journal.off` failed (committed,
+/// with a warning), which the write lists, and whose changeset or ref file it replays. The
+/// report comes with `Inserted` and with `AlreadyPresent` (the same request again, the retry an
+/// agent makes after the warning), with `Applied` and with `Mismatch`, and with the `Applied` of
+/// a move to the target it expects, which commits nothing; none of them warns.
+#[test]
+fn commit_and_cas_outcomes_carry_their_write_s_recovery() {
+    let listed_and_replayed = Recovered {
+        frames_listed: 1,
+        records_replayed: 1,
+        ..Recovered::default()
+    };
+    for again in [false, true] {
+        let (_dir, root, repo) = new_repo();
+        drop(repo);
+        let first = request(&[], vec![put("a", b"a")]);
+        let failed = listing_fails(&root).commit(first.clone()).unwrap();
+        assert_eq!(failed.warnings.len(), 1, "{failed:?}");
+        let repo = LocalRepo::open(&root).unwrap();
+        let req = if again {
+            first
+        } else {
+            request(&[failed.id], vec![put("b", b"b")])
+        };
+        let out = repo.commit(req).unwrap();
+        let want = if again {
+            InsertOutcome::AlreadyPresent
+        } else {
+            InsertOutcome::Inserted { seq: 1 }
+        };
+        assert_eq!(out.insert, want);
+        assert_eq!(out.recovered, listed_and_replayed, "{want:?}");
+        assert_eq!(out.warnings, Vec::<String>::new(), "{want:?}");
+    }
+
+    // main created at c1 through a move whose listing failed (its ref file never written), then
+    // a move whose write lists that frame and writes the file.
+    let listed_and_written = Recovered {
+        frames_listed: 1,
+        refs_replayed: 1,
+        ..Recovered::default()
+    };
+    let moves = |c1: ChangesetId, c2: ChangesetId| {
+        [
+            (Some(c1), Some(c2), CasResult::Applied { old: Some(c1) }),
+            (Some(c2), Some(c1), CasResult::Mismatch { actual: Some(c1) }),
+            (Some(c1), Some(c1), CasResult::Applied { old: Some(c1) }),
+        ]
+    };
+    for at in 0..3 {
+        let (_dir, root, repo) = new_repo();
+        let c1 = commit(&repo, &[], vec![put("a", b"a")]).id;
+        let c2 = commit(&repo, &[c1], vec![put("b", b"b")]).id;
+        drop(repo);
+        let created = listing_fails(&root)
+            .cas_ref("main", None, Some(c1), "test/agent")
+            .unwrap();
+        assert_eq!(created.result, CasResult::Applied { old: None });
+        assert_eq!(created.warnings.len(), 1, "{created:?}");
+        let (expected, new, want) = moves(c1, c2)[at];
+        let repo = LocalRepo::open(&root).unwrap();
+        let log = Layout::new(&root).journal_log();
+        let written = fs::metadata(&log).unwrap().len();
+        let out = repo.cas_ref("main", expected, new, "test/agent").unwrap();
+        assert_eq!(out.result, want, "{expected:?} to {new:?}");
+        assert_eq!(out.recovered, listed_and_written, "{expected:?} to {new:?}");
+        assert_eq!(
+            out.warnings,
+            Vec::<String>::new(),
+            "{expected:?} to {new:?}"
+        );
+        let grew = fs::metadata(&log).unwrap().len() > written;
+        assert_eq!(
+            grew,
+            at == 0,
+            "only the move that moves main writes a frame"
+        );
+        let main = repo.get_ref("main").unwrap().map(|state| state.target);
+        assert_eq!(main, if at == 0 { Some(c2) } else { Some(c1) });
+    }
 }
 
 /// Waits until the parent says go, so that the children commit at the same time.

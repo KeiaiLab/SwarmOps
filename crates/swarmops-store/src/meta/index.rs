@@ -73,6 +73,16 @@ pub struct ChangesetMeta {
     pub parents: Vec<ChangesetId>,
 }
 
+/// What [`Index::repair_tail_with`] repaired.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct IndexRepair {
+    /// The record slots it cut, counted in the longest column: records a crash left torn, and
+    /// records past the checkpoint that the journal does not vouch for.
+    pub(crate) dropped: u64,
+    /// Whether it finished a compaction a crash interrupted, the sorted views out of step.
+    pub(crate) views_rebuilt: bool,
+}
+
 // The five files, as paths in `meta/`, in the order a fresh index creates them.
 const IDS: &str = "idx/ids.col";
 const GENS: &str = "idx/gen.col";
@@ -502,22 +512,31 @@ impl Index {
     /// moving `journal.ckpt` past them.
     pub fn repair_tail(&mut self) -> Result<u64, StoreError> {
         self.repair_tail_vouched_by(None)
+            .map(|repair| repair.dropped)
     }
 
     /// [`Index::repair_tail`], with `past`, the frames past the checkpoint that this handle
     /// opened with ([`Index::open_with_past`]), vouching for the records it does not count, in
     /// place of a read of the journal of its own: what a write transaction calls right after it
     /// opened the index, holding [`crate::MetaLock`], so that the journal is as it read it.
-    pub(crate) fn repair_tail_with(&mut self, past: &[Frame]) -> Result<u64, StoreError> {
+    /// Returns what it repaired: the records it dropped, and whether it finished a compaction.
+    pub(crate) fn repair_tail_with(&mut self, past: &[Frame]) -> Result<IndexRepair, StoreError> {
         self.repair_tail_vouched_by(Some(past))
     }
 
-    fn repair_tail_vouched_by(&mut self, past: Option<&[Frame]>) -> Result<u64, StoreError> {
+    fn repair_tail_vouched_by(
+        &mut self,
+        past: Option<&[Frame]>,
+    ) -> Result<IndexRepair, StoreError> {
         let dropped = self.catch_up_vouched_by(past)?;
-        if !self.views.in_step() {
+        let views_rebuilt = !self.views.in_step();
+        if views_rebuilt {
             self.rebuild_views()?;
         }
-        Ok(dropped)
+        Ok(IndexRepair {
+            dropped,
+            views_rebuilt,
+        })
     }
 
     /// Cuts the index back to its first `records` records, or to as many as the sorted views
@@ -576,6 +595,10 @@ impl Index {
     /// Reopens the sorted views (another handle may have compacted since this one opened
     /// them) and repairs the columns; returns how many records were dropped. On an error the
     /// handle is left as it was.
+    ///
+    /// [`Index::append`] and [`Index::compact`] drop the count: in a write transaction they run
+    /// after [`Index::repair_tail_with`], under the same lock, and find nothing to cut, so what
+    /// a write repaired is that call's to report ([`crate::Recovered`]).
     fn catch_up(&mut self) -> Result<u64, StoreError> {
         self.catch_up_vouched_by(None)
     }

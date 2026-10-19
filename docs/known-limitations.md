@@ -109,12 +109,6 @@ left).
   may rely on). Readers whose results leave the host, M8's git export first, will read committed
   snapshots taken under the lock instead. *Target: M8. Found: M1 Task 2c; final review,
   question 2.*
-- **A `ref set` to the target it expects is answered from a snapshot.** When `new` equals
-  `expected_old`, `ref set` reads the ref without the lock and answers `already_applied: true` if
-  the ref holds `new`; that read can see another writer's frame before its sync, so the
-  acknowledgement can rest on state a failed sync or a power loss then takes back (the readers'
-  exposure above). Every other replay is decided under the lock, after the tail check. *Target:
-  M1.6 (decide it under the lock). Found: M1.5 final review.*
 - **A commit acknowledged with a warning can vanish for a moment.** When a writer's tail check
   writes unlisted frames afresh after a failed sync (storage spec §2 rule 3 (c)), a reader that
   reads between the cut and the rewrite does not see them: a changeset whose commit was

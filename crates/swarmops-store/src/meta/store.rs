@@ -15,6 +15,9 @@
 //! [`MetaStore::flush`] if any frame lies past the checkpoint, it also syncs the index and
 //! moves the checkpoint to the end of the journal: the batched durability of the projections.
 //!
+//! What the repairs at the start of a write transaction did, [`MetaWrite::recovered`] says
+//! ([`Recovered`]): all zero when the writers before it finished cleanly.
+//!
 //! An error from [`MetaWrite::commit`] says whether the transaction committed. Once its frame
 //! is appended, every error is [`StoreError::PostCommit`]: the frame is durable, a step after
 //! it failed, and the next [`MetaStore::write`] repairs that. A failed index sync returns
@@ -70,7 +73,7 @@ use swarmops_core::ChangesetId;
 
 use super::frame::{Frame, MAX_RECORDS, Record};
 use super::index::{ChangesetMeta, Index};
-use super::journal::Journal;
+use super::journal::{Journal, LogCut};
 use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
@@ -128,6 +131,45 @@ pub struct CommitInfo {
     /// journal: at 32 frames past the checkpoint, after a compaction, or for a flush with a
     /// frame past the checkpoint.
     pub checkpointed: bool,
+}
+
+/// What a write transaction's recovery repaired before the transaction's own work
+/// ([`MetaWrite::recovered`]): what the writers before it left when they crashed, or failed after
+/// their commit point. All zero ([`Recovered::is_empty`]) when they finished cleanly: frames past
+/// the checkpoint that replay only reads again, as every write does, count for nothing.
+///
+/// It is made of what the recovery knows already, with no filesystem call of its own, and kept
+/// nowhere: a recovery that fails part way leaves its repairs made and the report lost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Recovered {
+    /// The torn tail cut off `journal.log`, if any: a transaction that never reached its commit
+    /// point.
+    pub log_cut: Option<LogCut>,
+    /// The whole frames `journal.off` did not list that were listed: transactions that committed
+    /// and that their writer never listed, and frames whose entries a power loss zeroed.
+    pub frames_listed: u64,
+    /// Of those, the frames written afresh first, because the sync before their listing failed
+    /// (storage spec §2 rule 3 (c)).
+    pub frames_rewritten: u64,
+    /// The bytes dropped from the end of `journal.off`: a partial entry, zeroed entries.
+    pub off_bytes_dropped: u64,
+    /// The index record slots cut, counted in the longest column: records a crash left torn, and
+    /// records past the checkpoint that the journal does not vouch for (a power loss's).
+    pub index_records_dropped: u64,
+    /// Whether a compaction a crash interrupted was finished: the sorted views rebuilt.
+    pub views_rebuilt: bool,
+    /// The changesets replay appended to the index: those of frames committed and not
+    /// materialized, and those of records cut.
+    pub records_replayed: u64,
+    /// The ref files replay replaced or removed.
+    pub refs_replayed: u64,
+}
+
+impl Recovered {
+    /// Whether nothing was repaired.
+    pub fn is_empty(&self) -> bool {
+        *self == Recovered::default()
+    }
 }
 
 /// What [`MetaWrite::insert_changeset`] did.
@@ -354,7 +396,7 @@ impl MetaStore {
     /// write them afresh, the error is [`StoreError::NotCommitted`] (storage spec §2 rule 3 (c)).
     pub fn write(&self) -> Result<MetaWrite<'_>, StoreError> {
         let lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
-        self.journal.truncate_torn_tail()?;
+        let tail = self.journal.repair_tail()?;
         let ckpt = self.journal.ckpt()?;
         // The frames past the checkpoint vouch for the index's records past it, and are
         // replayed.
@@ -363,8 +405,8 @@ impl MetaStore {
                 self.journal.tail_frames_from(ckpt)
             })?;
         index.set_parallelism(self.parallelism);
-        index.repair_tail_with(&frames)?;
-        replay::replay(&mut index, &self.layout, &*self.fs, &frames)?;
+        let repaired = index.repair_tail_with(&frames)?;
+        let replayed = replay::replay(&mut index, &self.layout, &*self.fs, &frames)?;
         // The index holds every changeset of the journal now, those of the frames past the
         // checkpoint last.
         let past = frames
@@ -380,6 +422,16 @@ impl MetaStore {
             records: Vec::new(),
             queued: HashMap::new(),
             moved: HashMap::new(),
+            recovered: Recovered {
+                log_cut: tail.cut,
+                frames_listed: tail.frames_listed,
+                frames_rewritten: tail.frames_rewritten,
+                off_bytes_dropped: tail.off_bytes_dropped,
+                index_records_dropped: repaired.dropped,
+                views_rebuilt: repaired.views_rebuilt,
+                records_replayed: replayed.records,
+                refs_replayed: replayed.refs,
+            },
             _lock: lock,
         })
     }
@@ -589,10 +641,19 @@ pub struct MetaWrite<'a> {
     queued: HashMap<ChangesetId, u64>,
     /// The target each ref moved so far is left at.
     moved: HashMap<String, Option<ChangesetId>>,
+    /// What [`MetaStore::write`] repaired before it returned this transaction.
+    recovered: Recovered,
     _lock: MetaLock,
 }
 
 impl MetaWrite<'_> {
+    /// What the recovery that opened this transaction repaired ([`MetaStore::write`]): what the
+    /// writers before it left when they crashed or failed after their commit point. All zero
+    /// when they finished cleanly. It reads nothing.
+    pub fn recovered(&self) -> Recovered {
+        self.recovered
+    }
+
     /// Queues changeset `meta`, unless the store or this transaction holds it already
     /// ([`InsertOutcome::AlreadyPresent`]). Its `seq` and `generation` are ignored: the
     /// store numbers its changesets, and a generation is 1 + the largest parent generation,
@@ -811,6 +872,7 @@ impl fmt::Debug for MetaWrite<'_> {
             .field("checkpointed_records", &self.checkpointed_records)
             .field("uncheckpointed", &self.uncheckpointed)
             .field("records_queued", &self.records.len())
+            .field("recovered", &self.recovered)
             .finish_non_exhaustive()
     }
 }

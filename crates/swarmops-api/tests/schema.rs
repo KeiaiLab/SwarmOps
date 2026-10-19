@@ -10,10 +10,10 @@ use swarmops_api::{
     API_VERSION, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
     CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
     DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, Envelope, ErrorCode, FileContent,
-    FileKind, Identity, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, Meta, ModeInput, OpError,
-    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp,
-    RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
-    VerifyFinding, VerifyReport, VerifyReq, schema_for_all,
+    FileKind, Identity, IdentityInfo, InfoReq, InitReq, LogCutOut, LogPage, LogReq, Meta,
+    ModeInput, OpError, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq,
+    RefListResp, RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps,
+    TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq, schema_for_all,
 };
 
 /// Requests and the input types inside them.
@@ -43,9 +43,11 @@ const RESPONSES: &[&str] = &[
     "Envelope",
     "FileContent",
     "IdentityInfo",
+    "LogCutOut",
     "LogPage",
     "Meta",
     "OpError",
+    "RecoveredOut",
     "RefListResp",
     "RefOut",
     "RefSetResp",
@@ -263,6 +265,7 @@ fn meta() -> Meta {
         elapsed_ms: 12,
         resolved: BTreeMap::from([("main".to_owned(), "c9f1".to_owned())]),
         auth: "trust".to_owned(),
+        recovered: None,
     }
 }
 
@@ -300,6 +303,56 @@ fn envelope_serializes_without_nulls_for_success() {
         serde_json::from_str::<Envelope<CommitResp>>(&text).unwrap(),
         envelope
     );
+}
+
+/// `meta.recovered` is there only when a write repaired something: after `auth`, every count
+/// written out, and `log_cut` only when the journal was cut. It reads back as written, and its
+/// schema holds offsets, counts and a flag, no path.
+#[test]
+fn meta_reports_a_recovery_only_when_a_write_made_one() {
+    let mut meta = meta();
+    let plain = serde_json::to_string(&meta).unwrap();
+    assert_eq!(
+        plain,
+        r#"{"elapsed_ms":12,"resolved":{"main":"c9f1"},"auth":"trust"}"#
+    );
+    let counts = r#""frames_rewritten":0,"off_bytes_dropped":0,"index_records_dropped":0,"views_rebuilt":false"#;
+    meta.recovered = Some(RecoveredOut {
+        frames_listed: 1,
+        records_replayed: 1,
+        ..RecoveredOut::default()
+    });
+    let listed = serde_json::to_string(&meta).unwrap();
+    let want = format!(
+        r#"{{"elapsed_ms":12,"resolved":{{"main":"c9f1"}},"auth":"trust","recovered":{{"frames_listed":1,{counts},"records_replayed":1,"refs_replayed":0}}}}"#
+    );
+    assert_eq!(listed, want);
+    assert_eq!(serde_json::from_str::<Meta>(&listed).unwrap(), meta);
+    meta.recovered = Some(RecoveredOut {
+        log_cut: Some(LogCutOut { at: 257, bytes: 18 }),
+        ..RecoveredOut::default()
+    });
+    let cut = serde_json::to_string(&meta).unwrap();
+    assert!(
+        cut.ends_with(&format!(
+            r#""recovered":{{"log_cut":{{"at":257,"bytes":18}},"frames_listed":0,{counts},"records_replayed":0,"refs_replayed":0}}}}"#
+        )),
+        "{cut}"
+    );
+    assert_eq!(serde_json::from_str::<Meta>(&cut).unwrap(), meta);
+
+    let all = schema_for_all();
+    for name in ["RecoveredOut", "LogCutOut"] {
+        let properties = all[name]["properties"].as_object().unwrap();
+        for (field, schema) in properties {
+            let kind = &schema["type"];
+            let numeric = kind == "integer" && schema["format"] == "uint64";
+            assert!(
+                numeric || kind == "boolean" || field == "log_cut",
+                "{name}.{field}: {schema}"
+            );
+        }
+    }
 }
 
 #[test]

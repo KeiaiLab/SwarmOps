@@ -251,6 +251,7 @@ mod tests {
             elapsed_ms: 3,
             resolved: BTreeMap::from([("main".to_owned(), "ab".repeat(32))]),
             auth: "trust".to_owned(),
+            recovered: None,
         }
     }
 

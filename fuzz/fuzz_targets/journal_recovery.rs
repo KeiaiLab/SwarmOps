@@ -26,11 +26,14 @@
 //!   readers from the start return exactly what the model says, before recovery and after it:
 //!   the listed frames (and for `tail_frames_from(0)` the unlisted whole ones after them), or
 //!   `JournalCorrupt` at the first listed frame that is not whole.
-//! - (b) `truncate_torn_tail` does exactly what a model of recovery says: `JournalCorrupt` at
-//!   the model's offset with no file changed, or `Ok` with the model's cut, `journal.log` the
-//!   prefix up to it, and `journal.off` the whole entries it held, then one per frame listed.
-//!   After an `Ok`, a second call returns `Ok(None)` and changes no file, and `journal.log` ends
-//!   with the last listed frame, which reads whole (or is empty if nothing is listed).
+//! - (b) `repair_tail` does exactly what a model of recovery says: `JournalCorrupt` at the
+//!   model's offset with no file changed, or `Ok` with the model's cut, `journal.log` the prefix
+//!   up to it, and `journal.off` the whole entries it held, then one per frame listed. Its report
+//!   says just that: the cut's offset and the bytes it took to the end of `journal.log`, the
+//!   frames listed, none written afresh (no sync fails here), and the bytes dropped from the end
+//!   of `journal.off` (a partial entry, zeroed entries). After an `Ok`, a second call reports
+//!   nothing and changes no file, and `journal.log` ends with the last listed frame, which reads
+//!   whole (or is empty if nothing is listed).
 //! - (c) So recovery only cuts a suffix, and only a torn tail: whatever `journal.off` holds, a
 //!   frame a listed entry points at that reads whole survives byte-identical, since recovery
 //!   checks every listed frame before it cuts or lists anything; and no listed entry is
@@ -54,7 +57,7 @@ use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_fuzz::{
     ENTRY_LEN, HEADER_LEN, Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_length,
 };
-use swarmops_store::{Frame, FsOps, Journal, Layout, Record, StoreError};
+use swarmops_store::{Frame, FsOps, Journal, Layout, Record, StoreError, TailRepair};
 use swarmops_testkit::fs::NoSyncFs;
 
 /// The most frames mode 1 appends, and the most records in each, to keep a case quick.
@@ -150,31 +153,33 @@ fn check(layout: &Layout, ops: &Arc<dyn FsOps>, ckpt: u64, built: Option<&Built>
     }
 
     let recovery = Recovery::of(&before);
-    let cut = match journal.truncate_torn_tail() {
-        Ok(cut) => cut,
+    let repair = match journal.repair_tail() {
+        Ok(repair) => repair,
         Err(e) => {
-            assert!(is_typed(&e), "truncate_torn_tail: an untyped error: {e:?}");
+            assert!(is_typed(&e), "repair_tail: an untyped error: {e:?}");
             assert!(
                 Files::read(layout) == before,
-                "truncate_torn_tail changed the files, then failed with {e:?}"
+                "repair_tail changed the files, then failed with {e:?}"
             );
             assert!(
                 matches!((&recovery, &e), (Recovery::Corrupt { offset }, StoreError::JournalCorrupt { offset: at }) if at == offset),
-                "truncate_torn_tail failed with {e:?}, the model says {recovery:?}"
+                "repair_tail failed with {e:?}, the model says {recovery:?}"
             );
             return;
         }
     };
+    let cut = repair.cut.map(|cut| cut.at);
     let after = Files::read(layout);
     recovered_as_modelled(&recovery, cut, &before, &after);
-    let again = journal.truncate_torn_tail();
+    reported_as_modelled(&recovery, &repair, &before, &after);
+    let again = journal.repair_tail();
     assert!(
-        matches!(again, Ok(None)),
-        "truncate_torn_tail returned {cut:?}, then {again:?}"
+        matches!(again, Ok(again) if again == TailRepair::default()),
+        "repair_tail reported {repair:?}, then {again:?}"
     );
     assert!(
         Files::read(layout) == after,
-        "a second truncate_torn_tail changed the files"
+        "a second repair_tail changed the files"
     );
     ends_cleanly(&journal, &after);
     let seen_after = Seen::read(&journal, &after, ckpt);
@@ -232,7 +237,54 @@ fn recovered_as_modelled(recovery: &Recovery, cut: Option<u64>, before: &Files, 
     }
 }
 
-/// What `truncate_torn_tail` does with `files`, by the model. Under the lock the files are
+/// Asserts that the report of a successful recovery, which left `after` of `before`, says what
+/// it did, as the model has it: the bytes it cut, from the cut to the end of `journal.log`; the
+/// frames it listed, the model's entries past those `journal.off` listed already (its whole
+/// entries, less the zeroed ones at its end past frame 0, which recovery drops); none written
+/// afresh, since no sync fails here; and the bytes it dropped from the end of `journal.off`, a
+/// partial entry and those zeroed entries. `journal.off` then lost those bytes, and gained an
+/// entry per frame listed.
+fn reported_as_modelled(recovery: &Recovery, repair: &TailRepair, before: &Files, after: &Files) {
+    let Recovery::Clean { entries, .. } = recovery else {
+        panic!("repair_tail reported {repair:?}, the model says {recovery:?}");
+    };
+    let (log, off) = (to_u64(before.log.len()), to_u64(before.off.len()));
+    if let Some(cut) = repair.cut {
+        assert_eq!(
+            cut.at + cut.bytes,
+            log,
+            "the cut repair_tail reports does not run to the end of journal.log"
+        );
+    }
+    let cut = repair.cut.map_or(0, |cut| cut.bytes);
+    assert_eq!(
+        cut,
+        log - to_u64(after.log.len()),
+        "repair_tail cut other bytes than it reports"
+    );
+    let kept = before.listed().len();
+    assert_eq!(
+        repair.frames_listed,
+        to_u64(entries.len() - kept),
+        "repair_tail reports listing other frames than the model lists"
+    );
+    assert_eq!(
+        repair.frames_rewritten, 0,
+        "repair_tail reports rewriting frames: {repair:?}"
+    );
+    assert_eq!(
+        repair.off_bytes_dropped,
+        off - to_u64(kept * ENTRY_LEN),
+        "repair_tail reports dropping other bytes of journal.off than the model drops"
+    );
+    assert_eq!(
+        to_u64(after.off.len()),
+        off - repair.off_bytes_dropped + to_u64(ENTRY_LEN) * repair.frames_listed,
+        "journal.off after recovery is not what the report says"
+    );
+}
+
+/// What `repair_tail` does with `files`, by the model. Under the lock the files are
 /// quiescent. A partial entry is dropped, and so are zeroed entries past frame 0 at the end of
 /// `journal.off`. The last listed frame must lie within `journal.log`, start where the header of
 /// the frame listed before it says that one ends (frame 0 at 0), as must that frame, one link

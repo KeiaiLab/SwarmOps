@@ -27,8 +27,8 @@ use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_store::{
-    BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, MetaLock, RealFs, Record,
-    StoreError,
+    BadRecord, Frame, FsMethod, FsOps, Journal, Layout, LimitKind, LogCut, MetaLock, RealFs,
+    Record, StoreError, TailRepair,
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
@@ -2176,6 +2176,163 @@ fn a_tail_check_whose_sync_fails_never_lists_a_frame_not_on_disk() {
         None,
         "the tail check wrote the frame afresh"
     );
+}
+
+/// The lengths of `journal.log` and `journal.off` at `layout`.
+fn journal_lens(layout: &Layout) -> (u64, u64) {
+    (
+        file_len(layout.journal_log()),
+        file_len(layout.journal_off()),
+    )
+}
+
+/// [`Journal::repair_tail`] on `journal`, checked against the files: `journal.log` loses exactly
+/// the torn tail the report names, which ran to the file's end (a rewrite puts back the bytes it
+/// cut); `journal.off` loses the bytes the report says it dropped, then gains an entry per frame
+/// listed; only listed frames are written afresh; and a second call repairs nothing. Returns the
+/// report.
+#[track_caller]
+fn repaired(layout: &Layout, journal: &Journal) -> TailRepair {
+    let (log, off) = journal_lens(layout);
+    let repair = journal.repair_tail().unwrap();
+    if let Some(cut) = repair.cut {
+        assert_eq!(
+            cut.at + cut.bytes,
+            log,
+            "the cut runs to the end: {repair:?}"
+        );
+    }
+    let cut = repair.cut.map_or(0, |cut| cut.bytes);
+    let listed = 8 * repair.frames_listed;
+    assert_eq!(
+        journal_lens(layout),
+        (log - cut, off - repair.off_bytes_dropped + listed),
+        "{repair:?}"
+    );
+    assert!(
+        repair.frames_rewritten <= repair.frames_listed,
+        "{repair:?}"
+    );
+    assert_eq!(
+        journal.repair_tail().unwrap(),
+        TailRepair::default(),
+        "again, after {repair:?}"
+    );
+    repair
+}
+
+/// What [`Journal::repair_tail`] reports is what it changed, and only that: the torn tail it cut
+/// off `journal.log` (where it started, how many bytes), the whole frames `journal.off` did not
+/// list that it listed, and of those the ones it wrote afresh first (the sync before their
+/// listing having failed), and the bytes it dropped from the end of `journal.off` (part of an
+/// entry, zeroed entries). A clean journal reports nothing. Every case keeps the identities
+/// [`repaired`] checks.
+#[test]
+fn repair_tail_reports_exactly_what_it_changed() {
+    /// What a writer that died in the middle of its append leaves: a header announcing 100
+    /// bytes, and 10 of them.
+    fn torn() -> Vec<u8> {
+        [&100_u32.to_le_bytes()[..], &[0; 4], &[0xee; 10]].concat()
+    }
+    /// What a case does to a journal of two whole, listed frames.
+    type Damage = fn(&Layout);
+
+    // Frame 0 at 0..84, frame 1 at 84..257.
+    let two_frames = |layout: &Layout| {
+        let journal = new_journal(layout);
+        journal.append_frame(&[root_changeset()]).unwrap();
+        journal
+            .append_frame(&[child_changeset(), main_created()])
+            .unwrap();
+        journal
+    };
+    let torn_at_257 = Some(LogCut { at: 257, bytes: 18 });
+    let report = |cut, frames_listed, off_bytes_dropped| TailRepair {
+        cut,
+        frames_listed,
+        frames_rewritten: 0,
+        off_bytes_dropped,
+    };
+    let cases: [(&str, Damage, TailRepair); 7] = [
+        ("a clean journal", |_| {}, TailRepair::default()),
+        (
+            "a torn tail",
+            |layout| append_bytes(layout.journal_log(), &torn()),
+            report(torn_at_257, 0, 0),
+        ),
+        (
+            "a whole frame journal.off does not list (a crash between its two appends)",
+            |layout| set_len(layout.journal_off(), 8),
+            report(None, 1, 0),
+        ),
+        (
+            "a whole frame not listed, then a torn tail",
+            |layout| {
+                set_len(layout.journal_off(), 8);
+                append_bytes(layout.journal_log(), &torn());
+            },
+            report(torn_at_257, 1, 0),
+        ),
+        (
+            "part of an entry",
+            |layout| append_bytes(layout.journal_off(), &[0x54; 3]),
+            report(None, 0, 3),
+        ),
+        (
+            "frame 1's entry zeroed by a power loss, its length kept",
+            |layout| {
+                set_len(layout.journal_off(), 8);
+                append_bytes(layout.journal_off(), &[0; 8]);
+            },
+            report(None, 1, 8),
+        ),
+        (
+            "zeroed entries past the last frame, and part of another",
+            |layout| append_bytes(layout.journal_off(), &[0; 19]),
+            report(None, 0, 19),
+        ),
+    ];
+    for (what, damage, want) in cases {
+        let (_root, layout) = new_root();
+        let journal = two_frames(&layout);
+        damage(&layout);
+        assert_eq!(repaired(&layout, &journal), want, "{what}");
+    }
+
+    // The tail check's sync of a crashed writer's frame fails: it writes the frame afresh, then
+    // lists it, and cuts a torn tail after it all the same.
+    for torn_tail in [false, true] {
+        let (_root, layout) = new_root();
+        let log_syncs = AtomicU64::new(0);
+        let model = Arc::new(FsyncModelFs::new().failing(move |call| {
+            call.method == "sync_data"
+                && call.path.file_name().and_then(|name| name.to_str()) == Some("journal.log")
+                && log_syncs.fetch_add(1, Ordering::SeqCst) == 0
+        }));
+        let journal = Journal::create(&layout, checked(Arc::clone(&model))).unwrap();
+        journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+        let log = layout.journal_log().into_std_path_buf();
+        let frame = frame_bytes(
+            &[
+                &[2, 0][..],
+                &encoded(&child_changeset()),
+                &encoded(&main_created()),
+            ]
+            .concat(),
+        );
+        model.append(&log, &frame).unwrap(); // bytes 84..257, never synced
+        if torn_tail {
+            model.append(&log, &torn()).unwrap();
+        }
+        let cut = torn_tail.then_some(LogCut { at: 257, bytes: 18 });
+        let want = TailRepair {
+            frames_rewritten: 1,
+            ..report(cut, 1, 0)
+        };
+        assert_eq!(repaired(&layout, &journal), want, "torn tail: {torn_tail}");
+        assert_eq!(model.failed().len(), 1, "{:?}", model.failed());
+        assert_eq!(offsets_on_disk(&layout), [0, 84], "torn tail: {torn_tail}");
+    }
 }
 
 #[test]

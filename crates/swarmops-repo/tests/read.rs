@@ -19,7 +19,7 @@ use swarmops_core::{ChangesetId, EntryKind, ObjectId, ObjectKind, hash_object};
 use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV, RealFs};
-use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
+use swarmops_store::{ChangesetMeta, MetaStore, Recovered, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 #[cfg(feature = "test-hooks")]
@@ -326,14 +326,22 @@ fn cas_ref_through_repo_records_reflog() {
         CasOutcome {
             result: CasResult::Applied { old: None },
             warnings: Vec::new(),
+            recovered: Recovered::default(),
         },
-        "a move whose every step succeeds has no warnings"
+        "a move whose every step succeeds has no warnings, and repaired nothing first"
     );
     assert_eq!(
         repo.cas_ref("main", Some(c1), Some(c2), "agent/two")
             .unwrap()
             .result,
         CasResult::Applied { old: Some(c1) }
+    );
+    assert_eq!(
+        repo.cas_ref("main", Some(c2), Some(c2), "agent/four")
+            .unwrap()
+            .result,
+        CasResult::Applied { old: Some(c2) },
+        "a move to the target it expects finds it there, under the lock"
     );
     assert_eq!(
         repo.cas_ref("main", Some(c1), Some(c1), "agent/three")
@@ -349,7 +357,8 @@ fn cas_ref_through_repo_records_reflog() {
     assert_eq!(repo.get_ref("main").unwrap(), Some(main));
     assert_eq!(repo.list_refs().unwrap(), [("main".to_owned(), main)]);
 
-    // Every move is in the journal, newest first; the mismatch is not.
+    // Every move is in the journal, newest first; the mismatch and the move to the target it
+    // expects are not.
     let store = MetaStore::open(&root).unwrap();
     let log = store.read().unwrap().reflog("main", 10).unwrap();
     let moves: Vec<(Option<ChangesetId>, Option<ChangesetId>, &str)> = log

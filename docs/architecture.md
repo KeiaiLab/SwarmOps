@@ -180,7 +180,8 @@ fan-out directory appeared. Object writes take no lock and repeating one changes
    object is durable before any metadata names it.
 3. A metadata write transaction takes `meta/lock` (below), repairs what a crashed writer may
    have left (it cuts a torn journal tail, repairs the index tail, and replays the frames past
-   `journal.ckpt` into the index and the ref files), and queues the changeset for the index.
+   `journal.ckpt` into the index and the ref files; what that repair did comes back in the
+   envelope's `meta.recovered`), and queues the changeset for the index.
 4. It appends one frame to `journal.log` and `fdatasync`s it: **this is the commit point**. A
    commit that returns survives a power loss. The frame's offset then goes into `journal.off`,
    synced too.
@@ -251,7 +252,9 @@ fails, the error says so with `details.created: true`.
 after replay, is compared with the expected one. On a mismatch nothing is recorded and the
 caller gets `E_CAS_MISMATCH` with the actual target in `details.actual`. On a match, the move
 goes into the transaction's frame, and the ref file is replaced after the commit point. Refs are
-`main` and `release/<name>`; the journal's ref moves are the reflog.
+`main` and `release/<name>`; the journal's ref moves are the reflog. A move to the target it
+expects is compared the same way, under the lock, and records nothing either way: the ref holds
+that target (a replay) or another (`E_CAS_MISMATCH`).
 
 ## Reading
 
@@ -404,14 +407,17 @@ Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and
 plain text, and `mcp`, below, speaks MCP there instead):
 
 ```text
-{"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth}}
+{"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth, recovered}}
 ```
 
 A failure's `code` is one of 24 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
 kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 41 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 44 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
+`meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
+journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what
+it repaired, in offsets and counts; it is no warning (operations §0).
 
 A mutation needs an identity, `<family>/<instance>` (for example `agent/worker-17`), from
 `--as` or `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID` for the agent's run; without one it fails with
