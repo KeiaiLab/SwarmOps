@@ -235,7 +235,7 @@ impl ObjectStore for FsObjectStore {
 
     fn get(&self, id: ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, StoreError> {
         match self.fs.read(self.layout.object_path(id).as_std_path())? {
-            Some(file) => decode(id, &file).map(Some),
+            Some(file) => decode(id, file).map(Some),
             None => Ok(None),
         }
     }
@@ -355,8 +355,9 @@ fn compress(payload: &[u8]) -> io::Result<Vec<u8>> {
     compressor.compress(payload)
 }
 
-/// Parses the object file read for `id` and verifies that its payload hashes to `id`.
-fn decode(id: ObjectId, file: &[u8]) -> Result<(ObjectKind, Vec<u8>), StoreError> {
+/// Parses the object file read for `id` and verifies that its payload hashes to `id`. A raw
+/// payload comes back in `file` itself, its header drained off the front: no second copy.
+fn decode(id: ObjectId, mut file: Vec<u8>) -> Result<(ObjectKind, Vec<u8>), StoreError> {
     let bad_header = || StoreError::BadHeader { id };
     let corrupt = || StoreError::Corrupt { id };
     let (header, body) = file
@@ -369,7 +370,11 @@ fn decode(id: ObjectId, file: &[u8]) -> Result<(ObjectKind, Vec<u8>), StoreError
     let ulen = u64::from_le_bytes(header[8..].try_into().expect("8 bytes"));
     let ulen = usize::try_from(ulen).map_err(|_| bad_header())?;
     let payload = match header[5] {
-        ENC_RAW if body.len() == ulen => body.to_vec(),
+        ENC_RAW if body.len() == ulen => {
+            // One move of the payload to the front of the buffer it was read into.
+            file.drain(..HEADER_LEN);
+            file
+        }
         ENC_ZSTD => {
             // Every frame this store writes records its decompressed size (one without it
             // is damaged). It must equal ulen, which then bounds the output buffer.

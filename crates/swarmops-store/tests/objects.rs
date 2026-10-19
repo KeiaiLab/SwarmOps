@@ -440,6 +440,29 @@ fn damaged_header_is_reported_as_bad_header() {
 }
 
 #[test]
+fn a_raw_object_is_read_back_in_the_buffer_it_was_read_into() {
+    let (_root, layout) = new_root();
+    let store = real_store(&layout);
+    let payload = random_bytes(4096);
+    let id = store.put(ObjectKind::Blob, &payload).unwrap();
+    assert_eq!(
+        fs::read(layout.object_path(id)).unwrap()[5],
+        ENC_RAW,
+        "incompressible bytes are stored raw"
+    );
+    let (kind, got) = store.get(id).unwrap().expect("stored");
+    assert_eq!((kind, &got), (ObjectKind::Blob, &payload));
+    // The read buffer held the whole file: drained of its header in place, it keeps room for
+    // the header still. A copy of the payload would have been allocated at the payload's length.
+    assert!(
+        got.capacity() >= got.len() + HEADER_LEN,
+        "a payload of {} bytes in a buffer of {}",
+        got.len(),
+        got.capacity()
+    );
+}
+
+#[test]
 fn flush_fsyncs_each_touched_dir_once() {
     let (_root, layout) = new_root();
     let (store, calls) = counting_store(&layout);

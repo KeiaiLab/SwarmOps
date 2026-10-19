@@ -185,5 +185,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   storage spec §2 rule 4, and a violation panics with `order check: W<n> violated by …`. They
   were R1–R7, defined only in `crates/swarmops-store/src/order_check.rs`, under the names the
   spec's review invariants (§6) also use.
+- A raw object (one stored uncompressed: under 128 bytes, or content zstd cannot shrink, such
+  as media or archives) is read back in the buffer its file was read into, the 16-byte header
+  drained off the front, instead of being copied out of it: reading a large one peaks at about
+  its size, not twice that. It is still one read of the file.
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
