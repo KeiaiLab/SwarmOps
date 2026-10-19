@@ -210,6 +210,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - `swarmops_store::FsMethod` names the 14 methods of the `FsOps` seam (`FsMethod::ALL`,
   `as_str`, `is_mutating`, `flushes`): the one list the fault doubles and the test kit's
   watchers classify calls with. It compares equal to the method's name.
+- Test infrastructure: where a crate's integration tests are the modules of `tests/all.rs` (core,
+  api, store, repo and the CLI), `every_test_file_is_a_module_of_all_rs` fails on a file of
+  `tests/` that no `mod` line names, which `autotests = false` would leave unbuilt.
 
 ### Changed
 

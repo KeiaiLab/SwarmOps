@@ -128,7 +128,8 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
   through `assert_cmd`, set its `timeout` to the runner's deadline.
 - **One integration-test binary per crate.** Where a crate has several test files, they are the
   modules of its `tests/all.rs`, their tests named `<file>::<test>`; Cargo builds no other test
-  target from `tests/` there (`autotests = false`), so a new test file needs its `mod` line. The
+  target from `tests/` there (`autotests = false`), so a new test file needs its `mod` line, and
+  `every_test_file_is_a_module_of_all_rs`, in each `tests/all.rs`, fails until it has one. The
   CLI's release proof, `test_hooks.rs` (step 4 of `just check`), stays a binary of its own.
 - **Slow tests are ignored by default** with a reason that names their cost
   (`#[ignore = "slow, ~20 s: ~90 crashed commits"]`), and run in the slow suite below.

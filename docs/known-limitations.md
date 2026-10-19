@@ -332,10 +332,6 @@ These do not change what SwarmOps does, only how well the tests can see it.
   envelope of 14; the other ten are in its `NOT_RAISED` list, each with why the test cannot raise
   it (the four codes above among them). *Target: M1.6 (`E_IO` first). Found: the 2026-10-16
   comparison.*
-- **A test file `tests/all.rs` does not declare is not built.** Where a crate's integration tests
-  are the modules of its `tests/all.rs` (`autotests = false`: core, api, store, repo and the
-  CLI), nothing fails when a new file lacks its `mod` line. A test that lists `tests/` against
-  `all.rs` (jj's `no_forgotten_test_files`) would catch it. *Target: M1.6. Found: M1.5 Task 6.*
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its
