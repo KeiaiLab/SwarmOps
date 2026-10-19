@@ -144,6 +144,15 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   parent (`actual` null when the ref does not exist), so that the commit recorded nothing.
 ///   The message says to commit the change again on top of `actual` (`--parent <actual>
 ///   --advance <name>`), and the hint only reads, as for a ref move's below.
+/// - `E_CAS_MISMATCH` (retryable) `{name, actual, op}`: `UndoBlocked`, an `undo` of operation
+///   `op` that found ref `name` at `actual` (null when it does not exist), moved since the
+///   operation, so that the undo wrote nothing. The message says to undo the operations that
+///   moved it since, newest first, or to land a change that reverses the operation; the hint is
+///   `swarmops op log`, which only reads.
+/// - `E_OP_NOT_FOUND` `{op, last}`: `OpNotFound`, an `undo` of an operation past the store's last
+///   (`last` null when the store has none); the hint is `swarmops op log`.
+/// - `E_NOTHING_TO_UNDO` `{op}`: `NothingToUndo`, an `undo` of an operation that left every ref
+///   where it found it; the hint is `swarmops op log`.
 /// - `E_BUSY` (retryable): the store's `Busy` (a writer's lock wait ran out) or
 ///   `SnapshotContended` (a read's snapshot rounds ran out); either way nothing was committed (a
 ///   commit's flushed objects may remain, for GC). The hint says which, and to retry.

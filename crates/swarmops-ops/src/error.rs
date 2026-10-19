@@ -80,6 +80,22 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         }
         RepoError::RefName(name) => ref_name_invalid(name, message),
         RepoError::RefMoved { name, actual, .. } => ref_moved(&name, actual),
+        RepoError::OpNotFound { op: number, last } => {
+            let last = last.map_or(Value::Null, Value::from);
+            error(ErrorCode::OpNotFound, message)
+                .with_details(details([("op", number.into()), ("last", last)]))
+                .with_hint("swarmops op log")
+        }
+        RepoError::NothingToUndo(number) => error(ErrorCode::NothingToUndo, message)
+            .with_details(details([("op", number.into())]))
+            .with_hint("swarmops op log"),
+        RepoError::UndoBlocked {
+            op: number,
+            name,
+            expected,
+            actual,
+            ..
+        } => undo_blocked(number, &name, expected, actual),
         RepoError::MissingObject { id, .. } => {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
@@ -259,6 +275,32 @@ fn ref_moved(name: &str, actual: Option<ChangesetId>) -> OpError {
     error
 }
 
+/// An `undo` of operation `op` that found ref `name` at `actual` (`None`: it does not exist), not
+/// at `expected`, what the operation set it to, so that the undo wrote nothing: `E_CAS_MISMATCH`
+/// `{name, actual, op}`, whose message says to undo the operations that moved the ref since
+/// first, or to land a change that reverses this one, and whose hint only reads: the operation
+/// log.
+fn undo_blocked(
+    op: u64,
+    name: &str,
+    expected: Option<ChangesetId>,
+    actual: Option<ChangesetId>,
+) -> OpError {
+    let shown = |target: Option<ChangesetId>| {
+        target.map_or_else(|| "nothing".to_owned(), |id| id.to_string())
+    };
+    let message = format!(
+        "ref {name} has moved since operation {op} set it to {}: it names {} now, so this undo \
+         wrote nothing; undo the operations that moved it since, newest first, then this one \
+         again, or land a change that reverses operation {op}",
+        shown(expected),
+        shown(actual)
+    );
+    let mut error = cas_mismatch(name, actual, message).with_hint("swarmops op log");
+    error.details.insert("op".to_owned(), op.into());
+    error
+}
+
 fn ref_name_invalid(name: String, message: String) -> OpError {
     error(ErrorCode::RefNameInvalid, message)
         .with_details(details([("name", name.into())]))
@@ -373,6 +415,20 @@ mod tests {
             recovered: Box::default(),
         };
         maps(moved, op, ErrorCode::CasMismatch);
+        let not_found = RepoError::OpNotFound {
+            op: 7,
+            last: Some(3),
+        };
+        maps(not_found, op, ErrorCode::OpNotFound);
+        maps(RepoError::NothingToUndo(2), op, ErrorCode::NothingToUndo);
+        let blocked = RepoError::UndoBlocked {
+            op: 2,
+            name: "main".into(),
+            expected: Some(id()),
+            actual: None,
+            recovered: Box::default(),
+        };
+        maps(blocked, op, ErrorCode::CasMismatch);
         let missing = RepoError::MissingObject {
             id: id().0,
             kind: ObjectKind::Blob,
@@ -421,6 +477,59 @@ mod tests {
         ]);
         assert_eq!(gone.details, want);
         assert_eq!(gone.hint.as_deref(), Some("swarmops ref list"));
+    }
+
+    /// An `undo` that found a ref moved since its operation wrote nothing: `E_CAS_MISMATCH` (exit
+    /// 4) with the ref, what it names and the operation, a message that says to undo the later
+    /// operations first or land a change that reverses this one, and the operation log as its
+    /// read-only hint. An undo of an operation past the last, or of one that moved no ref, names
+    /// the operation too.
+    #[test]
+    fn an_undo_whose_ref_moved_since_is_a_cas_mismatch_that_names_the_operation() {
+        let blocked = repo_error(
+            RepoError::UndoBlocked {
+                op: 4,
+                name: "release/r".into(),
+                expected: Some(id()),
+                actual: None,
+                recovered: Box::default(),
+            },
+            During::Op,
+        );
+        assert_eq!(blocked.code, ErrorCode::CasMismatch.as_str());
+        assert_eq!((blocked.exit, blocked.retryable), (4, true));
+        let want = details([
+            ("name", "release/r".into()),
+            ("actual", Value::Null),
+            ("op", 4.into()),
+        ]);
+        assert_eq!(blocked.details, want);
+        for advice in [
+            format!("since operation 4 set it to {}", id()),
+            "it names nothing now".to_owned(),
+            "undo the operations that moved it since, newest first, then this one again".to_owned(),
+            "land a change that reverses operation 4".to_owned(),
+        ] {
+            assert!(blocked.message.contains(&advice), "{advice}: {blocked:?}");
+        }
+        assert_eq!(blocked.hint.as_deref(), Some("swarmops op log"));
+
+        let not_found = repo_error(RepoError::OpNotFound { op: 9, last: None }, During::Op);
+        assert_eq!(
+            (not_found.code.as_str(), not_found.exit),
+            ("E_OP_NOT_FOUND", 6)
+        );
+        assert_eq!(
+            not_found.details,
+            details([("op", 9.into()), ("last", Value::Null)])
+        );
+        assert_eq!(not_found.hint.as_deref(), Some("swarmops op log"));
+        let nothing = repo_error(RepoError::NothingToUndo(3), During::Op);
+        assert_eq!(
+            (nothing.code.as_str(), nothing.exit),
+            ("E_NOTHING_TO_UNDO", 1)
+        );
+        assert_eq!(nothing.details, details([("op", 3.into())]));
     }
 
     #[test]
