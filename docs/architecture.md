@@ -106,7 +106,9 @@ bytes, invalid names or paths), so each object has exactly one valid byte string
 
 A repository path is validated UTF-8: `/`-separated, with no empty, `.` or `..` component, no
 leading or trailing `/` and no NUL. Paths compare as bytes and are never normalized, so two
-Unicode spellings of a name are two paths. A file's content is at most 512 MiB.
+Unicode spellings of a name are two paths. A file's content is at most 512 MiB, a commit's
+contents at most 1 GiB together, and a request's text (a change list, an MCP message) at most
+64 MiB, each measured before it is read.
 
 ## The store on disk
 
@@ -216,9 +218,12 @@ one chain.
 **A commit** (`Repo::commit`; storage §2 rule 2, §3):
 
 1. The request is checked, its blobs hashed, and the changed directories rebuilt in memory,
-   bottom-up; then the changeset object is encoded.
-2. The new blobs, trees and the changeset are written in one parallel batch and flushed. Every
-   object is durable before any metadata names it.
+   bottom-up; then the changeset object is encoded. A blob a change names by its id
+   (`{"blob": id}`, stored before by `blob_put`) is neither read nor hashed: its header says the
+   store holds it, and the commit retains it.
+2. The new blobs, trees and the changeset are written in one parallel batch and flushed, and the
+   flush fsyncs the directories of the retained blobs too. Every object is durable before any
+   metadata names it.
 3. A metadata write transaction takes `meta/lock` (below), repairs what a crashed writer may
    have left (it cuts a torn journal tail, repairs the index tail, and replays the frames past
    `journal.ckpt` into the index and the ref files; what that repair did comes back in the
@@ -476,7 +481,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 24 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
 kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 44 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 52 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

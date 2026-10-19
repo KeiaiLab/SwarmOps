@@ -279,6 +279,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   entry at the path or below it, derived where the path changed and stored every 64 changesets
   of a quiet stretch, so that a later query walks at most 64. In the Rust API:
   `RepoRead::{last_modified, path_history, log_paths}`, `PathEvent` and `PathFilter::prefixes`.
+- Blobs by id: `blob_put` stores content as a blob outside any commit, durable when it returns
+  (`{blob, size, written}`; it needs an identity), and `blob_has` gives those of some ids the
+  store holds blobs under (CLI `blob put <file|->` and `blob has <id…>`; MCP tools `blob_put` and
+  `blob_has`). A change's content may name a stored blob by its id, `{"blob": "<id>"}`: the
+  commit neither sends nor reads the bytes, and retains the blob, so that its flush makes the
+  blob's name durable before the frame names it; an id the store holds no blob under (none, a
+  tree's, a changeset's) is `E_INVALID_ARG` `{index, path, blob}`, and nothing is written. In
+  the Rust API: `ContentInput::Blob`, `BlobPutReq`, `BlobPutResp`, `BlobHasReq`, `BlobHasResp`,
+  `StoreOps::{blob_put, blob_has}`, `ChangeOp::PutBlob`, `Repo::put_blob`, `Repo::has_blob`,
+  `BlobPut` and `RepoError::MissingBlob`.
 
 ### Changed
 
@@ -394,6 +404,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `log_first_parent`, `get_ref`, `list_refs`, and `info` on a local store) are those of one
   snapshot, and `Repo::commit_in` commits on parents resolved in one; `Repo`'s own read methods
   each take a snapshot of their own, as before.
+- A commit's contents together are held to 1 GiB (`MAX_COMMIT_CONTENT_BYTES`), and a request's
+  text to 64 MiB (`MAX_REQUEST_BYTES`: a `--changes` file or stdin, or one line of
+  `swarmops mcp`'s input), each checked before anything is read or written: the total by the
+  sizes the contents declare (a client file's length, unread; a blob named by id counts
+  nothing), as the change list's shape is checked, and a file that grows while it is read is
+  read no further than one byte past what the limits leave it. `E_TOO_LARGE` says which limit in
+  `details.scope`: `put` (one content over 512 MiB, as before), `commit` (its `size` is the
+  contents' together, and its hint stores them with `blob put` to name them by id) or
+  `request` (the CLI's, before parsing); an MCP line over the limit is a JSON-RPC `-32600`
+  without an `id`, its rest passed over, and the server serves on.
 
 ### Fixed
 

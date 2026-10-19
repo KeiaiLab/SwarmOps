@@ -715,6 +715,108 @@ fn a_change_list_from_stdin_cannot_name_stdin_as_a_client_file() {
     assert_eq!(piped["result"]["content"], "piped bytes\n");
 }
 
+/// `blob put` stores a file's content, or stdin's (`-`), as a blob and prints its id, its size
+/// and whether it wrote it; `blob has` gives those of the ids it is given that the store holds
+/// as blobs; and a commit names a stored blob by id (`{"blob": id}`), writing no blob. `blob
+/// put` is a mutation, so it needs an identity (exit 5 without one, and nothing is stored);
+/// `blob has` is a read, and an id that is not 64 hex digits is a usage error.
+#[test]
+fn blob_put_then_a_commit_names_the_blob_by_id() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let content = "named by id\n";
+    let id = hash_object(ObjectKind::Blob, content.as_bytes()).to_hex();
+    let file = s.file("payload.txt", content);
+    let put = s.run(&["--repo", &store, "--as", AGENT, "blob", "put", &file]);
+    assert_eq!(put.exit, 0, "{}", put.json);
+    assert_eq!(put["op"], "blob_put");
+    assert_eq!(
+        put["result"],
+        json!({"blob": id, "size": content.len(), "written": true})
+    );
+    let again = s.run_stdin(
+        content,
+        &["--repo", &store, "--as", AGENT, "blob", "put", "-"],
+    );
+    assert_eq!(again.exit, 0, "{}", again.json);
+    assert_eq!(
+        again["result"],
+        json!({"blob": id, "size": content.len(), "written": false})
+    );
+
+    let other = s.file("other.txt", "other\n");
+    let other_id = hash_object(ObjectKind::Blob, b"other\n").to_hex();
+    let anonymous = s.run(&["--repo", &store, "blob", "put", &other]);
+    assert_eq!(
+        (anonymous.exit, anonymous.code()),
+        (5, "E_IDENTITY_REQUIRED")
+    );
+    let has = s.run(&["--repo", &store, "blob", "has", &id, &other_id]);
+    assert_eq!(has.exit, 0, "{}", has.json);
+    assert_eq!(has["op"], "blob_has");
+    assert_eq!(has["result"], json!({"present": [id]}));
+    let bad = s.run(&["--repo", &store, "blob", "has", "xyz"]);
+    assert_eq!((bad.exit, bad.code()), (2, "E_INVALID_ARG"));
+
+    let changes = s.file(
+        "by-id.json",
+        &json!([{"path": "named.txt", "op": "put", "content": {"blob": id}}]).to_string(),
+    );
+    let commit = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "by id",
+        "--changes",
+        &changes,
+    ]);
+    assert_eq!(commit.exit, 0, "{}", commit.json);
+    assert_eq!(commit["result"]["blobs_written"], 0);
+    let c1 = s.name_at(&commit, "/result/changeset", "c1");
+    let cat = s.run(&["--repo", &store, "cat", &format!("{c1}:named.txt")]);
+    assert_eq!(
+        (&cat["result"]["content"], &cat["result"]["blob"]),
+        (&json!(content), &json!(id))
+    );
+}
+
+/// A change list past 64 MiB, the most a request's text may hold, is refused by its length
+/// (`E_TOO_LARGE`, scope `request`) before a byte of it is read or parsed: its bytes are zeros,
+/// which no JSON parser takes. Nothing is committed.
+#[test]
+fn a_change_list_past_64_mib_is_refused_before_it_is_parsed() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let limit = swarmops_ops::content::MAX_REQUEST_BYTES;
+    let huge = format!("{}/huge.json", s.tmp());
+    fs::File::create(&huge).unwrap().set_len(limit + 1).unwrap();
+    let refused = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "x",
+        "--changes",
+        &huge,
+    ]);
+    assert_eq!((refused.exit, refused.code()), (1, "E_TOO_LARGE"));
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"size": limit + 1, "limit": limit, "scope": "request", "changes": huge})
+    );
+    assert_eq!(
+        s.run(&["--repo", &store, "info"])["result"]["changesets"],
+        0
+    );
+}
+
 #[test]
 fn usage_error_exits_2_with_envelope() {
     let mut s = Session::new();

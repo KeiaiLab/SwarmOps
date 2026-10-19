@@ -29,7 +29,7 @@ pub mod repo;
 mod tree_edit;
 pub mod verify;
 
-pub use commit::{Advance, Advanced, Change, ChangeOp, CommitOutcome, CommitRequest};
+pub use commit::{Advance, Advanced, BlobPut, Change, ChangeOp, CommitOutcome, CommitRequest};
 pub use derive::{
     Derivation, DeriveCtx, DeriveError, FirstParentSkipList, LastModified, LastTouch, Need,
     PathKey, Registry, SkipList, Subject,

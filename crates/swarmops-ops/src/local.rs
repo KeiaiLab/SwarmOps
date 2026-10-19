@@ -3,7 +3,7 @@
 //! what each operation does and how failures map to error codes.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -17,6 +17,7 @@ use swarmops_api::{
     Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding,
     VerifyReport, VerifyReq,
 };
+use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
@@ -89,6 +90,14 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   recorded. Without `parent`, such a commit builds on that ref's head, recorded in the
 ///   request's [`Resolved`] under the ref's name, and on nothing if the ref does not exist (a
 ///   root changeset that creates it): the move then only detects a race from that moment on.
+///   A change's `blob` content names a blob the store holds by its id: the commit neither reads
+///   nor writes it again, and an id the store holds no blob under is `E_INVALID_ARG`.
+/// - `blob_put` stores its content as a blob, by the change list's rules for content (`blob`
+///   content aside, which names a blob already stored), durable when it returns, and says
+///   whether it placed it (`written`). It needs an identity, which it records nowhere.
+/// - `blob_has` gives the ids, of those asked for, that the store holds a blob under, in
+///   lowercase, in the order first given and each once; a tree's or a changeset's id is not
+///   among them.
 /// - `read_file` returns at most `max_bytes` bytes from the file's start: UTF-8 text when they
 ///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
 ///   fewer); otherwise exactly `max_bytes` bytes, in base64. A directory there is `E_IS_DIR`,
@@ -141,7 +150,9 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   `{prefix}` (an id prefix that is not 1 to 64 hex digits). Of the requests of these
 ///   operations only `init`'s reaches either, with a name of more than 255 bytes
 ///   (`repo_name_bytes`): a commit has one parent, the identity bounds the actor, and revision
-///   resolution takes 12 to 63 hex digits.
+///   resolution takes 12 to 63 hex digits. And `MissingBlob` `{index, path, blob}`: a change
+///   that names by id a blob the store does not hold (no object, or a tree or a changeset), a
+///   mistake in the request rather than damage; its hint is `swarmops blob put <file>`.
 /// - `E_EXISTS`: `Exists`; the hint is `swarmops --repo <path> info`.
 /// - `E_UNKNOWN_PARENT` `{parent}`: `UnknownParent`; the hint is `swarmops log`.
 /// - `E_EMPTY_COMMIT`: `EmptyChanges`; the hint names `--allow-empty`.
@@ -191,8 +202,10 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 /// with `--expect <actual>`; to a `ref_delete`, to re-check before deleting; to a move of a ref
 /// that is gone, that it is gone — and whose hint only reads, `swarmops show <actual>` or
 /// `swarmops ref list`, so that an agent that runs it cannot undo the move that won; `E_TOO_LARGE`
-/// `{index, path, size, limit}` for a put over 512 MiB; and `E_INVALID_ARG` for limits, cursors
-/// and requests that break their own rules.
+/// `{index, path, size, limit, scope}` (and the client `file` for file content) for a put over
+/// 512 MiB (`scope` `put`) or a commit's contents over 1 GiB together (`commit`, whose `size` is
+/// theirs up to and with the change's), measured before any is read; and `E_INVALID_ARG` for
+/// limits, cursors and requests that break their own rules.
 pub struct LocalOps {
     repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.
@@ -439,6 +452,12 @@ impl StoreOps for Recording<'_> {
             (None, None) => self.main_head(&read)?,
         };
         let changes = content::changes(changes)?;
+        // Where each blob named by id is in the list, to say which change names one the store
+        // lacks.
+        let named: BTreeMap<RepoPath, usize> = (changes.iter().enumerate())
+            .filter(|(_, change)| matches!(change.op, swarmops_repo::ChangeOp::PutBlob { .. }))
+            .map(|(index, change)| (change.path.clone(), index))
+            .collect();
         let signature = native_signature(who);
         let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
         if let Some(run_id) = who.run_id() {
@@ -472,7 +491,18 @@ impl StoreOps for Recording<'_> {
                 if let RepoError::RefMoved { recovered, .. } = &e {
                     self.resolved.record_recovered(**recovered);
                 }
-                op(e)
+                // A blob the list names that the store lacks is said of its change, as the list's
+                // other refusals are.
+                let at = match &e {
+                    RepoError::MissingBlob { path, .. } => named
+                        .get(path)
+                        .map(|&index| (index, path.as_str().to_owned())),
+                    _ => None,
+                };
+                match at {
+                    Some((index, path)) => content::in_change(op(e), index, &path),
+                    None => op(e),
+                }
             })?;
         self.resolved.record_recovered(outcome.recovered);
         Ok(CommitResp {
@@ -489,6 +519,39 @@ impl StoreOps for Recording<'_> {
             }),
             warnings: outcome.warnings,
         })
+    }
+
+    fn blob_put(&self, _who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
+        let BlobPutReq { content } = req;
+        let stored = (self.ops.repo)
+            .put_blob(content::bytes(content)?)
+            .map_err(op)?;
+        Ok(BlobPutResp {
+            blob: stored.id.to_string(),
+            size: stored.size,
+            written: stored.written,
+        })
+    }
+
+    fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError> {
+        // Every id is checked before the store is asked about any.
+        let ids = (req.ids.iter().enumerate())
+            .map(|(index, id)| {
+                content::blob_id(id).map_err(|mut e| {
+                    e.message = format!("id {index}: {}", e.message);
+                    e.details.insert("index".to_owned(), index.into());
+                    e
+                })
+            })
+            .collect::<Result<Vec<_>, OpError>>()?;
+        let mut asked = BTreeSet::new();
+        let mut present = Vec::new();
+        for id in ids {
+            if asked.insert(id) && self.ops.repo.has_blob(id).map_err(op)? {
+                present.push(id.to_string());
+            }
+        }
+        Ok(BlobHasResp { present })
     }
 
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError> {
@@ -826,6 +889,14 @@ impl StoreOps for LocalOps {
 
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError> {
         self.recording(&Resolved::default()).commit(who, req)
+    }
+
+    fn blob_put(&self, who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
+        self.recording(&Resolved::default()).blob_put(who, req)
+    }
+
+    fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError> {
+        self.recording(&Resolved::default()).blob_has(req)
     }
 
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError> {
