@@ -12,6 +12,11 @@
 //! - [`lossy`]: the classes of git content a changeset cannot hold as git has it ([`LossyClass`]),
 //!   and sets of them ([`LossySet`]).
 //! - [`render`]: the git objects a changeset renders to, [`tree_bytes`] and [`commit_bytes`].
+//! - [`native`]: the commit a native changeset exports to: its own signatures, and its message
+//!   followed by SwarmOps' trailers ([`TRAILERS`], [`export_message`], [`render_commit`]).
+//! - [`export_oid`]: [`ExportOid`], the derivation of the git commit each changeset exports to
+//!   ([`ExportedOid`]), and the git oids of its trees and blobs, memoized per object
+//!   ([`tree_oid`], [`blob_oid`]).
 //! - [`convert`]: [`Converter`], which converts git's commits, trees and blobs into a changeset's
 //!   fields ([`Converted`]), trees and blobs, refusing what the classes it allows do not cover
 //!   ([`ConvertError`]); a commit is converted without loss only if it renders back to its own
@@ -28,9 +33,11 @@
 //! change.
 
 pub mod convert;
+pub mod export_oid;
 pub mod gix_sink;
 pub mod gix_source;
 pub mod lossy;
+pub mod native;
 pub mod oid;
 pub mod raw;
 pub mod render;
@@ -38,9 +45,13 @@ pub mod sink;
 pub mod source;
 
 pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
+pub use export_oid::{
+    ExportObjects, ExportOid, ExportReader, ExportedOid, blob_oid, register, tree_oid,
+};
 pub use gix_sink::GixSink;
 pub use gix_source::GixSource;
 pub use lossy::{LossyClass, LossySet};
+pub use native::{TRAILERS, export_message, render_commit};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
 pub use raw::{RawCommit, RawError, RawIdent, RawTree, RawTreeEntry};
 pub use render::{commit_bytes, tree_bytes};

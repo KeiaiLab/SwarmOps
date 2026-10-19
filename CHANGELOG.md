@@ -435,6 +435,18 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   another writer holds or a dead one left, a ref in the branch's way, and a branch to an object the
   repository lacks. `swarmops_testkit::git::empty_repository()` makes an empty bare repository by
   hand, so that no test runs git.
+- Export oids: the git commit each changeset exports to, derived as `git_oid` (version 1) by
+  `swarmops_git::ExportOid` and kept in the derived store. An imported changeset whose lineage
+  SwarmOps did not change exports to the commit it was imported from, read without a tree; any
+  other is rendered and hashed, its trees' and blobs' git oids memoized per object
+  (`git_tree_oid`, `git_blob_oid`), which `Repo::derived_store` and `DeriveCtx::derived_store`
+  reach. A native changeset exports to a canonical commit with its own signatures and no extra
+  header, its message followed by a trailer block: `SwarmOps-Changeset: <id>`, then
+  `SwarmOps-Land-Key:`, `SwarmOps-CR:` and `SwarmOps-Squashed-From:` for the metadata keys
+  `land_key`, `cr` and `squashed_from`, joined to the message's last paragraph when that is a
+  trailer block already (a `Co-Authored-By:`), else after a blank line. The rendering is a
+  contract like the hash contract: a change to it is a new version, which every branch exported
+  before it meets as divergence (`docs/policies/versioning-and-stability.md`).
 
 ### Changed
 

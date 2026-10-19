@@ -49,7 +49,7 @@ swarmops-core    depends on no SwarmOps crate
 swarmops-api     depends on no SwarmOps crate
 swarmops-store   core
 swarmops-merge   core
-swarmops-git     core, store
+swarmops-git     core, repo, store
 swarmops-repo    core, merge, store
 swarmops-ops     api, core, repo, store
 swarmops-cli     api, ops            (its tests also use core, repo, store and testkit)
