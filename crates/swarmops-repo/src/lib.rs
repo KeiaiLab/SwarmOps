@@ -28,7 +28,9 @@ mod tree_edit;
 pub mod verify;
 
 pub use commit::{Advance, Advanced, Change, ChangeOp, CommitOutcome, CommitRequest};
-pub use derive::{Derivation, DeriveCtx, DeriveError, Need, Registry, Subject};
+pub use derive::{
+    Derivation, DeriveCtx, DeriveError, FirstParentSkipList, Need, Registry, SkipList, Subject,
+};
 pub use error::RepoError;
 pub use read::{RepoRead, StoredChangeset};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};

@@ -39,6 +39,9 @@
 //! takes none. A read of the store that fails is the run's error.
 
 mod engine;
+mod skiplist;
+
+pub use self::skiplist::{FirstParentSkipList, SkipList};
 
 use std::any::TypeId;
 use std::fmt;
@@ -252,9 +255,14 @@ impl Registry {
     }
 
     /// The registry a repository opens with: the built-in derivations of storage spec §5 that this
-    /// build has, none yet.
+    /// build has, [`FirstParentSkipList`].
     pub fn builtins() -> Registry {
-        Registry::new()
+        let mut registry = Registry::new();
+        // A built-in keeps every rule `register` checks, so this never fails.
+        registry
+            .register(FirstParentSkipList)
+            .expect("a built-in derivation is one the engine keeps");
+        registry
     }
 
     /// Registers `derivation`, so that its values can be derived. [`RepoError::Derived`], with the

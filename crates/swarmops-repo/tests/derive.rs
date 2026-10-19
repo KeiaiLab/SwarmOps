@@ -1093,3 +1093,176 @@ fn keys_tell_values_apart_and_a_redirect_may_change_the_key() {
     assert_eq!(subjects, at(&chain, &[2, 3, 4, 5]));
     assert_eq!(repo.derived::<Back>(chain[0], &7).unwrap(), 0, "the root");
 }
+
+/// The first-parent skip list, the first built-in derivation (storage spec §5): each changeset's
+/// first-parent ancestors 1, 2, 4, … steps back, nearest first.
+mod skip_list {
+    use swarmops_repo::{FirstParentSkipList, SkipList};
+    use swarmops_store::{DerivedSlot, DerivedStore, RealFs};
+
+    use super::*;
+
+    /// A changeset's skip list, through the repository's built-in.
+    fn list(repo: &LocalRepo, cs: ChangesetId) -> Vec<ChangesetId> {
+        let list: SkipList = repo.derived::<FirstParentSkipList>(cs, &()).unwrap();
+        list.into_vec()
+    }
+
+    /// The changesets of `chain` 1, 2, 4, … steps back from the one at `k`, as far as the chain
+    /// goes, by a walk: what that changeset's skip list holds.
+    fn walked(chain: &[ChangesetId], k: usize) -> Vec<ChangesetId> {
+        (0..usize::BITS)
+            .map(|i| 1_usize << i)
+            .take_while(|&steps| steps <= k)
+            .map(|steps| chain[k - steps])
+            .collect()
+    }
+
+    /// The value files of the skip list's version 1, as [`stored`] lists them, for `ids`.
+    fn files_of(ids: &[ChangesetId]) -> BTreeSet<String> {
+        ids.iter().map(ToString::to_string).collect()
+    }
+
+    /// A changeset's skip list holds its first-parent ancestors 1, 2, 4, … steps back, nearest
+    /// first, as far as its chain goes, and a root's is empty. On a chain c0 … c32: c8's list is
+    /// [c7, c6, c4, c0] (8 steps reach the root exactly), and deriving it derives the lists of c0
+    /// … c8 and nothing past c8; c32's is [c31, c30, c28, c24, c16, c0]; and every changeset's
+    /// list is what a walk along its first parents gives.
+    #[test]
+    fn skip_list_values_are_powers_of_two_back() {
+        let (_dir, root, repo) = new_repo();
+        let c = chain(&repo, 33);
+
+        assert_eq!(list(&repo, c[8]), [c[7], c[6], c[4], c[0]]);
+        assert_eq!(
+            stored(&root, FirstParentSkipList::NAME, 1),
+            files_of(&c[..=8]),
+            "c8's chain, nothing past it"
+        );
+        assert!(list(&repo, c[0]).is_empty(), "a root's list is empty");
+        let head = repo.derived::<FirstParentSkipList>(c[32], &()).unwrap();
+        assert_eq!(
+            *head,
+            [c[31], c[30], c[28], c[24], c[16], c[0]],
+            "read as a slice"
+        );
+        assert_eq!(stored(&root, FirstParentSkipList::NAME, 1), files_of(&c));
+        for (k, &cs) in c.iter().enumerate() {
+            assert_eq!(list(&repo, cs), walked(&c, k), "c{k}");
+        }
+    }
+
+    /// A merge's skip list follows its first parent, never the second, and so does the list of a
+    /// changeset whose first-parent chain passes through a merge. Over a root r, a first side a1 …
+    /// a4 on it and a second side b1 on it: the merge m of a4 and b1 has the list [a4, a3, a1],
+    /// and c, on m, [m, a4, a2]; deriving them derives the lists of their first-parent chain
+    /// alone, not b1's. The merge n of b1 and a4, b1 first, has [b1, r].
+    #[test]
+    fn a_skip_list_over_a_second_parent_follows_the_first() {
+        let (_dir, root, repo) = new_repo();
+        let commit = |parents: &[ChangesetId], name: &str| {
+            let req = request(parents, vec![put("f", name.as_bytes())], name);
+            repo.commit(req).unwrap().id
+        };
+        let r = commit(&[], "r");
+        let a1 = commit(&[r], "a1");
+        let a2 = commit(&[a1], "a2");
+        let a3 = commit(&[a2], "a3");
+        let a4 = commit(&[a3], "a4");
+        let b1 = commit(&[r], "b1");
+        let m = commit(&[a4, b1], "m");
+        let c = commit(&[m], "c");
+        let n = commit(&[b1, a4], "n");
+
+        assert_eq!(list(&repo, m), [a4, a3, a1]);
+        assert_eq!(list(&repo, c), [m, a4, a2]);
+        assert_eq!(
+            stored(&root, FirstParentSkipList::NAME, 1),
+            files_of(&[r, a1, a2, a3, a4, m, c]),
+            "the first parents' lists alone"
+        );
+        assert_eq!(list(&repo, n), [b1, r]);
+        assert_eq!(
+            stored(&root, FirstParentSkipList::NAME, 1),
+            files_of(&[r, a1, a2, a3, a4, m, c, b1, n])
+        );
+    }
+
+    /// The skip list is built in: a repository derives it with no registration, created or
+    /// opened, and refuses to register it again, while a registry of its own (`Registry::new`)
+    /// starts without it. It is `first_parent_skip_list`, version 1, eager (`swarmops derive`
+    /// derives it for each new changeset), with no memos.
+    #[test]
+    fn the_skip_list_is_built_in() {
+        assert_eq!(
+            (
+                FirstParentSkipList::NAME,
+                FirstParentSkipList::VERSION,
+                FirstParentSkipList::EAGER,
+                FirstParentSkipList::MEMO_EVERY,
+            ),
+            ("first_parent_skip_list", 1, true, None)
+        );
+        let (_dir, root, mut repo) = new_repo();
+        let c = chain(&repo, 3);
+        assert_eq!(list(&repo, c[2]), [c[1], c[0]]);
+        match repo.register(FirstParentSkipList) {
+            Err(RepoError::Derived { name, why }) => {
+                assert_eq!(name, "first_parent_skip_list", "{why}");
+                assert!(why.contains("registered already"), "{why}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        let reopened = LocalRepo::open(&root).unwrap();
+        assert_eq!(list(&reopened, c[1]), [c[0]]);
+        assert_eq!(stored(&root, "first_parent_skip_list", 1), files_of(&c));
+
+        let mut registry = Registry::new();
+        registry.register(FirstParentSkipList).unwrap();
+    }
+
+    /// A skip list is stored as postcard encodes it: the number of ids, then each id's 32 bytes,
+    /// nearest first; a root's is the one byte 0. This is version 1's layout: another takes a new
+    /// `VERSION`.
+    #[test]
+    fn a_skip_list_is_stored_as_its_ids_bytes() {
+        let (_dir, root, repo) = new_repo();
+        let c = chain(&repo, 5);
+        assert_eq!(list(&repo, c[4]), [c[3], c[2], c[0]]);
+
+        let store = DerivedStore::open(Layout::new(&root), Arc::new(RealFs));
+        let value = |cs: ChangesetId| {
+            let slot = DerivedSlot {
+                name: "first_parent_skip_list",
+                version: 1,
+                subject: cs.0,
+                key: &[],
+            };
+            store.get(&slot).unwrap().expect("a stored value")
+        };
+        let mut want = vec![3_u8];
+        for id in [c[3], c[2], c[0]] {
+            want.extend_from_slice(&id.0.0);
+        }
+        assert_eq!(value(c[4]), want);
+        assert_eq!(value(c[0]), [0]);
+    }
+
+    /// An ancestor's list that the store lost (derived values are never synced, so a power loss
+    /// may take any back) is derived again on the way: with the files of c4 and c8 of a 9-chain
+    /// removed, c8's list reads c4's, finds it missing, has the engine derive it, and is right;
+    /// both files are back.
+    #[test]
+    fn a_lost_ancestor_list_is_derived_again_on_the_way() {
+        let (_dir, root, repo) = new_repo();
+        let c = chain(&repo, 9);
+        assert_eq!(list(&repo, c[8]), [c[7], c[6], c[4], c[0]]);
+
+        for k in [4, 8] {
+            fs::remove_file(value_file(&root, FirstParentSkipList::NAME, 1, c[k])).unwrap();
+        }
+        assert_eq!(list(&repo, c[8]), [c[7], c[6], c[4], c[0]]);
+        assert_eq!(stored(&root, FirstParentSkipList::NAME, 1), files_of(&c));
+        assert_eq!(list(&repo, c[4]), [c[3], c[2], c[0]]);
+    }
+}
