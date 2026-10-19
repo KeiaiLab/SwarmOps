@@ -340,6 +340,15 @@ small byte ranges. Files and directories at a revision are read from the trees, 
 changeset's root: O(depth) object reads and no checkout.
 Every object read checks the object's header and hash.
 
+A request reads in one snapshot (storage §8, operations §4). `Repo::snapshot()` returns a
+`RepoRead`; `LocalOps` takes one when an operation starts and resolves every revision and ref
+of the request in it, and a `commit` checks its parent there too (`Repo::commit_in`), the
+insert's own check under the lock staying the one that counts. A snapshot is never read after
+the request's own write, and never kept from one request to the next: besides going stale, one
+that counted index records which a writer then cut back after a failed sync fails its lookups
+with an I/O error until a new one is taken. `Repo`'s own read methods each take a snapshot of
+their own.
+
 ## Durability
 
 Full fsync is the default and the only mode (umbrella §16, decision 5). An object is synced and
@@ -427,7 +436,8 @@ What an agent sees (operations §4):
 - Refs move only by compare-and-swap. When several agents expect the same target, exactly one
   wins each round; the others get `E_CAS_MISMATCH` and `details.actual`.
 - A read by changeset id is immutable, lock-free and cacheable. A ref named in a request is
-  resolved once, and the envelope's `meta.resolved` says what it named.
+  resolved once, and the envelope's `meta.resolved` says what it named. Every revision and ref
+  one request names is resolved in the same snapshot.
 - A reader may see a frame before its `fdatasync` has completed. A power loss, or a failed sync
   of that frame (which the writer then cuts back), can therefore take back state that a local
   reader returned. A mutation that names such state (a parent, a ref's expected or new target)

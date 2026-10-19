@@ -6,7 +6,8 @@
 //!    ([`RepoError::DuplicatePath`]), at most 255 parents (the metadata
 //!    store's [`StoreError::Limit`], as it gives at insert), distinct and in the store
 //!    ([`RepoError::UnknownParent`]), and the name of the ref to advance, if any, a ref name
-//!    ([`RepoError::RefName`]).
+//!    ([`RepoError::RefName`]). The parents are looked up in the snapshot the caller resolved
+//!    them in ([`Repo::commit_in`]), or in one of the call's own.
 //! 2. Hashes each put's content into its blob id, once, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
 //!    or where a directory is, or a delete of a directory, is a [`RepoError::TypeConflict`]; a
@@ -29,6 +30,9 @@
 //!    as it is: the frame was cut back off the journal, so the changeset is not recorded, and
 //!    the same request made again records it. What the transaction's recovery repaired first,
 //!    of what earlier writers left, comes back in [`CommitOutcome::recovered`].
+//!    The insert checks the parents again under the lock: one the store no longer holds (a
+//!    frame a failed sync took back after step 1 saw it) is [`RepoError::UnknownParent`],
+//!    nothing is recorded, and the objects step 4 flushed stay, unreferenced, for GC.
 //!
 //! An identical request computes the same objects and the same changeset: the store has them
 //! all, so nothing is written, and the insert finds the changeset
@@ -56,6 +60,7 @@ use swarmops_store::{
 };
 
 use crate::error::RepoError;
+use crate::read::RepoRead;
 use crate::repo::{Repo, post_commit_warning, ref_error};
 use crate::tree_edit::{Encoded, TreeEdit};
 
@@ -168,8 +173,30 @@ pub struct CommitOutcome {
 
 impl<O: ObjectStore> Repo<O> {
     /// Applies `req`'s changes to its first parent's tree and records the result as a
-    /// changeset: see [the module documentation](self) for the steps and their errors.
+    /// changeset: see [the module documentation](self) for the steps and their errors. The
+    /// parents are looked up in a snapshot of the call's own, taken only if there are any.
     pub fn commit(&self, req: CommitRequest) -> Result<CommitOutcome, RepoError> {
+        self.commit_with(None, req)
+    }
+
+    /// [`Repo::commit`] in a request that has read `seen`, the snapshot it resolved the parents
+    /// in: the parents are looked up there, so that the request reads in one snapshot (storage
+    /// spec §8), and the insert checks them again under the lock. `seen` is not read after the
+    /// commit, which it does not show.
+    pub fn commit_in(
+        &self,
+        seen: &RepoRead<'_, O>,
+        req: CommitRequest,
+    ) -> Result<CommitOutcome, RepoError> {
+        self.commit_with(Some(seen), req)
+    }
+
+    /// [`Repo::commit`], the parents looked up in `seen` if given, else in a snapshot of its own.
+    fn commit_with(
+        &self,
+        seen: Option<&RepoRead<'_, O>>,
+        req: CommitRequest,
+    ) -> Result<CommitOutcome, RepoError> {
         let CommitRequest {
             parents,
             changes,
@@ -184,7 +211,7 @@ impl<O: ObjectStore> Repo<O> {
             swarmops_store::check_ref_name(name).map_err(ref_error)?;
         }
         let changes = sorted_changes(changes, allow_empty)?;
-        self.check_parents(&parents)?;
+        self.check_parents(&parents, seen)?;
         let (candidates, mut contents) = candidate_delta(changes);
         let mut edit = match parents.first() {
             Some(&first) => TreeEdit::new(&self.objects, self.changeset_object(first)?.root)?,
@@ -259,8 +286,13 @@ impl<O: ObjectStore> Repo<O> {
 
     /// Refuses more parents than a journal record holds ([`StoreError::Limit`], as the
     /// metadata store gives at insert), a parent listed twice ([`StoreError::DuplicateParent`]),
-    /// or one not in the store ([`RepoError::UnknownParent`]).
-    fn check_parents(&self, parents: &[ChangesetId]) -> Result<(), RepoError> {
+    /// or one not in the store ([`RepoError::UnknownParent`]) as `seen` shows it, or, without
+    /// it, a snapshot taken here (none for a root changeset).
+    fn check_parents(
+        &self,
+        parents: &[ChangesetId],
+        seen: Option<&RepoRead<'_, O>>,
+    ) -> Result<(), RepoError> {
         if parents.len() > MAX_PARENTS {
             return Err(StoreError::Limit {
                 what: LimitKind::Parents,
@@ -277,9 +309,15 @@ impl<O: ObjectStore> Repo<O> {
         if parents.is_empty() {
             return Ok(());
         }
-        let read = self.meta.read()?;
+        let own;
+        let read = if let Some(seen) = seen {
+            seen
+        } else {
+            own = self.snapshot()?;
+            &own
+        };
         for &parent in parents {
-            if read.changeset(parent)?.is_none() {
+            if read.meta.changeset(parent)?.is_none() {
                 return Err(RepoError::UnknownParent(parent));
             }
         }

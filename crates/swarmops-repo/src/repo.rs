@@ -73,6 +73,7 @@ use swarmops_store::{
 
 use crate::derive::Registry;
 use crate::error::RepoError;
+use crate::read::RepoRead;
 
 /// What a store's `FORMAT` file holds: the store layout this build writes and reads.
 const FORMAT: &[u8] = b"swarmops-store 1\n";
@@ -198,17 +199,9 @@ impl LocalRepo {
         Self::open_on(store, fs, false)
     }
 
-    /// The repository's identity and counts, from a snapshot of its metadata.
+    /// The repository's identity and counts, in a snapshot of its own ([`RepoRead::info`]).
     pub fn info(&self) -> Result<RepoInfo, RepoError> {
-        let read = self.meta.read()?;
-        Ok(RepoInfo {
-            repo_id: self.identity.repo_id.clone(),
-            name: self.identity.name.clone(),
-            store_version: STORE_VERSION,
-            changesets: read.count_changesets()?,
-            refs: to_u64(read.list_refs()?.len()),
-            main: read.get_ref("main")?.map(|state| state.target),
-        })
+        self.snapshot()?.info()
     }
 
     fn create_on(
@@ -345,16 +338,43 @@ impl LocalRepo {
     }
 }
 
-impl<O: ObjectStore> Repo<O> {
-    /// Ref `name`, as a snapshot of the metadata shows it; `None` if it does not exist.
+impl RepoRead<'_, FsObjectStore> {
+    /// The repository's identity, and its counts as the snapshot shows them.
+    pub fn info(&self) -> Result<RepoInfo, RepoError> {
+        let identity = &self.repo.identity;
+        Ok(RepoInfo {
+            repo_id: identity.repo_id.clone(),
+            name: identity.name.clone(),
+            store_version: STORE_VERSION,
+            changesets: self.meta.count_changesets()?,
+            refs: to_u64(self.meta.list_refs()?.len()),
+            main: self.meta.get_ref("main")?.map(|state| state.target),
+        })
+    }
+}
+
+impl<O: ObjectStore> RepoRead<'_, O> {
+    /// Ref `name`, as the snapshot shows it; `None` if it does not exist.
     /// [`RepoError::RefName`] for a name that is not `main` or `release/<x>`.
     pub fn get_ref(&self, name: &str) -> Result<Option<RefState>, RepoError> {
-        self.meta.read()?.get_ref(name).map_err(ref_error)
+        self.meta.get_ref(name).map_err(ref_error)
     }
 
-    /// Every ref, by name.
+    /// Every ref the snapshot shows, by name.
     pub fn list_refs(&self) -> Result<Vec<(String, RefState)>, RepoError> {
-        Ok(self.meta.read()?.list_refs()?)
+        Ok(self.meta.list_refs()?)
+    }
+}
+
+impl<O: ObjectStore> Repo<O> {
+    /// Ref `name`, in a snapshot of its own ([`RepoRead::get_ref`]).
+    pub fn get_ref(&self, name: &str) -> Result<Option<RefState>, RepoError> {
+        self.snapshot()?.get_ref(name)
+    }
+
+    /// Every ref, by name, in a snapshot of its own ([`RepoRead::list_refs`]).
+    pub fn list_refs(&self) -> Result<Vec<(String, RefState)>, RepoError> {
+        self.snapshot()?.list_refs()
     }
 
     /// Moves ref `name` from `expected` to `new` (`None` deletes it; `expected` `None` creates

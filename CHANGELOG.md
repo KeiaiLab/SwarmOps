@@ -376,6 +376,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   not help (keys that share their first 8 bytes, or two probes in a row that each left more
   than half of the range), never reads more than 2(⌊log2 m⌋ + 1) keys, and finds the same
   bound a bisection does.
+- Each request reads in one snapshot of the store's metadata (storage spec §8, operations spec
+  §4): every revision and ref it names resolves in the same view, and a `commit` checks its
+  parent in the view it resolved it in. `cat`, `ls`, `show`, `log`, a commit on a parent and
+  `ref set` took two each (`cat` and `ls` three when the path holds nothing or the other kind),
+  each snapshot reading every ref file. In the Rust API, `Repo::snapshot` returns a `RepoRead`,
+  whose reads (`resolve`, `changeset`, `read_blob_at`, `list_tree`, `entry_at`, `tree`, `blob`,
+  `log_first_parent`, `get_ref`, `list_refs`, and `info` on a local store) are those of one
+  snapshot, and `Repo::commit_in` commits on parents resolved in one; `Repo`'s own read methods
+  each take a snapshot of their own, as before.
 
 ### Fixed
 

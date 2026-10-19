@@ -1793,3 +1793,48 @@ fn verify_reports_each_problem_as_a_finding() {
         );
     }
 }
+
+/// One snapshot per request (operations spec §4, storage spec §8): every revision and ref one
+/// request names is resolved in the same view, and that view is the request's alone.
+mod snapshot {
+    use super::*;
+
+    /// A request never reads in a snapshot taken before its own write, nor in another request's:
+    /// on one `LocalOps`, and through one request's record, a `show` of what a `commit` made, a
+    /// `ref_list` after the `ref_set` that created `main`, and a `cat`, a `log` and an `info` of
+    /// `main` after a `commit` that advanced it, each see what the write before it did.
+    #[test]
+    fn a_snapshot_is_not_reused_after_the_requests_own_write() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let resolved = Resolved::default();
+        let request = ops.recording(&resolved);
+
+        let c1 = (request.commit(&who, commit_req(None, vec![text("f", "1")])))
+            .unwrap()
+            .changeset;
+        assert_eq!(request.show(show(&c1)).unwrap().id, c1);
+        request.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let refs = request.ref_list(RefListReq {}).unwrap().refs;
+        let targets: Vec<(&str, &str)> = (refs.iter())
+            .map(|r| (r.name.as_str(), r.target.as_str()))
+            .collect();
+        assert_eq!(targets, [("main", c1.as_str())]);
+
+        let advancing = CommitReq {
+            advance: Some("main".to_owned()),
+            ..commit_req(Some(&c1), vec![text("f", "2")])
+        };
+        let c2 = request.commit(&who, advancing).unwrap().changeset;
+        assert_eq!(request.read_file(cat("main", "f")).unwrap().content, "2");
+        let log = request.log(log_req(None)).unwrap();
+        assert_eq!(ids(&log), [c2.as_str(), c1.as_str()]);
+        let main = request.repo_info(InfoReq {}).unwrap().main;
+        assert_eq!(main.as_deref(), Some(c2.as_str()));
+        assert_eq!(
+            resolved.take()["main"],
+            c2,
+            "main as the last read resolved it"
+        );
+    }
+}
