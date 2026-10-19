@@ -4,10 +4,12 @@
 //! whose paths [`Layout`] computes. Metadata lives in `meta/` ([`meta`]), behind the
 //! [`MetaStore`] facade: a CRC-framed, append-only [`Journal`] is its source of truth,
 //! [`MetaLock`] serializes its writers, the columnar changeset [`Index`] answers lookups by
-//! id, id prefix and delta hash, and ref files hold the refs. The object store's filesystem
-//! access and the metadata store's writes go through [`FsOps`], so tests can count calls and,
-//! in a build with the `test-hooks` feature, crash the process mid-write (`CrashAtFs`), fail
-//! calls (`FailAtFs`) or check the order of the writes (`OrderCheckFs`).
+//! id, id prefix and delta hash, and ref files hold the refs. Values derived from the objects
+//! are cached beside them in `meta/derived/` ([`DerivedStore`]), outside the journal. The object
+//! store's filesystem access, the metadata store's writes and the derived values' reads and
+//! writes go through [`FsOps`], so tests can count calls and, in a build with the `test-hooks`
+//! feature, crash the process mid-write (`CrashAtFs`), fail calls (`FailAtFs`) or check the
+//! order of the writes (`OrderCheckFs`).
 
 pub mod error;
 pub mod fs_objects;
@@ -28,9 +30,9 @@ pub use fs_ops::{CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
 pub use layout::{Layout, is_native_linux_fs};
 pub use meta::refs::check_ref_name;
 pub use meta::{
-    BadRecord, CasResult, ChangesetMeta, CommitInfo, Frame, Index, InsertOutcome, Journal,
-    JournalEntry, LogCut, MetaLock, MetaRead, MetaStore, MetaWrite, Record, Recovered, RefFile,
-    RefMoveEntry, RefState, SortedView, TailRepair,
+    BadRecord, CasResult, ChangesetMeta, CommitInfo, DerivedSlot, DerivedStore, Frame, Index,
+    InsertOutcome, Journal, JournalEntry, LogCut, MetaLock, MetaRead, MetaStore, MetaWrite, Record,
+    Recovered, RefFile, RefMoveEntry, RefState, SortedView, TailRepair,
 };
 #[cfg(feature = "test-hooks")]
 pub use order_check::OrderCheckFs;
