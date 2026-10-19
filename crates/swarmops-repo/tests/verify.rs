@@ -11,7 +11,8 @@
 
 use std::fs;
 use std::io;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
@@ -21,10 +22,10 @@ use swarmops_core::{
 };
 use swarmops_repo::{LocalRepo, MismatchCause, RepoError, StoreError, VerifyProblem, VerifyReport};
 use swarmops_store::{
-    ChangesetMeta, FsObjectStore, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore, RealFs,
-    Record,
+    ChangesetMeta, FsObjectStore, FsOps, Index, Journal, Layout, MetaLock, MetaStore, ObjectStore,
+    RealFs, Record,
 };
-use swarmops_testkit::fs::{RecordingFs, When};
+use swarmops_testkit::fs::{Call, RecordingFs, Watch, Watched, When};
 use swarmops_testkit::repo::{blob, commit, delete, new_repo, path, put, put_as, signature};
 use tempfile::TempDir;
 
@@ -464,6 +465,88 @@ fn verify_racing_the_cut_of_a_failed_index_sync_fails_with_an_io_error() {
     }
     assert_eq!(records(), 3, "cut");
     assert_problems(&repo, Vec::new());
+}
+
+/// Records every call by name ([`Call::named`]), and cuts the last entry off `journal.off` right
+/// after its `nth` measurement (`file_len journal.off`), as a writer whose listing of its frame
+/// failed cuts the entry back off (storage spec §2 rule 3 (b)); 0 cuts nothing.
+struct CutAfterMeasuring {
+    nth: u64,
+    measured: AtomicU64,
+    calls: Mutex<Vec<String>>,
+}
+
+impl Watch for CutAfterMeasuring {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        self.calls.lock().unwrap().push(call.named());
+        Ok(())
+    }
+
+    fn after(&self, call: &Call<'_>) {
+        if call.named() == "file_len journal.off"
+            && self.measured.fetch_add(1, Ordering::SeqCst) + 1 == self.nth
+        {
+            let off = call.path();
+            let listed = fs::metadata(off).unwrap().len();
+            let file = fs::OpenOptions::new().write(true).open(off).unwrap();
+            file.set_len(listed - 8).unwrap();
+        }
+    }
+}
+
+/// A writer may cut the last entry off `journal.off` while verify reads the journal: an entry
+/// whose sync failed (storage spec §2 rule 3 (b)), its frame whole in `journal.log` and committed.
+/// Whichever of verify's measurements of `journal.off` the cut follows, verify measures it again
+/// before it reads on, and reports no damage. (Its read of the frames past the last listed one,
+/// and its check of the checkpoint, used to report the journal corrupt.)
+#[test]
+fn verify_reads_journal_off_again_when_a_writer_cuts_an_entry_it_measured() {
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
+    repo.cas_ref("main", None, Some(c2), "test/agent").unwrap();
+    let off = Layout::new(&root).journal_off();
+    let entries = fs::read(&off).unwrap();
+    let verify_cutting_after = |nth| {
+        fs::write(&off, &entries).unwrap();
+        let cutting = Arc::new(Watched(CutAfterMeasuring {
+            nth,
+            measured: AtomicU64::new(0),
+            calls: Mutex::new(Vec::new()),
+        }));
+        let racing = LocalRepo::open_with_fs(&root, Arc::clone(&cutting) as Arc<dyn FsOps>);
+        let report = racing.unwrap().verify(false).unwrap();
+        let calls = std::mem::take(&mut *cutting.calls.lock().unwrap());
+        (report, calls)
+    };
+    let measured = |calls: &[String]| -> Vec<usize> {
+        (calls.iter().enumerate())
+            .filter(|(_, call)| *call == "file_len journal.off")
+            .map(|(at, _)| at)
+            .collect()
+    };
+    let (report, calls) = verify_cutting_after(0);
+    assert_eq!(report.problems, []);
+    let measurements = measured(&calls).len();
+    assert!(measurements >= 3, "{calls:?}");
+    for nth in 1..=measurements {
+        let (report, calls) = verify_cutting_after(u64::try_from(nth).unwrap());
+        assert_eq!(report.problems, [], "the cut after measurement {nth}");
+        let cut_after = measured(&calls)[nth - 1];
+        assert_eq!(
+            calls[cut_after + 1],
+            "file_len journal.off",
+            "measured again after measurement {nth}: {calls:?}"
+        );
+        if nth == 1 {
+            let read_again = [
+                "file_len journal.off",
+                "file_len journal.off",
+                "file_len journal.log",
+            ];
+            assert_eq!(calls[cut_after..cut_after + 3], read_again, "{calls:?}");
+        }
+    }
 }
 
 #[test]

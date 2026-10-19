@@ -10,10 +10,11 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub enum RepoError {
     /// The store failed: I/O, a corrupt object file, damaged metadata, a writer lock held for
-    /// the whole wait ([`StoreError::Busy`], retryable), a journal append that failed and was
-    /// undone ([`StoreError::NotCommitted`], retryable), or a store that is not what the call needs
-    /// ([`StoreError::Format`]: `open` of a directory that holds no store, or one of a layout
-    /// this build does not read; [`StoreError::UnsupportedFs`]: a path under `/mnt/`).
+    /// the whole wait ([`StoreError::Busy`], retryable), commits landing during every round of a
+    /// snapshot ([`StoreError::SnapshotContended`], retryable), a journal append that failed and
+    /// was undone ([`StoreError::NotCommitted`], retryable), or a store that is not what the call
+    /// needs ([`StoreError::Format`]: `open` of a directory that holds no store, or one of a
+    /// layout this build does not read; [`StoreError::UnsupportedFs`]: a path under `/mnt/`).
     #[error(transparent)]
     Store(#[from] StoreError),
     /// An object is not canonical: a stored one does not decode, or the changeset a commit

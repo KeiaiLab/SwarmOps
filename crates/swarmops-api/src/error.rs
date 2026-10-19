@@ -92,7 +92,9 @@ error_codes! {
     /// again is safe. A failure after the commit point is no error: the operation succeeds,
     /// with a warning.
     IoTransient => "E_IO_TRANSIENT", EXIT_RETRYABLE, true;
-    /// Another writer held the store's metadata lock for the whole wait.
+    /// Another writer held the store's metadata lock for the whole wait, or commits landed during
+    /// every one of a read's attempts to take a snapshot; nothing was committed (a commit's
+    /// flushed objects may remain, for GC), and running the operation again can succeed.
     Busy => "E_BUSY", EXIT_RETRYABLE, true;
     /// A bug in SwarmOps, such as a caught panic.
     Internal => "E_INTERNAL", EXIT_ERROR, false;

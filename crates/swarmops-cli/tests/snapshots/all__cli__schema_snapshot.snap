@@ -1054,7 +1054,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_BUSY",
-          "description": "Another writer held the store's metadata lock for the whole wait.",
+          "description": "Another writer held the store's metadata lock for the whole wait, or commits landed during\nevery one of a read's attempts to take a snapshot; nothing was committed (a commit's\nflushed objects may remain, for GC), and running the operation again can succeed.",
           "type": "string"
         },
         {

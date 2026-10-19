@@ -216,6 +216,21 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   as media or archives) is read back in the buffer its file was read into, the 16-byte header
   drained off the front, instead of being copied out of it: reading a large one peaks at about
   its size, not twice that. It is still one read of the file.
+- A read gives up with the retryable `E_BUSY` when a commit lands during every one of its
+  snapshot's 32 rounds (the store's `SnapshotContended`), where it used to read the refs and the
+  frames again for as long as commits kept landing. `E_BUSY`'s description, which the schema
+  carries, says so: another writer held the lock for the whole wait, or commits landed during
+  every attempt to take a snapshot; either way nothing was committed (a commit's flushed objects
+  may remain, for GC). It used to say only the first.
+
+### Fixed
+
+#### M1.6: the code-review follow-ups (2026-10-19)
+
+- A reader that measured `journal.off` before a writer cut an entry off it (a listing whose sync
+  failed, or the zeroed entries a crash left at its end) reads it again instead of reporting the
+  journal corrupt: snapshots, paging, `reflog`, `journal_after` and `verify` no longer give a
+  transient `E_STORE_CORRUPT` or report a `JournalCorrupt` problem that a second run does not.
 
 ### Security
 

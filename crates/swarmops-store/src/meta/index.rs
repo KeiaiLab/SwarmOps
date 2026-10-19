@@ -170,12 +170,15 @@ impl Index {
     /// those frames for its overlay and a write transaction for its replay, so vouching costs
     /// them no read they did not make already. `read_past` runs once, after the files' lengths
     /// are measured, so that every record they hold has its frame among what it reads (a writer
-    /// appends a frame before it materializes it); its frames come back with the handle.
-    pub(crate) fn open_with_past(
+    /// appends a frame before it materializes it); its frames come back with the handle. Its
+    /// error is the caller's own type, which the index's errors convert into, so that the
+    /// caller can tell its own reasons for stopping from the index's ([`crate::MetaStore::read`]
+    /// takes another round when `journal.off` shrank as the frames were read).
+    pub(crate) fn open_with_past<E: From<StoreError>>(
         layout: &Layout,
         fs: Arc<dyn FsOps>,
-        read_past: impl FnOnce() -> Result<Vec<Frame>, StoreError>,
-    ) -> Result<(Index, Vec<Frame>), StoreError> {
+        read_past: impl FnOnce() -> Result<Vec<Frame>, E>,
+    ) -> Result<(Index, Vec<Frame>), E> {
         let mut index = Self::handle(layout, fs)?;
         let lens = index.lens()?;
         let past = read_past()?;
