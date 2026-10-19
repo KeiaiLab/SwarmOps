@@ -37,6 +37,15 @@ pub enum StoreError {
     /// Another writer held `meta/lock` for the whole wait. Retryable.
     #[error("the metadata store is busy: another writer holds meta/lock")]
     Busy,
+    /// A snapshot ([`crate::MetaStore::read`]) found the metadata changing in every one of its
+    /// rounds: in each, a commit landed while it read the ref files (the frames past the
+    /// checkpoint were no longer the ones it had read), or a writer cut an entry of `journal.off`
+    /// as it read them. It took no lock and wrote nothing. Retryable.
+    #[error("the metadata changed during each of {rounds} attempts to take a snapshot")]
+    SnapshotContended {
+        /// How many rounds it made: [`crate::MetaStore::SNAPSHOT_ROUNDS`].
+        rounds: u32,
+    },
     /// A journal frame failed its checks where a torn write cannot explain it: a frame that
     /// `journal.off` lists fails its CRC, a frame's records do not decode, or a frame or an
     /// offset entry is malformed.

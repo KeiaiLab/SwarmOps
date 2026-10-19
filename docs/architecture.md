@@ -265,7 +265,13 @@ stops at a torn tail), reads every ref file, then reads the frames again, and if
 frames it read (new ones, or a frame a failed sync or rewrite cut back and the next writer
 replaced at its seq), reads the refs and frames again. It then lays the frames past the
 checkpoint over the index and the refs in memory. Writers replace a ref file only after its
-frame is whole, so the refs it reads never run ahead of the frames it read.
+frame is whole, so the refs it reads never run ahead of the frames it read. It makes at most 32
+such rounds of reading the refs and the frames (`MetaStore::SNAPSHOT_ROUNDS`): when the frames
+changed in every round, commits kept landing as it read, and it gives up with the retryable
+`E_BUSY` rather than wait for them to stop. A `journal.off` that holds fewer entries when the
+frames are read than when it was measured is no damage: a writer cut an entry that was never
+genuine (one whose own sync failed, or zeroed ones a crash left at its end), and every reader of
+the journal (the snapshot's rounds, paging, `reflog`, `verify`) measures it again and reads on.
 
 ```mermaid
 flowchart TD
@@ -275,7 +281,8 @@ flowchart TD
   frames --> refs["Read every ref file"]
   refs --> again["Read the frames again"]
   again --> more{"Frames changed?"}
-  more -- "yes" --> refs
+  more -- "yes, within 32 rounds" --> refs
+  more -- "yes, in all 32 rounds" --> busy(["Give up: the<br/>retryable E_BUSY"])
   more -- "no" --> overlay["Lay the frames over the<br/>index and the refs, in memory"]
 ```
 
@@ -360,12 +367,14 @@ power-loss images a model of the disk rather than a real device: a test with a l
   is not strictly first-in, first-out, but the wait is bounded: with 32 processes making 1,000
   commits each through the binary, none got `E_BUSY` and the slowest commit took 918 ms
   ([perf.md](perf.md)).
-- **Readers** take no lock (above).
+- **Readers** take no lock (above). Under commits that land during every one of its 32 rounds,
+  a snapshot gives up with the retryable `E_BUSY` instead of reading on.
 
 What an agent sees (operations §4):
 
 - `commit` only appends, and does not fail because of another agent: concurrent commits both
-  succeed (short of a lock wait past `lock_timeout`, the retryable `E_BUSY`).
+  succeed (short of a lock wait past `lock_timeout`, or a snapshot of its parents that meets a
+  new commit in every one of its 32 rounds: the retryable `E_BUSY`).
 - Refs move only by compare-and-swap. When several agents expect the same target, exactly one
   wins each round; the others get `E_CAS_MISMATCH` and `details.actual`.
 - A read by changeset id is immutable, lock-free and cacheable. A ref named in a request is

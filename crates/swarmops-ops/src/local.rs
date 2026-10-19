@@ -102,7 +102,9 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_PATH_NOT_FOUND` `{path}`: `PathNotFound`.
 /// - `E_REF_NAME_INVALID` `{name}`: `RefName`, the repository's or the store's; the hint gives
 ///   the ref grammar.
-/// - `E_BUSY` (retryable): the store's `Busy`.
+/// - `E_BUSY` (retryable): the store's `Busy` (a writer's lock wait ran out) or
+///   `SnapshotContended` (a read's snapshot rounds ran out); either way nothing was committed (a
+///   commit's flushed objects may remain, for GC). The hint says which, and to retry.
 /// - `E_NOT_A_REPO`, while opening: the store's `Format`, and an `Io` error of kind
 ///   `NotADirectory`. The hint is `swarmops init <path>` when the path holds no `FORMAT` file;
 ///   with one, the store is damaged or of a layout this build does not read.

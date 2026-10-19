@@ -22,7 +22,10 @@
 //!
 //! Writers hold [`crate::MetaLock`]; the journal itself takes no lock. Writes go through
 //! [`FsOps`]. Reads take no lock: they measure `journal.off` before `journal.log` (with
-//! [`FsOps::file_len`]) and never measure `journal.off` again after. A frame listed in that
+//! [`FsOps::file_len`]) and never measure `journal.off` again once `journal.log` is measured;
+//! one that finds `journal.off` holding fewer entries than it measured (a writer cut entries that
+//! were never genuine: one whose own append failed, or zeroed or partial ones a crash left at its
+//! end) starts over before it measures `journal.log`, up to three times. A frame listed in that
 //! snapshot was synced before its entry was written, so it is whole in the `journal.log`
 //! measured after it, and damage to it is [`StoreError::JournalCorrupt`] for readers too;
 //! they skip only an unlisted torn tail (or an append still in progress) silently, and drop,
@@ -47,6 +50,13 @@ use crate::layout::Layout;
 
 /// The size of one `journal.off` entry.
 const ENTRY_LEN: u64 = 8;
+
+/// How many times [`Journal::frames_from`] and [`Journal::tail_frames_from`] start over when
+/// `journal.off` holds fewer entries when they read them than when they measured it. Only a
+/// writer cuts it, under the lock, and only entries that were never genuine (one whose own append
+/// failed, or zeroed or partial ones a crash left at its end), so the next read nearly always
+/// finds it still; a shrink every time is reported as damage.
+const OFF_REREADS: u32 = 3;
 
 /// A handle on one store's metadata journal.
 pub struct Journal {
@@ -83,6 +93,20 @@ struct Tail {
     /// torn tail: set by a tail check and by each append, cleared before anything that
     /// could leave it wrong.
     checked: bool,
+}
+
+/// What one read of the frames ([`Journal::frames_from`], [`Journal::tail_frames_from`]) gives
+/// when it does not fail.
+enum Attempt {
+    /// The frames.
+    Read(Vec<Frame>),
+    /// `journal.off` held fewer entries when they were read than it did when measured: a writer
+    /// has cut entries that were never genuine since the measurement, and the read starts over.
+    /// Past [`OFF_REREADS`], [`StoreError::JournalCorrupt`] at `offset`.
+    Shrunk {
+        /// Where the read reports the journal corrupt once it gives up.
+        offset: u64,
+    },
 }
 
 impl Journal {
@@ -205,24 +229,29 @@ impl Journal {
     /// listed then was whole and durable before its entry was written, so it is whole in
     /// `journal.log` as measured after. One that is cut short or missing, fails its CRC or
     /// does not decode is [`StoreError::JournalCorrupt`], as is an entry that does not point
-    /// where the previous frame ends, and a `journal.off` that holds fewer entries when they
-    /// are read than it did when measured (a writer dropped entries that were never genuine):
-    /// that is reported at the first wanted frame's start, or 0 if its entry is gone too.
-    /// Zeroed entries at the end of `journal.off` list nothing and are dropped first, as
+    /// where the previous frame ends. A `journal.off` that holds fewer entries when they are read
+    /// than it did when measured is no damage: a writer cut entries that were never genuine (one
+    /// whose own append failed, or zeroed or partial ones a crash left at its end), and the read
+    /// starts over, measuring `journal.off` again, up to three times; a shrink every time is
+    /// [`StoreError::JournalCorrupt`] at the first wanted frame's start, or 0 if its entry is gone
+    /// too. Zeroed entries at the end of `journal.off` list nothing and are dropped first, as
     /// recovery drops them (see [`Journal::tail_frames_from`]).
     pub fn frames_from(&self, first: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
-        let listed = self.listed().map_err(|e| match e {
-            // journal.off cut since it was measured: entries of the snapshot are gone.
-            StoreError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                StoreError::JournalCorrupt { offset: 0 }
-            }
-            e => e,
-        })?;
+        reread(|| self.frames_from_once(first, limit))
+    }
+
+    /// One read of [`Journal::frames_from`]: [`Attempt::Shrunk`] where `journal.off` holds fewer
+    /// entries when they are read than it did when measured.
+    fn frames_from_once(&self, first: u64, limit: usize) -> Result<Attempt, StoreError> {
+        // journal.off cut since it was measured: entries of the snapshot are gone.
+        let Some(listed) = unless_cut(self.listed())? else {
+            return Ok(Attempt::Shrunk { offset: 0 });
+        };
         let wanted = u64::try_from(limit)
             .unwrap_or(u64::MAX)
             .min(listed.saturating_sub(first));
         if wanted == 0 {
-            return Ok(Vec::new());
+            return Ok(Attempt::Read(Vec::new()));
         }
         // The previous frame's entry (the first wanted frame starts where that frame ends),
         // the wanted frames' entries, and the next one (where the last wanted frame ends).
@@ -233,7 +262,7 @@ impl Journal {
         if to_u64(entries.len()) != count {
             // journal.off was cut since it was measured: entries of the snapshot are gone.
             let offset = entries.get(skip).copied().unwrap_or(0);
-            return Err(StoreError::JournalCorrupt { offset });
+            return Ok(Attempt::Shrunk { offset });
         }
         let previous = previous.map(|_| entries[0]);
         let offsets = &entries[skip..];
@@ -273,7 +302,7 @@ impl Journal {
         {
             return Err(StoreError::JournalCorrupt { offset: next });
         }
-        Ok(frames)
+        Ok(Attempt::Read(frames))
     }
 
     /// Every frame from `offset` to the end of `journal.log`, read with one `read_at`: what
@@ -296,30 +325,52 @@ impl Journal {
     /// short (an append in progress looks the same), failing its CRC, or whose length reads 0
     /// (zeros to the end of the file among them; see [`Journal::truncate_torn_tail`]). Anything
     /// else, an `offset` that is not a frame boundary included, is
-    /// [`StoreError::JournalCorrupt`]; a `journal.off` that holds fewer entries when they are
-    /// read than it did when measured (a writer dropped entries that were never genuine) is
-    /// reported at `offset`.
+    /// [`StoreError::JournalCorrupt`]. A `journal.off` that holds fewer entries when they are
+    /// read than it did when measured is no damage, as [`Journal::frames_from`] says: the read
+    /// starts over, up to three times, and a shrink every time is reported at `offset`.
     pub fn tail_frames_from(&self, offset: u64) -> Result<Vec<Frame>, StoreError> {
+        reread(|| self.tail_frames_once(offset))
+    }
+
+    /// [`Journal::tail_frames_from`] read once: `None` where `journal.off` holds fewer entries
+    /// when they are read than it did when measured, for a caller that counts such a shrink
+    /// itself ([`crate::MetaStore::read`] takes another of its rounds).
+    pub(crate) fn tail_frames_from_unless_shrunk(
+        &self,
+        offset: u64,
+    ) -> Result<Option<Vec<Frame>>, StoreError> {
+        match self.tail_frames_once(offset)? {
+            Attempt::Read(frames) => Ok(Some(frames)),
+            Attempt::Shrunk { .. } => Ok(None),
+        }
+    }
+
+    /// One read of [`Journal::tail_frames_from`]: [`Attempt::Shrunk`] where `journal.off` holds
+    /// fewer entries when they are read than it did when measured.
+    fn tail_frames_once(&self, offset: u64) -> Result<Attempt, StoreError> {
         // journal.off cut since it was measured: entries of the snapshot are gone.
-        let gone = |e: StoreError| match e {
-            StoreError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
-                StoreError::JournalCorrupt { offset }
-            }
-            e => e,
+        let shrunk = || Ok(Attempt::Shrunk { offset });
+        let Some(listed) = unless_cut(self.listed())? else {
+            return shrunk();
         };
-        let listed = self.listed().map_err(gone)?;
-        let first = self.first_at_or_after(offset, listed).map_err(gone)?;
+        let Some(first) = unless_cut(self.first_at_or_after(offset, listed))? else {
+            return shrunk();
+        };
         // Where each listed frame from `first` on starts, and where the listed frame just
         // before the read and the one before that start.
         let entries = self.entries(first, listed - first)?;
         if to_u64(entries.len()) != listed - first {
-            return Err(StoreError::JournalCorrupt { offset });
+            return shrunk();
         }
         let before = match first.checked_sub(1) {
-            Some(before) => Some((
-                self.entry_before(before).map_err(gone)?,
-                self.entry(before).map_err(gone)?,
-            )),
+            Some(before) => {
+                let previous = unless_cut(self.entry_before(before))?;
+                let (Some(previous), Some(start)) = (previous, unless_cut(self.entry(before))?)
+                else {
+                    return shrunk();
+                };
+                Some((previous, start))
+            }
             None => None,
         };
         // Only now journal.log, which holds whole every frame listed above.
@@ -383,7 +434,7 @@ impl Journal {
         if let Some(entry) = listed_at(seq) {
             return Err(StoreError::JournalCorrupt { offset: entry });
         }
-        Ok(frames)
+        Ok(Attempt::Read(frames))
     }
 
     /// Brings the journal to a clean end after a crash, and returns where `journal.log`
@@ -790,6 +841,33 @@ impl Journal {
             }
         }
         Ok(low)
+    }
+}
+
+/// The frames `read` gives, read again while it finds `journal.off` shrunk, at most
+/// [`OFF_REREADS`] times more; a shrink past that is [`StoreError::JournalCorrupt`] at the
+/// offset the last one names. Each read starts with its own measurement of `journal.off`, and
+/// finds the shrink before it measures `journal.log`.
+fn reread(read: impl Fn() -> Result<Attempt, StoreError>) -> Result<Vec<Frame>, StoreError> {
+    let mut rereads = 0;
+    loop {
+        match read()? {
+            Attempt::Read(frames) => return Ok(frames),
+            Attempt::Shrunk { offset } if rereads == OFF_REREADS => {
+                return Err(StoreError::JournalCorrupt { offset });
+            }
+            Attempt::Shrunk { .. } => rereads += 1,
+        }
+    }
+}
+
+/// What a read of `journal.off` entries gave, or `None` where it met the end of the file before
+/// an entry it was measured to hold (`UnexpectedEof`): a writer cut it since.
+fn unless_cut<T>(read: Result<T, StoreError>) -> Result<Option<T>, StoreError> {
+    match read {
+        Ok(read) => Ok(Some(read)),
+        Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e),
     }
 }
 

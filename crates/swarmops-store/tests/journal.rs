@@ -18,8 +18,8 @@ use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
 use std::slice;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -32,7 +32,7 @@ use swarmops_store::{Frame, FsOps, Journal, Layout, MetaLock, RealFs, Record, St
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::{FsyncModelFs, checked};
-use swarmops_testkit::fs::{Hook, RecordingFs, When};
+use swarmops_testkit::fs::{Call, Hook, RecordingFs, Watch, Watched, When};
 use swarmops_testkit::store::{append_bytes, file_len, new_root, real_fs, set_len};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::test_name;
@@ -959,15 +959,16 @@ fn readers_measure_off_before_log() {
 }
 
 #[test]
-fn journal_off_cut_after_a_reader_measured_it_is_journal_corrupt() {
+fn journal_off_cut_after_a_reader_measured_it_is_read_again() {
     // A reader measures journal.off, then reads the entries it holds. If journal.off is
-    // shorter by then (a writer's recovery dropped entries that snapshot held, which are never
-    // genuine ones), the snapshot is not one: JournalCorrupt, never fewer frames read
-    // silently.
+    // shorter by then, a writer has cut entries that were never genuine ones (an entry whose own
+    // append failed, or zeroed ones a crash left at the end): the reader measures journal.off
+    // again, before it measures journal.log, and reads what it lists then. The frame whose entry
+    // was cut is whole in journal.log, a frame not listed yet.
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
-    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
-    journal
+    let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    let second = journal
         .append_frame(&[child_changeset(), main_created()])
         .unwrap(); // bytes 84..257
     let cut_to_one_entry = || -> Hook {
@@ -979,33 +980,61 @@ fn journal_off_cut_after_a_reader_measured_it_is_journal_corrupt() {
             Box::new(cut),
         )
     };
-    let reads: [(&str, Read, u64); 3] = [
+    let again = ["file_len journal.off", "file_len journal.off"];
+    let then_log = [&again[..], &["file_len journal.log"]].concat();
+    let both = [first.clone(), second];
+    let reads: [(&str, Read, &[Frame], &[&str]); 3] = [
         (
             "tail_frames_from(0)",
             |reader| reader.tail_frames_from(0),
-            0,
+            &both,
+            &then_log,
         ),
-        ("frames_from(0, 10)", |reader| reader.frames_from(0, 10), 0),
+        (
+            "frames_from(0, 10)",
+            |reader| reader.frames_from(0, 10),
+            slice::from_ref(&first),
+            &then_log,
+        ),
+        // It finds no frame to read, so it returns before it measures journal.log.
         (
             "frames_after(0, 10)",
             |reader| reader.frames_after(0, 10),
-            0,
+            &[],
+            &again,
         ),
     ];
-    for (what, read, offset) in reads {
+    for (what, read, frames, measured) in reads {
         set_len(layout.journal_off(), 8);
         append_bytes(layout.journal_off(), &84_u64.to_le_bytes());
-        let (reader, _) = racing_journal(&layout, Some(cut_to_one_entry()));
-        assert_corrupt_at(read(&reader), offset, what);
+        let (reader, calls) = racing_journal(&layout, Some(cut_to_one_entry()));
+        assert_eq!(read(&reader).unwrap(), frames, "{what}");
+        assert_eq!(calls(), measured, "{what}");
     }
 
-    // Three frames, journal.off cut to two entries: the binary search finds the entries it
-    // reads, and the entries read after it come up one short.
+    // A writer that cuts journal.off back each time the reader has measured it: the reader reads
+    // three times more, then reports the journal corrupt where the shrink would have, before it
+    // ever measures journal.log.
+    let entries: Vec<u8> = [0_u64, 84].iter().flat_map(|e| e.to_le_bytes()).collect();
+    let cutting = Arc::new(Watched(CutAfterEachMeasurement {
+        entries,
+        calls: Mutex::new(Vec::new()),
+    }));
+    let reader = Journal::open(&layout, Arc::clone(&cutting) as Arc<dyn FsOps>).unwrap();
+    for (what, read, _, _) in reads {
+        assert_corrupt_at(read(&reader), 0, what);
+        let calls = std::mem::take(&mut *cutting.calls.lock().unwrap());
+        assert_eq!(calls, ["file_len journal.off"; 4], "{what}");
+    }
+
+    // Three frames, journal.off cut from three entries to two: the reader meets the cut reading
+    // the last entry it measured, reads again, and finds the third frame whole in journal.log,
+    // not listed.
     let (_root, layout) = new_root();
     let journal = new_journal(&layout);
-    for n in 1..=3 {
-        journal.append_frame(&[compacted(n)]).unwrap(); // bytes 0..19, 19..38, 38..57
-    }
+    let all: Vec<Frame> = (1..=3)
+        .map(|n| journal.append_frame(&[compacted(n)]).unwrap()) // bytes 0..19, 19..38, 38..57
+        .collect();
     let cut_to_two_entries = || -> Hook {
         let off = layout.journal_off();
         let cut = move || set_len(&off, 16);
@@ -1015,18 +1044,43 @@ fn journal_off_cut_after_a_reader_measured_it_is_journal_corrupt() {
             Box::new(cut),
         )
     };
-    for from in [0, 19] {
+    for (from, frames) in [(0, &all[..]), (19, &all[1..])] {
         let what = format!("tail_frames_from({from})");
         let off: Vec<u8> = [0_u64, 19, 38]
             .iter()
             .flat_map(|e| e.to_le_bytes())
             .collect();
         fs::write(layout.journal_off(), off).unwrap();
-        let (reader, _) = racing_journal(&layout, Some(cut_to_two_entries()));
-        assert_corrupt_at(reader.tail_frames_from(from), from, &what);
+        let (reader, calls) = racing_journal(&layout, Some(cut_to_two_entries()));
+        assert_eq!(reader.tail_frames_from(from).unwrap(), frames, "{what}");
+        assert_eq!(calls(), then_log, "{what}");
     }
 }
 
+/// Restores `journal.off` to `entries` right before each measurement of it, and cuts it back to
+/// its first entry right after: a writer that cuts an entry (one whose own append failed, say)
+/// every time a reader has measured. Records every call, by name ([`Call::named`]).
+struct CutAfterEachMeasurement {
+    entries: Vec<u8>,
+    calls: Mutex<Vec<String>>,
+}
+
+impl Watch for CutAfterEachMeasurement {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        let named = call.named();
+        if named == "file_len journal.off" {
+            fs::write(call.path(), &self.entries).unwrap();
+        }
+        self.calls.lock().unwrap().push(named);
+        Ok(())
+    }
+
+    fn after(&self, call: &Call<'_>) {
+        if call.named() == "file_len journal.off" {
+            set_len(call.path(), 8);
+        }
+    }
+}
 #[test]
 fn a_zeroed_entry_before_the_end_of_journal_off_is_journal_corrupt_for_readers_too() {
     // Zeroed entries at the end of journal.off are dropped, by readers and recovery alike

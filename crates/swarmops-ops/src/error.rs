@@ -90,6 +90,8 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
     match e {
         StoreError::Busy => error(ErrorCode::Busy, message)
             .with_hint("retry: another writer held the store's lock for the whole wait"),
+        StoreError::SnapshotContended { .. } => error(ErrorCode::Busy, message)
+            .with_hint("retry: commits landed during every attempt to take a read snapshot"),
         StoreError::Format(what) => match during {
             During::Open(at) => not_a_repo(at, what),
             During::Init(_) | During::Op => corrupt(message, during, "swarmops verify"),
@@ -336,6 +338,8 @@ mod tests {
         let store = RepoError::Store;
         let io = |kind: io::ErrorKind| store(StoreError::Io(io::Error::new(kind, "boom")));
         maps(store(StoreError::Busy), op, ErrorCode::Busy);
+        let contended = StoreError::SnapshotContended { rounds: 32 };
+        maps(store(contended), op, ErrorCode::Busy);
         let format = || store(StoreError::Format("no FORMAT file".into()));
         maps(format(), During::Open(at), ErrorCode::NotARepo);
         maps(format(), During::Init(at), ErrorCode::StoreCorrupt);
@@ -410,6 +414,23 @@ mod tests {
         );
         let hint = error.hint.unwrap_or_default();
         assert!(hint.contains("same command"), "{hint}");
+    }
+
+    /// A snapshot whose every round met a new frame took no lock and wrote nothing: `E_BUSY`,
+    /// retryable, no details, and a hint that names the snapshot, not the lock wait.
+    #[test]
+    fn a_contended_snapshot_is_busy_with_a_read_hint() {
+        let contended = StoreError::SnapshotContended { rounds: 32 };
+        let error = repo_error(RepoError::Store(contended), During::Op);
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_BUSY", 4, true)
+        );
+        assert!(error.details.is_empty(), "{:?}", error.details);
+        assert!(error.message.contains("32"), "{}", error.message);
+        let hint = error.hint.unwrap_or_default();
+        assert!(hint.contains("snapshot"), "{hint}");
+        assert!(!hint.contains("lock"), "{hint}");
     }
 
     /// An `init` that made the store whole but failed to read it back for its report says

@@ -95,15 +95,14 @@ left).
   `REPO` file or fail; two concurrent creations of a metadata store on one root are unsupported
   too. A no-clobber `REPO` link is the cheap hardening. *Target: M5 (with the workspace
   registry). Found: M1 Task 2c; final review, question 1.*
-- **A reader's snapshot loop has no cap.** A reader re-reads the refs and frames until the
-  frames it reads hold still, without a limit or back-off; under sustained commits with many
-  frames past the checkpoint it could keep retrying. *Unscheduled. Found: M1 Task 2c.*
-- **One transient error after a crash, or after a failed `journal.off` listing.** A reader that
-  races the first repair after a crash, or a writer's cut of a `journal.off` entry whose sync
-  failed (storage spec §2 rule 3 (b)), can see `E_STORE_CORRUPT` once, and a `verify` that races
-  that cut can report a `JournalCorrupt` problem; reading again succeeds, and a `verify` run
-  afterwards reports no problem. *Target: M1.6 (the snapshot round re-reads a `journal.off` that
-  shrank; `verify` and paging too). Found: M1 final review; M1.5 final review.*
+- **A read can give up under sustained commits.** A snapshot reads the refs and the frames again
+  until they hold still, in at most 32 rounds; when a commit lands during every round, it fails
+  with the retryable `E_BUSY` rather than wait. The bound makes no such reader progress: each
+  round reads every ref file and every frame past the checkpoint again. Reading again only the
+  refs the new frames move, or starting over from a fresh checkpoint, is the next step if a
+  measurement shows readers giving up; bench-compare's W6 ([perf.md](perf.md)) measured a
+  snapshot and lookup beside a writer's 64 commits/s at 87.3 µs p50 and 5.0 ms at worst.
+  *Unscheduled. Found: M1 Task 2c; the 2026-10-16 code review (Q9).*
 - **Readers may return state that is not durable yet.** A reader sees a frame before its
   `fdatasync` completes, so a power loss, or a failed sync of that frame (which the writer then
   cuts back), can take back state a local reader returned (operations spec §4 says what agents

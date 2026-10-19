@@ -47,9 +47,17 @@
 //! the frames it read before (new ones have appeared, or the next writer's frame has taken the
 //! place of one that a failed sync or rewrite cut back, storage §2 rule 3 (a)/(c)), a ref file
 //! may already show a move of a frame it did not read, so it reads the files and the frames
-//! again. The frames past the checkpoint (usually 0 to 31, and more only after a crash) then
-//! apply on top in memory: their changesets the index handle does not count, and their ref
-//! moves the ref files do not show yet.
+//! again. A `journal.off` that holds fewer entries when the frames are read than when it was
+//! measured is no damage either (a writer cut entries that were never genuine: one whose own
+//! append failed, storage §2 rule 3 (b), or zeroed ones a crash left at its end): it reads the
+//! files and the frames again, and opens the index again if the cut met that open. Each such
+//! reading of the files and the frames is a round. When the metadata changed during every one
+//! of [`MetaStore::SNAPSHOT_ROUNDS`] (32) rounds, commits kept landing as it read, and it gives
+//! up with [`StoreError::SnapshotContended`] (retryable) rather than wait for them to stop. It
+//! reads `journal.ckpt` once, so each round reads every frame past that checkpoint, which stays
+//! a frame boundary as the journal grows. The frames past the checkpoint (usually 0 to 31, and
+//! more only after a crash) then apply on top in memory: their changesets the index handle does
+//! not count, and their ref moves the ref files do not show yet.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -149,6 +157,22 @@ pub enum CasResult {
     },
 }
 
+/// What stopped an index open of [`MetaStore::read`] before it gave the index.
+enum NotOpened {
+    /// `journal.off` held fewer entries when the frames past the checkpoint were read than it
+    /// did when measured (a writer cut entries that were never genuine): the round is taken, and
+    /// the next one opens the index again.
+    Shrunk,
+    /// The open failed, and the read fails with it.
+    Failed(StoreError),
+}
+
+impl From<StoreError> for NotOpened {
+    fn from(e: StoreError) -> NotOpened {
+        NotOpened::Failed(e)
+    }
+}
+
 /// One journal record, as [`MetaRead::journal_after`] lists them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalEntry {
@@ -180,6 +204,14 @@ pub struct RefMoveEntry {
 }
 
 impl MetaStore {
+    /// How many rounds [`MetaStore::read`] makes at most. A round reads every ref file and the
+    /// frames past the checkpoint again, and a snapshot takes one more only when the metadata
+    /// changed during the last: a commit landed, or a writer cut an entry of `journal.off` as
+    /// the frames were read. With the frames two fdatasyncs apart at least, a second round is rare
+    /// and a third rarer still, and a load that lands a frame during every round is not waited
+    /// out by more of them: the snapshot gives up with [`StoreError::SnapshotContended`] instead.
+    pub const SNAPSHOT_ROUNDS: u32 = 32;
+
     /// Creates the metadata store of the store rooted at `dir` on the real filesystem: see
     /// [`MetaStore::create_with_fs`].
     pub fn create(dir: &Utf8Path) -> Result<MetaStore, StoreError> {
@@ -263,36 +295,54 @@ impl MetaStore {
         self.parallelism = threads;
     }
 
-    /// A snapshot of the metadata as committed now, taken without a lock: see the module
-    /// documentation.
+    /// A snapshot of the metadata as committed now, taken without a lock in at most
+    /// [`MetaStore::SNAPSHOT_ROUNDS`] rounds, or [`StoreError::SnapshotContended`] if the
+    /// metadata changed during every one: see the module documentation.
     pub fn read(&self) -> Result<MetaRead<'_>, StoreError> {
         let ckpt = self.journal.ckpt()?;
-        // The index after the checkpoint: everything before the checkpoint was in the index
-        // files before the checkpoint moved past it. The frames past it, read once the index
-        // files are measured, vouch for the index's records past it.
-        let (index, mut frames) =
-            Index::open_with_past(&self.layout, Arc::clone(&self.fs), || {
-                self.journal.tail_frames_from(ckpt)
-            })?;
-        let files = loop {
+        let mut opened = None;
+        for _ in 0..Self::SNAPSHOT_ROUNDS {
+            // The index after the checkpoint, opened in the first round (and again after a round
+            // whose open met a cut journal.off): everything before the checkpoint was in the
+            // index files before the checkpoint moved past it. The frames past it, read once the
+            // index files are measured, vouch for the index's records past it. A journal.off that
+            // a writer cut as they were read takes the round.
+            let (index, frames) = if let Some(opened) = opened.take() {
+                opened
+            } else {
+                let past = || {
+                    let frames = self.journal.tail_frames_from_unless_shrunk(ckpt)?;
+                    frames.ok_or(NotOpened::Shrunk)
+                };
+                match Index::open_with_past(&self.layout, Arc::clone(&self.fs), past) {
+                    Ok(opened) => opened,
+                    Err(NotOpened::Shrunk) => continue,
+                    Err(NotOpened::Failed(e)) => return Err(e),
+                }
+            };
             let files = refs::read_all(&self.layout, &*self.fs)?;
             // A writer replaces ref files only after its frame is whole in the journal, so if the
             // frames are the ones read before (none new, and none that a failed sync or rewrite cut
             // back, storage §2 rule 3 (a)/(c), and the next writer replaced at its seq), the files
-            // show none past `frames`.
-            let again = self.journal.tail_frames_from(ckpt)?;
-            if again == frames {
-                break files;
+            // show none past `frames`. A journal.off cut as they were read again says nothing
+            // about the files, and takes the round all the same.
+            match self.journal.tail_frames_from_unless_shrunk(ckpt)? {
+                Some(again) if again == frames => {
+                    let overlay = Overlay::new(&index, &frames, files)?;
+                    return Ok(MetaRead {
+                        store: self,
+                        ckpt,
+                        index,
+                        frames,
+                        overlay,
+                    });
+                }
+                Some(again) => opened = Some((index, again)),
+                None => opened = Some((index, frames)),
             }
-            frames = again;
-        };
-        let overlay = Overlay::new(&index, &frames, files)?;
-        Ok(MetaRead {
-            store: self,
-            ckpt,
-            index,
-            frames,
-            overlay,
+        }
+        Err(StoreError::SnapshotContended {
+            rounds: Self::SNAPSHOT_ROUNDS,
         })
     }
 

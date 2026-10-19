@@ -11,8 +11,8 @@ use std::fs::{self, OpenOptions};
 use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::process::{Command, Output};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -2000,6 +2000,134 @@ fn a_snapshot_whose_index_a_writer_cuts_after_it_opened_fails_with_an_io_error()
     }
 }
 
+/// Records 0 to 2 of a chain through `writer` (frames 0 to 2), flushed, so that the checkpoint
+/// passes them, then records 3 and 4 past it (frames 3 and 4); then a payload byte of frame 2
+/// flipped, so that its CRC fails. A writer's tail check reads only the last listed frame whole,
+/// and the headers of the two before it, so the writer still writes. A reader whose index holds
+/// none of the changesets past the checkpoint among its last records walks the journal back
+/// from the checkpoint to its last changeset, meets frame 2, and counts the records by their
+/// lengths.
+fn chain_past_a_damaged_frame(writer: &MetaStore, root: &Utf8Path) {
+    for n in 0..3 {
+        insert(writer, &[chained(n)]);
+    }
+    writer.flush().unwrap();
+    for n in 3..5 {
+        insert(writer, &[chained(n)]);
+    }
+    assert_eq!(chained_lens(root), chained_want(5));
+    let layout = Layout::new(root);
+    let frame_2 = usize::try_from(frames(root)[2].offset).unwrap();
+    let mut log = fs::read(layout.journal_log()).unwrap();
+    log[frame_2 + 12] ^= 0x01; // a payload byte: its CRC fails
+    fs::write(layout.journal_log(), log).unwrap();
+}
+
+/// Where the journal cannot vouch for the index's records past the checkpoint, the index counts
+/// them by their lengths ([`chain_past_a_damaged_frame`]); a writer may cut those records after
+/// they were measured (a flush whose index sync fails, [`Index::truncate_to`]). The count reads
+/// `par.col` as the cut leaves it, and counts the records the cut keeps, as a vouched count does:
+/// every record the checkpoint passed, the changesets past it coming from the frames. (It read
+/// `par.col` as it was measured, and failed with an I/O error, `UnexpectedEof`, on a single cut,
+/// where storage spec §3 allows the error only if the index is cut again meanwhile.)
+#[test]
+fn counting_by_length_as_a_writer_cuts_counts_the_records_the_cut_keeps() {
+    let (_dir, root) = new_root();
+    let (writer, fail) = failing_store(&root);
+    chain_past_a_damaged_frame(&writer, &root);
+    fail.set("sync_data ids.col");
+    // The reader's first FsOps call measures journal.off, to read the frames past the
+    // checkpoint, once it has measured the index files: right then, the writer's flush fails its
+    // index sync and cuts records 3 and 4. The reader's index then holds none of their changesets.
+    let (fs, _calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "file_len journal.off".to_owned(),
+        When::Before,
+        Box::new(move || {
+            let cut = writer.flush();
+            assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+
+    let read = match reader.read() {
+        Ok(read) => read,
+        Err(e) => panic!("expected a snapshot, got {e:?}"),
+    };
+    assert_eq!(chained_lens(&root), chained_want(3), "cut");
+    assert_eq!(read.count_changesets().unwrap(), 5);
+    for n in 0..5 {
+        let got = read.changeset(id(n)).unwrap();
+        assert_eq!(got, Some(chained_stored(n)), "changeset {n}");
+    }
+}
+
+/// The same, with the reader counting by length while the cut is made: after the writer has cut
+/// `ids.col`, which it cuts first, and before it cuts `par.col`. What `ids.col` holds once
+/// `par.col` is read bounds the count, so the snapshot counts the records the cut keeps, not
+/// records whose ids are gone, which it would look for in `ids.col` and fail on with an I/O
+/// error, the index cut only once.
+#[test]
+fn counting_by_length_in_the_middle_of_a_cut_counts_the_records_the_cut_keeps() {
+    let (_dir, root) = new_root();
+    let (paused_tx, paused_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    // The writer's cut waits before par.col until the reader has counted.
+    let fs = fs.with_hook((
+        "truncate par.col".to_owned(),
+        When::Before,
+        Box::new(move || {
+            paused_tx.send(()).unwrap();
+            let resumed = resume_rx.recv_timeout(PATIENCE);
+            resumed.expect("the reader counts");
+        }),
+    ));
+    let mut writer = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
+    writer.set_parallelism(1);
+    chain_past_a_damaged_frame(&writer, &root);
+    fail.set("sync_data ids.col");
+    // The reader's first FsOps call measures journal.off, once it has measured the index files:
+    // right then, the writer's flush starts, and the reader goes on once the cut has reached
+    // par.col.
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let (fs, _calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "file_len journal.off".to_owned(),
+        When::Before,
+        Box::new(move || {
+            go_tx.send(()).unwrap();
+            let paused = paused_rx.recv_timeout(PATIENCE);
+            paused.expect("the writer cuts ids.col");
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+
+    let writer = &writer;
+    thread::scope(|scope| {
+        let flush = scope.spawn(move || {
+            let go = go_rx.recv_timeout(PATIENCE);
+            go.expect("the reader opens its index");
+            writer.flush()
+        });
+        let read = reader.read();
+        resume_tx.send(()).unwrap();
+        let cut = flush.join().unwrap();
+        assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+        let read = match read {
+            Ok(read) => read,
+            Err(e) => panic!("expected a snapshot, got {e:?}"),
+        };
+        assert_eq!(chained_lens(&root), chained_want(3), "cut");
+        assert_eq!(read.count_changesets().unwrap(), 5);
+        for n in 0..5 {
+            let got = read.changeset(id(n)).unwrap();
+            assert_eq!(got, Some(chained_stored(n)), "changeset {n}");
+        }
+    });
+}
+
 /// How many frames `journal.off` at `root` lists.
 fn listed(root: &Utf8Path) -> u64 {
     file_len(Layout::new(root).journal_off()) / 8
@@ -3192,6 +3320,209 @@ fn snapshot_over_a_cut_and_replaced_frame(
     ));
     let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
     (dir, reader, calls)
+}
+
+/// How long the threads of a test wait for one another before the test fails: far longer than
+/// any hand-off takes, so that only a hang gets there.
+const PATIENCE: Duration = Duration::from_secs(60);
+
+/// Before each read of `main`'s file, while `left` is not 0, commits one more transaction through
+/// `writer`, a store of its own on the same root: changeset `next` on `next - 1`, with `main`
+/// moved from `next - 1` to it, `next` counting up.
+struct CommitBeforeReadingMain {
+    writer: MetaStore,
+    left: AtomicU32,
+    next: AtomicU64,
+}
+
+impl Watch for CommitBeforeReadingMain {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        let commits = call.named() == "read main"
+            && self
+                .left
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok();
+        if commits {
+            let n = self.next.fetch_add(1, Ordering::SeqCst);
+            let mut write = self.writer.write().unwrap();
+            write.insert_changeset(cs(n, &[n - 1])).unwrap();
+            write
+                .cas_ref("main", Some(id(n - 1)), Some(id(n)), ACTOR)
+                .unwrap();
+            write.commit().unwrap();
+        }
+        Ok(())
+    }
+}
+
+/// A store holding changeset 1 with `main` at it (version 1), and a reader of it that, before
+/// each of its reads of `main`'s file, `commits` times, commits changeset n on n - 1 and moves
+/// `main` to it, n counting up from 2 ([`CommitBeforeReadingMain`]).
+fn reader_racing_commits(commits: u32) -> (TempDir, Utf8PathBuf, MetaStore) {
+    let (dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]); // frame 0
+    cas(&store, "main", None, Some(1)); // frame 1
+    drop(store);
+    let racing = CommitBeforeReadingMain {
+        writer: open_checked(&root).unwrap(),
+        left: AtomicU32::new(commits),
+        next: AtomicU64::new(2),
+    };
+    let reader = MetaStore::open_with_fs(&root, checked(Watched(racing))).unwrap();
+    (dir, root, reader)
+}
+
+/// A snapshot reads the ref files and the frames past the checkpoint again when a commit lands
+/// in between, but not without end: when one lands during every one of its
+/// [`MetaStore::SNAPSHOT_ROUNDS`] rounds, it gives up with [`StoreError::SnapshotContended`]
+/// (the API's retryable `E_BUSY`) and leaves nothing behind. (It used to read again for as long
+/// as commits kept landing.) The 30th commit here moves the checkpoint while the reader holds
+/// the one it read first.
+#[test]
+fn a_snapshot_gives_up_as_contended_when_every_round_sees_a_new_frame() {
+    let rounds = MetaStore::SNAPSHOT_ROUNDS;
+    let (_dir, root, reader) = reader_racing_commits(rounds);
+    match reader.read().map(|read| read.count_changesets()) {
+        Err(StoreError::SnapshotContended { rounds: made }) => assert_eq!(made, rounds),
+        other => panic!("expected SnapshotContended after {rounds} rounds, got {other:?}"),
+    }
+    assert!(
+        ckpt(&root) > 0,
+        "a commit moved the checkpoint under the reader"
+    );
+    // One commit landed in every round, and the read that gave up left nothing behind: the next
+    // one, with no more commits landing, shows them all.
+    let last = 1 + u64::from(rounds);
+    let read = reader.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(last, last)));
+    assert_eq!(read.count_changesets().unwrap(), last);
+}
+
+/// The bound's guard: when the last of the rounds sees no new frame, the snapshot shows every
+/// commit that landed during the others.
+#[test]
+fn a_snapshot_whose_last_round_sees_no_new_frame_shows_every_commit() {
+    let rounds = MetaStore::SNAPSHOT_ROUNDS;
+    let (_dir, _root, reader) = reader_racing_commits(rounds - 1);
+    let read = reader.read().unwrap();
+    let last = u64::from(rounds);
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(last, last)));
+    for n in 1..=last {
+        let parents: Vec<u64> = (n - 1..n).filter(|&parent| parent > 0).collect();
+        let got = read.changeset(id(n)).unwrap();
+        assert_eq!(got, Some(stored(n, &parents, n - 1, n)), "changeset {n}");
+    }
+    assert_eq!(read.count_changesets().unwrap(), last);
+}
+
+/// When armed, holds the next `append_durable journal.off` once it has written and synced its
+/// entry, says so on `listed`, waits until the reader says on `measured` that it has measured
+/// `journal.off`, then fails the call as a sync that fails after its write: the writer cuts the
+/// entry back off (storage spec §2 rule 3 (b)).
+struct ListingFailsOnceMeasured {
+    armed: AtomicBool,
+    listed: mpsc::Sender<()>,
+    measured: Mutex<mpsc::Receiver<()>>,
+}
+
+impl Watch for ListingFailsOnceMeasured {
+    fn before(&self, _call: &Call<'_>) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn after_success(&self, call: &Call<'_>) -> io::Result<()> {
+        if call.named() != "append_durable journal.off" || !self.armed.swap(false, Ordering::SeqCst)
+        {
+            return Ok(());
+        }
+        self.listed.send(()).unwrap();
+        let measured = self.measured.lock().unwrap().recv_timeout(PATIENCE);
+        measured.expect("the reader measures journal.off");
+        Err(io::Error::from_raw_os_error(5)) // EIO
+    }
+}
+
+/// A reader that measures `journal.off` while it lists a writer's frame, and reads its entries
+/// once the writer has cut that entry back (its sync failed: storage spec §2 rule 3 (b)), finds
+/// fewer entries than it measured. That is no damage: a writer cuts only entries that were never
+/// genuine. The snapshot takes one more round and shows the writer's frame, whole in
+/// `journal.log` and committed, as a frame not listed yet. (It used to report the journal
+/// corrupt: the API's `E_STORE_CORRUPT`, which is not retryable.)
+#[test]
+fn a_snapshot_racing_a_journal_off_cut_reads_again_and_reports_no_damage() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]); // frame 0
+    cas(&store, "main", None, Some(1)); // frame 1
+    drop(store);
+    let (listed_tx, listed_rx) = mpsc::channel();
+    let (measured_tx, measured_rx) = mpsc::channel();
+    let (cut_tx, cut_rx) = mpsc::channel::<()>();
+    let listing_fails = ListingFailsOnceMeasured {
+        armed: AtomicBool::new(true),
+        listed: listed_tx,
+        measured: Mutex::new(measured_rx),
+    };
+    let writer = MetaStore::open_with_fs(&root, checked(Watched(listing_fails))).unwrap();
+    // Right after the reader first measures journal.off, the writer's listing fails, and the
+    // reader reads on once the writer has cut the entry back.
+    let (fs, calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "file_len journal.off".to_owned(),
+        When::After,
+        Box::new(move || {
+            measured_tx.send(()).unwrap();
+            let cut = cut_rx.recv_timeout(PATIENCE);
+            cut.expect("the writer cuts its entry back");
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+
+    thread::scope(|scope| {
+        let commit = scope.spawn(|| {
+            let mut write = writer.write().unwrap();
+            write.insert_changeset(cs(2, &[1])).unwrap();
+            write
+                .cas_ref("main", Some(id(1)), Some(id(2)), ACTOR)
+                .unwrap();
+            let committed = write.commit();
+            cut_tx.send(()).unwrap();
+            committed
+        });
+        let listed = listed_rx.recv_timeout(PATIENCE);
+        listed.expect("the writer lists its frame");
+        let read = match reader.read() {
+            Ok(read) => read,
+            Err(e) => panic!("expected a snapshot, got {e:?}"),
+        };
+        match commit.join().unwrap() {
+            Err(StoreError::PostCommit { frame_seq: 2, .. }) => {}
+            other => panic!("expected PostCommit at frame 2, got {other:?}"),
+        }
+        assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(2, 2)));
+        assert_eq!(read.changeset(id(2)).unwrap(), Some(stored(2, &[1], 1, 2)));
+        assert_eq!(read.count_changesets().unwrap(), 2);
+    });
+    // The shrunk read took the first round, before journal.log was measured; the second opened
+    // the index again.
+    let round = ["file_len journal.off", "file_len journal.log"];
+    assert_eq!(
+        calls(),
+        [
+            &["file_len journal.off"][..],
+            &round,
+            &["read main"],
+            &round
+        ]
+        .concat(),
+        "one more round"
+    );
+    assert_eq!(
+        (listed(&root), frames(&root).len()),
+        (2, 3),
+        "the frame is whole in journal.log, unlisted"
+    );
 }
 
 /// How many changesets [`snapshots_stay_consistent_across_a_compaction`] seeds its store with,
