@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
-use swarmops_core::{EntryKind, ObjectKind, RepoPath, Signature, hash_object};
+use swarmops_core::{LeafKind, ObjectKind, RepoPath, Signature, hash_object};
 use swarmops_repo::{Change, ChangeOp, CommitRequest, LocalRepo};
 use swarmops_store::{Layout, MetaLock, RealFs};
 use swarmops_testkit::fs::{Call, Watch, Watched};
@@ -527,7 +527,7 @@ fn one_file_commit(path: &str, content: &str) -> CommitRequest {
         changes: vec![Change {
             path: RepoPath::new(path).unwrap(),
             op: ChangeOp::Put {
-                kind: EntryKind::File,
+                kind: LeafKind::File,
                 content: content.as_bytes().to_vec(),
             },
         }],

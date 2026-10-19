@@ -4,7 +4,7 @@
 use arbitrary::{Arbitrary, Result, Unstructured};
 
 use super::changeset::{Changeset, DeltaEntry, DeltaOp, Signature};
-use super::tree::{EntryKind, Tree, TreeEntry};
+use super::tree::{EntryKind, EntryTarget, LeafKind, Tree, TreeEntry};
 use crate::id::{BlobId, ChangesetId, ObjectId, TreeId};
 use crate::path::RepoPath;
 
@@ -45,10 +45,15 @@ impl<'a> Arbitrary<'a> for EntryKind {
 
 impl<'a> Arbitrary<'a> for TreeEntry {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
+        // The draws of the `(kind, id)` pair a target replaced, in the same order (the name,
+        // one of the four kinds, the id), so that existing fuzz inputs keep decoding to the
+        // same shapes.
+        let name = component(u)?;
+        let kind = EntryKind::arbitrary(u)?;
+        let id = ObjectId::arbitrary(u)?;
         Ok(Self {
-            name: component(u)?,
-            kind: EntryKind::arbitrary(u)?,
-            id: ObjectId::arbitrary(u)?,
+            name,
+            target: EntryTarget::from_parts(kind, id),
         })
     }
 }
@@ -82,7 +87,7 @@ impl<'a> Arbitrary<'a> for DeltaOp {
     fn arbitrary(u: &mut Unstructured<'a>) -> Result<Self> {
         if bool::arbitrary(u)? {
             Ok(Self::Put {
-                kind: *u.choose(&[EntryKind::File, EntryKind::Exec, EntryKind::Symlink])?,
+                kind: *u.choose(&[LeafKind::File, LeafKind::Exec, LeafKind::Symlink])?,
                 id: BlobId(ObjectId::arbitrary(u)?),
             })
         } else {

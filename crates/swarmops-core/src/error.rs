@@ -31,4 +31,7 @@ pub enum PathError {
     /// A NUL byte was present.
     #[error("path contains a NUL byte")]
     Nul,
+    /// A single path component (a tree entry's name) contains `/`.
+    #[error("a single path component contains `/`")]
+    Slash,
 }
