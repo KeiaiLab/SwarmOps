@@ -185,7 +185,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   lock, as a CLI commit writes its objects, and the table gives n and each transaction's time
   in the lock once `write()` returned (p50, p99 and max). A test in the default gate checks that
   the objects are new each time and durable before the lock is taken, and that none of their
-  calls is made under it.
+  calls is made under it. The run fails unless every writer put its n objects before each of its
+  transactions (its line says so, and the store holds them all), which a second test in the
+  default gate checks on a run of two writers.
 - A criterion bench of a compaction on its own (`crates/swarmops-store/benches/compaction.rs`,
   which `just bench` and `just perf` run): `Index::compact()` with every sync on, on an index of
   100k and of 1M records whose unsorted tail has just passed the threshold (1,025 records), the
