@@ -207,7 +207,7 @@ flowchart TD
   list --> mat["Materialize: append the index<br/>records, unsynced; replace<br/>each moved ref's file"]
   mat --> settle["Housekeeping: every 32 frames,<br/>sync the index, move journal.ckpt;<br/>once over 1,024 records sit past<br/>the sorted views, compact them in too"]
   settle --> done(["Release the lock"])
-  append -. "the append or<br/>its fdatasync fails" .-> cut["Cut the frame back:<br/>E_IO_TRANSIENT,<br/>committed: false<br/>(if the cut fails: abort)"]
+  append -. "the append or<br/>its fdatasync fails" .-> cut["Cut the frame back:<br/>E_IO_TRANSIENT (E_IO if<br/>refused for good),<br/>committed: false<br/>(if the cut fails: abort)"]
   list -. "any failure<br/>from here on" .-> warn["Committed and durable:<br/>a warning, and the next<br/>write repairs the rest"]
 ```
 
@@ -218,7 +218,11 @@ What a failure means depends on which side of the commit point it falls (storage
   writer, still holding the lock, cuts the journal back to where the frame began (`ftruncate`,
   then `fdatasync`; if nothing of the frame reached the file, there is nothing to cut) and
   returns the retryable `E_IO_TRANSIENT` with `details.committed = false`: the transaction
-  definitely did not commit, and running the same command again is safe. The frame is cut, not
+  definitely did not commit, and running the same command again is safe. (If the filesystem
+  refused the append for want of permission or because it is read-only, the error is `E_IO`,
+  not retryable, with the same `details.committed = false` and a hint that says what to fix
+  first: running the command again meets the same refusal until then. So it is for the second
+  and third ways below.) The frame is cut, not
   left for a later writer to sync and list, because Linux reports a failed writeback only once
   and may drop the unwritten pages: a later sync could succeed although the frame never reached
   the disk. If the cut itself fails, the process aborts rather than go on with a journal tail it

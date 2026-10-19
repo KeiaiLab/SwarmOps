@@ -1250,7 +1250,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_IO",
-          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root.",
+          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed.",
           "type": "string"
         },
         {

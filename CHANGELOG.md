@@ -347,6 +347,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   get a hint that the tool's `inputSchema` gives them, where `swarmops schema` gives the
   request type without the rules the server adds. In the schema, `VerifyFinding.object` says
   that `missing_object` also names an object the store holds as another kind.
+- A journal append that the filesystem refuses for want of permission (`EACCES`, `EPERM`) or
+  because it is read-only (`EROFS`), and that the store cut back, is `E_IO` (exit 1, not
+  retryable) with `details.committed: false` and a hint that says what to fix first, where it
+  was the retryable `E_IO_TRANSIENT`: nothing was committed, but running the same command again
+  meets the same refusal until its cause is fixed. So it is for the write's own frame, for the
+  tail check's listing of a frame left unlisted and for its rewrite of frames whose sync failed
+  (storage spec §2 rule 3 (a)-(c)); any other failure there stays `E_IO_TRANSIENT`. The
+  schema's description of `E_IO` says so.
 
 ### Fixed
 

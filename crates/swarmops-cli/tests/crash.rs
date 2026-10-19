@@ -373,8 +373,9 @@ fn listed_one(records: u64, refs: u64) -> Value {
 /// Each exits 0 with a warning that names the append that failed (`append_durable
 /// meta/journal.off`, relative to the store's root, never with the store's own path), and
 /// readers see it already; while `journal.off` refuses writes, the next write fails, unable to
-/// list the frame, with the retryable `E_IO_TRANSIENT` (`committed: false`: its transaction
-/// never began), its `details` naming the same append, and reports no recovery.
+/// list the frame, with `E_IO` (`committed: false`: its transaction never began), not retryable,
+/// since running it again meets the same refusal until the file's mode changes (ruling M16-R8),
+/// its `details` naming the same append and its hint what to fix, and reports no recovery.
 /// Once `journal.off` takes writes, the same commit run again finds its changeset (the store
 /// holds it once), the same move finds it applied, each reporting in `meta.recovered` the
 /// listing its write made and what it replayed, not as a warning; and the store verifies clean.
@@ -409,7 +410,8 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
     let other = store.changes("other", "other.txt", "another change\n");
     let blocked = ["commit", "-m", "other", "--changes", other.as_str()];
     let blocked = store.run_as(&agent(0), &blocked, &[]);
-    let error = blocked.err("E_IO_TRANSIENT");
+    let error = blocked.err("E_IO");
+    assert_eq!((blocked.exit(), &error["retryable"]), (1, &json!(false)));
     assert_eq!(
         error["details"],
         serde_json::json!({
@@ -418,6 +420,11 @@ fn a_frame_journal_off_refuses_to_list_is_committed_with_a_warning() {
             "store_file": "meta/journal.off"
         }),
         "{error}"
+    );
+    let hint = error["hint"].as_str().unwrap_or_default();
+    assert!(
+        hint.contains("writable"),
+        "the hint says what to fix: {error}"
     );
     assert!(
         !error.to_string().contains(store.path()),

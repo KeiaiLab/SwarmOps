@@ -143,10 +143,31 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         StoreError::NotCommitted { source } => {
             let mut details = located(&source);
             details.insert("committed".to_owned(), false.into());
-            error(ErrorCode::IoTransient, message)
-                .with_details(details)
-                .with_hint("run the same command again: nothing of this one was committed")
+            match lasting_refusal(&source) {
+                Some(fix) => error(ErrorCode::Io, message)
+                    .with_details(details)
+                    .with_hint(format!(
+                        "{fix}, then run the same command again: nothing of this one was \
+                         committed"
+                    )),
+                None => error(ErrorCode::IoTransient, message)
+                    .with_details(details)
+                    .with_hint("run the same command again: nothing of this one was committed"),
+            }
         }
+    }
+}
+
+/// What to fix first when the filesystem refused a journal append in a way that running the
+/// same command again meets again: for want of permission (`EACCES`, `EPERM`), or as a
+/// read-only filesystem (`EROFS`). The store's `NotCommitted` is then the non-retryable
+/// `E_IO`, `committed: false` all the same (ruling M16-R8: retryable means that running the
+/// operation again can succeed). `None` for any other failure, which a run again can get past.
+fn lasting_refusal(failure: &IoFailure) -> Option<&'static str> {
+    match failure.kind() {
+        io::ErrorKind::PermissionDenied => Some("make the store's files writable for this user"),
+        io::ErrorKind::ReadOnlyFilesystem => Some("remount the store's filesystem read-write"),
+        _ => None,
     }
 }
 
@@ -561,6 +582,63 @@ mod tests {
         );
         let hint = error.hint.unwrap_or_default();
         assert!(hint.contains("same command"), "{hint}");
+    }
+
+    /// A journal append that the filesystem refused in a way that running the same command again
+    /// meets again, for want of permission (`EACCES`, `EPERM`) or as a read-only filesystem
+    /// (`EROFS`), and that the store cut back, committed nothing all the same: `E_IO`, exit 1,
+    /// not retryable, `committed: false`, naming the append, with a hint that says what to fix
+    /// before running it again (ruling M16-R8). Any other failure there, `EIO` or `ENOSPC`, stays
+    /// the retryable `E_IO_TRANSIENT`.
+    #[test]
+    fn a_journal_append_refused_for_good_is_e_io_and_not_committed() {
+        let not_committed = |errno| {
+            let source = IoFailure::new(
+                FileOp::Fs(FsMethod::AppendDurable),
+                Some("meta/journal.off".into()),
+                io::Error::from_raw_os_error(errno),
+            );
+            repo_error(
+                RepoError::Store(StoreError::NotCommitted { source }),
+                During::Op,
+            )
+        };
+        for (errno, fix) in [(13, "writable"), (1, "writable"), (30, "read-write")] {
+            let error = not_committed(errno);
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                ("E_IO", 1, false),
+                "errno {errno}"
+            );
+            assert_eq!(
+                Value::Object(error.details),
+                serde_json::json!({
+                    "committed": false,
+                    "fs_op": "append_durable",
+                    "store_file": "meta/journal.off"
+                }),
+                "errno {errno}"
+            );
+            assert!(
+                error.message.contains("did not commit"),
+                "{}",
+                error.message
+            );
+            let hint = error.hint.unwrap_or_default();
+            assert!(
+                hint.contains(fix) && hint.contains("same command"),
+                "errno {errno}: {hint}"
+            );
+        }
+        for errno in [5, 28] {
+            let error = not_committed(errno);
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                ("E_IO_TRANSIENT", 4, true),
+                "errno {errno}"
+            );
+            assert_eq!(error.details["committed"], false, "errno {errno}");
+        }
     }
 
     /// A filesystem failure names the file operation that failed (`details.fs_op`) and, where it

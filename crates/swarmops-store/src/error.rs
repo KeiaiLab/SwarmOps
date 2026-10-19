@@ -142,7 +142,10 @@ pub enum StoreError {
     /// frames are cut back off with it). Or the tail check's listing of such a frame in
     /// `journal.off` failed, and what reached `journal.off` of the entry was cut back off it:
     /// the transaction never began, and the next tail check lists the frame. Retrying the
-    /// transaction is safe: nothing of it is in the store. Retryable.
+    /// transaction is safe: nothing of it is in the store. Retryable, unless the filesystem
+    /// refused the append for want of permission or as a read-only filesystem (`source.kind()`
+    /// `PermissionDenied`, `ReadOnlyFilesystem`): running it again meets that refusal again
+    /// until its cause is fixed, and the API layer reports it as `E_IO`, not `E_IO_TRANSIENT`.
     #[error(
         "the transaction did not commit: a journal append failed, and what it wrote was cut \
          back off the journal: {source}"
