@@ -390,6 +390,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   import, `Repo` also gains `put_objects`, `contains_object`, `changeset_meta` (a changeset's
   index record, its object unread) and `flush_metadata` (the index synced and the checkpoint
   moved to the end of the journal).
+- An object holds at most 512 MiB (`swarmops_store::MAX_OBJECT_LEN`), the limit a put's content
+  already had. The store refuses a longer object before it hashes or writes anything, and a batch
+  with one such object in it writes none of its objects: `E_TOO_LARGE`, with `details`
+  `{"store_limit": "object_bytes", "max": 536870912, "got": <bytes>}` (in the Rust API,
+  `StoreError::Limit` with the new `LimitKind::ObjectBytes`). A stored object whose header
+  records more is refused as `E_STORE_CORRUPT` before anything is allocated for it (the store's
+  `BadHeader`, where a zstd frame that claimed as much was `Corrupt`), so a compression bomb in a
+  crafted store costs a read at most 512 MiB (storage spec §2 rule 1, §10 item 6).
 
 ### Fixed
 

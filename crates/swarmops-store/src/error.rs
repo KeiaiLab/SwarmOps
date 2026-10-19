@@ -146,7 +146,7 @@ pub enum StoreError {
 }
 
 /// Which limit of the store's layout a request went past ([`StoreError::Limit`]; storage spec
-/// §2's `REPO` line, and §3, "커밋 결과·오류·한도").
+/// §2's `REPO` line and rule 1, and §3, "커밋 결과·오류·한도").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKind {
     /// A changeset's parents: a journal record and `par.col` count them in one byte (255).
@@ -162,20 +162,25 @@ pub enum LimitKind {
     /// field, so the limit is a choice, the one ref names and actors have. The repository's
     /// create refuses a longer name before it makes anything.
     RepoNameBytes,
+    /// An object's payload, in bytes: [`crate::MAX_OBJECT_LEN`] (512 MiB). A put refuses a longer
+    /// payload before it hashes or writes anything, and a batch put writes none of its objects.
+    /// The API layer makes it `E_TOO_LARGE`, where every other limit is `E_INVALID_ARG`.
+    ObjectBytes,
 }
 
 impl LimitKind {
     /// Every limit, in declaration order.
-    pub const ALL: [LimitKind; 5] = [
+    pub const ALL: [LimitKind; 6] = [
         Self::Parents,
         Self::ActorBytes,
         Self::RefNameBytes,
         Self::Records,
         Self::RepoNameBytes,
+        Self::ObjectBytes,
     ];
 
     /// Its name in the API's `details.store_limit`: `"parents"`, `"actor_bytes"`,
-    /// `"ref_name_bytes"`, `"records"` or `"repo_name_bytes"`.
+    /// `"ref_name_bytes"`, `"records"`, `"repo_name_bytes"` or `"object_bytes"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Parents => "parents",
@@ -183,12 +188,14 @@ impl LimitKind {
             Self::RefNameBytes => "ref_name_bytes",
             Self::Records => "records",
             Self::RepoNameBytes => "repo_name_bytes",
+            Self::ObjectBytes => "object_bytes",
         }
     }
 }
 
 /// What the limit counts, as a message says it: "a changeset's parents", "an actor's bytes",
-/// "a ref name's bytes", "a transaction's records", "a repository name's bytes".
+/// "a ref name's bytes", "a transaction's records", "a repository name's bytes", "an object's
+/// bytes".
 impl fmt::Display for LimitKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -197,6 +204,7 @@ impl fmt::Display for LimitKind {
             Self::RefNameBytes => "a ref name's bytes",
             Self::Records => "a transaction's records",
             Self::RepoNameBytes => "a repository name's bytes",
+            Self::ObjectBytes => "an object's bytes",
         })
     }
 }
@@ -405,6 +413,7 @@ mod tests {
                 "ref_name_bytes",
                 "records",
                 "repo_name_bytes",
+                "object_bytes",
             ]
         );
         assert_eq!(
@@ -415,6 +424,7 @@ mod tests {
                 "a ref name's bytes",
                 "a transaction's records",
                 "a repository name's bytes",
+                "an object's bytes",
             ]
         );
     }

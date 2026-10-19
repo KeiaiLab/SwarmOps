@@ -20,7 +20,7 @@ pub mod meta;
 pub mod order_check;
 
 pub use error::{FileOp, IoFailure, LimitKind, StoreError};
-pub use fs_objects::{FsObjectStore, ObjectStore};
+pub use fs_objects::{FsObjectStore, MAX_OBJECT_LEN, ObjectStore};
 pub use fs_ops::{
     CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, FsMethod, FsOps, HookedFs, LinkOutcome,
     ORDER_CHECK_ENV, RealFs, StoreFs,

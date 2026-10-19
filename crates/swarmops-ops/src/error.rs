@@ -10,7 +10,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
 use swarmops_repo::{RepoError, StoreError};
-use swarmops_store::{IoFailure, Layout};
+use swarmops_store::{IoFailure, Layout, LimitKind};
 
 use crate::local::cas_mismatch;
 
@@ -131,7 +131,17 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         StoreError::DuplicateParent(id) => error(ErrorCode::InvalidArg, message)
             .with_details(details([("parent", id.to_string().into())])),
         StoreError::Limit { what, max, got } => {
-            error(ErrorCode::InvalidArg, message).with_details(details([
+            // An object past the most an object holds is content too large; every other limit
+            // is a request that breaks the layout's rules.
+            let code = match what {
+                LimitKind::ObjectBytes => ErrorCode::TooLarge,
+                LimitKind::Parents
+                | LimitKind::ActorBytes
+                | LimitKind::RefNameBytes
+                | LimitKind::Records
+                | LimitKind::RepoNameBytes => ErrorCode::InvalidArg,
+            };
+            error(code, message).with_details(details([
                 ("store_limit", what.as_str().into()),
                 ("max", max.into()),
                 ("got", got.into()),
@@ -540,6 +550,37 @@ mod tests {
         let einval = IoFailure::new(FileOp::Fs(FsMethod::Truncate), None, einval);
         let error = repo_error(store(StoreError::Io(einval)), op);
         assert_eq!((error.code.as_str(), error.exit), ("E_IO", 1));
+    }
+
+    /// The store's refusal of an object longer than an object holds (`ObjectBytes`) is
+    /// `E_TOO_LARGE`, exit 1 and not retryable, with the `details` of every store limit: which
+    /// limit, the most it holds and what was asked. Every other store limit stays
+    /// `E_INVALID_ARG`.
+    #[test]
+    fn an_object_limit_is_e_too_large() {
+        let limit = |what| {
+            RepoError::Store(StoreError::Limit {
+                what,
+                max: 536_870_912,
+                got: 536_870_913,
+            })
+        };
+        let error = repo_error(limit(LimitKind::ObjectBytes), During::Op);
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_TOO_LARGE", 1, false)
+        );
+        let want = serde_json::json!({
+            "store_limit": "object_bytes",
+            "max": 536_870_912,
+            "got": 536_870_913
+        });
+        assert_eq!(Value::Object(error.details), want);
+        for what in LimitKind::ALL {
+            if what != LimitKind::ObjectBytes {
+                maps(limit(what), During::Op, ErrorCode::InvalidArg);
+            }
+        }
     }
 
     /// A journal append that failed and was cut back off the journal committed nothing:
