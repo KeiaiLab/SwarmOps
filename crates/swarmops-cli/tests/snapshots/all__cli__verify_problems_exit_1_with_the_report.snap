@@ -56,7 +56,8 @@ expression: s.transcript()
       "result": {
         "objects_checked": 3,
         "changesets_checked": 1,
-        "problems": []
+        "problems": [],
+        "findings": []
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -76,7 +77,8 @@ expression: s.transcript()
       "result": {
         "objects_checked": 3,
         "changesets_checked": 1,
-        "problems": []
+        "problems": [],
+        "findings": []
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -100,6 +102,13 @@ expression: s.transcript()
         "exit": 1,
         "details": {
           "changesets_checked": 1,
+          "findings": [
+            {
+              "changeset": "[c1]",
+              "kind": "missing_object",
+              "object": "[id3]"
+            }
+          ],
           "objects_checked": 3,
           "problems": [
             "object [id3] is missing; changeset [c1] references it"
@@ -129,12 +138,19 @@ expression: s.transcript()
         "exit": 1,
         "details": {
           "changesets_checked": 1,
+          "findings": [
+            {
+              "changeset": "[c1]",
+              "kind": "missing_object",
+              "object": "[id3]"
+            }
+          ],
           "objects_checked": 2,
           "problems": [
             "object [id3] is missing; changeset [c1] references it"
           ]
         },
-        "hint": "details.problems names each damaged object or record: restore them from a backup of the store"
+        "hint": "details.findings names each damaged object, record or ref by kind and id: restore them from a backup of the store"
       },
       "meta": {
         "repo": "[tmp]/store",

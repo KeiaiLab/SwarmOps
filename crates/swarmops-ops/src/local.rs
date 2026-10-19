@@ -14,13 +14,16 @@ use swarmops_api::{
     EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq, LogPage, LogReq, OpError,
     ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp,
     RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
-    VerifyReport, VerifyReq,
+    VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, RepoPath, Signature, TreeEntry,
 };
-use swarmops_repo::{CasOutcome, CasResult, CommitRequest, LocalRepo, RepoError, StoredChangeset};
+use swarmops_repo::{
+    CasOutcome, CasResult, CommitRequest, LocalRepo, MismatchCause, RepoError, StoredChangeset,
+    VerifyProblem,
+};
 
 use crate::content;
 use crate::error::{During, details, error, hint, one_line, op, repo_error, shell_word};
@@ -637,6 +640,7 @@ impl StoreOps for Recording<'_> {
                 .iter()
                 .map(|problem| one_line(problem.to_string()))
                 .collect(),
+            findings: report.problems.iter().map(finding).collect(),
         })
     }
 }
@@ -843,6 +847,69 @@ fn change_out(entry: &DeltaEntry) -> ChangeOut {
     }
 }
 
+/// `problem` as a program reads it (operations spec §1, `verify`): its kind, a string of its
+/// own for each variant, and what it names, ids in lowercase hex. The match has no catch-all,
+/// so a new kind of problem does not compile until it has a finding.
+fn finding(problem: &VerifyProblem) -> VerifyFinding {
+    let of = |kind: &str| VerifyFinding {
+        kind: kind.to_owned(),
+        object: None,
+        changeset: None,
+        parent: None,
+        seq: None,
+        offset: None,
+        ref_name: None,
+        cause: None,
+    };
+    match problem {
+        VerifyProblem::CorruptObject(id) => VerifyFinding {
+            object: Some(id.to_hex()),
+            ..of("corrupt_object")
+        },
+        VerifyProblem::MissingObject { referenced_by, id } => VerifyFinding {
+            object: Some(id.to_hex()),
+            changeset: Some(referenced_by.to_string()),
+            ..of("missing_object")
+        },
+        VerifyProblem::MissingParent { child, parent } => VerifyFinding {
+            changeset: Some(child.to_string()),
+            parent: Some(parent.to_string()),
+            ..of("missing_parent")
+        },
+        VerifyProblem::RootMismatch(id) => VerifyFinding {
+            changeset: Some(id.to_string()),
+            ..of("root_mismatch")
+        },
+        VerifyProblem::DanglingRef(name) => VerifyFinding {
+            ref_name: Some(name.clone()),
+            ..of("dangling_ref")
+        },
+        VerifyProblem::CorruptRef(name) => VerifyFinding {
+            ref_name: Some(name.clone()),
+            ..of("corrupt_ref")
+        },
+        VerifyProblem::IndexMismatch { seq, cause } => VerifyFinding {
+            seq: Some(*seq),
+            cause: Some(mismatch_cause(*cause).to_owned()),
+            ..of("index_mismatch")
+        },
+        VerifyProblem::JournalCorrupt { offset } => VerifyFinding {
+            offset: Some(*offset),
+            ..of("journal_corrupt")
+        },
+        VerifyProblem::MetaCorrupt(_) => of("meta_corrupt"),
+    }
+}
+
+/// What a finding's `cause` says disagrees, which names what mends it.
+fn mismatch_cause(cause: MismatchCause) -> &'static str {
+    match cause {
+        MismatchCause::Journal => "journal",
+        MismatchCause::SortedView => "sorted_view",
+        MismatchCause::Object => "object",
+    }
+}
+
 fn tree_entry_out(entry: &TreeEntry) -> TreeEntryOut {
     TreeEntryOut {
         name: entry.name.clone(),
@@ -884,6 +951,7 @@ fn lossy(bytes: &[u8]) -> String {
 mod tests {
     use std::sync::Arc;
 
+    use serde_json::json;
     use swarmops_api::{ChangeInput, ContentInput, RefSetReq};
     use swarmops_testkit::fs::FailingFs;
 
@@ -909,6 +977,85 @@ mod tests {
         };
         assert!(warning.contains("injected failure"), "{warning}");
         assert!(warning.contains("committed"), "{warning}");
+    }
+
+    /// Each problem `verify` can find, `IndexMismatch` once for each cause, is a finding of its
+    /// own kind with exactly the keys that kind names, its ids in lowercase hex, so that a
+    /// program reads what is damaged without parsing the line. No two problems share a kind but
+    /// `IndexMismatch`'s causes, which `cause` tells apart.
+    #[test]
+    fn every_verify_problem_is_a_finding_with_its_keys() {
+        let (object, child, parent) = ("ab".repeat(32), "cd".repeat(32), "ef".repeat(32));
+        let id = |hex: &str| ObjectId::from_hex(&hex.to_uppercase()).unwrap();
+        let changeset = |hex: &str| ChangesetId(id(hex));
+        let mismatch = |cause| VerifyProblem::IndexMismatch { seq: 7, cause };
+        let cases = [
+            (
+                VerifyProblem::CorruptObject(id(&object)),
+                json!({"kind": "corrupt_object", "object": object}),
+            ),
+            (
+                VerifyProblem::MissingObject {
+                    referenced_by: changeset(&child),
+                    id: id(&object),
+                },
+                json!({"kind": "missing_object", "object": object, "changeset": child}),
+            ),
+            (
+                VerifyProblem::MissingParent {
+                    child: changeset(&child),
+                    parent: changeset(&parent),
+                },
+                json!({"kind": "missing_parent", "changeset": child, "parent": parent}),
+            ),
+            (
+                VerifyProblem::RootMismatch(changeset(&child)),
+                json!({"kind": "root_mismatch", "changeset": child}),
+            ),
+            (
+                VerifyProblem::DanglingRef("main".to_owned()),
+                json!({"kind": "dangling_ref", "ref": "main"}),
+            ),
+            (
+                VerifyProblem::CorruptRef("release/1.0".to_owned()),
+                json!({"kind": "corrupt_ref", "ref": "release/1.0"}),
+            ),
+            (
+                mismatch(MismatchCause::Journal),
+                json!({"kind": "index_mismatch", "seq": 7, "cause": "journal"}),
+            ),
+            (
+                mismatch(MismatchCause::SortedView),
+                json!({"kind": "index_mismatch", "seq": 7, "cause": "sorted_view"}),
+            ),
+            (
+                mismatch(MismatchCause::Object),
+                json!({"kind": "index_mismatch", "seq": 7, "cause": "object"}),
+            ),
+            (
+                VerifyProblem::JournalCorrupt { offset: 4096 },
+                json!({"kind": "journal_corrupt", "offset": 4096}),
+            ),
+            (
+                VerifyProblem::MetaCorrupt("journal.off is missing".to_owned()),
+                json!({"kind": "meta_corrupt"}),
+            ),
+        ];
+        let mut kinds: BTreeMap<String, Vec<&VerifyProblem>> = BTreeMap::new();
+        for (problem, expected) in &cases {
+            let found = finding(problem);
+            assert_eq!(
+                serde_json::to_value(&found).unwrap(),
+                *expected,
+                "{problem:?}"
+            );
+            kinds.entry(found.kind).or_default().push(problem);
+        }
+        assert_eq!(kinds.len(), 9, "{kinds:?}");
+        for (kind, problems) in &kinds {
+            let shared = problems.len() > 1;
+            assert!(!shared || kind == "index_mismatch", "{kind}: {problems:?}");
+        }
     }
 
     #[test]

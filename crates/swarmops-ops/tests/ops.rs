@@ -883,6 +883,42 @@ fn ref_set_create_update_mismatch_and_already_applied() {
     delete_refs_by_compare_and_swap(&ops, &who, [c1.as_str(), c3.as_str()]);
 }
 
+/// The operation's side of `RefSetReq`'s schema (the API's
+/// `ref_set_schema_says_exactly_one_of_expected_old_and_create`): of the five shapes a request
+/// can take, as JSON, `ref set` takes the two that meet one branch of its `oneOf`, an
+/// `expected_old` and a `create`, and refuses both, neither, and a null `expected_old` with
+/// `E_INVALID_ARG`, before it resolves anything.
+#[test]
+fn ref_set_takes_exactly_one_of_expected_old_and_create() {
+    let (_dir, _root, ops) = new_store();
+    let who = agent();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+    let request = |fields: Value| -> RefSetReq {
+        let mut req = json!({"name": "main", "new": c1});
+        for (key, value) in fields.as_object().unwrap() {
+            req[key] = value.clone();
+        }
+        serde_json::from_value(req).expect("each shape reads as a request")
+    };
+    for (shape, fields) in [
+        (
+            "{expected_old, create}",
+            json!({"expected_old": c1, "create": true}),
+        ),
+        ("{}", json!({})),
+        ("{expected_old: null}", json!({"expected_old": null})),
+    ] {
+        let err = expect_err(ops.ref_set(&who, request(fields)), ErrorCode::InvalidArg);
+        assert!(err.message.contains("exactly one"), "{shape}: {err:?}");
+    }
+    let created = ops.ref_set(&who, request(json!({"create": true}))).unwrap();
+    assert!(!created.already_applied, "{created:?}");
+    let mut moved = request(json!({"expected_old": c1}));
+    moved.new = Rev::from(c2.as_str());
+    assert!(!ops.ref_set(&who, moved).unwrap().already_applied);
+}
+
 /// `main` names `c3`, and `c1` is an older changeset: delete it by compare-and-swap.
 fn delete_refs_by_compare_and_swap(ops: &LocalOps, who: &Identity, [c1, c3]: [&str; 2]) {
     let delete = |name: &str, expected: &str| {
@@ -1561,4 +1597,26 @@ fn verify_reports_problems_as_lines() {
     );
     let err = expect_err(ops.read_file(cat(&c, "f")), ErrorCode::StoreCorrupt);
     assert_eq!(err.details["object"], gone.to_hex());
+}
+
+/// `verify` reports each problem as a finding beside its line, at the same index: a blob gone
+/// from the store is a `missing_object` that names it and the changeset that references it, in
+/// a structural verify and a deep one alike; a clean store has none.
+#[test]
+fn verify_reports_each_problem_as_a_finding() {
+    let (_dir, root, ops) = new_store();
+    let c = commit(&ops, None, vec![text("f", "content")]);
+    assert_eq!(ops.verify(VerifyReq { deep: true }).unwrap().findings, []);
+
+    let gone = hash_object(ObjectKind::Blob, b"content");
+    fs::remove_file(Layout::new(root.clone()).object_path(gone)).unwrap();
+    for deep in [false, true] {
+        let report = ops.verify(VerifyReq { deep }).unwrap();
+        assert_eq!(report.problems.len(), 1, "{report:?}");
+        assert_eq!(
+            serde_json::to_value(&report.findings).unwrap(),
+            json!([{"kind": "missing_object", "object": gone.to_hex(), "changeset": c}]),
+            "deep {deep}"
+        );
+    }
 }

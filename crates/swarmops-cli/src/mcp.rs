@@ -61,8 +61,15 @@
 //! type's JSON Schema, as `swarmops schema <type>` prints it, with each `$ref` replaced by the
 //! definition it names so that the schema stands alone: a keyword beside the reference wins
 //! over the definition's, but for `description`, where the reference's comes first and the
-//! definition's after it. Its annotations say whether it changes the store and how; none
-//! reaches beyond the store (`openWorldHint: false`).
+//! definition's after it. It is kept a plain object ([`tool_input_schema`]): nothing at its top
+//! but `$schema`, `title`, `description`, `type`, `properties` and `required`, since the Claude
+//! API refuses a request whose tools hold an input schema with a combinator there, so that one
+//! such tool would stop every request of the session; a rule across fields that the request
+//! type's schema states with one (`RefSetReq`'s exactly one of `expected_old` and `create`) is
+//! the description's and the server's own check. The `expected_old` of `ref_set` and
+//! `ref_delete` is a string of the full-id pattern ([`full_id_pattern`]), not any revision. A
+//! tool's annotations say whether it changes the store and how; none reaches beyond the store
+//! (`openWorldHint: false`).
 //!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
 //! does not know is ignored, and arguments that do not fit the type are `E_INVALID_ARG`, as is
@@ -85,7 +92,12 @@
 //! its path instead; it cuts only the text of an error, past about 11,000 characters. A result
 //! holds its envelope twice, so the descriptions and [`INSTRUCTIONS`] ask the model for small
 //! reads (`max_bytes` of 32 KiB or less, `limit` and `max_changes` of 100 or less, paging with
-//! the `cursor`); the API's defaults stay as the operations spec gives them.
+//! the `cursor`); the API's defaults stay as the operations spec gives them. `read_file`, the
+//! one tool whose result is file content the model sizes, raises that threshold for itself: its
+//! entry in `tools/list` carries `_meta: {"anthropic/maxResultSizeChars": 200000}`
+//! ([`READ_FILE_RESULT_CHARS`]), and Claude Code keeps a `read_file` result of up to that many
+//! characters in the conversation (500,000 at most) instead of saving it to a file. The other
+//! tools carry no `_meta`.
 //!
 //! # The store and the identity
 //!
@@ -182,23 +194,32 @@ operation sets isError and gives error {code, message, retryable, exit, details,
 retryable says whether the operation can succeed when it is run again, as it is or after \
 re-reading what the hint names, and a hint is often a swarmops command, \
 whose operation is the tool of the same name (ref list is ref_list, cat read_file, ls \
-read_tree, info repo_info). A revision is main, release/<name>, a changeset id or 12 or more of \
-its first hex digits, then optionally ~N for the N-th first parent. commit records a changeset \
-and moves no ref. ref_set and ref_delete change a ref by compare-and-swap, so their \
-expected_old is the full 64-hex changeset id the ref held when you read it (from ref_list, \
-show, log or a commit's result). A ref name, a relative revision or an id prefix is read when \
-the call runs instead of pinning the id you read: the ref's own name always matches, so the \
-compare-and-swap protects nothing, and main~1 on ref main never matches; the server refuses \
-them. After \
-E_CAS_MISMATCH, commit your change again on top of details.actual, re-applying your edits to \
-the content there, then retry with expected_old set to it. Clients limit long tool results \
-(Claude Code saves one over 25,000 tokens or 50,000 characters to a file and gives you its \
-path instead) and each result carries its envelope twice, so ask for little: max_bytes of \
+read_tree, info repo_info). commit records a changeset and moves no ref. ref_set and \
+ref_delete change a ref by compare-and-swap, so their expected_old is the full 64-hex \
+changeset id the ref held when you read it (from ref_list, show, log or a commit's result). A \
+ref name or a relative revision is read when the call runs instead of pinning the id you read: \
+the ref's own name always matches, so the compare-and-swap protects nothing, and main~1 on ref \
+main never matches; an id prefix stops resolving once another changeset shares it; the server \
+refuses all three. After E_CAS_MISMATCH, commit your change again on top of details.actual, \
+re-applying your edits to the content there, then retry with expected_old set to it. A read \
+may show a commit that a failed sync then takes back; a mutation that names it fails under the \
+lock instead of building on it. Clients limit long tool results and each result carries its \
+envelope twice, so ask for little: max_bytes of \
 32768 or less for read_file (less for a binary file, which comes back in base64), a limit of \
 100 or less for read_tree and log, paging on with the cursor a result returns, and \
 max_changes of 100 or less for show. A {\"file\": path} content is read by this server, not \
 by your client: give an absolute path (a relative one, or the server's own stdin or stdout, \
 is refused). Every change is recorded for the agent the server runs as.";
+
+/// The most characters of a `read_file` result that Claude Code keeps in the conversation
+/// instead of saving it to a file, which `read_file`'s entry in `tools/list` declares under
+/// [`RESULT_CHARS_KEY`]: four times Claude Code's default of 50,000, and under its ceiling of
+/// 500,000 even for a client that counts both copies of the envelope a result holds.
+const READ_FILE_RESULT_CHARS: u32 = 200_000;
+
+/// The `_meta` key of a tool's entry in `tools/list` under which Claude Code reads the most
+/// characters of the tool's text results to keep in the conversation.
+const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
 static TOOLS: [Spec; 10] = [
@@ -210,6 +231,7 @@ static TOOLS: [Spec; 10] = [
         description: "What the store is and holds: its id and name, the changeset main points \
                       at, and how many changesets and refs it has.",
         effect: Effect::Reads,
+        result_chars: None,
     },
     Spec {
         tool: Tool::ReadFile,
@@ -220,6 +242,7 @@ static TOOLS: [Spec; 10] = [
                       base64; pass max_bytes of 32768 or less (less for a binary file), since \
                       clients limit long tool results and this one holds the content twice.",
         effect: Effect::Reads,
+        result_chars: Some(READ_FILE_RESULT_CHARS),
     },
     Spec {
         tool: Tool::ReadTree,
@@ -230,6 +253,7 @@ static TOOLS: [Spec; 10] = [
                       at a time; pass a limit of 100 or less and page on with the cursor, since \
                       clients limit long tool results.",
         effect: Effect::Reads,
+        result_chars: None,
     },
     Spec {
         tool: Tool::Show,
@@ -240,6 +264,7 @@ static TOOLS: [Spec; 10] = [
                       signatures; pass max_changes of 100 or less, since clients limit long tool \
                       results.",
         effect: Effect::Reads,
+        result_chars: None,
     },
     Spec {
         tool: Tool::Log,
@@ -250,6 +275,7 @@ static TOOLS: [Spec; 10] = [
                       otherwise; pass a limit of 100 or less and page on with the cursor, since \
                       clients limit long tool results.",
         effect: Effect::Reads,
+        result_chars: None,
     },
     Spec {
         tool: Tool::RefList,
@@ -258,6 +284,7 @@ static TOOLS: [Spec; 10] = [
         title: "List refs",
         description: "Every ref, the changeset it points at, and how many moves it has had.",
         effect: Effect::Reads,
+        result_chars: None,
     },
     Spec {
         tool: Tool::RefSet,
@@ -266,9 +293,11 @@ static TOOLS: [Spec; 10] = [
         title: "Move a ref",
         description: "Moves a ref, or creates one, by compare-and-swap: give create, or \
                       expected_old, the full 64-hex changeset id the ref held when you read it; a \
-                      ref name, a relative revision or an id prefix is refused, since it is read \
-                      when the call runs instead of pinning the id you read.",
+                      ref name or a relative revision is refused, since it is read when the call \
+                      runs instead of pinning the id you read, and so is an id prefix, which \
+                      stops resolving once another changeset shares it.",
         effect: Effect::Moves,
+        result_chars: None,
     },
     Spec {
         tool: Tool::RefDelete,
@@ -276,10 +305,12 @@ static TOOLS: [Spec; 10] = [
         request: "RefDeleteReq",
         title: "Delete a ref",
         description: "Removes a ref by compare-and-swap, if it still holds expected_old, the \
-                      full 64-hex changeset id it held when you read it; a ref name, a relative \
-                      revision or an id prefix is refused, since it is read when the call runs \
-                      instead of pinning the id you read.",
+                      full 64-hex changeset id it held when you read it; a ref name or a relative \
+                      revision is refused, since it is read when the call runs instead of pinning \
+                      the id you read, and so is an id prefix, which stops resolving once another \
+                      changeset shares it.",
         effect: Effect::Moves,
+        result_chars: None,
     },
     Spec {
         tool: Tool::Commit,
@@ -290,6 +321,7 @@ static TOOLS: [Spec; 10] = [
                       main's head; it moves no ref. A {\"file\": path} content is read by this \
                       server: give an absolute path.",
         effect: Effect::Adds,
+        result_chars: None,
     },
     Spec {
         tool: Tool::Verify,
@@ -298,6 +330,7 @@ static TOOLS: [Spec; 10] = [
         title: "Verify the store",
         description: "Checks the whole store's consistency; deep re-hashes every object too.",
         effect: Effect::Reads,
+        result_chars: None,
     },
 ];
 
@@ -368,8 +401,11 @@ impl<'a> Server<'a> {
                 name: spec.name,
                 title: spec.title,
                 description: spec.description,
-                input_schema: standalone(&all[spec.request]),
+                input_schema: tool_input_schema(spec, &all),
                 annotations: spec.effect.annotations(),
+                meta: spec
+                    .result_chars
+                    .map(|chars| json!({RESULT_CHARS_KEY: chars})),
             })
             .collect();
         Server {
@@ -912,8 +948,22 @@ impl Refuse for RefDeleteReq {
     }
 }
 
+/// How many hex digits a full changeset id has.
+const FULL_ID_DIGITS: usize = 64;
+
+/// Whether `rev` is a full changeset id: [`FULL_ID_DIGITS`] hex digits, of either case, as the
+/// resolver takes them. The one rule behind [`concrete_expectation`] and [`full_id_pattern`].
+fn is_full_id(rev: &str) -> bool {
+    rev.len() == FULL_ID_DIGITS && rev.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// The JSON Schema pattern of what [`is_full_id`] accepts, for the tool schemas.
+fn full_id_pattern() -> String {
+    format!("^[0-9a-fA-F]{{{FULL_ID_DIGITS}}}$")
+}
+
 /// `E_INVALID_ARG` unless `expected`, the target a move or a delete of ref `name` expects, is a
-/// full changeset id: 64 hex digits, as the resolver takes them. Anything else (a ref name, a
+/// full changeset id ([`is_full_id`]), as the resolver takes them. Anything else (a ref name, a
 /// relative revision, an id's prefix) is read from the store when the call runs instead of
 /// pinning the id the caller read. The ref's own name always matches, so the compare-and-swap
 /// protects nothing: a move computed on a stale read would silently drop what another agent
@@ -923,7 +973,7 @@ impl Refuse for RefDeleteReq {
 /// `--expect`, whose help warns of this; an agent through this server gets the rule enforced.
 fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
     let rev = expected.as_str();
-    if rev.len() == 64 && rev.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if is_full_id(rev) {
         return Ok(());
     }
     Err(OpError::new(
@@ -975,6 +1025,61 @@ impl Reply<'_> {
             structured_content: envelope,
             is_error: !envelope.ok,
         })
+    }
+}
+
+/// The keywords at the top of a tool's `inputSchema`: a plain object. The Claude API refuses,
+/// with a 400 error, a request whose tools hold an input schema with a combinator at its top
+/// (`oneOf`, `anyOf` or `allOf`), and Claude Code sends every tool with every request, so one
+/// such tool would stop each request of the session. A rule across fields that a request type's
+/// schema states that way stays in its description and in the server's own check ([`Refuse`]).
+const PLAIN_OBJECT: [&str; 6] = [
+    "$schema",
+    "title",
+    "description",
+    "type",
+    "properties",
+    "required",
+];
+
+/// The `inputSchema` of tool `spec`, from `all`, the schema of every type: its request type's
+/// schema standing alone ([`standalone`]) and kept a plain object ([`PLAIN_OBJECT`]). The
+/// `expected_old` of `ref_set` and `ref_delete`, which the request types give as any revision,
+/// asks for a full changeset id instead ([`full_id`]), the one the server takes there
+/// ([`concrete_expectation`]).
+fn tool_input_schema(spec: &Spec, all: &Value) -> Value {
+    let mut request = all[spec.request].clone();
+    if matches!(spec.tool, Tool::RefSet | Tool::RefDelete)
+        && let Some(expected) = request.pointer_mut("/properties/expected_old")
+    {
+        full_id(expected);
+    }
+    let Value::Object(schema) = standalone(&request) else {
+        panic!("the schema of {} is not an object", spec.request)
+    };
+    Value::Object(
+        schema
+            .into_iter()
+            .filter(|(key, _)| PLAIN_OBJECT.contains(&key.as_str()))
+            .collect(),
+    )
+}
+
+/// `schema` with each reference to the revision type in it replaced by a string of a full
+/// changeset id's pattern ([`full_id_pattern`]). The revision's description goes with the
+/// reference, since it offers a ref name; the field's own stays.
+fn full_id(schema: &mut Value) {
+    match schema {
+        Value::Object(members) => {
+            if members.get("$ref").and_then(Value::as_str) == Some("#/$defs/Rev") {
+                members.remove("$ref");
+                members.insert("type".to_owned(), Value::from("string"));
+                members.insert("pattern".to_owned(), Value::from(full_id_pattern()));
+            }
+            members.values_mut().for_each(full_id);
+        }
+        Value::Array(items) => items.iter_mut().for_each(full_id),
+        _ => {}
     }
 }
 
@@ -1104,6 +1209,9 @@ struct Spec {
     /// One line.
     description: &'static str,
     effect: Effect,
+    /// The most characters of a result the tool asks Claude Code to keep in the conversation
+    /// instead of saving to a file, if it asks ([`RESULT_CHARS_KEY`]).
+    result_chars: Option<u32>,
 }
 
 /// The operations, one tool each.
@@ -1261,6 +1369,10 @@ struct ToolDef {
     description: &'static str,
     input_schema: Value,
     annotations: Value,
+    /// What the tool asks of a client beyond the protocol: `read_file`'s result size for
+    /// Claude Code ([`READ_FILE_RESULT_CHARS`]); omitted for the other tools.
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    meta: Option<Value>,
 }
 
 /// The result of `tools/call`.
@@ -1468,6 +1580,108 @@ mod tests {
         assert!(delete("main~1").refuse().is_err());
     }
 
+    /// The tools this server lists, as `tools/list` gives them.
+    fn listed() -> Vec<ToolDef> {
+        let global = Global::default();
+        let env = |_: &str| -> Option<OsString> { None };
+        Server::new(&global, &env).tools
+    }
+
+    /// Every tool's `inputSchema` is a plain object: of type `object`, with nothing at its top
+    /// but `$schema`, `title`, `description`, `type`, `properties` and `required`. The Claude
+    /// API refuses, with a 400 error, a request whose tools hold an input schema with `oneOf`,
+    /// `anyOf` or `allOf` at the top, and Claude Code sends every tool with every request, so
+    /// one such tool would stop each request of the session. The API's schema may state a rule
+    /// across fields that way (`RefSetReq`'s exactly one of `expected_old` and `create`); a
+    /// tool's leaves it to its description and to the server's own check.
+    #[test]
+    fn tool_input_schemas_are_plain_objects() {
+        let plain = BTreeSet::from([
+            "$schema",
+            "title",
+            "description",
+            "type",
+            "properties",
+            "required",
+        ]);
+        for tool in listed() {
+            let schema = tool.input_schema.as_object().expect("a schema object");
+            assert_eq!(schema["type"], "object", "{}", tool.name);
+            for key in schema.keys() {
+                assert!(
+                    plain.contains(key.as_str()),
+                    "{}: {key} at the top of its inputSchema",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    /// The `expected_old` of `ref_set` and `ref_delete` asks in the schema for what the server
+    /// takes there ([`concrete_expectation`]): a full changeset id, as a pattern. Its
+    /// description is the field's own, without the revision's that offers a ref name; `new`
+    /// keeps the revision's, since a move may name its target any way.
+    #[test]
+    fn a_compare_and_swap_asks_for_a_full_id_in_its_schema() {
+        let all = schema_for_all();
+        let revision = all["Rev"]["description"].as_str().unwrap();
+        let tools = listed();
+        let schema = |name: &str| {
+            &tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap()
+                .input_schema["properties"]
+        };
+        let own = |request: &str| all[request]["properties"]["expected_old"]["description"].clone();
+        assert_eq!(
+            schema("ref_delete")["expected_old"],
+            json!({
+                "type": "string",
+                "pattern": "^[0-9a-fA-F]{64}$",
+                "description": own("RefDeleteReq"),
+            })
+        );
+        let set = &schema("ref_set")["expected_old"];
+        assert_eq!(
+            set["anyOf"],
+            json!([{"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}, {"type": "null"}])
+        );
+        assert_eq!(set["description"], own("RefSetReq"));
+        for request in ["RefSetReq", "RefDeleteReq"] {
+            let own = own(request);
+            assert!(
+                !own.as_str().unwrap().contains(revision),
+                "{request}: {own}"
+            );
+        }
+        let new = schema("ref_set")["new"]["description"].as_str().unwrap();
+        assert!(new.ends_with(revision), "{new}");
+    }
+
+    /// One rule says what a full id is: the pattern the schema publishes and the refusal the
+    /// server applies agree on each sample, and only the two of 64 hex digits, one of each
+    /// case, are full ids.
+    #[test]
+    fn the_full_id_pattern_and_the_refusal_agree() {
+        assert_eq!(full_id_pattern(), "^[0-9a-fA-F]{64}$");
+        let id = "0123456789abcdef".repeat(4);
+        for (sample, full) in [
+            ("main".to_owned(), false),
+            ("release/1.2".to_owned(), false),
+            (id[..63].to_owned(), false),
+            (id.clone(), true),
+            (id.to_uppercase(), true),
+            (format!("{id}0"), false),
+            (format!("{id}~1"), false),
+            (format!("{}g", &id[..63]), false),
+        ] {
+            assert_eq!(is_full_id(&sample), full, "{sample}");
+            let refused = concrete_expectation("main", &Rev::from(sample.as_str()));
+            assert_eq!(refused.is_ok(), full, "{sample}");
+        }
+    }
+
     /// A commit's client file must be an absolute path, since the server would read a relative
     /// one from its own working directory, which the agent cannot see; and not this process's
     /// own stdin or stdout, which carry the protocol. The refusal names the change and the file.
@@ -1605,6 +1819,17 @@ mod tests {
             assert!(!spec.description.contains('\n'), "{}", spec.name);
             assert!(!spec.description.contains("  "), "{}", spec.name);
         }
+    }
+
+    /// The instructions fit in the 2,048 characters of a server's instructions that Claude
+    /// Code keeps, and are one line without a run of spaces that a broken string continuation
+    /// leaves: a sentence added to them names the one it trims to stay within the limit.
+    #[test]
+    fn the_instructions_fit_in_claude_code_s_2048_characters() {
+        let length = INSTRUCTIONS.chars().count();
+        assert!(length <= 2048, "{length} characters");
+        assert!(!INSTRUCTIONS.contains('\n'));
+        assert!(!INSTRUCTIONS.contains("  "));
     }
 
     #[test]

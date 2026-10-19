@@ -472,17 +472,20 @@ pub struct RefOut {
 /// `ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of
 /// `expected_old` and `create`; both or neither is `E_INVALID_ARG`.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+#[schemars(transform = one_of_expected_old_and_create)]
 pub struct RefSetReq {
     /// The ref: `main` or `release/<name>`.
     pub name: String,
     /// The revision to point it at.
     pub new: Rev,
     /// To move an existing ref: the target the caller last saw, by its full changeset id; if the
-    /// ref holds another, the move fails with `E_CAS_MISMATCH`. A ref name, a relative revision
-    /// or an id prefix is read from the store when the move runs instead of pinning the id the
-    /// caller read: the ref's own name always matches, so the compare-and-swap protects nothing,
-    /// and `main~1` on `main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and
-    /// the CLI's `--expect` help warns against it. Give this or `create`, not both.
+    /// ref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative
+    /// revision is read from the store when the move runs instead of pinning the id the caller
+    /// read: the ref's own name always matches, so the compare-and-swap protects nothing, and
+    /// `main~1` on `main` never matches. An id prefix pins the id the caller read only until
+    /// another changeset shares it; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all
+    /// three (`E_INVALID_ARG`), and the CLI's `--expect` help warns against them. Give this or
+    /// `create`, not both.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_old: Option<Rev>,
     /// To create the ref. If it exists at another target, the move fails with `E_CAS_MISMATCH`;
@@ -490,6 +493,21 @@ pub struct RefSetReq {
     /// (`already_applied`). Give this or `expected_old`, not both.
     #[serde(default)]
     pub create: bool,
+}
+
+/// States in `RefSetReq`'s schema what `ref set` checks: exactly one of `expected_old` (a
+/// string) and `create` (`true`). Both, neither, and an `expected_old` of null meet no branch,
+/// as the operation refuses them. The wire does not change.
+fn one_of_expected_old_and_create(schema: &mut schemars::Schema) {
+    schema.insert(
+        "oneOf".to_owned(),
+        serde_json::json!([
+            {"required": ["expected_old"],
+             "properties": {"expected_old": {"type": "string"}, "create": {"const": false}}},
+            {"required": ["create"],
+             "properties": {"create": {"const": true}, "expected_old": {"type": "null"}}},
+        ]),
+    );
 }
 
 /// `ref set` and `ref delete`: the move that was made.
@@ -520,11 +538,12 @@ pub struct RefDeleteReq {
     /// The ref.
     pub name: String,
     /// The target the caller last saw, by its full changeset id; if the ref holds another, the
-    /// delete fails with `E_CAS_MISMATCH`. A ref name, a relative revision or an id prefix is
-    /// read from the store when the delete runs instead of pinning the id the caller read: the
-    /// ref's own name always matches, so the compare-and-swap protects nothing, and `main~1` on
-    /// `main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's
-    /// `--expect` help warns against it.
+    /// delete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is read from the
+    /// store when the delete runs instead of pinning the id the caller read: the ref's own name
+    /// always matches, so the compare-and-swap protects nothing, and `main~1` on `main` never
+    /// matches. An id prefix pins the id the caller read only until another changeset shares
+    /// it; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all three (`E_INVALID_ARG`), and
+    /// the CLI's `--expect` help warns against them.
     pub expected_old: Rev,
 }
 
@@ -544,8 +563,54 @@ pub struct VerifyReport {
     pub objects_checked: u64,
     /// How many changesets were checked.
     pub changesets_checked: u64,
-    /// One line per problem found; empty for a clean store.
+    /// One line per problem found, for a reader of lines; empty for a clean store. `findings`
+    /// holds the same problems, at the same indexes, for a program.
     pub problems: Vec<String>,
+    /// One finding per problem found, for a program to act on: `findings[i]` is the problem
+    /// that the line `problems[i]` describes. Empty for a clean store; a report without it
+    /// reads as having none.
+    #[serde(default)]
+    pub findings: Vec<VerifyFinding>,
+}
+
+/// One problem `verify` found, as a program reads it: what kind of damage it is, and what it
+/// names. The keys its kind does not use are omitted; the line at the same index of `problems`
+/// says the same for a reader. Ids are lowercase hex.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct VerifyFinding {
+    /// What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,
+    /// `dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt` or `meta_corrupt`. A
+    /// string, as `OpError.code` is, so that a client can read kinds newer than its own list.
+    pub kind: String,
+    /// The object: one whose content does not hash to its id or does not decode
+    /// (`corrupt_object`), or one a changeset references that the store lacks
+    /// (`missing_object`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object: Option<String>,
+    /// The changeset: the first, in seq order, that references the missing object
+    /// (`missing_object`), the one that names a missing parent (`missing_parent`), or the one
+    /// whose root is not its first parent's root with its delta applied (`root_mismatch`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changeset: Option<String>,
+    /// The parent the changeset names, which the store does not hold (`missing_parent`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    /// The changeset record's place in the index, from 0 (`index_mismatch`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seq: Option<u64>,
+    /// Where the corrupt frame starts in `journal.log` (`journal_corrupt`); nothing after it
+    /// is read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    /// The ref: one that names no changeset in the store (`dangling_ref`), or whose file does
+    /// not read as a ref (`corrupt_ref`).
+    #[serde(rename = "ref", skip_serializing_if = "Option::is_none")]
+    pub ref_name: Option<String>,
+    /// What disagrees with the record (`index_mismatch`), which says what mends it: `journal`
+    /// (rebuild the index from the journal), `sorted_view` (rebuild the sorted views from the
+    /// index columns) or `object` (derive the record from its object again).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cause: Option<String>,
 }
 
 /// One store's operations, implemented over a local store now and by a remote client later

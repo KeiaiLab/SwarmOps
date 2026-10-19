@@ -180,6 +180,12 @@ left).
   and checks each sorted-view entry with its own reads (about 9 million reads at a million
   changesets, about 9 per changeset: each index record, and each entry of both sorted views, is
   read on its own). *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
+- **`verify`'s report has no cap.** `problems` and `findings` list every problem found, a line
+  and a finding each, and a failed verify's `E_STORE_CORRUPT` carries the whole report in
+  `details`, so a store damaged in many places gives a response as long as its damage, twice
+  over through MCP, whose result holds its envelope twice. *Target: M6 (streaming verify, which
+  pages the report and says when it cut it, `truncated`). Found: M1.5 addendum review (gap 14;
+  ruling 9(c)).*
 - **A missing `journal.off` opens as `E_IO`**, not `E_STORE_CORRUPT`; `verify` names it.
   *Unscheduled. Found: M1 final review.*
 - **`verify --deep` skips object files that are symlinks**, because the object listing ignores

@@ -494,6 +494,13 @@ expression: s.transcript()
         "exit": 1,
         "details": {
           "changesets_checked": 2,
+          "findings": [
+            {
+              "changeset": "[c1]",
+              "kind": "missing_object",
+              "object": "[id3]"
+            }
+          ],
           "objects_checked": 8,
           "problems": [
             "object [id3] is missing; changeset [c1] references it"

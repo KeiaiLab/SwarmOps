@@ -22,7 +22,8 @@ pub use ops::{
     DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, FileContent, FileKind,
     IdentityInfo, InfoReq, InitReq, LogPage, LogReq, ModeInput, ReadFileReq, ReadTreeReq,
     RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq,
-    SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyReport, VerifyReq,
+    SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport,
+    VerifyReq,
 };
 pub use rev::Rev;
 
@@ -89,5 +90,6 @@ pub fn schema_for_all() -> serde_json::Value {
         RefDeleteReq,
         VerifyReq,
         VerifyReport,
+        VerifyFinding,
     ]
 }

@@ -1414,7 +1414,8 @@ fn check_envelope(tool: &str, envelope: &Value) {
 
 /// Checks the tool `name` lists: its request type's schema (`request`, as `schema_for_all`
 /// gives it in `all`) standing alone, with no references; a title, a one-line description, and
-/// the annotations of what it does to the store.
+/// the annotations of what it does to the store; and for `read_file` alone, the `_meta` that
+/// raises the size of a result Claude Code keeps in the conversation to 200,000 characters.
 fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     let keys: BTreeSet<&str> = tool
         .as_object()
@@ -1422,11 +1423,17 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        keys,
-        BTreeSet::from(["name", "title", "description", "inputSchema", "annotations"]),
-        "{tool}"
-    );
+    let mut expected =
+        BTreeSet::from(["name", "title", "description", "inputSchema", "annotations"]);
+    if name == "read_file" {
+        expected.insert("_meta");
+        assert_eq!(
+            tool["_meta"],
+            json!({"anthropic/maxResultSizeChars": 200_000}),
+            "{tool}"
+        );
+    }
+    assert_eq!(keys, expected, "{tool}");
     for field in ["title", "description"] {
         let text = tool[field].as_str().unwrap();
         assert!(!text.is_empty() && !text.contains('\n'), "{name}: {text:?}");

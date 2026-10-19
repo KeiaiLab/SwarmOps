@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::error::OpError;
 
@@ -14,7 +15,7 @@ pub const API_VERSION: u32 = 1;
 ///
 /// Exactly one of `result` and `error` is present; the other is omitted, never written as null.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
-#[schemars(rename = "Envelope")]
+#[schemars(rename = "Envelope", transform = exactly_one_outcome)]
 pub struct Envelope<T> {
     /// Whether the operation succeeded.
     pub ok: bool,
@@ -56,6 +57,35 @@ impl<T> Envelope<T> {
             meta,
         }
     }
+}
+
+/// States in `Envelope`'s schema what its two constructors keep, which the struct cannot say:
+/// exactly one of `result` (when `ok`) and `error` (when not) is present, the other omitted,
+/// and `error` is never null. The wire does not change; a schema-validating client sees the rule.
+fn exactly_one_outcome(schema: &mut schemars::Schema) {
+    if let Some(Value::Object(error)) = schema
+        .get_mut("properties")
+        .and_then(|properties| properties.get_mut("error"))
+    {
+        // `Option<OpError>` gives `anyOf [OpError, null]`; the error is never written as null.
+        if let Some(Value::Array(branches)) = error.remove("anyOf") {
+            let mut written = branches
+                .into_iter()
+                .filter(|branch| branch.get("type") != Some(&Value::from("null")));
+            if let Some(Value::Object(only)) = written.next() {
+                error.extend(only);
+            }
+        }
+    }
+    schema.insert(
+        "oneOf".to_owned(),
+        json!([
+            {"properties": {"ok": {"const": true}}, "required": ["result"],
+             "not": {"required": ["error"]}},
+            {"properties": {"ok": {"const": false}}, "required": ["error"],
+             "not": {"required": ["result"]}},
+        ]),
+    );
 }
 
 /// What the envelope reports besides the outcome.

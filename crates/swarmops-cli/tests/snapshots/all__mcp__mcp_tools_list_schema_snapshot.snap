@@ -31,6 +31,9 @@ expression: listed
       "title": "Describe the store"
     },
     {
+      "_meta": {
+        "anthropic/maxResultSizeChars": 200000
+      },
       "annotations": {
         "destructiveHint": false,
         "idempotentHint": true,
@@ -217,7 +220,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Moves a ref, or creates one, by compare-and-swap: give create, or expected_old, the full 64-hex changeset id the ref held when you read it; a ref name, a relative revision or an id prefix is refused, since it is read when the call runs instead of pinning the id you read.",
+      "description": "Moves a ref, or creates one, by compare-and-swap: give create, or expected_old, the full 64-hex changeset id the ref held when you read it; a ref name or a relative revision is refused, since it is read when the call runs instead of pinning the id you read, and so is an id prefix, which stops resolving once another changeset shares it.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of\n`expected_old` and `create`; both or neither is `E_INVALID_ARG`.",
@@ -230,14 +233,14 @@ expression: listed
           "expected_old": {
             "anyOf": [
               {
-                "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                "pattern": "^[0-9a-fA-F]{64}$",
                 "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name, a relative revision\nor an id prefix is read from the store when the move runs instead of pinning the id the\ncaller read: the ref's own name always matches, so the compare-and-swap protects nothing,\nand `main~1` on `main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and\nthe CLI's `--expect` help warns against it. Give this or `create`, not both."
+            "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative\nrevision is read from the store when the move runs instead of pinning the id the caller\nread: the ref's own name always matches, so the compare-and-swap protects nothing, and\n`main~1` on `main` never matches. An id prefix pins the id the caller read only until\nanother changeset shares it; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all\nthree (`E_INVALID_ARG`), and the CLI's `--expect` help warns against them. Give this or\n`create`, not both."
           },
           "name": {
             "description": "The ref: `main` or `release/<name>`.",
@@ -265,13 +268,14 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Removes a ref by compare-and-swap, if it still holds expected_old, the full 64-hex changeset id it held when you read it; a ref name, a relative revision or an id prefix is refused, since it is read when the call runs instead of pinning the id you read.",
+      "description": "Removes a ref by compare-and-swap, if it still holds expected_old, the full 64-hex changeset id it held when you read it; a ref name or a relative revision is refused, since it is read when the call runs instead of pinning the id you read, and so is an id prefix, which stops resolving once another changeset shares it.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`ref delete`: remove a ref by compare-and-swap.",
         "properties": {
           "expected_old": {
-            "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name, a relative revision or an id prefix is\nread from the store when the delete runs instead of pinning the id the caller read: the\nref's own name always matches, so the compare-and-swap protects nothing, and `main~1` on\n`main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's\n`--expect` help warns against it. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is read from the\nstore when the delete runs instead of pinning the id the caller read: the ref's own name\nalways matches, so the compare-and-swap protects nothing, and `main~1` on `main` never\nmatches. An id prefix pins the id the caller read only until another changeset shares\nit; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all three (`E_INVALID_ARG`), and\nthe CLI's `--expect` help warns against them.",
+            "pattern": "^[0-9a-fA-F]{64}$",
             "type": "string"
           },
           "name": {

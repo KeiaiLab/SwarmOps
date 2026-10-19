@@ -184,7 +184,10 @@ agent harness that speaks the Model Context Protocol, such as Claude Code, calls
 as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
 `ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
 `inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
-definitions it refers to written in place. Its result is the envelope the CLI prints for that
+definitions it refers to written in place, and kept a plain object: a rule across fields that
+the type's schema states with a top-level `oneOf`, which the Claude API refuses in a tool, is
+left to the description and to the server's own check, and the `expected_old` of `ref_set` and
+`ref_delete` asks for a full changeset id. Its result is the envelope the CLI prints for that
 request, as `structuredContent` and as text, and a failed operation sets `isError`, with the
 envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
 to clients that open with `initialize`.
@@ -258,7 +261,10 @@ Two rules matter more to an agent than to a person at the CLI:
   agent should ask for little: `max_bytes` of 32 KiB or less for `read_file`, a `limit` of 100
   or less for `read_tree` and `log`, paging on with the `cursor` a result returns, and
   `max_changes` of 100 or less for `show`. The tools' descriptions say so; the operations' own
-  defaults stay as they are.
+  defaults stay as they are. `read_file` alone raises Claude Code's limit for itself: its entry
+  in `tools/list` carries `_meta: {"anthropic/maxResultSizeChars": 200000}`, so Claude Code
+  keeps a `read_file` result of up to 200,000 characters in the conversation instead of saving
+  it to a file.
 
 ### When the server does not start
 

@@ -910,6 +910,38 @@ expression: s.redact(&all)
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "One command's output: `result` on success, `error` on failure, `meta` either way.\n\nExactly one of `result` and `error` is present; the other is omitted, never written as null.",
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "error"
+            ]
+          },
+          "properties": {
+            "ok": {
+              "const": true
+            }
+          },
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "not": {
+            "required": [
+              "result"
+            ]
+          },
+          "properties": {
+            "ok": {
+              "const": false
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ],
       "properties": {
         "api": {
           "description": "The API version.",
@@ -918,14 +950,7 @@ expression: s.redact(&all)
           "type": "integer"
         },
         "error": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/OpError"
-            },
-            {
-              "type": "null"
-            }
-          ],
+          "$ref": "#/$defs/OpError",
           "description": "The failure; present exactly when not `ok`."
         },
         "meta": {
@@ -1561,7 +1586,7 @@ expression: s.redact(&all)
       "properties": {
         "expected_old": {
           "$ref": "#/$defs/Rev",
-          "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name, a relative revision or an id prefix is\nread from the store when the delete runs instead of pinning the id the caller read: the\nref's own name always matches, so the compare-and-swap protects nothing, and `main~1` on\n`main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and the CLI's\n`--expect` help warns against it."
+          "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is read from the\nstore when the delete runs instead of pinning the id the caller read: the ref's own name\nalways matches, so the compare-and-swap protects nothing, and `main~1` on `main` never\nmatches. An id prefix pins the id the caller read only until another changeset shares\nit; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all three (`E_INVALID_ARG`), and\nthe CLI's `--expect` help warns against them."
         },
         "name": {
           "description": "The ref.",
@@ -1662,6 +1687,34 @@ expression: s.redact(&all)
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of\n`expected_old` and `create`; both or neither is `E_INVALID_ARG`.",
+      "oneOf": [
+        {
+          "properties": {
+            "create": {
+              "const": false
+            },
+            "expected_old": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "expected_old"
+          ]
+        },
+        {
+          "properties": {
+            "create": {
+              "const": true
+            },
+            "expected_old": {
+              "type": "null"
+            }
+          },
+          "required": [
+            "create"
+          ]
+        }
+      ],
       "properties": {
         "create": {
           "default": false,
@@ -1677,7 +1730,7 @@ expression: s.redact(&all)
               "type": "null"
             }
           ],
-          "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name, a relative revision\nor an id prefix is read from the store when the move runs instead of pinning the id the\ncaller read: the ref's own name always matches, so the compare-and-swap protects nothing,\nand `main~1` on `main` never matches. `swarmops mcp` refuses one (`E_INVALID_ARG`), and\nthe CLI's `--expect` help warns against it. Give this or `create`, not both."
+          "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative\nrevision is read from the store when the move runs instead of pinning the id the caller\nread: the ref's own name always matches, so the compare-and-swap protects nothing, and\n`main~1` on `main` never matches. An id prefix pins the id the caller read only until\nanother changeset shares it; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all\nthree (`E_INVALID_ARG`), and the CLI's `--expect` help warns against them. Give this or\n`create`, not both."
         },
         "name": {
           "description": "The ref: `main` or `release/<name>`.",
@@ -2034,7 +2087,143 @@ expression: s.redact(&all)
       "title": "TreeListing",
       "type": "object"
     },
+    "VerifyFinding": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One problem `verify` found, as a program reads it: what kind of damage it is, and what it\nnames. The keys its kind does not use are omitted; the line at the same index of `problems`\nsays the same for a reader. Ids are lowercase hex.",
+      "properties": {
+        "cause": {
+          "description": "What disagrees with the record (`index_mismatch`), which says what mends it: `journal`\n(rebuild the index from the journal), `sorted_view` (rebuild the sorted views from the\nindex columns) or `object` (derive the record from its object again).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "changeset": {
+          "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), or the one\nwhose root is not its first parent's root with its delta applied (`root_mismatch`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt` or `meta_corrupt`. A\nstring, as `OpError.code` is, so that a client can read kinds newer than its own list.",
+          "type": "string"
+        },
+        "object": {
+          "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks\n(`missing_object`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Where the corrupt frame starts in `journal.log` (`journal_corrupt`); nothing after it\nis read.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "parent": {
+          "description": "The parent the changeset names, which the store does not hold (`missing_parent`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref": {
+          "description": "The ref: one that names no changeset in the store (`dangling_ref`), or whose file does\nnot read as a ref (`corrupt_ref`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "seq": {
+          "description": "The changeset record's place in the index, from 0 (`index_mismatch`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "VerifyFinding",
+      "type": "object"
+    },
     "VerifyReport": {
+      "$defs": {
+        "VerifyFinding": {
+          "description": "One problem `verify` found, as a program reads it: what kind of damage it is, and what it\nnames. The keys its kind does not use are omitted; the line at the same index of `problems`\nsays the same for a reader. Ids are lowercase hex.",
+          "properties": {
+            "cause": {
+              "description": "What disagrees with the record (`index_mismatch`), which says what mends it: `journal`\n(rebuild the index from the journal), `sorted_view` (rebuild the sorted views from the\nindex columns) or `object` (derive the record from its object again).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "changeset": {
+              "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), or the one\nwhose root is not its first parent's root with its delta applied (`root_mismatch`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt` or `meta_corrupt`. A\nstring, as `OpError.code` is, so that a client can read kinds newer than its own list.",
+              "type": "string"
+            },
+            "object": {
+              "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks\n(`missing_object`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "offset": {
+              "description": "Where the corrupt frame starts in `journal.log` (`journal_corrupt`); nothing after it\nis read.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "parent": {
+              "description": "The parent the changeset names, which the store does not hold (`missing_parent`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "ref": {
+              "description": "The ref: one that names no changeset in the store (`dangling_ref`), or whose file does\nnot read as a ref (`corrupt_ref`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "seq": {
+              "description": "The changeset record's place in the index, from 0 (`index_mismatch`).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "kind"
+          ],
+          "type": "object"
+        }
+      },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`verify`: what the consistency check found.",
       "properties": {
@@ -2044,6 +2233,14 @@ expression: s.redact(&all)
           "minimum": 0,
           "type": "integer"
         },
+        "findings": {
+          "default": [],
+          "description": "One finding per problem found, for a program to act on: `findings[i]` is the problem\nthat the line `problems[i]` describes. Empty for a clean store; a report without it\nreads as having none.",
+          "items": {
+            "$ref": "#/$defs/VerifyFinding"
+          },
+          "type": "array"
+        },
         "objects_checked": {
           "description": "How many objects were checked.",
           "format": "uint64",
@@ -2051,7 +2248,7 @@ expression: s.redact(&all)
           "type": "integer"
         },
         "problems": {
-          "description": "One line per problem found; empty for a clean store.",
+          "description": "One line per problem found, for a reader of lines; empty for a clean store. `findings`\nholds the same problems, at the same indexes, for a program.",
           "items": {
             "type": "string"
           },

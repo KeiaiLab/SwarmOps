@@ -197,6 +197,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   each of a fresh copy of its store as the load left it, taken at seeding, so that its row is
   that store's, not the one its first open settled. [docs/perf.md](docs/perf.md) keeps the
   2026-10-17 run's cells until the next quiet-window run measures the ones this changes.
+- `verify` reports each problem as a finding too: `VerifyReport.findings`, at the same index as
+  its line in `problems`, gives the problem's `kind` (`missing_object`, `index_mismatch`, …) and
+  what it names (`object`, `changeset`, `parent`, `seq`, `offset`, `ref`, `cause`), so that a
+  program acts on the damage without parsing the lines. A failed `verify`'s `E_STORE_CORRUPT`
+  carries it in `details` with the rest of the report, and the hint after a deep one names
+  `details.findings`. `swarmops schema` lists `VerifyFinding`.
+- `swarmops mcp`: `read_file`'s entry in `tools/list` carries
+  `_meta: {"anthropic/maxResultSizeChars": 200000}`, which Claude Code reads to keep a
+  `read_file` result of up to 200,000 characters in the conversation instead of saving one over
+  50,000 to a file. No other tool carries `_meta`.
 
 ### Changed
 
@@ -234,6 +244,22 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `Record::decode`, which gave it the position in its input where decoding stopped, returns a
   `BadRecord { at }` with that position instead (Rust API only; the readers report a frame
   that does not decode at its own offset, as before).
+- **Schema only, the wire unchanged:** `Envelope`'s schema says with a `oneOf` that exactly one
+  of `result` (when `ok`) and `error` (when not) is present, and its `error` is no longer
+  nullable; `RefSetReq`'s says with a `oneOf` that exactly one of `expected_old` and `create`
+  is given. Through `swarmops mcp`, every tool's `inputSchema` stays a plain object, with no
+  `oneOf`, `anyOf` or `allOf` at its top, which the Claude API refuses for the whole session,
+  and the `expected_old` of `ref_set` and `ref_delete` there is a string of the full-id
+  pattern `^[0-9a-fA-F]{64}$` that the server enforces, in place of the revision text that
+  offered a ref name.
+- The `expected_old` descriptions in `swarmops schema`, the `ref_set` and `ref_delete` tool
+  descriptions and the MCP server's instructions say what an id prefix does, apart from a ref
+  name and a relative revision: it pins the id read only until another changeset shares it,
+  then it is `E_AMBIGUOUS_ID`. The instructions also say that a read may show a commit that a
+  failed sync then takes back, and that a mutation naming it fails under the lock instead of
+  building on it; they drop the revision grammar, which each tool's schema and a bad
+  revision's hint give, and the parenthesis on Claude Code's result limits (1,990 of Claude
+  Code's 2,048 characters; they were 2,043).
 
 ### Fixed
 
