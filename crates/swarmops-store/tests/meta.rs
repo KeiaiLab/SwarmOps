@@ -3155,6 +3155,27 @@ fn a_transaction_refuses_more_records_than_a_frame_holds() {
     );
 }
 
+/// A changeset with more parents than a journal record and `par.col` count in one byte (255)
+/// is refused as it is queued, [`StoreError::Limit`] with 256 (the limit is checked before the
+/// parents are looked up, so none of them need be in the store), and nothing of it is queued:
+/// the transaction commits what it queued besides. The repository refuses such a changeset
+/// before it reaches the store, so only a direct call meets this.
+#[test]
+fn insert_changeset_refuses_more_than_255_parents() {
+    let (_dir, root, store) = new_store();
+    let parents: Vec<u64> = (0..256).collect();
+    let mut write = store.write().unwrap();
+    let refused = write.insert_changeset(cs(1000, &parents));
+    assert_limit(refused, LimitKind::Parents, 255, 256);
+    write.insert_changeset(cs(1, &[])).unwrap();
+    write.commit().unwrap();
+    assert_eq!(
+        frames(&root)[0].records.len(),
+        1,
+        "the refused changeset was not queued"
+    );
+}
+
 #[test]
 fn replay_checks_ref_names_before_appending_to_the_index() {
     let (_dir, root, store) = new_store();
