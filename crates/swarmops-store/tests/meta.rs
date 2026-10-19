@@ -4128,6 +4128,51 @@ fn read_committed_on_a_clean_tail_writes_nothing() {
     assert!(writes.is_empty(), "it wrote {writes:?}, of {made:?}");
 }
 
+/// A committed snapshot is taken under the lock, and not only its tail check: every [`FsOps`]
+/// call it makes, the snapshot's read of main's ref file among them, meets `meta/lock` held, so
+/// that no writer lands or cuts a frame while the snapshot reads (one round, as `read` takes it
+/// with no writer running).
+#[test]
+fn read_committed_takes_its_snapshot_under_the_lock() {
+    /// Records each call by name, with whether `meta/lock` was held when it was made: whether a
+    /// lock of its own, taken without waiting, gives up.
+    struct LockProbe {
+        layout: Layout,
+        calls: Mutex<Vec<(String, bool)>>,
+    }
+
+    impl Watch for LockProbe {
+        fn before(&self, call: &Call<'_>) -> io::Result<()> {
+            let attempt = MetaLock::acquire(&self.layout, Duration::ZERO);
+            let held = matches!(attempt, Err(StoreError::Busy));
+            drop(attempt);
+            self.calls.lock().unwrap().push((call.named(), held));
+            Ok(())
+        }
+    }
+
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    cas(&store, "main", None, Some(0));
+    let probe = LockProbe {
+        layout: Layout::new(&root),
+        calls: Mutex::new(Vec::new()),
+    };
+    let probe = Arc::new(Watched(probe, RealFs));
+    let reader = MetaStore::open_with_fs(&root, checked(Arc::clone(&probe))).unwrap();
+    probe.calls.lock().unwrap().clear();
+    let (read, _) = reader.read_committed().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(0, 1)));
+    drop(read);
+    let calls = std::mem::take(&mut *probe.calls.lock().unwrap());
+    assert!(
+        calls.iter().any(|(call, _)| call == "read main"),
+        "the snapshot reads main's ref file: {calls:?}"
+    );
+    let unlocked: Vec<&(String, bool)> = calls.iter().filter(|(_, held)| !held).collect();
+    assert!(unlocked.is_empty(), "made without the lock: {unlocked:?}");
+}
+
 #[test]
 fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
     let (_dir, root, store) = new_store();
