@@ -6,7 +6,9 @@
 //! run of a store's life is made in this process on an [`ImageRecordingFs`], deterministically
 //! (one thread, signatures at a fixed time): `init`; commits and ref moves (a create, moves, a
 //! delete) with a compaction and a checkpoint among them; then commits past the checkpoint, whose
-//! index records no sync has made durable. For a power failure after any step of the run, and a
+//! index records no sync has made durable. The slow variant's run ends with a transaction of
+//! more than 1,024 changesets, which its writer compacts after, as every writer does past that
+//! many records: an index sync, the compaction, a `Compacted` frame, the checkpoint. For a power failure after any step of the run, and a
 //! seed, the [`Image`] of what the disk may hold is written to a temp dir, and the binary must
 //! find in it, as RocksDB's crash tests put it, no hole:
 //!
@@ -29,9 +31,12 @@ use std::time::Duration;
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::Value;
-use swarmops_core::{ChangesetId, EntryKind, RepoPath, Signature};
+use swarmops_core::bytes::to_u64;
+use swarmops_core::{Changeset, ChangesetId, EntryKind, ObjectKind, RepoPath, Signature, Tree};
 use swarmops_repo::{CasResult, Change, ChangeOp, CommitRequest, LocalRepo};
-use swarmops_store::{FsOps, Index, Layout, MetaLock, MetaStore};
+use swarmops_store::{
+    ChangesetMeta, FsObjectStore, FsOps, Index, Layout, MetaLock, MetaStore, ObjectStore,
+};
 use swarmops_testkit::power::{
     Chooser, Image, ImageRecordingFs, Keep, KeepAllBut, PAGE, RecordedCall, SECTOR, Seeded,
     Timeline,
@@ -67,12 +72,24 @@ enum Op {
     /// `MetaStore::flush`: the index synced and the checkpoint moved to the journal's end; no
     /// frame.
     Flush,
+    /// [`BULK`] root changesets of the empty tree in one transaction of their own, their objects
+    /// put and flushed first (between the marks `bulk objects` and `bulk objects flushed`): its
+    /// frame takes the index's tail past [`Index::COMPACT_THRESHOLD`], so its writer syncs the
+    /// index, compacts, appends a `Compacted` frame (no transaction's) and moves the checkpoint.
+    Bulk,
 }
+
+/// How many changesets [`Op::Bulk`] records in its one frame: more than the index's compaction
+/// threshold, whatever tail the run left before.
+const BULK: u64 = Index::COMPACT_THRESHOLD + 1;
 
 /// The run after `init`. The actors' lengths place frames where a lost sector takes their
 /// header: frame 5's header (bytes 504..512) fills the end of the sector its write starts in,
 /// the next sector holding the rest of the frame; frame 10's length field (1020..1024) ends its
-/// first sector, its CRC starting the next.
+/// first sector, its CRC starting the next; and frame 13's length field (1535..1539) straddles a
+/// sector boundary, its low byte alone in the first sector, its payload over 255 bytes, so that a
+/// lost first sector leaves it a length that is not 0 but wrong (the long actors of frames 12 and
+/// 13 place it).
 const RUN: &[Op] = &[
     Op::Commit {
         parent: None,
@@ -138,6 +155,30 @@ const RUN: &[Op] = &[
         new: Some(4),
         actor: "test-power/worker-1",
     },
+    Op::Commit {
+        parent: Some(4),
+        puts: &[("docs/c.md", "c\n")],
+    },
+    Op::Cas {
+        name: "main",
+        expected: Some(4),
+        new: Some(5),
+        actor: concat!(
+            "test-power/worker-1-whose-name-is-long-enough-to-place-the-next-frame-",
+            "where-its-length-field-straddles-a-sector-boundary-",
+            "01234567890123456789012345678901234567890123456789012345678901234567890123456",
+        ),
+    },
+    Op::Cas {
+        name: "release/v2",
+        expected: None,
+        new: Some(5),
+        actor: concat!(
+            "test-power/worker-1-whose-name-is-long-enough-for-a-payload-over-255-bytes-",
+            "so-that-the-length-keeps-a-byte-that-is-not-zero-when-its-low-byte-is-lost-",
+            "01234567890123456789012345678901234567890123456789",
+        ),
+    },
 ];
 
 /// What one transaction of the run records in its frame.
@@ -145,6 +186,8 @@ const RUN: &[Op] = &[
 enum Txn {
     /// A commit's changeset (the commits' frames come in their order).
     Commit,
+    /// [`Op::Bulk`]'s [`BULK`] changesets, in one frame.
+    Bulk,
     /// A move of ref `name` to commit number `new`, or its deletion.
     Cas {
         name: &'static str,
@@ -191,6 +234,23 @@ fn signature() -> Signature {
 /// Runs `init`, then [`RUN`], on an [`ImageRecordingFs`] in a temp dir, on a one-thread pool:
 /// objects are written, and directories synced, one at a time, in the same order every run.
 fn record() -> Recorded {
+    record_ops(RUN)
+}
+
+/// [`record`], with the run `ops` after `init`.
+///
+/// The recorded order of the calls, so the steps and the images, is the same in every run
+/// because three settings keep the run to one thread: the one-thread rayon pool it runs in,
+/// where `put_batch` writes the objects and `flush` syncs the directories one at a time;
+/// `set_parallelism(1)` on the stores [`Op::Flush`] and [`Op::Bulk`] open, which sync the index
+/// files one at a time; and the compaction handle of [`Op::Compact`], whose `sync_threads` is 1
+/// unless set. `LocalRepo`'s own metadata store keeps the default parallelism (5), which is
+/// deterministic only while no transaction of it syncs the index: none reaches
+/// `CHECKPOINT_EVERY` (32 frames past the checkpoint) or the compaction threshold, so a `RUN`
+/// that grows past 32 frames since [`Op::Flush`] would record its index syncs in an order that
+/// varies between runs (the oracle stays valid; the images change), and [`Op::Bulk`] passes the
+/// threshold on a store of its own.
+fn record_ops(ops: &[Op]) -> Recorded {
     let dir = tempfile::tempdir().expect("make a temp dir");
     let base = dir.path().canonicalize().expect("the temp dir's path");
     let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
@@ -199,14 +259,17 @@ fn record() -> Recorded {
         .num_threads(1)
         .build()
         .expect("a one-thread pool");
-    let (commits, parents) = pool.install(|| run(&root, &fs));
+    let (commits, parents) = pool.install(|| run(&root, &fs, ops));
     let calls = fs.calls();
     let timeline = Timeline::new(&base, &calls);
     let log = base.join("store/meta/journal.log");
-    let mut whats = RUN.iter().filter_map(|op| match *op {
-        Op::Commit { .. } => Some(None),
-        Op::Cas { name, new, .. } => Some(Some((name, new))),
-        Op::Compact | Op::Flush => None,
+    // Each frame's transaction, in order; `None` for the `Compacted` frame that follows a bulk
+    // transaction, which is no transaction's.
+    let mut whats = ops.iter().flat_map(|op| match *op {
+        Op::Commit { .. } => vec![Some(Txn::Commit)],
+        Op::Cas { name, new, .. } => vec![Some(Txn::Cas { name, new })],
+        Op::Bulk => vec![Some(Txn::Bulk), None],
+        Op::Compact | Op::Flush => Vec::new(),
     });
     let mut frames = Vec::new();
     for (at, call) in calls.iter().enumerate() {
@@ -214,12 +277,11 @@ fn record() -> Recorded {
             && *path == log
             && !bytes.is_empty()
         {
-            let what = match whats.next().expect("a frame per commit and ref move") {
-                None => Txn::Commit,
-                Some((name, new)) => Txn::Cas { name, new },
-            };
-            let write = timeline.steps_of(at).start;
-            frames.push(Frame { what, write });
+            let what = whats.next().expect("a frame per commit and ref move");
+            if let Some(what) = what {
+                let write = timeline.steps_of(at).start;
+                frames.push(Frame { what, write });
+            }
         }
     }
     assert!(whats.next().is_none(), "a frame per commit and ref move");
@@ -234,13 +296,17 @@ fn record() -> Recorded {
     }
 }
 
-/// The run itself; the commits' ids and first parents.
-fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>) -> (Vec<ChangesetId>, Vec<Option<usize>>) {
+/// The run itself, `init` then `ops`; the changesets' ids and first parents, in their order.
+fn run(
+    root: &Utf8Path,
+    fs: &Arc<ImageRecordingFs>,
+    ops: &[Op],
+) -> (Vec<ChangesetId>, Vec<Option<usize>>) {
     let shared: Arc<dyn FsOps> = Arc::clone(fs) as Arc<dyn FsOps>;
     let repo = LocalRepo::create_with_fs(root, "power", Arc::clone(&shared)).expect("init");
     fs.mark("init");
     let (mut commits, mut parents) = (Vec::new(), Vec::new());
-    for (n, op) in RUN.iter().enumerate() {
+    for (n, op) in ops.iter().enumerate() {
         match *op {
             Op::Commit { parent, puts } => {
                 let changes = puts
@@ -291,10 +357,65 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>) -> (Vec<ChangesetId>, Vec<Op
                 meta.set_parallelism(1);
                 meta.flush().expect("flush");
             }
+            Op::Bulk => {
+                let ids = bulk(root, &shared, fs);
+                parents.extend(ids.iter().map(|_| None));
+                commits.extend(ids);
+            }
         }
         fs.mark(&format!("op {n}"));
     }
     (commits, parents)
+}
+
+/// [`Op::Bulk`] on the store at `root`, its calls through `shared` (the recorder `fs`, which
+/// marks where its objects are written); the changesets' ids, in the order it records them.
+fn bulk(root: &Utf8Path, shared: &Arc<dyn FsOps>, fs: &ImageRecordingFs) -> Vec<ChangesetId> {
+    let tree = Tree::empty_root();
+    let changesets: Vec<Changeset> = (0..BULK)
+        .map(|n| Changeset {
+            parents: Vec::new(),
+            root: tree.id(),
+            delta: Vec::new(),
+            author: signature(),
+            committer: signature(),
+            message: format!("bulk {n}").into_bytes(),
+            extra_headers: Vec::new(),
+            metadata: Vec::new(),
+        })
+        .collect();
+    let mut objects = vec![(ObjectKind::Tree, tree.encode())];
+    for changeset in &changesets {
+        objects.push((ObjectKind::Changeset, changeset.encode().expect("encode")));
+    }
+    fs.mark("bulk objects");
+    let store = FsObjectStore::open(Layout::new(root), Box::new(Arc::clone(shared)));
+    store.put_batch(objects).expect("put the objects");
+    store.flush().expect("flush the objects");
+    fs.mark("bulk objects flushed");
+    let mut meta = MetaStore::open_with_fs(root, Arc::clone(shared)).expect("open");
+    meta.set_parallelism(1);
+    let mut write = meta.write().expect("write");
+    let mut ids = Vec::new();
+    for changeset in &changesets {
+        let id = changeset.id().expect("the id");
+        let delta_hash = changeset.delta_hash().expect("the delta hash");
+        let record = ChangesetMeta {
+            id,
+            seq: 0,
+            generation: 0,
+            delta_hash,
+            parents: Vec::new(),
+        };
+        write.insert_changeset(record).expect("insert");
+        ids.push(id);
+    }
+    let info = write.commit().expect("commit");
+    assert!(
+        info.checkpointed,
+        "it passed the compaction threshold: {info:?}"
+    );
+    ids
 }
 
 /// The state of a store: its changesets and its refs.
@@ -316,6 +437,7 @@ impl Recorded {
         for frame in &self.frames[..frames] {
             match frame.what {
                 Txn::Commit => state.changesets += 1,
+                Txn::Bulk => state.changesets += usize::try_from(BULK).unwrap(),
                 Txn::Cas { name, new: None } => {
                     state.refs.remove(name);
                 }
@@ -696,10 +818,6 @@ fn allowed(rec: &Recorded, cut: usize, found: &Result<Found, String>) -> Result<
     }
 }
 
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).expect("usize fits in u64")
-}
-
 /// The image of a power failure after `cut` steps that keeps every directory change and every
 /// file's unsynced bytes, but loses those of the files `lose` names as it says.
 fn image_losing(rec: &Recorded, cut: usize, lose: &[(&str, Keep)]) -> Image {
@@ -744,12 +862,36 @@ fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit() {
 }
 
 /// [`power_loss_images_recover_a_prefix_with_every_acknowledged_commit`] at every cut, for ten
-/// seeds: nothing kept, everything kept, and eight at random.
+/// seeds: nothing kept, everything kept, and eight at random; on [`RUN`] and then
+/// [`Op::Bulk`], so that the images hold the compaction a writer makes past
+/// [`Index::COMPACT_THRESHOLD`] records: the index synced, the views written and renamed into
+/// place, the `Compacted` frame and the checkpoint after it, every cut of it checked. Two long
+/// runs of the bulk transaction repeat, call after call, what [`RUN`]'s cuts check at every step:
+/// its objects' writes (two calls for each of its 1,026 objects, as for every commit's objects)
+/// and the materialization of its records past the checkpoint (an unsynced append to each of
+/// the five index files, for each record, as every commit's materialization makes). Of their
+/// cuts it checks the first and last eight and every 64th.
 #[test]
 #[ignore = "slow: thousands of images through the binary; just check-slow runs it"]
 fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit_at_every_cut() {
-    let rec = record();
-    let cuts: Vec<usize> = (0..=rec.timeline.steps()).collect();
+    let ops: Vec<Op> = RUN.iter().copied().chain([Op::Bulk]).collect();
+    let rec = record_ops(&ops);
+    let objects = rec.timeline.mark("bulk objects")..rec.timeline.mark("bulk objects flushed");
+    // From the bulk frame's listing (its write and sync, then its entry's) to the index sync
+    // that starts the compaction.
+    let listed = rec.frames.last().expect("the bulk frame").write + 4;
+    let synced = (listed..rec.timeline.steps())
+        .find(|&step| rec.timeline.step(step).label.starts_with("sync_data"))
+        .expect("the bulk transaction syncs the index");
+    let sampled = |cut: usize| {
+        [&objects, &(listed..synced)].into_iter().all(|run| {
+            !(run.start + 8..run.end.saturating_sub(8)).contains(&cut)
+                || (cut - run.start).is_multiple_of(64)
+        })
+    };
+    let cuts: Vec<usize> = (0..=rec.timeline.steps())
+        .filter(|&cut| sampled(cut))
+        .collect();
     let seeds: Vec<u64> = (0..10).collect();
     let swept = sweep(&rec, &cuts, &seeds);
     println!(
@@ -805,7 +947,9 @@ fn zero_filled_index_tail_after_power_loss_is_replayed_not_counted() {
 /// writer writes, followed by bytes that are not zero. The frame never reached its commit point
 /// (its sync would have made its header durable), so it is a torn tail, cut like any other: the
 /// store opens and holds the frames before it. This holds where the whole header lies in the lost
-/// sector, and where only its length does, its CRC across the sector boundary.
+/// sector, where only its length does, its CRC across the sector boundary, and where its length
+/// straddles the boundary: its low byte lost, the length reads as one that is not 0 but wrong,
+/// and the frame fails its CRC, or runs past the end of the file, instead.
 #[test]
 fn a_lost_header_sector_is_a_torn_tail() {
     let rec = record();
@@ -817,17 +961,19 @@ fn a_lost_header_sector_is_a_torn_tail() {
             panic!("frame {n}: one write");
         };
         let boundary = (at / SECTOR + 1) * SECTOR;
-        // The length field in the first sector the write touches, the frame's end past it.
-        if boundary < at + 4 || at + len <= boundary {
+        // The frame's end past the first sector the write touches.
+        if at + len <= boundary {
             continue;
         }
         let image = image_losing(&rec, frame.write + 1, &[(log, Keep::FirstSectorLost)]);
         let bytes = image.file(Path::new(log)).expect("journal.log");
         let start = usize::try_from(at).unwrap();
-        assert_eq!(
-            &bytes[start..start + 4],
-            &[0; 4],
-            "frame {n}: its length lost"
+        // The bytes of its length field in that sector: all four, or the low ones of a length
+        // that straddles the boundary, the rest of it kept.
+        let lost = usize::try_from(boundary - at).unwrap().min(4);
+        assert!(
+            bytes[start..start + lost].iter().all(|&byte| byte == 0),
+            "frame {n}: the first {lost} bytes of its length lost"
         );
         assert!(
             bytes[start..].iter().any(|&byte| byte != 0),
@@ -851,6 +997,10 @@ fn a_lost_header_sector_is_a_torn_tail() {
     assert!(
         torn.iter().any(|&(_, lost)| (4..8).contains(&lost)),
         "a frame whose length lies in a lost sector, its CRC across the boundary: {torn:?}"
+    );
+    assert!(
+        torn.iter().any(|&(_, lost)| lost < 4),
+        "a frame whose length straddles the boundary, its low bytes lost: {torn:?}"
     );
 }
 

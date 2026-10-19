@@ -213,6 +213,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - Test infrastructure: where a crate's integration tests are the modules of `tests/all.rs` (core,
   api, store, repo and the CLI), `every_test_file_is_a_module_of_all_rs` fails on a file of
   `tests/` that no `mod` line names, which `autotests = false` would leave unbuilt.
+- Test infrastructure: the power-loss run places a frame whose length field straddles a 512 B
+  sector boundary, which a lost first sector leaves a wrong length that is not 0, and its slow
+  variant ends with a transaction of more than 1,024 changesets, so that its images hold the
+  compaction a writer makes past that many records (an index sync, the compaction, the
+  `Compacted` frame, the checkpoint), which the run's own compaction did not.
 
 ### Changed
 
