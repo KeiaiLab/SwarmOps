@@ -6,6 +6,7 @@
 //! importer diffs the trees it has just built in memory.
 
 pub mod line_diff;
+pub mod tree_diff;
 
 #[cfg(test)]
 mod tests {
