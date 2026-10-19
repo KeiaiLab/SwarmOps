@@ -4,6 +4,8 @@
 //! here.
 
 mod commit;
+#[cfg(feature = "test-hooks")]
+mod landing_models;
 mod read;
 mod verify;
 

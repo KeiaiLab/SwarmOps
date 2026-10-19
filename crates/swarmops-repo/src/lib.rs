@@ -12,6 +12,8 @@
 
 pub mod commit;
 pub mod error;
+#[cfg(feature = "test-hooks")]
+pub mod land_models;
 pub mod log;
 pub mod read;
 pub mod repo;

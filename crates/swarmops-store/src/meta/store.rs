@@ -8,7 +8,9 @@
 //! ([`Journal::truncate_torn_tail`]) and a torn index tail ([`Index::repair_tail`]), and
 //! replays the frames past `journal.ckpt` into the index and the ref files, so that both
 //! show every committed frame. [`MetaWrite`] then queues records, checking them against the
-//! index, the ref files and what it has queued already. [`MetaWrite::commit`] appends them
+//! index, the ref files and what it has queued already, and reads a ref
+//! ([`MetaWrite::get_ref`]) or a changeset ([`MetaWrite::changeset`]) as it sees them: what it
+//! queued first, then those files. [`MetaWrite::commit`] appends them
 //! as one frame ([`Journal::append_frame`]: the commit point), materializes the frame (an
 //! [`Index::append`] per changeset, without a sync; a ref file replaced per moved ref), and
 //! unlocks. Every 32 frames past the checkpoint, when it compacts (the sync first), and on
@@ -662,6 +664,52 @@ impl MetaWrite<'_> {
         self.recovered
     }
 
+    /// Ref `name` as this transaction compares against it ([`MetaWrite::cas_ref`]): the target
+    /// this transaction's last queued move of it leaves, or else what its file says, every
+    /// committed frame replayed into it by [`MetaStore::write`]; `None` if the ref does not
+    /// exist. Read under the lock, so no other writer moves the ref before this transaction is
+    /// committed or dropped. [`StoreError::RefName`] for a name that is not `main` or
+    /// `release/<x>`.
+    pub fn get_ref(&self, name: &str) -> Result<Option<ChangesetId>, StoreError> {
+        refs::check_ref_name(name)?;
+        self.current(name)
+    }
+
+    /// Changeset `id` as this transaction sees it: one it queued
+    /// ([`MetaWrite::insert_changeset`]), as the index will hold it once committed (at the seq
+    /// the insert returned, with the generation, delta hash and parents queued); or else the
+    /// index's record, every committed changeset replayed into the index by
+    /// [`MetaStore::write`]; `None` if neither holds it. Read under the lock.
+    pub fn changeset(&self, id: ChangesetId) -> Result<Option<ChangesetMeta>, StoreError> {
+        if self.queued.contains_key(&id) {
+            let queued = self.records.iter().filter_map(|record| match record {
+                Record::Changeset {
+                    id,
+                    generation,
+                    delta_hash,
+                    parents,
+                } => Some((id, generation, delta_hash, parents)),
+                Record::RefMove { .. } | Record::Compacted { .. } => None,
+            });
+            // The queued changesets take the seqs after the index's, in the queue's order.
+            for (at, (queued_id, generation, delta_hash, parents)) in queued.enumerate() {
+                if *queued_id == id {
+                    return Ok(Some(ChangesetMeta {
+                        id,
+                        seq: self.index.len() + to_u64(at),
+                        generation: *generation,
+                        delta_hash: *delta_hash,
+                        parents: parents.clone(),
+                    }));
+                }
+            }
+        }
+        match self.index.find(id)? {
+            Some(rec) => self.index.get(rec).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Queues changeset `meta`, unless the store or this transaction holds it already
     /// ([`InsertOutcome::AlreadyPresent`]). Its `seq` and `generation` are ignored: the
     /// store numbers its changesets, and a generation is 1 + the largest parent generation,
@@ -735,10 +783,7 @@ impl MetaWrite<'_> {
         {
             return Err(StoreError::UnknownRefTarget(target));
         }
-        let current = match self.moved.get(name) {
-            Some(&target) => target,
-            None => refs::read(&self.store.layout, &self.store.fs, name)?.map(|state| state.target),
-        };
+        let current = self.current(name)?;
         if current != expected {
             return Ok(CasResult::Mismatch { actual: current });
         }
@@ -860,6 +905,17 @@ impl MetaWrite<'_> {
                 max: to_u64(MAX_RECORDS),
                 got: to_u64(self.records.len()) + 1,
             })
+        }
+    }
+
+    /// What ref `name` (a valid name) names for this transaction: the target its last queued
+    /// move leaves, or else what the ref's file says.
+    fn current(&self, name: &str) -> Result<Option<ChangesetId>, StoreError> {
+        match self.moved.get(name) {
+            Some(&target) => Ok(target),
+            None => {
+                Ok(refs::read(&self.store.layout, &self.store.fs, name)?.map(|state| state.target))
+            }
         }
     }
 
