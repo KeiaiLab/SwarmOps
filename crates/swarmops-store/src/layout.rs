@@ -8,12 +8,17 @@
 //! <root>/meta/journal.log       append-only journal frames, the metadata's source of truth
 //! <root>/meta/journal.off       each frame's start offset in journal.log, u64le
 //! <root>/meta/journal.ckpt      how far the journal is materialized, a u64le offset
+//! <root>/meta/derived/<name>/<version>/<2hex>/<62hex>[.<16hex>]
+//!                               one derived value: a cache, outside the journal, never synced
+//! <root>/meta/derived/tmp/      temp files of derived values, written before they are linked
 //! <root>/objects/tmp/           temp files staged before they are linked into place
 //! <root>/objects/<2hex>/<62hex> loose objects, one fan-out directory per first id byte
 //! ```
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ObjectId;
+
+use crate::meta::derived::{DerivedSlot, is_derived_name};
 
 /// The paths of one store, all derived from its root. Computes paths only; touches nothing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,6 +81,45 @@ impl Layout {
     /// materialized (`u64le`).
     pub fn journal_ckpt(&self) -> Utf8PathBuf {
         self.meta_path("journal.ckpt")
+    }
+
+    /// `<root>/meta/derived`, the directory of the derived values (storage spec §3, §5).
+    pub fn derived_dir(&self) -> Utf8PathBuf {
+        self.meta_path("derived")
+    }
+
+    /// `<root>/meta/derived/tmp`, where a derived value's file is written before it is linked
+    /// into its slot: under `meta/derived/`, so on its filesystem.
+    pub fn derived_tmp(&self) -> Utf8PathBuf {
+        self.derived_dir().join("tmp")
+    }
+
+    /// The file of `slot`'s value:
+    /// `<root>/meta/derived/<name>/<version>/<first 2 hex>/<remaining 62 hex>`, the subject's hex
+    /// digits, then `.<16 hex>` when the key is not empty: the first 8 bytes of BLAKE3 of the
+    /// key. The slot's name must be one a store takes (1 to 64 bytes of `[a-z0-9_]`, not `tmp`),
+    /// as [`crate::DerivedStore`] checks before it asks: another could name a path out of the
+    /// name's directory.
+    pub fn derived_path(&self, slot: &DerivedSlot<'_>) -> Utf8PathBuf {
+        debug_assert!(
+            is_derived_name(slot.name),
+            "derived value name {:?} is not one a store takes",
+            slot.name
+        );
+        let hex = slot.subject.to_hex();
+        let (fanout, rest) = hex.split_at(2);
+        let file = if slot.key.is_empty() {
+            rest.to_owned()
+        } else {
+            let hash = blake3::hash(slot.key);
+            let (first, _) = hash.as_bytes().split_first_chunk::<8>().expect("32 bytes");
+            format!("{rest}.{:016x}", u64::from_be_bytes(*first))
+        };
+        self.derived_dir()
+            .join(slot.name)
+            .join(slot.version.to_string())
+            .join(fanout)
+            .join(file)
     }
 
     /// `<root>/objects`, the parent of the fan-out directories and `tmp`.

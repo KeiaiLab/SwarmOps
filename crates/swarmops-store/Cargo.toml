@@ -24,6 +24,7 @@ test-hooks = ["swarmops-testkit/test-hooks"]
 
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+blake3.workspace = true
 camino.workspace = true
 crc32fast.workspace = true
 rayon.workspace = true

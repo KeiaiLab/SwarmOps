@@ -33,7 +33,7 @@ and review (M7) come later, in the order of umbrella §13.
 | Crate | What it holds |
 | --- | --- |
 | `swarmops-core` | Object ids, repository paths and the canonical object codec. It does no I/O; its byte layouts are the hash contract. |
-| `swarmops-store` | The loose object files (`FsObjectStore`), the store's layout (`Layout`), and the native metadata store (`MetaStore`): the journal, the writer lock, the changeset index and the ref files. The object store's filesystem access and every metadata write go through the `FsOps` seam, which the crash tests hook. |
+| `swarmops-store` | The loose object files (`FsObjectStore`), the store's layout (`Layout`), the native metadata store (`MetaStore`): the journal, the writer lock, the changeset index and the ref files; and the cache of derived values beside it (`DerivedStore`). The object store's filesystem access, every metadata write and the derived values' reads and writes go through the `FsOps` seam, which the crash tests hook. |
 | `swarmops-merge` | Pure algorithms over trees and lines, with no I/O and no store: the tree diff (leaf-level changes, canonical deltas and three-way path entries) and the line diff (histogram hunks, by `imara-diff`) from M2, and the three-way merge from M4. `swarmops-repo` re-exports it as `swarmops_repo::merge`. |
 | `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, and `verify`. `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
@@ -126,6 +126,8 @@ A store is one directory (storage §2, §3):
   meta/parents.log           the parents the index points into
   meta/sorted/*.{key,rec}    sorted views of the index, by id and by delta hash, for binary search
   meta/refs/main             one file per ref ("<64 hex>\n<version>\n"); also meta/refs/release/<name>
+  meta/derived/<name>/...    derived values, one file each: a cache beside the journal, never synced (M2)
+  meta/derived/tmp/          where new derived values are staged
 ```
 
 Objects are compressed one at a time with zstd at level 3, with zstd's content checksum, when
@@ -136,7 +138,8 @@ The index and the ref files are projections of the journal. A journal frame is
 `u32le len | u32le crc32(payload) | payload`, and its payload holds fixed-width little-endian
 records: a changeset entering the index, a ref move, a compaction marker. The frame layout and
 the record layouts are the disk contract of `FORMAT 1`: not part of the hash contract, but
-changed only with a new `FORMAT` (storage §3). Later milestones add derived data (M2), the git
+changed only with a new `FORMAT` (storage §3). Derived values (M2) are no projection of the
+journal but a cache beside it, with a header of their own (below). Later milestones add the git
 id mapping (M3), workspaces (M5) and reviews (M7) to `meta/`.
 
 How the files depend on one another:
@@ -172,6 +175,17 @@ synced (`sync_all`), and hard-linked into `objects/<2 hex>/<62 hex>` without rep
 if the name exists, the content is the same, and the temp file is dropped. A flush then fsyncs
 each fan-out directory the batch touched, once and in parallel, and `objects/` itself if a new
 fan-out directory appeared. Object writes take no lock and repeating one changes nothing.
+
+**Derived values** (storage §3, §5). A value derived from immutable objects is cached in a file
+of its own, `meta/derived/<name>/<version>/<2 hex>/<62 hex>`: the derivation's name and version,
+then the object the value is about, with 16 hex digits of BLAKE3 of the value's key appended when
+it has one. The file is written to a temp file in `meta/derived/tmp/` and hard-linked into place
+without replacing anything, as an object is, but nothing is synced and no lock is taken: no
+journal record or other file names a derived value, so a power loss that takes one back, or
+leaves its file torn, costs a recomputation and nothing else. Each file holds its value's key
+(`SWDV` header, then the key and the value, zstd over 4 KiB) and ends in a BLAKE3 trailer over the
+slot (name, version, object, key) and the value. A read that finds a file failing any of those
+checks removes it and reports the value missing, so that it is derived again.
 
 **A commit** (`Repo::commit`; storage §2 rule 2, §3):
 
