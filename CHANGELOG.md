@@ -362,9 +362,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 #### M2: diff, history and derived data (2026-10-19)
 
 - A lookup by id no longer reads the key it found a second time: the search keeps the key it
-  read where it stopped, so a lookup in a sorted view of 100,000 changesets reads 18 byte
-  ranges, not 19. `resolve_prefix` and `by_delta_hash` read only each result's id, and an
-  insert only each parent's generation, where both read the whole index record.
+  read where it stopped, so the lookup reads one byte range fewer. `resolve_prefix` and
+  `by_delta_hash` read only each result's id, and an insert only each parent's generation,
+  where both read the whole index record.
 - A lookup by id, prefix or delta hash searches a sorted view by interpolation on the keys'
   first 8 bytes, which BLAKE3 spreads evenly, instead of bisecting it: 5.6 key reads per
   search over 100,000 ids, where a bisection reads 16.7. It bisects where interpolation does
