@@ -73,9 +73,9 @@ A change is done when `just check` passes on it. It runs, in order:
 
 Every cargo build, test, clippy and doc step uses `--locked`, so `Cargo.lock` (committed, like
 `fuzz/Cargo.lock`) is exactly what is built. `scripts/check.sh` runs the same steps on a machine
-without `just`. Lints are strict: `unsafe` is forbidden, clippy's `all` group is denied and
-`pedantic` warns (so fails under `-D warnings`), apart from five noisy lints the workspace
-`Cargo.toml` allows.
+without `just`. Lints are strict: `unsafe` is forbidden, every exported item must be documented
+(`missing_docs`), clippy's `all` group is denied and `pedantic` warns (so fails under
+`-D warnings`), apart from five noisy lints the workspace `Cargo.toml` allows.
 
 ## Tests
 

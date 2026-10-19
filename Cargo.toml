@@ -33,6 +33,9 @@ assert_cmd = "2.2.2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+# Every exported item has a doc comment. A warning, as `pedantic` is: `just check` denies
+# warnings in clippy and rustdoc, so it fails there, while a local build of a draft still runs.
+missing_docs = "warn"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
