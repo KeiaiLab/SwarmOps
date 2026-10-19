@@ -47,7 +47,8 @@
 //! line.
 //!
 //! `every_model_lands_a_small_race_without_loss` runs each model in turn with 4 landers × 5
-//! lands under the order checker, in the default gate. The three measurements,
+//! lands, in the default gate: on the real filesystem without its flushes (`NoSyncFs`), every
+//! process's calls under the order checker, which judges the flushes as made. The three measurements,
 //! `landing_models_closed_loop`, `landing_models_open_loop` and `landing_models_large_change`,
 //! are ignored: `scripts/landing-models.sh` runs the M4 plan's matrix with them, one run per
 //! cell, model and seed, optimized and under the host's heavy-run lock, and `just check-slow`
@@ -75,7 +76,7 @@ use swarmops_repo::{Advance, Change, LocalRepo, RepoError, StoreError};
 use swarmops_store::{FsOps, MetaStore, RealFs};
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, this_test};
 use swarmops_testkit::faults::checked;
-use swarmops_testkit::fs::Watched;
+use swarmops_testkit::fs::{NoSyncFs, Watched};
 use swarmops_testkit::landing::{
     Cell, Change as LandChange, Host, LAND_TAG, LandRecord, MAX_ATTEMPTS, MAX_LATENCY,
     OP_HEAD_REFS, PROBE_APPENDS, Pace, REGISTRY, RUN_TAG, Run, SCORED_CELL, Stats, SyncTimer,
@@ -583,6 +584,17 @@ const OPEN_LOOP_GRACE: Duration = Duration::from_mins(10);
 /// The ref the landers land on.
 const TARGET: &str = "main";
 
+/// How a run's processes reach the filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// The default gate's smoke race: the real filesystem without its flushes (`NoSyncFs`),
+    /// every call under the order checker, which judges the flushes as made; no host probe.
+    Smoke,
+    /// A measurement: the real filesystem, unchecked, the host probed at the run's start and
+    /// end.
+    Measure,
+}
+
 /// One run: a model in a cell, from a seed.
 #[derive(Debug, Clone, Copy)]
 struct Spec {
@@ -679,9 +691,9 @@ fn wait_for(path: &Path) {
     }
 }
 
-/// When this test binary runs as a lander ([`DIR`] set): lands its part of the run and returns
-/// `true`, its filesystem calls under the order checker with `checked_fs`. In the parent, `false`.
-fn as_lander(checked_fs: bool) -> bool {
+/// When this test binary runs as a lander ([`DIR`] set): lands its part of the run, its
+/// filesystem as `mode` says, and returns `true`. In the parent, `false`.
+fn as_lander(mode: Mode) -> bool {
     let Some(work) = std::env::var_os(DIR).map(PathBuf::from) else {
         return false;
     };
@@ -692,11 +704,9 @@ fn as_lander(checked_fs: bool) -> bool {
     let spec = Spec::from_env();
     let root = store_root(&work);
     let timer = Arc::new(SyncTimer::new(&root));
-    let watched = Watched(Arc::clone(&timer), RealFs);
-    let fs: Arc<dyn FsOps> = if checked_fs {
-        checked(watched)
-    } else {
-        Arc::new(watched)
+    let fs: Arc<dyn FsOps> = match mode {
+        Mode::Smoke => checked(Watched(Arc::clone(&timer), NoSyncFs)),
+        Mode::Measure => Arc::new(Watched(Arc::clone(&timer), RealFs)),
     };
     let lander = Lander {
         repo: LocalRepo::open_with_fs(&root, fs).expect("open the store"),
@@ -1045,22 +1055,25 @@ fn commit_base(repo: &LocalRepo, cell: &Cell) -> ChangesetId {
     repo.commit(req).expect("commit the base").id
 }
 
-/// The host's 1-minute load and raw `fdatasync` probe, in work directory `work`.
-fn host_now(work: &Path) -> (f64, u64) {
-    let probe = fdatasync_probe(work, PROBE_APPENDS).expect("probe fdatasync");
+/// The host's 1-minute load and, in a measurement, its raw `fdatasync` probe in work directory
+/// `work` (0 in the smoke race, which does not flush).
+fn host_now(work: &Path, mode: Mode) -> (f64, u64) {
+    let probe = match mode {
+        Mode::Smoke => Duration::ZERO,
+        Mode::Measure => fdatasync_probe(work, PROBE_APPENDS).expect("probe fdatasync"),
+    };
     (load1(), micros(probe))
 }
 
 /// Runs `spec` in a fresh directory under `parent`: a store whose `main` holds the base, the
-/// landers (this test binary run again as test `test`, their filesystem calls under the order
-/// checker with `checked_fs`) let go together and waited for until `deadline` after the go,
-/// then the gate. Prints the run's [`RUN_TAG`] line (and a failed gate's rule) and returns the
-/// run with its gate.
+/// landers (this test binary run again as test `test`, every process's filesystem as `mode`
+/// says) let go together and waited for until `deadline` after the go, then the gate. Prints the
+/// run's [`RUN_TAG`] line (and a failed gate's rule) and returns the run with its gate.
 fn run(
     spec: &Spec,
     parent: &Path,
     test: &str,
-    checked_fs: bool,
+    mode: Mode,
     deadline: Duration,
 ) -> (Run, Result<(), String>) {
     let work = parent.join(format!(
@@ -1071,20 +1084,19 @@ fn run(
     ));
     fs::create_dir_all(&work).expect("create the work directory");
     let root = store_root(&work);
-    let fs: Arc<dyn FsOps> = if checked_fs {
-        checked(RealFs)
-    } else {
-        Arc::new(RealFs)
+    let fs: Arc<dyn FsOps> = match mode {
+        Mode::Smoke => checked(NoSyncFs),
+        Mode::Measure => Arc::new(RealFs),
     };
     let repo = LocalRepo::create_with_fs(&root, "landing", fs).expect("create the store");
     let base = commit_base(&repo, &spec.cell);
-    let (load_start, fdatasync_start_us) = host_now(&work);
+    let (load_start, fdatasync_start_us) = host_now(&work, mode);
     let (records, wall) = race(spec, &work, test, deadline);
     if spec.model == Model::OpHeads {
         repo.settle_op_heads().expect("the final settle");
     }
     let gate = check_invariants(&root, TARGET, base, &records);
-    let (load_end, fdatasync_end_us) = host_now(&work);
+    let (load_end, fdatasync_end_us) = host_now(&work, mode);
     let elapsed = match spec.cell.pace {
         Pace::Closed { .. } => wall,
         Pace::Open { duration_s, .. } => Duration::from_secs(duration_s),
@@ -1183,7 +1195,7 @@ fn measure(test: &str, cell: Cell) {
     let mut failed = Vec::new();
     for model in models {
         let spec = Spec { model, cell, seed };
-        if let (_, Err(rule)) = run(&spec, dir.path(), test, false, deadline) {
+        if let (_, Err(rule)) = run(&spec, dir.path(), test, Mode::Measure, deadline) {
             failed.push(format!("{}: {rule}", model.name()));
         }
     }
@@ -1199,7 +1211,7 @@ fn env_workload(default: Workload) -> Workload {
 
 #[test]
 fn every_model_lands_a_small_race_without_loss() {
-    if as_lander(true) {
+    if as_lander(Mode::Smoke) {
         return;
     }
     let cell = Cell {
@@ -1214,7 +1226,7 @@ fn every_model_lands_a_small_race_without_loss() {
             cell,
             seed: 1,
         };
-        let (run, gate) = run(&spec, dir.path(), SMOKE, true, CHILD_TIMEOUT);
+        let (run, gate) = run(&spec, dir.path(), SMOKE, Mode::Smoke, CHILD_TIMEOUT);
         gate.unwrap_or_else(|rule| panic!("{}: {rule}", model.name()));
         assert_eq!(
             run.stats.landed + run.stats.conflicts + run.stats.exhausted,
@@ -1305,7 +1317,7 @@ fn check_invariants_rejects_a_lost_doubled_or_non_linear_landing() {
 #[test]
 #[ignore = "measurement, minutes of fsync'd lands under the heavy lock"]
 fn landing_models_closed_loop() {
-    if as_lander(false) {
+    if as_lander(Mode::Measure) {
         return;
     }
     let cell = Cell {
@@ -1321,7 +1333,7 @@ fn landing_models_closed_loop() {
 #[test]
 #[ignore = "measurement, minutes of fsync'd lands under the heavy lock"]
 fn landing_models_open_loop() {
-    if as_lander(false) {
+    if as_lander(Mode::Measure) {
         return;
     }
     let cell = Cell {
@@ -1338,7 +1350,7 @@ fn landing_models_open_loop() {
 #[test]
 #[ignore = "measurement, minutes of fsync'd lands under the heavy lock"]
 fn landing_models_large_change() {
-    if as_lander(false) {
+    if as_lander(Mode::Measure) {
         return;
     }
     let cell = Cell {
