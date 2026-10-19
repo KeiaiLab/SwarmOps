@@ -19,15 +19,20 @@ pub use identity::Identity;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
     CommitReq, CommitResp, ConflictKindOut, ConflictReport, ContentEncoding, ContentInput,
+    DEFAULT_DERIVE_LIMIT, DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES,
     DEFAULT_LOG_LIMIT, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES,
     DEFAULT_MAX_CHANGESETS, DEFAULT_MAX_CONFLICT_BYTES, DEFAULT_OP_LOG_LIMIT,
-    DEFAULT_READ_TREE_LIMIT, EntryKindOut, FileConflictOut, FileContent, FileKind, HunkOut,
-    IdentityInfo, InfoReq, InitReq, LandReq, LandResp, LandStatus, LinesOut, LogPage, LogReq,
-    MAX_LAND_ATTEMPTS, ModeInput, OpChangesetOut, OpLogPage, OpLogReq, OperationKind, OperationOut,
-    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut, RefSetReq,
-    RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
-    UndoReq, UndoResp, VerifyFinding, VerifyReport, VerifyReq,
+    DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, DeriveReq, DeriveResp, Diff, DiffFormat,
+    DiffHunk, DiffLineOut, DiffReq, DiffStatus, EntryKindOut, FileConflictOut, FileContent,
+    FileDiff, FileKind, HunkOut, IdentityInfo, InfoReq, InitReq, LandReq, LandResp, LandStatus,
+    LineOp, LineRange, LinesOut, LogPage, LogReq, MAX_LAND_ATTEMPTS, MAX_TREE_DEPTH, ModeInput,
+    OpChangesetOut, OpLogPage, OpLogReq, OperationKind, OperationOut, PathHistoryEntry,
+    PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq,
+    RefListResp, RefMoveOut, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut,
+    Signatures, StoreOps, TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding,
+    VerifyReport, VerifyReq,
 };
+pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 pub use rev::Rev;
 
 /// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
@@ -68,8 +73,14 @@ pub fn schema_for_all() -> serde_json::Value {
         ModeInput,
         CommitResp,
         Advanced,
+        // blob_put, blob_has.
+        BlobPutReq,
+        BlobPutResp,
+        BlobHasReq,
+        BlobHasResp,
         // read_file, read_tree.
         ReadFileReq,
+        LineRange,
         FileContent,
         FileKind,
         ContentEncoding,
@@ -87,6 +98,19 @@ pub fn schema_for_all() -> serde_json::Value {
         LogReq,
         LogPage,
         ChangesetSummary,
+        // path_history.
+        PathHistoryReq,
+        PathHistoryPage,
+        PathHistoryEntry,
+        // diff.
+        DiffReq,
+        DiffFormat,
+        Diff,
+        FileDiff,
+        DiffStatus,
+        DiffHunk,
+        DiffLineOut,
+        LineOp,
         // ref list, ref set, ref delete, verify.
         RefListReq,
         RefListResp,
@@ -97,6 +121,9 @@ pub fn schema_for_all() -> serde_json::Value {
         VerifyReq,
         VerifyReport,
         VerifyFinding,
+        // derive.
+        DeriveReq,
+        DeriveResp,
         // land, op log, undo (M4).
         LandReq,
         LandResp,

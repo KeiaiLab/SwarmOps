@@ -43,8 +43,8 @@ use std::collections::BTreeSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use swarmops_core::{
-    Changeset, ChangesetId, DeltaEntry, DeltaOp, LeafKind, ObjectId, ObjectKind, RepoPath,
-    Signature, hash_object,
+    Changeset, ChangesetId, DeltaEntry, DeltaOp, Hashed, LeafKind, ObjectId, ObjectKind, RepoPath,
+    Signature,
 };
 use swarmops_store::{CasResult, ChangesetMeta, InsertOutcome, MetaWrite, ObjectStore, StoreError};
 
@@ -239,15 +239,12 @@ impl<O: ObjectStore> Repo<O> {
             extra_headers: Vec::new(),
             metadata,
         };
-        let bytes = changeset.encode()?;
-        let id = ChangesetId(hash_object(ObjectKind::Changeset, &bytes));
-        let mut batch: Vec<(ObjectKind, Vec<u8>)> = contents
-            .into_values()
-            .map(|blob| (ObjectKind::Blob, blob))
-            .collect();
-        batch.extend(trees.into_iter().map(|(_, tree)| (ObjectKind::Tree, tree)));
-        batch.push((ObjectKind::Changeset, bytes));
-        self.objects.put_batch(batch)?;
+        let object = Hashed::new(ObjectKind::Changeset, changeset.encode()?);
+        let id = ChangesetId(object.id());
+        let mut batch: Vec<Hashed> = contents.into_values().collect();
+        batch.extend(trees);
+        batch.push(object);
+        self.objects.put_hashed_batch(batch)?;
         self.objects.flush()?;
         Ok(Publication {
             target: target.to_owned(),

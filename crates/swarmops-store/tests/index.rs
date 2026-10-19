@@ -534,19 +534,19 @@ fn read_at_binary_search_touches_only_key_column() {
     let mut keys: Vec<[u8; 32]> = metas.iter().map(|meta| meta.id.0.0).collect();
     keys.sort_unstable();
 
-    // ⌈log2 10,000⌉ = 14: a binary search over the key column reads at most 14 keys, and
-    // never the rec column.
+    // A search reads keys only, never the rec column. ⌈log2 10,000⌉ = 14: no more keys than a
+    // bisection reads, on keys spread as these are (storage §3 allows 2(⌊log2 m⌋ + 1) = 28 on
+    // any keys), and at most 6 on the mean.
     let mut probes = vec![[0; 32], [0xff; 32], keys[0], keys[9_999]];
     probes.extend(keys.iter().step_by(101).copied());
     probes.extend((10_000..10_100).map(|n| spread_id(n).0.0));
+    let mut all_reads = 0;
     for probe in &probes {
         let (keys_read, recs_read) = (view.probes(), view.rec_reads());
         let at = view.lower_bound(probe).unwrap();
-        assert!(
-            view.probes() - keys_read <= 14,
-            "{} probes",
-            view.probes() - keys_read
-        );
+        let reads = view.probes() - keys_read;
+        assert!(reads <= 14, "{reads} probes");
+        all_reads += reads;
         assert_eq!(view.rec_reads(), recs_read, "lower_bound reads keys only");
         let want = keys.partition_point(|key| key < probe);
         assert_eq!(at, to_u64(want), "{}", hex(probe));
@@ -554,19 +554,487 @@ fn read_at_binary_search_touches_only_key_column() {
             assert_eq!(view.key_at(at).unwrap(), keys[want]);
         }
     }
+    assert!(
+        all_reads <= 6 * to_u64(probes.len()),
+        "{all_reads} key reads for {} searches",
+        probes.len()
+    );
 
-    // A whole lookup: the search, one more key to compare, then one rec for a hit.
+    // A whole lookup reads the keys its search reads and no other: the key at the bound it
+    // returns is one the search read, kept, not read again to compare. Then one rec for a hit,
+    // none for a miss.
+    let search_reads = |key: &[u8; 32]| {
+        let before = view.probes();
+        view.lower_bound(key).unwrap();
+        view.probes() - before
+    };
     for (rec, meta) in (0..).zip(&metas).step_by(97) {
+        let searched = search_reads(&meta.id.0.0);
         let (keys_read, recs_read) = (view.probes(), view.rec_reads());
         assert_eq!(index.find(meta.id).unwrap(), Some(rec));
-        assert!(view.probes() - keys_read <= 15);
+        assert_eq!(
+            view.probes() - keys_read,
+            searched,
+            "a hit reads no key twice"
+        );
         assert_eq!(view.rec_reads() - recs_read, 1, "one rec_at per hit");
     }
     for n in 10_000..10_100 {
+        let searched = search_reads(&spread_id(n).0.0);
         let (keys_read, recs_read) = (view.probes(), view.rec_reads());
         assert_eq!(index.find(spread_id(n)).unwrap(), None);
-        assert!(view.probes() - keys_read <= 15);
+        assert_eq!(
+            view.probes() - keys_read,
+            searched,
+            "a miss reads no key twice"
+        );
         assert_eq!(view.rec_reads(), recs_read, "no rec_at for a miss");
+    }
+}
+
+#[test]
+fn find_takes_the_key_at_the_bound_not_the_last_probe() {
+    // Three ids, in key order k40 < k80 < kc0, all in the sorted view, appended out of that
+    // order so that no rec equals its key's place in the view. A search for k80 reads k80 (its
+    // upper bound moves there), then k40 (its lower bound moves past it), by bisection and by
+    // interpolation alike, since k80's first bytes lie in the middle of the key space: its last
+    // probe is a key below the one it found. `find` compares the key read when the upper bound
+    // last moved, never the last probe, which would report k80 missing.
+    let (k40, k80, kc0) = ([0x40; 32], [0x80; 32], [0xc0; 32]);
+    let (_root, layout) = new_root();
+    let mut index = open(&layout);
+    let metas = [k80, kc0, k40].map(|key| meta(cs(key), 1, key, vec![]));
+    append_all(&mut index, &metas);
+    assert_eq!(index.compact().unwrap(), 3);
+    let view = index.ids_view();
+    for (rec, key) in [(2, k40), (0, k80), (1, kc0)] {
+        let recs_read = view.rec_reads();
+        assert_eq!(index.find(cs(key)).unwrap(), Some(rec), "{}", hex(&key));
+        assert_eq!(view.rec_reads() - recs_read, 1, "one rec_at per hit");
+    }
+    // Between k80 and kc0, above kc0 and below k40: no key there is the one asked for, so no
+    // rec is read, and the tail is empty.
+    for absent in [[0xa0; 32], [0xd0; 32], [0x10; 32]] {
+        let recs_read = view.rec_reads();
+        assert_eq!(index.find(cs(absent)).unwrap(), None, "{}", hex(&absent));
+        assert_eq!(view.rec_reads(), recs_read, "no rec_at for a miss");
+    }
+}
+
+/// In a fresh store root, an index of root records with ids `ids` and delta hashes `dhs`, in
+/// rec order, written straight to its files as `Index::append` and `Index::compact` lay them out,
+/// the sorted views covering every record, all of it sync-free: many records at the cost of a few
+/// writes. The ids must differ.
+fn compacted_index(ids: &[[u8; 32]], dhs: &[[u8; 32]]) -> (TempDir, Index) {
+    assert_eq!(ids.len(), dhs.len());
+    let (root, layout) = bare_root();
+    Index::create(&layout, Arc::new(NoSyncFs)).unwrap();
+    let write = |rel: &str, bytes: Vec<u8>| fs::write(layout.meta_path(rel), bytes).unwrap();
+    write("idx/ids.col", ids.concat());
+    write("idx/gen.col", 1_u64.to_le_bytes().repeat(ids.len()));
+    write("idx/dh.col", dhs.concat());
+    // No parents: every par.col entry is offset 0, count 0, and parents.log stays empty.
+    write("idx/par.col", vec![0; 8 * ids.len()]);
+    for (keys, view) in [(ids, "ids"), (dhs, "dh")] {
+        let mut sorted: Vec<([u8; 32], u64)> = keys.iter().copied().zip(0..).collect();
+        sorted.sort_unstable();
+        let key_file: Vec<u8> = sorted.iter().flat_map(|(key, _)| *key).collect();
+        let rec_file: Vec<u8> = sorted
+            .iter()
+            .flat_map(|(_, rec)| rec.to_le_bytes())
+            .collect();
+        write(&format!("sorted/{view}.key"), key_file);
+        write(&format!("sorted/{view}.rec"), rec_file);
+    }
+    (root, Index::open(&layout, Arc::new(NoSyncFs)).unwrap())
+}
+
+/// The most keys storage §3 lets a search of a view of `len` keys read: 2(⌊log2 len⌋ + 1).
+fn worst_case_probes(len: u64) -> u64 {
+    2 * u64::from(len.bit_width())
+}
+
+/// At most `max` keys of one of three spreads: over the whole key space, as BLAKE3 ids and
+/// delta hashes are; most sharing their first 4 to 7 bytes, the rest spread, so that the first
+/// 8 bytes say little about where a key lies; or a few keys, each many times, as the delta hashes
+/// of rebased changesets (or the tests' `[n; 32]`) are, whose first bytes say nothing.
+fn arb_spread_keys(max: usize) -> impl Strategy<Value = Vec<[u8; 32]>> {
+    prop_oneof![
+        prop::collection::vec(any::<[u8; 32]>(), 0..max),
+        (
+            4..=7_usize,
+            any::<[u8; 7]>(),
+            prop::collection::vec((0..8_u8, any::<[u8; 32]>()), 0..max),
+        )
+            .prop_map(|(shared, prefix, keys)| {
+                (keys.into_iter())
+                    .map(|(spread, mut key)| {
+                        if spread > 0 {
+                            key[..shared].copy_from_slice(&prefix[..shared]);
+                        }
+                        key
+                    })
+                    .collect()
+            }),
+        (
+            prop::collection::vec(any::<[u8; 32]>(), 1..4),
+            prop::collection::vec(any::<prop::sample::Index>(), 0..max),
+        )
+            .prop_map(|(few, picks)| {
+                (picks.iter())
+                    .map(|pick| few[pick.index(few.len())])
+                    .collect()
+            }),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn lower_bound_agrees_with_partition_point(
+        ids in arb_spread_keys(300),
+        dhs in arb_spread_keys(300),
+        random in prop::collection::vec(any::<[u8; 32]>(), 0..16),
+        near in prop::collection::vec(any::<prop::sample::Index>(), 0..16),
+    ) {
+        // Each id once, in the order drawn; as many delta hashes as ids.
+        let mut seen = std::collections::HashSet::new();
+        let ids: Vec<[u8; 32]> = ids.into_iter().filter(|id| seen.insert(*id)).collect();
+        let records = ids.len().min(dhs.len());
+        let (ids, dhs) = (&ids[..records], &dhs[..records]);
+        let (_root, index) = compacted_index(ids, dhs);
+        // `find` takes the key at the bound: the drawn ids, found at their recs.
+        for pick in near.iter().filter(|_| !ids.is_empty()) {
+            let rec = pick.index(ids.len());
+            prop_assert_eq!(index.find(cs(ids[rec])).unwrap(), Some(to_u64(rec)));
+        }
+        for (name, view, keys) in [("ids", index.ids_view(), ids), ("dh", index.dh_view(), dhs)] {
+            let mut sorted = keys.to_vec();
+            sorted.sort_unstable();
+            // Random keys, the ends of the key space, and keys at and next to drawn keys of
+            // the view: one apart in their last byte, and in their eighth.
+            let mut probes = random.clone();
+            probes.extend([[0; 32], [0xff; 32]]);
+            for pick in near.iter().filter(|_| !sorted.is_empty()) {
+                let key = sorted[pick.index(sorted.len())];
+                for (byte, step) in [(31, 0), (31, 1), (31, u8::MAX), (7, 1), (7, u8::MAX)] {
+                    let mut probe = key;
+                    probe[byte] = probe[byte].wrapping_add(step);
+                    probes.push(probe);
+                }
+            }
+            for probe in &probes {
+                let before = view.probes();
+                let at = view.lower_bound(probe).unwrap();
+                let reads = view.probes() - before;
+                let want = to_u64(sorted.partition_point(|key| key < probe));
+                prop_assert_eq!(at, want, "{} view, {}", name, hex(probe));
+                prop_assert!(
+                    reads <= worst_case_probes(view.len()),
+                    "{} view of {}: {} reads for {}", name, view.len(), reads, hex(probe)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn uniform_ids_take_few_probes() {
+    // 100,000 ids spread as BLAKE3 ids are, all in the sorted view. A bisection reads 16 or 17
+    // keys per search (⌊log2 100,000⌋ + 1 = 17); interpolating on the first 8 bytes of the keys
+    // reads about log2 log2 100,000 + 1: at most 6 on the mean, hits and misses alike.
+    const RECORDS: u64 = 100_000;
+    let ids: Vec<[u8; 32]> = (0..RECORDS).map(|n| spread_id(n).0.0).collect();
+    let dhs: Vec<[u8; 32]> = (RECORDS..2 * RECORDS).map(|n| spread_id(n).0.0).collect();
+    let (_root, index) = compacted_index(&ids, &dhs);
+    let view = index.ids_view();
+    let hits = (0..RECORDS).step_by(20);
+    let misses = RECORDS..RECORDS + 5_000;
+    let (mut searches, mut reads) = (0, 0);
+    for n in hits.chain(misses) {
+        let before = view.probes();
+        let at = view.lower_bound(&spread_id(n).0.0).unwrap();
+        reads += view.probes() - before;
+        searches += 1;
+        if n < RECORDS {
+            assert_eq!(view.key_at(at).unwrap(), spread_id(n).0.0, "a hit's bound");
+        }
+    }
+    assert_eq!(searches, 10_000);
+    assert!(
+        reads <= 6 * searches,
+        "{reads} key reads for {searches} searches"
+    );
+}
+
+#[test]
+fn keys_that_share_their_first_8_bytes_take_about_a_bisection() {
+    // 4,096 ids that share their first 8 bytes, the bytes a search interpolates on: they give
+    // it nothing to go on. A bisection reads ⌊log2 4,096⌋ + 1 = 13 keys per search, and storage
+    // §3 allows 26; the search reads at most 16 on the mean, not crawling through them, since it
+    // bisects once both ends of its range share their first 8 bytes, and after two
+    // interpolations in a row that each left more than half of the range.
+    const RECORDS: u64 = 4_096;
+    let clustered = |n: u64| {
+        let mut key = spread_id(n).0.0;
+        key[..8].copy_from_slice(&[0xab; 8]);
+        key
+    };
+    let ids: Vec<[u8; 32]> = (0..RECORDS).map(clustered).collect();
+    let (_root, index) = compacted_index(&ids, &ids);
+    let view = index.ids_view();
+    let (mut searches, mut reads) = (0, 0);
+    for n in (0..RECORDS).step_by(4).chain(RECORDS..RECORDS + 1_024) {
+        let before = view.probes();
+        let at = view.lower_bound(&clustered(n)).unwrap();
+        let read = view.probes() - before;
+        assert!(read <= worst_case_probes(RECORDS), "{read} key reads");
+        (searches, reads) = (searches + 1, reads + read);
+        if n < RECORDS {
+            assert_eq!(view.key_at(at).unwrap(), clustered(n), "a hit's bound");
+        }
+    }
+    assert!(
+        reads <= 16 * searches,
+        "{reads} key reads for {searches} searches"
+    );
+}
+
+#[test]
+fn a_prefix_lookup_reads_only_the_id_column() {
+    use swarmops_store::MetaLock;
+    use swarmops_testkit::store::temp_dir;
+
+    // Three changesets whose ids share the prefix abcdef012345, two compacted into the sorted
+    // view and one in the tail, among others; three of them share a delta hash.
+    let shared = [0xab, 0xcd, 0xef, 0x01, 0x23, 0x45];
+    let change = [0xc1; 32];
+    let first = [
+        meta(id_with_prefix(&shared, 0x10, 0), 1, change, vec![]),
+        meta(spread_id(1), 1, [0xc2; 32], vec![]),
+        meta(id_with_prefix(&shared, 0x2f, 2), 1, change, vec![]),
+        meta(spread_id(3), 1, [0xc3; 32], vec![]),
+    ];
+    let second = [
+        meta(spread_id(4), 1, change, vec![]),
+        meta(id_with_prefix(&shared, 0x11, 5), 1, [0xc4; 32], vec![]),
+        meta(spread_id(6), 1, [0xc5; 32], vec![]),
+    ];
+    let (_dir, root) = temp_dir();
+    let layout = Layout::new(&root);
+    let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+    let insert = |metas: &[ChangesetMeta]| {
+        let mut write = store.write().unwrap();
+        for meta in metas {
+            write.insert_changeset(meta.clone()).unwrap();
+        }
+        write.commit().unwrap();
+    };
+    insert(&first);
+    {
+        // A compaction, as a writer makes one: under the lock.
+        let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            Index::open(&layout, real_fs()).unwrap().compact().unwrap(),
+            4
+        );
+    }
+    insert(&second);
+    let read = store.read().unwrap();
+    let matches = [first[0].id, first[2].id, second[1].id];
+    let rebases = [first[0].id, first[2].id, second[0].id];
+    assert_eq!(read.resolve_prefix("abcdef012345").unwrap(), matches);
+    assert_eq!(read.by_delta_hash(&change).unwrap(), rebases);
+
+    // Every index file that holds neither the keys searched nor the ids, cut to nothing under
+    // the snapshot: a lookup that read a match's whole record would fail on the first of them.
+    for rel in ["idx/gen.col", "idx/par.col", "parents.log"] {
+        set_len(layout.meta_path(rel), 0);
+    }
+    assert_eq!(read.resolve_prefix("abcdef012345").unwrap(), matches);
+    assert_eq!(read.by_delta_hash(&change).unwrap(), rebases);
+    // A prefix lookup searches the id view and scans ids.col: dh.col goes too.
+    set_len(layout.meta_path("idx/dh.col"), 0);
+    assert_eq!(read.resolve_prefix("abcdef012345").unwrap(), matches);
+}
+
+/// Draws from a seeded sequence: [`mix`] of a counter.
+struct Draws(u64);
+
+impl Draws {
+    /// A draw below `n`.
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 += 1;
+        mix(self.0) % n
+    }
+}
+
+/// `count` changesets in random chains with merges, their ids `spread_id(ids_from + n)`: now and
+/// then a root; otherwise a first parent that is mostly the changeset before, and up to two more
+/// parents drawn from those before. Each has the generation a store gives it.
+fn random_chains(draws: &mut Draws, count: u64, ids_from: u64) -> Vec<ChangesetMeta> {
+    let mut model: Vec<ChangesetMeta> = Vec::new();
+    for n in 0..count {
+        let mut parents = Vec::new();
+        let earlier = to_u64(model.len());
+        if earlier > 0 && draws.below(8) > 0 {
+            parents.push(match draws.below(4) {
+                0 => draws.below(earlier),
+                _ => earlier - 1,
+            });
+            for _ in 0..draws.below(3) {
+                let other = draws.below(earlier);
+                if !parents.contains(&other) {
+                    parents.push(other);
+                }
+            }
+        }
+        let at = |rec: u64| &model[usize::try_from(rec).unwrap()];
+        let generation = parents.iter().map(|&p| at(p).generation + 1).max();
+        let parents = parents.iter().map(|&p| at(p).id).collect();
+        let delta_hash = [u8::try_from(n % 7).unwrap(); 32];
+        let id = spread_id(ids_from + n);
+        model.push(meta(id, generation.unwrap_or(1), delta_hash, parents));
+    }
+    model
+}
+
+/// Appends `metas` to the journal of the store at `layout` as one frame, under the lock, and
+/// stops there: what a writer that died right after its commit point leaves behind, which a
+/// snapshot reads into its overlay and no index handle counts.
+fn append_unmaterialized(layout: &Layout, metas: &[ChangesetMeta]) {
+    use swarmops_store::{Journal, MetaLock, Record};
+
+    let _lock = MetaLock::acquire(layout, Duration::from_secs(10)).unwrap();
+    let journal = Journal::open(layout, real_fs()).unwrap();
+    journal.truncate_torn_tail().unwrap();
+    let records: Vec<Record> = (metas.iter())
+        .map(|meta| Record::Changeset {
+            id: meta.id,
+            generation: meta.generation,
+            delta_hash: meta.delta_hash,
+            parents: meta.parents.clone(),
+        })
+        .collect();
+    journal.append_frame(&records).unwrap();
+}
+
+#[test]
+fn first_parent_and_generation_match_get() {
+    use swarmops_store::MetaLock;
+    use swarmops_testkit::store::temp_dir;
+
+    // Random chains with merges, written in transactions of 1 to 12 changesets (no checkpoint:
+    // fewer than 32 frames), half of the seeds with the first half compacted into the sorted
+    // view, then 4 more changesets in a frame no writer has materialized: the snapshot's
+    // overlay. Every changeset's first parent, read narrowly, is the first of those
+    // `changeset` gives, wherever it is found; every record's narrow reads are `get`'s fields.
+    for seed in 0..4_u64 {
+        let mut draws = Draws(seed << 32);
+        let model = random_chains(&mut draws, 124, seed * 1_000);
+        let (stored, unmaterialized) = model.split_at(120);
+        let (_dir, root) = temp_dir();
+        let layout = Layout::new(&root);
+        let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+        let mut written = 0;
+        while written < stored.len() {
+            let take = usize::try_from(1 + draws.below(12)).unwrap();
+            let batch = &stored[written..stored.len().min(written + take)];
+            let mut write = store.write().unwrap();
+            for meta in batch {
+                write.insert_changeset(meta.clone()).unwrap();
+            }
+            write.commit().unwrap();
+            written += batch.len();
+            if seed % 2 == 1 && written >= 60 && written - batch.len() < 60 {
+                // A compaction, as a writer makes one: under the lock.
+                let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+                let mut index = Index::open(&layout, real_fs()).unwrap();
+                assert_eq!(index.compact().unwrap(), to_u64(written));
+            }
+        }
+        append_unmaterialized(&layout, unmaterialized);
+
+        let read = store.read().unwrap();
+        for (seq, meta) in (0..).zip(&model) {
+            let what = format!("seed {seed}, changeset {seq}");
+            let full = read.changeset(meta.id).unwrap().expect(&what);
+            assert_eq!(full, at_seq(meta, seq), "{what}");
+            assert_eq!(
+                read.first_parent(meta.id).unwrap(),
+                Some(full.parents.first().copied()),
+                "{what}"
+            );
+        }
+        for absent in [spread_id(999_999), id_of(0), id_of(0xff)] {
+            assert_eq!(read.first_parent(absent).unwrap(), None, "{absent}");
+        }
+
+        let index = Index::open(&layout, real_fs()).unwrap();
+        assert_eq!(index.len(), 120, "the last frame is not materialized");
+        for rec in 0..index.len() {
+            let full = index.get(rec).unwrap();
+            assert_eq!(index.id(rec).unwrap(), full.id, "seed {seed}, rec {rec}");
+            assert_eq!(index.generation(rec).unwrap(), full.generation);
+            assert_eq!(
+                index.first_parent(rec).unwrap(),
+                full.parents.first().copied()
+            );
+        }
+        for past in [index.len(), u64::MAX] {
+            assert_bad_call(index.id(past), "id past the end");
+            assert_bad_call(index.generation(past), "generation past the end");
+            assert_bad_call(index.first_parent(past), "first_parent past the end");
+        }
+    }
+}
+
+#[test]
+fn narrow_lookups_read_their_own_column_alone() {
+    // A root, a child and a merge. Each narrow lookup reads its own file and no other: with every
+    // other index file cut to nothing under the handle, it still answers for every record, where
+    // `get`, which reads them all, fails. The first parent of the merge is read without its
+    // second parent, which is cut off parents.log.
+    let metas = [
+        meta(id_of(1), 1, [0xd1; 32], vec![]),
+        meta(id_of(2), 2, [0xd2; 32], vec![id_of(1)]),
+        meta(id_of(3), 3, [0xd3; 32], vec![id_of(2), id_of(1)]),
+    ];
+    let lookups: [(&str, &[&str]); 3] = [
+        (
+            "id",
+            &["idx/gen.col", "idx/dh.col", "idx/par.col", "parents.log"],
+        ),
+        (
+            "generation",
+            &["idx/ids.col", "idx/dh.col", "idx/par.col", "parents.log"],
+        ),
+        (
+            "first_parent",
+            &["idx/ids.col", "idx/gen.col", "idx/dh.col"],
+        ),
+    ];
+    for (lookup, cut) in lookups {
+        let (_root, layout) = new_root();
+        let mut index = open(&layout);
+        append_all(&mut index, &metas);
+        for rel in cut {
+            set_len(layout.meta_path(rel), 0);
+        }
+        if lookup == "first_parent" {
+            // The child's parent and the merge's first parent: 64 of the 96 bytes.
+            set_len(layout.meta_path("parents.log"), 64);
+        }
+        for (rec, meta) in (0..).zip(&metas) {
+            match lookup {
+                "id" => assert_eq!(index.id(rec).unwrap(), meta.id),
+                "generation" => assert_eq!(index.generation(rec).unwrap(), meta.generation),
+                _ => assert_eq!(
+                    index.first_parent(rec).unwrap(),
+                    meta.parents.first().copied()
+                ),
+            }
+        }
+        assert!(index.get(2).is_err(), "{lookup}: get reads what was cut");
     }
 }
 

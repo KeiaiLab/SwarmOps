@@ -6,6 +6,7 @@
 mod conflict;
 mod diff3;
 mod line_diff;
+mod tree_diff;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's

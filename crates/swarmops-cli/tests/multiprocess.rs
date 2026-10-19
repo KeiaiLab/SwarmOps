@@ -110,8 +110,9 @@ fn eight_processes_commit_concurrently_all_persist() {
 
 /// Eight processes commit the same file at once: its blob and the one root tree are written
 /// by whichever process links them first, the others find them there or lose the no-clobber
-/// link. One file holds the blob, linked once (no temp file still names it), no temp file is
-/// left behind, and every changeset reads it back.
+/// link. Exactly one process counts the blob in `blobs_written`, the one whose link placed it.
+/// One file holds the blob, linked once (no temp file still names it), no temp file is left
+/// behind, and every changeset reads it back.
 #[test]
 fn blob_write_idempotent_across_processes() {
     let store = Store::init();
@@ -141,7 +142,10 @@ fn blob_write_idempotent_across_processes() {
         .iter()
         .map(|result| result["blobs_written"].as_u64().unwrap())
         .sum();
-    assert!(written >= 1, "some process wrote the blob");
+    assert_eq!(
+        written, 1,
+        "exactly one process placed the blob: {results:?}"
+    );
 
     let blob = hash_object(ObjectKind::Blob, content.as_bytes());
     let file = Layout::new(Utf8PathBuf::from(store.path())).object_path(blob);

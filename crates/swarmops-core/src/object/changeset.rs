@@ -4,7 +4,7 @@ use super::codec::{
     CodecError, Reader, check_strictly_sorted, put_count, put_len_prefixed, reader,
 };
 use super::tree::LeafKind;
-use crate::id::{BlobId, ChangesetId, ObjectId, ObjectKind, TreeId, hash_object};
+use crate::id::{BlobId, ChangesetId, Hashed, ObjectId, ObjectKind, TreeId, hash_object};
 use crate::path::RepoPath;
 
 const MAGIC: &[u8; 4] = b"SWCS";
@@ -265,5 +265,14 @@ impl Changeset {
     pub fn delta_hash(&self) -> Result<[u8; 32], CodecError> {
         let (bytes, range) = self.encode_with_delta_range()?;
         Ok(*blake3::hash(&bytes[range]).as_bytes())
+    }
+
+    /// The changeset as an object, with its id, and its delta hash, from one validation and
+    /// one encoding: what [`Changeset::encode`], [`Changeset::id`] and [`Changeset::delta_hash`]
+    /// give, each of which encodes the changeset again.
+    pub fn encode_hashed(&self) -> Result<(Hashed, [u8; 32]), CodecError> {
+        let (bytes, range) = self.encode_with_delta_range()?;
+        let delta_hash = *blake3::hash(&bytes[range]).as_bytes();
+        Ok((Hashed::new(ObjectKind::Changeset, bytes), delta_hash))
     }
 }

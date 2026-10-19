@@ -119,19 +119,23 @@ left).
 
 ## Reads and response sizes
 
-- **`cat` reads the whole blob.** `read_file` loads all of it even when `max_bytes` asks for
-  less; ranged reads (`range`, `--lines`) come later. An MCP agent, which the server's guidance
-  asks to pass a `max_bytes` of 32 KiB or less, can therefore read only the first 32 KiB of a
-  larger file: `ReadFileReq` has no offset. *Target: M2. Found: M1 Task 4b; final review,
-  question 6; the offset gap by the M1.5 Task 5 review.*
+- **`cat` reads the whole object file.** `read_file` returns part of a file, from `offset` or by
+  `lines`, and keeps only the bytes it returns while it verifies the whole blob (M2), but it
+  still reads the blob's object file whole: a large blob stored raw costs its size in memory on
+  every read, however little is asked for. Bounded reads come later. *Target: M6. Found: M1 Task
+  4b; final review, question 6; the offset gap by the M1.5 Task 5 review, closed in M2.*
 - **`ls` of a wide directory decodes its whole tree.** Paging limits what is returned, not what
-  is read; size and depth (`ReadTreeReq.depth`, each entry's `size`) come later, and the default
-  page sizes are measured again then, because `size` makes every entry longer. *Target: M2.
-  Found: M1 Task 5; final review, question 9.*
-- **Every read takes a full metadata snapshot**, and a snapshot reads every ref file: cheap with
-  a few refs, linear in their number. A commit takes two; passing one through
-  is the fix once measurements ask for it. *Target: M2 (with the other commit-path costs below).
-  Found: M1 Tasks 2c, 3 and 4b.*
+  is read: a page decodes the whole tree object of the listed directory, and at a `depth` of
+  every directory it enters, however few of their entries it lists. Bounded reads come later.
+  (Sizes and depths came in M2, and the default page was measured again for them: 250 entries.)
+  *Target: M6. Found: M1 Task 5; final review, question 9.*
+- **A snapshot reads every ref file**: cheap with a few refs, linear in their number. Each
+  request reads in one snapshot of the metadata (a commit, `cat`, `ls`, `show` and `log` take one
+  each, a ref move one besides its write), so a request pays it once. Refs are `main` and
+  `release/*` alone by design; should they grow past dozens, a snapshot's reading them calls for
+  a validated lazy read, a per-handle map of refs or a packed refs file (a FORMAT change), and
+  the `read_snapshot` bench measures 0, 16 and 256 refs to tell. *Unscheduled: when refs grow
+  past dozens. Found: M1 Tasks 2c, 3 and 4b.*
 - **A large frame past the checkpoint is parsed by every read.** After a bulk write, such as a
   git import, every `read()` parses the big frame again until the next checkpoint; the import
   should flush, or the store checkpoint once the frames past it grow large. *Target: M3. Found:
@@ -155,6 +159,12 @@ left).
   whether the ref's history holds it. A commit without a key still signs at its own time, so
   its retry records a second changeset. *Target: M9 (an index of commit keys, if measurements
   ask for one). Found: M1 final fix pass; narrowed by M4 Task 8.*
+- **History follows first parents only.** `log`, `log --path` and `history` walk first parents,
+  and a changeset's changes are those against its first parent: what a merge brought in from its
+  other parents shows as the merge's own change, and the changesets on those parents are never
+  listed. Native histories have no merge (`main` is linear, workspaces land squashed); git
+  import's do. *Target: M3, if imported merge histories need it (`LogReq.first_parent`). Found:
+  M2 Task 15 (M2 Decision 8).*
 - **No second root commit.** Once `main` exists, an omitted parent means `main`'s head (the
   advanced ref's, for a `commit --advance`), so the API makes a root commit only with `advance`
   naming a ref that does not exist yet. *Target: M3 (`commit_raw`, which git import needs).
@@ -163,8 +173,11 @@ left).
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
   *Documented (`--expect` help). Found: M1 Task 5; final review, question 13.*
-- **No blob-id puts.** A change cannot name a blob already in the store by its id; its content
-  is always sent again. *Target: M2 (`ContentInput::Blob`). Found: M1 Task 3.*
+- **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
+  together, and up to about two to three times that while their objects are encoded in
+  parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and
+  `{"blob": "<id>"}` take large contents out of the commit request. *Documented (bounded by the
+  limits since M2). Found: the 2026-10-16 code review, issue 10.*
 
 ## Verification and repair
 
@@ -305,10 +318,9 @@ left).
   makes) and every 13.75 ms through the binary; the difference appears only with the commits'
   own object writes on the same filesystem. *Target: M1.6 (docs/perf.md),
   then M2. Found: M1 Task 7b.*
-- **Commit-path costs.** Each blob is hashed twice (for its id, then when stored); reading one
-  field of a changeset's index record reads all five index files; every commit's
-  materialization scans the index tail; and the reflog walks frames past the snapshot only to
-  drop them. *Target: M2. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
+- **Commit-path costs.** Every
+  commit's materialization scans the index tail; and the reflog walks frames past the snapshot
+  only to drop them. *Target: M2. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
   store's mutex. *Unscheduled. Found: M1 Task 1.*
 - **No benchmark gate.** The benches run by hand (`just bench`, `just perf`); failing on a 20 %
@@ -373,10 +385,10 @@ each ruling is tracked above:
 | 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | M6, "bounded, not first-in, first-out" |
 | 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2, "Full fsync is slow" |
 | 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | M6, "Recovery after a crash walks all of `journal.off`", "No repair tool" |
-| 6 | `read_file` reads the whole blob | ranged reads | M2, "`cat` reads the whole blob" |
+| 6 | `read_file` reads the whole blob | ranged reads | M6, "`cat` reads the whole object file" (ranged reads: M2) |
 | 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | M6, "Crafted `journal.off` entries" |
 | 8 | `objects/tmp` leftovers | `gc` | M6, "Temp files of crashed writes" |
-| 9 | Wide directories in `ls` | size and depth | M2, "`ls` of a wide directory" |
+| 9 | Wide directories in `ls` | size and depth | M6, "`ls` of a wide directory" (size and depth: M2) |
 | 10 | Parked helper threads | the daemon | M10, "An abandoned lock wait" |
 | 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | M6, "The crash model" |
 | 12 | Second root commits | `commit_raw` | M3, "No second root commit" |

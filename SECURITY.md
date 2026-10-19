@@ -55,7 +55,11 @@ filesystem permissions are the access boundary. Within that model, these are vul
   file that is not a regular file is refused before it is opened.
 - **Requests.** Change lists, revisions and paths that get past their checks: a repository
   path with a `..` component, a leading `/` or a NUL byte; a request that makes SwarmOps write
-  outside the store; or one that corrupts the store.
+  outside the store; one that corrupts the store; or one that makes it allocate without bound.
+  A request's size is checked before it is read: its text (a `--changes` file or stdin, or one
+  line of `swarmops mcp`'s input) holds at most 64 MiB, a put's content 512 MiB, and a commit's
+  contents 1 GiB together, measured by the sizes they declare (a client file's length) before
+  a byte of them is read.
 - **Test hooks in a release build.** The `SWARMOPS_TEST_*` variables make a process crash or
   fail at a chosen filesystem call, count its calls, or pin its clock. A build without the
   `test-hooks` feature, as `cargo build --release` is, must ignore them; one that honours them

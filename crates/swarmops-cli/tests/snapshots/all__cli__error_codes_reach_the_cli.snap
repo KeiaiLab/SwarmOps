@@ -261,6 +261,7 @@ expression: s.transcript()
           "index": 0,
           "limit": 536870912,
           "path": "huge.bin",
+          "scope": "put",
           "size": 536870913
         },
         "hint": null

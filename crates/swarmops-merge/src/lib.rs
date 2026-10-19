@@ -8,6 +8,7 @@
 pub mod conflict;
 pub mod diff3;
 pub mod line_diff;
+pub mod tree_diff;
 
 #[cfg(test)]
 mod tests {

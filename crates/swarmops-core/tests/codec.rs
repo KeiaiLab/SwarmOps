@@ -270,6 +270,31 @@ fn changeset_golden_vectors() {
     );
 }
 
+/// `encode_hashed` gives the golden vectors' bytes, id and delta hash from one encoding: the hash
+/// contract did not move.
+#[test]
+fn encode_hashed_gives_the_golden_vectors() {
+    for (name, cs) in [
+        ("minimal_changeset", minimal_changeset()),
+        ("full_changeset", full_changeset()),
+    ] {
+        let (bytes, id, pinned_delta_hash) = read_golden(name);
+        let (object, delta_hash) = cs.encode_hashed().unwrap();
+        assert_eq!(object.kind(), ObjectKind::Changeset, "{name}");
+        assert_eq!(
+            object.payload(),
+            bytes.as_slice(),
+            "{name}: encoding drifted"
+        );
+        assert_eq!(object.id(), id, "{name}: id drifted");
+        assert_eq!(
+            Some(delta_hash),
+            pinned_delta_hash,
+            "{name}: delta_hash drifted"
+        );
+    }
+}
+
 /// `delta_hash` covers exactly the delta section (`varint m` + entries): the same
 /// delta on a different base, with a different message or metadata, hashes the same;
 /// a different delta hashes differently. The literal pins the section boundary
@@ -586,6 +611,56 @@ proptest! {
     fn decode_garbage_never_panics(bytes in proptest::collection::vec(any::<u8>(), 0..512)) {
         let _ = Tree::decode(&bytes);
         let _ = Changeset::decode(&bytes);
+    }
+}
+
+/// `cs` made invalid in one of four ways, each an error `encode` reports: a delete that names a
+/// rename source (`BadRename`), an author or a committer whose `-0000` has an offset
+/// (`BadSignature`), or metadata keys out of order (`UnsortedMetadata`).
+fn made_invalid(mut cs: Changeset, how: usize) -> Changeset {
+    match how % 4 {
+        0 => cs.delta.push(DeltaEntry {
+            path: RepoPath::new("zz/deleted").unwrap(),
+            op: DeltaOp::Delete,
+            renamed_from: Some(RepoPath::new("zz/source").unwrap()),
+        }),
+        1 => {
+            cs.author.negative_zero = true;
+            cs.author.offset_secs = 60;
+        }
+        2 => {
+            cs.committer.negative_zero = true;
+            cs.committer.offset_secs = -60;
+        }
+        _ => {
+            cs.metadata.push(("~".to_owned(), Vec::new()));
+            cs.metadata.push(("a".to_owned(), Vec::new()));
+        }
+    }
+    cs
+}
+
+proptest! {
+    /// `encode_hashed` gives what `encode`, `id` and `delta_hash` give, which each encode the
+    /// changeset again: its bytes as an object of kind `Changeset`, the id that hashes them, and
+    /// the delta hash. A changeset made invalid is refused by all four with the same error.
+    #[test]
+    fn encode_hashed_agrees_with_encode_id_and_delta_hash(
+        cs in arb_changeset(),
+        how in 0..4_usize
+    ) {
+        let (object, delta_hash) = cs.encode_hashed().unwrap();
+        prop_assert_eq!(object.kind(), ObjectKind::Changeset);
+        let bytes = cs.encode().unwrap();
+        prop_assert_eq!(object.payload(), bytes.as_slice());
+        prop_assert_eq!(object.id(), cs.id().unwrap().0);
+        prop_assert_eq!(delta_hash, cs.delta_hash().unwrap());
+
+        let bad = made_invalid(cs, how);
+        let refused = bad.encode().unwrap_err();
+        prop_assert_eq!(bad.encode_hashed().unwrap_err(), refused);
+        prop_assert_eq!(bad.id().unwrap_err(), refused);
+        prop_assert_eq!(bad.delta_hash().unwrap_err(), refused);
     }
 }
 
