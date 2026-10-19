@@ -835,6 +835,54 @@ fn create_syncs_each_directory_it_makes() {
     );
 }
 
+/// Where `create` and `open` name a call of theirs that fails (storage spec §3, operations spec
+/// §0): a file of the store relative to the store's root, the store's directory as `.`, and a
+/// directory above it as no file of the store; never the host path, which a `StoreFs` rooted
+/// anywhere but at the store would give, relative and free of `..` all the same
+/// (`tmp/…/store/FORMAT`). One call fails at each of the three places that root one: the making
+/// of the store's directory and the sync of its parent (where `create` works out the store's
+/// path), the link of `FORMAT` (`create`), and the reads of `FORMAT` and `REPO` (`open`).
+#[test]
+fn create_and_open_name_a_failed_call_relative_to_the_store() {
+    use swarmops_store::{FileOp, FsMethod, FsOps, IoFailure};
+    use swarmops_testkit::fs::FailingFs;
+
+    let dir = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
+    let store = base.join("store");
+    // The real filesystem, but that its calls of `method` on `path` fail.
+    let failing = |method: &'static str, path: Utf8PathBuf| -> Arc<dyn FsOps> {
+        Arc::new(FailingFs::new(move |called, at| {
+            called == method && at == path.as_std_path()
+        }))
+    };
+    let located = |result: Result<LocalRepo, RepoError>| match result {
+        Err(RepoError::Store(StoreError::Io(IoFailure { op, file, .. }))) => (op, file),
+        other => panic!("expected an I/O failure, got {:?}", other.map(|r| r.info())),
+    };
+    let named = |method, file: Option<&str>| (FileOp::Fs(method), file.map(Utf8PathBuf::from));
+
+    let create = |fs| LocalRepo::create_with_fs(&store, "demo", fs);
+    assert_eq!(
+        located(create(failing("create_dir_all", store.clone()))),
+        named(FsMethod::CreateDirAll, Some("."))
+    );
+    assert_eq!(
+        located(create(failing("fsync_dir", base.clone()))),
+        named(FsMethod::FsyncDir, None)
+    );
+    assert_eq!(
+        located(create(failing("link_noclobber", store.join("FORMAT")))),
+        named(FsMethod::LinkNoclobber, Some("FORMAT"))
+    );
+
+    drop(LocalRepo::create(&store, "demo").unwrap());
+    for file in ["FORMAT", "REPO"] {
+        let open = LocalRepo::open_with_fs(&store, failing("read", store.join(file)));
+        assert_eq!(located(open), named(FsMethod::Read, Some(file)));
+    }
+}
+
 /// The filesystem calls of `LocalRepo::create`, in order, on a fresh store.
 fn create_calls() -> Vec<String> {
     let dir = tempfile::tempdir().unwrap();

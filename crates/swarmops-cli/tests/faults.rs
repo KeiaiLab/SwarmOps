@@ -71,8 +71,9 @@ enum Ended {
 /// filesystem failure (`E_IO`, `E_IO_TRANSIENT`) names the file operation that failed
 /// (`details.fs_op`, one of the store's) and, where it was on a file of the store, that file
 /// relative to the store's root (`details.store_file`: never absolute, never with `..`). No
-/// error, and no warning of a run that succeeded, carries the store's path, but where an `init`
-/// that made the store says so: that message and its hint name the path the client gave.
+/// error, and no warning of a run that succeeded, carries the store's path ([`holds_store_path`]:
+/// with its leading `/` or without it, as a file named relative to `/` shows it), but where an
+/// `init` that made the store says so: that message and its hint name the path the client gave.
 fn ended(run: &Run, store: &str) -> Ended {
     if run.aborted() {
         assert!(
@@ -84,7 +85,7 @@ fn ended(run: &Run, store: &str) -> Ended {
     if run.exit() == 0 {
         let result = run.ok();
         assert!(
-            !result["warnings"].to_string().contains(store),
+            !holds_store_path(&result["warnings"].to_string(), store),
             "a host path in a warning: {run}"
         );
         return Ended::Succeeded(result);
@@ -118,10 +119,18 @@ fn ended(run: &Run, store: &str) -> Ended {
         seen["hint"] = Value::Null;
     }
     assert!(
-        !seen.to_string().contains(store),
+        !holds_store_path(&seen.to_string(), store),
         "a host path in the error: {run}"
     );
     Ended::Failed(error)
+}
+
+/// Whether `text` holds the store's path `store` (absolute), with its leading `/` or without it:
+/// a store file named relative to `/`, not to the store's root, shows the host path so
+/// (`tmp/…/store/FORMAT`), relative and free of `..`, so the check on `details.store_file`
+/// alone passes it.
+fn holds_store_path(text: &str, store: &str) -> bool {
+    text.contains(store.trim_start_matches('/'))
 }
 
 /// One run of the commit sweep: the swept commit on a copy of `template`, failing as `failure`
