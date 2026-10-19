@@ -1010,6 +1010,44 @@ fn compare_commits(
     }
 }
 
+/// An empty bare repository, as `git init --bare` makes one, in a temporary directory of its own
+/// that lives as long as it does: the destination of an export, made without running git.
+#[derive(Debug)]
+pub struct EmptyRepository {
+    /// The repository's directory, `repo.git`.
+    pub dir: PathBuf,
+    /// The temporary directory that holds `dir`.
+    _temp: TempDir,
+}
+
+/// An empty bare repository: the files `git init --bare` writes, written by hand so that no test
+/// runs git. `HEAD` names `refs/heads/main`, which does not exist yet; `config` holds git's
+/// `[core]` section for a bare repository (`repositoryformatversion = 0`, `filemode = true`,
+/// `bare = true`); `objects/info`, `objects/pack`, `refs/heads` and `refs/tags` are empty
+/// directories. git's sample hooks, `description` and `info/exclude`, which no command needs, are
+/// left out.
+pub fn empty_repository() -> EmptyRepository {
+    let temp = tempfile::tempdir().expect("create a temp dir");
+    let dir = temp.path().join("repo.git");
+    for sub in ["objects/info", "objects/pack", "refs/heads", "refs/tags"] {
+        let path = dir.join(sub);
+        fs::create_dir_all(&path)
+            .unwrap_or_else(|error| panic!("create {}: {error}", path.display()));
+    }
+    let files = [
+        ("HEAD", "ref: refs/heads/main\n"),
+        (
+            "config",
+            "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n",
+        ),
+    ];
+    for (name, text) in files {
+        let path = dir.join(name);
+        fs::write(&path, text).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    }
+    EmptyRepository { dir, _temp: temp }
+}
+
 /// `Vec<u8>` as standard padded base64.
 mod base64_bytes {
     use base64::Engine as _;

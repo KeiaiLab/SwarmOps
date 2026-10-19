@@ -1,7 +1,7 @@
-//! [`GixSource`], the [`GitSource`] of a repository on disk, read through gix: the crate's one
-//! contact with gix (umbrella decision 3), which also computes the SHA-1 behind
-//! [`git_hash`](crate::git_hash). Replacing gix, by git2 0.21.0 for instance, replaces this module
-//! alone.
+//! [`GixSource`], the [`GitSource`] of a repository on disk, read through gix: with
+//! [`gix_sink`](crate::gix_sink), the crate's contact with gix (umbrella decision 3), and what
+//! computes the SHA-1 behind [`git_hash`](crate::git_hash). Replacing gix, by git2 0.21.0 for
+//! instance, replaces these two modules alone.
 
 use std::fmt;
 use std::path::Path;
@@ -39,25 +39,9 @@ impl GixSource {
     /// [`SourceError::NotARepo`] when gix opens no repository there,
     /// [`SourceError::Unsupported`] for one it does not read as it is.
     pub fn open(path: &Path) -> Result<GixSource, SourceError> {
-        // gix cannot open a SHA-256 repository without its `sha256` feature, and says so without
-        // the format's name: the repository's own configuration is read first, to name it.
-        if let Some(config) = own_config(path) {
-            refuse_extensions(&config)?;
-        }
-        let mut repo = gix::open_opts(path, gix::open::Options::isolated()).map_err(|error| {
-            SourceError::NotARepo {
-                reason: reason(&error),
-            }
-        })?;
-        // Replacement objects never apply. gix 0.89 reads `core.useReplaceRefs` the other way
-        // round (`false` is what loads `refs/replace/`), so the object handle is told to ignore
-        // them whatever the configuration says; `read`'s hash check would see one regardless.
-        repo.objects.ignore_replacements = true;
-        refuse_extensions(repo.config_snapshot().plumbing())?;
-        if repo.is_shallow().map_err(|error| io(&error))? {
-            return Err(SourceError::Unsupported(Unsupported::Shallow));
-        }
-        Ok(GixSource { repo })
+        Ok(GixSource {
+            repo: open_repository(path)?,
+        })
     }
 
     /// The object the ref `name` points at, through symbolic refs, tags not peeled.
@@ -141,6 +125,35 @@ impl GitSource for GixSource {
     }
 }
 
+/// The repository at `path`, a work tree or a git directory, as gix's `open_opts` finds it
+/// (`<path>/.git`, or else `path` itself), with `gix::open::Options::isolated()`: no global or
+/// system configuration and no `GIT_*` variable, and replacement objects never applied. It
+/// refuses, before any read, a repository whose objects are named by another hash than SHA-1, one
+/// whose refs are kept otherwise than as files, and a shallow clone. [`GixSource::open`] and
+/// [`GixSink::open`](crate::GixSink::open) both open through it, so that the export writes only
+/// repositories the import reads.
+pub(crate) fn open_repository(path: &Path) -> Result<gix::Repository, SourceError> {
+    // gix cannot open a SHA-256 repository without its `sha256` feature, and says so without the
+    // format's name: the repository's own configuration is read first, to name it.
+    if let Some(config) = own_config(path) {
+        refuse_extensions(&config)?;
+    }
+    let mut repo = gix::open_opts(path, gix::open::Options::isolated()).map_err(|error| {
+        SourceError::NotARepo {
+            reason: reason(&error),
+        }
+    })?;
+    // Replacement objects never apply. gix 0.89 reads `core.useReplaceRefs` the other way round
+    // (`false` is what loads `refs/replace/`), so the object handle is told to ignore them
+    // whatever the configuration says; `read`'s hash check would see one regardless.
+    repo.objects.ignore_replacements = true;
+    refuse_extensions(repo.config_snapshot().plumbing())?;
+    if repo.is_shallow().map_err(|error| io(&error))? {
+        return Err(SourceError::Unsupported(Unsupported::Shallow));
+    }
+    Ok(repo)
+}
+
 /// The SHA-1 git gives an object of `kind` whose bytes are `bytes` (the hash of
 /// `"<kind> <len>\0"` and the bytes), by gix's SHA-1, which runs git's collision detection:
 /// `None` when that detection flags the bytes as a SHA-1 collision attack, an object git refuses
@@ -155,17 +168,21 @@ pub(crate) fn object_sha1(kind: RawKind, bytes: &[u8]) -> Option<GitOid> {
 /// `bytes`, read as the object `oid` of `kind`, when they hash to `oid`;
 /// [`SourceError::Corrupt`] otherwise.
 fn checked(oid: GitOid, kind: RawKind, bytes: Vec<u8>) -> Result<(RawKind, Vec<u8>), SourceError> {
-    match object_sha1(kind, &bytes) {
-        Some(hashed) if hashed == oid => Ok((kind, bytes)),
-        Some(hashed) => Err(SourceError::Corrupt {
-            oid,
-            reason: format!("its bytes, a {kind}, hash to {hashed}"),
-        }),
-        None => Err(SourceError::Corrupt {
-            oid,
-            reason: "git's collision detection flags its bytes as a SHA-1 collision attack"
-                .to_owned(),
-        }),
+    match not_the_object(oid, kind, &bytes) {
+        None => Ok((kind, bytes)),
+        Some(reason) => Err(SourceError::Corrupt { oid, reason }),
+    }
+}
+
+/// Why `bytes`, read as the object `oid` of `kind`, are not that object: they hash to another
+/// id, or git's collision detection flags them. `None` when they hash to `oid`.
+pub(crate) fn not_the_object(oid: GitOid, kind: RawKind, bytes: &[u8]) -> Option<String> {
+    match object_sha1(kind, bytes) {
+        Some(hashed) if hashed == oid => None,
+        Some(hashed) => Some(format!("its bytes, a {kind}, hash to {hashed}")),
+        None => {
+            Some("git's collision detection flags its bytes as a SHA-1 collision attack".to_owned())
+        }
     }
 }
 
@@ -243,7 +260,7 @@ fn io(error: &gix::Error) -> SourceError {
 }
 
 /// gix's error and every error under it, joined by `: `, each message once.
-fn reason(error: &gix::Error) -> String {
+pub(crate) fn reason(error: &gix::Error) -> String {
     let mut messages: Vec<String> = Vec::new();
     for error in error.iter_errors() {
         let message = error.to_string();
@@ -254,11 +271,13 @@ fn reason(error: &gix::Error) -> String {
     messages.join(": ")
 }
 
-fn to_gix(oid: GitOid) -> gix::ObjectId {
+/// `oid` as gix names it.
+pub(crate) fn to_gix(oid: GitOid) -> gix::ObjectId {
     gix::ObjectId::from(oid.0)
 }
 
-fn from_gix(id: &gix::ObjectId) -> GitOid {
+/// gix's object id `id` as a [`GitOid`].
+pub(crate) fn from_gix(id: &gix::ObjectId) -> GitOid {
     GitOid(
         id.as_bytes()
             .try_into()
@@ -266,7 +285,8 @@ fn from_gix(id: &gix::ObjectId) -> GitOid {
     )
 }
 
-fn raw_kind(kind: gix::objs::Kind) -> RawKind {
+/// gix's object kind `kind` as a [`RawKind`].
+pub(crate) fn raw_kind(kind: gix::objs::Kind) -> RawKind {
     match kind {
         gix::objs::Kind::Commit => RawKind::Commit,
         gix::objs::Kind::Tree => RawKind::Tree,

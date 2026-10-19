@@ -421,6 +421,20 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   and `E_GIT_WRITE` (exit 1; `io`, `ref_locked` or `ref_name_conflict`). Like `git import`,
   `git export` runs on the client and needs no identity: it is no `StoreOps` operation and no MCP
   tool, and no server receives its request (operations spec §0, §1 and §7).
+- The git side of the coming `git export`: `GitSink`, what the export writes to a git repository,
+  and `GixSink`, its gix implementation. Objects are written as loose files, as git writes them; one
+  whose loose file is there already but does not read back as the object (an export cut short left
+  it, and a power loss emptied it) is written again, and the empty tree counts as stored only when
+  it is (gix answers for it either way; git's own writer goes by the files). `sync` makes the files
+  and their fan-out directories durable, in parallel, before a branch moves; gix syncs nothing
+  itself. A branch moves by git's own lock protocol, as a compare-and-swap that git and other
+  exports respect: `refs/heads/<name>.lock` created exclusively and tried again for up to 100 ms
+  (git's `core.filesRefLockTimeout`), the branch compared under it, the new value synced, the lock
+  renamed onto the ref and its directory synced, with no reflog entry. The sink refuses what the
+  import refuses (SHA-256, reftable refs, a shallow clone), a branch name git does not take, a lock
+  another writer holds or a dead one left, a ref in the branch's way, and a branch to an object the
+  repository lacks. `swarmops_testkit::git::empty_repository()` makes an empty bare repository by
+  hand, so that no test runs git.
 
 ### Changed
 
