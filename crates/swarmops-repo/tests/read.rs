@@ -336,6 +336,13 @@ fn cas_ref_through_repo_records_reflog() {
         CasResult::Applied { old: Some(c1) }
     );
     assert_eq!(
+        repo.cas_ref("main", Some(c2), Some(c2), "agent/four")
+            .unwrap()
+            .result,
+        CasResult::Applied { old: Some(c2) },
+        "a move to the target it expects finds it there, under the lock"
+    );
+    assert_eq!(
         repo.cas_ref("main", Some(c1), Some(c1), "agent/three")
             .unwrap()
             .result,
@@ -349,7 +356,8 @@ fn cas_ref_through_repo_records_reflog() {
     assert_eq!(repo.get_ref("main").unwrap(), Some(main));
     assert_eq!(repo.list_refs().unwrap(), [("main".to_owned(), main)]);
 
-    // Every move is in the journal, newest first; the mismatch is not.
+    // Every move is in the journal, newest first; the mismatch and the move to the target it
+    // expects are not.
     let store = MetaStore::open(&root).unwrap();
     let log = store.read().unwrap().reflog("main", 10).unwrap();
     let moves: Vec<(Option<ChangesetId>, Option<ChangesetId>, &str)> = log

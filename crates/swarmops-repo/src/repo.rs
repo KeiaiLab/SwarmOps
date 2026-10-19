@@ -111,7 +111,9 @@ pub struct RepoInfo {
 /// What [`Repo::cas_ref`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CasOutcome {
-    /// Whether the ref moved, as the store decided.
+    /// What the store decided under the lock: [`CasResult::Applied`] when the ref named
+    /// `expected` (it names `new` now; with `old` equal to `new` for a move to the target it
+    /// expects, which is not recorded), [`CasResult::Mismatch`] with what it names otherwise.
     pub result: CasResult,
     /// Steps after the commit point that failed, one line each: the move is committed all
     /// the same.
@@ -314,6 +316,13 @@ impl<O: ObjectStore> Repo<O> {
     /// recorded in the journal (the reflog). [`RepoError::RefName`] for a bad name,
     /// [`RepoError::NotFound`] for a `new` that is not a changeset in the store.
     ///
+    /// A move to the target it expects (`expected == new`) changes nothing and is never
+    /// recorded: it is compared under the lock, after the write's tail check, as any move is
+    /// ([`CasResult::Applied`] with `old` equal to `new` where the ref names that target,
+    /// [`CasResult::Mismatch`] where it names another), and the write is dropped uncommitted, so
+    /// no frame is written and the ref's version stays. That holds for a deletion of a ref it
+    /// expects absent (`None` to `None`) too.
+    ///
     /// A move whose journal frame is durable is applied even if a step after that failed
     /// ([`StoreError::PostCommit`], its listing in `journal.off` among them): the outcome
     /// carries a warning, and the next write to the store repairs what is missing. A journal
@@ -331,8 +340,11 @@ impl<O: ObjectStore> Repo<O> {
             .cas_ref(name, expected, new, actor)
             .map_err(ref_error)?;
         let mut warnings = Vec::new();
-        // A mismatch queued nothing: dropping the write releases the lock and commits nothing.
-        if let CasResult::Applied { .. } = result {
+        // A mismatch queued nothing, and a move to the target it expects queued one that changes
+        // nothing: either way dropping the write releases the lock and commits nothing.
+        if let CasResult::Applied { .. } = result
+            && expected != new
+        {
             match write.commit() {
                 Ok(_) => {}
                 Err(StoreError::PostCommit { frame_seq, source }) => {

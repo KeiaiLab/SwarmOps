@@ -21,8 +21,7 @@ use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, RepoPath, Signature, TreeEntry,
 };
 use swarmops_repo::{
-    CasOutcome, CasResult, CommitRequest, LocalRepo, MismatchCause, RepoError, StoredChangeset,
-    VerifyProblem,
+    CasResult, CommitRequest, LocalRepo, MismatchCause, RepoError, StoredChangeset, VerifyProblem,
 };
 
 use crate::content;
@@ -76,12 +75,13 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `log` follows first parents from `rev` (`main` when omitted) or, given a `cursor`, from the
 ///   first parent of the changeset it names, which must be a full id the store holds; a page
 ///   is `truncated` when older history follows its last entry.
-/// - `ref_set` and `ref_delete` move a ref by compare-and-swap, recorded for the caller's agent.
-///   A move that finds the ref as it asks already (at `new` for `ref_set`, whatever it expected;
-///   gone, or never there, for `ref_delete`) is a replay: `already_applied`, with the response
-///   the move gave, and nothing is written, no journal frame and no new version of the ref. So a
-///   `ref_set` whose `new` is the target it expects never moves the ref: it is a replay where
-///   the ref holds that target, and a mismatch where it holds another.
+/// - `ref_set` and `ref_delete` move a ref by compare-and-swap, recorded for the caller's agent,
+///   and decide every move under the store's lock, after the write's tail check, never from a
+///   reader's snapshot. A move that finds the ref as it asks already (at `new` for `ref_set`,
+///   whatever it expected; gone, or never there, for `ref_delete`) is a replay: `already_applied`,
+///   with the response the move gave, and nothing is written, no journal frame and no new version
+///   of the ref. So a `ref_set` whose `new` is the target it expects never moves the ref: it is a
+///   replay where the ref holds that target, and a mismatch where it holds another.
 /// - `verify` checks the store and lists each problem as one line.
 ///
 /// Limits of 0 (`limit`, `max_changes`) are `E_INVALID_ARG`.
@@ -547,33 +547,18 @@ impl StoreOps for Recording<'_> {
             Some(rev) => Some(self.resolve(rev)?),
             None => None,
         };
-        let outcome = if expected == Some(new) {
-            // A move to the target it expects moves nothing: the ref holds it (a replay) or does
-            // not (a mismatch), and nothing is written either way. The store's compare-and-swap
-            // would journal the replay as a RefMove frame (two fdatasyncs), though the ref and
-            // its version would stay as they are; reading the ref skips the frame. The read is a
-            // reader's snapshot, which can show a writer's whole frame before its fdatasync
-            // (storage spec §3, reads; known-limitations, "Readers may return state that is not
-            // durable yet"), so this replay vouches for no durability. The compare-and-swap
-            // below takes the lock, which waits out that writer first.
-            let current = self.ops.repo.get_ref(&name).map_err(op)?;
-            CasOutcome {
-                result: CasResult::Mismatch {
-                    actual: current.map(|state| state.target),
-                },
-                warnings: Vec::new(),
-            }
-        } else {
-            // A ref that holds `new` already, whatever `expected` says, is a mismatch whose actual
-            // target is `new`: the compare-and-swap writes nothing, and the match below reads it
-            // as a replay.
-            self.ops
-                .repo
-                .cas_ref(&name, expected, Some(new), who.agent())
-                .map_err(op)?
-        };
+        // Every move is compared under the lock, after the write's tail check, never on a reader's
+        // snapshot, which can show another writer's frame before its sync. A ref that holds `new`
+        // already is a replay, whatever `expected` says: a mismatch whose actual target is `new`,
+        // or, for a move to the target it expects, the match itself, which the repository does
+        // not record.
+        let outcome = self
+            .ops
+            .repo
+            .cas_ref(&name, expected, Some(new), who.agent())
+            .map_err(op)?;
         let replay = match outcome.result {
-            CasResult::Applied { .. } => false,
+            CasResult::Applied { old } => old == Some(new),
             CasResult::Mismatch { actual } if actual == Some(new) => true,
             CasResult::Mismatch { actual } => {
                 let message = match (expected, actual) {
@@ -953,7 +938,10 @@ mod tests {
 
     use serde_json::json;
     use swarmops_api::{ChangeInput, ContentInput, RefSetReq};
+    use swarmops_store::FsOps;
+    use swarmops_testkit::faults::FsyncModelFs;
     use swarmops_testkit::fs::FailingFs;
+    use swarmops_testkit::store::file_len;
 
     use super::*;
 
@@ -964,7 +952,7 @@ mod tests {
     }
 
     /// `LocalOps` over the store at `root`, its every filesystem call going through `fs`.
-    fn ops_on(root: &Utf8Path, fs: FailingFs) -> LocalOps {
+    fn ops_on(root: &Utf8Path, fs: impl FsOps + 'static) -> LocalOps {
         let repo = LocalRepo::open_with_fs(root, Arc::new(fs)).expect("open the store");
         LocalOps::with_repo(repo, root)
     }
@@ -1139,5 +1127,97 @@ mod tests {
 
         let fresh = LocalOps::open(&root).unwrap();
         assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 0);
+    }
+
+    /// A `ref_set` to the target it expects is decided under the lock, after its write's tail
+    /// check, as every `ref_set` is (operations spec §4): never from a snapshot, which shows a
+    /// whole frame `journal.off` does not list as if it were committed, though its writer may not
+    /// have synced it. `main` moves from c1 to c2 in a frame whose listing fails: committed with a
+    /// warning, and readers see c2. (a) The self-move to c2 lists the frame before it answers its
+    /// replay, and writes no frame of its own. (b) Where the tail check can neither sync the frame
+    /// nor write it afresh, it cuts it, and the self-move is a retryable `E_IO_TRANSIENT` that
+    /// committed nothing, not a replay of a move no reader sees afterwards.
+    #[test]
+    fn a_move_to_the_target_it_expects_is_decided_after_the_tail_check() {
+        for tail_check_fails in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let who = Identity::parse("agent/worker-17").unwrap();
+            let commit = |parent: Option<&str>, content: &str| {
+                let put = ChangeInput {
+                    path: "f".to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline(content.to_owned())),
+                    mode: None,
+                };
+                let req = CommitReq {
+                    parent: parent.map(Rev::from),
+                    changes: vec![put],
+                    message: "m".to_owned(),
+                    allow_empty: false,
+                };
+                ops.commit(&who, req).unwrap().changeset
+            };
+            let c1 = commit(None, "1");
+            let c2 = commit(Some(&c1), "2");
+            let set = |new: &str, expected_old: Option<&str>| RefSetReq {
+                name: "main".to_owned(),
+                new: new.into(),
+                expected_old: expected_old.map(Rev::from),
+                create: expected_old.is_none(),
+            };
+            ops.ref_set(&who, set(&c1, None)).unwrap();
+            // The move to c2: its frame is whole and durable in journal.log, and its listing in
+            // journal.off fails, so readers overlay it, and the next write's tail check must
+            // sync and list it.
+            let moved = ops_on(&root, failing("append_durable", "journal.off"))
+                .ref_set(&who, set(&c2, Some(&c1)))
+                .unwrap();
+            one_injected(&moved.warnings);
+            let main = |ops: &LocalOps| ops.repo_info(InfoReq {}).unwrap().main;
+            assert_eq!(main(&ops).as_deref(), Some(c2.as_str()), "readers see c2");
+            let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
+            let lens = || (file_len(&log), file_len(&off));
+            let (log_len, off_len) = lens();
+            let self_move = set(&c2, Some(&c2));
+            if tail_check_fails {
+                // The tail check's sync of journal.log fails, and so does its rewrite.
+                let model = Arc::new(FsyncModelFs::new().failing(|call| {
+                    call.path.ends_with("journal.log")
+                        && (call.method == "sync_data" || call.method == "append_durable")
+                }));
+                let error = ops_on(&root, Arc::clone(&model))
+                    .ref_set(&who, self_move)
+                    .unwrap_err();
+                assert_eq!(
+                    (error.code.as_str(), error.exit, error.retryable),
+                    ("E_IO_TRANSIENT", 4, true),
+                    "{error:?}"
+                );
+                assert_eq!(error.details["committed"], false, "{error:?}");
+                assert_eq!(
+                    model.failed(),
+                    [format!("sync_data {log}"), format!("append_durable {log}")]
+                );
+                let fresh = LocalOps::open(&root).unwrap();
+                assert_eq!(
+                    main(&fresh).as_deref(),
+                    Some(c1.as_str()),
+                    "the cut took the move back"
+                );
+            } else {
+                let replay = ops.ref_set(&who, self_move).unwrap();
+                assert!(
+                    replay.already_applied && replay.warnings.is_empty(),
+                    "{replay:?}"
+                );
+                assert_eq!(
+                    lens(),
+                    (log_len, off_len + 8),
+                    "its write listed the frame before it answered, and wrote no frame of its own"
+                );
+            }
+        }
     }
 }

@@ -251,7 +251,9 @@ fails, the error says so with `details.created: true`.
 after replay, is compared with the expected one. On a mismatch nothing is recorded and the
 caller gets `E_CAS_MISMATCH` with the actual target in `details.actual`. On a match, the move
 goes into the transaction's frame, and the ref file is replaced after the commit point. Refs are
-`main` and `release/<name>`; the journal's ref moves are the reflog.
+`main` and `release/<name>`; the journal's ref moves are the reflog. A move to the target it
+expects is compared the same way, under the lock, and records nothing either way: the ref holds
+that target (a replay) or another (`E_CAS_MISMATCH`).
 
 ## Reading
 

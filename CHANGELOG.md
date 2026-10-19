@@ -318,6 +318,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   reads anything: a FIFO no longer holds up the session until something writes to it, and a
   device such as `/dev/zero` is no longer read up to the 512 MiB limit. The CLI still reads such
   files, a pipe included.
+- A `ref set` whose new target is the one it expects (`--expect` and the revision name the same
+  changeset) is decided under the store's metadata lock, after the tail check, as every other
+  `ref set` is: it answers `already_applied` only from the journal as the next writer finds it, no
+  longer from a snapshot that can show another writer's frame before that frame's sync, which a
+  failed sync or a power loss could then take back. It can now wait for the lock (`E_BUSY` after
+  10 s) and repair what a crashed writer left; it still writes no journal frame.
 
 ### Security
 
