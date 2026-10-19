@@ -406,6 +406,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   frames were (another writer's bytes in between) is cut back and refused as damage
   (`JournalCorrupt` at the frames' offset, `E_STORE_CORRUPT`) before anything is listed, where it
   used to list entries that pointed into other bytes.
+- A `FORMAT` or `REPO` that is not a regular file, such as a directory, is refused by its read
+  as not a regular file (`E_STORE_CORRUPT`, `read REPO: REPO is not a regular file`, with
+  `details.fs_op` and `details.store_file`), no longer as one too long by the size a directory
+  reports (`E_NOT_A_REPO`, `<store>/REPO is 4096 bytes long, …`).
 
 ### Security
 

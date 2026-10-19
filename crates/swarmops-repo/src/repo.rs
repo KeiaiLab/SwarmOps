@@ -282,8 +282,11 @@ impl LocalRepo {
         let layout = Layout::new(root.clone());
         // A FORMAT longer than the layout's names no layout this build reads, however long it
         // is: measured before it is read (through `std::fs`, no `FsOps` call), so that a
-        // crafted file of huge length is never read into memory. A missing one reaches the read.
+        // crafted file of huge length is never read into memory. A missing one, and one that is
+        // no regular file (whose size says nothing of its content), reach the read, which
+        // refuses the latter as such.
         if let Ok(meta) = std::fs::metadata(layout.format_file().as_std_path())
+            && meta.is_file()
             && meta.len() > to_u64(FORMAT.len())
         {
             return Err(StoreError::Format(format!(
@@ -603,8 +606,10 @@ fn read_identity(layout: &Layout, fs: &StoreFs) -> Result<Identity, RepoError> {
     // A REPO longer than an id line and the longest name create writes holds no identity this
     // build reads, however long it is: measured before it is read (through `std::fs`, no
     // `FsOps` call), so that a crafted file of huge length is never read into memory. A missing
-    // one reaches the read.
+    // one, and one that is no regular file (whose size says nothing of its content), reach the
+    // read, which refuses the latter as such.
     if let Ok(meta) = std::fs::metadata(path.as_std_path())
+        && meta.is_file()
         && meta.len() > MAX_REPO_LEN
     {
         return Err(bad(&format!(

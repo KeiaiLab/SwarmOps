@@ -583,6 +583,38 @@ fn a_format_file_one_byte_too_long_is_refused_by_its_length() {
     );
 }
 
+/// A `FORMAT` or `REPO` that is not a regular file (a directory here, of a few kilobytes on
+/// ext4) is refused as not a regular file by its read, which names it by its place in the store,
+/// and not by its length: a directory's size says nothing of a file that is too long.
+#[test]
+fn a_format_or_repo_that_is_a_directory_is_not_a_regular_file() {
+    use swarmops_store::{FileOp, FsMethod};
+
+    for file in ["FORMAT", "REPO"] {
+        let (_dir, root, repo) = new_repo();
+        drop(repo);
+        fs::remove_file(root.join(file)).unwrap();
+        fs::create_dir(root.join(file)).unwrap();
+        match LocalRepo::open(&root) {
+            Err(RepoError::Store(StoreError::Io(failure))) => {
+                assert_eq!(
+                    (failure.op, failure.file.as_deref()),
+                    (FileOp::Fs(FsMethod::Read), Some(Utf8Path::new(file))),
+                    "{failure}"
+                );
+                assert_eq!(
+                    failure.to_string(),
+                    format!("read {file}: {file} is not a regular file")
+                );
+            }
+            other => panic!(
+                "{file} a directory: expected the read's refusal, got {:?}",
+                other.map(|r| r.info())
+            ),
+        }
+    }
+}
+
 #[test]
 fn a_huge_repo_file_is_not_a_store_and_is_not_read_whole() {
     // REPO holds an id line and a name of at most 255 bytes, 288 bytes in all. A crafted one
