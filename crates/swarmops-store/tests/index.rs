@@ -326,8 +326,9 @@ fn find_prefix_rejects_what_is_not_a_hex_prefix() {
 
 #[test]
 fn find_delta_hash_groups_rebases() {
-    // A rebase that applies cleanly keeps the delta hash, so the original changeset and the
-    // rebased one share it: one in the sorted view, one in the tail, then both sorted.
+    // A rebase onto an upstream that left the files the change touches alone keeps the delta
+    // hash, so the original changeset and the rebased one share it: one in the sorted view, one
+    // in the tail, then both sorted.
     let change = [0xc1; 32];
     let other = [0xc2; 32];
     let original = meta(spread_id(1), 1, change, vec![]);

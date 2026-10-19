@@ -449,7 +449,9 @@ impl Index {
     }
 
     /// The recs, ascending, of the changesets whose delta hash is `dh`: changesets that make
-    /// the same change on different bases, as a clean rebase does. Searched like
+    /// the same change on different bases, as a rebase does onto an upstream that left the files
+    /// the change touches alone (a delta's put names the file's blob after the change, so an
+    /// upstream edit elsewhere in that file changes the hash). Searched like
     /// [`Index::find_prefix`], in the delta-hash view and the tail of `dh.col`.
     pub fn find_delta_hash(&self, dh: &[u8; 32]) -> Result<Vec<u64>, StoreError> {
         self.find_all(&self.views.dh, &self.dhs, dh, |key| key == dh)
