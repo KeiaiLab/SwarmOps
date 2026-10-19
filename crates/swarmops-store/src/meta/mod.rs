@@ -12,6 +12,9 @@
 //!   [`SortedView`]s by id and by delta hash for `O(log n)` lookups.
 //! - Refs (`meta/refs/main`, `meta/refs/release/<x>`): one file per ref, `<64 hex>\n<version>\n`
 //!   ([`RefState`]), replaced atomically.
+//! - [`DerivedStore`] (`meta/derived/`): values derived from immutable objects, one checksummed
+//!   file per [`DerivedSlot`]. No projection of the journal but a cache beside it: written without
+//!   the lock and without a sync, and derived again when a file is missing or damaged.
 //!
 //! A write transaction holds the lock throughout: [`Journal::truncate_torn_tail`] and
 //! [`Index::repair_tail`], replay of the frames past [`Journal::ckpt`] into the materialized
@@ -25,6 +28,7 @@
 //! checkpoint (storage spec §3).
 
 mod column;
+pub mod derived;
 pub mod frame;
 pub mod index;
 pub mod journal;
@@ -35,6 +39,7 @@ mod replay;
 pub mod sorted;
 pub mod store;
 
+pub use derived::{DerivedSlot, DerivedStore};
 pub use frame::{BadRecord, Frame, Record};
 pub use index::{ChangesetMeta, Index};
 pub use journal::{Journal, LogCut, TailRepair};

@@ -173,7 +173,12 @@ left).
   and write with `E_STORE_CORRUPT` on its own; verify reports both.) *Target: M6 (fsck). Found:
   M1.5 minors (Task 3 review N1).*
 - **Temp files of crashed writes stay.** `objects/tmp/` keeps what interrupted object writes left
-  there. *Target: M6 (`gc`). Found: M1 final review, question 8.*
+  there, and `meta/derived/tmp/` what interrupted writes of derived values left. *Target: M6
+  (`gc`). Found: M1 final review, question 8; M2 Task 5.*
+- **Derived values are never collected.** `meta/derived/` keeps every value it was given: those of
+  a derivation's older versions, and those about objects nothing names any more. A damaged value
+  file that the store fails to remove reads as missing, and is derived again, on every read.
+  *Target: M6 (`gc`). Found: M2 Task 5.*
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
   and checks each sorted-view entry with its own reads (about 9 million reads at a million
   changesets, about 9 per changeset: each index record, and each entry of both sorted views, is
