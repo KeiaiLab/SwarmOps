@@ -1,9 +1,11 @@
 //! The git crate's integration tests, in one test binary (one link): each file of `tests/` is a
-//! module here, and its tests are named after it (`convert::<test>`, `raw::<test>`,
-//! `source::<test>`); `support` holds what they share. Cargo builds no other test target from
-//! `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod` line here.
+//! module here, and its tests are named after it (`convert::<test>`, `import::<test>`,
+//! `raw::<test>`, `source::<test>`); `support` holds what they share. Cargo builds no other test
+//! target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod` line
+//! here.
 
 mod convert;
+mod import;
 mod raw;
 mod source;
 mod support;

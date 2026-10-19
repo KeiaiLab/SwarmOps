@@ -132,10 +132,6 @@ left).
   a few refs, linear in their number. A commit takes two; passing one through
   is the fix once measurements ask for it. *Target: M2 (with the other commit-path costs below).
   Found: M1 Tasks 2c, 3 and 4b.*
-- **A large frame past the checkpoint is parsed by every read.** After a bulk write, such as a
-  git import, every `read()` parses the big frame again until the next checkpoint; the import
-  should flush, or the store checkpoint once the frames past it grow large. *Target: M3. Found:
-  M1 Task 2c.*
 
 ## Commits, refs and history
 

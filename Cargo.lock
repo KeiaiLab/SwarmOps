@@ -2133,9 +2133,11 @@ dependencies = [
 name = "swarmops-git"
 version = "0.1.0"
 dependencies = [
+ "camino",
  "gix",
  "proptest",
  "swarmops-core",
+ "swarmops-repo",
  "swarmops-store",
  "swarmops-testkit",
  "tempfile",
