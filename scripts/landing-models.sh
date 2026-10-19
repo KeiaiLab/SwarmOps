@@ -14,11 +14,15 @@
 #
 # Three runs each: 60 runs, about 2.5 hours on this host. The script holds the host's heavy-run
 # lock (/tmp/swarmops-heavy.lock, or SWARMOPS_HEAVY_LOCK) for the whole matrix, so run it in a
-# quiet window. Each run's output goes to target/perf/landing-models/<cell>-<model>-run<k>.log;
-# matrix.log there and the console get the tree measured, the load before each run, and each
-# run's `landing-model: ` line (with the load and the raw fdatasync probe at its start and end),
-# and its `landing-gate: ` line if its gate failed. A run that fails is recorded and the matrix
-# goes on; the script exits non-zero at the end if any failed.
+# quiet window. Each run's output goes to target/perf/landing-models/runs/<cell>-<model>-run<k>.log;
+# matrix.log beside runs/ and the console get the tree measured, the load before each run, and
+# each run's `landing-model: ` line (with the load and the raw fdatasync probe at its start and
+# end), and its `landing-gate: ` line if its gate failed. A run that fails is recorded and the
+# matrix goes on. Last, `landing_models_decision` reads every run's line in runs/ (those of
+# earlier invocations too, so that a cell run again replaces only its own logs), prints each
+# cell's table (medians and [min-max]) and applies the M4 plan's Decision 1
+# (`swarmops_testkit::landing::decide`), into decision.log. The script exits non-zero at the end
+# if a run or the decision failed.
 #
 # Options: --runs N (3 by default); --cell NAME, repeatable (every cell by default), to run again
 # the cells a review names; --smoke, the matrix at tiny sizes (4 landers, 5 lands, 2 of W-large,
@@ -55,7 +59,7 @@ else
   out=target/perf/landing-models
   closed_landers=32 closed_lands=100 large_lands=50 open_landers=50 interval_ms=2000 duration_s=120
 fi
-mkdir -p "$out"
+mkdir -p "$out/runs"
 models=(cas_loop pushrebase metalog op_heads)
 nextest=(cargo nextest run --locked --profile default --release -p swarmops-repo --all-features)
 
@@ -85,7 +89,7 @@ for run in $(seq 1 "$runs"); do
     esac
     for i in 0 1 2 3; do
       model="${models[$(((i + run - 1) % 4))]}"
-      log="$out/$cell-$model-run$run.log"
+      log="$out/runs/$cell-$model-run$run.log"
       echo "landing-models: $cell $model run $run, load $(cut -d' ' -f1-3 /proc/loadavg)" | tee -a "$out/matrix.log"
       if ! env "${cell_env[@]}" SWARMOPS_TEST_LANDING_MODEL="$model" SWARMOPS_TEST_LANDING_SEED="$run" \
         "${nextest[@]}" --run-ignored ignored-only -E "test(=landing_models::$test)" --no-capture \
@@ -98,5 +102,22 @@ for run in $(seq 1 "$runs"); do
   done
 done
 
-echo "landing-models: done, $failed failed runs; the logs are in $out/" | tee -a "$out/matrix.log"
+echo "landing-models: Decision 1 on every run in $out/runs/" | tee -a "$out/matrix.log"
+# The cell Decision 1 scores is the plan's, unless the cell's variables name another: a smoke
+# names its own small open loop, and nothing from the caller's shell names any.
+scored_env=(-u SWARMOPS_TEST_LANDING_WORKLOAD -u SWARMOPS_TEST_LANDING_LANDERS
+  -u SWARMOPS_TEST_LANDING_INTERVAL_MS -u SWARMOPS_TEST_LANDING_DURATION_S)
+if [ "$smoke" -eq 1 ]; then
+  scored_env+=(SWARMOPS_TEST_LANDING_LANDERS="$open_landers" SWARMOPS_TEST_LANDING_INTERVAL_MS="$interval_ms"
+    SWARMOPS_TEST_LANDING_DURATION_S="$duration_s")
+fi
+if ! env "${scored_env[@]}" SWARMOPS_TEST_LANDING_LOGS="$PWD/$out/runs" "${nextest[@]}" \
+  --run-ignored ignored-only -E 'test(=landing_models::landing_models_decision)' --no-capture \
+  >"$out/decision.log" 2>&1; then
+  failed=$((failed + 1))
+  echo "landing-models: the decision FAILED, see $out/decision.log" | tee -a "$out/matrix.log"
+fi
+grep -E '^(W-|scored in: |\||landing-decision: )' "$out/decision.log" | tee -a "$out/matrix.log" || true
+
+echo "landing-models: done, $failed failed; the logs are in $out/" | tee -a "$out/matrix.log"
 [ "$failed" -eq 0 ]

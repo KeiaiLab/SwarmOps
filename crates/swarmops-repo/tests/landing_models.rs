@@ -78,10 +78,10 @@ use swarmops_testkit::child::{CHILD_TIMEOUT, Child, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{NoSyncFs, Watched};
 use swarmops_testkit::landing::{
-    Cell, Change as LandChange, Host, LAND_TAG, LandRecord, MAX_ATTEMPTS, MAX_LATENCY,
+    CANDIDATES, Cell, Change as LandChange, Host, LAND_TAG, LandRecord, MAX_ATTEMPTS, MAX_LATENCY,
     OP_HEAD_REFS, PROBE_APPENDS, Pace, REGISTRY, RUN_TAG, Run, SCORED_CELL, Stats, SyncTimer,
-    Workload, backoff, base_files, change_for, check_invariants, fdatasync_probe, load1,
-    open_loop_lands, registry_text, slot, tagged, with_line,
+    Verdict, Workload, YARDSTICK, backoff, base_files, change_for, check_invariants, decide,
+    fdatasync_probe, load1, open_loop_lands, registry_text, slot, tables, tagged, with_line,
 };
 use swarmops_testkit::measure::base_dir;
 use swarmops_testkit::repo::{commit, path, put, request};
@@ -1464,4 +1464,330 @@ fn open_loop_slots_keep_one_land_per_interval() {
     assert!(firsts[0] < interval.mul_f64(0.2), "{firsts:?}");
     assert!(firsts[49] > interval.mul_f64(0.8), "{firsts:?}");
     assert_eq!(open_loop_lands(1, 0, Duration::ZERO, duration), 0);
+}
+
+/// A run of `model` in the scored cell from seed `seed`, its gate passed, with a scored p99 of
+/// `p99_ms`, `lands_per_s` and a retry rate of `retry_pct` %, nothing exhausted.
+fn scored(model: &str, seed: u64, p99_ms: u64, lands_per_s: f64, retry_pct: f64) -> Run {
+    Run {
+        model: model.to_owned(),
+        cell: SCORED_CELL,
+        seed,
+        gate: true,
+        stats: Stats {
+            landed: 3_000,
+            lands_per_s,
+            latency_p50_us: p99_ms * 500,
+            latency_p99_us: p99_ms * 1_000,
+            retry_rate: retry_pct / 100.0,
+            conflicts: 0,
+            exhausted: 0,
+            busy: 0,
+            lock_hold_p50_us: 9_000,
+            lock_hold_p99_us: 20_000,
+            journal_share: 0.5,
+            ref_share: 0.25,
+            relocations: 900,
+        },
+        host: Host {
+            load_start: 12.0,
+            load_end: 13.5,
+            fdatasync_start_us: 3_800,
+            fdatasync_end_us: 3_900,
+        },
+    }
+}
+
+/// A matrix's runs: three of each model in the scored cell, with the p99s `p99_ms` (the
+/// yardstick's, then the candidates'), 25 lands/s and 1 % retries, and three of each in a
+/// closed-loop cell.
+fn matrix(p99_ms: [u64; 4]) -> Vec<Run> {
+    let closed = Cell {
+        workload: Workload::Disjoint,
+        landers: 32,
+        pace: Pace::Closed { lands: 100 },
+    };
+    let mut runs = Vec::new();
+    for (model, p99) in std::iter::once(YARDSTICK).chain(CANDIDATES).zip(p99_ms) {
+        for seed in 1..=3 {
+            runs.push(scored(model, seed, p99, 25.0, 1.0));
+            runs.push(Run {
+                cell: closed,
+                ..scored(model, seed, p99 / 2, 60.0, 0.0)
+            });
+        }
+    }
+    runs
+}
+
+/// `model`'s runs in the scored cell.
+fn scored_runs<'r>(runs: &'r mut [Run], model: &str) -> impl Iterator<Item = &'r mut Run> {
+    runs.iter_mut()
+        .filter(move |run| run.model == model && run.cell == SCORED_CELL)
+}
+
+/// Whether `a` and `b` are within a millionth of each other.
+fn close(a: f64, b: f64) -> bool {
+    (a - b).abs() <= 1e-6 * b.abs().max(1.0)
+}
+
+#[test]
+fn decision_1_chooses_the_lowest_scored_p99_or_less_work_within_ten_percent() {
+    // metalog's p99 is the lowest, 280 ms; pushrebase's, 300 ms, is within 10 % of it (308 ms)
+    // and pushrebase does less work under the lock.
+    let decision = decide(&matrix([100, 300, 280, 250]), SCORED_CELL).unwrap();
+    assert_eq!(
+        (decision.chosen.as_str(), decision.eligible),
+        ("pushrebase", true)
+    );
+    let models: Vec<&str> = decision.verdicts.iter().map(|v| v.model.as_str()).collect();
+    assert_eq!(models, ["cas_loop", "pushrebase", "metalog", "op_heads"]);
+    assert!(decision.verdicts.iter().all(Verdict::eligible));
+    // Past the 10 %, the lowest.
+    let decision = decide(&matrix([100, 309, 280, 250]), SCORED_CELL).unwrap();
+    assert_eq!(decision.chosen, "metalog");
+    // The yardstick is never chosen, however low its p99.
+    assert_eq!(
+        decide(&matrix([1, 300, 280, 250]), SCORED_CELL)
+            .unwrap()
+            .chosen,
+        "pushrebase"
+    );
+
+    // The scored numbers are medians over the runs: one fast and one slow run of three do not
+    // move metalog's p99 off 280 ms, nor one run under 20 lands/s its throughput off 25.
+    let mut runs = matrix([100, 309, 280, 250]);
+    let mut metalog: Vec<&mut Run> = scored_runs(&mut runs, "metalog").collect();
+    metalog[0].stats.latency_p99_us = 10_000;
+    metalog[1].stats.latency_p99_us = 900_000;
+    metalog[2].stats.lands_per_s = 5.0;
+    let decision = decide(&runs, SCORED_CELL).unwrap();
+    let verdict = &decision.verdicts[2];
+    assert!(close(verdict.latency_p99_us, 280_000.0), "{verdict:?}");
+    assert!(close(verdict.lands_per_s, 25.0), "{verdict:?}");
+    assert_eq!((verdict.runs, verdict.scored_runs), (6, 3));
+    assert_eq!(decision.chosen, "metalog");
+}
+
+#[test]
+fn decision_1_takes_op_heads_only_at_half_the_best_other_p99() {
+    // op_heads at 140 ms, half metalog's 280 ms: chosen.
+    assert_eq!(
+        decide(&matrix([100, 300, 280, 140]), SCORED_CELL)
+            .unwrap()
+            .chosen,
+        "op_heads"
+    );
+    // At 141 ms it is not, although its p99 is the lowest.
+    assert_eq!(
+        decide(&matrix([100, 300, 280, 141]), SCORED_CELL)
+            .unwrap()
+            .chosen,
+        "pushrebase"
+    );
+    // The only eligible candidate has none to beat: pushrebase and metalog miss 500 ms.
+    let decision = decide(&matrix([100, 600, 700, 400]), SCORED_CELL).unwrap();
+    assert_eq!(
+        (decision.chosen.as_str(), decision.eligible),
+        ("op_heads", true)
+    );
+}
+
+#[test]
+fn a_failed_gate_or_a_missed_scored_condition_makes_a_candidate_ineligible() {
+    // metalog at 200 ms is chosen (pushrebase's 300 ms is past 220).
+    let base = matrix([100, 300, 200, 250]);
+    assert_eq!(decide(&base, SCORED_CELL).unwrap().chosen, "metalog");
+    let metalog_after = |change: &dyn Fn(&mut [Run])| {
+        let mut runs = base.clone();
+        change(&mut runs);
+        let decision = decide(&runs, SCORED_CELL).unwrap();
+        assert_eq!(decision.chosen, "pushrebase");
+        decision.verdicts[2].clone()
+    };
+    // One failed gate, in a cell that is not scored.
+    let verdict = metalog_after(&|runs| {
+        let closed = runs
+            .iter_mut()
+            .find(|run| run.model == "metalog" && run.cell != SCORED_CELL)
+            .unwrap();
+        closed.gate = false;
+    });
+    assert_eq!((verdict.failed_gates, verdict.met), (1, [true; 4]));
+    // A median under 20 lands/s; a median p99 of 500 ms, not under it; a median retry rate of
+    // 5 %, not under it; one land exhausted in one scored run.
+    let scored_change = |field: fn(&mut Stats)| {
+        move |runs: &mut [Run]| scored_runs(runs, "metalog").for_each(|run| field(&mut run.stats))
+    };
+    let verdict = metalog_after(&scored_change(|stats| stats.lands_per_s = 19.9));
+    assert_eq!(verdict.met, [false, true, true, true]);
+    let verdict = metalog_after(&scored_change(|stats| stats.latency_p99_us = 500_000));
+    assert_eq!(verdict.met, [true, false, true, true]);
+    let verdict = metalog_after(&scored_change(|stats| stats.retry_rate = 0.05));
+    assert_eq!(verdict.met, [true, true, false, true]);
+    let verdict = metalog_after(&|runs| {
+        scored_runs(runs, "metalog").next().unwrap().stats.exhausted = 1;
+    });
+    assert_eq!(
+        (verdict.exhausted, verdict.met),
+        (1, [true, true, true, false])
+    );
+    assert!(!verdict.eligible());
+}
+
+#[test]
+fn with_no_eligible_candidate_decision_1_takes_the_most_conditions_met() {
+    // Every candidate under 20 lands/s, op_heads past 500 ms too; the yardstick alone is
+    // eligible, and is not chosen.
+    let mut runs = matrix([100, 300, 280, 600]);
+    for model in CANDIDATES {
+        scored_runs(&mut runs, model).for_each(|run| run.stats.lands_per_s = 15.0);
+    }
+    // pushrebase and metalog meet three conditions each: the lower retry rate, metalog's.
+    scored_runs(&mut runs, "pushrebase").for_each(|run| run.stats.retry_rate = 0.02);
+    let decision = decide(&runs, SCORED_CELL).unwrap();
+    assert_eq!(
+        (decision.chosen.as_str(), decision.eligible),
+        ("metalog", false)
+    );
+    let met: Vec<usize> = decision
+        .verdicts
+        .iter()
+        .map(Verdict::conditions_met)
+        .collect();
+    assert_eq!(met, [4, 3, 3, 2]);
+    assert!(decision.verdicts[0].eligible());
+    // As many conditions and the same retry rate: the order of work, which the rule leaves.
+    scored_runs(&mut runs, "pushrebase").for_each(|run| run.stats.retry_rate = 0.01);
+    assert_eq!(decide(&runs, SCORED_CELL).unwrap().chosen, "pushrebase");
+}
+
+#[test]
+fn decision_1_needs_a_scored_run_of_every_model() {
+    for model in std::iter::once(YARDSTICK).chain(CANDIDATES) {
+        let runs: Vec<Run> = matrix([100, 300, 280, 250])
+            .into_iter()
+            .filter(|run| !(run.model == model && run.cell == SCORED_CELL))
+            .collect();
+        let error = decide(&runs, SCORED_CELL).unwrap_err();
+        assert!(error.contains(model), "{error}");
+    }
+}
+
+#[test]
+fn run_and_land_lines_read_back() {
+    let run = scored("metalog", 2, 280, 24.5, 1.25);
+    let printed = format!("noise\n{RUN_TAG}{} wall_ms=120000\n", run.to_line());
+    let read: Vec<Option<Run>> = tagged(&printed, RUN_TAG).map(Run::parse).collect();
+    assert_eq!(read, [Some(run.clone())]);
+    let closed = Run {
+        cell: Cell {
+            workload: Workload::Large,
+            landers: 32,
+            pace: Pace::Closed { lands: 50 },
+        },
+        gate: false,
+        ..run
+    };
+    assert_eq!(Run::parse(&closed.to_line()), Some(closed));
+    assert_eq!(Run::parse("model=metalog workload=shared"), None);
+
+    let record = LandRecord {
+        id: Some("ab".repeat(32)),
+        attempts: 3,
+        relocated: true,
+        conflicted: false,
+        exhausted: false,
+        latency_us: 1_234,
+        lock_hold_us: vec![10, 20],
+        journal_sync_us: 7,
+        ref_sync_us: 8,
+        busy: 1,
+    };
+    assert_eq!(LandRecord::parse(&record.to_line()), Some(record));
+    let unlanded = LandRecord {
+        conflicted: true,
+        ..LandRecord::default()
+    };
+    assert_eq!(LandRecord::parse(&unlanded.to_line()), Some(unlanded));
+}
+
+#[test]
+fn the_tables_give_each_cell_s_medians_and_ranges() {
+    let mut runs = matrix([100, 300, 280, 250]);
+    scored_runs(&mut runs, "metalog")
+        .next()
+        .unwrap()
+        .stats
+        .lands_per_s = 20.0;
+    let text = tables(&runs);
+    let scored = text
+        .split(&SCORED_CELL.describe())
+        .nth(1)
+        .expect("the scored cell's table");
+    let rows: Vec<&str> = scored
+        .lines()
+        .filter(|line| line.starts_with("| ") && !line.starts_with("| model"))
+        .take(4)
+        .collect();
+    assert_eq!(rows.len(), 4, "{text}");
+    assert!(
+        rows[0].starts_with("| cas_loop | 3/3 | 25.0 [25.0–25.0] |"),
+        "{text}"
+    );
+    assert!(
+        rows[2].starts_with("| metalog | 3/3 | 25.0 [20.0–25.0] | 140.0 [140.0–140.0] | 280.0 [280.0–280.0] | 1.00 [1.00–1.00] |"),
+        "{text}"
+    );
+    assert!(rows[2].ends_with("| 12.0–13.5 | 3.8–3.9 |"), "{text}");
+    assert_eq!(
+        text.matches("| model | gate |").count(),
+        2,
+        "one table per cell"
+    );
+}
+
+/// Set to the directory of a matrix's run logs (`scripts/landing-models.sh` sets it):
+/// `landing_models_decision` reads every run's [`RUN_TAG`] line in its `.log` files, prints the
+/// cells' tables and applies Decision 1. Unset, that test decides nothing.
+const LOGS: &str = "SWARMOPS_TEST_LANDING_LOGS";
+
+#[test]
+#[ignore = "applies Decision 1 to the run logs SWARMOPS_TEST_LANDING_LOGS names; scripts/landing-models.sh runs it last"]
+fn landing_models_decision() {
+    let Some(logs) = std::env::var_os(LOGS).map(PathBuf::from) else {
+        eprintln!("landing_models_decision: {LOGS} is not set; nothing decided");
+        return;
+    };
+    let mut files: Vec<PathBuf> = fs::read_dir(&logs)
+        .unwrap_or_else(|e| panic!("read {}: {e}", logs.display()))
+        .map(|entry| entry.expect("a directory entry").path())
+        .filter(|file| file.extension().is_some_and(|ext| ext == "log"))
+        .collect();
+    files.sort();
+    let mut runs = Vec::new();
+    for file in &files {
+        let text = fs::read_to_string(file).expect("read a run's log");
+        for line in tagged(&text, RUN_TAG) {
+            let run = Run::parse(line)
+                .unwrap_or_else(|| panic!("{}: not a run's line: {line}", file.display()));
+            runs.push(run);
+        }
+    }
+    assert!(!runs.is_empty(), "no run's line in {}", logs.display());
+    // Decision 1's scored cell, unless the cell's variables name another (a smoke run's).
+    let scored = Cell {
+        workload: env_workload(SCORED_CELL.workload),
+        landers: to_usize(env_number(LANDERS, 50)),
+        pace: Pace::Open {
+            interval_ms: env_number(INTERVAL_MS, 2_000),
+            duration_s: env_number(DURATION_S, 120),
+        },
+    };
+    println!("{}", tables(&runs));
+    println!("scored in: {}\n", scored.describe());
+    let decision = decide(&runs, scored).unwrap_or_else(|e| panic!("{e}"));
+    for line in decision.lines() {
+        println!("{line}");
+    }
 }

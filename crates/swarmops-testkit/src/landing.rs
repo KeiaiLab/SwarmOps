@@ -17,9 +17,13 @@
 //!   [`open_loop_lands`]: when an open loop's lands are due.
 //! - [`Cell`] and [`Run`]: a cell of the measurement, and one run of one model in it, with the
 //!   line the harness prints for it ([`RUN_TAG`]) and reads back.
+//! - [`decide`]: the M4 plan's Decision 1, written before any number exists, applied to a
+//!   matrix's runs ([`Verdict`], [`Decision`]); [`tables`]: each cell's medians and ranges, as
+//!   `docs/perf.md` gives them.
 //! - [`load1`] and [`fdatasync_probe`]: the host, as `docs/perf.md`'s tables record it.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -987,6 +991,386 @@ impl Run {
             },
         })
     }
+}
+
+/// The candidates the M4 plan's Decision 1 chooses among, by the prototypes' names, in the order
+/// of the work they do under the lock, least first: the order its "within 10 %" clause prefers.
+pub const CANDIDATES: [&str; 3] = ["pushrebase", "metalog", "op_heads"];
+
+/// The yardstick, the CAS loop: reported beside the candidates and never chosen (decision 10
+/// chooses among the three; "§9 를 그대로 구현" is its rejected alternative).
+pub const YARDSTICK: &str = "cas_loop";
+
+/// The candidate whose production form needs a record FORMAT 1 does not have.
+const OP_HEADS: &str = "op_heads";
+
+/// Decision 1's first scored condition, umbrella §15's: at least 20 lands per second.
+pub const MIN_LANDS_PER_S: f64 = 20.0;
+
+/// Its second: a p99 latency under 500 ms, in microseconds.
+pub const MAX_LATENCY_P99_US: f64 = 500_000.0;
+
+/// Its third: a retry rate under 5 %. The fourth: no land that exhausted its attempts.
+pub const MAX_RETRY_RATE: f64 = 0.05;
+
+/// The names of the four scored conditions, in [`Verdict::met`]'s order.
+pub const CONDITIONS: [&str; 4] = ["lands_per_s", "latency_p99", "retry_rate", "none_exhausted"];
+
+/// How close to the lowest scored p99 a candidate that does less work under the lock may come
+/// and still be chosen over it: within 10 %.
+pub const P99_MARGIN: f64 = 0.10;
+
+/// Op heads is chosen only with a scored p99 at most this share of the best other eligible
+/// candidate's: half.
+pub const OP_HEADS_SHARE: f64 = 0.5;
+
+/// The tag of the lines [`Decision::lines`] gives.
+pub const DECISION_TAG: &str = "landing-decision: ";
+
+/// How one model fared under Decision 1's rule.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Verdict {
+    /// The model.
+    pub model: String,
+    /// Its runs, in every cell.
+    pub runs: usize,
+    /// How many of them failed the gate.
+    pub failed_gates: usize,
+    /// How many of them ran in the scored cell.
+    pub scored_runs: usize,
+    /// The median over its scored runs of their lands/s.
+    pub lands_per_s: f64,
+    /// The median over its scored runs of their p99 latency, in microseconds.
+    pub latency_p99_us: f64,
+    /// The median over its scored runs of their retry rate.
+    pub retry_rate: f64,
+    /// The lands of its scored runs that exhausted their attempts, all runs together.
+    pub exhausted: u64,
+    /// Which of the four scored conditions ([`CONDITIONS`]) those meet.
+    pub met: [bool; 4],
+}
+
+impl Verdict {
+    /// Whether the model is eligible: the gate passed in every run of every cell, and the four
+    /// scored conditions met.
+    pub fn eligible(&self) -> bool {
+        self.failed_gates == 0 && self.met.iter().all(|&met| met)
+    }
+
+    /// How many of the four scored conditions it meets.
+    pub fn conditions_met(&self) -> usize {
+        self.met.iter().filter(|&&met| met).count()
+    }
+
+    /// The verdict as one line of `key=value` fields.
+    fn line(&self) -> String {
+        let met: Vec<&str> = CONDITIONS
+            .iter()
+            .zip(self.met)
+            .filter_map(|(name, met)| met.then_some(*name))
+            .collect();
+        let role = if self.model == YARDSTICK {
+            "yardstick"
+        } else {
+            "candidate"
+        };
+        format!(
+            "{DECISION_TAG}model={} role={role} runs={} failed_gates={} scored_runs={} \
+             lands_per_s={:.3} latency_p99_us={:.0} retry_pct={:.3} exhausted={} met={} \
+             eligible={}",
+            self.model,
+            self.runs,
+            self.failed_gates,
+            self.scored_runs,
+            self.lands_per_s,
+            self.latency_p99_us,
+            self.retry_rate * 100.0,
+            self.exhausted,
+            if met.is_empty() {
+                "-".to_owned()
+            } else {
+                met.join(",")
+            },
+            if self.eligible() { "yes" } else { "no" },
+        )
+    }
+}
+
+/// Decision 1's rule applied to a matrix's runs ([`decide`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Decision {
+    /// Every model's verdict: the yardstick's first, then the candidates' in [`CANDIDATES`]'s
+    /// order.
+    pub verdicts: Vec<Verdict>,
+    /// The candidate chosen.
+    pub chosen: String,
+    /// Whether it is eligible. If it is not, no candidate is: the M4 plan sends the gap to
+    /// `docs/known-limitations.md` (target M9) and tells the user, decision 10's alternative
+    /// being theirs to take.
+    pub eligible: bool,
+    /// The clauses of the rule that chose it, in words.
+    pub reason: String,
+}
+
+impl Decision {
+    /// The decision as lines, each starting [`DECISION_TAG`]: one per verdict, then the choice.
+    pub fn lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self.verdicts.iter().map(Verdict::line).collect();
+        lines.push(format!(
+            "{DECISION_TAG}chosen={} eligible={} reason: {}",
+            self.chosen,
+            if self.eligible { "yes" } else { "no" },
+            self.reason
+        ));
+        lines
+    }
+}
+
+/// The M4 plan's Decision 1, applied to `runs`, every run of a matrix (several cells, each
+/// model, several runs of each), scored in cell `scored` ([`SCORED_CELL`] for the plan's
+/// matrix; a smoke run of the matrix scores its own small open loop):
+///
+/// - a model is *eligible* when it passed the gate in every one of its runs, in every cell, and
+///   its runs in `scored` meet the four scored conditions: a median of at least
+///   [`MIN_LANDS_PER_S`] lands/s, a median p99 latency under [`MAX_LATENCY_P99_US`], a median
+///   retry rate under [`MAX_RETRY_RATE`], and no land that exhausted its attempts in any of
+///   them ([`Verdict`]);
+/// - the *choice* is among the eligible [`CANDIDATES`], never the [`YARDSTICK`]: op heads only
+///   with a scored p99 at most [`OP_HEADS_SHARE`] of the best other eligible candidate's (with
+///   no other eligible candidate, there is none to beat); of those left, the one with the
+///   lowest scored p99, unless one that does less work under the lock (an earlier one in
+///   [`CANDIDATES`]) has a p99 within [`P99_MARGIN`] of it, the earliest such;
+/// - with *no eligible candidate*, the candidate that meets the most of the four scored
+///   conditions, ties broken by the lower scored retry rate, and a tie the rule leaves after
+///   that by the order of work ([`CANDIDATES`]); [`Decision::eligible`] is then `false`.
+///
+/// An error when the yardstick or a candidate has no run in the scored cell.
+pub fn decide(runs: &[Run], scored: Cell) -> Result<Decision, String> {
+    let verdicts = std::iter::once(YARDSTICK)
+        .chain(CANDIDATES)
+        .map(|model| verdict(runs, model, scored))
+        .collect::<Result<Vec<Verdict>, String>>()?;
+    let candidates = &verdicts[1..];
+    let eligible: Vec<&Verdict> = candidates.iter().filter(|v| v.eligible()).collect();
+    let (chosen, reason) = if eligible.is_empty() {
+        fallback(candidates)
+    } else {
+        choose(&eligible)
+    };
+    Ok(Decision {
+        chosen: chosen.model.clone(),
+        eligible: chosen.eligible(),
+        reason,
+        verdicts,
+    })
+}
+
+/// How `model` fared in `runs`, scored in cell `cell`; an error if it has no run there.
+fn verdict(runs: &[Run], model: &str, cell: Cell) -> Result<Verdict, String> {
+    let all: Vec<&Run> = runs.iter().filter(|run| run.model == model).collect();
+    let scored: Vec<&Run> = all.iter().copied().filter(|run| run.cell == cell).collect();
+    let median_of = |pick: fn(&Run) -> f64| {
+        let values: Vec<f64> = scored.iter().map(|run| pick(run)).collect();
+        median(&values).ok_or_else(|| format!("{model} has no run in the scored cell"))
+    };
+    let lands_per_s = median_of(|run| run.stats.lands_per_s)?;
+    let latency_p99_us = median_of(|run| as_f64(run.stats.latency_p99_us))?;
+    let retry_rate = median_of(|run| run.stats.retry_rate)?;
+    let exhausted = scored.iter().map(|run| run.stats.exhausted).sum();
+    Ok(Verdict {
+        model: model.to_owned(),
+        runs: all.len(),
+        failed_gates: all.iter().filter(|run| !run.gate).count(),
+        scored_runs: scored.len(),
+        lands_per_s,
+        latency_p99_us,
+        retry_rate,
+        exhausted,
+        met: [
+            lands_per_s >= MIN_LANDS_PER_S,
+            latency_p99_us < MAX_LATENCY_P99_US,
+            retry_rate < MAX_RETRY_RATE,
+            exhausted == 0,
+        ],
+    })
+}
+
+/// Decision 1's choice among `eligible` (in [`CANDIDATES`]'s order, at least one): see
+/// [`decide`].
+fn choose<'v>(eligible: &[&'v Verdict]) -> (&'v Verdict, String) {
+    let ms = |v: &Verdict| v.latency_p99_us / 1_000.0;
+    let names: Vec<&str> = eligible.iter().map(|v| v.model.as_str()).collect();
+    let mut reason = format!("eligible: {}", names.join(", "));
+    let best_other = eligible
+        .iter()
+        .filter(|v| v.model != OP_HEADS)
+        .map(|v| v.latency_p99_us)
+        .reduce(f64::min);
+    let mut choosable: Vec<&Verdict> = Vec::new();
+    for &v in eligible {
+        match best_other {
+            Some(best) if v.model == OP_HEADS && v.latency_p99_us > OP_HEADS_SHARE * best => {
+                let _ = write!(
+                    reason,
+                    "; op_heads's scored p99 {:.1} ms is more than half the best other's, \
+                     {:.1} ms",
+                    ms(v),
+                    best / 1_000.0
+                );
+            }
+            _ => choosable.push(v),
+        }
+    }
+    let lowest = choosable
+        .iter()
+        .copied()
+        .reduce(|a, b| {
+            if b.latency_p99_us < a.latency_p99_us {
+                b
+            } else {
+                a
+            }
+        })
+        .expect("an eligible candidate");
+    let chosen = choosable
+        .iter()
+        .copied()
+        .find(|v| v.latency_p99_us <= lowest.latency_p99_us * (1.0 + P99_MARGIN))
+        .expect("the lowest is within its own margin");
+    let _ = write!(
+        reason,
+        "; the lowest scored p99: {} at {:.1} ms",
+        lowest.model,
+        ms(lowest)
+    );
+    if chosen.model != lowest.model {
+        let _ = write!(
+            reason,
+            "; within 10 % of it, less work under the lock: {} at {:.1} ms",
+            chosen.model,
+            ms(chosen)
+        );
+    }
+    (chosen, reason)
+}
+
+/// Decision 1's "no eligible candidate": see [`decide`].
+fn fallback(candidates: &[Verdict]) -> (&Verdict, String) {
+    let mut best = &candidates[0];
+    for v in &candidates[1..] {
+        let more = v.conditions_met() > best.conditions_met();
+        let as_many_retrying_less =
+            v.conditions_met() == best.conditions_met() && v.retry_rate < best.retry_rate;
+        if more || as_many_retrying_less {
+            best = v;
+        }
+    }
+    let reason = format!(
+        "no eligible candidate; the most scored conditions met: {} with {} of 4 ({}), \
+         scored retry rate {:.3} %",
+        best.model,
+        best.conditions_met(),
+        CONDITIONS
+            .iter()
+            .zip(best.met)
+            .filter_map(|(name, met)| met.then_some(*name))
+            .collect::<Vec<_>>()
+            .join(", "),
+        best.retry_rate * 100.0
+    );
+    (best, reason)
+}
+
+/// One Markdown table per cell that `runs` cover, in the cells' order, as `docs/perf.md`
+/// gives them: a heading naming the cell, then a row per model (the yardstick first, then the
+/// candidates, then any other) with how many of its runs passed the gate, and each number as
+/// the median over its runs with the range `[min–max]` after it; the load and the raw
+/// `fdatasync` probe are the runs' starts and ends, as a range.
+pub fn tables(runs: &[Run]) -> String {
+    let mut cells: Vec<Cell> = runs.iter().map(|run| run.cell).collect();
+    cells.sort();
+    cells.dedup();
+    let mut models: Vec<&str> = std::iter::once(YARDSTICK).chain(CANDIDATES).collect();
+    for run in runs {
+        if !models.contains(&run.model.as_str()) {
+            models.push(&run.model);
+        }
+    }
+    let mut out = String::new();
+    for cell in cells {
+        let _ = write!(out, "\n{}\n\n", cell.describe());
+        out.push_str(
+            "| model | gate | lands/s | p50 ms | p99 ms | retries % | conflicts | exhausted | \
+             busy | lock p50 ms | lock p99 ms | journal % | ref % | relocated | load | \
+             fdatasync ms |\n",
+        );
+        let _ = writeln!(out, "|{}", "---|".repeat(16));
+        for &model in &models {
+            let of: Vec<&Run> = runs
+                .iter()
+                .filter(|run| run.cell == cell && run.model == model)
+                .collect();
+            if !of.is_empty() {
+                out.push_str(&row(model, &of));
+            }
+        }
+    }
+    out
+}
+
+/// A table row of `model`'s runs `of` in one cell: see [`tables`].
+fn row(model: &str, of: &[&Run]) -> String {
+    let spread = |pick: &dyn Fn(&Run) -> f64, decimals: usize| {
+        let values: Vec<f64> = of.iter().map(|run| pick(run)).collect();
+        let median = median(&values).expect("a run");
+        let (min, max) = values
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                (lo.min(v), hi.max(v))
+            });
+        format!("{median:.decimals$} [{min:.decimals$}–{max:.decimals$}]")
+    };
+    let ms = |us: u64| as_f64(us) / 1_000.0;
+    let range = |values: Vec<f64>, decimals: usize| {
+        let (min, max) = values
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), &v| {
+                (lo.min(v), hi.max(v))
+            });
+        format!("{min:.decimals$}–{max:.decimals$}")
+    };
+    let loads = of
+        .iter()
+        .flat_map(|run| [run.host.load_start, run.host.load_end])
+        .collect();
+    let probes = of
+        .iter()
+        .flat_map(|run| {
+            [
+                ms(run.host.fdatasync_start_us),
+                ms(run.host.fdatasync_end_us),
+            ]
+        })
+        .collect();
+    let cells = [
+        model.to_owned(),
+        format!("{}/{}", of.iter().filter(|run| run.gate).count(), of.len()),
+        spread(&|run| run.stats.lands_per_s, 1),
+        spread(&|run| ms(run.stats.latency_p50_us), 1),
+        spread(&|run| ms(run.stats.latency_p99_us), 1),
+        spread(&|run| run.stats.retry_rate * 100.0, 2),
+        spread(&|run| as_f64(run.stats.conflicts), 0),
+        spread(&|run| as_f64(run.stats.exhausted), 0),
+        spread(&|run| as_f64(run.stats.busy), 0),
+        spread(&|run| ms(run.stats.lock_hold_p50_us), 1),
+        spread(&|run| ms(run.stats.lock_hold_p99_us), 1),
+        spread(&|run| run.stats.journal_share * 100.0, 1),
+        spread(&|run| run.stats.ref_share * 100.0, 1),
+        spread(&|run| as_f64(run.stats.relocations), 0),
+        range(loads, 1),
+        range(probes, 1),
+    ];
+    format!("| {} |\n", cells.join(" | "))
 }
 
 /// The host's 1-minute load average now; NaN if `/proc/loadavg` does not say.
