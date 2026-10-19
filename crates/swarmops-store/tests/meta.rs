@@ -3841,6 +3841,293 @@ fn write_times_out_as_busy() {
         .unwrap();
 }
 
+/// A committed snapshot never returns a frame its writer cuts (design-L107, storage spec §3
+/// "읽기"). The writer's `journal.log` append is held between its write and its fdatasync
+/// ([`swarmops_testkit::fs::HoldThenFail`]), and then fails with `EIO`, so the writer cuts the
+/// frame back off the journal, still holding the lock (storage spec §2 rule 3 (a)). While it is
+/// held, a lock-free snapshot on a second thread overlays the frame: the local readers'
+/// semantics, pinned. A committed snapshot taken on a third thread waits for the lock until the
+/// writer lets it go, and then holds no trace of the frame; `journal.log` is back to its length
+/// before.
+#[test]
+fn read_committed_never_returns_a_frame_its_writer_cuts() {
+    use swarmops_store::TailRepair;
+    use swarmops_testkit::fs::HoldThenFail;
+
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    cas(&store, "main", None, Some(0));
+    let before = log_len(&root);
+    let (fs, held) = HoldThenFail::new(Layout::new(&root).journal_log(), RealFs);
+    let writer = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+    let root = &root;
+    thread::scope(|scope| {
+        let writing = scope.spawn(|| {
+            let mut write = writer.write()?;
+            write.insert_changeset(cs(1, &[0]))?;
+            write.cas_ref("main", Some(id(0)), Some(id(1)), ACTOR)?;
+            write.commit()
+        });
+        held.wait();
+
+        // The frame is whole in journal.log, not synced: a lock-free snapshot overlays it.
+        let local = scope.spawn(|| {
+            let store = open_checked(root).unwrap();
+            let read = store.read().unwrap();
+            (
+                read.changeset(id(1)).unwrap(),
+                read.get_ref("main").unwrap(),
+            )
+        });
+        let seen = local.join().unwrap();
+        assert_eq!(seen, (Some(stored(1, &[0], 1, 2)), Some(ref_state(1, 2))));
+
+        // A committed snapshot waits for the lock, which the held writer keeps.
+        let (started, starting) = mpsc::channel();
+        let committed = scope.spawn(move || {
+            let store = open_checked(root)
+                .unwrap()
+                .with_lock_timeout(Duration::from_secs(60));
+            started.send(()).unwrap();
+            let (read, repair) = store.read_committed().unwrap();
+            let got = (
+                read.changeset(id(1)).unwrap(),
+                read.get_ref("main").unwrap(),
+                read.count_changesets().unwrap(),
+            );
+            (got, repair)
+        });
+        starting.recv_timeout(Duration::from_secs(60)).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        assert!(
+            !committed.is_finished(),
+            "a committed snapshot returned while the writer held the lock"
+        );
+
+        // Let go, the writer's sync fails, and it cuts the frame before it unlocks.
+        held.release();
+        match writing.join().unwrap() {
+            Err(StoreError::NotCommitted { source }) => {
+                assert_eq!(source.raw_os_error(), Some(5), "{source}");
+            }
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        let (got, repair) = committed.join().unwrap();
+        assert_eq!(
+            got,
+            (None, Some(ref_state(0, 1)), 1),
+            "no trace of the frame"
+        );
+        assert_eq!(
+            repair,
+            TailRepair::default(),
+            "the writer cut its frame itself"
+        );
+    });
+    assert_eq!(
+        log_len(root),
+        before,
+        "journal.log is back to its length before"
+    );
+}
+
+/// Set only in the child of `read_committed_lists_and_returns_a_frame_committed_but_not_listed`
+/// that crashes between its frame's sync and its listing: the store root.
+#[cfg(feature = "test-hooks")]
+const COMMITTED_CRASH_ROOT: &str = "SWARMOPS_TEST_META_COMMITTED_CRASH_ROOT";
+
+/// The transaction [`read_committed_lists_and_returns_a_frame_committed_but_not_listed`] commits
+/// on a store holding changeset 0: changeset 1 on it, and main made to name changeset 1.
+#[cfg(feature = "test-hooks")]
+fn commit_one_on_zero(store: &MetaStore) -> Result<CommitInfo, StoreError> {
+    let mut write = store.write()?;
+    write.insert_changeset(cs(1, &[0]))?;
+    write.cas_ref("main", None, Some(id(1)), ACTOR)?;
+    write.commit()
+}
+
+/// How many [`FsOps`] calls a handle opened on the store at `root` makes, from its open through
+/// [`commit_one_on_zero`]'s listing of its frame in `journal.off`, that call included: counted on
+/// a copy of the store, through a [`RecordingFs`], under the order checker as the real runs are.
+#[cfg(feature = "test-hooks")]
+fn calls_to_the_listing(root: &Utf8Path) -> u64 {
+    let (_dir, dry) = new_root();
+    copy_dir(root.as_std_path(), dry.as_std_path());
+    let (fs, calls) = RecordingFs::new();
+    let store = MetaStore::open_with_fs(&dry, checked(fs)).unwrap();
+    commit_one_on_zero(&store).unwrap();
+    let calls = calls();
+    let listing = (calls.iter())
+        .position(|call| call == "append_durable journal.off")
+        .unwrap_or_else(|| panic!("no listing among {calls:?}"));
+    u64::try_from(listing + 1).unwrap()
+}
+
+/// A committed snapshot of `store`, the store at `root`, whose frame 2 (changeset 1, main moved
+/// to it) is whole and synced and that `journal.off` does not list: it returns the frame's
+/// changeset and move, `journal.off` lists the frame afterwards, and the repair says so.
+#[cfg(feature = "test-hooks")]
+#[track_caller]
+fn assert_read_committed_lists_it(store: &MetaStore, root: &Utf8Path, what: &str) {
+    use swarmops_store::TailRepair;
+
+    let (read, repair) = store.read_committed().unwrap();
+    assert_eq!(
+        read.changeset(id(1)).unwrap(),
+        Some(stored(1, &[0], 1, 2)),
+        "{what}"
+    );
+    assert_eq!(
+        read.get_ref("main").unwrap(),
+        Some(ref_state(1, 1)),
+        "{what}"
+    );
+    drop(read);
+    assert_eq!(listed(root), 2, "{what}: journal.off lists the frame");
+    let listed_one = TailRepair {
+        frames_listed: 1,
+        ..TailRepair::default()
+    };
+    assert_eq!(repair, listed_one, "{what}");
+}
+
+/// A committed snapshot lists, and returns, a frame committed and never listed: one whose
+/// `journal.off` append failed (its commit acknowledged with a warning, `PostCommit`), and one a
+/// crash left between its sync and its listing. Its tail check syncs the frame and lists it, as a
+/// writer's does (storage spec §2 rule 3), and the `TailRepair` it returns says so.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn read_committed_lists_and_returns_a_frame_committed_but_not_listed() {
+    use swarmops_store::FsMethod;
+
+    if let Ok(root) = std::env::var(COMMITTED_CRASH_ROOT) {
+        let k = std::env::var(CRASH_AT_ENV).unwrap().parse().unwrap();
+        let fs = checked(CrashAtFs::new(RealFs, k));
+        let store = MetaStore::open_with_fs(Utf8Path::new(&root), fs).unwrap();
+        // Call k is the listing: the process aborts there.
+        let _ = commit_one_on_zero(&store);
+        return;
+    }
+
+    // The listing fails once, after its write (EIO): the commit point is passed, and the writer
+    // cuts the entry back off journal.off.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    let fail = FailAt {
+        at: calls_to_the_listing(&root),
+        mode: FailMode::Once,
+        error: InjectedError::Eio,
+    };
+    let failing = Arc::new(FailAtFs::new(RealFs, fail));
+    let writer = MetaStore::open_with_fs(&root, checked(Arc::clone(&failing))).unwrap();
+    let committed = commit_one_on_zero(&writer);
+    assert!(
+        matches!(committed, Err(StoreError::PostCommit { frame_seq: 1, .. })),
+        "{committed:?}"
+    );
+    let listing = Layout::new(&root).journal_off().into_std_path_buf();
+    assert_eq!(
+        failing.failed_calls(),
+        [(FsMethod::AppendDurable, listing)],
+        "the failure struck the listing"
+    );
+    assert_eq!(
+        (listed(&root), frames(&root).len()),
+        (1, 2),
+        "the frame is whole in journal.log, unlisted"
+    );
+    assert_read_committed_lists_it(&writer, &root, "a failed listing");
+
+    // A crash at the listing: the child aborts right before it.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    drop(store);
+    let k = calls_to_the_listing(&root);
+    let child = run(this_test(&test_name!(
+        "read_committed_lists_and_returns_a_frame_committed_but_not_listed"
+    ))
+    .env(COMMITTED_CRASH_ROOT, &root)
+    .env(CRASH_AT_ENV, k.to_string()));
+    assert_eq!(
+        child.status.signal(),
+        Some(SIGABRT),
+        "{:?}\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stderr)
+    );
+    assert_eq!(
+        (listed(&root), frames(&root).len()),
+        (1, 2),
+        "the frame is whole in journal.log, unlisted"
+    );
+    let store = open_checked(&root).unwrap();
+    assert_read_committed_lists_it(&store, &root, "a crash at the listing");
+}
+
+/// A committed snapshot waits for the lock as a writer does, up to the store's `lock_timeout`,
+/// and then gives up with [`StoreError::Busy`] (the retryable `E_BUSY`); once the lock is free,
+/// it takes it.
+#[test]
+fn read_committed_times_out_busy_behind_a_held_lock() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    let held = store.write().unwrap();
+    let impatient = open_checked(&root)
+        .unwrap()
+        .with_lock_timeout(Duration::from_millis(200));
+    let started = Instant::now();
+    match impatient.read_committed() {
+        Err(StoreError::Busy) => {}
+        Err(e) => panic!("expected Busy, got {e:?}"),
+        Ok((read, repair)) => panic!(
+            "expected Busy, got a snapshot of {} changesets ({repair:?})",
+            read.count_changesets().unwrap()
+        ),
+    }
+    let waited = started.elapsed();
+    assert!(
+        waited >= Duration::from_millis(200),
+        "gave up after {waited:?}"
+    );
+    drop(held);
+    // A fresh handle with the default timeout, as in `write_times_out_as_busy`.
+    let patient = open_checked(&root).unwrap();
+    let (read, _) = patient.read_committed().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), 1);
+}
+
+/// A committed snapshot of a journal whose tail is clean writes nothing (design-L107 §9): of the
+/// [`FsOps`] calls it makes, none mutates or flushes ([`swarmops_store::FsMethod::is_mutating`],
+/// `flushes`).
+#[test]
+fn read_committed_on_a_clean_tail_writes_nothing() {
+    use swarmops_store::{FsMethod, TailRepair};
+
+    let (_dir, root) = new_root();
+    let (fs, calls) = RecordingFs::new();
+    let store = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
+    insert(&store, &[cs(0, &[])]);
+    insert(&store, &[cs(1, &[0])]);
+    cas(&store, "main", None, Some(1));
+    calls();
+    let (read, repair) = store.read_committed().unwrap();
+    assert_eq!(repair, TailRepair::default());
+    assert_eq!(read.count_changesets().unwrap(), 2);
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+    drop(read);
+    let made = calls();
+    let method = |call: &String| {
+        let name = call.split(' ').next();
+        (FsMethod::ALL.into_iter())
+            .find(|method| Some(method.as_str()) == name)
+            .unwrap_or_else(|| panic!("no method makes {call:?}"))
+    };
+    let writes: Vec<&String> = (made.iter())
+        .filter(|call| method(call).is_mutating() || method(call).flushes())
+        .collect();
+    assert!(writes.is_empty(), "it wrote {writes:?}, of {made:?}");
+}
+
 #[test]
 fn snapshot_reads_the_refs_again_after_a_commit_it_did_not_see() {
     let (_dir, root, store) = new_store();

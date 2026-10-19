@@ -62,6 +62,10 @@
 //! a frame boundary as the journal grows. The frames past the checkpoint (usually 0 to 31, and
 //! more only after a crash) then apply on top in memory: their changesets the index handle does
 //! not count, and their ref moves the ref files do not show yet.
+//!
+//! [`MetaStore::read_committed`] takes the same snapshot under [`MetaLock`], once the journal's
+//! tail check has left every whole frame durable and listed: one that no power loss can take
+//! back, for the readers whose results leave the host (storage spec §3).
 
 use std::collections::HashMap;
 use std::fmt;
@@ -73,7 +77,7 @@ use swarmops_core::ChangesetId;
 
 use super::frame::{Frame, MAX_RECORDS, Record};
 use super::index::{ChangesetMeta, Index};
-use super::journal::{Journal, LogCut};
+use super::journal::{Journal, LogCut, TailRepair};
 use super::lock::MetaLock;
 use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
@@ -395,6 +399,33 @@ impl MetaStore {
         Err(StoreError::SnapshotContended {
             rounds: Self::SNAPSHOT_ROUNDS,
         })
+    }
+
+    /// A snapshot of the committed metadata only, for the readers whose results leave the host
+    /// (M8's git export, M11's `serve` and `push`): the snapshot [`MetaStore::read`] takes, taken
+    /// under [`MetaLock`] after the journal's tail check. It takes the lock as
+    /// [`MetaStore::write`] does (waiting as [`MetaStore::with_lock_timeout`] says, then
+    /// [`StoreError::Busy`]), runs the tail check ([`Journal::repair_tail`], storage spec §2 rule
+    /// 3: the whole frames `journal.off` does not list synced and listed, or written afresh first;
+    /// a torn tail cut), takes the snapshot while it still holds the lock (in one round, since no
+    /// writer runs), and lets the lock go before it returns the snapshot with what the tail check
+    /// repaired. No writer is between its frame's write and its `fdatasync`, or its cut,
+    /// meanwhile, and every whole frame left has passed its commit point: neither a power loss nor
+    /// a cut under rule 3 (a) can take back what the snapshot returns, which a lock-free snapshot
+    /// cannot promise (storage spec §3, "읽기"). Local readers keep the lock-free one.
+    ///
+    /// It costs a wait behind the writer that holds the lock: about one transaction, longer under
+    /// contention. The lock is held for the tail check and the snapshot only, not while the caller
+    /// reads what the snapshot names. It repairs no index and replays nothing: the snapshot's
+    /// overlay supplies the frames past the checkpoint. On a clean tail it writes nothing; a tail
+    /// that needs a repair it repairs as the next writer would, and it fails where that writer's
+    /// tail check fails ([`MetaStore::write`]): on a read-only filesystem, say.
+    pub fn read_committed(&self) -> Result<(MetaRead<'_>, TailRepair), StoreError> {
+        let _lock = MetaLock::acquire(&self.layout, self.lock_timeout)?;
+        let repair = self.journal.repair_tail()?;
+        // Under the lock no frame lands, nor is any cut, while it reads: one round.
+        let snapshot = self.read()?;
+        Ok((snapshot, repair))
     }
 
     /// Starts a write transaction: takes [`MetaLock`] (waiting as

@@ -104,12 +104,13 @@ left).
   measurement shows readers giving up; bench-compare's W6 ([perf.md](perf.md)) measured a
   snapshot and lookup beside a writer's 64 commits/s at 87.3 µs p50 and 5.0 ms at worst.
   *Unscheduled. Found: M1 Task 2c; the 2026-10-16 code review (Q9).*
-- **Readers may return state that is not durable yet.** A reader sees a frame before its
-  `fdatasync` completes, so a power loss, or a failed sync of that frame (which the writer then
-  cuts back), can take back state a local reader returned (operations spec §4 says what agents
-  may rely on). Readers whose results leave the host, M8's git export first, will read committed
-  snapshots taken under the lock instead. *Target: M8. Found: M1 Task 2c; final review,
-  question 2.*
+- **Readers may return state that is not durable yet.** A local reader (the CLI, the MCP server)
+  sees a frame before its `fdatasync` completes, so a power loss, or a failed sync of that frame
+  (which the writer then cuts back), can take back state it returned (operations spec §4 says what
+  agents may rely on). Readers whose results leave the host (M8's git export, M11's `serve`) take a
+  committed snapshot under the lock instead, `MetaStore::read_committed`, which neither can take
+  back, at the cost of a wait behind the writer that holds the lock. *Documented (storage spec §3).
+  Found: M1 Task 2c; final review, question 2.*
 - **A commit acknowledged with a warning can vanish for a moment.** When a writer's tail check
   writes unlisted frames afresh after a failed sync (storage spec §2 rule 3 (c)), a reader that
   reads between the cut and the rewrite does not see them: a changeset whose commit was
@@ -370,7 +371,7 @@ each ruling is tracked above:
 | # | Question | Ruling | Entry |
 | --- | --- | --- | --- |
 | 1 | Concurrent `init` on one directory | unsupported, documented; revisit with workspaces | M5, "Concurrent `init`" |
-| 2 | Readers return state from frames not yet synced | allowed for local readers; committed snapshots for off-host readers | M8, "Readers may return state" |
+| 2 | Readers return state from frames not yet synced | allowed for local readers; committed snapshots for off-host readers (M8) | "Readers may return state" |
 | 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | M6, "bounded, not first-in, first-out" |
 | 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2, "Full fsync is slow" |
 | 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | M6, "Recovery after a crash walks all of `journal.off`", "No repair tool" |
