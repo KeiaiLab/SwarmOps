@@ -144,10 +144,17 @@ left).
   can a `commit --advance` without `--parent`: it builds on the ref's head when it runs, and its
   move catches only a race from then on, not edits that landed since the agent read the files
   it puts whole. *Target: M4 (merge and landing). Found: M1 Task 4b.*
-- **A retried commit can record a second changeset.** A commit signs at its own time, so when
-  a commit's outcome is unknown (its process died before it answered) and it is run again, a
-  first attempt that did commit stays as an unreferenced changeset beside the second. An
-  idempotency key (`commit --key`) closes this. *Target: M4. Found: M1 final fix pass.*
+- **A retried commit that omits its parent can record a second changeset.** `commit --key` (a
+  uuid v7) makes a retry of the same request replay the first attempt: the commit signs at the
+  key's time and records the key as `commit_key`, so on the same parent it is the same
+  changeset (`replayed`), and on the changeset the key made it replays that one. A keyed commit
+  without `--parent` builds on `main`'s head (the advanced ref's, with `--advance`) as it is
+  when it runs, so a retry after that head moved to another changeset commits again, on the new
+  head. Given `--parent` by its full id, the retry records the changeset once; with `--advance`
+  too, a ref that moved on past it makes the retry `E_CAS_MISMATCH`, and `swarmops log` shows
+  whether the ref's history holds it. A commit without a key still signs at its own time, so
+  its retry records a second changeset. *Target: M9 (an index of commit keys, if measurements
+  ask for one). Found: M1 final fix pass; narrowed by M4 Task 8.*
 - **No second root commit.** Once `main` exists, an omitted parent means `main`'s head (the
   advanced ref's, for a `commit --advance`), so the API makes a root commit only with `advance`
   naming a ref that does not exist yet. *Target: M3 (`commit_raw`, which git import needs).

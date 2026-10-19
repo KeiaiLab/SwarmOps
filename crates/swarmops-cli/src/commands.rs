@@ -123,6 +123,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             parent,
             allow_empty,
             advance,
+            key,
         } => ctx.on_store(
             op,
             || {
@@ -132,7 +133,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                     changes: read_changes(&changes)?,
                     message,
                     advance,
-                    idempotency_key: None,
+                    idempotency_key: key,
                     allow_empty,
                 };
                 Ok((who, req))

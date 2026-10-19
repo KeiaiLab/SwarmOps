@@ -270,6 +270,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `squashed_from`, omitted for a changeset no land made. Five error codes join the table:
   `E_CONFLICT` (exit 3, which no code had), `E_CAS_RETRY_EXHAUSTED` (exit 4, retryable),
   `E_NOTHING_TO_LAND` and `E_NOTHING_TO_UNDO` (exit 1) and `E_OP_NOT_FOUND` (exit 6).
+- `commit --key UUID` (`idempotency_key` in the API and over MCP) makes a retried commit replay.
+  The key, a uuid v7, signs the commit at the key's time, to the second, and is recorded as
+  `commit_key` metadata, so the same request on the same parent makes the same changeset, which
+  the store holds already: the retry answers `replayed: true` with the first attempt's changeset,
+  and writes nothing. A keyed commit whose parent (given, or the head of `main` or of the ref it
+  advances) is the changeset its key made replays that one too, decided under the store's lock;
+  with `--advance`, as `advanced.already_applied`. A key that is not a uuid v7 is
+  `E_INVALID_ARG`. `replayed` is `true` for any commit that found its changeset in the store and
+  wrote nothing.
 
 ### Changed
 

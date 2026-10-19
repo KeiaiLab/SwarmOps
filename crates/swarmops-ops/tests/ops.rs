@@ -1192,6 +1192,375 @@ mod advance {
     }
 }
 
+/// `commit` with an `idempotency_key`, `commit --key` (operations spec §4): a uuid v7 whose time
+/// signs the commit and which the changeset records as its `commit_key` metadata, so that a
+/// retry replays the first attempt instead of recording a second changeset.
+mod commit_key {
+    use swarmops_api::{Advanced, CommitResp, Signatures};
+
+    use super::*;
+
+    /// A key's time, in Unix milliseconds: 2001-09-09T01:46:40.999Z, far from the clock a test
+    /// runs at, with milliseconds that a signature's whole seconds drop.
+    const KEY_MS: u64 = 1_000_000_000_999;
+
+    /// A uuid v7 (RFC 9562) of time `ms`, in Unix milliseconds, whose random bits come from
+    /// `seed`: 48 bits of time, the version 7, 12 bits, the variant `10`, 62 bits.
+    fn key_at(ms: u64, seed: u64) -> String {
+        let rand_b = (seed & 0x3fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000;
+        let hex = format!("{ms:012x}7{:03x}{rand_b:016x}", seed & 0xfff);
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        )
+    }
+
+    /// [`commit_req`] with `key` as its `idempotency_key`.
+    fn keyed(parent: Option<&str>, changes: Vec<ChangeInput>, key: &str) -> CommitReq {
+        CommitReq {
+            idempotency_key: Some(key.to_owned()),
+            ..commit_req(parent, changes)
+        }
+    }
+
+    /// [`keyed`], also advancing `main`.
+    fn keyed_advancing(parent: Option<&str>, changes: Vec<ChangeInput>, key: &str) -> CommitReq {
+        CommitReq {
+            advance: Some("main".to_owned()),
+            ..keyed(parent, changes, key)
+        }
+    }
+
+    /// How many records the journal of the store at `root` holds: a request that writes no
+    /// frame adds none.
+    fn journal_records(root: &Utf8Path) -> usize {
+        let meta = MetaStore::open(root).unwrap();
+        meta.read()
+            .unwrap()
+            .journal_after(None, 1_000)
+            .unwrap()
+            .len()
+    }
+
+    /// The same keyed request twice, on the same parent, is one changeset: the second answers
+    /// `replayed` with the first's response but for its `blobs_written`, 0, and writes no frame;
+    /// `repo_info.changesets` grew by one. Given its parent by its full id, the request is the
+    /// same changeset again.
+    #[test]
+    fn commit_with_a_key_twice_is_one_changeset() {
+        let (_dir, root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let before = ops.repo_info(InfoReq {}).unwrap().changesets;
+        let key = key_at(KEY_MS, 1);
+        let changes = || vec![text("f", "2"), text("g", "3")];
+
+        // On main's head by default, which a commit without advance leaves where it is.
+        let first = ops.commit(&who, keyed(None, changes(), &key)).unwrap();
+        assert!(!first.replayed, "{first:?}");
+        assert_eq!(first.blobs_written, 2);
+        let records = journal_records(&root);
+        let again = ops.commit(&who, keyed(None, changes(), &key)).unwrap();
+        let replay = CommitResp {
+            blobs_written: 0,
+            replayed: true,
+            ..first.clone()
+        };
+        assert_eq!(again, replay);
+        assert_eq!(journal_records(&root), records, "no frame");
+        let after = ops.repo_info(InfoReq {}).unwrap().changesets;
+        assert_eq!(after, before + 1);
+
+        let pinned = ops.commit(&who, keyed(Some(&c1), changes(), &key)).unwrap();
+        assert_eq!(pinned, replay);
+    }
+
+    /// A keyed commit signs at its key's time, to the second: `show`'s `created_at` is the key's
+    /// milliseconds rounded down to a whole second, and both signatures hold those seconds, not
+    /// the clock's, which an unkeyed commit signs at. (Through the binary, `SWARMOPS_TEST_NOW`
+    /// does not move it either: `commit_with_a_key_twice_through_the_binary`.)
+    #[test]
+    fn a_commit_key_pins_the_signature_time() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let key = key_at(KEY_MS, 2);
+        let cs = ops
+            .commit(&who, keyed(None, vec![text("f", "1")], &key))
+            .unwrap()
+            .changeset;
+        let detail = ops.show(show(&cs)).unwrap();
+        assert_eq!(detail.created_at, 1_000_000_000_000);
+        let Signatures { author, committer } = detail.signatures;
+        assert_eq!(
+            (author.secs, committer.secs),
+            (1_000_000_000, 1_000_000_000)
+        );
+
+        let now = unix_secs();
+        let unkeyed = commit(&ops, Some(&cs), vec![text("f", "2")]);
+        let committer = ops.show(show(&unkeyed)).unwrap().signatures.committer;
+        assert!(committer.secs >= now, "the clock's time: {committer:?}");
+    }
+
+    /// A key that is not a uuid v7 is `E_INVALID_ARG` naming it in `details.idempotency_key`,
+    /// before anything is resolved or written: a v4 uuid and a v8 one, variants other than RFC
+    /// 9562's, a uuid without its hyphens or with one more digit, a digit that is not hex, a word
+    /// and nothing.
+    #[test]
+    fn a_commit_key_must_be_a_uuid_v7() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let v7 = key_at(KEY_MS, 3);
+        let at = |index: usize, digit: &str| {
+            let mut key = v7.clone();
+            key.replace_range(index..=index, digit);
+            key
+        };
+        let refused = [
+            at(14, "4"),
+            at(14, "8"),
+            at(19, "c"),
+            at(19, "7"),
+            v7.replace('-', ""),
+            format!("{v7}0"),
+            at(35, "g"),
+            "retry-1".to_owned(),
+            String::new(),
+        ];
+        for key in refused {
+            let resolved = Resolved::default();
+            let request = keyed(Some("main"), vec![text("f", "2")], &key);
+            let result = ops.recording(&resolved).commit(&who, request);
+            let err = expect_err(result, ErrorCode::InvalidArg);
+            assert_eq!(err.details["idempotency_key"], key.as_str(), "{err:?}");
+            assert!(resolved.take().is_empty(), "{key:?}: nothing resolved");
+        }
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 1);
+    }
+
+    /// A keyed commit records its key as `commit_key` metadata, beside `agent` and `run_id`, in
+    /// lowercase also when it was given in uppercase, which is the same key: a retry with it in
+    /// lowercase is a replay.
+    #[test]
+    fn a_keyed_commit_records_its_key() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent().with_run_id("run-3");
+        // Its variant digit is b, so that the uppercase key has a B there.
+        let key = key_at(KEY_MS, 0x3000_0000_0000_0004);
+        let shouted = key.to_uppercase();
+        assert_ne!(shouted, key);
+        let first = ops
+            .commit(&who, keyed(None, vec![text("f", "1")], &shouted))
+            .unwrap();
+        let metadata = ops.show(show(&first.changeset)).unwrap().metadata;
+        let expected = BTreeMap::from([
+            ("agent".to_owned(), "agent/worker-17".to_owned()),
+            ("commit_key".to_owned(), key.clone()),
+            ("run_id".to_owned(), "run-3".to_owned()),
+        ]);
+        assert_eq!(metadata, expected);
+        let again = ops
+            .commit(&who, keyed(None, vec![text("f", "1")], &key))
+            .unwrap();
+        assert!(again.replayed, "{again:?}");
+        assert_eq!(again.changeset, first.changeset);
+    }
+
+    /// An advancing commit retried with its key and no parent finds the ref's head carrying the
+    /// key, and replays it: the first attempt's changeset, parent and move, `replayed`,
+    /// `advanced.already_applied`, no second changeset and no frame, with `meta.resolved`
+    /// naming the ref's head as the request resolved it. Retried with the first attempt's parent
+    /// given, it is the same replay.
+    #[test]
+    fn an_advancing_commit_retried_with_its_key_is_a_replay() {
+        let (_dir, root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 5);
+        let request = |parent: Option<&str>| keyed_advancing(parent, vec![text("f", "2")], &key);
+        let first = ops.commit(&who, request(None)).unwrap();
+        let c2 = first.changeset.clone();
+        let moved = Advanced {
+            name: "main".to_owned(),
+            old: Some(c1.clone()),
+            new: c2.clone(),
+            already_applied: false,
+        };
+        assert_eq!(first.advanced, Some(moved.clone()));
+        let (info, records) = (ops.repo_info(InfoReq {}).unwrap(), journal_records(&root));
+
+        let resolved = Resolved::default();
+        let again = ops
+            .recording(&resolved)
+            .commit(&who, request(None))
+            .unwrap();
+        let replay = CommitResp {
+            blobs_written: 0,
+            advanced: Some(Advanced {
+                already_applied: true,
+                ..moved
+            }),
+            replayed: true,
+            ..first
+        };
+        assert_eq!(again, replay);
+        let main_at_c2 = BTreeMap::from([("main".to_owned(), c2.clone())]);
+        assert_eq!(resolved.take(), main_at_c2);
+        assert_eq!(
+            resolved.take_recovered(),
+            None,
+            "its write repaired nothing"
+        );
+        let pinned = ops.commit(&who, request(Some(&c1))).unwrap();
+        assert_eq!(pinned, replay);
+        assert_eq!(
+            ops.repo_info(InfoReq {}).unwrap(),
+            info,
+            "no second changeset"
+        );
+        assert_eq!(journal_records(&root), records, "no frame");
+    }
+
+    /// The changeset a keyed commit would build on is its replay when it carries the key, so it
+    /// is not made again on top of itself: given as `parent`, or as `main`'s head when the
+    /// request names none, after the first attempt was published by a `ref set` of its own.
+    #[test]
+    fn a_keyed_commit_on_its_own_changeset_is_a_replay() {
+        let (_dir, root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 6);
+        let first = ops
+            .commit(&who, keyed(None, vec![text("f", "2")], &key))
+            .unwrap();
+        let c2 = first.changeset.clone();
+        ops.ref_set(&who, set("main", &c2, Some(&c1), false))
+            .unwrap();
+        let records = journal_records(&root);
+        let replay = CommitResp {
+            blobs_written: 0,
+            replayed: true,
+            ..first
+        };
+        for parent in [Some(c2.as_str()), None] {
+            let again = ops
+                .commit(&who, keyed(parent, vec![text("f", "2")], &key))
+                .unwrap();
+            assert_eq!(again, replay, "parent {parent:?}");
+        }
+        assert_eq!(journal_records(&root), records, "no frame");
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 2);
+    }
+
+    /// With `advance`, a keyed commit whose parent is its own changeset replays only while the
+    /// ref names it: once the ref has moved on, it is `E_CAS_MISMATCH` naming what the ref holds,
+    /// `committed: false`, as the commit itself would be, and nothing is recorded.
+    #[test]
+    fn a_keyed_advance_on_its_changeset_after_the_ref_moved_is_a_cas_mismatch() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 7);
+        let c2 = ops
+            .commit(&who, keyed_advancing(None, vec![text("f", "2")], &key))
+            .unwrap()
+            .changeset;
+        let c3 = ops
+            .commit(
+                &who,
+                CommitReq {
+                    advance: Some("main".to_owned()),
+                    ..commit_req(Some(&c2), vec![text("g", "3")])
+                },
+            )
+            .unwrap()
+            .changeset;
+        let before = ops.repo_info(InfoReq {}).unwrap();
+
+        let request = keyed_advancing(Some(&c2), vec![text("f", "2")], &key);
+        let err = expect_err(ops.commit(&who, request), ErrorCode::CasMismatch);
+        assert_eq!(
+            Value::Object(err.details.clone()),
+            json!({"name": "main", "actual": c3, "committed": false})
+        );
+        assert_eq!(
+            ops.repo_info(InfoReq {}).unwrap(),
+            before,
+            "nothing recorded"
+        );
+    }
+
+    /// `replayed` says the request wrote nothing: a keyed retry whose changeset the store holds
+    /// already, but whose ref was moved back off it in between (as an undo does), moves the ref
+    /// to it again, in a frame of its own, and so answers as the first attempt did, with
+    /// `replayed` and `already_applied` false; it wrote no blob, and no second changeset.
+    #[test]
+    fn a_keyed_retry_that_moves_its_ref_again_is_no_replay() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 9);
+        let request = || keyed_advancing(Some(&c1), vec![text("f", "2")], &key);
+        let first = ops.commit(&who, request()).unwrap();
+        let c2 = first.changeset.clone();
+        ops.ref_set(&who, set("main", &c1, Some(&c2), false))
+            .unwrap();
+
+        let again = ops.commit(&who, request()).unwrap();
+        let moved_again = CommitResp {
+            blobs_written: 0,
+            ..first
+        };
+        assert_eq!(again, moved_again);
+        let info = ops.repo_info(InfoReq {}).unwrap();
+        assert_eq!((info.changesets, info.main), (2, Some(c2)));
+    }
+
+    /// What `commit --key` leaves open (known limitations): a keyed commit that names no parent
+    /// builds on `main`'s head as it is when it runs, so a retry after `main` moved to another
+    /// changeset commits again, on the new head. Given its parent by its full id, the retry is
+    /// the first attempt's changeset.
+    #[test]
+    fn a_keyed_retry_after_main_moved_commits_again_unless_its_parent_is_pinned() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 8);
+        let first = ops
+            .commit(&who, keyed(None, vec![text("f", "2")], &key))
+            .unwrap();
+        // Another agent's changeset becomes main's head in between.
+        let other = commit(&ops, Some(&c1), vec![text("g", "x")]);
+        ops.ref_set(&who, set("main", &other, Some(&c1), false))
+            .unwrap();
+
+        let again = ops
+            .commit(&who, keyed(None, vec![text("f", "2")], &key))
+            .unwrap();
+        assert!(!again.replayed, "{again:?}");
+        assert_ne!(again.changeset, first.changeset);
+        assert_eq!(again.parent.as_deref(), Some(other.as_str()));
+        let pinned = ops
+            .commit(&who, keyed(Some(&c1), vec![text("f", "2")], &key))
+            .unwrap();
+        assert!(pinned.replayed, "{pinned:?}");
+        assert_eq!(pinned.changeset, first.changeset);
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 4);
+    }
+}
+
 #[test]
 fn hints_quote_what_they_interpolate() {
     let (dir, root, ops) = new_store();

@@ -291,7 +291,7 @@ and starts no server either.
 | `init <dir> [--name N]` | Create a store in `<dir>` (made if missing) and describe it. The name `N` (by default the directory's name) takes at most 255 bytes. |
 | `info` | Describe the store: its id, name, `main`, and how many changesets and refs it holds. |
 | `whoami` | The identity this caller's changes carry. |
-| `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. |
+| `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--key UUID] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. With `--key`, a uuid v7, the same commit run again replays the first run (`replayed: true`) instead of recording a second changeset. |
 | `cat REV:PATH [--max-bytes N]` | One file at a revision: UTF-8 text, or base64. |
 | `ls REV[:PATH] [--limit N] [--cursor C]` | One directory at a revision, a page at a time. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
