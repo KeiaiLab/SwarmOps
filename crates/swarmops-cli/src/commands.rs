@@ -37,9 +37,9 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
-    ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, InfoReq, LogReq, Meta, OpError,
-    PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq,
-    RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, InfoReq, LineRange, LogReq, Meta,
+    OpError, PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq,
+    RefSetReq, RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
@@ -148,20 +148,19 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             |ops, (who, req)| ops.commit(&who, req),
         ),
         Command::Blob(command) => run_blob(ctx, op, command),
-        Command::Cat { target, max_bytes } => ctx.on_store(
+        Command::Cat {
+            target,
+            offset,
+            lines,
+            max_bytes,
+        } => ctx.on_store(
             op,
-            || {
-                let (rev, path) = file_target(&target)?;
-                Ok(ReadFileReq {
-                    rev: rev.into(),
-                    path: path.to_owned(),
-                    max_bytes,
-                })
-            },
+            || cat_request(&target, offset, lines, max_bytes),
             |ops, req| ops.read_file(req),
         ),
         Command::Ls {
             target,
+            depth,
             limit,
             cursor,
         } => ctx.on_store(
@@ -171,6 +170,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                 Ok(ReadTreeReq {
                     rev: rev.into(),
                     path: path.map(str::to_owned),
+                    depth,
                     limit,
                     cursor,
                 })
@@ -653,6 +653,24 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
         Some((rev, path)) => (rev, Some(path)),
         None => (target, None),
     }
+}
+
+/// `cat`'s request: `target`'s revision and path ([`file_target`]), read from `offset` or by
+/// `lines`, `max_bytes` at most.
+fn cat_request(
+    target: &str,
+    offset: u64,
+    lines: Option<LineRange>,
+    max_bytes: u64,
+) -> Result<ReadFileReq, OpError> {
+    let (rev, path) = file_target(target)?;
+    Ok(ReadFileReq {
+        rev: rev.into(),
+        path: path.to_owned(),
+        offset,
+        lines,
+        max_bytes,
+    })
 }
 
 /// `cat`'s `<rev>:<path>`, as [`split_target`] splits it; a target without a path is

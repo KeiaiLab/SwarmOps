@@ -1498,35 +1498,86 @@ expression: s.redact(&all)
               "type": "string"
             }
           ]
+        },
+        "LineRange": {
+          "description": "A range of a file's lines, numbered from 1: `first` to `last`, both included.",
+          "properties": {
+            "first": {
+              "description": "The range's first line: at least 1.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The range's last line: at least `first`.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`read_file` (CLI `cat`): a file's content.",
+      "description": "`read_file` (CLI `cat`): a file's content, or the part of it the request names.",
       "properties": {
         "blob": {
           "description": "The blob's id.",
           "type": "string"
         },
         "content": {
-          "description": "The bytes returned: the whole blob, or the start of it when `truncated`. A cut keeps text\nas text: it falls where a character starts, so text may stop up to 3 bytes short of\n`max_bytes`, while bytes that are not text stop at exactly `max_bytes`.",
+          "description": "The bytes returned: those from `offset`, or the requested lines, at most `max_bytes` of\nthem. A cut keeps text as text: it falls where a character starts, so text may stop up to\n3 bytes short of `max_bytes`, while bytes that are not text stop at exactly `max_bytes`.",
           "type": "string"
         },
         "encoding": {
           "$ref": "#/$defs/ContentEncoding",
-          "description": "How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they\nare not."
+          "description": "How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they\nare not (as when `offset` falls inside a character)."
         },
         "kind": {
           "$ref": "#/$defs/FileKind",
           "description": "The file's kind."
         },
+        "lines": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For a request by `lines`: the lines of its range that exist, which `content` holds (the\nstart of them when `truncated`); omitted when none does."
+        },
+        "next_offset": {
+          "description": "When `truncated`: where `content` stops, the `offset` that reads on from there. A cut text\nholds whole characters, so a `max_bytes` under 4 can stop before a longer character at\nthe `offset` it started from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Where `content` starts in the file, in bytes: the request's `offset`, or where the first\nof its `lines` that exists starts (the file's size when none does); omitted when that is\nthe file's start.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "size": {
-          "description": "The whole blob's size in bytes, also when `content` is truncated.",
+          "description": "The whole blob's size in bytes, also when `content` is part of it.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "truncated": {
-          "description": "Whether `content` stops before the end of the blob.",
+          "description": "Whether `content` stops before the end of what was asked for: the file, from `offset`; or\nthe requested lines that exist.",
           "type": "boolean"
         }
       },
@@ -1640,6 +1691,30 @@ expression: s.redact(&all)
         "name"
       ],
       "title": "InitReq",
+      "type": "object"
+    },
+    "LineRange": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A range of a file's lines, numbered from 1: `first` to `last`, both included.",
+      "properties": {
+        "first": {
+          "description": "The range's first line: at least 1.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "last": {
+          "description": "The range's last line: at least `first`.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "first",
+        "last"
+      ],
+      "title": "LineRange",
       "type": "object"
     },
     "LogCutOut": {
@@ -2263,17 +2338,57 @@ expression: s.redact(&all)
     },
     "ReadFileReq": {
       "$defs": {
+        "LineRange": {
+          "description": "A range of a file's lines, numbered from 1: `first` to `last`, both included.",
+          "properties": {
+            "first": {
+              "description": "The range's first line: at least 1.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The range's last line: at least `first`.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
+        },
         "Rev": {
           "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
           "type": "string"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout.",
+      "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or\na range of its lines.",
       "properties": {
+        "lines": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Read these lines instead, numbered from 1, both ends included: a line ends after its\nnewline, and a last line without one is a line too. The lines of the range that exist\ncome back, none past the file's last. Give this or `offset`, not both (`E_INVALID_ARG`)."
+        },
         "max_bytes": {
           "default": 1048576,
-          "description": "The most content bytes to return; a longer file comes back truncated.",
+          "description": "The most content bytes to return; more comes back truncated, with the `next_offset` to\nread on from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "description": "Where to start reading, in bytes from the file's start: a truncated read's `next_offset`\nreads on from where it stopped. An offset past the end gives empty content. Give this or\n`lines`, not both (`E_INVALID_ARG`).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -2302,7 +2417,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime.",
+      "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime; with `depth`, the directories below it too.",
       "properties": {
         "cursor": {
           "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
@@ -2311,8 +2426,16 @@ expression: s.redact(&all)
             "null"
           ]
         },
+        "depth": {
+          "default": 1,
+          "description": "How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so on, up\nto 64 (0 or more than 64 is `E_INVALID_ARG`).",
+          "format": "uint32",
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer"
+        },
         "limit": {
-          "default": 500,
+          "default": 250,
           "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
           "format": "uint",
           "minimum": 1,
@@ -2838,7 +2961,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "One entry of a directory.",
+      "description": "One entry of a listing.",
       "properties": {
         "id": {
           "description": "A blob id for a file, an executable or a symlink; a tree id for a directory.",
@@ -2851,6 +2974,22 @@ expression: s.redact(&all)
         "name": {
           "description": "The entry's name: one path component.",
           "type": "string"
+        },
+        "path": {
+          "description": "Its path below the listed directory, given when the request's `depth` is more than 1: its\nname, for one of the directory's own entries.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "For a file, an executable or a symlink: its content's size in bytes; omitted for a\ndirectory.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2889,7 +3028,7 @@ expression: s.redact(&all)
           ]
         },
         "TreeEntryOut": {
-          "description": "One entry of a directory.",
+          "description": "One entry of a listing.",
           "properties": {
             "id": {
               "description": "A blob id for a file, an executable or a symlink; a tree id for a directory.",
@@ -2902,6 +3041,22 @@ expression: s.redact(&all)
             "name": {
               "description": "The entry's name: one path component.",
               "type": "string"
+            },
+            "path": {
+              "description": "Its path below the listed directory, given when the request's `depth` is more than 1: its\nname, for one of the directory's own entries.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size": {
+              "description": "For a file, an executable or a symlink: its content's size in bytes; omitted for a\ndirectory.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -2913,7 +3068,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`read_tree` (CLI `ls`): a page of a directory's entries, in the tree's order (by name bytes).",
+      "description": "`read_tree` (CLI `ls`): a page of a directory's entries, in pre-order: a directory, then the\nentries below it to the request's `depth`, each directory's entries by name bytes (at `depth`\n1, the tree's order).",
       "properties": {
         "cursor": {
           "description": "When `truncated`: where the next page starts. Opaque: pass it back as given, as the next\nrequest's `cursor`.",

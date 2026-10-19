@@ -7,17 +7,16 @@
 //! which is always written). Ids are lowercase hex. A response that could grow without bound is
 //! capped by its request (`max_bytes`, `limit`, `max_changes`) and says when it was cut
 //! (`truncated`, `changes_truncated`); `read_tree`, `log` and `path_history` also return a
-//! `cursor` that resumes after the page. The default page of `read_tree`, `show`, `log` and
-//! `path_history` stays within the operations spec's 64 KiB target for a default response (§9);
-//! `read_file`'s 1 MiB is the spec's own.
+//! `cursor` that resumes after the page, and `read_file` a `next_offset`. The default page of
+//! `read_tree`, `show`, `log` and `path_history` stays within the operations spec's 64 KiB
+//! target for a default response (§9); `read_file`'s 1 MiB is the spec's own.
 //!
 //! No store-facing type carries a filesystem path. The two exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, and [`InitReq::path`],
 //! because `init` runs on the client and is not a [`StoreOps`] method.
 //!
 //! Not in M1 yet:
-//! - M2: `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each `TreeEntryOut`, and
-//!   `LogReq.first_parent`;
+//! - M2: `LogReq.first_parent`;
 //! - M4 (with land): `idempotency_key` and `replayed` on `commit`;
 //! - M4/M7: `lander`, `land_key`, `cr` and `annotations` on `ChangesetDetail` (`show`);
 //! - M5: `RepoInfo.workspaces`.
@@ -42,9 +41,14 @@ pub const DEFAULT_LOG_LIMIT: usize = 50;
 /// typical length.
 pub const DEFAULT_PATH_HISTORY_LIMIT: usize = 50;
 
-/// The default [`ReadTreeReq::limit`]: 500 entries. An entry prints in about 100 bytes besides
-/// its name, so a default page stays under the 64 KiB target for names of up to about 30 bytes.
-pub const DEFAULT_READ_TREE_LIMIT: usize = 500;
+/// The default [`ReadTreeReq::limit`]: 250 entries. An entry prints in about 140 bytes with a
+/// 30-byte name and a size of five digits, and in about 245 at `depth` 3, where its `path` is
+/// three such names long: so a default page stays under the 64 KiB target at that depth too, as
+/// 300 entries would not. A test of `swarmops-ops` measures it.
+pub const DEFAULT_READ_TREE_LIMIT: usize = 250;
+
+/// The most levels [`ReadTreeReq::depth`] lists below a directory: 64.
+pub const MAX_TREE_DEPTH: u32 = 64;
 
 /// The default [`ShowReq::max_changes`]: 400 changes. A change prints in about 110 bytes
 /// besides its path, so a default page stays under the 64 KiB target for paths of up to about
@@ -65,6 +69,10 @@ fn default_path_history_limit() -> usize {
 
 fn default_read_tree_limit() -> usize {
     DEFAULT_READ_TREE_LIMIT
+}
+
+fn default_read_tree_depth() -> u32 {
+    1
 }
 
 fn default_max_changes() -> usize {
@@ -290,36 +298,74 @@ pub struct BlobHasResp {
     pub present: Vec<String>,
 }
 
-/// `read_file` (CLI `cat`): read one file at a revision, without a checkout.
+/// `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or
+/// a range of its lines.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct ReadFileReq {
     /// The revision to read at.
     pub rev: Rev,
     /// The file's repository path.
     pub path: String,
-    /// The most content bytes to return; a longer file comes back truncated.
+    /// Where to start reading, in bytes from the file's start: a truncated read's `next_offset`
+    /// reads on from where it stopped. An offset past the end gives empty content. Give this or
+    /// `lines`, not both (`E_INVALID_ARG`).
+    #[serde(default)]
+    pub offset: u64,
+    /// Read these lines instead, numbered from 1, both ends included: a line ends after its
+    /// newline, and a last line without one is a line too. The lines of the range that exist
+    /// come back, none past the file's last. Give this or `offset`, not both (`E_INVALID_ARG`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines: Option<LineRange>,
+    /// The most content bytes to return; more comes back truncated, with the `next_offset` to
+    /// read on from.
     #[serde(default = "default_max_bytes")]
     pub max_bytes: u64,
 }
 
-/// `read_file` (CLI `cat`): a file's content.
+/// A range of a file's lines, numbered from 1: `first` to `last`, both included.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LineRange {
+    /// The range's first line: at least 1.
+    #[schemars(range(min = 1))]
+    pub first: u64,
+    /// The range's last line: at least `first`.
+    #[schemars(range(min = 1))]
+    pub last: u64,
+}
+
+/// `read_file` (CLI `cat`): a file's content, or the part of it the request names.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct FileContent {
     /// The blob's id.
     pub blob: String,
-    /// The whole blob's size in bytes, also when `content` is truncated.
+    /// The whole blob's size in bytes, also when `content` is part of it.
     pub size: u64,
     /// The file's kind.
     pub kind: FileKind,
     /// How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they
-    /// are not.
+    /// are not (as when `offset` falls inside a character).
     pub encoding: ContentEncoding,
-    /// The bytes returned: the whole blob, or the start of it when `truncated`. A cut keeps text
-    /// as text: it falls where a character starts, so text may stop up to 3 bytes short of
-    /// `max_bytes`, while bytes that are not text stop at exactly `max_bytes`.
+    /// The bytes returned: those from `offset`, or the requested lines, at most `max_bytes` of
+    /// them. A cut keeps text as text: it falls where a character starts, so text may stop up to
+    /// 3 bytes short of `max_bytes`, while bytes that are not text stop at exactly `max_bytes`.
     pub content: String,
-    /// Whether `content` stops before the end of the blob.
+    /// Whether `content` stops before the end of what was asked for: the file, from `offset`; or
+    /// the requested lines that exist.
     pub truncated: bool,
+    /// Where `content` starts in the file, in bytes: the request's `offset`, or where the first
+    /// of its `lines` that exists starts (the file's size when none does); omitted when that is
+    /// the file's start.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    /// For a request by `lines`: the lines of its range that exist, which `content` holds (the
+    /// start of them when `truncated`); omitted when none does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lines: Option<LineRange>,
+    /// When `truncated`: where `content` stops, the `offset` that reads on from there. A cut text
+    /// holds whole characters, so a `max_bytes` under 4 can stop before a longer character at
+    /// the `offset` it started from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_offset: Option<u64>,
 }
 
 /// How `FileContent.content` encodes bytes.
@@ -359,7 +405,7 @@ pub enum EntryKindOut {
 }
 
 /// `read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a
-/// time.
+/// time; with `depth`, the directories below it too.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct ReadTreeReq {
     /// The revision to read at.
@@ -367,6 +413,11 @@ pub struct ReadTreeReq {
     /// The directory's repository path; omitted for the root.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
+    /// How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so on, up
+    /// to 64 (0 or more than 64 is `E_INVALID_ARG`).
+    #[serde(default = "default_read_tree_depth")]
+    #[schemars(range(min = 1, max = MAX_TREE_DEPTH))]
+    pub depth: u32,
     /// The most entries to return: at least 1 (0 is `E_INVALID_ARG`).
     #[serde(default = "default_read_tree_limit")]
     #[schemars(range(min = 1))]
@@ -377,7 +428,9 @@ pub struct ReadTreeReq {
     pub cursor: Option<String>,
 }
 
-/// `read_tree` (CLI `ls`): a page of a directory's entries, in the tree's order (by name bytes).
+/// `read_tree` (CLI `ls`): a page of a directory's entries, in pre-order: a directory, then the
+/// entries below it to the request's `depth`, each directory's entries by name bytes (at `depth`
+/// 1, the tree's order).
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct TreeListing {
     /// The entries.
@@ -390,13 +443,21 @@ pub struct TreeListing {
     pub cursor: Option<String>,
 }
 
-/// One entry of a directory.
+/// One entry of a listing.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct TreeEntryOut {
     /// The entry's name: one path component.
     pub name: String,
+    /// Its path below the listed directory, given when the request's `depth` is more than 1: its
+    /// name, for one of the directory's own entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// What the entry is.
     pub kind: EntryKindOut,
+    /// For a file, an executable or a symlink: its content's size in bytes; omitted for a
+    /// directory.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
     /// A blob id for a file, an executable or a symlink; a tree id for a directory.
     pub id: String,
 }

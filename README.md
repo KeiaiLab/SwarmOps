@@ -71,7 +71,7 @@ planned, each with its milestone.
 | Offline, on one host | ✅ M1: no network code; every operation runs against the host's own store. | **Parity.** |
 | Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s. | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
 | Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
-| Breadth of reads | Today one file or one directory per call. 📋 M2: ranged reads, depths and sizes. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, recursive listings, `git grep <tree>` and sparse checkouts. |
+| Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, `git grep <tree>` and sparse checkouts. |
 | Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
 | Conflicts | Today the one signal is `E_CAS_MISMATCH`, with the ref's actual target. 📋 M4: three-way merge, conflicts reported per hunk as JSON and resolved without a checkout. | **Behind** today: git merges without a checkout (`git merge-tree`), with typed conflict records. M4 is **not yet comparable**. |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
@@ -293,8 +293,8 @@ and starts no server either.
 | `whoami` | The identity this caller's changes carry. |
 | `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. |
 | `blob put FILE\|-`, `blob has ID…` | Store a file's content (stdin's for `-`) as a blob, outside any commit, and print its id; or list which of the ids the store holds blobs under. A change names a stored blob by id. |
-| `cat REV:PATH [--max-bytes N]` | One file at a revision: UTF-8 text, or base64. |
-| `ls REV[:PATH] [--limit N] [--cursor C]` | One directory at a revision, a page at a time. |
+| `cat REV:PATH [--offset N \| --lines A-B] [--max-bytes N]` | One file at a revision, or part of it, from byte N or lines A to B: UTF-8 text, or base64. A read cut short gives `next_offset`, where `--offset` reads on. |
+| `ls REV[:PATH] [--depth N] [--limit N] [--cursor C]` | One directory at a revision, a page at a time, each file with its size; with `--depth`, the directories below it too, each entry with its path. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
 | `log [REV] [-n N] [--cursor C] [--path P]...` | History along first parents, newest first (from `main` by default); with `--path`, only the changesets that change those paths. |
 | `history REV:PATH [-n N] [--cursor C]` | The changesets that changed a file, or anything below a directory, newest first, each with what the path holds after it. |

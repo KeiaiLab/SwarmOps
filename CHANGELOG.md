@@ -301,6 +301,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   pre-order and a page at a time after a path, each leaf with its size from its object's header
   (`ListedEntry`, `TreePage`); a page reads the trees it enters, and none to learn that more
   entries follow.
+- `read_file` (`swarmops cat`) reads part of a file: from `offset` (`--offset N`), or the lines a
+  `lines` range names (`--lines A-B`, numbered from 1, both included; those that exist). Its
+  result says where the content starts (`offset`), which lines it holds (`lines`) and, when it
+  is cut short, where the next page starts (`next_offset`), so that text paged by it stays
+  text; an offset inside a character gives base64, and an offset past the end empty content. It
+  keeps only the bytes it returns while it verifies the whole blob. An MCP agent, which the
+  server asks for 32 KiB or less at a time, can now read all of a larger file.
+- `read_tree` (`swarmops ls`) takes `depth` (`--depth N`, 1 to 64): the directories below the
+  listed one too, in pre-order, a directory before the entries below it, each entry past depth
+  1 with its `path`, and a page's cursor its last entry's path. Every file entry carries its
+  `size`, from its object's header. The two tools' descriptions in `swarmops mcp` say so.
 
 ### Changed
 
@@ -426,6 +437,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   contents' together, and its hint stores them with `blob put` to name them by id) or
   `request` (the CLI's, before parsing); an MCP line over the limit is a JSON-RPC `-32600`
   without an `id`, its rest passed over, and the server serves on.
+- `read_tree`'s default page holds 250 entries, where it held 500: entries carry a `size` now,
+  and a `path` past depth 1, and 500 of them print past the 64 KiB target for a default response
+  even at depth 1 (70,780 bytes, with 30-byte names), where 250 at depth 3 print in 60,971 (a
+  test of `swarmops-ops` measures it). A `read_tree` cursor that is no repository path is
+  `E_INVALID_ARG`, where any string was taken as a name to resume after.
 
 ### Fixed
 

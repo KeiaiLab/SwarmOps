@@ -11,22 +11,22 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{
     Attribution, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp,
-    EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq, LogCutOut, LogPage, LogReq,
-    OpError, PathHistoryEntry, PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq,
-    RecoveredOut, RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo,
-    Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding,
-    VerifyReport, VerifyReq,
+    EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq, LineRange, LogCutOut,
+    LogPage, LogReq, MAX_TREE_DEPTH, OpError, PathHistoryEntry, PathHistoryPage, PathHistoryReq,
+    ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefListResp, RefOut,
+    RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps,
+    TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
-    Signature, TreeEntry,
+    Signature,
 };
 use swarmops_repo::merge::tree_diff::PathFilter;
 use swarmops_repo::{
-    CasResult, CommitRequest, LocalRepo, MismatchCause, PathEvent, RepoError, RepoRead,
-    StoredChangeset, VerifyProblem,
+    CasResult, CommitRequest, FileSpan, ListedEntry, LocalRepo, MismatchCause, PathEvent,
+    RepoError, RepoRead, StoredChangeset, VerifyProblem,
 };
 use swarmops_store::{FsObjectStore, LogCut, Recovered};
 
@@ -98,13 +98,21 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 /// - `blob_has` gives the ids, of those asked for, that the store holds a blob under, in
 ///   lowercase, in the order first given and each once; a tree's or a changeset's id is not
 ///   among them.
-/// - `read_file` returns at most `max_bytes` bytes from the file's start: UTF-8 text when they
-///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
-///   fewer); otherwise exactly `max_bytes` bytes, in base64. A directory there is `E_IS_DIR`,
-///   nothing there `E_PATH_NOT_FOUND`.
+/// - `read_file` returns at most `max_bytes` bytes of the file: from `offset` (0, its start, by
+///   default), or of the lines `lines` names (numbered from 1, both ends included: those that
+///   exist). They are UTF-8 text when they are text, a cut inside a character moved back to the
+///   character's start (so up to 3 bytes fewer); otherwise exactly `max_bytes` bytes, in base64,
+///   as are bytes from an offset inside a character. A read cut short gives `next_offset`, where
+///   the next page starts; an offset past the end gives empty content, not cut short. The blob's
+///   object file is read whole and verified whole, but only the bytes returned are kept. Both
+///   `offset` and `lines`, and lines from 0 or a range that ends before it starts, are
+///   `E_INVALID_ARG`. A directory there is `E_IS_DIR`, nothing there `E_PATH_NOT_FOUND`.
 /// - `read_tree` lists a directory (the root for an omitted or empty path; one trailing `/` is
-///   taken) in name order, a page of at most `limit` entries after the `cursor` name; a file or
-///   nothing at the path is `E_PATH_NOT_FOUND`.
+///   taken) and, to `depth` levels (1 to 64, else `E_INVALID_ARG`), the directories below it, in
+///   pre-order (a directory, then the entries below it; each directory's entries in name order),
+///   each leaf with its size from its object's header: a page of at most `limit` entries after
+///   the `cursor` path, those past `depth` 1 with their `path`. A cursor that is no repository
+///   path is `E_INVALID_ARG`; a file or nothing at the path, `E_PATH_NOT_FOUND`.
 /// - `show` attributes the changeset by its `agent` and `run_id` metadata (`unknown/unknown`
 ///   when it records no agent); `created_at` is the committer's time in milliseconds (0 before
 ///   1970); a metadata value that is not UTF-8 is given in base64 under its key with `:b64`
@@ -294,6 +302,91 @@ fn no_directory(
         Some(Err(e)) => e,
         _ => path_not_found(rev, path),
     }
+}
+
+/// Why `read_file` found no file at `path` (`repo_path`) in changeset `cs`, which `rev` named in
+/// `read`: a directory is there (`E_IS_DIR`), or nothing is (`E_PATH_NOT_FOUND`).
+fn no_file(
+    read: &Snapshot<'_>,
+    cs: ChangesetId,
+    rev: &Rev,
+    path: &str,
+    repo_path: &RepoPath,
+) -> OpError {
+    match read.entry_at(cs, repo_path) {
+        Ok(Some(EntryTarget::Dir(_))) => error(
+            ErrorCode::IsDir,
+            format!("{path:?} is a directory at {rev}"),
+        )
+        .with_details(rev_and_path(rev, path))
+        .with_hint(hint(format!(
+            "swarmops ls {}",
+            shell_word(&format!("{rev}:{path}"))
+        ))),
+        Ok(_) => path_not_found(rev, path),
+        Err(e) => op(e),
+    }
+}
+
+/// The part of a file that `read_file`'s `offset` and `lines` name. `E_INVALID_ARG` for both at
+/// once (an `offset` of 0 is the default, not a choice), and for lines numbered from 0 or a range
+/// that ends before it starts.
+fn file_span(offset: u64, lines: Option<LineRange>) -> Result<FileSpan, OpError> {
+    let Some(LineRange { first, last }) = lines else {
+        return Ok(FileSpan::Bytes { start: offset });
+    };
+    let range = || {
+        Value::from(Map::from_iter([
+            ("first".to_owned(), Value::from(first)),
+            ("last".to_owned(), Value::from(last)),
+        ]))
+    };
+    if offset != 0 {
+        return Err(error(
+            ErrorCode::InvalidArg,
+            format!(
+                "read_file takes offset or lines, not both: offset {offset}, lines {first}-{last}"
+            ),
+        )
+        .with_details(details([("offset", offset.into()), ("lines", range())]))
+        .with_hint("pass offset to read from a byte, or lines to read a range of lines"));
+    }
+    if first == 0 || last < first {
+        return Err(error(
+            ErrorCode::InvalidArg,
+            format!(
+                "lines {first}-{last} is no range of lines: they are numbered from 1, and a range \
+                 ends at or after its start"
+            ),
+        )
+        .with_details(details([("lines", range())])));
+    }
+    Ok(FileSpan::Lines { first, last })
+}
+
+/// `E_INVALID_ARG` unless `depth`, a `read_tree` request's, lists 1 to [`MAX_TREE_DEPTH`] levels.
+fn tree_depth(depth: u32) -> Result<(), OpError> {
+    if (1..=MAX_TREE_DEPTH).contains(&depth) {
+        return Ok(());
+    }
+    Err(error(
+        ErrorCode::InvalidArg,
+        format!("depth must be 1 to {MAX_TREE_DEPTH}, not {depth}"),
+    )
+    .with_details(details([("depth", depth.into())])))
+}
+
+/// The path a `read_tree` page resumes after: its `cursor`, the last entry's path on the page
+/// before. `E_INVALID_ARG` for a cursor that is no repository path.
+fn listing_cursor(cursor: &str) -> Result<RepoPath, OpError> {
+    RepoPath::new(cursor).map_err(|e| {
+        error(
+            ErrorCode::InvalidArg,
+            format!("{cursor:?} is not a listing cursor: {e}"),
+        )
+        .with_details(details([("cursor", cursor.into())]))
+        .with_hint("pass the previous page's cursor as it was given, or none to start over")
+    })
 }
 
 /// Where a log page resumes after `cursor`, the last id of the page before: that changeset's
@@ -558,36 +651,36 @@ impl StoreOps for Recording<'_> {
         let ReadFileReq {
             rev,
             path,
+            offset,
+            lines,
             max_bytes,
         } = req;
+        let span = file_span(offset, lines)?;
         let read = self.snapshot()?;
         let cs = self.resolve(&read, &rev)?;
         let repo_path = content::repo_path(&path)?;
-        let (kind, blob) = match read.entry_at(cs, &repo_path).map_err(op)? {
-            Some(EntryTarget::Leaf(kind, blob)) => (kind, blob),
-            Some(EntryTarget::Dir(_)) => {
-                return Err(error(
-                    ErrorCode::IsDir,
-                    format!("{path:?} is a directory at {rev}"),
-                )
-                .with_details(rev_and_path(&rev, &path))
-                .with_hint(hint(format!(
-                    "swarmops ls {}",
-                    shell_word(&format!("{rev}:{path}"))
-                ))));
-            }
-            None => return Err(path_not_found(&rev, &path)),
+        // Up to CHAR_TAIL bytes past the cut, for `encode` to see whether they complete a
+        // character it cuts.
+        let past_the_cut = max_bytes.saturating_add(content::CHAR_TAIL);
+        let Some(got) = (read.read_file_span(cs, &repo_path, span, past_the_cut)).map_err(op)?
+        else {
+            return Err(no_file(&read, cs, &rev, &path, &repo_path));
         };
-        let bytes = read.blob(blob).map_err(op)?;
-        let keep = usize::try_from(max_bytes).map_or(bytes.len(), |max| max.min(bytes.len()));
-        let (encoding, content) = content::encode(&bytes, keep);
+        let keep =
+            usize::try_from(max_bytes).map_or(got.bytes.len(), |max| max.min(got.bytes.len()));
+        let encoded = content::encode(&got.bytes, keep);
+        // The span runs on past the bytes returned exactly when it is longer than max_bytes.
+        let truncated = keep < got.bytes.len();
         Ok(FileContent {
-            blob: blob.to_string(),
-            size: to_u64(bytes.len()),
-            kind: file_kind(kind),
-            encoding,
-            content,
-            truncated: keep < bytes.len(),
+            blob: got.blob.to_string(),
+            size: got.size,
+            kind: file_kind(got.kind),
+            encoding: encoded.encoding,
+            content: encoded.content,
+            truncated,
+            offset: (got.start > 0).then_some(got.start),
+            lines: got.lines.map(|(first, last)| LineRange { first, last }),
+            next_offset: truncated.then(|| got.start + to_u64(encoded.len)),
         })
     }
 
@@ -595,10 +688,13 @@ impl StoreOps for Recording<'_> {
         let ReadTreeReq {
             rev,
             path,
+            depth,
             limit,
             cursor,
         } = req;
         at_least_one("limit", limit)?;
+        tree_depth(depth)?;
+        let after = cursor.as_deref().map(listing_cursor).transpose()?;
         let read = self.snapshot()?;
         let cs = self.resolve(&read, &rev)?;
         // One trailing `/` is taken (`ls main:src/`). A path malformed even without it is
@@ -613,22 +709,18 @@ impl StoreOps for Recording<'_> {
                 Some(RepoPath::new(trimmed).or_else(|_| content::repo_path(path))?)
             }
         };
-        let Some(entries) = read.list_tree(cs, dir.as_ref()).map_err(op)? else {
+        let listed = read.list_tree_depth(cs, dir.as_ref(), depth, after.as_ref(), limit);
+        let Some(page) = listed.map_err(op)? else {
             return Err(no_directory(&read, cs, &rev, dir.as_ref()));
         };
-        let start = cursor.as_deref().map_or(0, |after| {
-            entries.partition_point(|entry| entry.name.as_bytes() <= after.as_bytes())
-        });
-        let rest = &entries[start..];
-        let page = &rest[..rest.len().min(limit)];
-        let truncated = page.len() < rest.len();
         Ok(TreeListing {
-            entries: page.iter().map(tree_entry_out).collect(),
-            truncated,
-            cursor: page
-                .last()
-                .filter(|_| truncated)
-                .map(|last| last.name.clone()),
+            entries: (page.entries.iter())
+                .map(|entry| tree_entry_out(entry, depth > 1))
+                .collect(),
+            truncated: page.truncated,
+            cursor: (page.entries.last())
+                .filter(|_| page.truncated)
+                .map(|last| last.path.to_string()),
         })
     }
 
@@ -1221,10 +1313,14 @@ fn mismatch_cause(cause: MismatchCause) -> &'static str {
     }
 }
 
-fn tree_entry_out(entry: &TreeEntry) -> TreeEntryOut {
+/// `entry` of a listing as `read_tree` gives it, with its `path` when `with_path` (a `depth` past
+/// 1).
+fn tree_entry_out(entry: &ListedEntry, with_path: bool) -> TreeEntryOut {
     TreeEntryOut {
-        name: entry.name.clone(),
+        name: entry.path.file_name().to_owned(),
+        path: with_path.then(|| entry.path.to_string()),
         kind: entry_kind_out(entry.target.kind()),
+        size: entry.size,
         id: entry.target.id().to_hex(),
     }
 }
@@ -1711,6 +1807,28 @@ mod tests {
 
         use super::*;
 
+        /// `read_file` of `path` at `main`, 1 KiB at most.
+        fn cat(path: &str) -> ReadFileReq {
+            ReadFileReq {
+                rev: "main".into(),
+                path: path.to_owned(),
+                offset: 0,
+                lines: None,
+                max_bytes: 1024,
+            }
+        }
+
+        /// `read_tree` of `path` at `main`, 100 entries at most.
+        fn ls(path: &str) -> ReadTreeReq {
+            ReadTreeReq {
+                rev: "main".into(),
+                path: Some(path.to_owned()),
+                depth: 1,
+                limit: 100,
+                cursor: None,
+            }
+        }
+
         /// Each request reads in one snapshot of the metadata, counted by the reads of a witness
         /// ref, `release/witness`, which no request names or moves: every snapshot reads every
         /// ref file once, while a write reads only the refs it moves (its `cas_ref`, and its
@@ -1764,17 +1882,6 @@ mod tests {
                 let witness = "read meta/refs/release/witness";
                 let reads = calls().into_iter().filter(|call| call == witness).count();
                 counts.push((request, reads));
-            };
-            let cat = |path: &str| ReadFileReq {
-                rev: "main".into(),
-                path: path.to_owned(),
-                max_bytes: 1024,
-            };
-            let ls = |path: &str| ReadTreeReq {
-                rev: "main".into(),
-                path: Some(path.to_owned()),
-                limit: 100,
-                cursor: None,
             };
             let log = |rev: Option<&str>, cursor: Option<&str>| LogReq {
                 rev: rev.map(Rev::from),

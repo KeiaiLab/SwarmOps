@@ -8,7 +8,7 @@ use clap::error::ErrorKind;
 use clap::{ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use swarmops_api::{
     DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT,
-    DEFAULT_READ_TREE_LIMIT,
+    DEFAULT_READ_TREE_LIMIT, LineRange,
 };
 
 use crate::output::printable;
@@ -154,23 +154,34 @@ pub enum Command {
     /// holds.
     #[command(subcommand)]
     Blob(BlobCommand),
-    /// Print one file at a revision.
+    /// Print one file at a revision, or part of it: from a byte, or a range of lines.
     Cat {
         // Split at the first ':' by commands::split_target: M1's revision grammar has no ':'.
         // `ws:<name>` and `cr:CR-n[@k]` arrive later, and the split must become prefix-aware.
         /// The revision and the file's path, split at the first ':'.
         #[arg(value_name = "REV:PATH")]
         target: String,
+        /// Start at byte N of the file; a truncated result's next_offset reads on from there.
+        #[arg(long, value_name = "N", default_value_t = 0, conflicts_with = "lines")]
+        offset: u64,
+        /// Print lines A to B only, numbered from 1, both included, such as 10-20.
+        #[arg(long, value_name = "A-B", value_parser = line_range)]
+        lines: Option<LineRange>,
         /// The most content bytes to print.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_BYTES)]
         max_bytes: u64,
     },
-    /// List one directory at a revision (the root without a PATH).
+    /// List one directory at a revision (the root without a PATH), and with --depth the
+    /// directories below it.
     Ls {
         // Split at the first ':' as `cat`'s target is (see there).
         /// The revision, and the directory's path after the first ':'.
         #[arg(value_name = "REV[:PATH]")]
         target: String,
+        /// How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so
+        /// on, up to 64.
+        #[arg(long, value_name = "N", default_value_t = 1)]
+        depth: u32,
         /// The most entries to list.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_READ_TREE_LIMIT)]
         limit: usize,
@@ -414,6 +425,22 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["mcp"] => "mcp",
         _ => return None,
     })
+}
+
+/// `cat --lines A-B`: two line numbers, such as 10-20. Whether they make a range `read_file` takes
+/// (numbered from 1, ending at or after its start) is the operation's to say, as for every client.
+fn line_range(text: &str) -> Result<LineRange, String> {
+    let number = |digits: &str| {
+        let decimal = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+        decimal.then(|| digits.parse().ok()).flatten()
+    };
+    let range = text.split_once('-').and_then(|(first, last)| {
+        Some(LineRange {
+            first: number(first)?,
+            last: number(last)?,
+        })
+    });
+    range.ok_or_else(|| "expected two line numbers, A-B, such as 10-20".to_owned())
 }
 
 /// The usage line of the subcommand `path` names, or of the deepest part of it that names
