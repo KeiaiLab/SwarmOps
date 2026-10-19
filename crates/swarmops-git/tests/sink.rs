@@ -463,6 +463,41 @@ fn a_held_ref_lock_is_ref_locked() {
     assert!(!lock.exists());
 }
 
+#[cfg(feature = "test-hooks")]
+#[test]
+fn the_ref_lock_is_tried_by_its_pauses_not_by_the_clock() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    let destination = git::empty_repository();
+    let mut sink = open(&destination.dir);
+    let [first, ..] = three_commits(&mut sink);
+    let lock = destination.dir.join("refs/heads/main.lock");
+    fs::write(&lock, "held by another writer\n").unwrap();
+    // A loaded host stalls the export for longer than the whole timeout before its second
+    // attempt, and the other writer lets the lock go only after that attempt. git counts the
+    // timeout by its pauses, not by the clock: the stall costs no attempt, and the move takes
+    // the lock at the third.
+    let (held, retries) = (lock.clone(), Arc::new(AtomicUsize::new(0)));
+    let counted = Arc::clone(&retries);
+    sink.on_lock_retry(move || {
+        if counted.fetch_add(1, Ordering::Relaxed) == 0 {
+            thread::sleep(Duration::from_millis(150));
+        } else {
+            fs::remove_file(&held).unwrap();
+        }
+    });
+    assert_eq!(
+        sink.cas_branch("main", None, first),
+        Ok(BranchUpdate::Applied)
+    );
+    assert_eq!(retries.load(Ordering::Relaxed), 2);
+    assert_eq!(sink.branch("main"), Ok(Some(first)));
+    assert!(!lock.exists());
+}
+
 #[test]
 fn a_bad_branch_name_is_refused() {
     let destination = git::empty_repository();

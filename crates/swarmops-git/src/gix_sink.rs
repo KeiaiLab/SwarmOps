@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "test-hooks")]
 use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use gix::objs::{Exists as _, Find as _};
 use gix::prelude::Write as _;
@@ -27,6 +27,8 @@ use crate::{
 
 /// How long the export tries a branch's lock before the branch is [`SinkError::RefLocked`]:
 /// git's `core.filesRefLockTimeout` default, so that two exports racing to one branch take turns.
+/// Counted as git counts it, by the pauses between attempts rather than by the clock, so that a
+/// loaded host makes as many attempts as a quiet one.
 const LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 
 /// The paths a [`GixSink`] opened with [`GixSink::open_recording_syncs`] fsynced, relative to the
@@ -226,10 +228,11 @@ impl GixSink {
     }
 
     /// Takes the lock file `lock` (relative to the git directory), as git does: created
-    /// exclusively, and tried again for up to [`LOCK_TIMEOUT`] while another writer holds it.
+    /// exclusively, and tried again while another writer holds it, after a pause of 1 ms that
+    /// doubles each time, until the pauses add up to [`LOCK_TIMEOUT`].
     fn lock(&mut self, lock: &str) -> Result<File, SinkError> {
         let path = self.files.git_dir.join(lock);
-        let started = Instant::now();
+        let mut paused = Duration::ZERO;
         let mut pause = Duration::from_millis(1);
         loop {
             let error = match OpenOptions::new().write(true).create_new(true).open(&path) {
@@ -245,8 +248,7 @@ impl GixSink {
                 }
                 _ => return Err(self.files.failed_write(&path, &error)),
             }
-            let waited = started.elapsed();
-            if waited >= LOCK_TIMEOUT {
+            if paused >= LOCK_TIMEOUT {
                 return Err(SinkError::RefLocked {
                     lock: lock.to_owned(),
                 });
@@ -255,7 +257,9 @@ impl GixSink {
             if let Some(hook) = &mut self.lock_retry {
                 hook();
             }
-            thread::sleep(pause.min(LOCK_TIMEOUT.saturating_sub(waited)));
+            let wait = pause.min(LOCK_TIMEOUT.saturating_sub(paused));
+            thread::sleep(wait);
+            paused += wait;
             pause *= 2;
         }
     }
