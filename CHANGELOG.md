@@ -355,6 +355,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   batch a changeset at a time and gives each one's id before anything is written, so that a
   later one can name it as a parent. The power-loss run ends with a batch of three, a second
   root, its child and a merge: every image holds all three or none.
+- Git fixtures that need a newer git: a script whose first lines say `# needs git X.Y` is skipped,
+  and said to be, by an older git (`regenerate`, `check`, the fixture tests), so that it has no
+  archive while the declared git is older. `swarmops_testkit::git::names()` lists only the
+  fixtures at hand, `skipped(name)` says why one is not, and `check` writes the version of the
+  git it ran to `<dir>/GIT_VERSION`. The first is `reftable` (`git init --ref-format=reftable`,
+  git 2.45 and newer), which `GixSource::open` refuses as `Unsupported(RefStorage("reftable"))`:
+  `a_reftable_repository_is_unsupported` checks that on the fixture the version matrix's newest
+  git makes, and says why it checks nothing where there is none.
 
 ### Changed
 

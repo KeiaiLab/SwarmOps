@@ -90,7 +90,10 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
   on purpose, byte for byte the same when nothing changed, with the git that
   `git-fixtures/GIT_VERSION` declares (2.43.0; `SWARMOPS_GIT` names the binary, and any other
   version is refused unless `SWARMOPS_GIT_FIXTURES_ANY_GIT=1`): review the diff and commit it
-  with the scripts. A new fixture is one more script and the archive that command writes.
+  with the scripts. A new fixture is one more script and the archive that command writes. A
+  script whose first lines say `# needs git X.Y` is made by that release or a later one only: an
+  older git skips it and says so. While the declared git is older, such a script has no archive,
+  and only the version matrix's newest git makes it (`reftable`).
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
   build without the feature can name), and a release build honours no test hook. The hooks are
