@@ -289,6 +289,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   the Rust API: `ContentInput::Blob`, `BlobPutReq`, `BlobPutResp`, `BlobHasReq`, `BlobHasResp`,
   `StoreOps::{blob_put, blob_has}`, `ChangeOp::PutBlob`, `Repo::put_blob`, `Repo::has_blob`,
   `BlobPut` and `RepoError::MissingBlob`.
+- `swarmops-store`: `ObjectStore::read_chunks` reads an object as `get` does, with the same
+  checks and errors, but hands its payload over in pieces, in order, instead of returning it: a
+  raw payload from the buffer its file was read into, a zstd one 64 KiB at a time as its stream
+  decodes. The pieces are hashed as they go and the id checked at the end, so `Corrupt` comes
+  after the pieces before the damage went by, and the caller drops what it kept of them.
 
 ### Changed
 
