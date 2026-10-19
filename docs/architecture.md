@@ -209,6 +209,7 @@ flowchart TD
   settle --> done(["Release the lock"])
   append -. "the append or<br/>its fdatasync fails" .-> cut["Cut the frame back:<br/>E_IO_TRANSIENT (E_IO if<br/>refused for good),<br/>committed: false<br/>(if the cut fails: abort)"]
   list -. "any failure<br/>from here on" .-> warn["Committed and durable:<br/>a warning, and the next<br/>write repairs the rest"]
+  repair -. "listing a frame left<br/>unlisted, or writing<br/>it afresh, fails" .-> notyet["Cut back what the failed<br/>append wrote: E_IO_TRANSIENT<br/>(E_IO if refused for good),<br/>committed: false"]
 ```
 
 What a failure means depends on which side of the commit point it falls (storage §2 rule 3,
@@ -246,11 +247,12 @@ What a failure means depends on which side of the commit point it falls (storage
   sync and then its rewrite fail, or it crashes between its cut and its rewrite, the commit is
   lost. That takes three faults (storage §2 rule 3 lists the remaining double and triple faults).
 
-Three double faults abort the process (`std::process::abort`, saying why on stderr) rather
+Four double faults abort the process (`std::process::abort`, saying why on stderr) rather
 than let it go on with state it cannot vouch for: a failed frame whose cut fails too, a cut
-that fails while unlisted frames are written afresh, and an `init` that cannot take its
-`FORMAT` back. A long-lived process, such as `swarmops mcp`, ends with them, and its client
-sees it exit.
+that fails while unlisted frames are written afresh, frames written afresh that land anywhere
+but where they were (another writer's bytes came in between) and cannot be cut back, and an
+`init` that cannot take its `FORMAT` back. A long-lived process, such as `swarmops mcp`, ends
+with them, and its client sees it exit.
 
 `init` (storage §2) writes `FORMAT` last and then syncs the store's root. If that sync fails, it
 takes `FORMAT` back (removes it, and syncs the removal) and fails: the store is not complete,
