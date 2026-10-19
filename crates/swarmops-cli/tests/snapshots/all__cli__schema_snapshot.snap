@@ -1057,6 +1057,63 @@ expression: s.redact(&all)
       ],
       "title": "ContentInput"
     },
+    "DeriveReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`derive`: derive ahead of any reader the eager derived values (storage spec §5: each\nchangeset's first-parent skip list) of the changesets the journal records after a frame, so\nthat reads find them stored. It writes only the store's cache of derived values, so it takes\nno identity.",
+      "properties": {
+        "after": {
+          "description": "Go on after this journal frame: a previous call's `next`. From the journal's first frame\nwhen omitted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 1000,
+          "description": "The most journal frames to read; a frame is one transaction, a commit or a ref's move. 0\nreads none and derives nothing: `next` is then the journal's last frame, from where the\nnext calls derive only what is recorded later.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "title": "DeriveReq",
+      "type": "object"
+    },
+    "DeriveResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`derive`: how many values one call derived, how many the store held already, and where to\ngo on.",
+      "properties": {
+        "cached": {
+          "description": "How many of those values the store held already.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "derived": {
+          "description": "How many values it derived: of each eager derivation, one for each changeset its frames\nrecord whose value the store lacked. Values those needed on the way, an older\nchangeset's, are derived too and not counted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "next": {
+          "description": "The last frame it read: pass it as the next call's `after` to go on, through a journal\nlonger than `limit` frames or through the frames recorded since. Omitted when it read no\nframe, as none follows `after`: it is at the journal's end. With `limit` 0, the journal's\nlast frame, omitted while the journal holds none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "derived",
+        "cached"
+      ],
+      "title": "DeriveResp",
+      "type": "object"
+    },
     "EntryKindOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "What a tree entry is.",

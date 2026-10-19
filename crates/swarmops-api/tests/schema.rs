@@ -22,6 +22,7 @@ const REQUESTS: &[&str] = &[
     "BlobPutReq",
     "ChangeInput",
     "CommitReq",
+    "DeriveReq",
     "Identity",
     "InfoReq",
     "InitReq",
@@ -47,6 +48,7 @@ const RESPONSES: &[&str] = &[
     "ChangesetDetail",
     "ChangesetSummary",
     "CommitResp",
+    "DeriveResp",
     "Envelope",
     "FileContent",
     "IdentityInfo",
@@ -174,6 +176,7 @@ fn store_ops_signatures<S: StoreOps + ?Sized>() {
     ) -> Result<swarmops_api::BlobPutResp, OpError> = S::blob_put;
     let _: fn(&S, swarmops_api::BlobHasReq) -> Result<swarmops_api::BlobHasResp, OpError> =
         S::blob_has;
+    let _: fn(&S, swarmops_api::DeriveReq) -> Result<swarmops_api::DeriveResp, OpError> = S::derive;
 }
 
 #[test]
@@ -1424,6 +1427,42 @@ mod spans {
         assert_eq!(
             serde_json::to_string(&below).unwrap(),
             r#"{"name":"b.rs","path":"a/b.rs","kind":"file","size":10,"id":"b1"}"#
+        );
+    }
+}
+
+/// `derive`'s request and response (operations spec §1): `after` and `limit`, 1,000 frames by
+/// default, in; the counts and `next` out, `next` omitted when there is none.
+mod derive {
+    use swarmops_api::{DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp};
+
+    use super::*;
+
+    #[test]
+    fn derive_takes_after_and_limit_and_gives_counts_and_next() {
+        assert_eq!(DEFAULT_DERIVE_LIMIT, 1000);
+        let defaults: DeriveReq = serde_json::from_value(json!({})).unwrap();
+        let limit = DEFAULT_DERIVE_LIMIT;
+        assert_eq!(defaults, DeriveReq { after: None, limit });
+        assert_ignores_unknown_fields::<DeriveReq>("DeriveReq", json!({"after": 7}));
+        assert_ignores_unknown_fields::<DeriveResp>(
+            "DeriveResp",
+            json!({"derived": 1, "cached": 2, "next": 7}),
+        );
+        let req = DeriveReq {
+            after: None,
+            limit: 5,
+        };
+        assert_eq!(serde_json::to_value(&req).unwrap(), json!({"limit": 5}));
+        let resp = DeriveResp {
+            derived: 1,
+            cached: 2,
+            next: None,
+        };
+        let printed = serde_json::to_string(&resp).unwrap();
+        assert_eq!(
+            printed, r#"{"derived":1,"cached":2}"#,
+            "in this order, next omitted"
         );
     }
 }

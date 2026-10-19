@@ -11,11 +11,11 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{
     Attribution, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp,
-    EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq, LineRange, LogCutOut,
-    LogPage, LogReq, MAX_TREE_DEPTH, OpError, PathHistoryEntry, PathHistoryPage, PathHistoryReq,
-    ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefListResp, RefOut,
-    RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps,
-    TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
+    DeriveReq, DeriveResp, EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq,
+    LineRange, LogCutOut, LogPage, LogReq, MAX_TREE_DEPTH, OpError, PathHistoryEntry,
+    PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq,
+    RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut,
+    Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_core::bytes::to_u64;
@@ -138,8 +138,14 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   of the ref. So a `ref_set` whose `new` is the target it expects never moves the ref: it is a
 ///   replay where the ref holds that target, and a mismatch where it holds another.
 /// - `verify` checks the store and lists each problem as one line.
+/// - `derive` derives ahead of any reader the eager derived values (storage spec §5) of the
+///   changesets recorded in the journal's frames after frame `after` (from the first frame
+///   without it), reading at most `limit` frames, and gives the last frame it read as `next`,
+///   omitted when it read none; with a `limit` of 0 it reads no frame, derives nothing and gives
+///   the journal's last frame. It writes only the store's cache of derived values, so it needs
+///   no identity.
 ///
-/// Limits of 0 (`limit`, `max_changes`) are `E_INVALID_ARG`.
+/// Limits of 0 (`limit`, `max_changes`) are `E_INVALID_ARG`, but for `derive`'s `limit`.
 ///
 /// # Errors
 ///
@@ -970,6 +976,16 @@ impl StoreOps for Recording<'_> {
             findings: report.problems.iter().map(finding).collect(),
         })
     }
+
+    fn derive(&self, req: DeriveReq) -> Result<DeriveResp, OpError> {
+        let DeriveReq { after, limit } = req;
+        let run = self.ops.repo.derive_eager(after, limit).map_err(op)?;
+        Ok(DeriveResp {
+            derived: run.derived,
+            cached: run.cached,
+            next: run.last_frame,
+        })
+    }
 }
 
 /// Each operation as a request of its own, whose resolved revisions go unrecorded: to report
@@ -1025,6 +1041,10 @@ impl StoreOps for LocalOps {
 
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {
         self.recording(&Resolved::default()).verify(req)
+    }
+
+    fn derive(&self, req: DeriveReq) -> Result<DeriveResp, OpError> {
+        self.recording(&Resolved::default()).derive(req)
     }
 }
 

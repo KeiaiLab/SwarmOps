@@ -3091,3 +3091,74 @@ mod spans {
         );
     }
 }
+
+/// `derive` (operations spec §1): the eager derived values of the changesets the journal records
+/// after a frame, how many it derived and found stored, and where to go on.
+mod derive {
+    use swarmops_api::{DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp};
+
+    use super::*;
+
+    fn req(after: Option<u64>, limit: usize) -> DeriveReq {
+        DeriveReq { after, limit }
+    }
+
+    fn resp(derived: u64, cached: u64, next: Option<u64>) -> DeriveResp {
+        DeriveResp {
+            derived,
+            cached,
+            next,
+        }
+    }
+
+    /// Over three commits (frames 0 to 2), the first call derives their skip lists and says to
+    /// go on after frame 2; from there nothing is left and `next` is omitted; from the first
+    /// frame the three are found stored. `limit` bounds the frames a call reads, and a `limit`
+    /// of 0 reads none and gives the journal's last frame. It needs no identity and resolves no
+    /// revision. A request of `{}` reads 1,000 frames from the first, and a response without a
+    /// `next` omits it.
+    #[test]
+    fn derive_reports_what_it_derived() {
+        let (_dir, root, ops) = new_store();
+        assert_eq!(
+            ops.derive(req(None, DEFAULT_DERIVE_LIMIT)).unwrap(),
+            resp(0, 0, None)
+        );
+        let c1 = commit(&ops, None, vec![text("a.txt", "1")]);
+        let c2 = commit(&ops, Some(&c1), vec![text("a.txt", "2")]);
+        let c3 = commit(&ops, Some(&c2), vec![text("a.txt", "3")]);
+
+        let first = ops.derive(req(None, DEFAULT_DERIVE_LIMIT)).unwrap();
+        assert_eq!(first, resp(3, 0, Some(2)));
+        for id in [&c1, &c2, &c3] {
+            let list = format!(
+                "meta/derived/first_parent_skip_list/1/{}/{}",
+                &id[..2],
+                &id[2..]
+            );
+            assert!(root.join(&list).is_file(), "{list}");
+        }
+        assert_eq!(
+            ops.derive(req(Some(2), DEFAULT_DERIVE_LIMIT)).unwrap(),
+            resp(0, 0, None)
+        );
+        assert_eq!(
+            ops.derive(req(None, DEFAULT_DERIVE_LIMIT)).unwrap(),
+            resp(0, 3, Some(2))
+        );
+        assert_eq!(ops.derive(req(Some(0), 1)).unwrap(), resp(0, 1, Some(1)));
+        assert_eq!(ops.derive(req(None, 0)).unwrap(), resp(0, 0, Some(2)));
+
+        let resolved = Resolved::default();
+        let recorded = ops.recording(&resolved).derive(req(None, 1)).unwrap();
+        assert_eq!(recorded, resp(0, 1, Some(0)));
+        assert_eq!(resolved.take(), BTreeMap::new(), "no revision resolved");
+
+        let wire = serde_json::to_value(resp(0, 0, None)).unwrap();
+        assert_eq!(wire, json!({"derived": 0, "cached": 0}));
+        let wire = serde_json::to_value(first).unwrap();
+        assert_eq!(wire, json!({"derived": 3, "cached": 0, "next": 2}));
+        let defaults: DeriveReq = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(defaults, req(None, 1000));
+    }
+}
