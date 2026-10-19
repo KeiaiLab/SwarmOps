@@ -33,10 +33,12 @@ check:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
     cargo deny --locked check
 
-# The test hooks are on (`--all-features`), as in `just check`.
+# The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
+# or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,
+# `check_git_fixtures`) are left out.
 # Slow suite: more proptest cases plus the ignored tests (multi-process, crash, perf-ratio).
 check-slow:
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden)'
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures)'
 
 # `check-slow` without the two 32-process contention measurements (`thirty_two_processes_*`),
 # which `just perf` runs: each takes minutes of fsync'd work on this host, and their no-`Busy`
@@ -45,7 +47,15 @@ check-slow:
 # `NEXTEST_PROFILE=ci-slow` (.config/nextest.toml).
 # The weekly CI slow suite (scheduled.yml): check-slow without the 32-process measurements.
 check-ci-slow:
-    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(thirty_two_processes)'
+    PROPTEST_CASES=2000 cargo nextest run --locked --workspace --all-features --run-ignored all -E 'not test(regenerate_golden) and not test(regenerate_git_fixtures) and not test(check_git_fixtures) and not test(thirty_two_processes)'
+
+# The git fixtures (crates/swarmops-testkit/git-fixtures/): every script run again by the git
+# that git-fixtures/GIT_VERSION declares (`SWARMOPS_GIT` names the binary; any other version is
+# refused unless `SWARMOPS_GIT_FIXTURES_ANY_GIT=1`), and its archive and manifest rewritten,
+# byte for byte the same when nothing changed. Review the diff, and commit it with the scripts.
+# Rebuilds the git fixtures' archives from their scripts, with the declared git.
+git-fixtures:
+    SWARMOPS_REGEN_GIT_FIXTURES=1 cargo nextest run --locked -p swarmops-testkit --run-ignored ignored-only -E 'test(regenerate_git_fixtures)' --no-capture
 
 # The criterion benches, with cargo's full output (`perf` prints only their summary lines).
 bench:

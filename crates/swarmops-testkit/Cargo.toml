@@ -12,12 +12,14 @@ publish.workspace = true
 workspace = true
 
 [features]
-# The runs of the `swarmops` binary and their JSON envelopes (`cli`), and the repository builders
-# (`repo`), default-on: the filesystem doubles (`fs`, `faults`, `power`) and the store's helpers
-# need neither, nor their dependencies (`serde_json`, `swarmops-repo`), so that the fuzz crate,
-# a workspace of its own, takes this crate with `default-features = false`.
-default = ["cli", "repo"]
+# The runs of the `swarmops` binary and their JSON envelopes (`cli`), the git fixtures (`git`),
+# and the repository builders (`repo`), default-on: the filesystem doubles (`fs`, `faults`,
+# `power`) and the store's helpers need none of them, nor their dependencies (`serde_json`;
+# `tar`, `base64`, `serde` and `serde_json`; `swarmops-repo`), so that the fuzz crate, a
+# workspace of its own, takes this crate with `default-features = false`.
+default = ["cli", "git", "repo"]
 cli = ["dep:serde_json"]
+git = ["dep:base64", "dep:serde", "dep:serde_json", "dep:tar"]
 repo = ["dep:swarmops-repo"]
 # The store's test hooks (`swarmops-store/test-hooks`), for the doubles that need them: the order
 # checker of `faults::checked`. Not a default: the crates that use the test kit take it as a
@@ -35,6 +37,9 @@ test-hooks = ["swarmops-store/test-hooks"]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.1.0", optional = true }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+base64 = { workspace = true, optional = true }
 camino.workspace = true
+serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
 tempfile.workspace = true
