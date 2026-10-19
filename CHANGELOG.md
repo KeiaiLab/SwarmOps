@@ -275,7 +275,8 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   records in one transaction) and malformed id prefixes are `E_INVALID_ARG`, with
   `details.store_limit`, `max` and `got`, or `details.prefix`; they were `E_IO`. A call the
   store's API does not take, which only a bug makes, is `E_INTERNAL`. No CLI, `StoreOps` or MCP
-  request reaches them in M1 (storage spec §3, operations spec §0). In the Rust API,
+  request reaches these in M1 (storage spec §3, operations spec §0): the one request field that
+  reaches a store limit is `init`'s name (its 255-byte limit is below). In the Rust API,
   `StoreError` gains `Limit` (with `LimitKind`), `BadPrefix` and `BadCall`, its `Io` keeps the
   failures the filesystem reported, and `Record::encode` returns a `Result` instead of
   panicking on a record past the layout's lengths.
