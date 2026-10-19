@@ -117,11 +117,16 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   `DuplicatePath` `{path}`, `ReservedMetadataKey` `{key}` (a metadata key that ends in
 ///   `:b64`), and the store's `DuplicateParent` `{parent}`, `Limit`
 ///   `{store_limit, max, got}` (a request past a limit of the store's layout: `store_limit` is
-///   `parents`, `actor_bytes`, `ref_name_bytes`, `records` or `repo_name_bytes`) and `BadPrefix`
+///   `parents`, `actor_bytes`, `ref_name_bytes`, `records` or `repo_name_bytes`; the object limit
+///   is `E_TOO_LARGE`, below) and `BadPrefix`
 ///   `{prefix}` (an id prefix that is not 1 to 64 hex digits). Of the requests of these
 ///   operations only `init`'s reaches either, with a name of more than 255 bytes
 ///   (`repo_name_bytes`): a commit has one parent, the identity bounds the actor, and revision
 ///   resolution takes 12 to 63 hex digits.
+/// - `E_TOO_LARGE` `{store_limit, max, got}`: the store's `Limit` of an object longer than an
+///   object holds (`store_limit` `object_bytes`, `max` 512 MiB): a commit's tree or changeset
+///   object past that size, since a put's content is refused at it first (`{index, path, size,
+///   limit}`, below).
 /// - `E_EXISTS`: `Exists`; the hint is `swarmops --repo <path> info`.
 /// - `E_UNKNOWN_PARENT` `{parent}`: `UnknownParent`; the hint is `swarmops log`.
 /// - `E_EMPTY_COMMIT`: `EmptyChanges`; the hint names `--allow-empty`.

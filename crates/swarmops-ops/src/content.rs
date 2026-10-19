@@ -49,8 +49,9 @@ use swarmops_core::bytes::to_u64;
 use swarmops_core::{LeafKind, RepoPath};
 use swarmops_repo::Change;
 
-/// The most bytes a put's content may hold: 512 MiB.
-pub const MAX_CONTENT_BYTES: u64 = 512 * 1024 * 1024;
+/// The most bytes a put's content may hold: 512 MiB, the most an object of the store holds
+/// ([`swarmops_store::MAX_OBJECT_LEN`]).
+pub const MAX_CONTENT_BYTES: u64 = swarmops_store::MAX_OBJECT_LEN;
 
 /// The suffix of a metadata key whose value `show` gives in base64: the one the repository
 /// refuses at the end of a stored key ([`swarmops_repo::check_metadata`]).
@@ -286,6 +287,14 @@ mod tests {
     #[test]
     fn the_limit_is_512_mib() {
         assert_eq!(MAX_CONTENT_BYTES, 512 * 1024 * 1024);
+    }
+
+    /// A put's content and an object of the store hold at most as much as each other: the
+    /// content limit is the store's object limit, so that no content the check lets through is
+    /// refused by the store.
+    #[test]
+    fn the_object_limit_is_the_content_limit() {
+        assert_eq!(MAX_CONTENT_BYTES, swarmops_store::MAX_OBJECT_LEN);
     }
 
     #[test]

@@ -23,7 +23,7 @@ use rayon::prelude::*;
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 
-use crate::error::{FileOp, IoFailure, StoreError};
+use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
 use crate::fs_ops::{FsMethod, FsOps, HookedFs, RealFs, StoreFs};
 use crate::layout::Layout;
 
@@ -40,17 +40,31 @@ const ZSTD_LEVEL: i32 = 3;
 /// (storage spec §2 rule 1).
 const PREALLOC_MAX: usize = 64 << 20;
 
+/// The most bytes an object's payload holds: 512 MiB (2^29), umbrella spec §5's bound on a blob
+/// and the operations' bound on a put's content (storage spec §2 rule 1, §10 item 6).
+/// [`ObjectStore::put`] and [`ObjectStore::put_batch`] refuse a longer payload before anything is
+/// hashed or written ([`StoreError::Limit`], [`LimitKind::ObjectBytes`]), and
+/// [`ObjectStore::get`] refuses an object file whose header records more as
+/// [`StoreError::BadHeader`] before it allocates anything for the payload.
+pub const MAX_OBJECT_LEN: u64 = 512 << 20;
+
 /// Content-addressed storage of blobs, trees and changesets (storage spec §8).
 pub trait ObjectStore: Send + Sync {
     /// Stores one object and returns its id. Idempotent: an object that already exists
     /// is not written again. The file content is durable on return; its directory entry
-    /// becomes durable at the next [`ObjectStore::flush`].
+    /// becomes durable at the next [`ObjectStore::flush`]. A payload longer than
+    /// [`MAX_OBJECT_LEN`] is [`StoreError::Limit`] ([`LimitKind::ObjectBytes`]), refused before
+    /// it is hashed or anything is written.
     fn put(&self, kind: ObjectKind, payload: &[u8]) -> Result<ObjectId, StoreError>;
 
-    /// [`ObjectStore::put`] for many objects in parallel; the ids come back in input order.
+    /// [`ObjectStore::put`] for many objects in parallel; the ids come back in input order. A
+    /// payload longer than [`MAX_OBJECT_LEN`] anywhere in `items` is refused as `put` refuses it,
+    /// before any object of the batch is hashed or written.
     fn put_batch(&self, items: Vec<(ObjectKind, Vec<u8>)>) -> Result<Vec<ObjectId>, StoreError>;
 
-    /// Reads one object, verified against `id`; `None` if it is not stored.
+    /// Reads one object, verified against `id`; `None` if it is not stored. An object file whose
+    /// header records a payload longer than [`MAX_OBJECT_LEN`] is [`StoreError::BadHeader`],
+    /// refused before anything is allocated for the payload.
     fn get(&self, id: ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, StoreError>;
 
     /// Whether an object file for `id` exists (not verified).
@@ -219,6 +233,7 @@ impl FsObjectStore {
 
 impl ObjectStore for FsObjectStore {
     fn put(&self, kind: ObjectKind, payload: &[u8]) -> Result<ObjectId, StoreError> {
+        within_object_limit(payload)?;
         let id = hash_object(kind, payload);
         let path = self.layout.object_path(id);
         let fanout = path
@@ -237,6 +252,11 @@ impl ObjectStore for FsObjectStore {
     }
 
     fn put_batch(&self, items: Vec<(ObjectKind, Vec<u8>)>) -> Result<Vec<ObjectId>, StoreError> {
+        // Every payload is measured before any is put, so that one past the limit leaves
+        // nothing of the batch written.
+        for (_, payload) in &items {
+            within_object_limit(payload)?;
+        }
         let put_all = || {
             items
                 .into_par_iter()
@@ -324,6 +344,20 @@ impl ObjectStore for FsObjectStore {
     }
 }
 
+/// Refuses `payload` if it is longer than an object holds ([`MAX_OBJECT_LEN`]): a
+/// [`StoreError::Limit`] of [`LimitKind::ObjectBytes`], with the payload's length.
+fn within_object_limit(payload: &[u8]) -> Result<(), StoreError> {
+    let got = to_u64(payload.len());
+    if got > MAX_OBJECT_LEN {
+        return Err(StoreError::Limit {
+            what: LimitKind::ObjectBytes,
+            max: MAX_OBJECT_LEN,
+            got,
+        });
+    }
+    Ok(())
+}
+
 /// Whether `name` is what an object file in a fan-out directory is named: the last 62 hex
 /// digits of its id, lowercase.
 fn is_object_name(name: &str) -> bool {
@@ -377,9 +411,11 @@ fn compress(payload: &[u8]) -> io::Result<Vec<u8>> {
     compressor.compress(payload)
 }
 
-/// Parses the object file read for `id` and verifies that its payload hashes to `id`. A raw
-/// payload comes back in `file` itself, its header drained off the front: no second copy. A zstd
-/// payload of more than [`PREALLOC_MAX`] bytes is decoded as a stream ([`decode_capped`]).
+/// Parses the object file read for `id` and verifies that its payload hashes to `id`. A header
+/// that records a payload longer than [`MAX_OBJECT_LEN`] is `BadHeader` before anything is
+/// allocated for it, raw or zstd. A raw payload comes back in `file` itself, its header drained
+/// off the front: no second copy. A zstd payload of more than [`PREALLOC_MAX`] bytes is decoded
+/// as a stream ([`decode_capped`]).
 fn decode(id: ObjectId, file: Vec<u8>) -> Result<(ObjectKind, Vec<u8>), StoreError> {
     decode_capped(id, file, PREALLOC_MAX)
 }
@@ -403,6 +439,10 @@ fn decode_capped(
     }
     let kind = kind_from_byte(header[4]).ok_or_else(bad_header)?;
     let ulen = u64::from_le_bytes(header[8..].try_into().expect("8 bytes"));
+    // No object holds more, whatever its encoding: refused before a buffer is sized by it.
+    if ulen > MAX_OBJECT_LEN {
+        return Err(bad_header());
+    }
     let ulen = usize::try_from(ulen).map_err(|_| bad_header())?;
     let payload = match header[5] {
         ENC_RAW if body.len() == ulen => {

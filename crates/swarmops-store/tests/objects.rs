@@ -486,13 +486,24 @@ fn a_zstd_frame_that_records_a_huge_size_is_corrupt_without_allocating_it() {
     let id = store.put(ObjectKind::Blob, &[b'a'; 4096]).unwrap();
     // Each lie agrees with itself (header and frame record the same size), and the frame makes
     // no output at all: no read may reserve the size it claims before the output says otherwise.
-    let cases: [Damage; 4] = [
+    // A size past the object limit (512 MiB) is refused by the header alone, as `BadHeader`,
+    // before any decoding; one within it is decoded and found out by its output, as `Corrupt`.
+    let past_the_limit: [Damage; 2] = [
         ("2^40 bytes, which aborted the process", id, |file| {
             lying_zstd(file, 1 << 40);
         }),
         ("2^63 bytes, which panicked", id, |file| {
             lying_zstd(file, 1 << 63);
         }),
+    ];
+    for (what, id, damage) in past_the_limit {
+        let got = get_damaged(&store, &layout, id, damage);
+        assert!(
+            matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+            "{what}: {got:?}"
+        );
+    }
+    let within_it: [Damage; 2] = [
         (
             "64 MiB + 1, the first size decoded as a stream",
             id,
@@ -504,10 +515,79 @@ fn a_zstd_frame_that_records_a_huge_size_is_corrupt_without_allocating_it() {
             lying_zstd(file, 64 << 20);
         }),
     ];
-    for (what, id, damage) in cases {
+    for (what, id, damage) in within_it {
         let got = get_damaged(&store, &layout, id, damage);
         assert!(
             matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+            "{what}: {got:?}"
+        );
+    }
+}
+
+/// A payload longer than the object limit is refused before it is hashed and before any
+/// filesystem call (storage spec §2 rule 1): by `put`, and by `put_batch` where it follows two
+/// payloads that fit, of which nothing is written either. Each oversized payload is a `vec!` of
+/// zeros, whose pages stay untouched until something reads them.
+#[test]
+fn put_refuses_a_payload_past_the_object_limit_without_a_filesystem_call() {
+    use swarmops_store::{LimitKind, MAX_OBJECT_LEN};
+    use swarmops_testkit::fs::RecordingFs;
+
+    let (_root, layout) = new_root();
+    let (fs, calls) = RecordingFs::new();
+    let store = FsObjectStore::open(layout.clone(), Box::new(fs));
+    let past = || vec![0_u8; usize::try_from(MAX_OBJECT_LEN + 1).unwrap()];
+    let refused = |got: Result<(), StoreError>| match got {
+        Err(StoreError::Limit { what, max, got }) => (what, max, got),
+        other => panic!("not a limit: {other:?}"),
+    };
+    let limit = (LimitKind::ObjectBytes, 536_870_912, 536_870_913);
+
+    assert_eq!(
+        refused(store.put(ObjectKind::Blob, &past()).map(|_| ())),
+        limit
+    );
+    let batch = vec![
+        (ObjectKind::Blob, b"one".to_vec()),
+        (ObjectKind::Tree, b"two".to_vec()),
+        (ObjectKind::Blob, past()),
+    ];
+    assert_eq!(refused(store.put_batch(batch).map(|_| ())), limit);
+    assert_eq!(calls(), Vec::<String>::new(), "no filesystem call at all");
+    assert_eq!(object_files(&layout), Vec::<PathBuf>::new());
+}
+
+/// An object file whose header records more than the object limit is `BadHeader` before
+/// anything is allocated for its payload, raw or zstd (storage spec §2 rule 1): a raw header
+/// that claims `MAX_OBJECT_LEN + 1` bytes over a 16-byte body, and a zstd header and frame that
+/// both claim 2^40 bytes (the same lie within the limit is decoded, and found `Corrupt`).
+#[test]
+fn a_header_claiming_more_than_the_object_limit_is_bad_header() {
+    use swarmops_store::MAX_OBJECT_LEN;
+
+    let (_root, layout) = new_root();
+    let store = real_store(&layout);
+    let raw = store.put(ObjectKind::Blob, &[7; 16]).unwrap();
+    let zstd = store.put(ObjectKind::Blob, &[b'a'; 4096]).unwrap();
+    assert_eq!(fs::read(layout.object_path(raw)).unwrap()[5], ENC_RAW);
+    assert_eq!(fs::read(layout.object_path(zstd)).unwrap()[5], ENC_ZSTD);
+
+    let cases: [Damage; 2] = [
+        ("a raw header one byte past the limit", raw, |file| {
+            file[8..16].copy_from_slice(&(MAX_OBJECT_LEN + 1).to_le_bytes());
+        }),
+        (
+            "a zstd header and frame that claim 2^40 bytes",
+            zstd,
+            |file| {
+                lying_zstd(file, 1 << 40);
+            },
+        ),
+    ];
+    for (what, id, damage) in cases {
+        let got = get_damaged(&store, &layout, id, damage);
+        assert!(
+            matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
             "{what}: {got:?}"
         );
     }
