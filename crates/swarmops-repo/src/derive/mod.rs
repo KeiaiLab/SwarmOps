@@ -188,6 +188,14 @@ impl DeriveCtx<'_> {
             })),
         }
     }
+
+    /// The derived store the run reads values from and stores them in ([`Repo::derived_store`]),
+    /// for a derivation that also memoizes values of its own per object rather than per changeset
+    /// (the git export's tree and blob oids, M8), under names no derivation registers. What it
+    /// stores there must, as a derived value does, depend on immutable objects alone.
+    pub fn derived_store(&self) -> &DerivedStore {
+        self.store
+    }
 }
 
 /// Why [`Derivation::canonical`] or [`Derivation::derive`] gave no value.

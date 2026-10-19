@@ -32,6 +32,15 @@ to the weakest:
    it describes.
 5. **The MCP tools.** The tools `swarmops mcp` lists, their names, their `inputSchema` (the
    request types' schemas) and their results (the same envelope the CLI prints).
+6. **The git export.** The git commit each changeset exports to (storage-core spec §7): an
+   imported changeset's own commit while SwarmOps has not changed its lineage, and for any other
+   changeset the commit its trees, its signatures and its message render to, a native
+   changeset's message followed by SwarmOps' trailers (`SwarmOps-Changeset`, and the land, review
+   and squash trailers). That rendering is version 1 of the `git_oid` derivation: git's tree order
+   and modes, the commit layout, the signatures verbatim and the trailer block. It changes only
+   as a new version, never in place, and every branch exported before a new version meets it as
+   divergence, to be exported again once with `--force`: a deployment pipeline sees a rewritten
+   history.
 
 The contract surfaces (3 to 5) grow without breaking: a new field, a new optional argument, a new
 command, a new error code or a new tool is not a breaking change. Clients must allow for that.

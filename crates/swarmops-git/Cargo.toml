@@ -25,10 +25,15 @@ test-hooks = []
 # export writes in parallel.
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+# The repository export oids are derived in: its derivation framework, and the derived store that
+# memoizes the git oids of its trees and blobs.
+swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 # The object length limit (`MAX_OBJECT_LEN`), which the conversion refuses a longer blob against.
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 gix.workspace = true
 rayon.workspace = true
+# An export oid's serde form, which the derived store keeps (as postcard).
+serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

@@ -4,6 +4,7 @@
 //! `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod` line here.
 
 mod convert;
+mod export_oid;
 mod raw;
 mod sink;
 mod source;

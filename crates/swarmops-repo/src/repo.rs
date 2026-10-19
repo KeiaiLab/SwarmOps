@@ -503,6 +503,14 @@ impl<O: ObjectStore> Repo<O> {
         Ok(self.external_ids.put_batch(system, entries)?)
     }
 
+    /// The derived store, `meta/derived/`, where [`Repo::derived`] keeps its values: for a reader
+    /// outside a derivation that memoizes values of its own there per object (the git export's
+    /// tree and blob oids, M8), under names no derivation registers, as a derivation does through
+    /// [`crate::DeriveCtx::derived_store`].
+    pub fn derived_store(&self) -> &DerivedStore {
+        &self.derived
+    }
+
     /// Changeset `id`'s object, decoded.
     pub(crate) fn changeset_object(&self, id: ChangesetId) -> Result<Changeset, RepoError> {
         let payload = object(&self.objects, id.0, ObjectKind::Changeset)?;
