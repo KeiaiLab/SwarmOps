@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Barrier, Mutex};
@@ -754,6 +755,60 @@ fn a_client_file_must_be_absolute_and_not_the_servers_stdio() {
     server.finish_clean();
     store.assert_clean("after the refused commits");
 }
+
+/// A `commit`'s client file that is not a regular file (a FIFO, whose open would block until
+/// something opens it for writing, a symlink to one, a device, a directory) is refused before
+/// anything is resolved, opened or read, with the change and the file named; the server serves
+/// on, and the store is untouched.
+#[test]
+fn a_client_file_that_is_not_a_regular_file_is_refused_without_blocking() {
+    let store = Store::init();
+    let fifo = store.tmp().join("pipe");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let to_fifo = store.tmp().join("to-pipe");
+    std::os::unix::fs::symlink(&fifo, &to_fifo).unwrap();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    for file in [
+        fifo.as_path(),
+        to_fifo.as_path(),
+        Path::new("/dev/null"),
+        store.tmp(),
+    ] {
+        let file = file.to_str().unwrap();
+        let refused = server.err(
+            "commit",
+            json!({
+                "message": "x",
+                "changes": [
+                    {"path": "README.md", "op": "put", "content": {"inline": "# acme\n"}},
+                    {"path": "lib.rs", "op": "put", "content": {"file": file}},
+                ],
+            }),
+            "E_INVALID_ARG",
+        );
+        assert_eq!(
+            refused["error"]["details"],
+            json!({"index": 1, "path": "lib.rs", "file": file}),
+            "{refused}"
+        );
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains("not a regular file"), "{file}: {message}");
+        assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
+        assert_eq!(server.result("ping", json!({})), json!({}));
+        let info = server.ok("repo_info", json!({}));
+        assert_eq!(info["result"]["changesets"], 0, "{file}: {info}");
+    }
+    server.finish_clean();
+    store.assert_clean("after the refused commits");
+}
+
 /// A changeset committed through `server` on `parent`, putting a file named `name`; its id.
 fn commit_on(server: &mut Server, name: &str, parent: &str) -> String {
     let arguments = json!({

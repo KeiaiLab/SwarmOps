@@ -287,6 +287,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   changeset, as an `IndexMismatch` (cause `Journal`) while changeset frames follow the
   checkpoint too. The index does not count such a record there, so verify reported nothing, and
   the next write cut it without a word.
+- `swarmops mcp` refuses a `commit` whose `{"file": path}` content is not a regular file (a
+  FIFO, a socket, a device or a directory, or a symlink to one) with `E_INVALID_ARG` before it
+  reads anything: a FIFO no longer holds up the session until something writes to it, and a
+  device such as `/dev/zero` is no longer read up to the 512 MiB limit. The CLI still reads such
+  files, a pipe included.
 
 ### Security
 

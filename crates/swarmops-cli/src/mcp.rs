@@ -78,9 +78,10 @@
 //! name or a relative revision resolves when the call runs and so defeats the compare-and-swap,
 //! and an id prefix stops resolving once another changeset shares it (the CLI takes any
 //! revision for `--expect`, and its help warns why not to); and a `commit` whose `{"file":
-//! <path>}` content names a relative path, or this process's own stdin or stdout, is refused,
-//! since the server would read the file from a working directory the agent cannot see, or
-//! block on the pipe that carries the protocol. A mutation then
+//! <path>}` content names a relative path, this process's own stdin or stdout, or anything but
+//! a regular file, is refused, since the server would read the file from a working directory
+//! the agent cannot see, block on the pipe that carries the protocol, or block on a FIFO or a
+//! device. A mutation then
 //! needs the server's identity, and last the store is opened and the operation runs; a
 //! `verify` that finds problems is `E_STORE_CORRUPT`, as `swarmops verify` is, and a panic in
 //! the operation is `E_INTERNAL`. The tool result holds the envelope the CLI prints for the
@@ -106,8 +107,9 @@
 //! there is each call's `E_NOT_A_REPO`, and the server serves on. The identity is `--as`, else
 //! `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI; a mutation without one is
 //! `E_IDENTITY_REQUIRED`. The client starts the server as its own user, in its own trust
-//! domain, so `{"file": <path>}` content is read here, as the CLI reads it; a relative path, or
-//! one that is this process's own stdin or stdout, is refused ([`Refuse`]). The output flags
+//! domain, so `{"file": <path>}` content is read here, as the CLI reads it; a relative path,
+//! one that is this process's own stdin or stdout, and one that is not a regular file are
+//! refused ([`Refuse`]). The output flags
 //! (`--json`, `--human`, `--pretty`) do not
 //! apply. A command line that parses as `swarmops mcp` but is refused (a usage error in what
 //! follows the word `mcp`, a `SWARMOPS_FORMAT` that is neither `json` nor `human`), and a panic
@@ -117,6 +119,7 @@
 //! mcp`) is a plain usage error of the CLI, whose envelope goes to stdout with exit code 2, and
 //! no server starts either.
 
+use std::fs;
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
@@ -896,8 +899,12 @@ impl Refuse for RefListReq {}
 impl Refuse for VerifyReq {}
 
 /// A change's client file is read by this server, so its path must be absolute (the agent
-/// cannot see the server's working directory) and must not be this process's own stdin or
-/// stdout, which carry the protocol: a read of either would block the session.
+/// cannot see the server's working directory), must not be this process's own stdin or
+/// stdout, which carry the protocol, and must name a regular file, a symlink to one included:
+/// opening a FIFO blocks until something opens it for writing, and a device can block or never
+/// end. A read of any of them would hold up the session, which serves one request at a time.
+/// The path is `stat`ed, never opened; one that cannot be `stat`ed passes, and its read reports
+/// the error.
 impl Refuse for CommitReq {
     fn refuse(&self) -> Result<(), OpError> {
         for (index, change) in self.changes.iter().enumerate() {
@@ -909,14 +916,17 @@ impl Refuse for CommitReq {
                  directory, not yours"
             } else if commands::is_own_stdio(file) {
                 "is this process's own stdin or stdout, which carry the protocol"
+            } else if fs::metadata(file).is_ok_and(|meta| !meta.is_file()) {
+                "is not a regular file (a FIFO, a socket, a device or a directory), which a \
+                 read could block on"
             } else {
                 continue;
             };
             return Err(OpError::new(
                 ErrorCode::InvalidArg,
                 output::printable(&format!(
-                    "change {index} ({:?}): the client file {file:?} {why}: give its absolute \
-                     path, or send the bytes as inline or base64 content",
+                    "change {index} ({:?}): the client file {file:?} {why}: name a regular file \
+                     by its absolute path, or send the bytes as inline or base64 content",
                     change.path
                 )),
             )
@@ -1682,12 +1692,9 @@ mod tests {
         }
     }
 
-    /// A commit's client file must be an absolute path, since the server would read a relative
-    /// one from its own working directory, which the agent cannot see; and not this process's
-    /// own stdin or stdout, which carry the protocol. The refusal names the change and the file.
-    #[test]
-    fn a_client_file_must_be_absolute_and_not_this_process_s_stdio() {
-        let commit = |file: &str| CommitReq {
+    /// A commit of two puts, the second of whose content is the client file `file`.
+    fn naming(file: &str) -> CommitReq {
+        CommitReq {
             parent: None,
             changes: vec![
                 ChangeInput {
@@ -1705,9 +1712,16 @@ mod tests {
             ],
             message: "x".to_owned(),
             allow_empty: false,
-        };
+        }
+    }
+
+    /// A commit's client file must be an absolute path, since the server would read a relative
+    /// one from its own working directory, which the agent cannot see; and not this process's
+    /// own stdin or stdout, which carry the protocol. The refusal names the change and the file.
+    #[test]
+    fn a_client_file_must_be_absolute_and_not_this_process_s_stdio() {
         let refused = |file: &str, why: &str| {
-            let error = commit(file).refuse().expect_err(file);
+            let error = naming(file).refuse().expect_err(file);
             assert_eq!((error.code.as_str(), error.exit), ("E_INVALID_ARG", 2));
             assert_eq!(
                 Value::Object(error.details),
@@ -1730,11 +1744,58 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let regular = dir.path().join("lib.rs");
         std::fs::write(&regular, "pub fn f() {}\n").unwrap();
-        assert!(commit(regular.to_str().unwrap()).refuse().is_ok());
+        assert!(naming(regular.to_str().unwrap()).refuse().is_ok());
         assert!(
-            commit("/no/such/file").refuse().is_ok(),
+            naming("/no/such/file").refuse().is_ok(),
             "read later, reported then"
         );
+    }
+
+    /// A commit's client file must be a regular file, a symlink to one included: a FIFO blocks
+    /// the open until something opens it for writing, a socket cannot be opened, and a device
+    /// can block or never end, so the server refuses each before it reads anything. A missing
+    /// file is read later, and reported then.
+    #[test]
+    fn a_client_file_must_be_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("pipe");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.unwrap().success(), "mkfifo");
+        let to_fifo = dir.path().join("to-pipe");
+        std::os::unix::fs::symlink(&fifo, &to_fifo).unwrap();
+        let socket = dir.path().join("sock");
+        let _listening = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        // Not /dev/null: under nextest it is this test's own stdin, which the stdio rule
+        // refuses first.
+        for file in [
+            fifo.as_path(),
+            to_fifo.as_path(),
+            socket.as_path(),
+            Path::new("/dev/zero"),
+            dir.path(),
+        ] {
+            let file = file.to_str().unwrap();
+            let error = naming(file).refuse().expect_err(file);
+            assert_eq!((error.code.as_str(), error.exit), ("E_INVALID_ARG", 2));
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"index": 1, "path": "src/lib.rs", "file": file})
+            );
+            assert!(
+                error.message.contains("not a regular file"),
+                "{file}: {}",
+                error.message
+            );
+            assert!(!error.message.contains('\n'), "{}", error.message);
+        }
+        let regular = dir.path().join("lib.rs");
+        std::fs::write(&regular, "pub fn f() {}\n").unwrap();
+        let to_regular = dir.path().join("to-lib.rs");
+        std::os::unix::fs::symlink(&regular, &to_regular).unwrap();
+        for file in [regular, to_regular, dir.path().join("missing")] {
+            let named = naming(file.to_str().unwrap());
+            assert!(named.refuse().is_ok(), "{}", file.display());
+        }
     }
 
     /// A panic in a tool's operation is that call's `E_INTERNAL` envelope, with the store the
