@@ -270,6 +270,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `Watched(watcher, fs)` runs its watcher over any filesystem, and a watcher sees a call's
   method as an `FsMethod`. The test kit's CLI and repository helpers sit behind its default
   features `cli` and `repo`, so the fuzz crate takes it with `default-features = false`.
+- The order checker's W1 also refuses a cut below what the journal vouches for: of
+  `journal.log` into the frames `journal.off` lists, or of `journal.off` below an entry the
+  process synced or found there (the zeroed entries past frame 0 at its end aside, which list no
+  frame). Before, `truncate` was only followed, and a wrong cut showed only when a sweep's oracle
+  found the frames lost.
 
 ### Fixed
 

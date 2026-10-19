@@ -185,6 +185,39 @@ fn w1_a_failed_sync_is_not_made_good_by_a_later_one() {
     });
 }
 
+/// A cut never takes what the journal vouches for: of `journal.log`, a frame `journal.off`
+/// lists; of `journal.off`, an entry this process synced, or found there when it first saw the
+/// file (entry 0 lists frame 0 at offset 0, whatever it holds). A torn tail past the listed
+/// frames may go, and so may a partial entry, and the zeroed entries past frame 0 that a power
+/// loss leaves at the end of `journal.off`, which list no frame (the tail check drops them).
+#[test]
+fn w1_a_cut_never_takes_a_listed_frame_or_a_synced_entry() {
+    let (_dir, root) = root();
+    let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
+    let fs = OrderCheckFs::new(RealFs);
+    let at = fs.append_durable(&log, &compacted()).unwrap();
+    fs.append_durable(&off, &at.to_le_bytes()).unwrap();
+    let end = at + to_u64(compacted().len());
+    assert_breaks("W1", || fs.truncate(&log, end - 1).unwrap());
+    assert_breaks("W1", || fs.truncate(&off, 4).unwrap());
+    fs.append(&log, b"torn").unwrap();
+    fs.truncate(&log, end).unwrap();
+    fs.append(&off, &[1, 2, 3]).unwrap();
+    fs.truncate(&off, ENTRY_LEN).unwrap();
+
+    // What a crash left, as a new process finds it: two listed frames, then a zeroed entry.
+    let frames = [compacted(), compacted()].concat();
+    fs::write(&log, &frames).unwrap();
+    let second = to_u64(compacted().len());
+    let entries = [0, second, 0].map(u64::to_le_bytes).concat();
+    fs::write(&off, &entries).unwrap();
+    let fs = OrderCheckFs::new(RealFs);
+    assert_breaks("W1", || fs.truncate(&off, ENTRY_LEN).unwrap());
+    assert_breaks("W1", || fs.truncate(&log, second).unwrap());
+    fs.truncate(&off, 2 * ENTRY_LEN).unwrap();
+    fs.truncate(&log, to_u64(frames.len())).unwrap();
+}
+
 #[test]
 fn w2_a_ref_moves_only_once_its_frame_is_durable() {
     let (_dir, root) = root();

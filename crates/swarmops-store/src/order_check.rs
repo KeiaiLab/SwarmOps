@@ -18,7 +18,11 @@
 //!   failed sync has left some of its bytes not durable: Linux reports a failed writeback once,
 //!   to the sync that meets it, and may drop the pages it could not write, so a later sync that
 //!   succeeds does not make those bytes durable, and a frame or an entry written after them
-//!   would outlive them in a power loss.
+//!   would outlive them in a power loss. Nor is either file cut below what the journal vouches
+//!   for: `journal.log` into the frames `journal.off` lists, `journal.off` below an entry this
+//!   process synced or found there when it first saw the file (the zeroed entries past frame 0
+//!   that a power loss leaves at its end list no frame, and the tail check drops them, as it
+//!   does a partial entry).
 //! - **W2, the refs.** A ref file is replaced or removed only while every byte of `journal.log`
 //!   is durable: the frame that moves the ref is durable before its projection changes.
 //! - **W3, the checkpoint.** `journal.ckpt` moves to an offset past 0 only when the five index
@@ -394,6 +398,35 @@ impl State {
         None
     }
 
+    /// W1 for a cut to `len` of `path`, the journal file `file` of `meta`: `journal.log` is
+    /// never cut into the frames `journal.off` lists, nor `journal.off` below an entry this
+    /// process synced or found there when it first saw the file, but for the zeroed entries past
+    /// frame 0 at its end, which list no frame.
+    fn journal_cut(&self, file: JournalFile, path: &Path, meta: &Path, len: u64) -> Option<String> {
+        match file {
+            JournalFile::Log => {
+                let listed = listed_end(meta);
+                (len < listed).then(|| {
+                    format!(
+                        "it cuts journal.log to {len}, into the frames journal.off lists (to \
+                         {listed}): a committed frame would be lost"
+                    )
+                })
+            }
+            JournalFile::Off => {
+                let synced = self.files.get(path).map_or(0, |file| file.durable_to);
+                let listing = listing_entries_end(path, synced);
+                (len < listing).then(|| {
+                    format!(
+                        "it cuts journal.off to {len}, below the entries synced or found there \
+                         (to {listing}): a committed frame would no longer be listed"
+                    )
+                })
+            }
+            JournalFile::Ckpt => None,
+        }
+    }
+
     /// W1 and W5 for an append of `frame` to `log`, the `journal.log` of `meta`: the rule
     /// broken, and how.
     fn frame(&self, log: &Path, meta: &Path, frame: &[u8]) -> Option<(Rule, String)> {
@@ -669,11 +702,12 @@ fn frame_end(log: &Path, offset: u64) -> Option<u64> {
     Some(offset + HEADER_LEN + u64::from(len))
 }
 
-/// Where the last frame `journal.off` of `meta` lists ends, as the files are now; 0 if it lists
-/// none, or its last entry or that frame's header cannot be read.
+/// Where the last frame `journal.off` of `meta` lists ends, as the files are now (the zeroed
+/// entries past frame 0 at its end list none: [`listing_entries_end`]); 0 if it lists none, or
+/// its last entry or that frame's header cannot be read.
 fn listed_end(meta: &Path) -> u64 {
     let off = meta.join("journal.off");
-    let listed = real_len(&off) / ENTRY_LEN;
+    let listed = listing_entries_end(&off, real_len(&off)) / ENTRY_LEN;
     let Some(last) = listed.checked_sub(1) else {
         return 0;
     };
@@ -681,6 +715,19 @@ fn listed_end(meta: &Path) -> u64 {
         .and_then(|entry| <[u8; 8]>::try_from(entry).ok())
         .and_then(|entry| frame_end(&meta.join("journal.log"), u64::from_le_bytes(entry)))
         .unwrap_or(0)
+}
+
+/// Where the last entry of `off`, a `journal.off`, among its first `upto` bytes that lists a
+/// frame ends: a partial entry lists none, nor do the zeroed entries past frame 0 at the end
+/// (what a zero-filled block leaves: no frame but the first starts at 0), which the tail check
+/// drops; entry 0 lists frame 0 whatever it holds. 0 if there is no entry.
+fn listing_entries_end(off: &Path, upto: u64) -> u64 {
+    let whole = upto.min(real_len(off)) / ENTRY_LEN;
+    let last = (1..whole)
+        .rev()
+        .find(|&n| read_at(off, n * ENTRY_LEN, 8).is_none_or(|entry| entry != [0; 8]))
+        .unwrap_or(0);
+    whole.min(last + 1) * ENTRY_LEN
 }
 
 /// The name of `path`'s last component, if it is UTF-8.
@@ -887,7 +934,12 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
-        self.state().track(path);
+        let violation = {
+            let mut state = self.state();
+            state.track(path);
+            journal_file(path).and_then(|(file, meta)| state.journal_cut(file, path, meta, len))
+        };
+        verdict(Rule::W1, FsMethod::Truncate, &[path], violation);
         let result = self.inner.truncate(path, len);
         self.state().cut(path, result.is_ok());
         result
