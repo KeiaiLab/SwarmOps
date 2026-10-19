@@ -19,12 +19,14 @@ pub use identity::Identity;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
     CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
-    DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, FileContent, FileKind,
-    GitImportReq, GitImportResp, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, LossyClass,
-    LossyCommitOut, ModeInput, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp,
-    RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps,
-    TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
+    DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, EntryKindOut,
+    FileContent, FileKind, GitImportReq, GitImportResp, IdentityInfo, InfoReq, InitReq, LogPage,
+    LogReq, LossyClass, LossyCommitOut, ModeInput, PathHistoryEntry, PathHistoryPage,
+    PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefOut,
+    RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut,
+    TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
+pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 pub use rev::Rev;
 
 /// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
@@ -65,6 +67,11 @@ pub fn schema_for_all() -> serde_json::Value {
         ModeInput,
         CommitResp,
         Advanced,
+        // blob_put, blob_has.
+        BlobPutReq,
+        BlobPutResp,
+        BlobHasReq,
+        BlobHasResp,
         // read_file, read_tree.
         ReadFileReq,
         FileContent,
@@ -84,6 +91,10 @@ pub fn schema_for_all() -> serde_json::Value {
         LogReq,
         LogPage,
         ChangesetSummary,
+        // path_history.
+        PathHistoryReq,
+        PathHistoryPage,
+        PathHistoryEntry,
         // ref list, ref set, ref delete, verify.
         RefListReq,
         RefListResp,

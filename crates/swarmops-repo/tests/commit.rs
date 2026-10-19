@@ -1912,3 +1912,220 @@ mod objects_once {
         assert_eq!(repo.verify(true).unwrap().problems, []);
     }
 }
+
+/// Commits that name a blob the store holds by its id (`ChangeOp::PutBlob`, storage spec §4):
+/// the commit neither reads the blob nor writes it again, but retains it, so that its flush makes
+/// the blob's name durable before the frame names it; a blob the store lacks, or an object of
+/// another kind under that id, is refused before anything is written. `Repo::put_blob` stores
+/// the content first, outside any commit.
+mod blob_by_id {
+    use swarmops_core::BlobId;
+    use swarmops_repo::BlobPut;
+    use swarmops_testkit::fs::RecordingFs;
+    use swarmops_testkit::repo::put_blob;
+
+    use super::*;
+
+    /// The frame's append, which every committed changeset makes.
+    const FRAME: &str = "append_durable meta/journal.log";
+
+    /// What a root commit of `req`, one change at the root that names a blob by id, relies on and
+    /// writes: the blob it names, its root tree and the changeset, built as `Repo::commit` builds
+    /// them (the same as a put of the blob's content).
+    fn named_root_commit_objects(req: &CommitRequest) -> [ObjectId; 3] {
+        let [
+            Change {
+                path: file,
+                op: ChangeOp::PutBlob { kind, id },
+            },
+        ] = &req.changes[..]
+        else {
+            panic!("a request of one blob named by id: {:?}", req.changes);
+        };
+        let root = tree(vec![TreeEntry::leaf(file.as_str(), *kind, *id)]).id();
+        let changeset = Changeset {
+            parents: Vec::new(),
+            root,
+            delta: vec![DeltaEntry {
+                path: file.clone(),
+                op: DeltaOp::Put {
+                    kind: *kind,
+                    id: *id,
+                },
+                renamed_from: None,
+            }],
+            author: req.author.clone(),
+            committer: req.committer.clone(),
+            message: req.message.clone(),
+            extra_headers: Vec::new(),
+            metadata: req.metadata.clone(),
+        };
+        [id.0, root.0, changeset.id().unwrap().0]
+    }
+
+    /// A root commit that names, by id, the blob of the content it comes with, at `named.bin`:
+    /// the content picked so that the blob lies in a fan-out directory apart from the commit's
+    /// root tree's and changeset's, so that only the blob's retain can have its flush fsync it.
+    fn a_blob_apart() -> (CommitRequest, Vec<u8>) {
+        (0..10_000_u32)
+            .map(|i| {
+                let content = format!("named by id {i}\n").into_bytes();
+                (
+                    request(&[], vec![put_blob("named.bin", blob(&content))]),
+                    content,
+                )
+            })
+            .find(|(req, _)| {
+                let [named, root, changeset] = named_root_commit_objects(req);
+                fanout(named) != fanout(root) && fanout(named) != fanout(changeset)
+            })
+            .expect("most candidates fit")
+    }
+
+    /// Where call `call` is among `calls`.
+    #[track_caller]
+    fn at(calls: &[String], call: &str) -> usize {
+        calls
+            .iter()
+            .position(|made| made == call)
+            .unwrap_or_else(|| panic!("no {call:?} among {calls:?}"))
+    }
+
+    /// The calls of `calls` that change something: every one but a read, a lookup and a
+    /// length.
+    fn changing(calls: &[String]) -> Vec<&String> {
+        calls
+            .iter()
+            .filter(|call| {
+                !["read ", "exists ", "file_len "]
+                    .iter()
+                    .any(|r| call.starts_with(r))
+            })
+            .collect()
+    }
+
+    /// `Repo::put_blob` stores a blob outside any commit, durable on return, and says whether
+    /// it placed the file; a commit then names it by id. The commit makes no call on the blob's
+    /// file (it neither looks it up through the store's filesystem nor writes it), counts no
+    /// blob written, and fsyncs the blob's fan-out directory in its flush, before its frame,
+    /// although none of its own objects lies there: it relies on a blob it did not write. The
+    /// changeset is the one a put of the content makes.
+    #[test]
+    fn a_commit_names_a_stored_blob_by_id() {
+        let (_dir, root, repo) = new_repo();
+        let (req, content) = a_blob_apart();
+        let size = u64::try_from(content.len()).unwrap();
+        let stored = repo.put_blob(content.clone()).unwrap();
+        let id = blob(&content);
+        assert_eq!(
+            stored,
+            BlobPut {
+                id,
+                size,
+                written: true
+            }
+        );
+        let again = repo.put_blob(content.clone()).unwrap();
+        assert_eq!(
+            again,
+            BlobPut {
+                written: false,
+                ..stored
+            },
+            "stored already"
+        );
+        drop(repo);
+
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(root.as_std_path().to_path_buf());
+        let repo = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
+        calls();
+        let out = repo.commit(req.clone()).unwrap();
+        let made = calls();
+        let hex = id.to_string();
+        let file = format!("objects/{}/{}", &hex[..2], &hex[2..]);
+        assert!(
+            !made.iter().any(|call| call.ends_with(&file)),
+            "no call on the blob's file: {made:?}"
+        );
+        let fsync = format!("fsync_dir {}", fanout(id.0));
+        assert!(
+            at(&made, &fsync) < at(&made, FRAME),
+            "the blob's directory is fsynced before the frame: {made:?}"
+        );
+        let [_, tree_id, changeset] = named_root_commit_objects(&req);
+        assert_eq!((out.root.0, out.id.0), (tree_id, changeset));
+        assert_eq!(
+            (out.files_changed, out.blobs_written, out.trees_written),
+            (1, 0, 1)
+        );
+        assert_eq!(
+            repo.read_blob_at(out.id, &path("named.bin")).unwrap(),
+            Some((LeafKind::File, id, content.clone()))
+        );
+        // The same request with the content itself makes the same changeset.
+        let by_content = CommitRequest {
+            changes: vec![put("named.bin", &content)],
+            ..req
+        };
+        let (_dir2, _root2, twin) = new_repo();
+        assert_eq!(twin.commit(by_content).unwrap().id, out.id);
+        assert_eq!(repo.verify(true).unwrap().problems, []);
+    }
+
+    /// A change that names by id a blob the store lacks, a tree, or a changeset is
+    /// `RepoError::MissingBlob`, with its path and the id, and the commit writes nothing: no
+    /// object (not even the new blob of the put beside it), no frame, no call that changes a
+    /// file.
+    #[test]
+    fn a_commit_naming_a_missing_blob_or_a_tree_writes_nothing() {
+        let (_dir, root, repo) = new_repo();
+        let c1 = commit(&repo, &[], vec![put("a.txt", b"a")]);
+        drop(repo);
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(root.as_std_path().to_path_buf());
+        let repo = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
+        let (objects, frames) = (object_files(&root), journal_frames(&root));
+        let named = [
+            (blob(b"never stored"), "a blob the store lacks"),
+            (BlobId(c1.root.0), "a tree"),
+            (BlobId(c1.id.0), "a changeset"),
+        ];
+        for (id, what) in named {
+            calls();
+            let req = request(
+                &[c1.id],
+                vec![put("new.txt", b"new"), put_blob("named.bin", id)],
+            );
+            match repo.commit(req) {
+                Err(RepoError::MissingBlob { path: at, id: got }) => {
+                    assert_eq!((at, got), (path("named.bin"), id), "{what}");
+                }
+                other => panic!("{what}: expected MissingBlob, got {other:?}"),
+            }
+            let made = calls();
+            assert_eq!(
+                changing(&made),
+                Vec::<&String>::new(),
+                "{what}: nothing written: {made:?}"
+            );
+            assert_eq!(object_files(&root), objects, "{what}");
+            assert_eq!(journal_frames(&root), frames, "{what}");
+        }
+        assert_eq!(repo.verify(true).unwrap().problems, []);
+    }
+
+    /// `Repo::has_blob` says whether the store holds a blob of an id, by the object's header: a
+    /// tree, a changeset and an id the store lacks are no blob.
+    #[test]
+    fn has_blob_finds_blobs_only() {
+        let (_dir, _root, repo) = new_repo();
+        let c1 = commit(&repo, &[], vec![put("a.txt", b"a")]);
+        let stored = repo.put_blob(b"stored".to_vec()).unwrap().id;
+        assert!(repo.has_blob(stored).unwrap());
+        assert!(repo.has_blob(blob(b"a")).unwrap(), "the commit's blob");
+        for id in [blob(b"never stored"), BlobId(c1.root.0), BlobId(c1.id.0)] {
+            assert!(!repo.has_blob(id).unwrap(), "{id}");
+        }
+    }
+}

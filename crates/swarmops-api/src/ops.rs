@@ -6,9 +6,10 @@
 //! Absent options in these types are omitted, never written as null (unlike `OpError.hint`,
 //! which is always written). Ids are lowercase hex. A response that could grow without bound is
 //! capped by its request (`max_bytes`, `limit`, `max_changes`) and says when it was cut
-//! (`truncated`, `changes_truncated`); `read_tree` and `log` also return a `cursor` that resumes
-//! after the page. The default page of `read_tree`, `show` and `log` stays within the operations
-//! spec's 64 KiB target for a default response (§9); `read_file`'s 1 MiB is the spec's own.
+//! (`truncated`, `changes_truncated`); `read_tree`, `log` and `path_history` also return a
+//! `cursor` that resumes after the page. The default page of `read_tree`, `show`, `log` and
+//! `path_history` stays within the operations spec's 64 KiB target for a default response (§9);
+//! `read_file`'s 1 MiB is the spec's own.
 //!
 //! No store-facing type carries a filesystem path. The three exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, [`InitReq::path`],
@@ -17,8 +18,8 @@
 //! caller's host and is not a [`StoreOps`] method either (nor an MCP tool).
 //!
 //! Not in M1 yet:
-//! - M2: `ContentInput::Blob`, `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each
-//!   `TreeEntryOut`, and `LogReq.paths` and `LogReq.first_parent`;
+//! - M2: `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each `TreeEntryOut`, and
+//!   `LogReq.first_parent`;
 //! - M4 (with land): `idempotency_key` and `replayed` on `commit`;
 //! - M4/M7: `lander`, `land_key`, `cr` and `annotations` on `ChangesetDetail` (`show`);
 //! - M5: `RepoInfo.workspaces`.
@@ -39,6 +40,10 @@ pub const DEFAULT_MAX_BYTES: u64 = 1024 * 1024;
 /// length.
 pub const DEFAULT_LOG_LIMIT: usize = 50;
 
+/// The default [`PathHistoryReq::limit`]: 50 changesets, a page of about 16 KB with titles of
+/// typical length.
+pub const DEFAULT_PATH_HISTORY_LIMIT: usize = 50;
+
 /// The default [`ReadTreeReq::limit`]: 500 entries. An entry prints in about 100 bytes besides
 /// its name, so a default page stays under the 64 KiB target for names of up to about 30 bytes.
 pub const DEFAULT_READ_TREE_LIMIT: usize = 500;
@@ -54,6 +59,10 @@ fn default_max_bytes() -> u64 {
 
 fn default_log_limit() -> usize {
     DEFAULT_LOG_LIMIT
+}
+
+fn default_path_history_limit() -> usize {
+    DEFAULT_PATH_HISTORY_LIMIT
 }
 
 fn default_read_tree_limit() -> usize {
@@ -120,7 +129,11 @@ pub struct CommitReq {
     /// limitation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<Rev>,
-    /// What to change, relative to the parent.
+    /// What to change, relative to the parent. The contents hold at most 1 GiB together, by the
+    /// sizes they declare (inline text's length, the bytes base64 decodes to, a client file's
+    /// length; a `blob` named by id counts nothing): more is `E_TOO_LARGE` with `scope`
+    /// `commit`, refused before any content is read. Store large contents with `blob_put` first,
+    /// and name them by id.
     pub changes: Vec<ChangeInput>,
     /// The commit message.
     pub message: String,
@@ -149,8 +162,8 @@ pub struct ChangeInput {
     pub path: String,
     /// Whether to write the path or remove it.
     pub op: ChangeOp,
-    /// The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`
-    /// takes none.
+    /// The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs
+    /// it, a `delete` takes none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentInput>,
     /// The kind of entry a `put` writes; `file` when omitted.
@@ -176,6 +189,11 @@ pub enum ContentInput {
     Inline(String),
     /// Bytes in standard, padded base64.
     Base64(String),
+    /// A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the
+    /// commit neither sends nor reads its bytes. An id the store holds no blob under (none, or
+    /// a tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes
+    /// the other forms only.
+    Blob(String),
     /// A file on the client's machine. The client reads it and sends its bytes, so the store is
     /// never asked to read a path.
     File(String),
@@ -234,6 +252,44 @@ pub struct Advanced {
     /// The ref held the changeset already, from an identical request before, so nothing was
     /// written and a replay is safe.
     pub already_applied: bool,
+}
+
+/// `blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's
+/// change list can name it by its id (`{"blob": id}`) instead of carrying its bytes. The blob is
+/// durable once the call returns; until a commit names it, nothing references it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobPutReq {
+    /// The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with
+    /// `scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`
+    /// here.
+    pub content: ContentInput,
+}
+
+/// `blob_put`: the blob stored.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobPutResp {
+    /// The blob's id, which a change names it by: `{"blob": id}`.
+    pub blob: String,
+    /// The content's size in bytes.
+    pub size: u64,
+    /// Whether this call placed the blob in the object store; false when the store held it
+    /// already, or a concurrent writer placed it first.
+    pub written: bool,
+}
+
+/// `blob_has` (CLI `blob has`): which of some blobs the store holds.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobHasReq {
+    /// The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.
+    pub ids: Vec<String>,
+}
+
+/// `blob_has`: the blobs the store holds, of those asked for.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobHasResp {
+    /// The ids of `ids` that the store holds a blob under, in lowercase hex, in the order first
+    /// given, each once; an id of another kind of object (a tree, a changeset) is not among them.
+    pub present: Vec<String>,
 }
 
 /// `read_file` (CLI `cat`): read one file at a revision, without a checkout.
@@ -457,6 +513,11 @@ pub struct LogReq {
     /// changeset it names, and `rev` is not used.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
+    /// Only the changesets that change one of these paths: a file (its content or kind, or
+    /// whether it is there), or a directory and anything below it; one trailing `/` is taken.
+    /// Omitted or empty for every changeset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 
 /// `log`: a page of changesets, newest first, following first parents.
@@ -480,6 +541,64 @@ pub struct ChangesetSummary {
     /// The parents' ids, mainline parent first.
     pub parents: Vec<String>,
     /// The agent that wrote it, as `show` gives `author.agent`.
+    pub author_agent: String,
+    /// When it was recorded: the committer signature's time, in Unix milliseconds.
+    pub created_at: u64,
+    /// The message's first line.
+    pub title: String,
+}
+
+/// `path_history` (CLI `history`): the changesets that changed what a path holds, newest first,
+/// following first parents, a page at a time.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct PathHistoryReq {
+    /// Where to start; `main` when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rev: Option<Rev>,
+    /// The repository path: a file, whose history is that of its content and kind, or a
+    /// directory, whose history is that of everything below it. One trailing `/` is taken.
+    pub path: String,
+    /// The most entries to return: at least 1 (0 is `E_INVALID_ARG`).
+    #[serde(default = "default_path_history_limit")]
+    #[schemars(range(min = 1))]
+    pub limit: usize,
+    /// Resume a history: the previous page's `cursor`. Pass it back exactly as returned; do not
+    /// construct it (cursors are opaque). This page continues from the first parent of the
+    /// changeset it names, and `rev` is not used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// `path_history` (CLI `history`): a page of a path's history, newest first.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct PathHistoryPage {
+    /// The path, without a trailing `/`.
+    pub path: String,
+    /// The changesets that changed what it holds.
+    pub entries: Vec<PathHistoryEntry>,
+    /// Whether an older changeset that changed it follows this page.
+    pub truncated: bool,
+    /// When `truncated`: where the next page continues. Opaque: pass it back as given, as the
+    /// next request's `cursor`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// One changeset of a path's history, and what the path holds after it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct PathHistoryEntry {
+    /// The changeset's id.
+    pub changeset: String,
+    /// `put` when something is at the path after the changeset, `delete` when nothing is.
+    pub op: ChangeOp,
+    /// What is at the path after it; omitted after a `delete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<EntryKindOut>,
+    /// A blob id for a file, an executable or a symlink; a tree id for a directory; omitted after
+    /// a `delete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// The agent that wrote the changeset, as `log` gives it.
     pub author_agent: String,
     /// When it was recorded: the committer signature's time, in Unix milliseconds.
     pub created_at: u64,
@@ -817,6 +936,14 @@ pub trait StoreOps {
     /// leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
 
+    /// Stores content as a blob, outside any commit, for a commit to name by its id (CLI `blob
+    /// put`). A mutation, so it takes the caller's identity, which it records nowhere: a blob has
+    /// no metadata.
+    fn blob_put(&self, who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError>;
+
+    /// Which of the given blob ids the store holds blobs under (CLI `blob has`).
+    fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError>;
+
     /// Reads one file at a revision (CLI `cat`).
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError>;
 
@@ -826,8 +953,13 @@ pub trait StoreOps {
     /// One changeset in full (CLI `show`).
     fn show(&self, req: ShowReq) -> Result<ChangesetDetail, OpError>;
 
-    /// History along first parents, newest first (CLI `log`).
+    /// History along first parents, newest first (CLI `log`); with `paths`, only the changesets
+    /// that change them.
     fn log(&self, req: LogReq) -> Result<LogPage, OpError>;
+
+    /// The changesets that changed what a path holds, newest first, along first parents (CLI
+    /// `history`).
+    fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError>;
 
     /// Every ref (CLI `ref list`).
     fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError>;

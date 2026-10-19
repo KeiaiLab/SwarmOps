@@ -139,6 +139,11 @@ impl PathFilter {
             }
         }
     }
+
+    /// The prefixes, sorted by bytes, each once; `None` for every path ([`PathFilter::all`]).
+    pub fn prefixes(&self) -> Option<&[RepoPath]> {
+        self.prefixes.as_deref()
+    }
 }
 
 /// What a filter reaches of one directory.

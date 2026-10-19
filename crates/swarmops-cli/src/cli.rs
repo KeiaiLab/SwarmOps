@@ -7,7 +7,8 @@ use std::path::Path;
 use clap::error::ErrorKind;
 use clap::{ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use swarmops_api::{
-    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT,
+    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT,
+    DEFAULT_READ_TREE_LIMIT,
 };
 
 use crate::output::printable;
@@ -137,7 +138,7 @@ pub enum Command {
         /// The commit message.
         #[arg(short, long)]
         message: String,
-        /// A JSON file holding an array of changes, or - for stdin.
+        /// A JSON file holding an array of changes, or - for stdin: at most 64 MiB.
         #[arg(long, value_name = "FILE")]
         changes: String,
         /// The changeset to commit on top of (default: main's head, if main exists).
@@ -149,6 +150,10 @@ pub enum Command {
         #[arg(long, value_name = "REF", help = ADVANCE_HELP, long_help = ADVANCE_LONG_HELP)]
         advance: Option<String>,
     },
+    /// Store content as a blob for a commit to name by its id, or ask which blobs the store
+    /// holds.
+    #[command(subcommand)]
+    Blob(BlobCommand),
     /// Print one file at a revision.
     Cat {
         // Split at the first ':' by commands::split_target: M1's revision grammar has no ':'.
@@ -191,6 +196,22 @@ pub enum Command {
         /// Resume a log: the previous page's cursor, exactly as it was returned.
         #[arg(long)]
         cursor: Option<String>,
+        /// Only the changesets that change PATH, or anything below it; give it again for more.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
+    },
+    /// List the changesets that changed a path, newest first, along first parents.
+    History {
+        // Split at the first ':' as `cat`'s target is (see there).
+        /// The revision and the path (a file, or a directory), split at the first ':'.
+        #[arg(value_name = "REV:PATH")]
+        target: String,
+        /// The most changesets to list.
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_PATH_HISTORY_LIMIT)]
+        limit: usize,
+        /// Resume a history: the previous page's cursor, exactly as it was returned.
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// List refs, or move one by compare-and-swap.
     #[command(subcommand)]
@@ -203,14 +224,33 @@ pub enum Command {
     },
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
-    /// One tool per operation (repo_info, read_file, read_tree, show, log, ref_list, ref_set,
-    /// ref_delete, commit, verify), each taking the operation's request as its arguments and
-    /// returning the envelope the other commands print. The store and the identity are the
-    /// server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28,
-    /// and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope:
-    /// stdout carries the protocol until stdin ends, and a command line it refuses has its
-    /// envelope on stderr.
+    /// One tool per operation (repo_info, read_file, read_tree, show, log, path_history, ref_list,
+    /// ref_set, ref_delete, commit, blob_put, blob_has, verify), each taking the operation's
+    /// request as its arguments and returning the envelope the other commands print. The store and
+    /// the identity are the server's, --repo and --as or their variables, never a call's. Speaks
+    /// MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints
+    /// no envelope: stdout carries the protocol until stdin ends, and a command line it refuses has
+    /// its envelope on stderr.
     Mcp,
+}
+
+/// `blob`'s operations.
+#[derive(Subcommand, Debug)]
+pub enum BlobCommand {
+    /// Store FILE's content as a blob, outside any commit, and print its id, which a change
+    /// names it by: {"blob": ID}. A change list holds at most 64 MiB and a commit's contents
+    /// 1 GiB together; a blob named by id counts toward neither.
+    Put {
+        /// The file whose content to store, or - for stdin.
+        #[arg(value_name = "FILE")]
+        file: String,
+    },
+    /// Of the IDs given, list those the store holds blobs under.
+    Has {
+        /// Blob ids, 64 hex digits each.
+        #[arg(value_name = "ID", required = true)]
+        ids: Vec<String>,
+    },
 }
 
 /// `ref`'s operations.
@@ -360,10 +400,13 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["whoami"] => "whoami",
         ["schema"] => "schema",
         ["commit"] => "commit",
+        ["blob", "put"] => "blob_put",
+        ["blob", "has"] => "blob_has",
         ["cat"] => "read_file",
         ["ls"] => "read_tree",
         ["show"] => "show",
         ["log"] => "log",
+        ["history"] => "path_history",
         ["ref", "list"] => "ref_list",
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
@@ -397,6 +440,7 @@ fn command() -> clap::Command {
     Cli::command()
         .arg_required_else_help(false)
         .mut_subcommand("ref", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("blob", |cmd| cmd.arg_required_else_help(false))
 }
 
 /// Of `--json` and `--human`, keeps the one given last: clap's `overrides_with` settles them
@@ -476,11 +520,12 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 14);
+        assert_eq!(ops.len(), 17);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 14, "two subcommands name one op");
+        assert_eq!(ops.len(), 17, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
+        assert_eq!(op_name(&["blob"]), None);
     }
 
     #[test]
@@ -533,7 +578,7 @@ mod tests {
             panic!("a usage error");
         };
         assert_eq!(path, Vec::<String>::new());
-        for line in [&[][..], &["ref"]] {
+        for line in [&[][..], &["ref"], &["blob"]] {
             let Parsed::Usage { error, .. } = parse(&args(line)) else {
                 panic!("{line:?}: a usage error, not a help screen");
             };

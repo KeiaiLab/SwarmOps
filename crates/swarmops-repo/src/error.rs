@@ -2,7 +2,7 @@
 
 use std::io;
 
-use swarmops_core::{ChangesetId, CodecError, ObjectId, ObjectKind, RepoPath};
+use swarmops_core::{BlobId, ChangesetId, CodecError, ObjectId, ObjectKind, RepoPath};
 use swarmops_store::{IoFailure, Recovered, StoreError};
 use thiserror::Error;
 
@@ -96,6 +96,16 @@ pub enum RepoError {
         /// The path named twice.
         path: RepoPath,
     },
+    /// A change names by its id a blob the store does not hold: no object of that id, or one
+    /// of another kind ([`crate::ChangeOp::PutBlob`]). Nothing was written; store the content
+    /// first ([`crate::Repo::put_blob`]).
+    #[error("{path}: the store holds no blob {id}")]
+    MissingBlob {
+        /// The path of the change.
+        path: RepoPath,
+        /// The id it names.
+        id: BlobId,
+    },
     /// The store lacks an object that its metadata or its trees reference, or holds an object
     /// of another kind under that id: a damaged store ([`crate::Repo::verify`] says more).
     #[error("the store lacks {kind:?} object {id}")]
@@ -104,6 +114,18 @@ pub enum RepoError {
         id: ObjectId,
         /// The kind the reference expects.
         kind: ObjectKind,
+    },
+    /// A derived value cannot be made ([`crate::derive`]): its derivation is not registered, or
+    /// is refused at registration ([`crate::derive::Registry::register`] says what it refuses),
+    /// the values it needs form a cycle, a call returns `Missing` for a value it was given, or a
+    /// key or a value does not encode or decode. Its inputs are immutable, so asking again fails
+    /// again: a bug of the derivation.
+    #[error("derivation {name}: {why}")]
+    Derived {
+        /// The derivation's name ([`crate::derive::Derivation::NAME`]).
+        name: String,
+        /// What went wrong, as one line.
+        why: String,
     },
 }
 

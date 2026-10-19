@@ -7,7 +7,12 @@
 //!    store's [`StoreError::Limit`], as it gives at insert), distinct and in the store
 //!    ([`RepoError::UnknownParent`]), the name of the ref to advance, if any, a ref name
 //!    ([`RepoError::RefName`]), and no metadata key that ends in `:b64`
-//!    ([`RepoError::ReservedMetadataKey`], [`check_metadata`]).
+//!    ([`RepoError::ReservedMetadataKey`], [`check_metadata`]). The parents are looked up in the
+//!    snapshot the caller resolved them in ([`Repo::commit_in`]), or in one of the call's own. Each
+//!    blob a change names by its id ([`ChangeOp::PutBlob`]) is retained ([`ObjectStore::retain`]:
+//!    its header read, its payload neither read nor written), so that step 4's flush makes its name
+//!    durable before the frame names it; an id the store holds no blob under is
+//!    [`RepoError::MissingBlob`].
 //! 2. Hashes each put's content into its blob id, once, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
 //!    or where a directory is, or a delete of a directory, is a [`RepoError::TypeConflict`]; a
@@ -30,6 +35,9 @@
 //!    as it is: the frame was cut back off the journal, so the changeset is not recorded, and
 //!    the same request made again records it. What the transaction's recovery repaired first,
 //!    of what earlier writers left, comes back in [`CommitOutcome::recovered`].
+//!    The insert checks the parents again under the lock: one the store no longer holds (a
+//!    frame a failed sync took back after step 1 saw it) is [`RepoError::UnknownParent`],
+//!    nothing is recorded, and the objects step 4 flushed stay, unreferenced, for GC.
 //!
 //! An identical request computes the same objects and the same changeset: the store has them
 //! all, so nothing is written, and the insert finds the changeset
@@ -53,10 +61,12 @@ use swarmops_core::{
     RepoPath, Signature, TreeId,
 };
 use swarmops_store::{
-    ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, PutOutcome, Recovered, StoreError,
+    ChangesetMeta, InsertOutcome, LimitKind, ObjectStat, ObjectStore, PutOutcome, Recovered,
+    StoreError,
 };
 
 use crate::error::RepoError;
+use crate::read::RepoRead;
 use crate::repo::{Repo, post_commit_warning, ref_error};
 use crate::tree_edit::{Encoded, TreeEdit};
 
@@ -88,6 +98,17 @@ pub enum ChangeOp {
         kind: LeafKind,
         /// The bytes.
         content: Vec<u8>,
+    },
+    /// The path holds blob `id`, which the store holds already ([`Repo::put_blob`] stores one),
+    /// as a `kind` leaf afterwards: as [`ChangeOp::Put`] of the blob's content, which the commit
+    /// neither reads nor writes again, but retains, so that its flush makes the blob's name
+    /// durable before the frame names it. An id the store holds no blob under is
+    /// [`RepoError::MissingBlob`], before anything is written.
+    PutBlob {
+        /// File, Exec or Symlink.
+        kind: LeafKind,
+        /// The blob.
+        id: BlobId,
     },
     /// The file at the path is gone afterwards, and so is each directory that leaves empty.
     Delete,
@@ -141,6 +162,18 @@ pub struct Advanced {
     pub already_applied: bool,
 }
 
+/// What [`Repo::put_blob`] stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobPut {
+    /// The blob's id, which a [`ChangeOp::PutBlob`] names it by.
+    pub id: BlobId,
+    /// The content's size in bytes.
+    pub size: u64,
+    /// Whether this call placed the blob's file ([`PutOutcome::written`]): not when the store
+    /// held it already, nor when a writer racing this one placed it first.
+    pub written: bool,
+}
+
 /// What [`Repo::commit`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitOutcome {
@@ -175,8 +208,30 @@ pub struct CommitOutcome {
 
 impl<O: ObjectStore> Repo<O> {
     /// Applies `req`'s changes to its first parent's tree and records the result as a
-    /// changeset: see [the module documentation](self) for the steps and their errors.
+    /// changeset: see [the module documentation](self) for the steps and their errors. The
+    /// parents are looked up in a snapshot of the call's own, taken only if there are any.
     pub fn commit(&self, req: CommitRequest) -> Result<CommitOutcome, RepoError> {
+        self.commit_with(None, req)
+    }
+
+    /// [`Repo::commit`] in a request that has read `seen`, the snapshot it resolved the parents
+    /// in: the parents are looked up there, so that the request reads in one snapshot (storage
+    /// spec §8), and the insert checks them again under the lock. `seen` is not read after the
+    /// commit, which it does not show.
+    pub fn commit_in(
+        &self,
+        seen: &RepoRead<'_, O>,
+        req: CommitRequest,
+    ) -> Result<CommitOutcome, RepoError> {
+        self.commit_with(Some(seen), req)
+    }
+
+    /// [`Repo::commit`], the parents looked up in `seen` if given, else in a snapshot of its own.
+    fn commit_with(
+        &self,
+        seen: Option<&RepoRead<'_, O>>,
+        req: CommitRequest,
+    ) -> Result<CommitOutcome, RepoError> {
         let CommitRequest {
             parents,
             changes,
@@ -192,7 +247,8 @@ impl<O: ObjectStore> Repo<O> {
         }
         check_metadata(&metadata)?;
         let changes = sorted_changes(changes, allow_empty)?;
-        self.check_parents(&parents)?;
+        self.check_parents(&parents, seen)?;
+        self.retain_named(&changes)?;
         let (candidates, mut contents) = candidate_delta(changes);
         let mut edit = match parents.first() {
             Some(&first) => TreeEdit::new(&self.objects, self.changeset_object(first)?.root)?,
@@ -265,10 +321,62 @@ impl<O: ObjectStore> Repo<O> {
         })
     }
 
+    /// Stores `content` as a blob, outside any transaction: hashed once, written unless the
+    /// store holds it already, and flushed, so that it is durable on return, its name included.
+    /// Nothing in the metadata names it until a commit does ([`ChangeOp::PutBlob`]); until then
+    /// it is unreferenced, as the objects a failed commit flushed are, for GC.
+    pub fn put_blob(&self, content: Vec<u8>) -> Result<BlobPut, RepoError> {
+        let size = to_u64(content.len());
+        let blob = Hashed::new(ObjectKind::Blob, content);
+        let id = BlobId(blob.id());
+        let outcomes = self.objects.put_hashed_batch(vec![blob])?;
+        let written = outcomes.iter().any(|outcome| outcome.written);
+        self.objects.flush()?;
+        Ok(BlobPut { id, size, written })
+    }
+
+    /// Whether the store holds a blob under `id`: an object whose header says it is a blob
+    /// ([`ObjectStore::stat`]), not a tree or a changeset. Reads the header alone, so it verifies
+    /// nothing of the payload.
+    pub fn has_blob(&self, id: BlobId) -> Result<bool, RepoError> {
+        let stat = self.objects.stat(id.0)?;
+        Ok(stat.is_some_and(|stat| stat.kind == ObjectKind::Blob))
+    }
+
+    /// Retains each blob a change of `changes` names by its id ([`ChangeOp::PutBlob`]), so that
+    /// the next flush, the commit's, makes its name durable: [`RepoError::MissingBlob`] for an id
+    /// the store holds no blob under (none, or an object of another kind). Reads each object's
+    /// header alone, and writes nothing.
+    fn retain_named(&self, changes: &[Change]) -> Result<(), RepoError> {
+        for change in changes {
+            let ChangeOp::PutBlob { id, .. } = change.op else {
+                continue;
+            };
+            match self.objects.retain(id.0)? {
+                Some(ObjectStat {
+                    kind: ObjectKind::Blob,
+                    ..
+                }) => {}
+                _ => {
+                    return Err(RepoError::MissingBlob {
+                        path: change.path.clone(),
+                        id,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Refuses more parents than a journal record holds ([`StoreError::Limit`], as the
     /// metadata store gives at insert), a parent listed twice ([`StoreError::DuplicateParent`]),
-    /// or one not in the store ([`RepoError::UnknownParent`]).
-    fn check_parents(&self, parents: &[ChangesetId]) -> Result<(), RepoError> {
+    /// or one not in the store ([`RepoError::UnknownParent`]) as `seen` shows it, or, without
+    /// it, a snapshot taken here (none for a root changeset).
+    fn check_parents(
+        &self,
+        parents: &[ChangesetId],
+        seen: Option<&RepoRead<'_, O>>,
+    ) -> Result<(), RepoError> {
         if parents.len() > MAX_PARENTS {
             return Err(StoreError::Limit {
                 what: LimitKind::Parents,
@@ -285,9 +393,15 @@ impl<O: ObjectStore> Repo<O> {
         if parents.is_empty() {
             return Ok(());
         }
-        let read = self.meta.read()?;
+        let own;
+        let read = if let Some(seen) = seen {
+            seen
+        } else {
+            own = self.snapshot()?;
+            &own
+        };
         for &parent in parents {
-            if read.changeset(parent)?.is_none() {
+            if read.meta.changeset(parent)?.is_none() {
                 return Err(RepoError::UnknownParent(parent));
             }
         }
@@ -399,8 +513,8 @@ fn sorted_changes(mut changes: Vec<Change>, allow_empty: bool) -> Result<Vec<Cha
     Ok(changes)
 }
 
-/// The delta `changes` (sorted, checked) would make, each put naming the blob of its content,
-/// with the contents as blob objects by id: each content hashed once.
+/// The delta `changes` (sorted, checked) would make, each put naming the blob of its content (or
+/// the blob it names by id), with the contents as blob objects by id: each content hashed once.
 fn candidate_delta(changes: Vec<Change>) -> (Vec<DeltaEntry>, BTreeMap<ObjectId, Hashed>) {
     let mut contents = BTreeMap::new();
     let delta = changes
@@ -416,6 +530,7 @@ fn candidate_delta(changes: Vec<Change>) -> (Vec<DeltaEntry>, BTreeMap<ObjectId,
                         id: BlobId(id),
                     }
                 }
+                ChangeOp::PutBlob { kind, id } => DeltaOp::Put { kind, id },
                 ChangeOp::Delete => DeltaOp::Delete,
             };
             DeltaEntry {

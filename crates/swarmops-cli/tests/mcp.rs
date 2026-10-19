@@ -54,16 +54,19 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 
 /// The tools, one per `StoreOps` operation, in the order `tools/list` gives them, each with
 /// the request type its arguments are.
-const TOOLS: [(&str, &str); 10] = [
+const TOOLS: [(&str, &str); 13] = [
     ("repo_info", "InfoReq"),
     ("read_file", "ReadFileReq"),
     ("read_tree", "ReadTreeReq"),
     ("show", "ShowReq"),
     ("log", "LogReq"),
+    ("path_history", "PathHistoryReq"),
     ("ref_list", "RefListReq"),
     ("ref_set", "RefSetReq"),
     ("ref_delete", "RefDeleteReq"),
     ("commit", "CommitReq"),
+    ("blob_put", "BlobPutReq"),
+    ("blob_has", "BlobHasReq"),
     ("verify", "VerifyReq"),
 ];
 
@@ -81,7 +84,7 @@ const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 // The tests.
 // ---------------------------------------------------------------------------------------------
 
-/// Every revision lists the same ten tools: `initialize` negotiates 2025-11-25 or 2025-06-18
+/// Every revision lists the same thirteen tools: `initialize` negotiates 2025-11-25 or 2025-06-18
 /// (2025-11-25 for a client that asks for a version it does not serve), `server/discover`
 /// advertises all three, and each tool's schema is its request type's, standing alone.
 #[test]
@@ -370,8 +373,92 @@ fn the_cli_prints_the_same(server: &mut Server, store: &Store, c2: &str) {
     }
 }
 
+/// `path_history` is a tool: its call returns the envelope that `history` prints for the same
+/// request, a page at a time, and a path nothing ever touched is a tool error,
+/// `E_PATH_NOT_FOUND`.
+#[test]
+fn the_path_history_tool_lists_and_runs() {
+    let store = Store::init();
+    let c1 = store.commit(AGENT, "src/lib.rs", "pub fn f() {}\n", None);
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": c1, "create": true}),
+    );
+    let c2 = store.commit(AGENT, "src/lib.rs", "pub fn g() {}\n", None);
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": c2, "expected_old": c1}),
+    );
+
+    let page = server.ok("path_history", json!({"path": "src/lib.rs", "limit": 1}));
+    assert_eq!(page["result"]["entries"][0]["changeset"], c2.as_str());
+    assert_eq!(
+        (&page["result"]["truncated"], &page["result"]["cursor"]),
+        (&json!(true), &json!(c2))
+    );
+    assert_eq!(page["meta"]["resolved"], json!({"main": c2}));
+    let rest = server.ok("path_history", json!({"path": "src", "cursor": c2}));
+    assert_eq!(rest["result"]["entries"][0]["changeset"], c1.as_str());
+    let call = server.call("path_history", json!({"path": "src/lib.rs"}));
+    let printed = store.read(&["history", "main:src/lib.rs"]);
+    assert_eq!(printed.exit(), 0, "{printed}");
+    assert_eq!(
+        without_elapsed(&call.text),
+        without_elapsed(printed.stdout.trim_end()),
+        "the CLI prints the same envelope"
+    );
+    let logged = server.ok("log", json!({"paths": ["src/lib.rs"]}));
+    assert_eq!(logged["result"]["entries"].as_array().unwrap().len(), 2);
+
+    let missing = server.err("path_history", json!({"path": "nope"}), "E_PATH_NOT_FOUND");
+    assert_eq!(
+        missing["error"]["details"],
+        json!({"rev": "main", "path": "nope"})
+    );
+    server.finish_clean();
+}
+
+/// `blob_put` stores content as a blob, `blob_has` finds it among the ids it is given, and a
+/// commit names it by id (`{"blob": id}`), writing no blob; the store verifies clean. A
+/// `blob_put` of a client file is held to a commit's rules for one: a relative path, which the
+/// server would read from its own working directory, is refused before anything is read.
+#[test]
+fn mcp_blob_put_then_a_commit_names_it_by_id() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let content = "stored first\n";
+    let id = hash_object(ObjectKind::Blob, content.as_bytes()).to_hex();
+    let put = server.ok("blob_put", json!({"content": {"inline": content}}));
+    assert_eq!(
+        put["result"],
+        json!({"blob": id, "size": content.len(), "written": true})
+    );
+    let again = server.ok("blob_put", json!({"content": {"inline": content}}));
+    assert_eq!(again["result"]["written"], false, "{again}");
+    let unknown = hash_object(ObjectKind::Blob, b"never stored").to_hex();
+    let has = server.ok("blob_has", json!({"ids": [unknown, id]}));
+    assert_eq!(has["result"], json!({"present": [id]}));
+    let changes = json!([{"path": "named.txt", "op": "put", "content": {"blob": id}}]);
+    let commit = server.ok("commit", json!({"message": "by id", "changes": changes}));
+    assert_eq!(commit["result"]["blobs_written"], 0, "{commit}");
+    let c1 = commit["result"]["changeset"].as_str().unwrap().to_owned();
+    let read = server.ok("read_file", json!({"rev": c1, "path": "named.txt"}));
+    assert_eq!(read["result"]["content"], content);
+    let relative = server.err(
+        "blob_put",
+        json!({"content": {"file": "notes.txt"}}),
+        "E_INVALID_ARG",
+    );
+    assert_eq!(relative["error"]["details"], json!({"file": "notes.txt"}));
+    server.finish_clean();
+    store.assert_clean("after the blob and the commit that names it");
+}
+
 /// Mutations take the server's identity, from `--as`, else `SWARMOPS_AGENT` with
-/// `SWARMOPS_RUN_ID`: without one, `commit`, `ref_set` and `ref_delete` are each an
+/// `SWARMOPS_RUN_ID`: without one, `commit`, `blob_put`, `ref_set` and `ref_delete` are each an
 /// `E_IDENTITY_REQUIRED` tool error that writes nothing, in a session and in a 2026-07-28
 /// request alike, and no call can supply one.
 #[test]
@@ -385,6 +472,7 @@ fn mcp_mutation_without_identity_is_e_identity_required() {
     });
     let mutations = [
         ("commit", commit.clone()),
+        ("blob_put", json!({"content": {"inline": "a"}})),
         (
             "ref_set",
             json!({"name": "main", "new": "main", "create": true}),
@@ -416,6 +504,9 @@ fn mcp_mutation_without_identity_is_e_identity_required() {
     // Reads need none, and nothing was written.
     let info = server.ok("repo_info", json!({}));
     assert_eq!(info["result"]["changesets"], 0);
+    let blob_a = hash_object(ObjectKind::Blob, b"a").to_hex();
+    let has = server.ok("blob_has", json!({"ids": [blob_a]}));
+    assert_eq!(has["result"], json!({"present": []}), "no blob stored");
     assert_eq!(
         server.ok("ref_list", json!({}))["result"]["refs"],
         json!([])
@@ -1101,7 +1192,7 @@ fn mcp_rejects_unknown_methods_and_bad_json() {
             .as_array()
             .unwrap()
             .len(),
-        10
+        TOOLS.len()
     );
     server.error("frobnicate", json!({}), METHOD_NOT_FOUND);
     let unknown = server.error(
@@ -1611,7 +1702,7 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     assert_eq!(fields(schema), fields(original), "{name}");
     assert_no_references(name, schema);
     let (read_only, destructive, idempotent) = match name {
-        "commit" => (false, false, false),
+        "commit" | "blob_put" => (false, false, false),
         "ref_set" | "ref_delete" => (false, true, true),
         _ => (true, false, true),
     };

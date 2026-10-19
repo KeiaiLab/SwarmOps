@@ -128,10 +128,13 @@ left).
   is read; size and depth (`ReadTreeReq.depth`, each entry's `size`) come later, and the default
   page sizes are measured again then, because `size` makes every entry longer. *Target: M2.
   Found: M1 Task 5; final review, question 9.*
-- **Every read takes a full metadata snapshot**, and a snapshot reads every ref file: cheap with
-  a few refs, linear in their number. A commit takes two; passing one through
-  is the fix once measurements ask for it. *Target: M2 (with the other commit-path costs below).
-  Found: M1 Tasks 2c, 3 and 4b.*
+- **A snapshot reads every ref file**: cheap with a few refs, linear in their number. Each
+  request reads in one snapshot of the metadata (a commit, `cat`, `ls`, `show` and `log` take one
+  each, a ref move one besides its write), so a request pays it once. Refs are `main` and
+  `release/*` alone by design; should they grow past dozens, a snapshot's reading them calls for
+  a validated lazy read, a per-handle map of refs or a packed refs file (a FORMAT change), and
+  the `read_snapshot` bench measures 0, 16 and 256 refs to tell. *Unscheduled: when refs grow
+  past dozens. Found: M1 Tasks 2c, 3 and 4b.*
 - **A large frame past the checkpoint is parsed by every read.** After a bulk write, such as a
   git import, every `read()` parses the big frame again until the next checkpoint; the import
   should flush, or the store checkpoint once the frames past it grow large. *Target: M3. Found:
@@ -148,6 +151,12 @@ left).
   a commit's outcome is unknown (its process died before it answered) and it is run again, a
   first attempt that did commit stays as an unreferenced changeset beside the second. An
   idempotency key (`commit --key`) closes this. *Target: M4. Found: M1 final fix pass.*
+- **History follows first parents only.** `log`, `log --path` and `history` walk first parents,
+  and a changeset's changes are those against its first parent: what a merge brought in from its
+  other parents shows as the merge's own change, and the changesets on those parents are never
+  listed. Native histories have no merge (`main` is linear, workspaces land squashed); git
+  import's do. *Target: M3, if imported merge histories need it (`LogReq.first_parent`). Found:
+  M2 Task 15 (M2 Decision 8).*
 - **No second root commit.** Once `main` exists, an omitted parent means `main`'s head (the
   advanced ref's, for a `commit --advance`), so the API makes a root commit only with `advance`
   naming a ref that does not exist yet. *Target: M3 (`commit_raw`, which git import needs).
@@ -156,8 +165,11 @@ left).
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
   *Documented (`--expect` help). Found: M1 Task 5; final review, question 13.*
-- **No blob-id puts.** A change cannot name a blob already in the store by its id; its content
-  is always sent again. *Target: M2 (`ContentInput::Blob`). Found: M1 Task 3.*
+- **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
+  together, and up to about two to three times that while their objects are encoded in
+  parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and
+  `{"blob": "<id>"}` take large contents out of the commit request. *Documented (bounded by the
+  limits since M2). Found: the 2026-10-16 code review, issue 10.*
 
 ## Verification and repair
 
