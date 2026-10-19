@@ -56,9 +56,9 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `read_file`, `read_tree`, `show`, `log`, `path_history`, `ref_list`, `ref_set`,
-//! `ref_delete`, `commit`, `blob_put`, `blob_has` and `verify`, which `tools/list` gives in
-//! that order. A tool's `inputSchema` is its request type's JSON Schema, as `swarmops schema
+//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `ref_list`,
+//! `ref_set`, `ref_delete`, `commit`, `blob_put`, `blob_has` and `verify`, which `tools/list` gives
+//! in that order. A tool's `inputSchema` is its request type's JSON Schema, as `swarmops schema
 //! <type>` prints it, with each `$ref` replaced by the definition it names so that the schema
 //! stands alone: a keyword beside the reference wins over the definition's, but for
 //! `description`, where the reference's comes first and the definition's after it. It is kept a
@@ -70,6 +70,9 @@
 //! the server's own check. The `expected_old` of `ref_set` and `ref_delete` is a string of the
 //! full-id pattern ([`full_id_pattern`]), not any revision. A tool's annotations say whether it
 //! changes the store and how; none reaches beyond the store (`openWorldHint: false`).
+//!
+//! `derive` alone has no tool: `swarmops derive` runs it beside the store as maintenance,
+//! deriving values ahead of readers as the journal grows, which is no agent's work.
 //!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
 //! does not know is ignored, and arguments that do not fit the type are `E_INVALID_ARG`, as is
@@ -128,9 +131,10 @@ use std::time::Instant;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
+use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
-    CommitReq, ContentInput, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
+    CommitReq, ContentInput, DiffReq, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
     PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq,
     StoreOps, VerifyReq, schema_for_all,
 };
@@ -228,7 +232,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 13] = [
+static TOOLS: [Spec; 15] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -240,13 +244,28 @@ static TOOLS: [Spec; 13] = [
         result_chars: None,
     },
     Spec {
+        tool: Tool::ResolveRev,
+        name: "resolve_rev",
+        request: "ResolveRevReq",
+        title: "Resolve a revision",
+        description: "The full id of the changeset a revision names (a ref name, a full id or a \
+                      unique prefix of 12 or more hex digits, then any ~N suffixes), resolved as \
+                      every tool resolves one, and its kind: ref when the revision is exactly a \
+                      ref's name, whose target moves with the ref, changeset otherwise. Its CLI \
+                      command is swarmops resolve.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
         tool: Tool::ReadFile,
         name: "read_file",
         request: "ReadFileReq",
         title: "Read a file",
         description: "Reads one file at a revision, without a checkout, as UTF-8 text or \
-                      base64; pass max_bytes of 32768 or less (less for a binary file), since \
-                      clients limit long tool results and this one holds the content twice.",
+                      base64, from offset or the lines a range names; pass max_bytes of 32768 or \
+                      less (less for a binary file), since clients limit long tool results and \
+                      this one holds the content twice, and read on from next_offset while the \
+                      result is truncated.",
         effect: Effect::Reads,
         result_chars: Some(READ_FILE_RESULT_CHARS),
     },
@@ -256,8 +275,9 @@ static TOOLS: [Spec; 13] = [
         request: "ReadTreeReq",
         title: "List a directory",
         description: "Lists one directory at a revision, without a checkout, a page of entries \
-                      at a time; pass a limit of 100 or less and page on with the cursor, since \
-                      clients limit long tool results.",
+                      at a time, each file with its size, and with depth the directories below it \
+                      too; pass a limit of 100 or less and page on with the cursor, since clients \
+                      limit long tool results.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -293,6 +313,19 @@ static TOOLS: [Spec; 13] = [
                       what the path holds after it (the CLI command is history); pass a limit of \
                       100 or less and page on with the cursor, since clients limit long tool \
                       results.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Diff,
+        name: "diff",
+        request: "DiffReq",
+        title: "Diff two revisions",
+        description: "The files that differ between two revisions, in path order: with format \
+                      names (the default) each one's path and status, with stat also its line \
+                      counts, with unified also its hunks; pass a limit of 100 or less, keep \
+                      max_bytes at 32768 or less for unified, and page on with the cursor, since \
+                      clients limit long tool results.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -837,11 +870,13 @@ trait Operate {
 fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
     match tool {
         Tool::RepoInfo => how.read(|ops, req| ops.repo_info(req)),
+        Tool::ResolveRev => how.read(|ops, req| ops.resolve_rev(req)),
         Tool::ReadFile => how.read(|ops, req| ops.read_file(req)),
         Tool::ReadTree => how.read(|ops, req| ops.read_tree(req)),
         Tool::Show => how.read(|ops, req| ops.show(req)),
         Tool::Log => how.read(|ops, req| ops.log(req)),
         Tool::PathHistory => how.read(|ops, req| ops.path_history(req)),
+        Tool::Diff => how.read(|ops, req| ops.diff(req)),
         Tool::RefList => how.read(|ops, req| ops.ref_list(req)),
         Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
         Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
@@ -965,11 +1000,13 @@ trait Refuse: DeserializeOwned {
 }
 
 impl Refuse for InfoReq {}
+impl Refuse for ResolveRevReq {}
 impl Refuse for ReadFileReq {}
 impl Refuse for ReadTreeReq {}
 impl Refuse for ShowReq {}
 impl Refuse for LogReq {}
 impl Refuse for PathHistoryReq {}
+impl Refuse for DiffReq {}
 impl Refuse for RefListReq {}
 impl Refuse for VerifyReq {}
 impl Refuse for BlobHasReq {}
@@ -1381,11 +1418,13 @@ struct Spec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
     RepoInfo,
+    ResolveRev,
     ReadFile,
     ReadTree,
     Show,
     Log,
     PathHistory,
+    Diff,
     RefList,
     RefSet,
     RefDelete,
@@ -1566,10 +1605,11 @@ mod tests {
     use std::ffi::OsString;
 
     use camino::Utf8Path;
+    use swarmops_api::ResolvedRev;
     use swarmops_api::{
         BlobHasResp, BlobPutResp, ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput,
-        FileContent, LogPage, PathHistoryPage, RefListResp, RefSetResp, RepoInfo, TreeListing,
-        VerifyReport,
+        DeriveReq, DeriveResp, FileContent, LogPage, PathHistoryPage, RefListResp, RefSetResp,
+        RepoInfo, TreeListing, VerifyReport,
     };
     use swarmops_ops::LocalOps;
 
@@ -1581,7 +1621,8 @@ mod tests {
     #[test]
     fn the_tools_are_the_store_operations() {
         // `init`, `git import` and `git export` run on the client and are no `StoreOps`
-        // operations, so they have no tool.
+        // operations, so they have no tool; `derive` is maintenance, which `swarmops derive` runs
+        // beside the store, and no agent's work.
         let client_side = ["InitReq", "GitImportReq", "GitExportReq"];
         let all = schema_for_all();
         let requests: Vec<&str> = all
@@ -1589,7 +1630,9 @@ mod tests {
             .unwrap()
             .keys()
             .map(String::as_str)
-            .filter(|name| name.ends_with("Req") && !client_side.contains(name))
+            .filter(|name| {
+                name.ends_with("Req") && !client_side.contains(name) && *name != "DeriveReq"
+            })
             .collect();
         let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
         advertised.sort_unstable();
@@ -1622,6 +1665,8 @@ mod tests {
     fn sample() -> Value {
         json!({
             "rev": "main",
+            "from": "main",
+            "to": "main",
             "path": "a",
             "name": "main",
             "new": "main",
@@ -1670,6 +1715,10 @@ mod tests {
             self.called("repo_info", "InfoReq")
         }
 
+        fn resolve_rev(&self, _: ResolveRevReq) -> Result<ResolvedRev, OpError> {
+            self.called("resolve_rev", "ResolveRevReq")
+        }
+
         fn commit(&self, _: &Identity, _: CommitReq) -> Result<CommitResp, OpError> {
             self.called("commit", "CommitReq")
         }
@@ -1694,6 +1743,10 @@ mod tests {
             self.called("path_history", "PathHistoryReq")
         }
 
+        fn diff(&self, _: DiffReq) -> Result<swarmops_api::Diff, OpError> {
+            self.called("diff", "DiffReq")
+        }
+
         fn ref_list(&self, _: RefListReq) -> Result<RefListResp, OpError> {
             self.called("ref_list", "RefListReq")
         }
@@ -1716,6 +1769,10 @@ mod tests {
 
         fn blob_has(&self, _: BlobHasReq) -> Result<BlobHasResp, OpError> {
             self.called("blob_has", "BlobHasReq")
+        }
+
+        fn derive(&self, _: DeriveReq) -> Result<DeriveResp, OpError> {
+            self.called("derive", "DeriveReq")
         }
     }
 

@@ -18,15 +18,19 @@ pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
-    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
-    DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, EntryKindOut,
-    FileContent, FileKind, GitExportReq, GitExportResp, GitImportReq, GitImportResp, IdentityInfo,
-    InfoReq, InitReq, LogPage, LogReq, LossyClass, LossyCommitOut, ModeInput, PathHistoryEntry,
-    PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq,
-    RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures,
-    StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
+    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_DERIVE_LIMIT,
+    DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
+    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT,
+    DeriveReq, DeriveResp, Diff, DiffFormat, DiffHunk, DiffLineOut, DiffReq, DiffStatus,
+    EntryKindOut, FileContent, FileDiff, FileKind, GitExportReq, GitExportResp, GitImportReq,
+    GitImportResp, IdentityInfo, InfoReq, InitReq, LineOp, LineRange, LogPage, LogReq, LossyClass,
+    LossyCommitOut, MAX_TREE_DEPTH, ModeInput, PathHistoryEntry, PathHistoryPage, PathHistoryReq,
+    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp,
+    RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
+    VerifyFinding, VerifyReport, VerifyReq,
 };
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
 pub use rev::Rev;
 
 /// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
@@ -72,8 +76,13 @@ pub fn schema_for_all() -> serde_json::Value {
         BlobPutResp,
         BlobHasReq,
         BlobHasResp,
+        // resolve_rev.
+        ResolveRevReq,
+        ResolvedRev,
+        RevKind,
         // read_file, read_tree.
         ReadFileReq,
+        LineRange,
         FileContent,
         FileKind,
         ContentEncoding,
@@ -95,6 +104,15 @@ pub fn schema_for_all() -> serde_json::Value {
         PathHistoryReq,
         PathHistoryPage,
         PathHistoryEntry,
+        // diff.
+        DiffReq,
+        DiffFormat,
+        Diff,
+        FileDiff,
+        DiffStatus,
+        DiffHunk,
+        DiffLineOut,
+        LineOp,
         // ref list, ref set, ref delete, verify.
         RefListReq,
         RefListResp,
@@ -105,6 +123,9 @@ pub fn schema_for_all() -> serde_json::Value {
         VerifyReq,
         VerifyReport,
         VerifyFinding,
+        // derive.
+        DeriveReq,
+        DeriveResp,
         // git import, which runs on the client, as init does.
         GitImportReq,
         LossyClass,

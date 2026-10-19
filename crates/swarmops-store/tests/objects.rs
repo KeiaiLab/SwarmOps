@@ -1430,3 +1430,177 @@ mod stat {
         assert_eq!(calls(), Vec::<String>::new(), "nothing to fsync");
     }
 }
+
+/// `read_chunks`: an object's payload handed over in pieces as it decodes, and verified whole, as
+/// `get` verifies it (storage spec §2 rule 1, §8).
+mod read_chunks {
+    use swarmops_store::ObjectStat;
+
+    use super::*;
+
+    /// What `read_chunks` of an object returns, and the pieces it handed its visitor, in order.
+    type Visited = (Result<Option<ObjectStat>, StoreError>, Vec<Vec<u8>>);
+
+    /// The lines of [`numbered_lines`] in a payload of 240,000 bytes.
+    const LINES: u32 = 20_000;
+
+    /// `count` lines of 12 bytes, `line 000000\n` numbered from 0: text that zstd shrinks.
+    fn numbered_lines(count: u32) -> Vec<u8> {
+        (0..count)
+            .flat_map(|n| format!("line {n:06}\n").into_bytes())
+            .collect()
+    }
+
+    fn visit(store: &FsObjectStore, id: ObjectId) -> Visited {
+        let mut pieces = Vec::new();
+        let got = store.read_chunks(id, &mut |piece: &[u8]| pieces.push(piece.to_vec()));
+        (got, pieces)
+    }
+
+    /// Applies `damage` to the file of `id`, reads `id` in pieces, and restores the file.
+    fn visit_damaged(
+        store: &FsObjectStore,
+        layout: &Layout,
+        id: ObjectId,
+        damage: fn(&mut Vec<u8>),
+    ) -> Visited {
+        let path = layout.object_path(id);
+        let pristine = fs::read(&path).unwrap();
+        let mut damaged = pristine.clone();
+        damage(&mut damaged);
+        fs::write(&path, &damaged).unwrap();
+        let got = visit(store, id);
+        fs::write(&path, &pristine).unwrap();
+        got
+    }
+
+    /// Objects of each kind, raw and zstd, come back in pieces that concatenate to what `get`
+    /// returns, with their kind and payload length: a raw payload in one piece (none when it is
+    /// empty), from the buffer its file was read into; a zstd payload as its stream decodes, so a
+    /// megabyte of it in more than one. An object that is not stored is `None`, nothing visited.
+    #[test]
+    fn read_chunks_visits_the_payload_in_order() {
+        let (_root, layout) = new_root();
+        let store = real_store(&layout);
+        let cases = [
+            (ObjectKind::Blob, random_bytes(1 << 20), ENC_RAW),
+            (ObjectKind::Blob, numbered_lines(100_000), ENC_ZSTD),
+            (ObjectKind::Tree, b"a tree's bytes".to_vec(), ENC_RAW),
+            (ObjectKind::Changeset, vec![b'c'; 4096], ENC_ZSTD),
+            (ObjectKind::Blob, Vec::new(), ENC_RAW),
+        ];
+        for (kind, payload, enc) in cases {
+            let id = store.put(kind, &payload).unwrap();
+            let size = u64::try_from(payload.len()).unwrap();
+            let what = format!("{kind:?} of {size} bytes");
+            assert_eq!(fs::read(layout.object_path(id)).unwrap()[5], enc, "{what}");
+            let (got, pieces) = visit(&store, id);
+            assert_eq!(got.unwrap(), Some(ObjectStat { kind, size }), "{what}");
+            let whole = store.get(id).unwrap().expect("stored").1;
+            assert!(
+                pieces.concat() == whole,
+                "{what}: the pieces are the payload"
+            );
+            assert!(whole == payload, "{what}");
+            if enc == ENC_RAW {
+                assert_eq!(pieces.len(), usize::from(size > 0), "{what}");
+            } else if size > 1 << 20 {
+                assert!(pieces.len() > 1, "{what}: {} piece(s)", pieces.len());
+            }
+        }
+
+        let missing = hash_object(ObjectKind::Blob, b"never stored");
+        let (got, pieces) = visit(&store, missing);
+        assert_eq!((got.unwrap(), pieces.len()), (None, 0));
+    }
+
+    /// A damaged object fails as `get` fails it, wherever the damage lies: a header this store
+    /// does not write (one past the object limit among them) is `BadHeader` before any piece is
+    /// visited, and bytes that are not the object's are `Corrupt`, found once the pieces before the
+    /// damage have gone by (the caller drops what it kept of them).
+    #[test]
+    fn read_chunks_verifies_the_whole_payload() {
+        use swarmops_store::MAX_OBJECT_LEN;
+
+        let (_root, layout) = new_root();
+        let store = real_store(&layout);
+        let raw = store
+            .put(ObjectKind::Blob, &random_bytes(200 << 10))
+            .unwrap();
+        let zstd = store.put(ObjectKind::Blob, &numbered_lines(LINES)).unwrap();
+        assert_eq!(fs::read(layout.object_path(raw)).unwrap()[5], ENC_RAW);
+        assert_eq!(fs::read(layout.object_path(zstd)).unwrap()[5], ENC_ZSTD);
+
+        let corrupt: [Damage; 6] = [
+            ("raw payload byte flipped near its end", raw, |file| {
+                file[HEADER_LEN + (190 << 10)] ^= 0x01;
+            }),
+            ("kind byte changed to another valid kind", raw, |file| {
+                file[4] = 1;
+            }),
+            ("zstd payload byte flipped mid-file", zstd, |file| {
+                let middle = file.len() / 2;
+                file[middle] ^= 0x01;
+            }),
+            ("zstd checksum flipped", zstd, |file| {
+                *file.last_mut().unwrap() ^= 0x01;
+            }),
+            ("zstd frame cut short", zstd, |file| {
+                file.pop();
+            }),
+            (
+                "a frame that records 4 KiB and makes nothing",
+                zstd,
+                |file| {
+                    lying_zstd(file, 4096);
+                },
+            ),
+        ];
+        for (what, id, damage) in corrupt {
+            let (got, _) = visit_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+                "{what}: {got:?}"
+            );
+        }
+
+        let bad_header: [Damage; 7] = [
+            ("bad magic", raw, |file| {
+                file[0] = b'X';
+            }),
+            ("header cut short", raw, |file| {
+                file.truncate(HEADER_LEN - 1);
+            }),
+            ("raw payload cut short", raw, |file| {
+                file.pop();
+            }),
+            ("zstd ulen below the frame size", zstd, |file| {
+                let size = u64::from(LINES) * 12 - 1;
+                file[8..16].copy_from_slice(&size.to_le_bytes());
+            }),
+            ("zstd ulen above the frame size", zstd, |file| {
+                let size = u64::from(LINES) * 12 + 1;
+                file[8..16].copy_from_slice(&size.to_le_bytes());
+            }),
+            // The object limit's cases, as `get` refuses them.
+            ("a raw header one byte past the object limit", raw, |file| {
+                file[8..16].copy_from_slice(&(MAX_OBJECT_LEN + 1).to_le_bytes());
+            }),
+            (
+                "a zstd header and frame that claim 2^40 bytes",
+                zstd,
+                |file| {
+                    lying_zstd(file, 1 << 40);
+                },
+            ),
+        ];
+        for (what, id, damage) in bad_header {
+            let (got, pieces) = visit_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+                "{what}: {got:?}"
+            );
+            assert_eq!(pieces.len(), 0, "{what}: no piece is visited");
+        }
+    }
+}

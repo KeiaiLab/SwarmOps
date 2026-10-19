@@ -120,15 +120,16 @@ left).
 
 ## Reads and response sizes
 
-- **`cat` reads the whole blob.** `read_file` loads all of it even when `max_bytes` asks for
-  less; ranged reads (`range`, `--lines`) come later. An MCP agent, which the server's guidance
-  asks to pass a `max_bytes` of 32 KiB or less, can therefore read only the first 32 KiB of a
-  larger file: `ReadFileReq` has no offset. *Target: M2. Found: M1 Task 4b; final review,
-  question 6; the offset gap by the M1.5 Task 5 review.*
+- **`cat` reads the whole object file.** `read_file` returns part of a file, from `offset` or by
+  `lines`, and keeps only the bytes it returns while it verifies the whole blob (M2), but it
+  still reads the blob's object file whole: a large blob stored raw costs its size in memory on
+  every read, however little is asked for. Bounded reads come later. *Target: M6. Found: M1 Task
+  4b; final review, question 6; the offset gap by the M1.5 Task 5 review, closed in M2.*
 - **`ls` of a wide directory decodes its whole tree.** Paging limits what is returned, not what
-  is read; size and depth (`ReadTreeReq.depth`, each entry's `size`) come later, and the default
-  page sizes are measured again then, because `size` makes every entry longer. *Target: M2.
-  Found: M1 Task 5; final review, question 9.*
+  is read: a page decodes the whole tree object of the listed directory, and at a `depth` of
+  every directory it enters, however few of their entries it lists. Bounded reads come later.
+  (Sizes and depths came in M2, and the default page was measured again for them: 250 entries.)
+  *Target: M6. Found: M1 Task 5; final review, question 9.*
 - **A snapshot reads every ref file**: cheap with a few refs, linear in their number. Each
   request reads in one snapshot of the metadata (a commit, `cat`, `ls`, `show` and `log` take one
   each, a ref move one besides its write), so a request pays it once. Refs are `main` and
@@ -372,10 +373,10 @@ each ruling is tracked above:
 | 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | M6, "bounded, not first-in, first-out" |
 | 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2, "Full fsync is slow" |
 | 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | M6, "Recovery after a crash walks all of `journal.off`", "No repair tool" |
-| 6 | `read_file` reads the whole blob | ranged reads | M2, "`cat` reads the whole blob" |
+| 6 | `read_file` reads the whole blob | ranged reads | M6, "`cat` reads the whole object file" (ranged reads: M2) |
 | 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | M6, "Crafted `journal.off` entries" |
 | 8 | `objects/tmp` leftovers | `gc` | M6, "Temp files of crashed writes" |
-| 9 | Wide directories in `ls` | size and depth | M2, "`ls` of a wide directory" |
+| 9 | Wide directories in `ls` | size and depth | M6, "`ls` of a wide directory" (size and depth: M2) |
 | 10 | Parked helper threads | the daemon | M10, "An abandoned lock wait" |
 | 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | M6, "The crash model" |
 | 12 | Second root commits | `commit_raw` | closed in M3: `Repo::commit_raw`, the git import's writer, makes a root changeset whatever refs exist |
