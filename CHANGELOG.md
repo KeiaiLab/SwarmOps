@@ -177,6 +177,27 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   none of them. Its numbers, in the M1.5 section of [docs/perf.md](docs/perf.md), are the
   quiet-window run's at the plan's sizes (2026-10-17), no longer provisional.
 
+#### M1.6: the code-review follow-ups (2026-10-19)
+
+- The store-level 32-process contention measurement (`crates/swarmops-store/tests/contention.rs`)
+  can add other writers' object syncs: with `SWARMOPS_TEST_CONTENTION_OBJECT_SYNCS=<n>` each
+  writer puts and flushes n new 4 KiB blobs of its own before each transaction, outside the
+  lock, as a CLI commit writes its objects, and the table gives n and each transaction's time
+  in the lock once `write()` returned (p50, p99 and max). A test in the default gate checks that
+  the objects are new each time and durable before the lock is taken, and that none of their
+  calls is made under it.
+- A criterion bench of a compaction on its own (`crates/swarmops-store/benches/compaction.rs`,
+  which `just bench` and `just perf` run): `Index::compact()` with every sync on, on an index of
+  100k and of 1M records whose unsorted tail has just passed the threshold (1,025 records), the
+  sorted views restored before each iteration, untimed. It prints the bytes each compaction
+  writes (both views whole, 80 per record); `SWARMOPS_BENCH_COMPACTION_RECORDS` sets other sizes
+  for a quick check.
+- `bench/compare` times each seeded store's first open after its load (`first_open_ms`, a W4
+  section per size), once, before any workload opens it; and `fjall-unflushed`'s W4 opens are
+  each of a fresh copy of its store as the load left it, taken at seeding, so that its row is
+  that store's, not the one its first open settled. [docs/perf.md](docs/perf.md) keeps the
+  2026-10-17 run's cells until the next quiet-window run measures the ones this changes.
+
 ### Changed
 
 #### M1.6: the code-review follow-ups (2026-10-19)

@@ -13,7 +13,9 @@
 //! the next changeset of a chain of its own and committing it, with the default 10 s lock
 //! timeout: a `Busy` is counted and the transaction tried again. [`PAUSE`] puts a pause
 //! between two transactions of a child, as an agent leaves at least a process start between
-//! two commits. For every transaction a child times
+//! two commits. [`OBJECT_SYNCS`] has each child put and flush that many new objects of its
+//! own before each transaction, outside the lock, as a CLI commit writes its objects before
+//! its transaction takes the lock ([`Prelude`]). For every transaction a child times
 //!
 //! - the transaction: from calling [`MetaStore::write`] until `commit` returns;
 //! - the lock wait: until [`MetaStore::write`] returns, which is the wait for `meta/lock`
@@ -21,10 +23,17 @@
 //!   the children are done show what those cost alone.
 //!
 //! It prints one JSON line (its percentiles, `Busy` count and elapsed time) and writes its
-//! samples to a file. The parent aggregates them and prints the table, and the uncontended
-//! `write`s' cost; then it checks the store as `verify` would (every changeset there, each
-//! chain intact, one frame per transaction, and the seqs contiguous in journal order), prints
-//! what an uncontended transaction costs, and asserts last that no child met `Busy`.
+//! samples to a file. The parent aggregates them and prints the table, with each
+//! transaction's time in the lock once `write` returned (the transaction minus its lock
+//! wait), and the uncontended `write`s' cost; then it checks the store as `verify` would
+//! (every changeset there, each chain intact, one frame per transaction, and the seqs
+//! contiguous in journal order), prints what an uncontended transaction costs, and asserts
+//! last that no child met `Busy`.
+//!
+//! One test runs in the default gate: `object_syncs_prelude_writes_new_objects_and_flushes_them`
+//! checks the prelude on a store whose filesystem calls are recorded (new objects each time,
+//! their fan-out directories fsynced before `write` takes the lock, no call under it), so that
+//! a run with [`OBJECT_SYNCS`] measures the object syncs it says it adds.
 //!
 //! The 0-`Busy` assertion assumes a disk no more than about a third slower than this host's:
 //! with the kernel-queue lock a waiter can lose a few hundred releases in a row (docs/perf.md,
@@ -38,6 +47,7 @@
 //! test as soon as a child fails, and waits for the children only until [`PARENT_DEADLINE`];
 //! and whatever ends the test early, [`Children`] kills and reaps every child still running.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::path::{Path, PathBuf};
@@ -47,11 +57,16 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
-use swarmops_core::{ChangesetId, ObjectKind, hash_object};
+use swarmops_core::bytes::to_u64;
+use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
 use swarmops_store::{
-    ChangesetMeta, Frame, InsertOutcome, Journal, Layout, MetaStore, RealFs, Record, StoreError,
+    ChangesetMeta, Frame, FsObjectStore, InsertOutcome, Journal, Layout, MetaStore, ObjectStore,
+    RealFs, Record, StoreError,
 };
-use swarmops_testkit::measure::{base_dir, percentile};
+use swarmops_testkit::faults::checked;
+use swarmops_testkit::fs::RecordingFs;
+use swarmops_testkit::measure::{base_dir, mix, percentile};
+use swarmops_testkit::store::new_root;
 use swarmops_testkit::test_name;
 
 /// How many writer processes the test runs.
@@ -76,6 +91,13 @@ const CHILD_NUMBER: &str = "SWARMOPS_TEST_CONTENTION_CHILD";
 
 /// Set to put a pause between two transactions of a child: its length in microseconds.
 const PAUSE: &str = "SWARMOPS_TEST_CONTENTION_PAUSE_US";
+
+/// Set to make a child put and flush that many new objects before each transaction, outside
+/// the lock ([`Prelude`]): other writers' object syncs.
+const OBJECT_SYNCS: &str = "SWARMOPS_TEST_CONTENTION_OBJECT_SYNCS";
+
+/// The length of each blob a [`Prelude`] puts: 4 KiB.
+const BLOB_LEN: usize = 4_096;
 
 /// How a child's summary line starts.
 const SUMMARY: &str = "{\"child\":";
@@ -172,6 +194,111 @@ fn pause() -> Duration {
     })
 }
 
+/// The new objects a child puts and flushes before each transaction: [`OBJECT_SYNCS`], or
+/// none.
+fn object_syncs() -> u64 {
+    std::env::var(OBJECT_SYNCS).map_or(0, |objects| {
+        objects
+            .parse()
+            .expect("the object syncs are a whole number of objects")
+    })
+}
+
+/// Blob `k` of the prelude of transaction `j` of chain `chain`: [`BLOB_LEN`] bytes that start
+/// with the three numbers, so that no other prelude's blob is the same, and go on with
+/// SplitMix64's scattered output, which zstd cannot shrink, so that the object file holds the
+/// whole 4 KiB.
+fn blob(chain: u64, j: u64, k: u64) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(BLOB_LEN);
+    for n in [chain, j, k] {
+        blob.extend_from_slice(&n.to_le_bytes());
+    }
+    let seed = mix(mix(mix(chain) ^ j) ^ k);
+    let mut word = 0;
+    while blob.len() < BLOB_LEN {
+        blob.extend_from_slice(&mix(seed.wrapping_add(word)).to_le_bytes());
+        word += 1;
+    }
+    blob.truncate(BLOB_LEN);
+    blob
+}
+
+/// What a child does before each transaction, outside the lock. With `blobs` > 0 (from
+/// [`OBJECT_SYNCS`]) it puts that many new blobs ([`blob`]) into a [`FsObjectStore`] on the
+/// store's own `objects/` and flushes it, as a CLI commit writes its objects before its write
+/// transaction takes the lock: `put_batch` writes each to a temp file, `sync_all`s it and links
+/// it into its fan-out directory, then `flush` fsyncs those directories, all at once on the
+/// object store's pool. Those are the other writers' object syncs that the lock holder's two
+/// journal syncs may queue behind on ext4's shared journal (docs/perf.md, "M1 — `just perf`
+/// after all merges"). Nothing removes the objects. With 0 it does nothing, and the
+/// transactions are M1's bare ones.
+struct Prelude {
+    /// The object store on the store's `objects/`.
+    objects: FsObjectStore,
+    /// How many blobs it puts before each transaction.
+    blobs: u64,
+}
+
+impl Prelude {
+    /// Puts the blobs of transaction `j` of chain `chain` and flushes them.
+    fn run(&self, chain: u64, j: u64) {
+        if self.blobs == 0 {
+            return;
+        }
+        let batch = (0..self.blobs)
+            .map(|k| (ObjectKind::Blob, blob(chain, j, k)))
+            .collect();
+        self.objects.put_batch(batch).expect("put the blobs");
+        self.objects.flush().expect("flush the blobs");
+    }
+}
+
+/// What one transaction took, as a child times it: see the module documentation.
+struct Timed {
+    /// From calling [`MetaStore::write`] until `commit` returned.
+    transaction: Duration,
+    /// Until [`MetaStore::write`] returned.
+    wait: Duration,
+    /// Whether the commit moved `journal.ckpt`.
+    checkpointed: bool,
+}
+
+/// Transaction `j` of chain `chain` on `store`, as child `chain` runs it: first `prelude`,
+/// outside the lock; then a write transaction that inserts changeset `j` of the chain and
+/// commits, tried again after each `Busy` (counted in `busy`).
+fn transaction(store: &MetaStore, prelude: &Prelude, chain: u64, j: u64, busy: &mut u64) -> Timed {
+    prelude.run(chain, j);
+    let meta = changeset(chain, j);
+    let begun = Instant::now();
+    let mut in_a_row = 0;
+    let mut write = loop {
+        match store.write() {
+            Ok(write) => break write,
+            Err(StoreError::Busy) => {
+                *busy += 1;
+                in_a_row += 1;
+                assert!(
+                    in_a_row < MAX_BUSY_IN_A_ROW,
+                    "child {chain}, transaction {j}: Busy {in_a_row} times in a row"
+                );
+            }
+            Err(err) => panic!("child {chain}, transaction {j}: {err}"),
+        }
+    };
+    let wait = begun.elapsed();
+    let outcome = write.insert_changeset(meta).expect("insert");
+    assert!(
+        matches!(outcome, InsertOutcome::Inserted { .. }),
+        "child {chain}, transaction {j}: {outcome:?}"
+    );
+    let info = write.commit().expect("commit");
+    Timed {
+        transaction: begun.elapsed(),
+        wait,
+        checkpointed: info.checkpointed,
+    }
+}
+
 /// The work directory and number of this process, if it is a child.
 fn child_env() -> Option<(PathBuf, u64)> {
     let work = std::env::var_os(WORK_DIR)?;
@@ -185,7 +312,12 @@ fn child_env() -> Option<(PathBuf, u64)> {
 /// A child: [`PER_CHILD`] write transactions on chain `number`, timed; see the module
 /// documentation.
 fn child(work: &Path, number: u64) {
-    let store = MetaStore::open(&store_root(work)).expect("open the store");
+    let root = store_root(work);
+    let store = MetaStore::open(&root).expect("open the store");
+    let prelude = Prelude {
+        objects: FsObjectStore::open(Layout::new(root), Box::new(RealFs)),
+        blobs: object_syncs(),
+    };
     fs::write(work.join(format!("ready-{number}")), b"").expect("say ready");
     wait_for(&work.join("go"));
     let pause = pause();
@@ -203,33 +335,10 @@ fn child(work: &Path, number: u64) {
             Instant::now() < deadline,
             "child {number}: transaction {j} not started {CHILD_DEADLINE:?} after the go"
         );
-        let meta = changeset(number, j);
-        let begun = Instant::now();
-        let mut in_a_row = 0;
-        let mut write = loop {
-            match store.write() {
-                Ok(write) => break write,
-                Err(StoreError::Busy) => {
-                    busy += 1;
-                    in_a_row += 1;
-                    assert!(
-                        in_a_row < MAX_BUSY_IN_A_ROW,
-                        "child {number}, transaction {j}: Busy {in_a_row} times in a row"
-                    );
-                }
-                Err(err) => panic!("child {number}, transaction {j}: {err}"),
-            }
-        };
-        let waited = begun.elapsed();
-        let outcome = write.insert_changeset(meta).expect("insert");
-        assert!(
-            matches!(outcome, InsertOutcome::Inserted { .. }),
-            "child {number}, transaction {j}: {outcome:?}"
-        );
-        let info = write.commit().expect("commit");
-        transactions.push(begun.elapsed());
-        waits.push(waited);
-        checkpoints += u64::from(info.checkpointed);
+        let timed = transaction(&store, &prelude, number, j, &mut busy);
+        transactions.push(timed.transaction);
+        waits.push(timed.wait);
+        checkpoints += u64::from(timed.checkpointed);
     }
     let elapsed = started.elapsed();
 
@@ -241,11 +350,12 @@ fn child(work: &Path, number: u64) {
     let [txn_p50, txn_p99, txn_max] = spread(&mut transactions).map(|d| d.as_micros());
     let [lock_p50, lock_p99, lock_max] = spread(&mut waits).map(|d| d.as_micros());
     println!(
-        "{SUMMARY}{number},\"transactions\":{PER_CHILD},\"pause_us\":{},\"busy\":{busy},\
-         \"checkpoints\":{checkpoints},\"elapsed_us\":{},\"txn_p50_us\":{txn_p50},\
-         \"txn_p99_us\":{txn_p99},\"txn_max_us\":{txn_max},\"lock_p50_us\":{lock_p50},\
-         \"lock_p99_us\":{lock_p99},\"lock_max_us\":{lock_max}}}",
+        "{SUMMARY}{number},\"transactions\":{PER_CHILD},\"pause_us\":{},\"object_syncs\":{},\
+         \"busy\":{busy},\"checkpoints\":{checkpoints},\"elapsed_us\":{},\
+         \"txn_p50_us\":{txn_p50},\"txn_p99_us\":{txn_p99},\"txn_max_us\":{txn_max},\
+         \"lock_p50_us\":{lock_p50},\"lock_p99_us\":{lock_p99},\"lock_max_us\":{lock_max}}}",
         pause.as_micros(),
+        prelude.blobs,
         elapsed.as_micros()
     );
 }
@@ -396,7 +506,9 @@ fn run_children(work: &Path) -> (Vec<String>, Duration) {
 }
 
 /// Prints what the children measured, aggregated, and returns how many `Busy` errors they
-/// met.
+/// met. Besides the transaction and the lock wait, it gives each transaction's time in the
+/// lock once `write` returned (the transaction minus its lock wait): the insert and the
+/// commit, the two journal syncs included, which is what [`OBJECT_SYNCS`] may slow.
 fn print_contention(work: &Path, lines: &[String], wall: Duration) -> u64 {
     let busy = lines.iter().map(|line| field(line, "busy")).sum();
     let elapsed = |line: &String| Duration::from_micros(field(line, "elapsed_us"));
@@ -404,12 +516,21 @@ fn print_contention(work: &Path, lines: &[String], wall: Duration) -> u64 {
     let slowest = lines.iter().map(elapsed).max().expect("children");
     let (mut transactions, mut waits) = samples(work);
     assert_eq!(transactions.len(), usize::try_from(TOTAL).expect("fits"));
+    // Paired sample by sample, before the sorts below.
+    let mut in_lock: Vec<Duration> = transactions
+        .iter()
+        .zip(&waits)
+        .map(|(transaction, wait)| transaction.saturating_sub(*wait))
+        .collect();
     let [txn_p50, txn_p99, txn_max] = spread(&mut transactions);
     let [lock_p50, lock_p99, lock_max] = spread(&mut waits);
+    let [held_p50, held_p99, held_max] = spread(&mut in_lock);
     let total = f64::from(u32::try_from(TOTAL).expect("TOTAL fits in u32"));
     println!(
-        "{CHILDREN} processes x {PER_CHILD} write transactions of one changeset, {} us apart:",
-        pause().as_micros()
+        "{CHILDREN} processes x {PER_CHILD} write transactions of one changeset, {} us apart, \
+         {} new objects put and flushed before each:",
+        pause().as_micros(),
+        object_syncs()
     );
     println!(
         "  wall {:.1} s, {:.1} transactions/s, Busy {busy}",
@@ -427,6 +548,12 @@ fn print_contention(work: &Path, lines: &[String], wall: Duration) -> u64 {
         ms(lock_p50),
         ms(lock_p99),
         ms(lock_max)
+    );
+    println!(
+        "  in lock (transaction minus lock wait): p50 {} p99 {} max {}",
+        ms(held_p50),
+        ms(held_p99),
+        ms(held_max)
     );
     println!(
         "  child total time: min {:.1} s, max {:.1} s, spread {:.2}x",
@@ -565,4 +692,127 @@ fn thirty_two_processes_thousand_transactions_each() {
     print_uncontended_transaction(&store);
     // Last, so that a run that meets `Busy` still checks the store and prints everything.
     assert_eq!(busy, 0, "Busy errors");
+}
+
+#[test]
+fn object_syncs_prelude_writes_new_objects_and_flushes_them() {
+    const BLOBS: u64 = 4;
+    const TRANSACTIONS: u64 = 3;
+    let (dir, layout) = new_root();
+    let root = layout.root().to_owned();
+    MetaStore::create(&root).expect("create the store");
+    let (recorder, calls) = RecordingFs::new();
+    let recorder = Arc::new(recorder.naming_paths_in(dir.path().to_path_buf()));
+    // One filesystem for both stores, so that the order checker (in a build with the test
+    // hooks) judges the objects' syncs and the frames' together.
+    let shared = checked(Arc::clone(&recorder));
+    let store = MetaStore::open_with_fs(&root, Arc::clone(&shared)).expect("open the store");
+    let prelude = Prelude {
+        objects: FsObjectStore::open(layout.clone(), Box::new(Arc::clone(&shared))),
+        blobs: BLOBS,
+    };
+    calls();
+    let (mut busy, mut temps) = (0, 0);
+    for j in 0..TRANSACTIONS {
+        transaction(&store, &prelude, 0, j, &mut busy);
+        let made = calls();
+        // `write` takes `meta/lock` (through std::fs) before its first call in `meta/`, and
+        // `commit` lets it go once the last one returns.
+        let start = made
+            .iter()
+            .position(|call| path(call).starts_with("meta/"))
+            .unwrap_or_else(|| panic!("transaction {j} made no call in meta/: {made:?}"));
+        let (before, locked) = made.split_at(start);
+        assert!(
+            before.iter().all(|call| in_objects(call)),
+            "transaction {j}: calls before the lock other than the prelude's: {before:?}"
+        );
+        assert!(
+            !locked.iter().any(|call| in_objects(call)),
+            "transaction {j}: a prelude call under the lock: {locked:?}"
+        );
+        assert!(
+            locked.contains(&"append_durable meta/journal.log".to_owned()),
+            "transaction {j} wrote no frame: {locked:?}"
+        );
+        let count =
+            |method: &str| to_u64(before.iter().filter(|call| name(call) == method).count());
+        assert_eq!(
+            count("write_durable_temp"),
+            BLOBS,
+            "transaction {j}: {before:?}"
+        );
+        assert_eq!(
+            count("link_noclobber"),
+            BLOBS,
+            "transaction {j}: {before:?}"
+        );
+        temps += count("write_durable_temp");
+        // Every fan-out directory an object was linked into is fsynced after the link, and
+        // `objects/` after a fan-out directory is made in it, all before the lock.
+        for (at, call) in before.iter().enumerate() {
+            let synced = |dir: &str| before[at..].contains(&format!("fsync_dir {dir}"));
+            match name(call) {
+                "link_noclobber" => {
+                    let fanout = path(call).rsplit_once('/').expect("a fan-out dir").0;
+                    assert!(
+                        synced(fanout),
+                        "transaction {j}: {fanout} unsynced: {before:?}"
+                    );
+                }
+                "create_dir_all" if path(call) != "objects/tmp" => {
+                    assert!(
+                        synced("objects"),
+                        "transaction {j}: objects unsynced: {before:?}"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    assert_eq!((busy, temps), (0, TRANSACTIONS * BLOBS));
+    let expected: BTreeSet<ObjectId> = (0..TRANSACTIONS)
+        .flat_map(|j| (0..BLOBS).map(move |k| hash_object(ObjectKind::Blob, &blob(0, j, k))))
+        .collect();
+    assert_eq!(
+        to_u64(expected.len()),
+        TRANSACTIONS * BLOBS,
+        "every blob is new"
+    );
+    let listed: BTreeSet<ObjectId> = prelude.objects.list().expect("list").into_iter().collect();
+    assert_eq!(listed, expected);
+    for id in &listed {
+        let stored = fs::metadata(layout.object_path(*id))
+            .expect("an object file")
+            .len();
+        assert!(
+            stored > to_u64(BLOB_LEN),
+            "{id:?} is stored whole, uncompressed"
+        );
+    }
+    let journal = Journal::open(&layout, Arc::new(RealFs)).expect("open the journal");
+    let frames = journal
+        .frames_from(0, usize::MAX)
+        .expect("read the journal");
+    assert_eq!(
+        to_u64(frames.len()),
+        TRANSACTIONS,
+        "a frame per transaction"
+    );
+}
+
+/// The method a call recorded as `"<method> <path>"` is of.
+fn name(call: &str) -> &str {
+    call.split_once(' ').map_or(call, |(method, _)| method)
+}
+
+/// The path, in the store root, that a call recorded as `"<method> <path>"` acts on.
+fn path(call: &str) -> &str {
+    call.split_once(' ').map_or("", |(_, path)| path)
+}
+
+/// Whether a call recorded as `"<method> <path>"` acts on `objects/` or a path in it.
+fn in_objects(call: &str) -> bool {
+    let path = path(call);
+    path == "objects" || path.starts_with("objects/")
 }

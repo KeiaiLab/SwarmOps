@@ -26,8 +26,9 @@
 //! the load left in memtables and deletes the sealed journals (2.9 s against 0.55 s at 1M);
 //! every later open replays the same active journal. A small store keeps its whole journal
 //! beside the new tables. `fjall-unflushed` settles with the journal sync alone: the store as
-//! the bulk load left it, measured in W3–W5 only, for the record (W5 sizes it as left; W3 and
-//! W4 see it after its first open settled it).
+//! the bulk load left it, measured in W3–W5 only, for the record (W5 sizes it as left, its first
+//! open is timed at seeding, and W4 opens fresh copies of it as left, taken at seeding; W3 and
+//! W4's recovery see it after that first open settled it).
 
 use std::path::Path;
 use std::thread;

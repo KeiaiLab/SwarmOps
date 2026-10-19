@@ -24,7 +24,9 @@ use measure::{Env, recorded};
 use report::{Col, detail, num, summary};
 use workloads::sync::PerCommit;
 use workloads::w2::Mode;
-use workloads::{Plan, Record, Seed, Values, same_files_as, same_writes_as, size_name};
+use workloads::{
+    Plan, Record, Seed, Values, opens_as_loaded, same_files_as, same_writes_as, size_name,
+};
 
 const USAGE: &str = "\
 usage: swarmops-bench-compare [--quick] [--runs N] [--engines a,b,...] [--only w1,w2,...]
@@ -294,6 +296,17 @@ fn orchestrate(options: &Options) -> ExitCode {
     } else {
         (Seeds::new(), SeedFiles::new())
     };
+    // Each seeded store's first open after its load, before any workload opens it: every
+    // open in W3–W6 is a re-open (bench-1).
+    for ((name, n), seed) in &seeds {
+        let Some(engine) = engines.iter().find(|engine| engine.name() == name) else {
+            continue;
+        };
+        let exe = bench.exe.clone();
+        bench.measure("w4-first-open", &size_name(*n), name, 1, || {
+            workloads::w4::first_open(engine.as_ref(), seed, &exe)
+        });
+    }
     let seed_of = |engine: &str, n: u64| {
         let name = same_files_as(engine).unwrap_or(engine);
         seeds.get(&(name.to_owned(), n))
@@ -476,7 +489,8 @@ fn sync_runs(
 /// size and files taken once it is settled and closed, before any workload writes into it.
 /// With `w5_runs`, W5 builds every store that many times, the engines in each run's rotated
 /// order, and records each build's size: the first build's stores are kept for W3, W4 and W6,
-/// the others deleted once measured.
+/// the others deleted once measured. A kept store of an engine W4 opens as the load left it
+/// ([`opens_as_loaded`]) keeps a copy of itself, taken before anything opens it.
 fn seed_all(
     bench: &mut Bench<'_>,
     engines: &[Box<dyn Engine>],
@@ -499,7 +513,7 @@ fn seed_all(
                 let (seed, env) = recorded(&bench.work, plan.probes, || {
                     workloads::seed(engine, n, &bench.work)
                 });
-                let seed = match seed {
+                let mut seed = match seed {
                     Ok(seed) => seed,
                     Err(e) => {
                         let e = format!("seed {} {n} build {build}: {e}", engine.name());
@@ -514,6 +528,13 @@ fn seed_all(
                     bench.records.push(record);
                 }
                 if build == 1 {
+                    if opens_as_loaded(engine.name())
+                        && let Err(e) = seed.keep_as_loaded()
+                    {
+                        let e = format!("copy of seed {} {n}: {e}", engine.name());
+                        bench.errors.push(e);
+                        continue;
+                    }
                     let key = (engine.name().to_owned(), n);
                     seed_files.insert(key.clone(), (size, files));
                     seeds.insert(key, seed);
@@ -924,12 +945,29 @@ fn render(
             );
         }
     }
+    for &n in &plan.sizes {
+        section(
+            &mut out,
+            &format!(
+                "W4: the first open after the load, {} changesets (warm), in a fresh process",
+                size_name(n)
+            ),
+            "Once per seeded store, right after its load and settle and before any workload opens it, so that what an engine's first open does and later ones do not shows (fjall-unflushed's replays and settles what its load left); the open, the first lookup, and the process from spawn to exit.",
+            "w4-first-open",
+            &size_name(n),
+            &[
+                Col("first_open_ms", "first open ms"),
+                Col("first_lookup_ms", "first lookup ms"),
+                Col("process_ms", "process ms"),
+            ],
+        );
+    }
     let largest = size_name(*plan.sizes.iter().max().expect("sizes"));
     section(
         &mut out,
         &format!("W4: opening a {largest}-changeset store (warm), in a fresh process"),
         &format!(
-            "Median of {} opens per run, and the worst of them; in a full run W3 has opened the store before, so these are re-opens.",
+            "Median of {} opens per run, and the worst of them: re-opens, since each store's first open after its load is timed at seeding (above); fjall-unflushed's each open a fresh copy of its store as the load left it, taken at seeding.",
             plan.w4_opens
         ),
         "w4-open",
@@ -1035,13 +1073,13 @@ fn render(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::Instant;
 
     use super::{Bench, seed_all, sync_runs, tree_name};
     use crate::engines::{self, Engine};
-    use crate::workloads::Plan;
     use crate::workloads::sync::PerCommit;
+    use crate::workloads::{Plan, copy_store};
 
     fn named(names: &[&str]) -> Vec<Box<dyn Engine>> {
         names
@@ -1138,6 +1176,95 @@ mod tests {
             .expect("the work dir")
             .count();
         assert_eq!(left, 4, "only the kept stores are left in the work dir");
+    }
+
+    /// Every file under `dir`, by its path in `dir`, with its bytes.
+    fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
+        let mut files = BTreeMap::new();
+        let mut dirs = vec![dir.to_path_buf()];
+        while let Some(at) = dirs.pop() {
+            for entry in std::fs::read_dir(&at).expect("a directory") {
+                let path = entry.expect("an entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    let bytes = std::fs::read(&path).expect("a file");
+                    let name = path.strip_prefix(dir).expect("under dir").to_path_buf();
+                    files.insert(name, bytes);
+                }
+            }
+        }
+        files
+    }
+
+    #[test]
+    fn fjall_unflushed_keeps_a_copy_of_its_store_as_the_load_left_it() {
+        let work = tempfile::tempdir().expect("a temp dir");
+        let mut plan = Plan::quick();
+        plan.sizes = vec![1_000];
+        plan.probes = 1;
+        let mut bench = Bench {
+            plan: &plan,
+            work: work.path().to_path_buf(),
+            exe: PathBuf::new(),
+            started: Instant::now(),
+            records: Vec::new(),
+            errors: Vec::new(),
+        };
+        let engines = named(&["fjall-unflushed", "sqlite"]);
+        let (seeds, _) = seed_all(&mut bench, &engines, None);
+        assert!(bench.errors.is_empty(), "{:?}", bench.errors);
+        let unflushed = &seeds[&("fjall-unflushed".to_owned(), 1_000)];
+        let copy = unflushed.as_loaded.as_ref().expect("a copy of the store");
+        // Nothing has opened the store since its load: the copy holds what it holds, the
+        // journals the load left among it.
+        let held = tree(&unflushed.dir);
+        assert!(
+            held.keys()
+                .any(|file| file.extension().is_some_and(|e| e == "jnl")),
+            "{:?}",
+            held.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(tree(copy.path()), held);
+        assert!(seeds[&("sqlite".to_owned(), 1_000)].as_loaded.is_none());
+        // Beside the two stores in the work dir, and gone with them.
+        let entries = || {
+            std::fs::read_dir(work.path())
+                .expect("the work dir")
+                .count()
+        };
+        assert_eq!(entries(), 3);
+        drop(seeds);
+        assert_eq!(entries(), 0);
+    }
+
+    #[test]
+    fn a_store_copy_holds_its_files_and_directories_and_refuses_anything_else() {
+        let work = tempfile::tempdir().expect("a temp dir");
+        let store = work.path().join("store");
+        std::fs::create_dir_all(store.join("keyspaces/0")).expect("make the dirs");
+        std::fs::create_dir(store.join("empty")).expect("make an empty dir");
+        std::fs::write(store.join("0.jnl"), b"a journal").expect("write a file");
+        std::fs::write(store.join("keyspaces/0/table"), [7; 5_000]).expect("write a file");
+        let copy = copy_store(&store).expect("copy the store");
+        assert_eq!(copy.path().parent(), Some(work.path()), "beside the store");
+        assert_eq!(tree(copy.path()), tree(&store));
+        assert!(copy.path().join("empty").is_dir());
+        let path = copy.path().to_path_buf();
+        drop(copy);
+        assert!(!path.exists(), "removed when dropped");
+        std::os::unix::fs::symlink("0.jnl", store.join("link")).expect("make a symlink");
+        assert!(
+            copy_store(&store).is_err(),
+            "a symlink is neither a file nor a dir"
+        );
+        assert_eq!(
+            std::fs::read_dir(work.path())
+                .expect("the work dir")
+                .count(),
+            1,
+            "a failed copy leaves nothing"
+        );
     }
 
     #[test]
