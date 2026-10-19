@@ -337,6 +337,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   failed, where it was the non-retryable `E_IO`: nothing of the write was committed, and running
   it again lists the frame. In the Rust API it is `StoreError::NotCommitted`, where it was
   `StoreError::Io`.
+- `swarmops mcp`: refusing a `ref_set` or `ref_delete` whose `expected_old`, or a `commit` with
+  `advance` whose `parent`, is no full changeset id, the server says what an id prefix does
+  apart from a ref name and a relative revision (it stops resolving once another changeset
+  shares it), as the tool descriptions do; and arguments that do not fit a tool's request type
+  get a hint that the tool's `inputSchema` gives them, where `swarmops schema` gives the
+  request type without the rules the server adds. In the schema, `VerifyFinding.object` says
+  that `missing_object` also names an object the store holds as another kind.
 
 ### Fixed
 
@@ -388,8 +395,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 
 - An object file whose zstd frame records a huge decompressed size, in agreement with its header
   (17 bytes of frame are enough), no longer makes a read panic (`E_INTERNAL`) or abort the process
-  while it reserves that size: a read reserves at most 64 MiB before the frame's output arrives,
-  and such an object is `E_STORE_CORRUPT`, which `verify --deep` lists. An object whose frame
+  while it reserves that size: before the frame's output arrives, a read reserves at most 64 MiB
+  for it, beside the zstd decoder's window, which the frame's header sets up to zstd's default
+  limit of 128 MiB (this store's frames use at most 2 MiB): about 192 MiB at worst. Such an
+  object is `E_STORE_CORRUPT`, which `verify --deep` lists. An object whose frame
   really decompresses to a huge size is still decoded whole
   ([docs/known-limitations.md](docs/known-limitations.md), "A zstd bomb object is decoded
   whole").

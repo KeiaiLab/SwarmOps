@@ -2508,7 +2508,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "object": {
-          "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks\n(`missing_object`).",
+          "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks, or holds as\nanother kind (`missing_object`).",
           "type": [
             "string",
             "null"
@@ -2577,7 +2577,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "object": {
-              "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks\n(`missing_object`).",
+              "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks, or holds as\nanother kind (`missing_object`).",
               "type": [
                 "string",
                 "null"

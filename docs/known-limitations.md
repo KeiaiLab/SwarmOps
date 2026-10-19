@@ -32,9 +32,11 @@ left).
   512 B or 4 KiB, zero-filled, or with its first sector lost; directory entries that no fsync
   covered reverted), each of which the binary must recover. What stays open: `abort()` stands
   in for `SIGKILL`, and the images come from a model of the disk, not a real device, and the
-  recorded run is short (its journal ends at 1,130 B), so a cut at 4 KiB is in the model but
-  never differs from dropping. A test with a literal `SIGKILL` on a real device is *M6*. *Found:
-  M1 Task 6; final review, question 11; narrowed by M1.5 Task 3.*
+  recorded run is short (its journal ends at 2,016 B), so a cut at 4 KiB is in the model but
+  never differs from dropping there; only the slow variant's bulk frame (1,025 changeset
+  records, about 76 KB) reaches past a 4 KiB boundary. A test with a literal `SIGKILL` on a real
+  device is *M6*. *Found: M1 Task 6; final review, question 11; narrowed by M1.5 Task 3 and M1.6
+  Task 4.*
 - **A double failure leaves an index risk open.** When an index sync fails, the writer cuts the
   unsynced records back so the journal can supply them again; if the cut fails too, the error
   names both failures, and the risk stays open until the next successful sync, which could carry
@@ -100,7 +102,7 @@ left).
   registry). Found: M1 Task 2c; final review, question 1.*
 - **A read can give up under sustained commits.** A snapshot reads the refs and the frames again
   until they hold still, in at most 32 rounds; when a commit lands during every round, it fails
-  with the retryable `E_BUSY` rather than wait. The bound makes no such reader progress: each
+  with the retryable `E_BUSY` rather than wait. The bound does not make such a reader progress: each
   round reads every ref file and every frame past the checkpoint again. Reading again only the
   refs the new frames move, or starting over from a fresh checkpoint, is the next step if a
   measurement shows readers giving up; bench-compare's W6 ([perf.md](perf.md)) measured a
@@ -207,10 +209,12 @@ left).
 - **A zstd bomb object is decoded whole.** An object file whose zstd frame really produces a
   huge payload, a small file that decompresses to the size it records, is decompressed in full
   before its hash is checked; a frame that only claims a huge size is refused as corrupt
-  (`E_STORE_CORRUPT`, which `verify --deep` lists) before more than 64 MiB is reserved for it.
-  SwarmOps never writes such a file; a crafted store can hold one. A maximum object length, or
-  streamed reads, closes it. *Target: M3 (the object-length decision, storage spec §10 item 6),
-  M2 (streamed reads). Found: M1 Task 1; the 2026-10-16 code review.*
+  (`E_STORE_CORRUPT`, which `verify --deep` lists) before more than 64 MiB is reserved for its
+  output, beside the decoder's window, which the frame's header sets up to zstd's default limit
+  of 128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store can
+  hold one. A maximum object length, or streamed reads, closes it. *Target: M3 (the
+  object-length decision, storage spec §10 item 6), M2 (streamed reads). Found: M1 Task 1; the
+  2026-10-16 code review.*
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range

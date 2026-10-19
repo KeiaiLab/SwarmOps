@@ -39,7 +39,7 @@ and review (M7) come later, in the order of umbrella §13.
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
-| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, and builders of stores, repositories and runs of the binary. A dev-dependency of the store, the repository, the operations and the CLI; no product build includes it. |
+| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, and builders of stores, repositories and runs of the binary. A dev-dependency of the store, the repository, the operations and the CLI, and a dependency of the fuzz targets, which take it without its default features `cli` and `repo` (the runs of the binary and the repository builders); no product build includes it. |
 
 Dependencies point one way, from the binary down to the codec, the test kit's dev edges aside:
 
@@ -50,7 +50,8 @@ swarmops-store   core
 swarmops-repo    core, store
 swarmops-ops     api, core, repo, store
 swarmops-cli     api, ops            (its tests also use core, repo, store and testkit)
-swarmops-testkit core, repo, store   (a dev-dependency of store, repo, ops and cli)
+swarmops-testkit core, store, repo   (repo behind its default feature `repo`; a dev-dependency
+                                      of store, repo, ops and cli, and fuzz/'s dependency)
 ```
 
 `fuzz/` is a cargo workspace of its own, with four cargo-fuzz targets over the codec and the
@@ -450,8 +451,9 @@ and says when it cut the list.
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
 stdio: one tool per `StoreOps` operation, whose input schema is the request type's JSON Schema,
 kept a plain object (a rule across fields that the type's schema states with a top-level `oneOf`
-goes into the description and the server's own check), and whose result is the envelope the
-CLI prints.
+goes into the description and the server's own check) and with the `expected_old` of `ref_set`
+and `ref_delete` narrowed to a full changeset id, and whose result is the envelope the CLI
+prints.
 
 ## Where to read more
 

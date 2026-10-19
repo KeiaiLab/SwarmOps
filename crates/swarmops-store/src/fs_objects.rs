@@ -420,15 +420,7 @@ fn decode_capped(
             let payload = if ulen <= cap {
                 zstd::bulk::decompress(body, ulen).map_err(|_| corrupt())?
             } else {
-                stream_decode(body, ulen, cap).map_err(|e| match e.kind() {
-                    // The host could not hold what the frame really produces: not the file's
-                    // fault, but a failed read of it, named by its place in the store.
-                    io::ErrorKind::OutOfMemory => {
-                        let file = Layout::new(Utf8PathBuf::new()).object_path(id);
-                        IoFailure::new(FileOp::Fs(FsMethod::Read), Some(file), e).into()
-                    }
-                    _ => corrupt(),
-                })?
+                stream_decode(body, ulen, cap).map_err(|e| stream_failure(id, e))?
             };
             // A frame that produces more or less than it records is zstd damage.
             if payload.len() != ulen {
@@ -442,6 +434,19 @@ fn decode_capped(
         return Err(corrupt());
     }
     Ok((kind, payload))
+}
+
+/// What a failed [`stream_decode`] of object `id` is: a growth of its buffer the host could not
+/// back (`OutOfMemory`) is not the file's fault, but a failed read of it, named by its place in
+/// the store; anything else is zstd damage.
+fn stream_failure(id: ObjectId, e: io::Error) -> StoreError {
+    match e.kind() {
+        io::ErrorKind::OutOfMemory => {
+            let file = Layout::new(Utf8PathBuf::new()).object_path(id);
+            IoFailure::new(FileOp::Fs(FsMethod::Read), Some(file), e).into()
+        }
+        _ => StoreError::Corrupt { id },
+    }
 }
 
 /// `body` decoded by zstd's streaming decoder into a buffer that starts at `start` bytes and
@@ -504,6 +509,36 @@ mod tests {
             assert!(
                 corrupt(decode_capped(id, lying_zstd(4096), cap)),
                 "a frame that records 4 KiB and makes nothing, cap {cap}"
+            );
+        }
+    }
+
+    /// A stream that fails because the host cannot back its buffer's growth (`OutOfMemory`,
+    /// what `read_to_end`'s `try_reserve` gives) is a failed read of the object's file, named by
+    /// its place in the store, not damage: the file is not at fault. Any other failure of the
+    /// stream is zstd damage.
+    #[test]
+    fn a_stream_the_host_cannot_hold_is_a_failed_read_not_damage() {
+        let id = hash_object(ObjectKind::Blob, b"a payload");
+        let hex = id.to_hex();
+        let file = Utf8PathBuf::from(format!("objects/{}/{}", &hex[..2], &hex[2..]));
+        match stream_failure(id, io::Error::from(io::ErrorKind::OutOfMemory)) {
+            StoreError::Io(failure) => {
+                assert_eq!(failure.kind(), io::ErrorKind::OutOfMemory);
+                assert_eq!(failure.op, FileOp::Fs(FsMethod::Read));
+                assert_eq!(failure.file, Some(file));
+            }
+            other => panic!("expected the read's failure, got {other:?}"),
+        }
+        for kind in [
+            io::ErrorKind::InvalidData,
+            io::ErrorKind::UnexpectedEof,
+            io::ErrorKind::Other,
+        ] {
+            let got = stream_failure(id, io::Error::from(kind));
+            assert!(
+                matches!(got, StoreError::Corrupt { id: bad } if bad == id),
+                "{kind:?}: {got:?}"
             );
         }
     }
