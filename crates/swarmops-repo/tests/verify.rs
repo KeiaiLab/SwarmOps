@@ -292,6 +292,35 @@ fn verify_detects_corrupt_blob_and_missing_object() {
     );
 }
 
+/// Rewrites the file of object `id` in the store at `root` as a zstd object whose header and
+/// frame both record `size` bytes, around a frame holding one empty raw block: a lie that agrees
+/// with itself, so that the header check passes and only decoding finds it out.
+fn lie_about_its_size(root: &Utf8Path, id: ObjectId, size: u64) {
+    let file = object_file(root, id);
+    let mut bytes = fs::read(&file).unwrap();
+    bytes.truncate(16); // "SOB1" | kind | enc | rsvd | ulen
+    bytes[5] = 1; // zstd
+    bytes[8..16].copy_from_slice(&size.to_le_bytes());
+    bytes.extend([0x28, 0xB5, 0x2F, 0xFD, 0xC0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
+    bytes.extend(size.to_le_bytes()); // frame content size
+    bytes.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
+    fs::write(&file, bytes).unwrap();
+}
+
+#[test]
+fn verify_deep_lists_an_object_whose_zstd_frame_lies_about_its_size() {
+    let (_dir, root, repo) = new_repo();
+    let content = b"a line that compresses well\n".repeat(147); // 4,116 bytes
+    commit(&repo, &[], vec![put("big.txt", &content)]);
+    let lying = blob(&content).0;
+    lie_about_its_size(&root, lying, 1 << 40);
+
+    // Read whole, the file would claim a TiB: the deep check lists it as corrupt and goes on.
+    assert_problems_when(&repo, true, vec![VerifyProblem::CorruptObject(lying)]);
+    // A shallow check reads no blob.
+    assert_problems_when(&repo, false, Vec::new());
+}
+
 #[test]
 fn verify_detects_dangling_ref() {
     let (_dir, root, repo) = new_repo();

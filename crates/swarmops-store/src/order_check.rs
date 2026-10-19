@@ -56,9 +56,13 @@
 //! it left behind, read back from the files themselves: a failed sync leaves the bytes that it
 //! did not cover not durable, for good (W1's lost writeback; the index files too, so that W3
 //! catches a checkpoint past records a failed sync may have lost); a failed replace or rename
-//! that took effect leaves its new name waiting for a directory fsync. It reads the files with
-//! `std::fs`, never through the [`FsOps`] it wraps, so that it changes no call count, and it
-//! holds no lock while a call runs, so that calls made at once stay at once.
+//! that took effect leaves its new name waiting for a directory fsync. A directory's later fsync
+//! that succeeds covers every change made in it before, those a failed one left waiting among
+//! them, as storage spec §2 rule 5 assumes (a failed directory fsync is fail-stop on the
+//! filesystems the store supports); file data that a failed sync left not durable is never made
+//! good by a later sync. It reads the files with `std::fs`, never through the [`FsOps`] it wraps,
+//! so that it changes no call count, and it holds no lock while a call runs, so that calls made
+//! at once stay at once.
 //!
 //! It judges the order of the calls, and takes each at what [`FsOps`] documents for it, not at
 //! what `RealFs` does inside it: that `atomic_replace` syncs its temp file before the rename and

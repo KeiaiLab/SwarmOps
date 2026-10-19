@@ -295,6 +295,12 @@ directory fsync. The index is synced only in batches, which is safe because the 
 every record and replay restores what a crash took from the index. A `--durability fast` flag
 exists only if [perf.md](perf.md) records a measurement that justifies it, and none does.
 
+A failed sync of file data is never trusted to a later one: the journal and the index cut back
+what it covered or write it afresh (storage §2 rule 3, §3), and an object's data is synced in a
+fresh temp file before its name exists; a failed directory fsync is fail-stop on the filesystems
+the store supports (storage §2 rule 5), so the object store's retry of one covers only an fsync
+that never ran.
+
 The price is measured in [perf.md](perf.md): about 4 ms per fsync on the reference host, and
 about 21 ms for an uncontended durable commit through the binary. The umbrella spec's commit
 target (5 ms plus 0.3 ms per file) counts no syncs; batching syncs is to be reconsidered in M2.

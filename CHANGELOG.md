@@ -212,5 +212,21 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   storage spec §2 rule 4, and a violation panics with `order check: W<n> violated by …`. They
   were R1–R7, defined only in `crates/swarmops-store/src/order_check.rs`, under the names the
   spec's review invariants (§6) also use.
+- A raw object (one stored uncompressed: under 128 bytes, or content zstd cannot shrink, such
+  as media or archives) is read back in the buffer its file was read into, the 16-byte header
+  drained off the front, instead of being copied out of it: reading a large one peaks at about
+  its size, not twice that. It is still one read of the file.
+
+### Security
+
+#### M1.6: the code-review follow-ups (2026-10-19)
+
+- An object file whose zstd frame records a huge decompressed size, in agreement with its header
+  (17 bytes of frame are enough), no longer makes a read panic (`E_INTERNAL`) or abort the process
+  while it reserves that size: a read reserves at most 64 MiB before the frame's output arrives,
+  and such an object is `E_STORE_CORRUPT`, which `verify --deep` lists. An object whose frame
+  really decompresses to a huge size is still decoded whole
+  ([docs/known-limitations.md](docs/known-limitations.md), "A zstd bomb object is decoded
+  whole").
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable

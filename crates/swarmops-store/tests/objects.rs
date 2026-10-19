@@ -228,6 +228,18 @@ fn get_damaged(
     got
 }
 
+/// Makes `file` a SOB1 zstd object whose header and frame both record `size`, around a frame
+/// holding one empty raw block: a lie that agrees with itself, so that the header check passes
+/// and only decoding finds it out.
+fn lying_zstd(file: &mut Vec<u8>, size: u64) {
+    file.truncate(HEADER_LEN);
+    file[5] = ENC_ZSTD;
+    file[8..16].copy_from_slice(&size.to_le_bytes());
+    file.extend([0x28, 0xB5, 0x2F, 0xFD, 0xC0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
+    file.extend(size.to_le_bytes()); // frame content size
+    file.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
+}
+
 fn fanout_dir(layout: &Layout, blob: &[u8]) -> PathBuf {
     let object = layout.object_path(hash_object(ObjectKind::Blob, blob));
     object.parent().unwrap().as_std_path().to_path_buf()
@@ -437,6 +449,82 @@ fn damaged_header_is_reported_as_bad_header() {
             "{what}: {got:?}"
         );
     }
+}
+
+#[test]
+fn a_raw_object_is_read_back_in_the_buffer_it_was_read_into() {
+    let (_root, layout) = new_root();
+    let store = real_store(&layout);
+    let payload = random_bytes(4096);
+    let id = store.put(ObjectKind::Blob, &payload).unwrap();
+    assert_eq!(
+        fs::read(layout.object_path(id)).unwrap()[5],
+        ENC_RAW,
+        "incompressible bytes are stored raw"
+    );
+    let (kind, got) = store.get(id).unwrap().expect("stored");
+    assert_eq!((kind, &got), (ObjectKind::Blob, &payload));
+    // The read buffer held the whole file: drained of its header in place, it keeps room for
+    // the header still. A copy of the payload would have been allocated at the payload's length.
+    assert!(
+        got.capacity() >= got.len() + HEADER_LEN,
+        "a payload of {} bytes in a buffer of {}",
+        got.len(),
+        got.capacity()
+    );
+}
+
+#[test]
+fn a_zstd_frame_that_records_a_huge_size_is_corrupt_without_allocating_it() {
+    let (_root, layout) = new_root();
+    let store = real_store(&layout);
+    let id = store.put(ObjectKind::Blob, &[b'a'; 4096]).unwrap();
+    // Each lie agrees with itself (header and frame record the same size), and the frame makes
+    // no output at all: no read may reserve the size it claims before the output says otherwise.
+    let cases: [Damage; 4] = [
+        ("2^40 bytes, which aborted the process", id, |file| {
+            lying_zstd(file, 1 << 40);
+        }),
+        ("2^63 bytes, which panicked", id, |file| {
+            lying_zstd(file, 1 << 63);
+        }),
+        (
+            "64 MiB + 1, the first size decoded as a stream",
+            id,
+            |file| {
+                lying_zstd(file, (64 << 20) + 1);
+            },
+        ),
+        ("64 MiB, the largest size decoded in one pass", id, |file| {
+            lying_zstd(file, 64 << 20);
+        }),
+    ];
+    for (what, id, damage) in cases {
+        let got = get_damaged(&store, &layout, id, damage);
+        assert!(
+            matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+            "{what}: {got:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "slow, ~5 s: a 64 MiB + 1 object put and read back whole (~200 MiB peak); just check-slow runs it"]
+fn a_zstd_object_past_the_cap_round_trips_through_the_store() {
+    let (_root, layout) = new_root();
+    let store = real_store(&layout);
+    // One byte past the largest payload decoded in one pass: `get` decodes it as a stream.
+    let payload = vec![0; (64 << 20) + 1];
+    let id = store.put(ObjectKind::Blob, &payload).unwrap();
+    let file = fs::read(layout.object_path(id)).unwrap();
+    assert_eq!(file[5], ENC_ZSTD);
+    assert!(
+        file.len() < 64 << 10,
+        "{} bytes of zstd for 64 MiB of zeros",
+        file.len()
+    );
+    let got = store.get(id).unwrap().expect("stored");
+    assert!(got == (ObjectKind::Blob, payload), "the payload comes back");
 }
 
 #[test]

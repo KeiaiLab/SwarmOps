@@ -64,9 +64,11 @@ type FailWhen = dyn Fn(&SyncCall<'_>) -> bool + Send + Sync;
 ///   and `write_durable_temp`), volatile until then.
 ///
 /// A file the model has seen no call on counts as durable as it is. It models file data only:
-/// directory entries count as durable at once (a power loss can take back entries no fsync of
-/// their directory covered, which the power-loss images model), and so a failed `fsync_dir`, or
-/// a failed `rename_durable` or `atomic_replace` once its data is synced, loses no data here.
+/// directory entries count as durable at once, as storage spec §2 rule 5 lets it (a failed
+/// directory fsync is fail-stop on the filesystems the store supports, so no later sync succeeds
+/// over an entry it left unsure; a power loss can take back entries no fsync of their directory
+/// covered, which the power-loss images model), and so a failed `fsync_dir`, or a failed
+/// `rename_durable` or `atomic_replace` once its data is synced, loses no data here.
 pub struct FsyncModelFs<F: FsOps = RealFs> {
     /// The filesystem the calls run on.
     inner: F,

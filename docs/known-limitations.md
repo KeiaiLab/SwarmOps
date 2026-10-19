@@ -57,12 +57,15 @@ left).
   sequence number and the previous frame's CRC, and fsck). Found: M1.5 Task 2.*
 - **A failed directory fsync in the object store is retried, not taken back.**
   `FsObjectStore::flush` keeps a fan-out directory whose fsync failed and fsyncs it again on a
-  later flush. Linux reports a failed writeback once, so the later fsync's success does not
-  prove that the earlier links reached the disk, and a later commit may name an object whose
-  link a power loss then takes back. The journal's policy above does not cover objects, and
-  neither the order checker nor the fsync-failure model applies lost writebacks to directories.
-  On ext4 a failed directory fsync normally aborts the filesystem's journal, which bounds the
-  risk. *Target: M6. Found: M1.5 Task 2; the 2026-10-16 expert review.*
+  later flush; the commit whose flush failed fails. The retry is for an fsync that never ran (the
+  directory could not be opened: `EMFILE`, `ENOMEM`, `EACCES`). A later success cannot make
+  good a failed one, and on the filesystems the store supports it need not: there a failed
+  directory fsync is fail-stop (storage spec §2 rule 5), so every later sync fails too; the
+  order checker and the fsync-failure model assume the same. On a filesystem that is not
+  fail-stop (ext4 without a journal, ext2, FUSE, NFS or SMB), which the store does not detect
+  yet, a later fsync's success proves nothing about the earlier links, and a later commit may
+  name an object whose link a power loss then takes back. *Target: M6 (detection by `statfs`).
+  Found: M1.5 Task 2; the 2026-10-16 expert review.*
 - **Full fsync is slow on this host.** An uncontended durable commit takes about 21 ms through
   the binary, at about 4 ms per fsync; the umbrella spec's commit target (5 ms plus 0.3 ms per
   file) leaves syncs out. Batching object and journal syncs, and whether any
@@ -187,12 +190,13 @@ left).
 
 [SECURITY.md](../SECURITY.md) says which inputs are in scope.
 
-- **An oversized zstd frame aborts a read.** An object file whose zstd frame records a huge
-  decompressed size, equal to the header's length, makes `get` allocate that size up front and
-  panic or abort, instead of failing with `BadHeader`. SwarmOps never writes such a file; a
-  crafted or damaged store can hold one. The fix is a streaming decoder that stops one byte past
-  the expected length. *Unscheduled in the ledger; proposed for M6, with a fuzz target for
-  object files. Found: M1 Task 1.*
+- **A zstd bomb object is decoded whole.** An object file whose zstd frame really produces a
+  huge payload, a small file that decompresses to the size it records, is decompressed in full
+  before its hash is checked; a frame that only claims a huge size is refused as corrupt
+  (`E_STORE_CORRUPT`, which `verify --deep` lists) before more than 64 MiB is reserved for it.
+  SwarmOps never writes such a file; a crafted store can hold one. A maximum object length, or
+  streamed reads, closes it. *Target: M3 (the object-length decision, storage spec §10 item 6),
+  M2 (streamed reads). Found: M1 Task 1; the 2026-10-16 code review.*
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range
@@ -264,6 +268,11 @@ left).
 - **The filesystem check is by path name only.** A store under `/mnt/` is refused, but NFS, SMB
   or FUSE mounts are not detected (and not supported). *Target: M6 (detection by `statfs`).
   Found: M1 Task 3; umbrella spec §4.*
+- **Directory fsync failures are assumed fail-stop.** On ext4 with a journal, XFS and btrfs a
+  failed directory fsync makes every later sync fail until the filesystem is mounted again, so a
+  later sync that succeeds covers the entries made before it (storage spec §2 rule 5). ext4
+  without a journal, ext2, FUSE and network filesystems do not behave this way and are not
+  supported. *Target: M6 (detection by `statfs`). Found: the 2026-10-16 code review.*
 - **btrfs and a resumed `init`.** Resuming an interrupted `init` relies on ext4's and XFS's
   ordered journal to make the crashed attempt's directories durable; on btrfs they might not be
   (recoverable by creating the store again). *Unscheduled. Found: M1 Task 3.*
@@ -290,9 +299,8 @@ left).
   field of a changeset's index record reads all five index files; every commit's
   materialization scans the index tail; and the reflog walks frames past the snapshot only to
   drop them. *Target: M2. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
-- **Small object-store costs.** A raw object read copies its payload instead of stripping the
-  header in place, and a put that creates a fan-out directory checks for it under the store's
-  mutex. *Unscheduled. Found: M1 Task 1.*
+- **Small object-store costs.** A put that creates a fan-out directory checks for it under the
+  store's mutex. *Unscheduled. Found: M1 Task 1.*
 - **No benchmark gate.** The benches run by hand (`just bench`, `just perf`); failing on a 20 %
   regression (`bench/thresholds.toml`) comes later. *Target: M9. Found: docs/perf.md.*
 
