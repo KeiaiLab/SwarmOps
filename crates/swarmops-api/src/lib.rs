@@ -18,9 +18,11 @@ pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
-    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_DERIVE_LIMIT, DEFAULT_LOG_LIMIT,
+    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_DERIVE_LIMIT,
+    DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
     DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT,
-    DeriveReq, DeriveResp, EntryKindOut, FileContent, FileKind, IdentityInfo, InfoReq, InitReq,
+    DeriveReq, DeriveResp, Diff, DiffFormat, DiffHunk, DiffLineOut, DiffReq, DiffStatus,
+    EntryKindOut, FileContent, FileDiff, FileKind, IdentityInfo, InfoReq, InitReq, LineOp,
     LineRange, LogPage, LogReq, MAX_TREE_DEPTH, ModeInput, PathHistoryEntry, PathHistoryPage,
     PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefOut,
     RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut,
@@ -96,6 +98,15 @@ pub fn schema_for_all() -> serde_json::Value {
         PathHistoryReq,
         PathHistoryPage,
         PathHistoryEntry,
+        // diff.
+        DiffReq,
+        DiffFormat,
+        Diff,
+        FileDiff,
+        DiffStatus,
+        DiffHunk,
+        DiffLineOut,
+        LineOp,
         // ref list, ref set, ref delete, verify.
         RefListReq,
         RefListResp,

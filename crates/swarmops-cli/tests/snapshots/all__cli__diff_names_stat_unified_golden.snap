@@ -1,0 +1,708 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store --name acme",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "acme",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m first --changes [tmp]/first.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[id1]",
+        "files_changed": 5,
+        "blobs_written": 5
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m second --parent [c1] --changes [tmp]/second.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[id2]",
+        "files_changed": 6,
+        "blobs_written": 3
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c1]",
+        "to": "[c2]",
+        "files": [
+          {
+            "path": "README.md",
+            "status": "modified"
+          },
+          {
+            "path": "bin/run",
+            "status": "modified"
+          },
+          {
+            "path": "latest",
+            "status": "type_changed"
+          },
+          {
+            "path": "logo.bin",
+            "status": "modified"
+          },
+          {
+            "path": "notes.txt",
+            "status": "deleted"
+          },
+          {
+            "path": "src/lib.rs",
+            "status": "added"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --format stat",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c1]",
+        "to": "[c2]",
+        "files": [
+          {
+            "path": "README.md",
+            "status": "modified",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 1
+          },
+          {
+            "path": "bin/run",
+            "status": "modified",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 0
+          },
+          {
+            "path": "latest",
+            "status": "type_changed",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 0
+          },
+          {
+            "path": "logo.bin",
+            "status": "modified",
+            "binary": true
+          },
+          {
+            "path": "notes.txt",
+            "status": "deleted",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 1
+          },
+          {
+            "path": "src/lib.rs",
+            "status": "added",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 0
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --format unified",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c1]",
+        "to": "[c2]",
+        "files": [
+          {
+            "path": "README.md",
+            "status": "modified",
+            "old_kind": "file",
+            "new_kind": "file",
+            "old_blob": "[id3]",
+            "new_blob": "[id4]",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 1,
+            "hunks": [
+              {
+                "old_start": 1,
+                "old_lines": 4,
+                "new_start": 1,
+                "new_lines": 4,
+                "lines": [
+                  {
+                    "op": "context",
+                    "text": "# acme\n"
+                  },
+                  {
+                    "op": "context",
+                    "text": "\n"
+                  },
+                  {
+                    "op": "remove",
+                    "text": "line 3\n"
+                  },
+                  {
+                    "op": "add",
+                    "text": "line three\n"
+                  },
+                  {
+                    "op": "context",
+                    "text": "line 4\n"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "path": "bin/run",
+            "status": "modified",
+            "old_kind": "file",
+            "new_kind": "exec",
+            "old_blob": "[id5]",
+            "new_blob": "[id5]",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 0,
+            "hunks": []
+          },
+          {
+            "path": "latest",
+            "status": "type_changed",
+            "old_kind": "symlink",
+            "new_kind": "file",
+            "old_blob": "[id6]",
+            "new_blob": "[id6]",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 0,
+            "hunks": []
+          },
+          {
+            "path": "logo.bin",
+            "status": "modified",
+            "old_kind": "file",
+            "new_kind": "file",
+            "old_blob": "[id7]",
+            "new_blob": "[id8]",
+            "binary": true
+          },
+          {
+            "path": "notes.txt",
+            "status": "deleted",
+            "old_kind": "file",
+            "old_blob": "[id9]",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 1,
+            "hunks": [
+              {
+                "old_start": 1,
+                "old_lines": 1,
+                "new_start": 0,
+                "new_lines": 0,
+                "lines": [
+                  {
+                    "op": "remove",
+                    "text": "kept\n"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "path": "src/lib.rs",
+            "status": "added",
+            "new_kind": "file",
+            "new_blob": "[id10]",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 0,
+            "hunks": [
+              {
+                "old_start": 0,
+                "old_lines": 0,
+                "new_start": 1,
+                "new_lines": 1,
+                "lines": [
+                  {
+                    "op": "add",
+                    "text": "pub fn f() {}\n"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --format unified --context 0",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c1]",
+        "to": "[c2]",
+        "files": [
+          {
+            "path": "README.md",
+            "status": "modified",
+            "old_kind": "file",
+            "new_kind": "file",
+            "old_blob": "[id3]",
+            "new_blob": "[id4]",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 1,
+            "hunks": [
+              {
+                "old_start": 3,
+                "old_lines": 1,
+                "new_start": 3,
+                "new_lines": 1,
+                "lines": [
+                  {
+                    "op": "remove",
+                    "text": "line 3\n"
+                  },
+                  {
+                    "op": "add",
+                    "text": "line three\n"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "path": "bin/run",
+            "status": "modified",
+            "old_kind": "file",
+            "new_kind": "exec",
+            "old_blob": "[id5]",
+            "new_blob": "[id5]",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 0,
+            "hunks": []
+          },
+          {
+            "path": "latest",
+            "status": "type_changed",
+            "old_kind": "symlink",
+            "new_kind": "file",
+            "old_blob": "[id6]",
+            "new_blob": "[id6]",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 0,
+            "hunks": []
+          },
+          {
+            "path": "logo.bin",
+            "status": "modified",
+            "old_kind": "file",
+            "new_kind": "file",
+            "old_blob": "[id7]",
+            "new_blob": "[id8]",
+            "binary": true
+          },
+          {
+            "path": "notes.txt",
+            "status": "deleted",
+            "old_kind": "file",
+            "old_blob": "[id9]",
+            "binary": false,
+            "insertions": 0,
+            "deletions": 1,
+            "hunks": [
+              {
+                "old_start": 1,
+                "old_lines": 1,
+                "new_start": 0,
+                "new_lines": 0,
+                "lines": [
+                  {
+                    "op": "remove",
+                    "text": "kept\n"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "path": "src/lib.rs",
+            "status": "added",
+            "new_kind": "file",
+            "new_blob": "[id10]",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 0,
+            "hunks": [
+              {
+                "old_start": 0,
+                "old_lines": 0,
+                "new_start": 1,
+                "new_lines": 1,
+                "lines": [
+                  {
+                    "op": "add",
+                    "text": "pub fn f() {}\n"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --limit 2",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c1]",
+        "to": "[c2]",
+        "files": [
+          {
+            "path": "README.md",
+            "status": "modified"
+          },
+          {
+            "path": "bin/run",
+            "status": "modified"
+          }
+        ],
+        "truncated": true,
+        "cursor": "bin/run"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --limit 2 --cursor bin/run",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c1]",
+        "to": "[c2]",
+        "files": [
+          {
+            "path": "latest",
+            "status": "type_changed"
+          },
+          {
+            "path": "logo.bin",
+            "status": "modified"
+          }
+        ],
+        "truncated": true,
+        "cursor": "logo.bin"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --path src/ --path README.md --format stat",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c1]",
+        "to": "[c2]",
+        "files": [
+          {
+            "path": "README.md",
+            "status": "modified",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 1
+          },
+          {
+            "path": "src/lib.rs",
+            "status": "added",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 0
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --format unified --max-bytes 1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c1]",
+        "to": "[c2]",
+        "files": [
+          {
+            "path": "README.md",
+            "status": "modified",
+            "old_kind": "file",
+            "new_kind": "file",
+            "old_blob": "[id3]",
+            "new_blob": "[id4]",
+            "binary": false,
+            "insertions": 1,
+            "deletions": 1,
+            "hunks": [],
+            "hunks_truncated": true
+          }
+        ],
+        "truncated": true,
+        "cursor": "README.md"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c2] [c2]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "diff",
+      "api": 1,
+      "result": {
+        "from": "[c2]",
+        "to": "[c2]",
+        "files": [],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] release/nope",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "diff",
+      "api": 1,
+      "error": {
+        "code": "E_REV_NOT_FOUND",
+        "message": "release/nope: not found",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "rev": "release/nope"
+        },
+        "hint": "swarmops ref list"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --limit 0",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "diff",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "limit must be at least 1",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "limit": 0
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store diff [c1] [c2] --format patch",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "diff",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "invalid value 'patch' for '--format <FORMAT>' [possible values: names, stat, unified]",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops diff [OPTIONS] <FROM> <TO>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

@@ -1114,6 +1114,534 @@ expression: s.redact(&all)
       "title": "DeriveResp",
       "type": "object"
     },
+    "Diff": {
+      "$defs": {
+        "DiffHunk": {
+          "description": "A hunk of a unified diff: one or more changes and the unchanged lines around them, with the\nnumbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.",
+          "properties": {
+            "lines": {
+              "description": "Its lines, in order; each change's removed lines come before its added lines.",
+              "items": {
+                "$ref": "#/$defs/DiffLineOut"
+              },
+              "type": "array"
+            },
+            "new_lines": {
+              "description": "How many new lines it holds: its context and added lines.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "new_start": {
+              "description": "The first new line it holds, counted as `old_start` is.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_lines": {
+              "description": "How many old lines it holds: its context and removed lines.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_start": {
+              "description": "The first old line it holds, counted from 1; when it holds none, the line before where\nthey would be (0 at the top), as git prints it.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "old_start",
+            "old_lines",
+            "new_start",
+            "new_lines",
+            "lines"
+          ],
+          "type": "object"
+        },
+        "DiffLineOut": {
+          "description": "One line of a hunk.",
+          "properties": {
+            "op": {
+              "$ref": "#/$defs/LineOp",
+              "description": "Whether both sides have it, only the new one, or only the old one."
+            },
+            "text": {
+              "description": "The line with its line break, a carriage return before it kept; a file's last line has\nnone when the file does not end in one.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "text"
+          ],
+          "type": "object"
+        },
+        "DiffStatus": {
+          "description": "What happened to a file between the two revisions.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "It is in `to` only: in `from`, nothing or a directory is there.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is in `from` only.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content or its exec bit changed: a file or an executable on both sides, or a\nsymlink on both sides.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A symlink on one side, a file or an executable on the other.",
+              "type": "string"
+            }
+          ]
+        },
+        "FileDiff": {
+          "description": "One file that differs: a file, an executable or a symlink whose content or kind changed, or\nthat is on one side only. A directory never is one: a file that becomes a directory is that\nfile deleted and the directory's files added. No rename is detected: a file that moved is\none deleted and one added. Which fields follow `status` depends on the request's `format`,\nand a field that says nothing is omitted.",
+          "properties": {
+            "binary": {
+              "description": "`stat` and `unified`: whether it is binary, which gets no line counts and no hunks: a side\nthat is not UTF-8, or holds a NUL in its first 8,000 bytes.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "deletions": {
+              "description": "`stat` and `unified`, for text: the lines the change deletes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "hunks": {
+              "description": "`unified`, for text: the hunks, in order; empty when only the exec bit or the kind\nchanged.",
+              "items": {
+                "$ref": "#/$defs/DiffHunk"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "hunks_truncated": {
+              "description": "`unified`: true when `hunks` stops before the file's last hunk, to keep the page within\n`max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the\nsame.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "insertions": {
+              "description": "`stat` and `unified`, for text: the lines the change inserts.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "new_blob": {
+              "description": "`unified`: its blob id in `to`; omitted for a deleted file.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "new_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FileKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`unified`: its kind in `to`; omitted for a deleted file."
+            },
+            "old_blob": {
+              "description": "`unified`: its blob id in `from`; omitted for an added file.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FileKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`unified`: its kind in `from`; omitted for an added file."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/DiffStatus",
+              "description": "What happened to it."
+            }
+          },
+          "required": [
+            "path",
+            "status"
+          ],
+          "type": "object"
+        },
+        "FileKind": {
+          "description": "What a file is; never a directory.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            }
+          ]
+        },
+        "LineOp": {
+          "description": "Which side of a diff a hunk's line is on.",
+          "oneOf": [
+            {
+              "const": "context",
+              "description": "Both: an unchanged line around a change.",
+              "type": "string"
+            },
+            {
+              "const": "add",
+              "description": "The new side only.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "The old side only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`diff`: a page of the files that differ between two revisions, in path order (by bytes).",
+      "properties": {
+        "cursor": {
+          "description": "When `truncated`: where the next page starts. Opaque: pass it back as given, as the next\nrequest's `cursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "description": "The files.",
+          "items": {
+            "$ref": "#/$defs/FileDiff"
+          },
+          "type": "array"
+        },
+        "from": {
+          "description": "The changeset `from` named.",
+          "type": "string"
+        },
+        "to": {
+          "description": "The changeset `to` named.",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "Whether more files follow this page.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "files",
+        "truncated"
+      ],
+      "title": "Diff",
+      "type": "object"
+    },
+    "DiffFormat": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What `diff` says of each file.",
+      "oneOf": [
+        {
+          "const": "names",
+          "description": "Its path and status.",
+          "type": "string"
+        },
+        {
+          "const": "stat",
+          "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+          "type": "string"
+        },
+        {
+          "const": "unified",
+          "description": "Also its kinds, its blobs and, for text, its hunks.",
+          "type": "string"
+        }
+      ],
+      "title": "DiffFormat"
+    },
+    "DiffHunk": {
+      "$defs": {
+        "DiffLineOut": {
+          "description": "One line of a hunk.",
+          "properties": {
+            "op": {
+              "$ref": "#/$defs/LineOp",
+              "description": "Whether both sides have it, only the new one, or only the old one."
+            },
+            "text": {
+              "description": "The line with its line break, a carriage return before it kept; a file's last line has\nnone when the file does not end in one.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "text"
+          ],
+          "type": "object"
+        },
+        "LineOp": {
+          "description": "Which side of a diff a hunk's line is on.",
+          "oneOf": [
+            {
+              "const": "context",
+              "description": "Both: an unchanged line around a change.",
+              "type": "string"
+            },
+            {
+              "const": "add",
+              "description": "The new side only.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "The old side only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A hunk of a unified diff: one or more changes and the unchanged lines around them, with the\nnumbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.",
+      "properties": {
+        "lines": {
+          "description": "Its lines, in order; each change's removed lines come before its added lines.",
+          "items": {
+            "$ref": "#/$defs/DiffLineOut"
+          },
+          "type": "array"
+        },
+        "new_lines": {
+          "description": "How many new lines it holds: its context and added lines.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "new_start": {
+          "description": "The first new line it holds, counted as `old_start` is.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_lines": {
+          "description": "How many old lines it holds: its context and removed lines.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_start": {
+          "description": "The first old line it holds, counted from 1; when it holds none, the line before where\nthey would be (0 at the top), as git prints it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "old_start",
+        "old_lines",
+        "new_start",
+        "new_lines",
+        "lines"
+      ],
+      "title": "DiffHunk",
+      "type": "object"
+    },
+    "DiffLineOut": {
+      "$defs": {
+        "LineOp": {
+          "description": "Which side of a diff a hunk's line is on.",
+          "oneOf": [
+            {
+              "const": "context",
+              "description": "Both: an unchanged line around a change.",
+              "type": "string"
+            },
+            {
+              "const": "add",
+              "description": "The new side only.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "The old side only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One line of a hunk.",
+      "properties": {
+        "op": {
+          "$ref": "#/$defs/LineOp",
+          "description": "Whether both sides have it, only the new one, or only the old one."
+        },
+        "text": {
+          "description": "The line with its line break, a carriage return before it kept; a file's last line has\nnone when the file does not end in one.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "text"
+      ],
+      "title": "DiffLineOut",
+      "type": "object"
+    },
+    "DiffReq": {
+      "$defs": {
+        "DiffFormat": {
+          "description": "What `diff` says of each file.",
+          "oneOf": [
+            {
+              "const": "names",
+              "description": "Its path and status.",
+              "type": "string"
+            },
+            {
+              "const": "stat",
+              "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+              "type": "string"
+            },
+            {
+              "const": "unified",
+              "description": "Also its kinds, its blobs and, for text, its hunks.",
+              "type": "string"
+            }
+          ]
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`diff`: the files that differ between two revisions, in path order, a page at a time.",
+      "properties": {
+        "context": {
+          "default": 3,
+          "description": "The unchanged lines around each change in a `unified` hunk.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cursor": {
+          "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "$ref": "#/$defs/DiffFormat",
+          "default": "names",
+          "description": "What to say of each file: `names` its path and status; `stat` also whether it is binary\nand, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and,\nfor text, its hunks."
+        },
+        "from": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to diff from: the old side."
+        },
+        "limit": {
+          "default": 500,
+          "description": "The most files to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 32768,
+          "description": "The most bytes a `unified` page's files take, as the JSON array `files` they print as: at\nleast 1 (0 is `E_INVALID_ARG`). The page stops before the first file that would take it\npast this, but always holds one file, whose hunks are cut to the first ones that fit\n(`hunks_truncated`) when they alone would pass it. A `names` or `stat` page is held by\n`limit` alone.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "paths": {
+          "description": "Only the files at or below these repository paths (a file's path takes that file; one\ntrailing `/` is taken); every file when empty or omitted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "to": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to diff to: the new side."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "DiffReq",
+      "type": "object"
+    },
+    "DiffStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What happened to a file between the two revisions.",
+      "oneOf": [
+        {
+          "const": "added",
+          "description": "It is in `to` only: in `from`, nothing or a directory is there.",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "description": "It is in `from` only.",
+          "type": "string"
+        },
+        {
+          "const": "modified",
+          "description": "Its content or its exec bit changed: a file or an executable on both sides, or a\nsymlink on both sides.",
+          "type": "string"
+        },
+        {
+          "const": "type_changed",
+          "description": "A symlink on one side, a file or an executable on the other.",
+          "type": "string"
+        }
+      ],
+      "title": "DiffStatus"
+    },
     "EntryKindOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "What a tree entry is.",
@@ -1649,6 +2177,233 @@ expression: s.redact(&all)
       "title": "FileContent",
       "type": "object"
     },
+    "FileDiff": {
+      "$defs": {
+        "DiffHunk": {
+          "description": "A hunk of a unified diff: one or more changes and the unchanged lines around them, with the\nnumbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.",
+          "properties": {
+            "lines": {
+              "description": "Its lines, in order; each change's removed lines come before its added lines.",
+              "items": {
+                "$ref": "#/$defs/DiffLineOut"
+              },
+              "type": "array"
+            },
+            "new_lines": {
+              "description": "How many new lines it holds: its context and added lines.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "new_start": {
+              "description": "The first new line it holds, counted as `old_start` is.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_lines": {
+              "description": "How many old lines it holds: its context and removed lines.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_start": {
+              "description": "The first old line it holds, counted from 1; when it holds none, the line before where\nthey would be (0 at the top), as git prints it.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "old_start",
+            "old_lines",
+            "new_start",
+            "new_lines",
+            "lines"
+          ],
+          "type": "object"
+        },
+        "DiffLineOut": {
+          "description": "One line of a hunk.",
+          "properties": {
+            "op": {
+              "$ref": "#/$defs/LineOp",
+              "description": "Whether both sides have it, only the new one, or only the old one."
+            },
+            "text": {
+              "description": "The line with its line break, a carriage return before it kept; a file's last line has\nnone when the file does not end in one.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "text"
+          ],
+          "type": "object"
+        },
+        "DiffStatus": {
+          "description": "What happened to a file between the two revisions.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "It is in `to` only: in `from`, nothing or a directory is there.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is in `from` only.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content or its exec bit changed: a file or an executable on both sides, or a\nsymlink on both sides.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A symlink on one side, a file or an executable on the other.",
+              "type": "string"
+            }
+          ]
+        },
+        "FileKind": {
+          "description": "What a file is; never a directory.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            }
+          ]
+        },
+        "LineOp": {
+          "description": "Which side of a diff a hunk's line is on.",
+          "oneOf": [
+            {
+              "const": "context",
+              "description": "Both: an unchanged line around a change.",
+              "type": "string"
+            },
+            {
+              "const": "add",
+              "description": "The new side only.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "The old side only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One file that differs: a file, an executable or a symlink whose content or kind changed, or\nthat is on one side only. A directory never is one: a file that becomes a directory is that\nfile deleted and the directory's files added. No rename is detected: a file that moved is\none deleted and one added. Which fields follow `status` depends on the request's `format`,\nand a field that says nothing is omitted.",
+      "properties": {
+        "binary": {
+          "description": "`stat` and `unified`: whether it is binary, which gets no line counts and no hunks: a side\nthat is not UTF-8, or holds a NUL in its first 8,000 bytes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "deletions": {
+          "description": "`stat` and `unified`, for text: the lines the change deletes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hunks": {
+          "description": "`unified`, for text: the hunks, in order; empty when only the exec bit or the kind\nchanged.",
+          "items": {
+            "$ref": "#/$defs/DiffHunk"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "hunks_truncated": {
+          "description": "`unified`: true when `hunks` stops before the file's last hunk, to keep the page within\n`max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the\nsame.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "insertions": {
+          "description": "`stat` and `unified`, for text: the lines the change inserts.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "new_blob": {
+          "description": "`unified`: its blob id in `to`; omitted for a deleted file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "new_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`unified`: its kind in `to`; omitted for a deleted file."
+        },
+        "old_blob": {
+          "description": "`unified`: its blob id in `from`; omitted for an added file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`unified`: its kind in `from`; omitted for an added file."
+        },
+        "path": {
+          "description": "The repository path.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/DiffStatus",
+          "description": "What happened to it."
+        }
+      },
+      "required": [
+        "path",
+        "status"
+      ],
+      "title": "FileDiff",
+      "type": "object"
+    },
     "FileKind": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "What a file is; never a directory.",
@@ -1749,6 +2504,28 @@ expression: s.redact(&all)
       ],
       "title": "InitReq",
       "type": "object"
+    },
+    "LineOp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Which side of a diff a hunk's line is on.",
+      "oneOf": [
+        {
+          "const": "context",
+          "description": "Both: an unchanged line around a change.",
+          "type": "string"
+        },
+        {
+          "const": "add",
+          "description": "The new side only.",
+          "type": "string"
+        },
+        {
+          "const": "remove",
+          "description": "The old side only.",
+          "type": "string"
+        }
+      ],
+      "title": "LineOp"
     },
     "LineRange": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",

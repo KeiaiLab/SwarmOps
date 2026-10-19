@@ -369,6 +369,150 @@ fn history_and_log_path_golden() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// diff: the files that differ between two changesets, by name (the default), with line counts
+/// (`stat`) and with unified hunks (`--context` lines around each change), every status among
+/// them and binary content too; a page at a time (`--limit`, `--cursor`), within `--path`s, and
+/// within `--max-bytes`; a changeset against itself; and its revision and usage errors.
+#[test]
+fn diff_names_stat_unified_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store, "--name", "acme"]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+    let [c1, c2] = changesets_to_diff(&mut s, &store);
+    diff_formats(&mut s, &store, [&c1, &c2]);
+    diff_pages_and_errors(&mut s, &store, [&c1, &c2]);
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// Two changesets to diff, the second on the first, with each status between them and binary
+/// content too; their ids, named `[c1]` and `[c2]`.
+fn changesets_to_diff(s: &mut Session, store: &str) -> [String; 2] {
+    let mutate = ["--repo", store, "--as", AGENT];
+    let first = s.file(
+        "first.json",
+        &json!([
+            {"path": "README.md", "op": "put", "content": {"inline": "# acme\n\nline 3\nline 4\n"}},
+            {"path": "bin/run", "op": "put", "content": {"inline": "#!/bin/sh\necho hi\n"}},
+            {"path": "latest", "op": "put", "mode": "symlink", "content": {"inline": "README.md"}},
+            {"path": "logo.bin", "op": "put", "content": {"base64": "AAEC/w=="}},
+            {"path": "notes.txt", "op": "put", "content": {"inline": "kept\n"}},
+        ])
+        .to_string(),
+    );
+    let c1 = s.run(&[&mutate[..], &["commit", "-m", "first", "--changes", &first]].concat());
+    let c1 = s.name_at(&c1, "/result/changeset", "c1");
+    let second = s.file(
+        "second.json",
+        &json!([
+            {"path": "README.md", "op": "put",
+             "content": {"inline": "# acme\n\nline three\nline 4\n"}},
+            {"path": "bin/run", "op": "put", "mode": "exec",
+             "content": {"inline": "#!/bin/sh\necho hi\n"}},
+            {"path": "latest", "op": "put", "content": {"inline": "README.md"}},
+            {"path": "logo.bin", "op": "put", "content": {"base64": "AAEC/g=="}},
+            {"path": "notes.txt", "op": "delete"},
+            {"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() {}\n"}},
+        ])
+        .to_string(),
+    );
+    let args = [
+        "commit",
+        "-m",
+        "second",
+        "--parent",
+        &c1,
+        "--changes",
+        &second,
+    ];
+    let c2 = s.run(&[&mutate[..], &args].concat());
+    let c2 = s.name_at(&c2, "/result/changeset", "c2");
+    [c1, c2]
+}
+
+/// diff of `c1` to `c2` in each format: names (the default, and both revisions resolved), stat,
+/// and unified with the default context and with none.
+fn diff_formats(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
+    let diff = ["--repo", store, "diff", c1, c2];
+    let with = |more: &[&'static str]| [&diff[..], more].concat();
+    let names = s.run(&diff);
+    let statuses: Vec<(&str, &str)> = names["result"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| {
+            (
+                file["path"].as_str().unwrap(),
+                file["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("README.md", "modified"),
+            ("bin/run", "modified"),
+            ("latest", "type_changed"),
+            ("logo.bin", "modified"),
+            ("notes.txt", "deleted"),
+            ("src/lib.rs", "added"),
+        ]
+    );
+    assert_eq!(names["meta"]["resolved"], json!({c1: c1, c2: c2}));
+    let stat = s.run(&with(&["--format", "stat"]));
+    assert_eq!(
+        stat["result"]["files"][3],
+        json!({"path": "logo.bin", "status": "modified", "binary": true})
+    );
+    let unified = s.run(&with(&["--format", "unified"]));
+    assert_eq!(
+        unified["result"]["files"][0]["hunks"][0]["lines"][2],
+        json!({"op": "remove", "text": "line 3\n"})
+    );
+    let tight = s.run(&with(&["--format", "unified", "--context", "0"]));
+    assert_eq!(tight["result"]["files"][0]["hunks"][0]["old_start"], 3);
+}
+
+/// diff of `c1` to `c2` a page at a time, within paths, and within --max-bytes; of a changeset
+/// against itself; and its errors: a revision that names nothing, a limit of 0, a format it does
+/// not know.
+fn diff_pages_and_errors(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
+    let diff = ["--repo", store, "diff", c1, c2];
+    let with = |more: &[&'static str]| [&diff[..], more].concat();
+    let page = s.run(&with(&["--limit", "2"]));
+    assert_eq!(
+        (&page["result"]["truncated"], &page["result"]["cursor"]),
+        (&json!(true), &json!("bin/run"))
+    );
+    let next = s.run(&with(&["--limit", "2", "--cursor", "bin/run"]));
+    assert_eq!(next["result"]["files"][0]["path"], "latest");
+    let within = s.run(&with(&[
+        "--path",
+        "src/",
+        "--path",
+        "README.md",
+        "--format",
+        "stat",
+    ]));
+    assert_eq!(within["result"]["files"].as_array().unwrap().len(), 2);
+    // The first file comes whatever --max-bytes says, its hunks cut to those that fit.
+    let cut = s.run(&with(&["--format", "unified", "--max-bytes", "1"]));
+    assert_eq!(cut["result"]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(cut["result"]["files"][0]["hunks_truncated"], true);
+    let same = s.run(&["--repo", store, "diff", c2, c2]);
+    assert_eq!(same["result"]["files"], json!([]));
+
+    let unknown = s.run(&["--repo", store, "diff", c1, "release/nope"]);
+    assert_eq!((unknown.exit, unknown.code()), (6, "E_REV_NOT_FOUND"));
+    let zero = s.run(&with(&["--limit", "0"]));
+    assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
+    let format = s.run(&with(&["--format", "patch"]));
+    assert_eq!(
+        (format.exit, format.code(), &format["op"]),
+        (2, "E_INVALID_ARG", &json!("diff"))
+    );
+}
+
 #[test]
 fn ref_set_expect_mismatch_exits_4() {
     let mut s = Session::new();

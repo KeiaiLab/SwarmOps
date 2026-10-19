@@ -190,7 +190,7 @@ Every command, its revisions and change lists, and its output are in [Commands](
 
 `swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
 agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
-as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `ref_list`,
+as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `ref_list`,
 `ref_set`, `ref_delete`, `commit`, `blob_put`, `blob_has` and `verify`. A tool's arguments are
 the operation's request: its `inputSchema` is the request type's schema, as `swarmops schema
 <Type>` prints it, with the definitions it refers to written in place, and kept a plain object:
@@ -297,6 +297,7 @@ and starts no server either.
 | `ls REV[:PATH] [--depth N] [--limit N] [--cursor C]` | One directory at a revision, a page at a time, each file with its size; with `--depth`, the directories below it too, each entry with its path. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
 | `log [REV] [-n N] [--cursor C] [--path P]...` | History along first parents, newest first (from `main` by default); with `--path`, only the changesets that change those paths. |
+| `diff FROM TO [--path P]... [--format names\|stat\|unified] [--context N] [--limit N] [--cursor C] [--max-bytes N]` | The files that differ between two revisions, in path order, a page at a time: each one's path and status (`added`, `deleted`, `modified`, `type_changed`); with `stat` also whether it is binary and its inserted and deleted lines; with `unified` also its kinds, blobs and hunks, the page within `--max-bytes` (32 KiB) of JSON. `--path` keeps the files at or below some paths. |
 | `history REV:PATH [-n N] [--cursor C]` | The changesets that changed a file, or anything below a directory, newest first, each with what the path holds after it. |
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |

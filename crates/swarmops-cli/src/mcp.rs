@@ -56,7 +56,7 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `read_file`, `read_tree`, `show`, `log`, `path_history`, `ref_list`, `ref_set`,
+//! `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `ref_list`, `ref_set`,
 //! `ref_delete`, `commit`, `blob_put`, `blob_has` and `verify`, which `tools/list` gives in
 //! that order. A tool's `inputSchema` is its request type's JSON Schema, as `swarmops schema
 //! <type>` prints it, with each `$ref` replaced by the definition it names so that the schema
@@ -133,7 +133,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
-    CommitReq, ContentInput, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
+    CommitReq, ContentInput, DiffReq, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
     PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq,
     StoreOps, VerifyReq, schema_for_all,
 };
@@ -231,7 +231,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 13] = [
+static TOOLS: [Spec; 14] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -299,6 +299,19 @@ static TOOLS: [Spec; 13] = [
                       what the path holds after it (the CLI command is history); pass a limit of \
                       100 or less and page on with the cursor, since clients limit long tool \
                       results.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Diff,
+        name: "diff",
+        request: "DiffReq",
+        title: "Diff two revisions",
+        description: "The files that differ between two revisions, in path order: with format \
+                      names (the default) each one's path and status, with stat also its line \
+                      counts, with unified also its hunks; pass a limit of 100 or less, keep \
+                      max_bytes at 32768 or less for unified, and page on with the cursor, since \
+                      clients limit long tool results.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -848,6 +861,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::Show => how.read(|ops, req| ops.show(req)),
         Tool::Log => how.read(|ops, req| ops.log(req)),
         Tool::PathHistory => how.read(|ops, req| ops.path_history(req)),
+        Tool::Diff => how.read(|ops, req| ops.diff(req)),
         Tool::RefList => how.read(|ops, req| ops.ref_list(req)),
         Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
         Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
@@ -976,6 +990,7 @@ impl Refuse for ReadTreeReq {}
 impl Refuse for ShowReq {}
 impl Refuse for LogReq {}
 impl Refuse for PathHistoryReq {}
+impl Refuse for DiffReq {}
 impl Refuse for RefListReq {}
 impl Refuse for VerifyReq {}
 impl Refuse for BlobHasReq {}
@@ -1392,6 +1407,7 @@ enum Tool {
     Show,
     Log,
     PathHistory,
+    Diff,
     RefList,
     RefSet,
     RefDelete,
@@ -1627,6 +1643,8 @@ mod tests {
     fn sample() -> Value {
         json!({
             "rev": "main",
+            "from": "main",
+            "to": "main",
             "path": "a",
             "name": "main",
             "new": "main",
@@ -1697,6 +1715,10 @@ mod tests {
 
         fn path_history(&self, _: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
             self.called("path_history", "PathHistoryReq")
+        }
+
+        fn diff(&self, _: DiffReq) -> Result<swarmops_api::Diff, OpError> {
+            self.called("diff", "DiffReq")
         }
 
         fn ref_list(&self, _: RefListReq) -> Result<RefListResp, OpError> {

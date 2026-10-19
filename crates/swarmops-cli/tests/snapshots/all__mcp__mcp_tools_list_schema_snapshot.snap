@@ -307,6 +307,93 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
+      "description": "The files that differ between two revisions, in path order: with format names (the default) each one's path and status, with stat also its line counts, with unified also its hunks; pass a limit of 100 or less, keep max_bytes at 32768 or less for unified, and page on with the cursor, since clients limit long tool results.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`diff`: the files that differ between two revisions, in path order, a page at a time.",
+        "properties": {
+          "context": {
+            "default": 3,
+            "description": "The unchanged lines around each change in a `unified` hunk.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cursor": {
+            "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "default": "names",
+            "description": "What to say of each file: `names` its path and status; `stat` also whether it is binary\nand, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and,\nfor text, its hunks. What `diff` says of each file.",
+            "oneOf": [
+              {
+                "const": "names",
+                "description": "Its path and status.",
+                "type": "string"
+              },
+              {
+                "const": "stat",
+                "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+                "type": "string"
+              },
+              {
+                "const": "unified",
+                "description": "Also its kinds, its blobs and, for text, its hunks.",
+                "type": "string"
+              }
+            ]
+          },
+          "from": {
+            "description": "The revision to diff from: the old side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          },
+          "limit": {
+            "default": 500,
+            "description": "The most files to return: at least 1 (0 is `E_INVALID_ARG`).",
+            "format": "uint",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_bytes": {
+            "default": 32768,
+            "description": "The most bytes a `unified` page's files take, as the JSON array `files` they print as: at\nleast 1 (0 is `E_INVALID_ARG`). The page stops before the first file that would take it\npast this, but always holds one file, whose hunks are cut to the first ones that fit\n(`hunks_truncated`) when they alone would pass it. A `names` or `stat` page is held by\n`limit` alone.",
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "paths": {
+            "description": "Only the files at or below these repository paths (a file's path takes that file; one\ntrailing `/` is taken); every file when empty or omitted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "to": {
+            "description": "The revision to diff to: the new side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "DiffReq",
+        "type": "object"
+      },
+      "name": "diff",
+      "title": "Diff two revisions"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Every ref, the changeset it points at, and how many moves it has had.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

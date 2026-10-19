@@ -5,10 +5,13 @@ use std::ffi::OsString;
 use std::path::Path;
 
 use clap::error::ErrorKind;
-use clap::{ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
+use clap::{
+    ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
+};
 use swarmops_api::{
-    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT,
-    DEFAULT_READ_TREE_LIMIT, LineRange,
+    DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
+    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT,
+    LineRange,
 };
 
 use crate::output::printable;
@@ -224,6 +227,8 @@ pub enum Command {
         #[arg(long)]
         cursor: Option<String>,
     },
+    /// List the files that differ between two revisions, a page at a time.
+    Diff(DiffArgs),
     /// List refs, or move one by compare-and-swap.
     #[command(subcommand)]
     Ref(RefCommand),
@@ -235,13 +240,14 @@ pub enum Command {
     },
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
-    /// One tool per operation (repo_info, read_file, read_tree, show, log, path_history, ref_list,
-    /// ref_set, ref_delete, commit, blob_put, blob_has, verify), each taking the operation's
-    /// request as its arguments and returning the envelope the other commands print. The store and
-    /// the identity are the server's, --repo and --as or their variables, never a call's. Speaks
-    /// MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints
-    /// no envelope: stdout carries the protocol until stdin ends, and a command line it refuses has
-    /// its envelope on stderr. The derive command has no tool: it is maintenance, no agent's work.
+    /// One tool per operation (repo_info, read_file, read_tree, show, log, path_history, diff,
+    /// ref_list, ref_set, ref_delete, commit, blob_put, blob_has, verify), each taking the
+    /// operation's request as its arguments and returning the envelope the other commands print.
+    /// The store and the identity are the server's, --repo and --as or their variables, never a
+    /// call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with
+    /// initialize. Prints no envelope: stdout carries the protocol until stdin ends, and a command
+    /// line it refuses has its envelope on stderr. The derive command has no tool: it is
+    /// maintenance, no agent's work.
     Mcp,
     /// Derive the eager derived values of new changesets, ahead of any reader.
     ///
@@ -292,6 +298,45 @@ pub enum BlobCommand {
         #[arg(value_name = "ID", required = true)]
         ids: Vec<String>,
     },
+}
+
+/// `diff`'s arguments.
+#[derive(Args, Debug)]
+pub struct DiffArgs {
+    /// The revision to diff from.
+    pub from: String,
+    /// The revision to diff to.
+    pub to: String,
+    /// Only the files at or below this path; give it again for more.
+    #[arg(long = "path", value_name = "P")]
+    pub paths: Vec<String>,
+    /// What to say of each file.
+    #[arg(long, value_enum, default_value_t = DiffFormatArg::Names)]
+    pub format: DiffFormatArg,
+    /// The unchanged lines around each change in a unified hunk.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_CONTEXT)]
+    pub context: u32,
+    /// The most files to list.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_LIMIT)]
+    pub limit: usize,
+    /// Resume a diff: the previous page's cursor, exactly as it was returned.
+    #[arg(long)]
+    pub cursor: Option<String>,
+    /// The most bytes of a unified page's files, as JSON (the first file comes all the same,
+    /// its hunks cut to fit).
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_MAX_BYTES)]
+    pub max_bytes: u64,
+}
+
+/// What `diff` says of each file (`--format`).
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffFormatArg {
+    /// Its path and status.
+    Names,
+    /// Also whether it is binary and, for text, the lines it inserts and deletes.
+    Stat,
+    /// Also its kinds, its blobs and, for text, its hunks.
+    Unified,
 }
 
 /// `ref`'s operations.
@@ -448,6 +493,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["show"] => "show",
         ["log"] => "log",
         ["history"] => "path_history",
+        ["diff"] => "diff",
         ["ref", "list"] => "ref_list",
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
@@ -578,10 +624,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 18);
+        assert_eq!(ops.len(), 19);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 18, "two subcommands name one op");
+        assert_eq!(ops.len(), 19, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
     }
