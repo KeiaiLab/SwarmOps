@@ -94,7 +94,12 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   `swarmops ref list` for a ref name, `swarmops log` for an id or a `~N` walk.
 /// - `E_AMBIGUOUS_ID` `{rev}`: `Ambiguous`; the hint says to give more digits.
 /// - `E_INVALID_ARG`: `BadRev` `{rev}` (the hint gives the revision grammar), `DirPut` and
-///   `DuplicatePath` `{path}`, and the store's `DuplicateParent` `{parent}`.
+///   `DuplicatePath` `{path}`, and the store's `DuplicateParent` `{parent}`, `Limit`
+///   `{store_limit, max, got}` (a request past a limit of the store's layout: `store_limit` is
+///   `parents`, `actor_bytes`, `ref_name_bytes` or `records`) and `BadPrefix` `{prefix}` (an id
+///   prefix that is not 1 to 64 hex digits). No request of these operations reaches the last
+///   two: a commit has one parent, the identity bounds the actor, and revision resolution takes
+///   12 to 63 hex digits.
 /// - `E_EXISTS`: `Exists`; the hint is `swarmops --repo <path> info`.
 /// - `E_UNKNOWN_PARENT` `{parent}`: `UnknownParent`; the hint is `swarmops log`.
 /// - `E_EMPTY_COMMIT`: `EmptyChanges`; the hint names `--allow-empty`.
@@ -115,13 +120,14 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   the hint is `swarmops verify` (with `--deep` for an object whose bytes fail their id).
 /// - `E_UNSUPPORTED_FS` `{path}`: the store's `UnsupportedFs`, a path under `/mnt/`, on `init`
 ///   and on open alike; the hint points at a native filesystem.
-/// - `E_IO`: any other `Io` error.
+/// - `E_IO`: any other `Io` error, whatever its kind (an OS `EINVAL` among them).
 /// - `E_IO_TRANSIENT` (retryable) `{committed}`, always `false`: the store's `NotCommitted`, a
 ///   journal append that failed and that the store cut back off the journal, so the write
 ///   committed nothing; the hint says to run the same command again.
 /// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning (a
 ///   failure after the commit point, a failed listing in `journal.off` among them), so that it
-///   never reaches here.
+///   never reaches here; and the store's `BadCall`, a call its API does not take, which only a
+///   bug makes.
 ///
 /// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
 /// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does

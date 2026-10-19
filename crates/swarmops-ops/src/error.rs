@@ -124,7 +124,19 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         StoreError::UnknownRefTarget(id) => repo_error(RepoError::NotFound(id.to_string()), during),
         StoreError::DuplicateParent(id) => error(ErrorCode::InvalidArg, message)
             .with_details(details([("parent", id.to_string().into())])),
-        StoreError::PostCommit { .. } => error(ErrorCode::Internal, message),
+        StoreError::Limit { what, max, got } => {
+            error(ErrorCode::InvalidArg, message).with_details(details([
+                ("store_limit", what.as_str().into()),
+                ("max", max.into()),
+                ("got", got.into()),
+            ]))
+        }
+        StoreError::BadPrefix(prefix) => {
+            error(ErrorCode::InvalidArg, message).with_details(details([("prefix", prefix.into())]))
+        }
+        StoreError::PostCommit { .. } | StoreError::BadCall(_) => {
+            error(ErrorCode::Internal, message)
+        }
         StoreError::NotCommitted { .. } => error(ErrorCode::IoTransient, message)
             .with_details(details([("committed", false.into())]))
             .with_hint("run the same command again: nothing of this one was committed"),
@@ -250,6 +262,7 @@ pub fn shell_word(word: &str) -> String {
 #[cfg(test)]
 mod tests {
     use swarmops_core::{ChangesetId, CodecError, ObjectKind};
+    use swarmops_store::LimitKind;
 
     use super::*;
 
@@ -392,6 +405,45 @@ mod tests {
             source: io::Error::other("boom"),
         };
         maps(store(not_committed), op, ErrorCode::IoTransient);
+    }
+
+    /// The store's refusals of a request past a limit of its layout, and of an id prefix that
+    /// is not one, are mistakes in the request: `E_INVALID_ARG`, saying which limit and by how
+    /// much, or which prefix. A call the store does not take is a bug: `E_INTERNAL`. An `Io`
+    /// error stays `E_IO` whatever its kind: an OS `EINVAL` is `InvalidInput`, and no arm takes
+    /// that kind for a refusal.
+    #[test]
+    fn store_limits_are_invalid_arguments_and_os_einval_stays_e_io() {
+        let op = During::Op;
+        let store = RepoError::Store;
+        let limit = || StoreError::Limit {
+            what: LimitKind::Parents,
+            max: 255,
+            got: 256,
+        };
+        maps(store(limit()), op, ErrorCode::InvalidArg);
+        let error = repo_error(store(limit()), op);
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_INVALID_ARG", 2, false)
+        );
+        assert_eq!(
+            Value::Object(error.details),
+            serde_json::json!({"store_limit": "parents", "max": 255, "got": 256})
+        );
+        let prefix = || StoreError::BadPrefix("xyz".into());
+        maps(store(prefix()), op, ErrorCode::InvalidArg);
+        let error = repo_error(store(prefix()), op);
+        assert_eq!(
+            Value::Object(error.details),
+            serde_json::json!({"prefix": "xyz"})
+        );
+        let call = StoreError::BadCall("rec 9 is past the index's 2 records".into());
+        maps(store(call), op, ErrorCode::Internal);
+        let einval = io::Error::from_raw_os_error(22);
+        assert_eq!(einval.kind(), io::ErrorKind::InvalidInput);
+        let error = repo_error(store(StoreError::Io(einval)), op);
+        assert_eq!((error.code.as_str(), error.exit), ("E_IO", 1));
     }
 
     /// A journal append that failed and was cut back off the journal committed nothing:

@@ -24,7 +24,9 @@ pub fn frame_bytes(records: &[Record]) -> Vec<u8> {
     let count = u16::try_from(records.len()).expect("a frame holds at most 65,535 records");
     let mut payload = count.to_le_bytes().to_vec();
     for record in records {
-        record.encode(&mut payload);
+        record
+            .encode(&mut payload)
+            .expect("a record within the layout's limits encodes");
     }
     frame_around(&payload)
 }

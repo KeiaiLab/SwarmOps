@@ -3,8 +3,8 @@
 //!
 //! 1. Checks the request before it reads or writes anything: changes to make, unless
 //!    `allow_empty` ([`RepoError::EmptyChanges`]), no directory put ([`RepoError::DirPut`]),
-//!    each path once ([`RepoError::DuplicatePath`]), at most 255 parents (an `InvalidInput`
-//!    error, as the metadata store gives), distinct and in the store
+//!    each path once ([`RepoError::DuplicatePath`]), at most 255 parents (the metadata
+//!    store's [`StoreError::Limit`], as it gives at insert), distinct and in the store
 //!    ([`RepoError::UnknownParent`]).
 //! 2. Hashes each put's content into its blob id, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
@@ -30,13 +30,13 @@
 //! ([`InsertOutcome::AlreadyPresent`]) without appending a transaction.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
 
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath,
     Signature, TreeId, hash_object,
 };
-use swarmops_store::{ChangesetMeta, InsertOutcome, ObjectStore, StoreError};
+use swarmops_store::{ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, StoreError};
 
 use crate::error::RepoError;
 use crate::repo::{Repo, post_commit_warning};
@@ -206,16 +206,17 @@ impl<O: ObjectStore> Repo<O> {
         })
     }
 
-    /// Refuses more parents than a journal record holds (an `InvalidInput` error, as the
+    /// Refuses more parents than a journal record holds ([`StoreError::Limit`], as the
     /// metadata store gives at insert), a parent listed twice ([`StoreError::DuplicateParent`]),
     /// or one not in the store ([`RepoError::UnknownParent`]).
     fn check_parents(&self, parents: &[ChangesetId]) -> Result<(), RepoError> {
         if parents.len() > MAX_PARENTS {
-            let message = format!(
-                "a changeset has at most {MAX_PARENTS} parents, not {}",
-                parents.len()
-            );
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, message).into());
+            return Err(StoreError::Limit {
+                what: LimitKind::Parents,
+                max: to_u64(MAX_PARENTS),
+                got: to_u64(parents.len()),
+            }
+            .into());
         }
         for (at, parent) in parents.iter().enumerate() {
             if parents[..at].contains(parent) {

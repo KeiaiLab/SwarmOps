@@ -404,6 +404,26 @@ fn verify_detects_index_journal_mismatch() {
             mismatch(2, MismatchCause::Journal),
         ],
     );
+
+    // The same record while changeset frames follow the checkpoint: past it, the index counts
+    // only the records those frames vouch for, so no handle counts one that no frame holds,
+    // past the journal's last changeset, and the next writer would cut it without a word. The
+    // index files hold it all the same, which verify measures by their lengths before it reads
+    // the journal.
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+    commit(&repo, &[c1], vec![put("f", b"2")]);
+    let layout = Layout::new(&root);
+    {
+        let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+        let mut index = Index::open(&layout, Arc::new(RealFs)).unwrap();
+        assert_eq!(index.append(&bogus).unwrap(), 2);
+        index.sync().unwrap();
+    }
+    let index = Index::open(&layout, Arc::new(RealFs)).unwrap();
+    assert_eq!(index.len(), 2, "no handle counts it");
+    assert_eq!(index.held().unwrap(), 3, "the files hold it");
+    assert_problems(&repo, vec![mismatch(2, MismatchCause::Journal)]);
 }
 
 #[test]

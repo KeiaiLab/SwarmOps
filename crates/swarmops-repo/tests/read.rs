@@ -546,6 +546,33 @@ fn a_huge_format_file_is_not_a_store_and_is_not_read_whole() {
 }
 
 #[test]
+fn a_format_file_one_byte_too_long_is_refused_by_its_length() {
+    // The length check's boundary: a FORMAT of its 17 bytes is read, and refused for what it
+    // names when that is another layout; one byte more is refused by its length, before it is
+    // read.
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    let format = root.join("FORMAT");
+    let refused = |what: String| match LocalRepo::open(&root) {
+        Err(RepoError::Store(StoreError::Format(said))) => assert_eq!(said, what),
+        other => panic!("{what}: expected Format, got {:?}", other.map(|r| r.info())),
+    };
+    fs::write(&format, b"swarmops-store 2\n").unwrap();
+    refused(format!(
+        "{root}/FORMAT names a store layout this build does not read"
+    ));
+    fs::write(&format, b"swarmops-store 1\n\n").unwrap();
+    refused(format!(
+        "{root}/FORMAT is 18 bytes long, not a store layout this build reads"
+    ));
+    fs::write(&format, b"swarmops-store 1\n").unwrap();
+    assert_eq!(
+        LocalRepo::open(&root).unwrap().info().unwrap().changesets,
+        0
+    );
+}
+
+#[test]
 fn create_refuses_mnt_paths_before_touching_them() {
     // WSL mounts Windows drives under /mnt/ (drvfs): no store may live there. The check is
     // made before anything is created, so this test leaves no trace on the drive.

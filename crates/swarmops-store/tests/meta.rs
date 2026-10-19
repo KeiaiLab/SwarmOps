@@ -24,8 +24,8 @@ use swarmops_store::{
 };
 use swarmops_store::{
     CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
-    JournalEntry, Layout, MetaLock, MetaRead, MetaStore, RealFs, Record, RefMoveEntry, RefState,
-    StoreError,
+    JournalEntry, Layout, LimitKind, MetaLock, MetaRead, MetaStore, RealFs, Record, RefMoveEntry,
+    RefState, StoreError,
 };
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
 use swarmops_testkit::faults::checked;
@@ -485,10 +485,8 @@ fn cas_ref_rejects_unknown_target_and_bad_name() {
     }
     // An actor longer than a ref move can record is refused before anything is queued.
     let actor = "a".repeat(256);
-    match write.cas_ref("release/v2", None, Some(id(1)), &actor) {
-        Err(StoreError::Io(e)) => assert_eq!(e.kind(), io::ErrorKind::InvalidInput),
-        other => panic!("expected InvalidInput, got {other:?}"),
-    }
+    let refused = write.cas_ref("release/v2", None, Some(id(1)), &actor);
+    assert_limit(refused, LimitKind::ActorBytes, 255, 256);
     assert_eq!(write.commit().unwrap().moved_refs, 4);
     let listed = store.read().unwrap().list_refs().unwrap();
     let names: Vec<&str> = listed.iter().map(|(name, _)| name.as_str()).collect();
@@ -549,12 +547,54 @@ fn a_huge_ref_file_is_not_a_ref_file_and_is_not_read_whole() {
     assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
     assert_eq!(
         e.to_string(),
-        format!("{main} is 1073741824 bytes long, not a ref file")
+        "meta/refs/main is 1073741824 bytes long, not a ref file"
     );
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "read whole: {:?}",
         started.elapsed()
+    );
+}
+
+#[test]
+fn a_malformed_checkpoint_or_ref_file_is_reported_without_the_store_path() {
+    // The store's root is a host path, which no error carries to an agent (operations spec
+    // §0): a metadata file that does not read as one is named by its place in the store, and
+    // a store file that is not a regular file by its name.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    cas(&store, "main", None, Some(1));
+    let read_fails_with = |want: &str| {
+        let got = store.read().map(|_| ());
+        let Err(StoreError::Io(e)) = &got else {
+            panic!("{want}: expected InvalidData, got {got:?}");
+        };
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+        assert!(!e.to_string().contains(root.as_str()), "{e}");
+        assert_eq!(e.to_string(), want);
+    };
+    let layout = Layout::new(&root);
+    let ckpt = layout.journal_ckpt();
+    let kept = fs::read(&ckpt).unwrap();
+    fs::write(&ckpt, [0; 3]).unwrap();
+    read_fails_with("meta/journal.ckpt holds 3 bytes, not a u64le");
+    fs::remove_file(&ckpt).unwrap();
+    fs::create_dir(&ckpt).unwrap();
+    read_fails_with("journal.ckpt is not a regular file");
+    fs::remove_dir(&ckpt).unwrap();
+    fs::write(&ckpt, kept).unwrap();
+
+    let main = layout.meta_path("refs/main");
+    let kept = fs::read(&main).unwrap();
+    fs::write(&main, b"not a ref file\n").unwrap();
+    read_fails_with(r#"meta/refs/main is not a ref file: "<64 hex digits>\n<version>\n""#);
+    // One byte past what a ref file holds: refused by its length, before it is read.
+    fs::write(&main, [b'0'; 87]).unwrap();
+    read_fails_with("meta/refs/main is 87 bytes long, not a ref file");
+    fs::write(&main, kept).unwrap();
+    assert_eq!(
+        store.read().unwrap().get_ref("main").unwrap(),
+        Some(ref_state(1, 1))
     );
 }
 
@@ -598,8 +638,8 @@ fn resolve_prefix_unique_and_ambiguous() {
     assert_eq!(resolve(&one.id.0.to_hex()), [one.id], "all 64 digits");
     for bad in ["", "abcdef01234g", &"a".repeat(65)] {
         match read.resolve_prefix(bad) {
-            Err(StoreError::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),
-            other => panic!("{bad:?}: expected InvalidInput, got {other:?}"),
+            Err(StoreError::BadPrefix(prefix)) => assert_eq!(prefix, bad),
+            other => panic!("{bad:?}: expected BadPrefix, got {other:?}"),
         }
     }
     assert_eq!(read.by_delta_hash(&[0x30; 32]).unwrap(), [past.id]);
@@ -2740,11 +2780,22 @@ fn errors_during_recovery_leave_the_store_openable() {
     );
 }
 
+/// Asserts that `result` is the refusal of a request past the layout's limit `what`, which
+/// holds `max`, asking for `got`.
 #[track_caller]
-fn assert_invalid_input<T: std::fmt::Debug>(got: Result<T, StoreError>) {
-    match got {
-        Err(StoreError::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),
-        other => panic!("expected InvalidInput, got {other:?}"),
+fn assert_limit<T: std::fmt::Debug>(
+    result: Result<T, StoreError>,
+    what: LimitKind,
+    max: u64,
+    got: u64,
+) {
+    match result {
+        Err(StoreError::Limit {
+            what: limit,
+            max: most,
+            got: asked,
+        }) => assert_eq!((limit, most, asked), (what, max, got)),
+        other => panic!("expected Limit {{ {what:?}, {max}, {got} }}, got {other:?}"),
     }
 }
 
@@ -2762,8 +2813,10 @@ fn a_transaction_refuses_more_records_than_a_frame_holds() {
         main = target;
     }
     // The next record is refused, and nothing is queued; what queues nothing still answers.
-    assert_invalid_input(write.cas_ref("main", main, Some(id(2)), ACTOR));
-    assert_invalid_input(write.insert_changeset(cs(3, &[])));
+    let refused = write.cas_ref("main", main, Some(id(2)), ACTOR);
+    assert_limit(refused, LimitKind::Records, 65_535, 65_536);
+    let refused = write.insert_changeset(cs(3, &[]));
+    assert_limit(refused, LimitKind::Records, 65_535, 65_536);
     let present = write.insert_changeset(cs(1, &[])).unwrap();
     assert_eq!(present, InsertOutcome::AlreadyPresent);
     let stale = write.cas_ref("main", None, Some(id(2)), ACTOR).unwrap();

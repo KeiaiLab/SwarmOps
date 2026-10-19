@@ -76,7 +76,7 @@ use super::parents::MAX_PARENTS;
 use super::refs::{self, RefFile, RefState};
 use super::replay::{self, Overlay};
 use super::to_u64;
-use crate::error::{StoreError, invalid_input};
+use crate::error::{LimitKind, StoreError};
 use crate::fs_ops::{FsOps, RealFs};
 use crate::layout::Layout;
 
@@ -447,7 +447,7 @@ impl MetaRead<'_> {
     }
 
     /// The changesets whose ids start with `hex`, 1 to 64 hex digits of either case
-    /// (anything else is an `InvalidInput` error), in seq order.
+    /// (anything else is [`StoreError::BadPrefix`]), in seq order.
     pub fn resolve_prefix(&self, hex: &str) -> Result<Vec<ChangesetId>, StoreError> {
         let mut ids = self.ids_at(self.index.find_prefix(hex)?)?;
         let prefix = hex.to_ascii_lowercase();
@@ -601,14 +601,15 @@ impl MetaWrite<'_> {
     /// Every parent must be in the store or queued before it: otherwise
     /// [`StoreError::MissingParent`]. A parent listed twice is
     /// [`StoreError::DuplicateParent`]; more than 255 parents, or a transaction that holds
-    /// 65,535 records already (all one frame holds), an `InvalidInput` error. Nothing is queued
+    /// 65,535 records already (all one frame holds), [`StoreError::Limit`]. Nothing is queued
     /// then.
     pub fn insert_changeset(&mut self, meta: ChangesetMeta) -> Result<InsertOutcome, StoreError> {
         if meta.parents.len() > MAX_PARENTS {
-            return Err(invalid_input(format!(
-                "a changeset has at most {MAX_PARENTS} parents, not {}",
-                meta.parents.len()
-            )));
+            return Err(StoreError::Limit {
+                what: LimitKind::Parents,
+                max: to_u64(MAX_PARENTS),
+                got: to_u64(meta.parents.len()),
+            });
         }
         if self.queued.contains_key(&meta.id) || self.index.find(meta.id)?.is_some() {
             return Ok(InsertOutcome::AlreadyPresent);
@@ -643,8 +644,8 @@ impl MetaWrite<'_> {
     ///
     /// A name that is not `main` or `release/<x>` is [`StoreError::RefName`]; a `new` that is
     /// neither in the store nor queued, [`StoreError::UnknownRefTarget`]; an actor longer than
-    /// 255 bytes, or a move that would not fit in the transaction's frame (65,535 records), an
-    /// `InvalidInput` error.
+    /// 255 bytes, or a move that would not fit in the transaction's frame (65,535 records),
+    /// [`StoreError::Limit`].
     pub fn cas_ref(
         &mut self,
         name: &str,
@@ -654,10 +655,11 @@ impl MetaWrite<'_> {
     ) -> Result<CasResult, StoreError> {
         refs::check_name(name)?;
         if actor.len() > MAX_ACTOR_LEN {
-            return Err(invalid_input(format!(
-                "an actor takes at most {MAX_ACTOR_LEN} bytes, not {}",
-                actor.len()
-            )));
+            return Err(StoreError::Limit {
+                what: LimitKind::ActorBytes,
+                max: to_u64(MAX_ACTOR_LEN),
+                got: to_u64(actor.len()),
+            });
         }
         if let Some(target) = new
             && self.generation(target)?.is_none()
@@ -775,15 +777,17 @@ impl MetaWrite<'_> {
         }
     }
 
-    /// Refuses, with an `InvalidInput` error, a record past what the transaction's one frame
+    /// Refuses, with [`StoreError::Limit`], a record past what the transaction's one frame
     /// holds.
     fn check_room(&self) -> Result<(), StoreError> {
         if self.records.len() < MAX_RECORDS {
             Ok(())
         } else {
-            Err(invalid_input(format!(
-                "a transaction holds at most {MAX_RECORDS} records, what one frame holds"
-            )))
+            Err(StoreError::Limit {
+                what: LimitKind::Records,
+                max: to_u64(MAX_RECORDS),
+                got: to_u64(self.records.len()) + 1,
+            })
         }
     }
 

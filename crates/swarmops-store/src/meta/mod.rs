@@ -35,7 +35,7 @@ mod replay;
 pub mod sorted;
 pub mod store;
 
-pub use frame::{Frame, Record};
+pub use frame::{BadRecord, Frame, Record};
 pub use index::{ChangesetMeta, Index};
 pub use journal::Journal;
 pub use lock::MetaLock;

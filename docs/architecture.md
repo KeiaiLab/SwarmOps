@@ -259,7 +259,10 @@ Readers take no lock (storage §3, "읽기"). `MetaStore::read()` takes a snapsh
 `journal.ckpt`, opens the index (counting only the records that all five index files hold whole,
 and, past the checkpoint and the sorted views, only those that the frames past the checkpoint
 vouch for, field by field, as storage §3, "색인의 보증", says: a record that a power loss zero-filled
-is not counted, the snapshot reads its changeset from the frame, and the next write replays it),
+is not counted, the snapshot reads its changeset from the frame, and the next write replays it;
+with no journal to read, or a damaged one, it counts those records by the files' lengths instead,
+an index whose `par.col` entries there break their layout does not open, and `verify` reports the
+journal's damage),
 reads every frame past the checkpoint (whole frames not yet listed in `journal.off` included; it
 stops at a torn tail), reads every ref file, then reads the frames again, and if they are not the
 frames it read (new ones, or a frame a failed sync or rewrite cut back and the next writer

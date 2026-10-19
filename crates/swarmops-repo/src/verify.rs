@@ -18,12 +18,14 @@
 //!   only the records the journal vouches for, `Index::open`; those the views cover count as
 //!   they are, even past the checkpoint, synced before the views were written. One the journal
 //!   does not vouch for, which a power loss can leave there, is no damage, and the next writer
-//!   replays the journal's in its place. So a record that no frame holds at all, past the
+//!   replays the journal's in its place. A record that no frame holds at all, past the
 //!   journal's last changeset (what a writer that went around the journal would leave), is
-//!   reported only if the journal reads whole and the index counts it: if no changeset frame
-//!   follows the checkpoint, or the sorted views cover it. Otherwise verify reports nothing for
-//!   it: the index does not count it and the next writer cuts it, or the journal is damaged or
-//!   missing, which verify reports instead.) So are sorted-view
+//!   another matter: the index does not count it either while changeset frames follow the
+//!   checkpoint, and the next writer would cut it without a word. So verify measures what the
+//!   index files hold by their lengths (`Index::held`) before it reads the journal, and reports
+//!   a mismatch at the journal's changeset count whenever they hold more and the journal reads
+//!   whole: a writer appends a record only once its frame is durable and listed. With the
+//!   journal damaged or missing, verify reports that instead.) So are sorted-view
 //!   entries that disagree with the index columns (the advisory `Compacted` frames are never
 //!   consulted); each names its [`MismatchCause`]. A frame the journal's reader finds corrupt is a
 //!   [`VerifyProblem::JournalCorrupt`]: the comparison stops there, and the index's records
@@ -275,6 +277,12 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             Ok(index) => (Some(index), None),
             Err(what) => (None, Some(what)),
         };
+        // Before the journal is read: a writer appends a record only once its frame is durable
+        // and listed, so every record the index files hold now has its frame in what is read.
+        let held = match &index {
+            Some(index) => index.held()?,
+            None => 0,
+        };
         let ref_files = self.repo.meta.ref_files()?;
         let (frames, whole) = match &journal {
             Some(journal) => {
@@ -324,6 +332,12 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         if let Some(index) = &index {
             records = self.index_records(index)?;
             self.compare(&journaled, &records, ckpt, whole);
+            // A record past the journal's last changeset, which no frame holds, whether the index
+            // counts it or not.
+            if whole && held > to_u64(journaled.len()) {
+                self.mismatches
+                    .insert((to_u64(journaled.len()), MismatchCause::Journal));
+            }
             self.check_view(index.ids_view(), &records, |meta| meta.id.0.0, true)?;
             self.check_view(index.dh_view(), &records, |meta| meta.delta_hash, false)?;
         }

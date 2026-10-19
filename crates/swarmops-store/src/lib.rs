@@ -17,7 +17,7 @@ pub mod meta;
 #[cfg(feature = "test-hooks")]
 pub mod order_check;
 
-pub use error::StoreError;
+pub use error::{LimitKind, StoreError};
 pub use fs_objects::{FsObjectStore, ObjectStore};
 pub use fs_ops::{
     CRASH_AT_ENV, FAIL_AT_ENV, FS_CALLS_ENV, FsOps, HookedFs, LinkOutcome, ORDER_CHECK_ENV, RealFs,
@@ -26,8 +26,9 @@ pub use fs_ops::{
 pub use fs_ops::{CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
 pub use layout::{Layout, is_native_linux_fs};
 pub use meta::{
-    CasResult, ChangesetMeta, CommitInfo, Frame, Index, InsertOutcome, Journal, JournalEntry,
-    MetaLock, MetaRead, MetaStore, MetaWrite, Record, RefFile, RefMoveEntry, RefState, SortedView,
+    BadRecord, CasResult, ChangesetMeta, CommitInfo, Frame, Index, InsertOutcome, Journal,
+    JournalEntry, MetaLock, MetaRead, MetaStore, MetaWrite, Record, RefFile, RefMoveEntry,
+    RefState, SortedView,
 };
 #[cfg(feature = "test-hooks")]
 pub use order_check::OrderCheckFs;

@@ -29,20 +29,28 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::{AtomicU64, Ordering};
+use tempfile::NamedTempFile;
 
 /// Opens `path` read-only if it is a regular file, a symlink to one included; anything else
-/// is refused with `InvalidData` before it is opened. No store file is a FIFO, a device or a
-/// socket, and opening a FIFO would block until something opened it for writing.
+/// is refused with `InvalidData` before it is opened, the message naming the file by its
+/// name alone: the rest of the path is the store's root, a host path. No store file is a
+/// FIFO, a device or a socket, and opening a FIFO would block until something opened it for
+/// writing.
 pub(crate) fn open_regular(path: impl AsRef<Path>) -> io::Result<File> {
     let path = path.as_ref();
     if !fs::metadata(path)?.is_file() {
+        let name = path
+            .file_name()
+            .map_or_else(|| "a store file".into(), |name| name.to_string_lossy());
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{} is not a regular file", path.display()),
+            format!("{name} is not a regular file"),
         ));
     }
     File::open(path)
@@ -170,8 +178,8 @@ impl FsOps for RealFs {
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
-        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
-        temp.write_all(bytes)?;
+        let mut temp = temp_file_in(dir)?;
+        temp.as_file_mut().write_all(bytes)?;
         temp.as_file().sync_all()?;
         let (_file, path) = temp.keep().map_err(|e| e.error)?;
         Ok(path)
@@ -231,8 +239,8 @@ impl FsOps for RealFs {
 
     fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
         let dir = parent_dir(path);
-        let mut temp = tempfile::Builder::new().tempfile_in(dir)?;
-        temp.write_all(bytes)?;
+        let mut temp = temp_file_in(dir)?;
+        temp.as_file_mut().write_all(bytes)?;
         temp.as_file().sync_all()?;
         // On failure the temp file is removed when the returned `NamedTempFile` drops.
         temp.persist(path).map_err(|e| e.error)?;
@@ -254,6 +262,23 @@ impl FsOps for RealFs {
         fs::rename(from, to)?;
         self.fsync_dir(parent_dir(to))
     }
+}
+
+/// A new temp file in `dir`, named and made as tempfile names and makes one (`.tmp` and six
+/// random characters, created exclusively, mode 0600, removed when dropped unless kept or
+/// persisted), but opened by the caller's own `OpenOptions`: tempfile's own constructors, and
+/// writes through its `NamedTempFile`, wrap a failure with the temp file's absolute path and
+/// drop its errno, where this returns the operating system's error as it is. (Writes go to
+/// [`NamedTempFile::as_file_mut`], the file itself, for the same reason.)
+fn temp_file_in(dir: &Path) -> io::Result<NamedTempFile> {
+    tempfile::Builder::new().make_in(dir, |path| {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+    })
 }
 
 /// The directory that holds `path`; `.` for a bare file name.
@@ -865,6 +890,49 @@ mod tests {
         }
         let e = read_regular(dir.path().join("missing")).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::NotFound, "{e}");
+    }
+
+    /// A temp file that `RealFs` cannot create, for an object write or a replacement, fails
+    /// with the operating system's own error: its errno kept, and no path in its text (a
+    /// store's temp files lie under its root, a host path). Missing directories make the
+    /// failure, so that it fails as root too. Where the directory is there, the temp file is
+    /// made as tempfile makes one: a fresh `.tmp` name, mode 0600, the bytes in it.
+    #[test]
+    fn real_fs_temp_files_fail_with_the_os_own_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let shown = dir.path().to_str().unwrap();
+        let missing = dir.path().join("missing");
+        let e = RealFs.write_durable_temp(&missing, b"bytes").unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(2), "write_durable_temp: {e}");
+        assert!(!e.to_string().contains(shown), "write_durable_temp: {e}");
+        let e = RealFs
+            .atomic_replace(&missing.join("f"), b"bytes")
+            .unwrap_err();
+        assert_eq!(e.raw_os_error(), Some(2), "atomic_replace: {e}");
+        assert!(!e.to_string().contains(shown), "atomic_replace: {e}");
+
+        let temp = RealFs.write_durable_temp(dir.path(), b"bytes").unwrap();
+        assert_eq!(temp.parent(), Some(dir.path()));
+        let name = temp.file_name().unwrap().to_str().unwrap();
+        assert!(name.starts_with(".tmp"), "{name}");
+        assert_eq!(fs::read(&temp).unwrap(), b"bytes");
+        let mode = fs::metadata(&temp).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        let file = dir.path().join("f");
+        RealFs.atomic_replace(&file, b"one").unwrap();
+        RealFs.atomic_replace(&file, b"two").unwrap();
+        assert_eq!(fs::read(&file).unwrap(), b"two");
+        let left: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(
+            left.len(),
+            2,
+            "the replacements leave no temp file: {left:?}"
+        );
     }
 
     #[test]

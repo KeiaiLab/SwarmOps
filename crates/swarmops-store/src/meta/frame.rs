@@ -16,9 +16,10 @@
 
 use swarmops_core::bytes::Reader;
 use swarmops_core::{ChangesetId, ObjectId};
+use thiserror::Error;
 
 use super::to_u64;
-use crate::error::{StoreError, invalid_input};
+use crate::error::{LimitKind, StoreError};
 
 /// A frame header: `u32le len | u32le crc32(payload)`.
 pub(crate) const HEADER_LEN: usize = 8;
@@ -64,6 +65,17 @@ pub enum Record {
     },
 }
 
+/// Bytes that are not a journal record: where [`Record::decode`] stopped in them. A position in
+/// the bytes it was given, not in `journal.log`: a reader of the journal reports a frame whose
+/// records do not decode as [`StoreError::JournalCorrupt`] at the frame's own offset there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("not a journal record: it does not decode at byte {at}")]
+pub struct BadRecord {
+    /// Where in the bytes decoding stopped: the start of the field it could not read, or of
+    /// the record for a kind it does not know.
+    pub at: usize,
+}
+
 /// One transaction as the journal holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
@@ -76,26 +88,13 @@ pub struct Frame {
 }
 
 impl Record {
-    /// Appends the record's encoding to `out`.
-    ///
-    /// # Panics
-    ///
-    /// If a length does not fit its `u8` field: more than 255 parents, or a ref name or
-    /// an actor longer than 255 bytes. [`crate::Journal::append_frame`] refuses such
-    /// records with an error instead.
-    pub fn encode(&self, out: &mut Vec<u8>) {
-        if let Err(too_long) = self.try_encode(out) {
-            panic!("cannot encode {too_long}");
-        }
-    }
-
     /// Decodes the record at the start of `buf`, returning it and how many bytes it took;
     /// the bytes after it are left alone.
     ///
-    /// Malformed or truncated bytes give [`StoreError::JournalCorrupt`], with `offset` the
-    /// position in `buf` where decoding stopped.
-    pub fn decode(buf: &[u8]) -> Result<(Record, usize), StoreError> {
-        let mut r = Reader::new(buf, corrupt_at);
+    /// Malformed or truncated bytes give [`BadRecord`], at the position in `buf` where decoding
+    /// stopped.
+    pub fn decode(buf: &[u8]) -> Result<(Record, usize), BadRecord> {
+        let mut r = Reader::new(buf, bad_record);
         let record = match r.u8()? {
             KIND_CHANGESET => Self::Changeset {
                 id: r.id()?,
@@ -121,9 +120,10 @@ impl Record {
         Ok((record, r.pos()))
     }
 
-    /// [`Record::encode`], or which field is too long for its `u8` length; `out` is left
-    /// untouched then.
-    fn try_encode(&self, out: &mut Vec<u8>) -> Result<(), &'static str> {
+    /// Appends the record's encoding to `out`. A length that does not fit its `u8` field (more
+    /// than 255 parents, or a ref name or an actor longer than 255 bytes) is
+    /// [`StoreError::Limit`], and `out` is left untouched then.
+    pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), StoreError> {
         match self {
             Self::Changeset {
                 id,
@@ -131,7 +131,7 @@ impl Record {
                 delta_hash,
                 parents,
             } => {
-                let n = u8::try_from(parents.len()).map_err(|_| "more than 255 parents")?;
+                let n = fits_u8(LimitKind::Parents, parents.len())?;
                 out.push(KIND_CHANGESET);
                 out.extend_from_slice(&id.0.0);
                 out.extend_from_slice(&generation.to_le_bytes());
@@ -148,10 +148,8 @@ impl Record {
                 actor,
                 ts,
             } => {
-                let name_len =
-                    u8::try_from(name.len()).map_err(|_| "a ref name longer than 255 bytes")?;
-                let actor_len =
-                    u8::try_from(actor.len()).map_err(|_| "an actor longer than 255 bytes")?;
+                let name_len = fits_u8(LimitKind::RefNameBytes, name.len())?;
+                let actor_len = fits_u8(LimitKind::ActorBytes, actor.len())?;
                 out.push(KIND_REF_MOVE);
                 out.push(name_len);
                 out.extend_from_slice(name.as_bytes());
@@ -170,6 +168,15 @@ impl Record {
     }
 }
 
+/// `len` as the `u8` a record's length field holds; past 255, [`StoreError::Limit`] for `what`.
+fn fits_u8(what: LimitKind, len: usize) -> Result<u8, StoreError> {
+    u8::try_from(len).map_err(|_| StoreError::Limit {
+        what,
+        max: u64::from(u8::MAX),
+        got: to_u64(len),
+    })
+}
+
 fn put_optional_id(out: &mut Vec<u8>, id: Option<ChangesetId>) {
     match id {
         Some(id) => {
@@ -180,24 +187,24 @@ fn put_optional_id(out: &mut Vec<u8>, id: Option<ChangesetId>) {
     }
 }
 
-/// The bytes of a frame holding `records`. Refuses, with `InvalidInput`, no records, more
-/// than 65,535, or a record whose lengths do not fit the layout.
+/// The bytes of a frame holding `records`. Refuses more than 65,535 records, or a record
+/// whose lengths do not fit the layout, with [`StoreError::Limit`]; no records, which no
+/// transaction appends, with [`StoreError::BadCall`].
 pub(crate) fn encode_frame(records: &[Record]) -> Result<Vec<u8>, StoreError> {
-    let count = u16::try_from(records.len())
-        .ok()
-        .filter(|&count| count > 0)
-        .ok_or_else(|| {
-            invalid_input(format!(
-                "a frame holds 1 to 65,535 records, not {}",
-                records.len()
-            ))
-        })?;
+    if records.is_empty() {
+        return Err(StoreError::BadCall(
+            "a frame holds at least one record".to_owned(),
+        ));
+    }
+    let count = u16::try_from(records.len()).map_err(|_| StoreError::Limit {
+        what: LimitKind::Records,
+        max: to_u64(MAX_RECORDS),
+        got: to_u64(records.len()),
+    })?;
     let mut frame = vec![0; HEADER_LEN];
     frame.extend_from_slice(&count.to_le_bytes());
     for record in records {
-        record
-            .try_encode(&mut frame)
-            .map_err(|too_long| invalid_input(format!("cannot encode {too_long}")))?;
+        record.encode(&mut frame)?;
     }
     let payload = &frame[HEADER_LEN..];
     // At most 65,535 records of at most 8,234 bytes (a changeset with 255 parents).
@@ -255,6 +262,9 @@ pub(crate) fn parse_frame(buf: &[u8]) -> Parsed {
 }
 
 /// The records of a frame payload: a count of at least 1, then exactly that many records.
+/// A record that does not decode makes the frame [`Parsed::Invalid`], which the journal's
+/// readers report as [`StoreError::JournalCorrupt`] at the frame's offset in `journal.log`: the
+/// position in the payload where its record stopped decoding goes no further.
 fn decode_payload(payload: &[u8]) -> Option<Vec<Record>> {
     let (count, mut rest) = payload.split_first_chunk::<2>()?;
     let count = usize::from(u16::from_le_bytes(*count));
@@ -271,31 +281,29 @@ fn decode_payload(payload: &[u8]) -> Option<Vec<Record>> {
     rest.is_empty().then_some(records)
 }
 
-/// What a record's bytes that do not decode are: [`StoreError::JournalCorrupt`] at `pos`, the
-/// position in them where decoding stopped.
-fn corrupt_at(pos: usize) -> StoreError {
-    StoreError::JournalCorrupt {
-        offset: to_u64(pos),
-    }
+/// What a record's bytes that do not decode are: [`BadRecord`] at `at`, the position in them
+/// where decoding stopped.
+fn bad_record(at: usize) -> BadRecord {
+    BadRecord { at }
 }
 
 /// The reads of a record's fields beyond fixed-width integers.
 trait RecordReader {
-    fn id(&mut self) -> Result<ChangesetId, StoreError>;
+    fn id(&mut self) -> Result<ChangesetId, BadRecord>;
 
     /// A `u8` flag (0 or 1), then the id if the flag is 1.
-    fn optional_id(&mut self) -> Result<Option<ChangesetId>, StoreError>;
+    fn optional_id(&mut self) -> Result<Option<ChangesetId>, BadRecord>;
 
     /// A `u8` length, then that many bytes of UTF-8.
-    fn string(&mut self) -> Result<String, StoreError>;
+    fn string(&mut self) -> Result<String, BadRecord>;
 }
 
-impl RecordReader for Reader<'_, StoreError> {
-    fn id(&mut self) -> Result<ChangesetId, StoreError> {
+impl RecordReader for Reader<'_, BadRecord> {
+    fn id(&mut self) -> Result<ChangesetId, BadRecord> {
         self.array().map(|bytes| ChangesetId(ObjectId(bytes)))
     }
 
-    fn optional_id(&mut self) -> Result<Option<ChangesetId>, StoreError> {
+    fn optional_id(&mut self) -> Result<Option<ChangesetId>, BadRecord> {
         let flag_at = self.pos();
         match self.u8()? {
             0 => Ok(None),
@@ -304,7 +312,7 @@ impl RecordReader for Reader<'_, StoreError> {
         }
     }
 
-    fn string(&mut self) -> Result<String, StoreError> {
+    fn string(&mut self) -> Result<String, BadRecord> {
         let len = usize::from(self.u8()?);
         let start = self.pos();
         let bytes = self.bytes(len)?;

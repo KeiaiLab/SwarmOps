@@ -222,6 +222,18 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   carries, says so: another writer held the lock for the whole wait, or commits landed during
   every attempt to take a snapshot; either way nothing was committed (a commit's flushed objects
   may remain, for GC). It used to say only the first.
+- The store's limit refusals (more than 255 parents, an actor over 255 bytes, more than 65,535
+  records in one transaction) and malformed id prefixes are `E_INVALID_ARG`, with
+  `details.store_limit`, `max` and `got`, or `details.prefix`; they were `E_IO`. A call the
+  store's API does not take, which only a bug makes, is `E_INTERNAL`. No CLI, `StoreOps` or MCP
+  request reaches them in M1 (storage spec §3, operations spec §0). In the Rust API,
+  `StoreError` gains `Limit` (with `LimitKind`), `BadPrefix` and `BadCall`, its `Io` keeps the
+  failures the filesystem reported, and `Record::encode` returns a `Result` instead of
+  panicking on a record past the layout's lengths.
+- `StoreError::JournalCorrupt`'s `offset` is always a position in `journal.log`.
+  `Record::decode`, which gave it the position in its input where decoding stopped, returns a
+  `BadRecord { at }` with that position instead (Rust API only; the readers report a frame
+  that does not decode at its own offset, as before).
 
 ### Fixed
 
@@ -234,6 +246,21 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - A snapshot or `verify` whose index counts its records by their lengths (the journal cannot
   vouch for them) no longer fails with an I/O error when a writer cuts the index as it opens:
   it counts the records the cut keeps, and fails only if the index is cut again meanwhile.
+- A sorted-view entry that points at a record its view does not cover is `E_STORE_CORRUPT`
+  (`IndexCorrupt`) on every lookup that reads it. Before, a lookup by id, prefix or delta hash
+  answered with another changeset's record where the entry pointed into the unsorted tail, and
+  failed with `E_IO` past the index's end.
+- No error from the store carries the store's absolute path any more. A malformed
+  `journal.ckpt` or ref file, and a ref file over its size cap, are named by their place in the
+  store (`meta/journal.ckpt`, `meta/refs/<name>`), and a store file that is not a regular file
+  by its name. A temp file that the store cannot create or write (an object write, or the
+  replacement of a ref file or of `journal.ckpt`) fails with the operating system's own error,
+  errno included, where tempfile's wrapper named the temp file's absolute path and dropped the
+  errno.
+- `verify` reports an index record that no journal frame holds, past the journal's last
+  changeset, as an `IndexMismatch` (cause `Journal`) while changeset frames follow the
+  checkpoint too. The index does not count such a record there, so verify reported nothing, and
+  the next write cut it without a word.
 
 ### Security
 

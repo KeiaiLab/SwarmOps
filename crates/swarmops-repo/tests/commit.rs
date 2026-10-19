@@ -8,7 +8,6 @@
 //! binary again as their children (selected by [`CHILD_ROOT`]), on the real filesystem.
 
 use std::fs;
-use std::io;
 #[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
@@ -30,7 +29,7 @@ use swarmops_repo::{
 };
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, FailAt, FailAtFs, FailMode, InjectedError, ORDER_CHECK_ENV};
-use swarmops_store::{ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
+use swarmops_store::{ChangesetMeta, Journal, Layout, LimitKind, MetaStore, RealFs, StoreError};
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, this_test};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run};
@@ -446,10 +445,10 @@ fn commit_refuses_more_than_255_parents_before_writing() {
     let mut parents = vec![base.id];
     parents.extend(others);
     match repo.commit(request(&parents, vec![put("b", b"b")])) {
-        Err(RepoError::Store(StoreError::Io(e))) => {
-            assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
+        Err(RepoError::Store(StoreError::Limit { what, max, got })) => {
+            assert_eq!((what, max, got), (LimitKind::Parents, 255, 256));
         }
-        other => panic!("expected InvalidInput, got {other:?}"),
+        other => panic!("expected Limit, got {other:?}"),
     }
     assert_eq!(object_files(&root), objects, "nothing was written");
 }
