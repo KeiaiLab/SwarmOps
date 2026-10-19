@@ -269,3 +269,55 @@ fn an_object_the_repository_lacks_is_missing() {
         Err(SourceError::Missing { oid: absent })
     );
 }
+
+#[test]
+fn the_real_unsupported_fixtures_are_refused() {
+    use swarmops_git::RawTree;
+
+    // Refused as they open: a SHA-256 repository, and a shallow clone git made.
+    for (name, refused) in [
+        ("sha256", Unsupported::ObjectFormat("sha256".to_owned())),
+        ("shallow", Unsupported::Shallow),
+    ] {
+        let fixture = git::fixture(name);
+        assert_eq!(
+            GixSource::open(repo(&fixture)).map(|_| ()),
+            Err(SourceError::Unsupported(refused)),
+            "{name}"
+        );
+    }
+
+    // A partial clone opens, and lacks every blob its trees name.
+    let partial = git::fixture("partial_clone");
+    let (source, held) = (open(&partial), manifest(&partial));
+    let mut lacked = std::collections::BTreeSet::new();
+    for bytes in held.trees.values() {
+        for entry in RawTree::parse(bytes).unwrap().entries {
+            if entry.mode == b"100644" {
+                assert!(!held.blobs.contains_key(&entry.oid.to_string()));
+                let missing = SourceError::Missing { oid: entry.oid };
+                assert_eq!(source.read(entry.oid), Err(missing.clone()));
+                assert_eq!(source.header(entry.oid), Err(missing));
+                lacked.insert(entry.oid);
+            }
+        }
+    }
+    assert_eq!(
+        lacked.len(),
+        3,
+        "the blobs of dir/1.txt, dir/2.txt and dir/3.txt"
+    );
+
+    // A loose blob whose file holds another blob is damaged, once read.
+    let corrupt = git::fixture("corrupt_object");
+    let (source, held) = (open(&corrupt), manifest(&corrupt));
+    let tree = &held.trees[&held.commits[1].tree];
+    let damaged = (RawTree::parse(tree).unwrap().entries.into_iter())
+        .find(|entry| entry.name == b"damaged.txt")
+        .expect("the second commit adds damaged.txt")
+        .oid;
+    assert!(
+        matches!(source.read(damaged), Err(SourceError::Corrupt { oid, .. }) if oid == damaged),
+        "{damaged}"
+    );
+}

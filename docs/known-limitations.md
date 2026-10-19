@@ -261,8 +261,9 @@ left).
 - **`created_at` cannot show a time before 1970.** A changeset keeps its signatures' times as
   signed seconds (storage spec §1, §7), but the API's `created_at` in `show` and
   `log`, unsigned milliseconds derived from the committer's time, reports 0 for any time before
-  1970. Whether the git import keeps such commits as they are or refuses them unless asked to be
-  lossy is M3's choice. *Target: M3. Found: M1 Task 4a.*
+  1970. The git import keeps such commits as they are, without loss (the M3 plan's decision 4),
+  and `show`'s `signatures` give their exact times. *Documented (storage spec §7). Found: M1
+  Task 4a.*
 - **No test reads a real repository yet.** M1 had none, so the final review had nothing to judge
   (question 14). The first come with the git import, behind `SWARMOPS_HOST_REPOS=1`. *Target:
   M3.*
