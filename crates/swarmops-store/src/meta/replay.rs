@@ -8,7 +8,8 @@
 //! for (those the views cover count as they are, even past the checkpoint), so that what a
 //! power loss leaves there with its bytes lost is a suffix too ([`Index::open`]). So replay
 //! finds how many of the changesets past the checkpoint the index holds with a binary search
-//! (one lookup when it holds them all, the usual case) and appends the rest.
+//! (one lookup when it holds them all, the usual case) and appends the rest, a frame's with
+//! one [`Index::append_batch`].
 //!
 //! Every frame past the checkpoint but the last is materialized: a writer appends its frame
 //! only after replaying all the others. Each ref those frames move ends at the target of its
@@ -39,8 +40,9 @@ pub(crate) struct Replayed {
 }
 
 /// Brings the index and the ref files up to date with `frames`, the frames past the
-/// checkpoint in journal order, appending only what they lack, and returns what it changed.
-/// The caller holds [`crate::MetaLock`] and has repaired the journal's and the index's tails.
+/// checkpoint in journal order, appending only what they lack (each frame's changesets with one
+/// [`Index::append_batch`]), and returns what it changed. The caller holds
+/// [`crate::MetaLock`] and has repaired the journal's and the index's tails.
 pub(crate) fn replay(
     index: &mut Index,
     layout: &Layout,
@@ -51,8 +53,18 @@ pub(crate) fn replay(
     let targets = ref_targets(frames)?;
     let changesets = changesets(frames);
     let held = held(index, &changesets)?;
-    for record in &changesets[held..] {
-        index.append(&record.meta(0))?;
+    // Those past `held`, a frame at a time.
+    let mut from = 0;
+    for frame in frames {
+        let to = from + changeset_count(frame);
+        if to > held {
+            let metas: Vec<ChangesetMeta> = changesets[from.max(held)..to]
+                .iter()
+                .map(|record| record.meta(0))
+                .collect();
+            index.append_batch(&metas)?;
+        }
+        from = to;
     }
     let mut files = 0;
     for (name, target) in targets {
@@ -180,6 +192,13 @@ pub(super) fn changesets(frames: &[Frame]) -> Vec<ChangesetRecord<'_>> {
             Record::RefMove { .. } | Record::Compacted { .. } => None,
         })
         .collect()
+}
+
+/// How many `Changeset` records `frame` holds.
+fn changeset_count(frame: &Frame) -> usize {
+    (frame.records.iter())
+        .filter(|record| matches!(record, Record::Changeset { .. }))
+        .count()
 }
 
 /// How many of `changesets`, in journal order, `index` holds: a prefix, so a binary search

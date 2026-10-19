@@ -19,9 +19,9 @@
 //! A write transaction holds the lock throughout: [`Journal::truncate_torn_tail`] and
 //! [`Index::repair_tail`], replay of the frames past [`Journal::ckpt`] into the materialized
 //! files, one [`Journal::append_frame`] (the commit point), then materialization (for the
-//! index, one [`Index::append`] per changeset; for each moved ref, its file replaced). A
-//! transaction is durable once its frame is: the journal's syncs (and a moved ref's file
-//! replacement) are its only per-transaction fsyncs. [`Index::sync`] and the
+//! index, one [`Index::append_batch`] of the frame's changesets; for each moved ref, its file
+//! replaced). A transaction is durable once its frame is: the journal's syncs (and a moved
+//! ref's file replacement) are its only per-transaction fsyncs. [`Index::sync`] and the
 //! [`Journal::set_ckpt`] after it are batched instead: every 32 frames past the checkpoint,
 //! with [`Index::compact`] (which syncs the index before it writes the sorted views), and on
 //! an explicit [`MetaStore::flush`]. Readers take no lock and overlay the frames past the

@@ -260,9 +260,6 @@ left).
   `log`, unsigned milliseconds derived from the committer's time, reports 0 for any time before
   1970. Whether the git import keeps such commits as they are or refuses them unless asked to be
   lossy is M3's choice. *Target: M3. Found: M1 Task 4a.*
-- **No batch insertion yet.** One transaction can hold up to 65,535 records, but the index has no
-  batch append and `insert_changesets_batch` does not exist yet (storage spec §3.1). *Target: M3.
-  Found: M1 Task 2b.*
 - **No test reads a real repository yet.** M1 had none, so the final review had nothing to judge
   (question 14). The first come with the git import, behind `SWARMOPS_HOST_REPOS=1`. *Target:
   M3.*

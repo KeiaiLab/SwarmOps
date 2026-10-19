@@ -13,8 +13,9 @@
 //! [`Index::create`] lays the files out, empty, when the store is created, and nothing else
 //! creates or removes one, so a missing file is [`StoreError::IndexCorrupt`]. A record's
 //! number, its rec, is its position in the columns and its `seq`. The files grow by
-//! [`Index::append`], which writes `parents.log`, `par.col`, `gen.col`, `dh.col` and
-//! `ids.col`, in that order, with plain appends; [`Index::sync`] then makes them durable,
+//! [`Index::append_batch`], which writes `parents.log`, `par.col`, `gen.col`, `dh.col` and
+//! `ids.col`, in that order, with one plain append each for however many records
+//! ([`Index::append`] is a batch of one); [`Index::sync`] then makes them durable,
 //! once for many appends. They shrink only at the end, when a writer cuts what a crash left
 //! of a record ([`Index::repair_tail`]) or, after a failed sync, the records past the
 //! checkpoint, never below what the sorted views cover ([`Index::truncate_to`]). Lookups
@@ -25,17 +26,17 @@
 //! # Crashes and concurrency
 //!
 //! Writers hold [`crate::MetaLock`]; readers take no lock and may open the index while a
-//! writer appends or compacts. A crash in the middle of an append leaves the record's first
-//! files written and the rest not. Every handle counts only the records that all five files
-//! hold whole (`ids.col`, written last, is the one that lags behind), and, past
-//! `journal.ckpt` and the sorted views, only those the journal vouches for: appended without
-//! a sync, they are what a power loss may leave with their bytes lost, zeros in their place.
-//! [`Index::repair_tail`] cuts the rest off. A crash in the middle of a compaction's renames
-//! leaves the sorted views out of step; each view still covers the records it covers, or is
-//! read as empty, so lookups stay right, and [`Index::repair_tail`] runs the compaction again.
-//! The one cut of whole records, after a failed sync, can take records from under a handle
-//! opened before it, a reader's snapshot's included: [`Index::truncate_to`] says which lookups
-//! then fail.
+//! writer appends or compacts. A crash in the middle of an append leaves the records in the
+//! first files and not in the rest, perhaps only some of them in the file it was writing.
+//! Every handle counts only the records that all five files hold whole (`ids.col`, written
+//! last, is the one that lags behind), and, past `journal.ckpt` and the sorted views, only
+//! those the journal vouches for: appended without a sync, they are what a power loss may
+//! leave with their bytes lost, zeros in their place. [`Index::repair_tail`] cuts the rest off.
+//! A crash in the middle of a compaction's renames leaves the sorted views out of step; each
+//! view still covers the records it covers, or is read as empty, so lookups stay right, and
+//! [`Index::repair_tail`] runs the compaction again. The one cut of whole records, after a
+//! failed sync, can take records from under a handle opened before it, a reader's snapshot's
+//! included: [`Index::truncate_to`] says which lookups then fail.
 
 use std::num::NonZero;
 use std::panic;
@@ -63,7 +64,8 @@ pub struct ChangesetMeta {
     /// The changeset's id.
     pub id: ChangesetId,
     /// Its record number in the index: its place among the journal's changesets, so parents
-    /// come before their children. [`Index::append`] assigns it and ignores the value given.
+    /// come before their children. [`Index::append_batch`] assigns it and ignores the value
+    /// given.
     pub seq: u64,
     /// 1 + the largest parent generation; 1 for a root.
     pub generation: u64,
@@ -93,8 +95,9 @@ const PARENTS: &str = "parents.log";
 /// A handle on one store's changeset index.
 ///
 /// A handle counts the records that every file held whole when it opened, plus those it
-/// appended since. [`Index::append`], [`Index::compact`] and [`Index::repair_tail`] first
-/// catch up with what other handles wrote; lookups answer from what this handle counts.
+/// appended since. [`Index::append_batch`] (and so [`Index::append`]), [`Index::compact`] and
+/// [`Index::repair_tail`] first catch up with what other handles wrote; lookups answer from
+/// what this handle counts.
 /// Lookups take `&self` and read with `read_at` on read-only handles; changes take
 /// `&mut self`, go through [`FsOps`], and need [`crate::MetaLock`].
 pub struct Index {
@@ -288,49 +291,85 @@ impl Index {
         &self.views.dh
     }
 
-    /// Appends `meta` as the next record and returns its rec (`meta.seq` is ignored): one
-    /// plain append (no fsync) to each of `parents.log`, `par.col`, `gen.col`, `dh.col` and
-    /// `ids.col`, in that order. [`Index::sync`] makes the records durable.
-    ///
-    /// The caller must hold [`crate::MetaLock`]. If the files do not end where this
-    /// handle's records do (another handle appended, or a crash left part of a record),
-    /// this handle catches up first, cutting off what is not whole, as
-    /// [`Index::repair_tail`] does; files that hold fewer whole records than this handle
-    /// counts, or than the sorted views cover, are damaged, [`StoreError::IndexCorrupt`],
-    /// and nothing is cut or written then. More than 255 parents is [`StoreError::Limit`],
-    /// and nothing is written then either. After any other error, what was written is cut
-    /// off by the next append or repair.
+    /// Appends `meta` as the next record and returns its rec (`meta.seq` is ignored):
+    /// [`Index::append_batch`] of the one record, so one plain append (no fsync) to each of
+    /// `parents.log`, `par.col`, `gen.col`, `dh.col` and `ids.col`, in that order, after the
+    /// same catch-up and with the same refusals: more than 255 parents is [`StoreError::Limit`],
+    /// and nothing is written then. [`Index::sync`] makes the record durable.
     pub fn append(&mut self, meta: &ChangesetMeta) -> Result<u64, StoreError> {
-        let count = u8::try_from(meta.parents.len()).map_err(|_| StoreError::Limit {
-            what: LimitKind::Parents,
-            max: to_u64(MAX_PARENTS),
-            got: to_u64(meta.parents.len()),
-        })?;
+        self.append_batch(std::slice::from_ref(meta))
+    }
+
+    /// Appends `metas` as the next records, in order, and returns the rec of the first (their
+    /// `seq`s are ignored): one plain append (no fsync) to each of `parents.log`, `par.col`,
+    /// `gen.col`, `dh.col` and `ids.col`, in that order, each with the file's part of every
+    /// record, however many. The files then hold, byte for byte, what as many [`Index::append`]s
+    /// write. [`Index::sync`] makes the records durable.
+    ///
+    /// The caller must hold [`crate::MetaLock`]. If the files do not end where this handle's
+    /// records do (another handle appended, or a crash left part of a record), this handle
+    /// catches up first, cutting off what is not whole, as [`Index::repair_tail`] does; files
+    /// that hold fewer whole records than this handle counts, or than the sorted views cover,
+    /// are damaged, [`StoreError::IndexCorrupt`], and nothing is cut or written then. A record
+    /// of more than 255 parents anywhere in `metas` is [`StoreError::Limit`], before the
+    /// catch-up; a record whose parents would start past the offsets a `par.col` entry holds,
+    /// an I/O error (`FileTooLarge`): nothing is written then either, since every record is
+    /// encoded before the first append. An empty `metas` appends nothing and returns the rec
+    /// the next record takes. After any other error, what was written is cut off by the next
+    /// append or repair: as a crash in the middle does, it may leave the records in some files
+    /// and not in others, and only some of them in the file it was writing, and every handle
+    /// counts only the records that all five files hold whole.
+    pub fn append_batch(&mut self, metas: &[ChangesetMeta]) -> Result<u64, StoreError> {
+        let counts = (metas.iter())
+            .map(|meta| {
+                u8::try_from(meta.parents.len()).map_err(|_| StoreError::Limit {
+                    what: LimitKind::Parents,
+                    max: to_u64(MAX_PARENTS),
+                    got: to_u64(meta.parents.len()),
+                })
+            })
+            .collect::<Result<Vec<u8>, StoreError>>()?;
         if !self.ends_where_counted()? {
             self.catch_up()?;
         }
-        let rec = self.len;
-        let at = ParentsAt {
-            offset: self.parents_len,
-            count,
-        };
-        if at.offset > ParentsAt::MAX_OFFSET {
-            let full = io::Error::new(io::ErrorKind::FileTooLarge, "the file is full");
-            return Err(self
-                .parents
-                .failed(FileOp::Fs(FsMethod::Append), full)
-                .into());
+        let first = self.len;
+        if metas.is_empty() {
+            return Ok(first);
         }
+        // One pass encodes each file's part of every record, the parents back to back from
+        // where this handle's records leave off, their offsets accumulating.
+        let parent_count: usize = metas.iter().map(|meta| meta.parents.len()).sum();
+        let mut parents_log = Vec::with_capacity(32 * parent_count);
+        let mut par_col = Vec::with_capacity(8 * metas.len());
+        let mut gen_col = Vec::with_capacity(8 * metas.len());
+        let mut dh_col = Vec::with_capacity(32 * metas.len());
+        let mut ids_col = Vec::with_capacity(32 * metas.len());
         let mut buf = [0; MAX_PARENTS_LEN];
-        let parents = parents::encode(&meta.parents, &mut buf);
-        self.parents.append(parents, at.offset)?;
-        self.pars.append(&at.entry().to_le_bytes(), rec)?;
-        self.gens.append(&meta.generation.to_le_bytes(), rec)?;
-        self.dhs.append(&meta.delta_hash, rec)?;
-        self.ids.append(&meta.id.0.0, rec)?;
-        self.len = rec + 1;
-        self.parents_len = at.end();
-        Ok(rec)
+        let mut offset = self.parents_len;
+        for (meta, count) in metas.iter().zip(counts) {
+            if offset > ParentsAt::MAX_OFFSET {
+                let full = io::Error::new(io::ErrorKind::FileTooLarge, "the file is full");
+                return Err(self
+                    .parents
+                    .failed(FileOp::Fs(FsMethod::Append), full)
+                    .into());
+            }
+            let at = ParentsAt { offset, count };
+            parents_log.extend_from_slice(parents::encode(&meta.parents, &mut buf));
+            par_col.extend_from_slice(&at.entry().to_le_bytes());
+            gen_col.extend_from_slice(&meta.generation.to_le_bytes());
+            dh_col.extend_from_slice(&meta.delta_hash);
+            ids_col.extend_from_slice(&meta.id.0.0);
+            offset = at.end();
+        }
+        self.parents.append(&parents_log, self.parents_len)?;
+        self.pars.append(&par_col, first)?;
+        self.gens.append(&gen_col, first)?;
+        self.dhs.append(&dh_col, first)?;
+        self.ids.append(&ids_col, first)?;
+        self.len = first + to_u64(metas.len());
+        self.parents_len = offset;
+        Ok(first)
     }
 
     /// Makes [`Index::sync`] (also the sync a compaction starts with) flush the five files
@@ -507,8 +546,9 @@ impl Index {
     /// returns how many records were dropped. What a writer calls, holding
     /// [`crate::MetaLock`], before it replays the journal into the index.
     ///
-    /// - A crash in the middle of an append leaves the record in some files and not in
-    ///   others (`ids.col` is written last, `parents.log` first; with power lost before a
+    /// - A crash in the middle of an append leaves the records in some files and not in
+    ///   others, perhaps only some of them in the file it was writing, as it leaves a single
+    ///   record (`ids.col` is written last, `parents.log` first; with power lost before a
     ///   sync, any of them can lag). A power loss can also keep a file's length and lose the
     ///   bytes of records past `journal.ckpt` (zeros in their place, or in the first sector of
     ///   them only), which the journal then does not vouch for. Every column is cut to the
@@ -612,9 +652,9 @@ impl Index {
     /// them) and repairs the columns; returns how many records were dropped. On an error the
     /// handle is left as it was.
     ///
-    /// [`Index::append`] and [`Index::compact`] drop the count: in a write transaction they run
-    /// after [`Index::repair_tail_with`], under the same lock, and find nothing to cut, so what
-    /// a write repaired is that call's to report ([`crate::Recovered`]).
+    /// [`Index::append_batch`] and [`Index::compact`] drop the count: in a write transaction
+    /// they run after [`Index::repair_tail_with`], under the same lock, and find nothing to cut,
+    /// so what a write repaired is that call's to report ([`crate::Recovered`]).
     fn catch_up(&mut self) -> Result<u64, StoreError> {
         self.catch_up_vouched_by(None)
     }

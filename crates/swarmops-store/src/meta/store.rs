@@ -9,11 +9,12 @@
 //! replays the frames past `journal.ckpt` into the index and the ref files, so that both
 //! show every committed frame. [`MetaWrite`] then queues records, checking them against the
 //! index, the ref files and what it has queued already. [`MetaWrite::commit`] appends them
-//! as one frame ([`Journal::append_frame`]: the commit point), materializes the frame (an
-//! [`Index::append`] per changeset, without a sync; a ref file replaced per moved ref), and
-//! unlocks. Every 32 frames past the checkpoint, when it compacts (the sync first), and on
-//! [`MetaStore::flush`] if any frame lies past the checkpoint, it also syncs the index and
-//! moves the checkpoint to the end of the journal: the batched durability of the projections.
+//! as one frame ([`Journal::append_frame`]: the commit point), materializes the frame (its
+//! changesets with one [`Index::append_batch`], without a sync; a ref file replaced per moved
+//! ref), and unlocks. Every 32 frames past the checkpoint, when it compacts (the sync first),
+//! and on [`MetaStore::flush`] if any frame lies past the checkpoint, it also syncs the index
+//! and moves the checkpoint to the end of the journal: the batched durability of the
+//! projections.
 //!
 //! What the repairs at the start of a write transaction did, [`MetaWrite::recovered`] says
 //! ([`Recovered`]): all zero when the writers before it finished cleanly.
@@ -671,8 +672,42 @@ impl MetaWrite<'_> {
     /// [`StoreError::MissingParent`]. A parent listed twice is
     /// [`StoreError::DuplicateParent`]; more than 255 parents, or a transaction that holds
     /// 65,535 records already (all one frame holds), [`StoreError::Limit`]. Nothing is queued
-    /// then.
+    /// then. It is [`MetaWrite::insert_changesets_batch`] of `meta` alone.
     pub fn insert_changeset(&mut self, meta: ChangesetMeta) -> Result<InsertOutcome, StoreError> {
+        let mut staged = Staged::default();
+        let outcome = self.stage(meta, &mut staged)?;
+        self.queue(staged)?;
+        Ok(outcome)
+    }
+
+    /// Queues `metas` in order, each as [`MetaWrite::insert_changeset`] queues one, and returns
+    /// what it did with each: [`InsertOutcome::AlreadyPresent`] for a changeset the store holds,
+    /// this transaction queued already, or `metas` named before it. A parent may be in the
+    /// store, queued before, or earlier in `metas`. They join the transaction's one frame, whose
+    /// commit materializes its changesets with one [`Index::append_batch`].
+    ///
+    /// All or nothing: for more than 255 parents ([`StoreError::Limit`]), a parent listed twice
+    /// ([`StoreError::DuplicateParent`]) or a parent that is nowhere
+    /// ([`StoreError::MissingParent`]) in any of `metas`, or for more records than the frame's
+    /// 65,535 with those queued already ([`StoreError::Limit`], `got` the records the frame
+    /// would hold), it queues nothing of `metas`; what the transaction queued before stays
+    /// queued.
+    pub fn insert_changesets_batch(
+        &mut self,
+        metas: Vec<ChangesetMeta>,
+    ) -> Result<Vec<InsertOutcome>, StoreError> {
+        let mut staged = Staged::default();
+        let outcomes = (metas.into_iter())
+            .map(|meta| self.stage(meta, &mut staged))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.queue(staged)?;
+        Ok(outcomes)
+    }
+
+    /// Checks `meta` as [`MetaWrite::insert_changeset`] does, against the store, this
+    /// transaction's queue and `staged`, but for the room in the frame, which
+    /// [`MetaWrite::queue`] checks; and stages it, unless one of them holds it already.
+    fn stage(&self, meta: ChangesetMeta, staged: &mut Staged) -> Result<InsertOutcome, StoreError> {
         if meta.parents.len() > MAX_PARENTS {
             return Err(StoreError::Limit {
                 what: LimitKind::Parents,
@@ -680,7 +715,10 @@ impl MetaWrite<'_> {
                 got: to_u64(meta.parents.len()),
             });
         }
-        if self.queued.contains_key(&meta.id) || self.index.find(meta.id)?.is_some() {
+        if staged.generations.contains_key(&meta.id)
+            || self.queued.contains_key(&meta.id)
+            || self.index.find(meta.id)?.is_some()
+        {
             return Ok(InsertOutcome::AlreadyPresent);
         }
         for (at, parent) in meta.parents.iter().enumerate() {
@@ -691,20 +729,35 @@ impl MetaWrite<'_> {
         let mut generation = 1;
         for &parent in &meta.parents {
             let parent_generation = self
-                .generation(parent)?
+                .staged_generation(parent, staged)?
                 .ok_or(StoreError::MissingParent(parent))?;
             generation = generation.max(parent_generation.saturating_add(1));
         }
-        self.check_room()?;
-        let seq = self.index.len() + to_u64(self.queued.len());
-        self.queued.insert(meta.id, generation);
-        self.records.push(Record::Changeset {
+        let seq = self.index.len() + to_u64(self.queued.len() + staged.generations.len());
+        staged.generations.insert(meta.id, generation);
+        staged.records.push(Record::Changeset {
             id: meta.id,
             generation,
             delta_hash: meta.delta_hash,
             parents: meta.parents,
         });
         Ok(InsertOutcome::Inserted { seq })
+    }
+
+    /// Queues what `staged` holds, if the transaction's frame has room for it: else
+    /// [`StoreError::Limit`], and nothing is queued.
+    fn queue(&mut self, staged: Staged) -> Result<(), StoreError> {
+        let records = self.records.len() + staged.records.len();
+        if records > MAX_RECORDS {
+            return Err(StoreError::Limit {
+                what: LimitKind::Records,
+                max: to_u64(MAX_RECORDS),
+                got: to_u64(records),
+            });
+        }
+        self.queued.extend(staged.generations);
+        self.records.extend(staged.records);
+        Ok(())
     }
 
     /// Queues a move of ref `name` from `expected` to `new` (`None` deletes it) by `actor`,
@@ -863,6 +916,19 @@ impl MetaWrite<'_> {
         }
     }
 
+    /// The generation of changeset `id` if `staged` holds it, this transaction queued it, or
+    /// the store holds it; `None` otherwise.
+    fn staged_generation(
+        &self,
+        id: ChangesetId,
+        staged: &Staged,
+    ) -> Result<Option<u64>, StoreError> {
+        if let Some(&generation) = staged.generations.get(&id) {
+            return Ok(Some(generation));
+        }
+        self.generation(id)
+    }
+
     /// The generation of changeset `id` if this transaction queued it or the store holds
     /// it; `None` otherwise.
     fn generation(&self, id: ChangesetId) -> Result<Option<u64>, StoreError> {
@@ -886,6 +952,16 @@ impl fmt::Debug for MetaWrite<'_> {
             .field("recovered", &self.recovered)
             .finish_non_exhaustive()
     }
+}
+
+/// What one call of [`MetaWrite::insert_changeset`] or [`MetaWrite::insert_changesets_batch`]
+/// queues, held apart until all of it is checked, so that an error leaves none of it queued.
+#[derive(Default)]
+struct Staged {
+    /// The generation of each changeset staged.
+    generations: HashMap<ChangesetId, u64>,
+    /// Their records, in order.
+    records: Vec<Record>,
 }
 
 /// The error of a failed append of the advisory `Compacted` marker, once the compaction is

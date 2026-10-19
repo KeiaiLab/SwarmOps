@@ -1346,6 +1346,169 @@ fn a_stale_handle_appends_at_the_real_end() {
     assert_eq!(open(&layout).sorted_count(), 4);
 }
 
+/// A record, then three a batch appends after it, each with parents (one, a merge's two, one),
+/// so that the batch starts past rec 0 and past the first record's parents in `parents.log`.
+fn batch_metas() -> (ChangesetMeta, [ChangesetMeta; 3]) {
+    let before = meta(id_of(9), 2, [0xd9; 32], vec![id_of(8)]);
+    let batch = [
+        meta(id_of(1), 3, [0xd1; 32], vec![id_of(9)]),
+        meta(id_of(2), 4, [0xd2; 32], vec![id_of(1), id_of(9)]),
+        meta(id_of(3), 5, [0xd3; 32], vec![id_of(2)]),
+    ];
+    (before, batch)
+}
+
+/// Where the parents of [`batch_metas`]' records end in `parents.log`: the first record's,
+/// then each of the batch's.
+const BATCH_PARENTS_END: [u64; 4] = [32, 64, 128, 160];
+
+/// A fresh store root with an empty index, every handle on it from [`no_sync`]: the tests that
+/// lay out many roots pay for no flush.
+fn new_no_sync_root() -> (TempDir, Layout) {
+    let (dir, layout) = bare_root();
+    Index::create(&layout, Arc::new(NoSyncFs)).expect("create the index files");
+    (dir, layout)
+}
+
+/// An index handle on `layout` whose changes flush nothing.
+fn no_sync(layout: &Layout) -> Index {
+    Index::open(layout, Arc::new(NoSyncFs)).unwrap()
+}
+
+#[test]
+fn append_batch_appends_each_index_file_once() {
+    let (before, batch) = batch_metas();
+    let (_root, layout) = new_root();
+    append_all(&mut open(&layout), std::slice::from_ref(&before));
+    let (recording, calls) = recording_fs();
+    let mut index = Index::open(&layout, recording).unwrap();
+    assert_eq!(index.append_batch(&batch).unwrap(), 1, "the first new rec");
+    assert_eq!(
+        calls(),
+        [
+            "append parents.log",
+            "append par.col",
+            "append gen.col",
+            "append dh.col",
+            "append ids.col",
+        ],
+        "one append to each file, in write order, for the three records"
+    );
+    assert_eq!(index.len(), 4);
+
+    // The bytes three appends write, file by file, on another store.
+    let (_singles_root, singles) = new_root();
+    append_all(&mut open(&singles), std::slice::from_ref(&before));
+    append_all(&mut open(&singles), &batch);
+    for (rel, _) in COLUMNS {
+        let read = |layout: &Layout| fs::read(layout.meta_path(rel)).unwrap();
+        assert_eq!(read(&layout), read(&singles), "{rel}");
+    }
+    // Each record reads back, from the handle that appended it and from a fresh one.
+    let reopened = open(&layout);
+    for handle in [&index, &reopened] {
+        assert_eq!(handle.get(0).unwrap(), at_seq(&before, 0));
+        for (rec, meta) in (1..).zip(&batch) {
+            assert_eq!(handle.get(rec).unwrap(), at_seq(meta, rec));
+            assert_eq!(handle.find(meta.id).unwrap(), Some(rec));
+        }
+    }
+}
+
+/// A batch is refused whole, before any call: a record of more than 255 parents anywhere in it
+/// is refused as `append` refuses one. An empty batch makes no call either: it returns the rec
+/// the next record takes.
+#[test]
+fn append_batch_writes_nothing_for_a_batch_it_refuses() {
+    let (before, batch) = batch_metas();
+    let (_root, layout) = new_root();
+    append_all(&mut open(&layout), std::slice::from_ref(&before));
+    let lens = column_lens(&layout);
+    let (recording, calls) = recording_fs();
+    let mut index = Index::open(&layout, recording).unwrap();
+    let mut refused = batch.to_vec();
+    refused.push(meta(id_of(4), 6, [0xd4; 32], vec![spread_id(0); 256]));
+    match index.append_batch(&refused) {
+        Err(StoreError::Limit { what, max, got }) => {
+            assert_eq!((what, max, got), (LimitKind::Parents, 255, 256));
+        }
+        other => panic!("256 parents: expected Limit, got {other:?}"),
+    }
+    assert_eq!(calls(), Vec::<String>::new(), "no call");
+    assert_eq!(column_lens(&layout), lens, "nothing written");
+    assert_eq!(index.len(), 1);
+    assert_eq!(
+        index.append_batch(&[]).unwrap(),
+        1,
+        "the rec the next record takes"
+    );
+    assert_eq!(
+        calls(),
+        Vec::<String>::new(),
+        "an empty batch makes no call"
+    );
+    assert_eq!(index.append_batch(&batch).unwrap(), 1);
+    assert_eq!(index.len(), 4);
+}
+
+/// What a crash in the middle of a batch's appends leaves, or a power loss before their sync:
+/// any one of the five files short, cut at a record's boundary or inside a record. Readers
+/// count the records that all five hold whole; `repair_tail` cuts the rest off (it returns the
+/// record slots it cut from the longest column), as after a single append; and the rest of the
+/// batch, appended by a handle opened before it, lands where the whole records end: that handle
+/// catches up first, cutting what is not whole if no repair did.
+#[test]
+fn an_append_batch_cut_anywhere_counts_its_whole_prefix() {
+    let (before, batch) = batch_metas();
+    for (rel, width) in COLUMNS {
+        // The file's length with the first record and k of the batch's, k = 0..=3.
+        let bounds: Vec<u64> = (0..4)
+            .map(|k| match rel {
+                "parents.log" => BATCH_PARENTS_END[k],
+                _ => width * (1 + to_u64(k)),
+            })
+            .collect();
+        // Each boundary, and between two of them: k records whole, and part of the next.
+        let mut cuts: Vec<(u64, usize)> = bounds.iter().copied().zip(0..).collect();
+        cuts.extend((0..3).map(|k| (bounds[k].midpoint(bounds[k + 1]), k)));
+        for (len, k) in cuts {
+            for repair_first in [true, false] {
+                let what = format!("{rel} cut to {len} bytes, repair first: {repair_first}");
+                let (_root, layout) = new_no_sync_root();
+                let mut index = no_sync(&layout);
+                index.append_batch(std::slice::from_ref(&before)).unwrap();
+                let mut stale = no_sync(&layout);
+                index.append_batch(&batch).unwrap();
+                let whole = column_lens(&layout);
+                set_len(layout.meta_path(rel), len);
+                let records = 1 + to_u64(k);
+                assert_eq!(open_len(&layout).unwrap(), records, "{what}: a reader");
+                if repair_first {
+                    let dropped = no_sync(&layout).repair_tail().unwrap();
+                    assert_eq!(dropped, 3 - to_u64(k), "{what}: dropped");
+                    let kept = [
+                        BATCH_PARENTS_END[k],
+                        8 * records,
+                        8 * records,
+                        32 * records,
+                        32 * records,
+                    ];
+                    assert_eq!(column_lens(&layout), kept, "{what}: cut");
+                    assert_eq!(open_len(&layout).unwrap(), records, "{what}: reopened");
+                }
+                let rest = stale.append_batch(&batch[k..]).unwrap();
+                assert_eq!(rest, records, "{what}: where the rest lands");
+                assert_eq!(column_lens(&layout), whole, "{what}: whole again");
+                let after = open(&layout);
+                assert_eq!(after.len(), 4, "{what}");
+                for (rec, meta) in (1..).zip(&batch) {
+                    assert_eq!(after.get(rec).unwrap(), at_seq(meta, rec), "{what}");
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn real_fs_appends_without_syncing_and_renames_durably() {
     let dir = tempfile::tempdir().unwrap();

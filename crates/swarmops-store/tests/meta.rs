@@ -390,6 +390,268 @@ fn insert_is_idempotent() {
     assert_eq!(store.read().unwrap().count_changesets().unwrap(), 2);
 }
 
+/// `count` root changesets, from changeset `first` on.
+fn roots(first: u64, count: u64) -> Vec<ChangesetMeta> {
+    (first..first + count).map(|n| cs(n, &[])).collect()
+}
+
+#[test]
+fn insert_changesets_batch_is_one_frame() {
+    let (_dir, root, store) = new_store();
+    let inserted = |seq| InsertOutcome::Inserted { seq };
+    // Each on the one before it; the seq and generation a caller passes are ignored.
+    let mut first = cs(1, &[]);
+    (first.seq, first.generation) = (7, 99);
+    let mut write = store.write().unwrap();
+    let outcomes = write
+        .insert_changesets_batch(vec![first, cs(2, &[1]), cs(3, &[2])])
+        .unwrap();
+    assert_eq!(outcomes, [inserted(0), inserted(1), inserted(2)]);
+    let want = CommitInfo {
+        frame_seq: 0,
+        inserted: 3,
+        moved_refs: 0,
+        checkpointed: false,
+    };
+    assert_eq!(write.commit().unwrap(), want);
+    let records = [
+        changeset_record(&cs(1, &[]), 1),
+        changeset_record(&cs(2, &[1]), 2),
+        changeset_record(&cs(3, &[2]), 3),
+    ];
+    let frames = frames(&root);
+    assert_eq!(frames.len(), 1, "one frame for the batch");
+    assert_eq!(frames[0].records, records, "generations 1 to 3");
+    let entry = |n| JournalEntry {
+        seq: 0,
+        kind: "changeset",
+        key: id(n).0.0.to_vec(),
+        ts: 0,
+    };
+    let entries = store.read().unwrap().journal_after(None, 10).unwrap();
+    assert_eq!(entries, [entry(1), entry(2), entry(3)]);
+
+    // A second batch builds on the store's changesets and on its own: a merge of both.
+    let mut write = store.write().unwrap();
+    let outcomes = write
+        .insert_changesets_batch(vec![cs(4, &[1]), cs(5, &[3, 4])])
+        .unwrap();
+    assert_eq!(outcomes, [inserted(3), inserted(4)]);
+    assert_eq!(write.commit().unwrap().inserted, 2);
+    let want = [
+        stored(1, &[], 0, 1),
+        stored(2, &[1], 1, 2),
+        stored(3, &[2], 2, 3),
+        stored(4, &[1], 3, 2),
+        stored(5, &[3, 4], 4, 4),
+    ];
+    let reopened = open_checked(&root).unwrap();
+    for store in [&store, &reopened] {
+        let read = store.read().unwrap();
+        for meta in &want {
+            assert_eq!(read.changeset(meta.id).unwrap().as_ref(), Some(meta));
+        }
+        assert_eq!(read.count_changesets().unwrap(), 5);
+    }
+}
+
+#[test]
+fn insert_changesets_batch_queues_nothing_on_an_error() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    let nothing = CommitInfo {
+        frame_seq: 1,
+        inserted: 0,
+        moved_refs: 0,
+        checkpointed: false,
+    };
+    // The third changeset's parent is nowhere: the two valid ones before it are not queued
+    // either.
+    let mut write = store.write().unwrap();
+    match write.insert_changesets_batch(vec![cs(2, &[1]), cs(3, &[2]), cs(4, &[42])]) {
+        Err(StoreError::MissingParent(parent)) => assert_eq!(parent, id(42)),
+        other => panic!("expected MissingParent, got {other:?}"),
+    }
+    assert_eq!(write.commit().unwrap(), nothing, "no frame");
+    // More changesets than one frame holds.
+    let mut write = store.write().unwrap();
+    let refused = write.insert_changesets_batch(roots(2, 65_536));
+    assert_limit(refused, LimitKind::Records, 65_535, 65_536);
+    assert_eq!(write.commit().unwrap(), nothing, "no frame");
+
+    assert_eq!(frames(&root).len(), 1);
+    let read = store.read().unwrap();
+    assert_eq!(read.count_changesets().unwrap(), 1);
+    for n in [2, 3, 65_537] {
+        assert_eq!(read.changeset(id(n)).unwrap(), None, "{n}");
+    }
+}
+
+/// What a transaction queued before a batch stays queued whatever the batch does, and counts
+/// toward the records its frame holds; a changeset a batch names twice counts once. An error
+/// leaves nothing of its own call queued: the same changesets, queued afterwards, take the seqs
+/// that follow what was queued before.
+#[test]
+fn insert_changesets_batch_keeps_what_was_queued_before_it() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    let inserted = |seq| InsertOutcome::Inserted { seq };
+    let mut write = store.write().unwrap();
+    assert_eq!(write.insert_changeset(cs(2, &[1])).unwrap(), inserted(1));
+    // Beside the one queued, 65,535 more are a record too many.
+    let refused = write.insert_changesets_batch(roots(10, 65_535));
+    assert_limit(refused, LimitKind::Records, 65_535, 65_536);
+    // An error at a batch's third changeset, the first two valid.
+    let batch = |third| vec![cs(3, &[2]), cs(4, &[3]), third];
+    let mut too_many = cs(5, &[]);
+    too_many.parents = vec![id(1); 256];
+    let refused = write.insert_changesets_batch(batch(too_many));
+    assert_limit(refused, LimitKind::Parents, 255, 256);
+    match write.insert_changesets_batch(batch(cs(5, &[4, 3, 4]))) {
+        Err(StoreError::DuplicateParent(parent)) => assert_eq!(parent, id(4)),
+        other => panic!("expected DuplicateParent, got {other:?}"),
+    }
+    match write.insert_changesets_batch(batch(cs(5, &[4, 42]))) {
+        Err(StoreError::MissingParent(parent)) => assert_eq!(parent, id(42)),
+        other => panic!("expected MissingParent, got {other:?}"),
+    }
+    let outcomes = write.insert_changesets_batch(batch(cs(5, &[4]))).unwrap();
+    assert_eq!(outcomes, [inserted(2), inserted(3), inserted(4)]);
+    assert_eq!(write.commit().unwrap().inserted, 4);
+    let chained: Vec<Record> = (2..=5)
+        .map(|n| changeset_record(&cs(n, &[n - 1]), n))
+        .collect();
+    assert_eq!(frames(&root)[1].records, chained);
+
+    // A frame's worth exactly fits: changeset 6 queued, 65,534 new ones and one named twice.
+    let mut write = store.write().unwrap();
+    assert_eq!(write.insert_changeset(cs(6, &[5])).unwrap(), inserted(5));
+    let mut full = roots(10, 65_534);
+    full.push(cs(10, &[]));
+    let outcomes = write.insert_changesets_batch(full).unwrap();
+    assert_eq!(outcomes.len(), 65_535);
+    assert_eq!(outcomes[0], inserted(6));
+    assert_eq!(outcomes[65_533], inserted(65_539));
+    assert_eq!(outcomes[65_534], InsertOutcome::AlreadyPresent);
+    let refused = write.insert_changeset(cs(7, &[6]));
+    assert_limit(refused, LimitKind::Records, 65_535, 65_536);
+}
+
+#[test]
+fn insert_changesets_batch_reports_what_is_present() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    let present = InsertOutcome::AlreadyPresent;
+    let inserted = |seq| InsertOutcome::Inserted { seq };
+    let mut write = store.write().unwrap();
+    assert_eq!(write.insert_changeset(cs(2, &[1])).unwrap(), inserted(1));
+    // In the store, queued before, new, named twice in the batch, new.
+    let batch = vec![
+        cs(1, &[]),
+        cs(2, &[1]),
+        cs(3, &[2]),
+        cs(3, &[2]),
+        cs(4, &[3, 1]),
+    ];
+    let outcomes = write.insert_changesets_batch(batch).unwrap();
+    assert_eq!(
+        outcomes,
+        [present, present, inserted(2), present, inserted(3)]
+    );
+    // A batch of nothing new, or of nothing, queues nothing.
+    let again = write.insert_changesets_batch(vec![cs(4, &[3, 1]), cs(1, &[])]);
+    assert_eq!(again.unwrap(), [present, present]);
+    let none = write.insert_changesets_batch(Vec::new()).unwrap();
+    assert_eq!(none, Vec::<InsertOutcome>::new());
+    assert_eq!(write.commit().unwrap().inserted, 3);
+    let frames = frames(&root);
+    assert_eq!(frames.len(), 2);
+    let queued_once = [
+        changeset_record(&cs(2, &[1]), 2),
+        changeset_record(&cs(3, &[2]), 3),
+        changeset_record(&cs(4, &[3, 1]), 4),
+    ];
+    assert_eq!(frames[1].records, queued_once, "each changeset queued once");
+}
+
+#[test]
+fn a_frame_is_materialized_with_one_append_batch() {
+    let (_dir, root) = new_root();
+    let (recording, calls) = RecordingFs::new();
+    let store = MetaStore::create_with_fs(&root, checked(recording)).unwrap();
+    let mut write = store.write().unwrap();
+    write
+        .insert_changesets_batch(vec![cs(1, &[]), cs(2, &[1]), cs(3, &[2])])
+        .unwrap();
+    calls();
+    write.commit().unwrap();
+    let frame = ["append_durable journal.log", "append_durable journal.off"];
+    let records = [
+        "append parents.log",
+        "append par.col",
+        "append gen.col",
+        "append dh.col",
+        "append ids.col",
+    ];
+    assert_eq!(
+        calls(),
+        [&frame[..], &records].concat(),
+        "five index appends for the frame's three changesets, not fifteen"
+    );
+    let index = index(&root);
+    let want = [
+        stored(1, &[], 0, 1),
+        stored(2, &[1], 1, 2),
+        stored(3, &[2], 2, 3),
+    ];
+    for (rec, meta) in (0..).zip(&want) {
+        assert_eq!(index.get(rec).unwrap(), *meta);
+    }
+}
+
+/// Replay brings the index up to the frames past the checkpoint a frame at a time, what each
+/// frame holds that the index lacks with one `append_batch`: here the last two changesets of a
+/// frame of three, whose first a crash left whole in the index, then both of the next frame's.
+#[test]
+fn replay_appends_what_each_frame_lacks_with_one_append_batch() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    drop(store);
+    let chained = |n: u64| changeset_record(&cs(n, &[n - 1]), n);
+    append_unmaterialized(&root, &[chained(2), chained(3), chained(4)]);
+    append_unmaterialized(&root, &[chained(5), chained(6)]);
+    let mut crashed = Index::open(&Layout::new(&root), Arc::new(RealFs)).unwrap();
+    crashed.append(&stored(2, &[1], 1, 2)).unwrap();
+    drop(crashed);
+
+    let (recording, calls) = RecordingFs::new();
+    let store = MetaStore::open_with_fs(&root, checked(recording)).unwrap();
+    let write = store.write().unwrap();
+    assert_eq!(write.recovered().records_replayed, 4);
+    write.commit().unwrap();
+    let appends: Vec<String> = (calls().into_iter())
+        .filter(|call| call.starts_with("append "))
+        .collect();
+    let batch = [
+        "append parents.log",
+        "append par.col",
+        "append gen.col",
+        "append dh.col",
+        "append ids.col",
+    ];
+    assert_eq!(appends, [batch, batch].concat(), "one batch for each frame");
+    let index = index(&root);
+    assert_eq!(index.len(), 6);
+    for n in 1..=6 {
+        let parents: Vec<u64> = (n - 1..n).filter(|&parent| parent > 0).collect();
+        assert_eq!(
+            index.get(n - 1).unwrap(),
+            stored(n, &parents, n - 1, n),
+            "{n}"
+        );
+    }
+}
+
 #[test]
 fn cas_ref_create_update_delete_and_mismatch() {
     let (_dir, root, store) = new_store();
