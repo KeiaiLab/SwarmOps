@@ -6,4 +6,5 @@
 mod arbitrary;
 mod codec;
 mod id;
+mod lints;
 mod path;
