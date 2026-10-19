@@ -25,6 +25,7 @@ pub use ops::{
     RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut,
     Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
+pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 pub use rev::Rev;
 
 /// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
@@ -65,6 +66,11 @@ pub fn schema_for_all() -> serde_json::Value {
         ModeInput,
         CommitResp,
         Advanced,
+        // blob_put, blob_has.
+        BlobPutReq,
+        BlobPutResp,
+        BlobHasReq,
+        BlobHasResp,
         // read_file, read_tree.
         ReadFileReq,
         FileContent,

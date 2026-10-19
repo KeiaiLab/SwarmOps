@@ -279,6 +279,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   entry at the path or below it, derived where the path changed and stored every 64 changesets
   of a quiet stretch, so that a later query walks at most 64. In the Rust API:
   `RepoRead::{last_modified, path_history, log_paths}`, `PathEvent` and `PathFilter::prefixes`.
+- Blobs by id: `blob_put` stores content as a blob outside any commit, durable when it returns
+  (`{blob, size, written}`; it needs an identity), and `blob_has` gives those of some ids the
+  store holds blobs under (CLI `blob put <file|->` and `blob has <id…>`; MCP tools `blob_put` and
+  `blob_has`). A change's content may name a stored blob by its id, `{"blob": "<id>"}`: the
+  commit neither sends nor reads the bytes, and retains the blob, so that its flush makes the
+  blob's name durable before the frame names it; an id the store holds no blob under (none, a
+  tree's, a changeset's) is `E_INVALID_ARG` `{index, path, blob}`, and nothing is written. In
+  the Rust API: `ContentInput::Blob`, `BlobPutReq`, `BlobPutResp`, `BlobHasReq`, `BlobHasResp`,
+  `StoreOps::{blob_put, blob_has}`, `ChangeOp::PutBlob`, `Repo::put_blob`, `Repo::has_blob`,
+  `BlobPut` and `RepoError::MissingBlob`.
 
 ### Changed
 

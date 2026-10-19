@@ -2,7 +2,7 @@
 
 use std::io;
 
-use swarmops_core::{ChangesetId, CodecError, ObjectId, ObjectKind, RepoPath};
+use swarmops_core::{BlobId, ChangesetId, CodecError, ObjectId, ObjectKind, RepoPath};
 use swarmops_store::{IoFailure, Recovered, StoreError};
 use thiserror::Error;
 
@@ -83,6 +83,16 @@ pub enum RepoError {
     DuplicatePath {
         /// The path named twice.
         path: RepoPath,
+    },
+    /// A change names by its id a blob the store does not hold: no object of that id, or one
+    /// of another kind ([`crate::ChangeOp::PutBlob`]). Nothing was written; store the content
+    /// first ([`crate::Repo::put_blob`]).
+    #[error("{path}: the store holds no blob {id}")]
+    MissingBlob {
+        /// The path of the change.
+        path: RepoPath,
+        /// The id it names.
+        id: BlobId,
     },
     /// The store lacks an object that its metadata or its trees reference, or holds an object
     /// of another kind under that id: a damaged store ([`crate::Repo::verify`] says more).

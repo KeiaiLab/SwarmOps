@@ -68,6 +68,143 @@ expression: s.redact(&all)
       "title": "Attribution",
       "type": "object"
     },
+    "BlobHasReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_has` (CLI `blob has`): which of some blobs the store holds.",
+      "properties": {
+        "ids": {
+          "description": "The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "title": "BlobHasReq",
+      "type": "object"
+    },
+    "BlobHasResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_has`: the blobs the store holds, of those asked for.",
+      "properties": {
+        "present": {
+          "description": "The ids of `ids` that the store holds a blob under, in lowercase hex, in the order first\ngiven, each once; an id of another kind of object (a tree, a changeset) is not among them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "present"
+      ],
+      "title": "BlobHasResp",
+      "type": "object"
+    },
+    "BlobPutReq": {
+      "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's\nchange list can name it by its id (`{\"blob\": id}`) instead of carrying its bytes. The blob is\ndurable once the call returns; until a commit names it, nothing references it.",
+      "properties": {
+        "content": {
+          "$ref": "#/$defs/ContentInput",
+          "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE`).\nA `blob` names content the store holds already, and is `E_INVALID_ARG` here."
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "title": "BlobPutReq",
+      "type": "object"
+    },
+    "BlobPutResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_put`: the blob stored.",
+      "properties": {
+        "blob": {
+          "description": "The blob's id, which a change names it by: `{\"blob\": id}`.",
+          "type": "string"
+        },
+        "size": {
+          "description": "The content's size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "written": {
+          "description": "Whether this call placed the blob in the object store; false when the store held it\nalready, or a concurrent writer placed it first.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "blob",
+        "size",
+        "written"
+      ],
+      "title": "BlobPutResp",
+      "type": "object"
+    },
     "ChangeInput": {
       "$defs": {
         "ChangeOp": {
@@ -111,6 +248,19 @@ expression: s.redact(&all)
               },
               "required": [
                 "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
               ],
               "type": "object"
             },
@@ -644,6 +794,19 @@ expression: s.redact(&all)
             },
             {
               "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
               "properties": {
                 "file": {
@@ -862,6 +1025,19 @@ expression: s.redact(&all)
           },
           "required": [
             "base64"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+          "properties": {
+            "blob": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "blob"
           ],
           "type": "object"
         },

@@ -16,8 +16,8 @@
 //! because `init` runs on the client and is not a [`StoreOps`] method.
 //!
 //! Not in M1 yet:
-//! - M2: `ContentInput::Blob`, `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each
-//!   `TreeEntryOut`, and `LogReq.first_parent`;
+//! - M2: `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each `TreeEntryOut`, and
+//!   `LogReq.first_parent`;
 //! - M4 (with land): `idempotency_key` and `replayed` on `commit`;
 //! - M4/M7: `lander`, `land_key`, `cr` and `annotations` on `ChangesetDetail` (`show`);
 //! - M5: `RepoInfo.workspaces`.
@@ -183,6 +183,11 @@ pub enum ContentInput {
     Inline(String),
     /// Bytes in standard, padded base64.
     Base64(String),
+    /// A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the
+    /// commit neither sends nor reads its bytes. An id the store holds no blob under (none, or
+    /// a tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes
+    /// the other forms only.
+    Blob(String),
     /// A file on the client's machine. The client reads it and sends its bytes, so the store is
     /// never asked to read a path.
     File(String),
@@ -241,6 +246,43 @@ pub struct Advanced {
     /// The ref held the changeset already, from an identical request before, so nothing was
     /// written and a replay is safe.
     pub already_applied: bool,
+}
+
+/// `blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's
+/// change list can name it by its id (`{"blob": id}`) instead of carrying its bytes. The blob is
+/// durable once the call returns; until a commit names it, nothing references it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobPutReq {
+    /// The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE`).
+    /// A `blob` names content the store holds already, and is `E_INVALID_ARG` here.
+    pub content: ContentInput,
+}
+
+/// `blob_put`: the blob stored.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobPutResp {
+    /// The blob's id, which a change names it by: `{"blob": id}`.
+    pub blob: String,
+    /// The content's size in bytes.
+    pub size: u64,
+    /// Whether this call placed the blob in the object store; false when the store held it
+    /// already, or a concurrent writer placed it first.
+    pub written: bool,
+}
+
+/// `blob_has` (CLI `blob has`): which of some blobs the store holds.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobHasReq {
+    /// The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.
+    pub ids: Vec<String>,
+}
+
+/// `blob_has`: the blobs the store holds, of those asked for.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobHasResp {
+    /// The ids of `ids` that the store holds a blob under, in lowercase hex, in the order first
+    /// given, each once; an id of another kind of object (a tree, a changeset) is not among them.
+    pub present: Vec<String>,
 }
 
 /// `read_file` (CLI `cat`): read one file at a revision, without a checkout.
@@ -741,6 +783,14 @@ pub trait StoreOps {
     /// caller names (M10 adds the client-side pass that turns it into bytes before a request
     /// leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
+
+    /// Stores content as a blob, outside any commit, for a commit to name by its id (CLI `blob
+    /// put`). A mutation, so it takes the caller's identity, which it records nowhere: a blob has
+    /// no metadata.
+    fn blob_put(&self, who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError>;
+
+    /// Which of the given blob ids the store holds blobs under (CLI `blob has`).
+    fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError>;
 
     /// Reads one file at a revision (CLI `cat`).
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError>;

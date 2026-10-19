@@ -165,8 +165,6 @@ left).
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
   *Documented (`--expect` help). Found: M1 Task 5; final review, question 13.*
-- **No blob-id puts.** A change cannot name a blob already in the store by its id; its content
-  is always sent again. *Target: M2 (`ContentInput::Blob`). Found: M1 Task 3.*
 
 ## Verification and repair
 

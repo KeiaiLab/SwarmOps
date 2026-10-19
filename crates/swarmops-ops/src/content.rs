@@ -12,7 +12,9 @@
 //! - `inline` content is UTF-8 text, taken verbatim; `base64` content is standard, padded
 //!   base64; `file` content is a file on the client's filesystem (a relative path is taken
 //!   from the current directory), read here, on the client, so that the store is never asked
-//!   to read a path.
+//!   to read a path; `blob` content names, by its id (64 hex digits, of either case), a blob the
+//!   store holds already, whose bytes the commit neither sends nor reads (an id the store holds
+//!   no blob under is the repository's refusal, `E_INVALID_ARG` too, when the commit runs).
 //! - A put's content is at most [`MAX_CONTENT_BYTES`], 512 MiB. Each form is measured before it
 //!   is converted: inline text by its length, base64 by the bytes it decodes to, and a file by
 //!   its length before it is read; a file that grows while it is read (or a device without a
@@ -21,8 +23,9 @@
 //! A breach of the limit is `E_TOO_LARGE`, with the content's `size` and the `limit` in
 //! `details`; every other breach is `E_INVALID_ARG`. Either names the change, in its message
 //! and its `details`: its `index` in the list (from 0) and its `path`, and the client `file` for
-//! file content. The whole list is checked before any content is decoded or read, so a
-//! malformed list costs no file reads, and nothing is written for a refused one.
+//! file content or the `blob` for blob content. The whole list is checked before any content is
+//! decoded or read, so a malformed list costs no file reads, and nothing is written for a
+//! refused one.
 //!
 //! # Content out
 //!
@@ -46,7 +49,7 @@ use swarmops_api::{
     ChangeInput, ChangeOp, ContentEncoding, ContentInput, ErrorCode, ModeInput, OpError,
 };
 use swarmops_core::bytes::to_u64;
-use swarmops_core::{LeafKind, RepoPath};
+use swarmops_core::{BlobId, LeafKind, ObjectId, RepoPath};
 use swarmops_repo::Change;
 
 /// The most bytes a put's content may hold: 512 MiB.
@@ -56,9 +59,10 @@ pub const MAX_CONTENT_BYTES: u64 = 512 * 1024 * 1024;
 const BASE64_KEY_SUFFIX: &str = ":b64";
 
 /// The bytes `content` stands for: inline text as its UTF-8 bytes, base64 decoded, a client
-/// file read. `E_INVALID_ARG` for base64 that is not standard and padded, or a file that
-/// cannot be read; `E_TOO_LARGE` for more than [`MAX_CONTENT_BYTES`], found before the content
-/// is converted. A file's errors carry the `file` in `details`.
+/// file read. `E_INVALID_ARG` for base64 that is not standard and padded, a file that cannot be
+/// read, or a blob named by id, whose bytes are the store's (with the `blob` in `details`);
+/// `E_TOO_LARGE` for more than [`MAX_CONTENT_BYTES`], found before the content is converted. A
+/// file's errors carry the `file` in `details`.
 pub fn bytes(content: ContentInput) -> Result<Vec<u8>, OpError> {
     bytes_within(content, MAX_CONTENT_BYTES)
 }
@@ -83,7 +87,25 @@ fn bytes_within(content: ContentInput, limit: u64) -> Result<Vec<u8>, OpError> {
             e.details.insert("file".to_owned(), Value::from(file));
             e
         }),
+        ContentInput::Blob(id) => Err(OpError::new(
+            ErrorCode::InvalidArg,
+            "blob content names bytes the store holds already: give the content inline, in \
+             base64 or as a file",
+        )
+        .with_details(Map::from_iter([("blob".to_owned(), Value::from(id))]))),
     }
+}
+
+/// The blob `id` names, 64 hex digits of either case: `E_INVALID_ARG` with the `blob` in
+/// `details` for anything else.
+pub(crate) fn blob_id(id: &str) -> Result<BlobId, OpError> {
+    ObjectId::from_hex(id).map(BlobId).map_err(|e| {
+        OpError::new(
+            ErrorCode::InvalidArg,
+            format!("{id:?} is not a blob id: {e}"),
+        )
+        .with_details(Map::from_iter([("blob".to_owned(), Value::from(id))]))
+    })
 }
 
 /// The bytes of client file `file`, at most `limit` of them: its length is checked before it is
@@ -153,7 +175,13 @@ pub(crate) fn changes(inputs: Vec<ChangeInput>) -> Result<Vec<Change>, OpError> 
         let repo_path = RepoPath::new(path.as_str())
             .map_err(|e| refuse(&format!("not a repository path: {e}")))?;
         let content = match (op, content, mode) {
-            (ChangeOp::Put, Some(content), mode) => Some((leaf_kind(mode), content)),
+            (ChangeOp::Put, Some(ContentInput::Blob(id)), mode) => {
+                let id = blob_id(&id).map_err(|e| in_change(e, index, &path))?;
+                Some((leaf_kind(mode), Content::Blob(id)))
+            }
+            (ChangeOp::Put, Some(content), mode) => {
+                Some((leaf_kind(mode), Content::Bytes(content)))
+            }
             (ChangeOp::Put, None, _) => return Err(refuse("a put needs content")),
             (ChangeOp::Delete, None, None) => None,
             (ChangeOp::Delete, Some(_), _) => return Err(refuse("a delete takes no content")),
@@ -168,15 +196,25 @@ pub(crate) fn changes(inputs: Vec<ChangeInput>) -> Result<Vec<Change>, OpError> 
         .into_iter()
         .map(|(index, path, content)| {
             let op = match content {
-                Some((kind, content)) => swarmops_repo::ChangeOp::Put {
+                Some((kind, Content::Bytes(content))) => swarmops_repo::ChangeOp::Put {
                     kind,
                     content: bytes(content).map_err(|e| in_change(e, index, path.as_str()))?,
                 },
+                Some((kind, Content::Blob(id))) => swarmops_repo::ChangeOp::PutBlob { kind, id },
                 None => swarmops_repo::ChangeOp::Delete,
             };
             Ok(Change { path, op })
         })
         .collect()
+}
+
+/// A put's content once its change's shape is checked: bytes to decode or read, or a blob the
+/// store holds, by its id.
+enum Content {
+    /// Inline, base64 or file content.
+    Bytes(ContentInput),
+    /// A blob named by its id.
+    Blob(BlobId),
 }
 
 /// `path` as a repository path; `E_INVALID_ARG` with the `path` in `details` if it is not one.
@@ -260,7 +298,7 @@ fn leaf_kind(mode: Option<ModeInput>) -> LeafKind {
 
 /// `error`, said of change `index` of the list, at `path`: its message prefixed with them,
 /// and both in its `details`.
-fn in_change(mut error: OpError, index: usize, path: &str) -> OpError {
+pub(crate) fn in_change(mut error: OpError, index: usize, path: &str) -> OpError {
     error.message = format!("change {index} ({path:?}): {}", error.message);
     error.details.insert("index".to_owned(), Value::from(index));
     error.details.insert("path".to_owned(), Value::from(path));

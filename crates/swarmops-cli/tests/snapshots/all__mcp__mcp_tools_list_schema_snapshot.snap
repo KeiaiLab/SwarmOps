@@ -414,6 +414,19 @@ expression: listed
                         },
                         {
                           "additionalProperties": false,
+                          "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                          "properties": {
+                            "blob": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "blob"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
                           "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
                           "properties": {
                             "file": {
@@ -515,6 +528,114 @@ expression: listed
       },
       "name": "commit",
       "title": "Commit a changeset"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Stores content as a blob, outside any commit, and gives its id: a commit's change then names it as {\"blob\": id} content instead of carrying its bytes, the way to commit a large file. A {\"file\": path} content is read by this server: give an absolute path. A hint's swarmops blob put is this tool.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's\nchange list can name it by its id (`{\"blob\": id}`) instead of carrying its bytes. The blob is\ndurable once the call returns; until a commit names it, nothing references it.",
+        "properties": {
+          "content": {
+            "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE`).\nA `blob` names content the store holds already, and is `E_INVALID_ARG` here. A `put`'s content, as an object with one key.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "UTF-8 text, verbatim.",
+                "properties": {
+                  "inline": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "inline"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Bytes in standard, padded base64.",
+                "properties": {
+                  "base64": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "base64"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                "properties": {
+                  "blob": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "blob"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "BlobPutReq",
+        "type": "object"
+      },
+      "name": "blob_put",
+      "title": "Store a blob"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Of the blob ids given, the ones the store holds blobs under: the contents a commit can name by id without storing them again.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`blob_has` (CLI `blob has`): which of some blobs the store holds.",
+        "properties": {
+          "ids": {
+            "description": "The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "title": "BlobHasReq",
+        "type": "object"
+      },
+      "name": "blob_has",
+      "title": "Find stored blobs"
     },
     {
       "annotations": {

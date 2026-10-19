@@ -2202,3 +2202,275 @@ mod path_history {
         assert!(bytes.len() <= 65_536, "log --path: {} bytes", bytes.len());
     }
 }
+
+/// Blobs by id (operations spec §1's `blob_put` and `blob_has`, §0's `{blob: id}` content):
+/// content stored first, outside any commit, then named by a commit's change list by its id.
+mod blob {
+    use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+
+    use super::*;
+
+    /// Stores `content` as [`agent`]: what `blob_put` returns.
+    #[track_caller]
+    fn blob_put(ops: &LocalOps, content: ContentInput) -> BlobPutResp {
+        ops.blob_put(&agent(), BlobPutReq { content })
+            .expect("blob_put")
+    }
+
+    /// A put of blob `id`, named by its id, as a regular file at `path`.
+    fn named(path: &str, id: &str) -> ChangeInput {
+        put(path, ContentInput::Blob(id.to_owned()), None)
+    }
+
+    /// `blob_put` stores content as a blob and says whether it placed it (`written`): from a
+    /// client file, then the same bytes in base64, stored already. A commit names the blob by
+    /// id, as a file and as an executable: it writes no blob, and reads back as the content.
+    /// The changes made with the content itself give the same root. `blob_put` takes inline,
+    /// base64 or file content, not `{"blob": id}`, which names content the store holds already.
+    #[test]
+    fn blob_put_then_commit_by_id() {
+        let (dir, _root, ops) = new_store();
+        let content = noise(4096);
+        let file = utf8(dir.path().join("payload.bin"));
+        fs::write(&file, &content).unwrap();
+        let first = blob_put(&ops, ContentInput::File(file.to_string()));
+        assert_eq!(
+            first,
+            BlobPutResp {
+                blob: blob(&content),
+                size: 4096,
+                written: true,
+            }
+        );
+        let again = blob_put(&ops, ContentInput::Base64(STANDARD.encode(&content)));
+        assert_eq!(
+            again,
+            BlobPutResp {
+                written: false,
+                ..first.clone()
+            }
+        );
+
+        let by_id = ops
+            .commit(
+                &agent(),
+                commit_req(
+                    None,
+                    vec![
+                        named("data/payload.bin", &first.blob),
+                        put(
+                            "tool",
+                            ContentInput::Blob(first.blob.to_uppercase()),
+                            Some(ModeInput::Exec),
+                        ),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!((by_id.files_changed, by_id.blobs_written), (2, 0));
+        let read = ops
+            .read_file(cat(&by_id.changeset, "data/payload.bin"))
+            .unwrap();
+        assert_eq!(
+            (read.blob.as_str(), read.size, read.kind),
+            (first.blob.as_str(), 4096, FileKind::File)
+        );
+        assert_eq!(STANDARD.decode(&read.content).unwrap(), content);
+        let tool = ops.read_file(cat(&by_id.changeset, "tool")).unwrap();
+        assert_eq!((tool.blob, tool.kind), (first.blob.clone(), FileKind::Exec));
+        let shown = ops.show(show(&by_id.changeset)).unwrap();
+        assert_eq!(
+            shown.changes[0],
+            ChangeOut {
+                path: "data/payload.bin".to_owned(),
+                op: ChangeOp::Put,
+                kind: Some(FileKind::File),
+                blob: Some(first.blob.clone()),
+            }
+        );
+
+        let by_content = ops
+            .commit(
+                &agent(),
+                commit_req(
+                    None,
+                    vec![
+                        put(
+                            "data/payload.bin",
+                            ContentInput::File(file.to_string()),
+                            None,
+                        ),
+                        put(
+                            "tool",
+                            ContentInput::Base64(STANDARD.encode(&content)),
+                            Some(ModeInput::Exec),
+                        ),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(by_content.root, by_id.root);
+
+        let err = expect_err(
+            ops.blob_put(
+                &agent(),
+                BlobPutReq {
+                    content: ContentInput::Blob(first.blob.clone()),
+                },
+            ),
+            ErrorCode::InvalidArg,
+        );
+        assert_eq!(err.details["blob"], first.blob.as_str(), "{err:?}");
+    }
+
+    /// A change that names by id a blob the store lacks, a tree or a changeset is
+    /// `E_INVALID_ARG` `{index, path, blob}`, whose hint stores the content first; one whose id
+    /// is not 64 hex digits is refused with the list's other malformed changes. Either way the
+    /// commit writes nothing, the put of new content beside it included.
+    #[test]
+    fn a_commit_naming_a_missing_blob_or_a_tree_is_an_invalid_argument() {
+        let (_dir, _root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("a.txt", "a")]);
+        let tree = ops.show(show(&c1)).unwrap().root;
+        let missing = blob(b"never stored");
+        for (id, what) in [
+            (missing.as_str(), "a blob the store lacks"),
+            (tree.as_str(), "a tree"),
+            (c1.as_str(), "a changeset"),
+        ] {
+            let changes = vec![text("new.txt", "new"), named("b/named.bin", id)];
+            let err = expect_err(
+                ops.commit(&agent(), commit_req(Some(&c1), changes)),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(
+                Value::Object(err.details),
+                json!({"index": 1, "path": "b/named.bin", "blob": id}),
+                "{what}"
+            );
+            assert!(
+                err.message.starts_with("change 1 (\"b/named.bin\"): "),
+                "{what}: {}",
+                err.message
+            );
+            assert_eq!(
+                err.hint.as_deref(),
+                Some("swarmops blob put <file>"),
+                "{what}"
+            );
+        }
+        let long = format!("{missing}0");
+        let not_hex = "g".repeat(64);
+        for bad in ["abc", long.as_str(), not_hex.as_str()] {
+            let changes = vec![text("new.txt", "new"), named("x", bad)];
+            let err = expect_err(
+                ops.commit(&agent(), commit_req(Some(&c1), changes)),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(
+                Value::Object(err.details),
+                json!({"index": 1, "path": "x", "blob": bad}),
+                "{bad}"
+            );
+        }
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 1);
+        let unwritten = BlobHasReq {
+            ids: vec![blob(b"new")],
+        };
+        assert_eq!(
+            ops.blob_has(unwritten).unwrap().present,
+            Vec::<String>::new()
+        );
+    }
+
+    /// `blob_has` gives the ids of those asked for that the store holds as blobs, in lowercase
+    /// hex, in the order first given, each once: a tree, a changeset and an id the store lacks
+    /// are not among them. An id that is not 64 hex digits is `E_INVALID_ARG` `{index, blob}`.
+    #[test]
+    fn blob_has_reports_the_present_blobs() {
+        let (_dir, _root, ops) = new_store();
+        let stored = blob_put(&ops, ContentInput::Inline("stored\n".to_owned())).blob;
+        let c1 = commit(&ops, None, vec![text("a.txt", "a")]);
+        let tree = ops.show(show(&c1)).unwrap().root;
+        let committed = blob(b"a");
+        let unknown = blob(b"never stored");
+        let ask = |ids: &[&str]| {
+            ops.blob_has(BlobHasReq {
+                ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            })
+        };
+        let has = ask(&[
+            &unknown,
+            &stored.to_uppercase(),
+            &tree,
+            &c1,
+            &committed,
+            &stored,
+        ])
+        .unwrap();
+        assert_eq!(
+            has,
+            BlobHasResp {
+                present: vec![stored.clone(), committed],
+            }
+        );
+        assert_eq!(ask(&[]).unwrap().present, Vec::<String>::new());
+        let err = expect_err(ask(&[&stored, "not-an-id"]), ErrorCode::InvalidArg);
+        assert_eq!(
+            Value::Object(err.details),
+            json!({"index": 1, "blob": "not-an-id"})
+        );
+    }
+
+    /// `blob_put` is a mutation, as `commit` is (operations spec §5): it takes the caller's
+    /// identity, which the CLI and the MCP server refuse to go without (`E_IDENTITY_REQUIRED`,
+    /// their tests), and records nothing of it, a blob carrying no metadata. `blob_has` is a
+    /// read, and takes none.
+    #[test]
+    fn blob_put_needs_an_identity() {
+        let _: fn(&LocalOps, &Identity, BlobPutReq) -> Result<BlobPutResp, OpError> =
+            <LocalOps as StoreOps>::blob_put;
+        let _: fn(&LocalOps, BlobHasReq) -> Result<BlobHasResp, OpError> =
+            <LocalOps as StoreOps>::blob_has;
+        let err = expect_err(require_identity(None), ErrorCode::IdentityRequired);
+        assert_eq!(err.exit, 5);
+        // Two callers that store the same bytes store one blob: the first places it.
+        let (_dir, _root, ops) = new_store();
+        let content = || BlobPutReq {
+            content: ContentInput::Inline("shared\n".to_owned()),
+        };
+        let one = Identity::parse("agent/worker-1").unwrap();
+        let two = Identity::parse("agent/worker-2").unwrap();
+        let first = ops.blob_put(&one, content()).unwrap();
+        let second = ops.blob_put(&two, content()).unwrap();
+        assert_eq!((first.written, second.written), (true, false));
+        assert_eq!(first.blob, second.blob);
+    }
+
+    /// `blob_put`'s content is held to a put's limit, 512 MiB, measured before it is read: a
+    /// sparse file one byte over it is `E_TOO_LARGE`, and nothing is stored.
+    #[test]
+    fn blob_put_refuses_more_than_512_mib_before_reading() {
+        let (dir, _root, ops) = new_store();
+        let limit: u64 = 512 * 1024 * 1024;
+        let huge = utf8(dir.path().join("huge.bin"));
+        fs::File::create(&huge).unwrap().set_len(limit + 1).unwrap();
+        let err = expect_err(
+            ops.blob_put(
+                &agent(),
+                BlobPutReq {
+                    content: ContentInput::File(huge.to_string()),
+                },
+            ),
+            ErrorCode::TooLarge,
+        );
+        assert_eq!(
+            (
+                &err.details["size"],
+                &err.details["limit"],
+                &err.details["file"]
+            ),
+            (&json!(limit + 1), &json!(limit), &json!(huge.as_str()))
+        );
+    }
+}

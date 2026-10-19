@@ -7,7 +7,10 @@
 //!    store's [`StoreError::Limit`], as it gives at insert), distinct and in the store
 //!    ([`RepoError::UnknownParent`]), and the name of the ref to advance, if any, a ref name
 //!    ([`RepoError::RefName`]). The parents are looked up in the snapshot the caller resolved
-//!    them in ([`Repo::commit_in`]), or in one of the call's own.
+//!    them in ([`Repo::commit_in`]), or in one of the call's own. Each blob a change names by
+//!    its id ([`ChangeOp::PutBlob`]) is retained ([`ObjectStore::retain`]: its header read, its
+//!    payload neither read nor written), so that step 4's flush makes its name durable before
+//!    the frame names it; an id the store holds no blob under is [`RepoError::MissingBlob`].
 //! 2. Hashes each put's content into its blob id, once, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
 //!    or where a directory is, or a delete of a directory, is a [`RepoError::TypeConflict`]; a
@@ -56,7 +59,8 @@ use swarmops_core::{
     RepoPath, Signature, TreeId,
 };
 use swarmops_store::{
-    ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, PutOutcome, Recovered, StoreError,
+    ChangesetMeta, InsertOutcome, LimitKind, ObjectStat, ObjectStore, PutOutcome, Recovered,
+    StoreError,
 };
 
 use crate::error::RepoError;
@@ -87,6 +91,17 @@ pub enum ChangeOp {
         kind: LeafKind,
         /// The bytes.
         content: Vec<u8>,
+    },
+    /// The path holds blob `id`, which the store holds already ([`Repo::put_blob`] stores one),
+    /// as a `kind` leaf afterwards: as [`ChangeOp::Put`] of the blob's content, which the commit
+    /// neither reads nor writes again, but retains, so that its flush makes the blob's name
+    /// durable before the frame names it. An id the store holds no blob under is
+    /// [`RepoError::MissingBlob`], before anything is written.
+    PutBlob {
+        /// File, Exec or Symlink.
+        kind: LeafKind,
+        /// The blob.
+        id: BlobId,
     },
     /// The file at the path is gone afterwards, and so is each directory that leaves empty.
     Delete,
@@ -137,6 +152,18 @@ pub struct Advanced {
     /// Whether the ref named the changeset already, so that nothing was written: an identical
     /// request committed it before (the insert is then [`InsertOutcome::AlreadyPresent`]).
     pub already_applied: bool,
+}
+
+/// What [`Repo::put_blob`] stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlobPut {
+    /// The blob's id, which a [`ChangeOp::PutBlob`] names it by.
+    pub id: BlobId,
+    /// The content's size in bytes.
+    pub size: u64,
+    /// Whether this call placed the blob's file ([`PutOutcome::written`]): not when the store
+    /// held it already, nor when a writer racing this one placed it first.
+    pub written: bool,
 }
 
 /// What [`Repo::commit`] did.
@@ -212,6 +239,7 @@ impl<O: ObjectStore> Repo<O> {
         }
         let changes = sorted_changes(changes, allow_empty)?;
         self.check_parents(&parents, seen)?;
+        self.retain_named(&changes)?;
         let (candidates, mut contents) = candidate_delta(changes);
         let mut edit = match parents.first() {
             Some(&first) => TreeEdit::new(&self.objects, self.changeset_object(first)?.root)?,
@@ -282,6 +310,53 @@ impl<O: ObjectStore> Repo<O> {
             warnings,
             recovered,
         })
+    }
+
+    /// Stores `content` as a blob, outside any transaction: hashed once, written unless the
+    /// store holds it already, and flushed, so that it is durable on return, its name included.
+    /// Nothing in the metadata names it until a commit does ([`ChangeOp::PutBlob`]); until then
+    /// it is unreferenced, as the objects a failed commit flushed are, for GC.
+    pub fn put_blob(&self, content: Vec<u8>) -> Result<BlobPut, RepoError> {
+        let size = to_u64(content.len());
+        let blob = Hashed::new(ObjectKind::Blob, content);
+        let id = BlobId(blob.id());
+        let outcomes = self.objects.put_hashed_batch(vec![blob])?;
+        let written = outcomes.iter().any(|outcome| outcome.written);
+        self.objects.flush()?;
+        Ok(BlobPut { id, size, written })
+    }
+
+    /// Whether the store holds a blob under `id`: an object whose header says it is a blob
+    /// ([`ObjectStore::stat`]), not a tree or a changeset. Reads the header alone, so it verifies
+    /// nothing of the payload.
+    pub fn has_blob(&self, id: BlobId) -> Result<bool, RepoError> {
+        let stat = self.objects.stat(id.0)?;
+        Ok(stat.is_some_and(|stat| stat.kind == ObjectKind::Blob))
+    }
+
+    /// Retains each blob a change of `changes` names by its id ([`ChangeOp::PutBlob`]), so that
+    /// the next flush, the commit's, makes its name durable: [`RepoError::MissingBlob`] for an id
+    /// the store holds no blob under (none, or an object of another kind). Reads each object's
+    /// header alone, and writes nothing.
+    fn retain_named(&self, changes: &[Change]) -> Result<(), RepoError> {
+        for change in changes {
+            let ChangeOp::PutBlob { id, .. } = change.op else {
+                continue;
+            };
+            match self.objects.retain(id.0)? {
+                Some(ObjectStat {
+                    kind: ObjectKind::Blob,
+                    ..
+                }) => {}
+                _ => {
+                    return Err(RepoError::MissingBlob {
+                        path: change.path.clone(),
+                        id,
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Refuses more parents than a journal record holds ([`StoreError::Limit`], as the
@@ -413,8 +488,8 @@ fn sorted_changes(mut changes: Vec<Change>, allow_empty: bool) -> Result<Vec<Cha
     Ok(changes)
 }
 
-/// The delta `changes` (sorted, checked) would make, each put naming the blob of its content,
-/// with the contents as blob objects by id: each content hashed once.
+/// The delta `changes` (sorted, checked) would make, each put naming the blob of its content (or
+/// the blob it names by id), with the contents as blob objects by id: each content hashed once.
 fn candidate_delta(changes: Vec<Change>) -> (Vec<DeltaEntry>, BTreeMap<ObjectId, Hashed>) {
     let mut contents = BTreeMap::new();
     let delta = changes
@@ -430,6 +505,7 @@ fn candidate_delta(changes: Vec<Change>) -> (Vec<DeltaEntry>, BTreeMap<ObjectId,
                         id: BlobId(id),
                     }
                 }
+                ChangeOp::PutBlob { kind, id } => DeltaOp::Put { kind, id },
                 ChangeOp::Delete => DeltaOp::Delete,
             };
             DeltaEntry {

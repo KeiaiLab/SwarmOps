@@ -35,6 +35,7 @@ use std::time::Instant;
 use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, InfoReq, LogReq, Meta, OpError,
     PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq,
@@ -43,10 +44,13 @@ use swarmops_api::{
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Resolved, shell_word};
 
-use crate::cli::{self, Command, Global, RefCommand};
+use crate::cli::{self, BlobCommand, Command, Global, RefCommand};
 use crate::context::{self, Env};
 use crate::mcp;
 use crate::output::{self, Format, Printed};
+
+/// The client file `blob put -` reads: this process's stdin, through the path it is open at.
+const STDIN: &str = "/dev/stdin";
 
 /// The hint of a failed deep `verify`, which leaves nothing to re-check.
 const RESTORE_HINT: &str = "details.findings names each damaged object, record or ref by kind and \
@@ -138,6 +142,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             },
             |ops, (who, req)| ops.commit(&who, req),
         ),
+        Command::Blob(command) => run_blob(ctx, op, command),
         Command::Cat { target, max_bytes } => ctx.on_store(
             op,
             || {
@@ -239,6 +244,28 @@ fn history(
         },
         |ops, req| ops.path_history(req),
     )
+}
+
+/// Runs a `blob` subcommand, which names operation `op`.
+fn run_blob(ctx: &Ctx<'_>, op: &'static str, command: BlobCommand) -> Printed {
+    let agent = ctx.global.agent.as_deref();
+    match command {
+        BlobCommand::Put { file } => ctx.on_store(
+            op,
+            || {
+                let who = context::mutator(agent, ctx.env)?;
+                let file = if file == "-" { STDIN.to_owned() } else { file };
+                let req = BlobPutReq {
+                    content: ContentInput::File(file),
+                };
+                Ok((who, req))
+            },
+            |ops, (who, req)| ops.blob_put(&who, req),
+        ),
+        BlobCommand::Has { ids } => {
+            ctx.on_store(op, || Ok(BlobHasReq { ids }), |ops, req| ops.blob_has(req))
+        }
+    }
 }
 
 /// Runs a `ref` subcommand, which names operation `op`.

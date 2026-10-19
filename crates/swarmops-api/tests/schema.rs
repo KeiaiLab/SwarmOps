@@ -18,6 +18,8 @@ use swarmops_api::{
 
 /// Requests and the input types inside them.
 const REQUESTS: &[&str] = &[
+    "BlobHasReq",
+    "BlobPutReq",
     "ChangeInput",
     "CommitReq",
     "Identity",
@@ -38,6 +40,8 @@ const REQUESTS: &[&str] = &[
 const RESPONSES: &[&str] = &[
     "Advanced",
     "Attribution",
+    "BlobHasResp",
+    "BlobPutResp",
     "ChangeOut",
     "ChangesetDetail",
     "ChangesetSummary",
@@ -162,6 +166,13 @@ fn store_ops_signatures<S: StoreOps + ?Sized>() {
     let _: fn(&S, &Identity, RefSetReq) -> Result<RefSetResp, OpError> = S::ref_set;
     let _: fn(&S, &Identity, RefDeleteReq) -> Result<RefSetResp, OpError> = S::ref_delete;
     let _: fn(&S, VerifyReq) -> Result<VerifyReport, OpError> = S::verify;
+    let _: fn(
+        &S,
+        &Identity,
+        swarmops_api::BlobPutReq,
+    ) -> Result<swarmops_api::BlobPutResp, OpError> = S::blob_put;
+    let _: fn(&S, swarmops_api::BlobHasReq) -> Result<swarmops_api::BlobHasResp, OpError> =
+        S::blob_has;
 }
 
 #[test]
@@ -568,6 +579,11 @@ fn requests_and_responses_ignore_unknown_fields() {
     assert_ignores_unknown_fields::<InfoReq>("InfoReq", json!({}));
     assert_ignores_unknown_fields::<RefListReq>("RefListReq", json!({}));
     assert_ignores_unknown_fields::<VerifyReq>("VerifyReq", json!({"deep": true}));
+    assert_ignores_unknown_fields::<swarmops_api::BlobPutReq>(
+        "BlobPutReq",
+        json!({"content": {"inline": "x"}}),
+    );
+    assert_ignores_unknown_fields::<swarmops_api::BlobHasReq>("BlobHasReq", json!({"ids": ["b1"]}));
 
     let signature = json!({"name": "human/purple", "email": "purple@human.swarmops.local", "secs": 0, "offset_secs": 0});
     assert_ignores_unknown_fields::<RepoInfo>(
@@ -605,6 +621,14 @@ fn requests_and_responses_ignore_unknown_fields() {
     assert_ignores_unknown_fields::<RefListResp>(
         "RefListResp",
         json!({"refs": [{"name": "main", "target": "c", "version": 1}]}),
+    );
+    assert_ignores_unknown_fields::<swarmops_api::BlobPutResp>(
+        "BlobPutResp",
+        json!({"blob": "b1", "size": 1, "written": true}),
+    );
+    assert_ignores_unknown_fields::<swarmops_api::BlobHasResp>(
+        "BlobHasResp",
+        json!({"present": ["b1"]}),
     );
     assert_ignores_unknown_fields::<RefSetResp>(
         "RefSetResp",
@@ -1289,4 +1313,43 @@ mod path_history {
             "uint64"
         );
     }
+}
+
+/// A blob named by id is `{"blob": "<id>"}` content, beside `inline`, `base64` and `file`, and
+/// `blob_put` and `blob_has` keep their wire forms: `blob_put` takes any content and answers
+/// with the blob's id, size and whether it wrote it; `blob_has` takes ids and gives the present
+/// ones.
+#[test]
+fn blobs_by_id_use_their_wire_forms() {
+    use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+
+    let id = "ab".repeat(32);
+    let change: ChangeInput =
+        serde_json::from_value(json!({"path": "a.bin", "op": "put", "content": {"blob": id}}))
+            .unwrap();
+    assert_eq!(change.content, Some(ContentInput::Blob(id.clone())));
+    assert_eq!(
+        serde_json::to_value(&change).unwrap(),
+        json!({"path": "a.bin", "op": "put", "content": {"blob": id}})
+    );
+    let put: BlobPutReq = serde_json::from_value(json!({"content": {"base64": "AAE="}})).unwrap();
+    assert_eq!(put.content, ContentInput::Base64("AAE=".to_owned()));
+    let stored = BlobPutResp {
+        blob: id.clone(),
+        size: 2,
+        written: false,
+    };
+    assert_eq!(
+        serde_json::to_string(&stored).unwrap(),
+        format!(r#"{{"blob":"{id}","size":2,"written":false}}"#)
+    );
+    let has: BlobHasReq = serde_json::from_value(json!({"ids": [id]})).unwrap();
+    assert_eq!(has.ids, vec![id.clone()]);
+    let present = BlobHasResp {
+        present: vec![id.clone()],
+    };
+    assert_eq!(
+        serde_json::to_string(&present).unwrap(),
+        format!(r#"{{"present":["{id}"]}}"#)
+    );
 }

@@ -191,15 +191,15 @@ Every command, its revisions and change lists, and its output are in [Commands](
 `swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
 agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
 as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `ref_list`,
-`ref_set`, `ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
-`inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
-definitions it refers to written in place, and kept a plain object: a rule across fields that
-the type's schema states with a top-level `oneOf`, which the Claude API refuses in a tool, is
-left to the description and to the server's own check, and the `expected_old` of `ref_set` and
-`ref_delete` asks for a full changeset id. Its result is the envelope the CLI prints for that
-request, as `structuredContent` and as text, and a failed operation sets `isError`, with the
-envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
-to clients that open with `initialize`.
+`ref_set`, `ref_delete`, `commit`, `blob_put`, `blob_has` and `verify`. A tool's arguments are
+the operation's request: its `inputSchema` is the request type's schema, as `swarmops schema
+<Type>` prints it, with the definitions it refers to written in place, and kept a plain object:
+a rule across fields that the type's schema states with a top-level `oneOf`, which the Claude
+API refuses in a tool, is left to the description and to the server's own check, and the
+`expected_old` of `ref_set` and `ref_delete` asks for a full changeset id. Its result is the
+envelope the CLI prints for that request, as `structuredContent` and as text, and a failed
+operation sets `isError`, with the envelope's `error` saying why. The server speaks MCP
+2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with `initialize`.
 
 ### Register the server
 
@@ -292,6 +292,7 @@ and starts no server either.
 | `info` | Describe the store: its id, name, `main`, and how many changesets and refs it holds. |
 | `whoami` | The identity this caller's changes carry. |
 | `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. |
+| `blob put FILE\|-`, `blob has ID…` | Store a file's content (stdin's for `-`) as a blob, outside any commit, and print its id; or list which of the ids the store holds blobs under. A change names a stored blob by id. |
 | `cat REV:PATH [--max-bytes N]` | One file at a revision: UTF-8 text, or base64. |
 | `ls REV[:PATH] [--limit N] [--cursor C]` | One directory at a revision, a page at a time. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
@@ -308,8 +309,9 @@ A revision is `main`, `release/<name>`, a changeset id or a unique prefix of 12 
 hex digits, then any number of `~N` (the N-th first parent). A change list is a JSON array of
 `{"path", "op": "put" | "delete", "content", "mode"}`: a put's `content` is `{"inline": "<UTF-8
 text>"}`, `{"base64": "<bytes>"}` or `{"file": "<path>"}` (read by the CLI, on the client), at
-most 512 MiB, and its `mode` is `file` (the default), `exec` or `symlink`; directories follow
-from the paths. A ref moves only by compare-and-swap: when another agent moved it first,
+most 512 MiB, or `{"blob": "<id>"}`, a blob stored before (`blob put`), whose bytes the commit
+neither sends nor reads; its `mode` is `file` (the default), `exec` or `symlink`; directories
+follow from the paths. A ref moves only by compare-and-swap: when another agent moved it first,
 `ref set` and `commit --advance` fail with `E_CAS_MISMATCH` (exit 4) and the ref's target in
 `details.actual` (a `commit --advance` that fails so records nothing). Then read the files you
 changed at `<actual>`, re-apply your edits to them (M1 has no merge, so re-sending your old
