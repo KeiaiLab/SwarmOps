@@ -3,7 +3,7 @@
 use super::codec::{
     CodecError, Reader, check_strictly_sorted, put_count, put_len_prefixed, reader,
 };
-use super::tree::EntryKind;
+use super::tree::LeafKind;
 use crate::id::{BlobId, ChangesetId, ObjectId, ObjectKind, TreeId, hash_object};
 use crate::path::RepoPath;
 
@@ -28,10 +28,11 @@ pub struct Signature {
 /// What happened to one path relative to the first parent.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeltaOp {
-    /// The path now holds this leaf (`kind` is never `Dir`).
+    /// The path now holds this leaf: a file, an executable or a symlink, never a directory
+    /// (a directory follows from the paths of the leaves below it).
     Put {
         /// File, Exec, or Symlink.
-        kind: EntryKind,
+        kind: LeafKind,
         /// The content.
         id: BlobId,
     },
@@ -103,11 +104,6 @@ impl Signature {
 
 impl DeltaEntry {
     fn validate(&self) -> Result<(), CodecError> {
-        if let DeltaOp::Put { kind, .. } = &self.op
-            && *kind == EntryKind::Dir
-        {
-            return Err(CodecError::BadKind(EntryKind::Dir.as_u8()));
-        }
         if let Some(from) = &self.renamed_from
             && (matches!(self.op, DeltaOp::Delete) || *from == self.path)
         {
@@ -138,8 +134,9 @@ impl DeltaEntry {
     fn decode(r: &mut Reader<'_>) -> Result<Self, CodecError> {
         let path = RepoPath::new(r.utf8()?)?;
         let op = match r.u8()? {
+            // A kind byte of 3 (a directory) or more is `BadKind`: a put names a leaf.
             0 => DeltaOp::Put {
-                kind: EntryKind::from_u8(r.u8()?)?,
+                kind: LeafKind::from_u8(r.u8()?)?,
                 id: BlobId(ObjectId(r.array()?)),
             },
             1 => DeltaOp::Delete,
@@ -161,9 +158,9 @@ impl DeltaEntry {
 }
 
 impl Changeset {
-    /// Checks the invariants the layout cannot express: sorted unique delta
-    /// paths, leaf-only puts, renames only on puts and never from the entry's own
-    /// path, sorted unique metadata keys, consistent signatures.
+    /// Checks the invariants neither the layout nor the types express: sorted unique delta
+    /// paths, renames only on puts and never from the entry's own path, sorted unique metadata
+    /// keys, consistent signatures. (That a put names a leaf, the type says: [`LeafKind`].)
     pub fn validate(&self) -> Result<(), CodecError> {
         for d in &self.delta {
             d.validate()?;
