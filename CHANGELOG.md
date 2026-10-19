@@ -388,8 +388,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 
 - An object file whose zstd frame records a huge decompressed size, in agreement with its header
   (17 bytes of frame are enough), no longer makes a read panic (`E_INTERNAL`) or abort the process
-  while it reserves that size: a read reserves at most 64 MiB before the frame's output arrives,
-  and such an object is `E_STORE_CORRUPT`, which `verify --deep` lists. An object whose frame
+  while it reserves that size: before the frame's output arrives, a read reserves at most 64 MiB
+  for it, beside the zstd decoder's window, which the frame's header sets up to zstd's default
+  limit of 128 MiB (this store's frames use at most 2 MiB): about 192 MiB at worst. Such an
+  object is `E_STORE_CORRUPT`, which `verify --deep` lists. An object whose frame
   really decompresses to a huge size is still decoded whole
   ([docs/known-limitations.md](docs/known-limitations.md), "A zstd bomb object is decoded
   whole").
