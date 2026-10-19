@@ -81,6 +81,16 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
 
 - **Tests never need the network.** Tests that read real repositories on this host run only when
   `SWARMOPS_HOST_REPOS=1`.
+- **What git writes is a committed fixture.** The git import's tests read repositories that real
+  git made, without running git. Each is a POSIX sh script in
+  `crates/swarmops-testkit/git-fixtures/scripts/` (`lib.sh` holds the helpers), run in a pinned
+  environment, and what it made is committed beside it as `<name>.tar`, with a `manifest.json`
+  that git's plumbing wrote of the repository: the oracle the tests compare against. A test
+  extracts one with `swarmops_testkit::git::fixture`. `just git-fixtures` rebuilds every archive
+  on purpose, byte for byte the same when nothing changed, with the git that
+  `git-fixtures/GIT_VERSION` declares (2.43.0; `SWARMOPS_GIT` names the binary, and any other
+  version is refused unless `SWARMOPS_GIT_FIXTURES_ANY_GIT=1`): review the diff and commit it
+  with the scripts. A new fixture is one more script and the archive that command writes.
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
   build without the feature can name), and a release build honours no test hook. The hooks are
@@ -95,8 +105,8 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
   feature (`swarmops-testkit`'s, which turns on the store's) is not a default, and must not
   become one: the crates take the test kit as a dev-dependency, and by feature unification a
   default would build the hooks into the `swarmops` of that release proof. Its default
-  features, `cli` and `repo`, hold the helpers that need `serde_json` and `swarmops-repo`; the
-  fuzz crate takes it without them.
+  features, `cli`, `git` and `repo`, hold the helpers that need `serde_json`, `tar` and
+  `swarmops-repo`; the fuzz crate takes it without them.
 - **Crash and fault tests are deterministic.** A crash sweep aborts the process at its k-th
   filesystem call (`SWARMOPS_TEST_CRASH_AT=k`) for every k a dry run counted
   (`SWARMOPS_TEST_FS_CALLS`), and an I/O-error sweep fails that call instead
@@ -149,11 +159,12 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
 
 | Command | What it does |
 | --- | --- |
-| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash and I/O-error sweeps, the power-loss images at every cut, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
-| `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden` and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
+| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors) and the git fixtures' two switches (`regenerate_git_fixtures`, `check_git_fixtures`): the crash and I/O-error sweeps, the power-loss images at every cut, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
+| `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden`, the git fixtures' two switches and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |
 | `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. |
+| `just git-fixtures` | Rebuilds the git fixtures' archives and manifests (`crates/swarmops-testkit/git-fixtures/`) from their scripts with the declared git, 2.43.0: the ignored test `regenerate_git_fixtures`, with `SWARMOPS_REGEN_GIT_FIXTURES=1`. A few seconds; run it after changing a script, and commit what it rewrites. |
 
 Run `just check-slow` before landing a change to the store's write, recovery or locking paths.
 Run `just perf` only in a quiet window (nothing else heavy on the disk), and record what it

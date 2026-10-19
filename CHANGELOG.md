@@ -258,6 +258,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   conflict), `E_GIT_IMPORT_LOSSY`, `E_GIT_UNSUPPORTED` and `E_GIT_READ` (exit 1). Like `init`,
   `git import` runs on the client: it is no `StoreOps` operation and no MCP tool, and no server
   receives its request (operations spec §0, §1 and §7).
+- The git fixture harness (`swarmops_testkit::git`, the test kit's default feature `git`): POSIX
+  sh scripts in `crates/swarmops-testkit/git-fixtures/scripts/` that run real git 2.43.0 in a
+  pinned environment, and the deterministic archives of what they made, committed beside them,
+  each repository with a `manifest.json` from git's plumbing (its refs, its commits parents
+  first with their bytes, its trees' bytes and its blobs' sizes), the oracle the git import's
+  tests compare against without running git. `fixture(name)` extracts one for a test;
+  `just git-fixtures` rebuilds them all with the declared git (`git-fixtures/GIT_VERSION`), and
+  `check` rebuilds them with any git and names each difference from the archives' manifests,
+  for the version matrix. The first fixtures: `linear`, `merges` (a `--no-ff` merge, an octopus,
+  a criss-cross pair, an annotated and a lightweight tag) and `modes` (exec bits, symlinks,
+  `a.b` beside a directory `a`, a path with a space and a UTF-8 name).
 
 ### Changed
 
