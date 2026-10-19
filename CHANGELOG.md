@@ -192,6 +192,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   sorted views restored before each iteration, untimed. It prints the bytes each compaction
   writes (both views whole, 80 per record); `SWARMOPS_BENCH_COMPACTION_RECORDS` sets other sizes
   for a quick check.
+- `bench/compare` times each seeded store's first open after its load (`first_open_ms`, a W4
+  section per size), once, before any workload opens it; and `fjall-unflushed`'s W4 opens are
+  each of a fresh copy of its store as the load left it, taken at seeding, so that its row is
+  that store's, not the one its first open settled. [docs/perf.md](docs/perf.md) keeps the
+  2026-10-17 run's cells until the next quiet-window run measures the ones this changes.
 
 ### Changed
 

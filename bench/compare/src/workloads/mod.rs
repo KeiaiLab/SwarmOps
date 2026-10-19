@@ -10,13 +10,15 @@ pub mod w4;
 pub mod w6;
 
 use std::collections::BTreeMap;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use tempfile::TempDir;
 
 use crate::data::{Id, chain, changeset};
-use crate::engines::{Engine, Error, Main, Result, Session};
+use crate::engines::{Engine, Error, Main, Result, Session, other};
 use crate::measure::Env;
 
 /// How much of everything to run.
@@ -188,7 +190,62 @@ pub struct Seed {
     pub dir: PathBuf,
     /// How long the load took (not a workload: for the record).
     pub load_secs: f64,
+    /// For an engine W4 opens as the load left it ([`opens_as_loaded`]): a copy of the store
+    /// taken at seeding, before anything opened it ([`Seed::keep_as_loaded`]), which W4 copies
+    /// again for each of its opens.
+    pub as_loaded: Option<TempDir>,
     _keep: tempfile::TempDir,
+}
+
+impl Seed {
+    /// Keeps a copy of the store as it is now in [`Seed::as_loaded`].
+    pub fn keep_as_loaded(&mut self) -> Result<()> {
+        self.as_loaded = Some(copy_store(&self.dir)?);
+        Ok(())
+    }
+}
+
+/// A copy of the store in `dir`, in a fresh directory beside it, every file and directory of it
+/// synced, so that an open of the copy finds the files as `dir` holds them, on disk. A store of
+/// these engines holds only files and directories; anything else is an error. Removed when
+/// dropped.
+pub fn copy_store(dir: &Path) -> Result<TempDir> {
+    let parent = dir
+        .parent()
+        .ok_or_else(|| other("a store dir has a parent"))?;
+    let name = dir.file_name().map_or_else(
+        || "store".into(),
+        |name| name.to_string_lossy().into_owned(),
+    );
+    let copy = tempfile::Builder::new()
+        .prefix(&format!("{name}-copy-"))
+        .tempdir_in(parent)?;
+    copy_tree(dir, copy.path())?;
+    Ok(copy)
+}
+
+/// Copies what directory `from` holds into the empty directory `to`, syncing every file it
+/// writes and every directory it fills.
+fn copy_tree(from: &Path, to: &Path) -> Result<()> {
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let (path, target) = (entry.path(), to.join(entry.file_name()));
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            fs::create_dir(&target)?;
+            copy_tree(&path, &target)?;
+        } else if kind.is_file() {
+            fs::copy(&path, &target)?;
+            File::open(&target)?.sync_all()?;
+        } else {
+            return Err(other(format!(
+                "{} is neither a file nor a directory",
+                path.display()
+            )));
+        }
+    }
+    File::open(to)?.sync_all()?;
+    Ok(())
 }
 
 pub fn seed(engine: &dyn Engine, n: u64, base: &Path) -> Result<Seed> {
@@ -216,6 +273,7 @@ pub fn seed(engine: &dyn Engine, n: u64, base: &Path) -> Result<Seed> {
         n,
         dir,
         load_secs: started.elapsed().as_secs_f64(),
+        as_loaded: None,
         _keep: keep,
     })
 }
@@ -231,4 +289,13 @@ pub fn same_files_as(engine: &str) -> Option<&'static str> {
 /// W2, W6) skip it.
 pub fn same_writes_as(engine: &str) -> Option<&'static str> {
     (engine == "fjall-unflushed").then_some("fjall")
+}
+
+/// The engines W4 opens as the load left them, each open on a fresh copy of the store taken at
+/// seeding ([`Seed::as_loaded`]): `fjall-unflushed`, whose first open settles what its load left
+/// (it replays every journal, flushes the memtables it recovers and deletes the sealed
+/// journals), so that any later open of the store itself times the settled store, as `fjall`'s
+/// row does.
+pub fn opens_as_loaded(engine: &str) -> bool {
+    engine == "fjall-unflushed"
 }

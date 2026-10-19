@@ -2,9 +2,11 @@
 //!
 //! - open: a fresh process opens the store and looks up one changeset (`__open`); the open,
 //!   the first lookup and the process from spawn to exit are timed. The files are in the page
-//!   cache (dropping it needs root): this is a warm open. In a full run W3 has opened the store
-//!   before, so this times a re-open; with `--only w4`, run 1's first trial is the first open
-//!   after the load, which `open_max_ms` shows.
+//!   cache (dropping it needs root): this is a warm open. Each seeded store's first open after
+//!   its load is timed once at seeding, before W3 ([`first_open`]), so these are re-opens; for
+//!   an engine whose first open settles what its load left (`fjall-unflushed`,
+//!   [`super::opens_as_loaded`]), each trial opens a fresh copy of the store as the load left
+//!   it, taken at seeding ([`Seed::as_loaded`]), so that its row is that store's.
 //! - recovery: a writer process (`__writer`) commits W1's transaction in a loop, printing each
 //!   acknowledged commit; a seeded 0.1–1 s after its first, it is killed with SIGKILL, most
 //!   likely inside a commit. A fresh process (`__recover`) then opens the store, commits one
@@ -21,7 +23,9 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use super::{Seed, Values};
+use tempfile::TempDir;
+
+use super::{Seed, Values, copy_store};
 use crate::data::{chain, hex, id, mix};
 use crate::engines::{Engine, Result, other};
 use crate::measure::{median_range, ms};
@@ -41,23 +45,49 @@ pub struct Recovered {
     pub acked_present: bool,
 }
 
+/// One open of the store in `dir`, a seed of `n` changesets, by a fresh process (`__open`) that
+/// then looks one changeset up: what that process timed, and its own time from spawn to exit.
+fn open_once(engine: &dyn Engine, dir: &Path, n: u64, exe: &Path) -> Result<(Opened, Duration)> {
+    let target = id(chain::SEED, n / 2);
+    let started = Instant::now();
+    let out = Command::new(exe)
+        .arg("__open")
+        .arg(engine.name())
+        .arg(dir)
+        .arg(hex(&target))
+        .stderr(Stdio::inherit())
+        .output()?;
+    let process = started.elapsed();
+    if !out.status.success() {
+        return Err(other(format!("__open failed: {}", out.status)));
+    }
+    let opened: Opened = serde_json::from_slice(&out.stdout).map_err(other)?;
+    Ok((opened, process))
+}
+
+/// The first open of `seed`'s store after its load, timed as one trial of [`open`] is: once per
+/// seeded store, before any workload opens it (`main.rs`).
+pub fn first_open(engine: &dyn Engine, seed: &Seed, exe: &Path) -> Result<Values> {
+    let (opened, process) = open_once(engine, &seed.dir, seed.n, exe)?;
+    Ok(Values::from([
+        ("first_open_ms".into(), opened.open_us as f64 / 1e3),
+        ("first_lookup_ms".into(), opened.first_us as f64 / 1e3),
+        ("process_ms".into(), ms(process)),
+    ]))
+}
+
 pub fn open(engine: &dyn Engine, seed: &Seed, trials: usize, exe: &Path) -> Result<Values> {
-    let target = id(chain::SEED, seed.n / 2);
     let (mut opens, mut firsts, mut processes) = (vec![], vec![], vec![]);
     for _ in 0..trials {
-        let started = Instant::now();
-        let out = Command::new(exe)
-            .arg("__open")
-            .arg(engine.name())
-            .arg(&seed.dir)
-            .arg(hex(&target))
-            .stderr(Stdio::inherit())
-            .output()?;
-        let process = started.elapsed();
-        if !out.status.success() {
-            return Err(other(format!("__open failed: {}", out.status)));
-        }
-        let opened: Opened = serde_json::from_slice(&out.stdout).map_err(other)?;
+        // A fresh copy of the store as its load left it, made and synced untimed, for an
+        // engine W4 opens so.
+        let copy = seed
+            .as_loaded
+            .as_ref()
+            .map(|as_loaded| copy_store(as_loaded.path()))
+            .transpose()?;
+        let dir = copy.as_ref().map_or(seed.dir.as_path(), TempDir::path);
+        let (opened, process) = open_once(engine, dir, seed.n, exe)?;
         opens.push(opened.open_us as f64 / 1e3);
         firsts.push(opened.first_us as f64 / 1e3);
         processes.push(ms(process));
