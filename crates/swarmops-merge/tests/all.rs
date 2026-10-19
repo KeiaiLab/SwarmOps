@@ -3,6 +3,8 @@
 //! test target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod`
 //! line here.
 
+mod line_diff;
+
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's
 /// `no_forgotten_test_files`). Directories (`support/`, `snapshots/`, …) are passed over.
