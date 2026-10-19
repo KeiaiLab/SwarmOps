@@ -114,7 +114,8 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   `swarmops ref list` for a ref name, `swarmops log` for an id or a `~N` walk.
 /// - `E_AMBIGUOUS_ID` `{rev}`: `Ambiguous`; the hint says to give more digits.
 /// - `E_INVALID_ARG`: `BadRev` `{rev}` (the hint gives the revision grammar), `DirPut` and
-///   `DuplicatePath` `{path}`, and the store's `DuplicateParent` `{parent}`, `Limit`
+///   `DuplicatePath` `{path}`, `ReservedMetadataKey` `{key}` (a metadata key that ends in
+///   `:b64`), and the store's `DuplicateParent` `{parent}`, `Limit`
 ///   `{store_limit, max, got}` (a request past a limit of the store's layout: `store_limit` is
 ///   `parents`, `actor_bytes`, `ref_name_bytes`, `records` or `repo_name_bytes`) and `BadPrefix`
 ///   `{prefix}` (an id prefix that is not 1 to 64 hex digits). Of the requests of these

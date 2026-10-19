@@ -383,6 +383,60 @@ fn commit_rejects_a_changeset_it_cannot_encode() {
     assert_eq!(repo.info().unwrap().changesets, 0);
 }
 
+/// The repository refuses a metadata key that ends in `:b64` itself, before anything is written,
+/// as the operations do: `show` gives a value that is not UTF-8 in base64 under its key with that
+/// suffix appended, so a writer below the API, such as the git import, must not store such a key
+/// either. `check_metadata` is the rule every writer runs; it names the first key that breaks it.
+#[test]
+fn commit_refuses_a_reserved_metadata_key_too() {
+    use swarmops_repo::{RESERVED_METADATA_KEY_SUFFIX, check_metadata};
+
+    let entry = |key: &str| (key.to_owned(), b"v".to_vec());
+    assert_eq!(RESERVED_METADATA_KEY_SUFFIX, ":b64");
+    let refused = |keys: &[&str]| {
+        let metadata: Vec<(String, Vec<u8>)> = keys.iter().map(|&key| entry(key)).collect();
+        match check_metadata(&metadata) {
+            Ok(()) => None,
+            Err(RepoError::ReservedMetadataKey { key }) => Some(key),
+            Err(other) => panic!("{keys:?}: {other:?}"),
+        }
+    };
+    assert_eq!(refused(&[]), None);
+    // The suffix counts at the end of a key only.
+    assert_eq!(
+        refused(&["agent", "b64", "x:b6", "x:b64:y", "x:b64y"]),
+        None
+    );
+    assert_eq!(refused(&[":b64"]).as_deref(), Some(":b64"));
+    assert_eq!(
+        refused(&["agent", "note:b64", "z:b64"]).as_deref(),
+        Some("note:b64")
+    );
+
+    let (_dir, root, repo) = new_repo();
+    let objects = object_files(&root);
+    let mut req = request(&[], vec![put("a", b"a")]);
+    req.metadata.push(entry("x:b64"));
+    let refusal = repo.commit(req.clone()).expect_err("a reserved key");
+    assert!(
+        matches!(&refusal, RepoError::ReservedMetadataKey { key } if key == "x:b64"),
+        "{refusal:?}"
+    );
+    // The operations give this message with E_INVALID_ARG.
+    assert_eq!(
+        refusal.to_string(),
+        r#"metadata key "x:b64" ends in ":b64", which show reserves"#
+    );
+    assert_eq!(object_files(&root), objects, "nothing was written");
+    assert_eq!(journal_frames(&root), 0, "no transaction");
+    assert_eq!(repo.info().unwrap().changesets, 0);
+
+    // A key that holds the suffix without ending in it is a key like any other.
+    req.metadata[1] = entry("x:b64:y");
+    let out = repo.commit(req).unwrap();
+    assert_eq!(out.insert, InsertOutcome::Inserted { seq: 0 });
+}
+
 #[test]
 fn allow_empty_commits_a_changeset_with_the_parent_root() {
     let (_dir, _root, repo) = new_repo();
@@ -1200,6 +1254,82 @@ fn a_failed_object_flush_fails_the_commit_and_inserts_nothing() {
     let fresh = LocalRepo::open(&root).unwrap();
     assert_eq!(fresh.info().unwrap().changesets, 0);
     assert_eq!(fresh.verify(true).unwrap().problems, []);
+}
+
+/// `flush_metadata` makes the metadata's projections durable at once: a commit moves the
+/// checkpoint only every 32 frames, so after two commits both frames lie past it; the flush syncs
+/// the index and moves the checkpoint to the end of the journal, and appends no frame. A second
+/// flush, with no frame past the checkpoint, changes nothing.
+#[test]
+fn flush_metadata_moves_the_checkpoint_to_the_journal_end() {
+    let (_dir, root, repo) = new_repo();
+    let ckpt = || {
+        Journal::open(&Layout::new(&root), Arc::new(RealFs))
+            .unwrap()
+            .ckpt()
+            .unwrap()
+    };
+    let log_len = || fs::metadata(root.join("meta/journal.log")).unwrap().len();
+    let first = commit(&repo, &[], vec![put("a", b"1")]);
+    commit(&repo, &[first.id], vec![put("a", b"2")]);
+    let end = log_len();
+    assert_eq!(journal_frames(&root), 2);
+    assert!(ckpt() < end, "both frames lie past the checkpoint");
+
+    repo.flush_metadata().unwrap();
+    assert_eq!(ckpt(), end);
+    assert_eq!(
+        (journal_frames(&root), log_len()),
+        (2, end),
+        "no frame appended"
+    );
+
+    repo.flush_metadata().unwrap();
+    assert_eq!(ckpt(), end);
+    assert_eq!((journal_frames(&root), log_len()), (2, end));
+}
+
+/// An object `put_objects` stored is durable by name once the handle next flushes its objects,
+/// which a commit does before its journal frame whether or not its changeset names the object: so
+/// the git import can put a commit's blobs and trees first and record the changeset after them
+/// (storage spec §2 rule 2). The put alone syncs no directory.
+#[test]
+fn put_objects_are_made_durable_by_the_next_commit() {
+    use swarmops_testkit::fs::RecordingFs;
+
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    let (fs, calls) = RecordingFs::new();
+    let fs = fs.naming_paths_in(root.as_std_path().to_path_buf());
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+    calls();
+
+    let payload = b"put before the commit that makes it durable\n";
+    let ids = repo
+        .put_objects(vec![(ObjectKind::Blob, payload.to_vec())])
+        .unwrap();
+    assert_eq!(ids, [blob(payload).0]);
+    let dir = fanout(ids[0]);
+    let fsync = format!("fsync_dir {dir}");
+    let putting = calls();
+    assert!(
+        !putting.iter().any(|call| call.starts_with("fsync_dir")),
+        "{putting:?}"
+    );
+
+    // A commit none of whose own objects lies in that directory.
+    repo.commit(a_commit_outside(&dir)).unwrap();
+    let committing = calls();
+    let at = |call: &str| {
+        committing
+            .iter()
+            .position(|made| made == call)
+            .unwrap_or_else(|| panic!("no {call:?} among {committing:?}"))
+    };
+    assert!(
+        at(&fsync) < at("append_durable meta/journal.log"),
+        "{committing:?}"
+    );
 }
 
 /// The fan-out directory of object `id`, as a path in the store: `objects/<xx>`.

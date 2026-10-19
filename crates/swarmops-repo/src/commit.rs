@@ -5,8 +5,9 @@
 //!    `allow_empty` ([`RepoError::EmptyChanges`]), no directory put ([`RepoError::DirPut`]),
 //!    each path once ([`RepoError::DuplicatePath`]), at most 255 parents (the metadata
 //!    store's [`StoreError::Limit`], as it gives at insert), distinct and in the store
-//!    ([`RepoError::UnknownParent`]), and the name of the ref to advance, if any, a ref name
-//!    ([`RepoError::RefName`]).
+//!    ([`RepoError::UnknownParent`]), the name of the ref to advance, if any, a ref name
+//!    ([`RepoError::RefName`]), and no metadata key that ends in `:b64`
+//!    ([`RepoError::ReservedMetadataKey`], [`check_metadata`]).
 //! 2. Hashes each put's content into its blob id, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
 //!    or where a directory is, or a delete of a directory, is a [`RepoError::TypeConflict`]; a
@@ -58,6 +59,11 @@ use crate::tree_edit::{Encoded, TreeEdit};
 /// The most parents a changeset may have: what a journal record holds (its count is a byte).
 const MAX_PARENTS: usize = 255;
 
+/// The suffix no metadata key may end in ([`check_metadata`]): the operations' `show` gives a
+/// metadata value that is not UTF-8 in base64, under its key with this appended, so that `k:b64`
+/// always means `k`'s value in base64.
+pub const RESERVED_METADATA_KEY_SUFFIX: &str = ":b64";
+
 /// One change of a [`CommitRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Change {
@@ -97,7 +103,8 @@ pub struct CommitRequest {
     pub committer: Signature,
     /// The message, verbatim.
     pub message: Vec<u8>,
-    /// SwarmOps-owned key/value pairs; keys strictly ascending.
+    /// SwarmOps-owned key/value pairs; keys strictly ascending, none ending in `:b64`
+    /// ([`check_metadata`]).
     pub metadata: Vec<(String, Vec<u8>)>,
     /// Whether a changeset that changes nothing may be made (no changes, or only puts of what
     /// their paths hold already); otherwise that is [`RepoError::EmptyChanges`].
@@ -177,6 +184,7 @@ impl<O: ObjectStore> Repo<O> {
         if let Some(Advance { name, .. }) = &advance {
             swarmops_store::check_ref_name(name).map_err(ref_error)?;
         }
+        check_metadata(&metadata)?;
         let changes = sorted_changes(changes, allow_empty)?;
         self.check_parents(&parents)?;
         let (candidates, mut contents) = candidate_delta(changes);
@@ -371,6 +379,22 @@ impl<O: ObjectStore> Repo<O> {
             }
         }
         Ok((insert, advanced, warnings, recovered))
+    }
+}
+
+/// Refuses `metadata` with a key that ends in [`RESERVED_METADATA_KEY_SUFFIX`]:
+/// [`RepoError::ReservedMetadataKey`], naming the first such key. The rule every writer of
+/// changesets runs before it writes anything, [`Repo::commit`] among them, so that a writer below
+/// the operations (the git import) keeps it as a commit through them does: `show` gives a value
+/// that is not UTF-8 under its key with that suffix appended, which a stored key ending in it
+/// would make ambiguous.
+pub fn check_metadata(metadata: &[(String, Vec<u8>)]) -> Result<(), RepoError> {
+    match metadata
+        .iter()
+        .find(|(key, _)| key.ends_with(RESERVED_METADATA_KEY_SUFFIX))
+    {
+        Some((key, _)) => Err(RepoError::ReservedMetadataKey { key: key.clone() }),
+        None => Ok(()),
     }
 }
 

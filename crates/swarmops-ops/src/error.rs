@@ -75,6 +75,9 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         RepoError::DirPut { path: at } | RepoError::DuplicatePath { path: at } => {
             error(ErrorCode::InvalidArg, message).with_details(path(&at))
         }
+        RepoError::ReservedMetadataKey { key } => {
+            error(ErrorCode::InvalidArg, message).with_details(details([("key", key.into())]))
+        }
         RepoError::PathNotFound { path: at } => {
             error(ErrorCode::PathNotFound, message).with_details(path(&at))
         }
@@ -359,6 +362,13 @@ mod tests {
         );
         maps(
             RepoError::DuplicatePath { path: path() },
+            op,
+            ErrorCode::InvalidArg,
+        );
+        maps(
+            RepoError::ReservedMetadataKey {
+                key: "x:b64".into(),
+            },
             op,
             ErrorCode::InvalidArg,
         );

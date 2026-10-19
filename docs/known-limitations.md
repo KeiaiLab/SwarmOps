@@ -224,10 +224,11 @@ left).
 - **A zeroed `journal.off` entry deep in the chain** (three or more links before the end) is
   outside the crash model: recovery checks the last two links, and `verify` finds the rest.
   *Target: M6 (the next `FORMAT`'s checksums). Found: M1 fuzzing review.*
-- **Metadata keys written below the API.** `show` can lose an entry for a changeset that holds
-  both a key `x` and `x:b64`; the API refuses the `:b64` suffix on commit, so only a writer below
-  it can do this, which the git import will be. It must run the same check. *Target: M3. Found:
-  M1 Task 4b.*
+- **A changeset written outside the repository library can hold both `x` and `x:b64`.** The
+  library refuses a metadata key that ends in `:b64` for every writer
+  (`swarmops_repo::check_metadata`, which `Repo::commit` runs), so only a store written by other
+  means, such as a crafted one, can hold such a pair; `show` then gives one of the two entries,
+  and `verify` does not report it. *Unscheduled. Found: M1 Task 4b.*
 
 ## Serving requests
 
