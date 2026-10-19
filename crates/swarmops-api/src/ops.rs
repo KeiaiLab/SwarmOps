@@ -6,10 +6,11 @@
 //! Absent options in these types are omitted, never written as null (unlike `OpError.hint`,
 //! which is always written). Ids are lowercase hex. A response that could grow without bound is
 //! capped by its request (`max_bytes`, `limit`, `max_changes`) and says when it was cut
-//! (`truncated`, `changes_truncated`); `read_tree`, `log` and `path_history` also return a
-//! `cursor` that resumes after the page, and `read_file` a `next_offset`. The default page of
-//! `read_tree`, `show`, `log` and `path_history` stays within the operations spec's 64 KiB
-//! target for a default response (§9); `read_file`'s 1 MiB is the spec's own.
+//! (`truncated`, `changes_truncated`, `hunks_truncated`); `read_tree`, `log`, `path_history` and
+//! `diff` also return a `cursor` that resumes after the page, and `read_file` a `next_offset`. The
+//! default page of `read_tree`, `show`, `log`, `path_history` and `diff` stays within the
+//! operations spec's 64 KiB target for a default response (§9); `read_file`'s 1 MiB is the spec's
+//! own.
 //!
 //! No store-facing type carries a filesystem path. The two exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, and [`InitReq::path`],
@@ -58,6 +59,17 @@ pub const DEFAULT_MAX_CHANGES: usize = 400;
 /// The default [`DeriveReq::limit`]: 1,000 journal frames, each one transaction.
 pub const DEFAULT_DERIVE_LIMIT: usize = 1000;
 
+/// The default [`DiffReq::limit`]: 500 files. A file of a `stat` page prints in about 75 bytes
+/// besides its path, so a default `names` or `stat` page stays under the 64 KiB target for paths
+/// of up to about 40 bytes; a `unified` page is held within [`DiffReq::max_bytes`] as well.
+pub const DEFAULT_DIFF_LIMIT: usize = 500;
+
+/// The default [`DiffReq::max_bytes`]: 32 KiB of a `unified` page's files, as JSON.
+pub const DEFAULT_DIFF_MAX_BYTES: u64 = 32_768;
+
+/// The default [`DiffReq::context`]: 3 unchanged lines around each change, as git's.
+pub const DEFAULT_DIFF_CONTEXT: u32 = 3;
+
 fn default_max_bytes() -> u64 {
     DEFAULT_MAX_BYTES
 }
@@ -84,6 +96,18 @@ fn default_max_changes() -> usize {
 
 fn default_derive_limit() -> usize {
     DEFAULT_DERIVE_LIMIT
+}
+
+fn default_diff_limit() -> usize {
+    DEFAULT_DIFF_LIMIT
+}
+
+fn default_diff_max_bytes() -> u64 {
+    DEFAULT_DIFF_MAX_BYTES
+}
+
+fn default_diff_context() -> u32 {
+    DEFAULT_DIFF_CONTEXT
 }
 
 /// `init`: create a store.
@@ -672,6 +696,171 @@ pub struct PathHistoryEntry {
     pub title: String,
 }
 
+/// `diff`: the files that differ between two revisions, in path order, a page at a time.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct DiffReq {
+    /// The revision to diff from: the old side.
+    pub from: Rev,
+    /// The revision to diff to: the new side.
+    pub to: Rev,
+    /// Only the files at or below these repository paths (a file's path takes that file; one
+    /// trailing `/` is taken); every file when empty or omitted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// What to say of each file: `names` its path and status; `stat` also whether it is binary
+    /// and, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and,
+    /// for text, its hunks.
+    #[serde(default)]
+    pub format: DiffFormat,
+    /// The unchanged lines around each change in a `unified` hunk.
+    #[serde(default = "default_diff_context")]
+    pub context: u32,
+    /// The most files to return: at least 1 (0 is `E_INVALID_ARG`).
+    #[serde(default = "default_diff_limit")]
+    #[schemars(range(min = 1))]
+    pub limit: usize,
+    /// Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not
+    /// construct it (cursors are opaque). This page starts after the file it names.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// The most bytes a `unified` page's files take, as the JSON array `files` they print as: at
+    /// least 1 (0 is `E_INVALID_ARG`). The page stops before the first file that would take it
+    /// past this, but always holds one file, whose hunks are cut to the first ones that fit
+    /// (`hunks_truncated`) when they alone would pass it. A `names` or `stat` page is held by
+    /// `limit` alone.
+    #[serde(default = "default_diff_max_bytes")]
+    #[schemars(range(min = 1))]
+    pub max_bytes: u64,
+}
+
+/// What `diff` says of each file.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffFormat {
+    /// Its path and status.
+    #[default]
+    Names,
+    /// Also whether it is binary and, for text, the lines it inserts and deletes.
+    Stat,
+    /// Also its kinds, its blobs and, for text, its hunks.
+    Unified,
+}
+
+/// `diff`: a page of the files that differ between two revisions, in path order (by bytes).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct Diff {
+    /// The changeset `from` named.
+    pub from: String,
+    /// The changeset `to` named.
+    pub to: String,
+    /// The files.
+    pub files: Vec<FileDiff>,
+    /// Whether more files follow this page.
+    pub truncated: bool,
+    /// When `truncated`: where the next page starts. Opaque: pass it back as given, as the next
+    /// request's `cursor`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// One file that differs: a file, an executable or a symlink whose content or kind changed, or
+/// that is on one side only. A directory never is one: a file that becomes a directory is that
+/// file deleted and the directory's files added. No rename is detected: a file that moved is
+/// one deleted and one added. Which fields follow `status` depends on the request's `format`,
+/// and a field that says nothing is omitted.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    /// The repository path.
+    pub path: String,
+    /// What happened to it.
+    pub status: DiffStatus,
+    /// `unified`: its kind in `from`; omitted for an added file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_kind: Option<FileKind>,
+    /// `unified`: its kind in `to`; omitted for a deleted file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_kind: Option<FileKind>,
+    /// `unified`: its blob id in `from`; omitted for an added file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_blob: Option<String>,
+    /// `unified`: its blob id in `to`; omitted for a deleted file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_blob: Option<String>,
+    /// `stat` and `unified`: whether it is binary, which gets no line counts and no hunks: a side
+    /// that is not UTF-8, or holds a NUL in its first 8,000 bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub binary: Option<bool>,
+    /// `stat` and `unified`, for text: the lines the change inserts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub insertions: Option<u64>,
+    /// `stat` and `unified`, for text: the lines the change deletes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
+    /// `unified`, for text: the hunks, in order; empty when only the exec bit or the kind
+    /// changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hunks: Option<Vec<DiffHunk>>,
+    /// `unified`: true when `hunks` stops before the file's last hunk, to keep the page within
+    /// `max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the
+    /// same.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hunks_truncated: Option<bool>,
+}
+
+/// What happened to a file between the two revisions.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffStatus {
+    /// It is in `to` only: in `from`, nothing or a directory is there.
+    Added,
+    /// It is in `from` only.
+    Deleted,
+    /// Its content or its exec bit changed: a file or an executable on both sides, or a
+    /// symlink on both sides.
+    Modified,
+    /// A symlink on one side, a file or an executable on the other.
+    TypeChanged,
+}
+
+/// A hunk of a unified diff: one or more changes and the unchanged lines around them, with the
+/// numbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct DiffHunk {
+    /// The first old line it holds, counted from 1; when it holds none, the line before where
+    /// they would be (0 at the top), as git prints it.
+    pub old_start: u64,
+    /// How many old lines it holds: its context and removed lines.
+    pub old_lines: u64,
+    /// The first new line it holds, counted as `old_start` is.
+    pub new_start: u64,
+    /// How many new lines it holds: its context and added lines.
+    pub new_lines: u64,
+    /// Its lines, in order; each change's removed lines come before its added lines.
+    pub lines: Vec<DiffLineOut>,
+}
+
+/// One line of a hunk.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct DiffLineOut {
+    /// Whether both sides have it, only the new one, or only the old one.
+    pub op: LineOp,
+    /// The line with its line break, a carriage return before it kept; a file's last line has
+    /// none when the file does not end in one.
+    pub text: String,
+}
+
+/// Which side of a diff a hunk's line is on.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LineOp {
+    /// Both: an unchanged line around a change.
+    Context,
+    /// The new side only.
+    Add,
+    /// The old side only.
+    Remove,
+}
+
 /// `ref list`: list every ref. It has no options yet.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct RefListReq {}
@@ -916,6 +1105,9 @@ pub trait StoreOps {
     /// The changesets that changed what a path holds, newest first, along first parents (CLI
     /// `history`).
     fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError>;
+
+    /// The files that differ between two revisions, a page at a time (CLI `diff`).
+    fn diff(&self, req: DiffReq) -> Result<Diff, OpError>;
 
     /// Every ref (CLI `ref list`).
     fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError>;

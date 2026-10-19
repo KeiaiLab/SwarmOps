@@ -5,17 +5,19 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
+use std::io;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{
     Attribution, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp,
-    DeriveReq, DeriveResp, EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq,
-    LineRange, LogCutOut, LogPage, LogReq, MAX_TREE_DEPTH, OpError, PathHistoryEntry,
-    PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq,
-    RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut,
-    Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
+    DeriveReq, DeriveResp, Diff, DiffFormat, DiffHunk, DiffLineOut, DiffReq, DiffStatus,
+    EntryKindOut, ErrorCode, FileContent, FileDiff, FileKind, Identity, InfoReq, LineOp, LineRange,
+    LogCutOut, LogPage, LogReq, MAX_TREE_DEPTH, OpError, PathHistoryEntry, PathHistoryPage,
+    PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefListResp,
+    RefOut, RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps,
+    TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_core::bytes::to_u64;
@@ -23,7 +25,10 @@ use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
     Signature,
 };
-use swarmops_repo::merge::tree_diff::PathFilter;
+use swarmops_repo::merge::line_diff::{
+    DiffLine, UnifiedHunk, is_text, line_hunks, line_stats, unified,
+};
+use swarmops_repo::merge::tree_diff::{ChangeKind, PathFilter, TreeChange};
 use swarmops_repo::{
     CasResult, CommitRequest, FileSpan, ListedEntry, LocalRepo, MismatchCause, PathEvent,
     RepoError, RepoRead, StoredChangeset, VerifyProblem,
@@ -130,6 +135,20 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   it (`put` with its kind and id, `delete` with neither) and the changeset's agent, time and
 ///   title. A path that no changeset on the first-parent chain touched is `E_PATH_NOT_FOUND` on
 ///   a first page; a page after a cursor may be empty.
+/// - `diff` lists the files that differ between the trees of the changesets `from` and `to`
+///   name, in path order (by bytes): each file, executable or symlink that is on one side only
+///   (`added`, `deleted`), whose content or exec bit changed (`modified`, a symlink's target
+///   too), or that turned from a symlink into a file or back (`type_changed`); a directory as
+///   its files, and no renames. `paths` keeps the files at or below one of them, each a
+///   repository path with one trailing `/` taken. A page holds at most `limit` files, after
+///   `cursor`, the last path of the page before. `names` gives each file's path and status;
+///   `stat` reads its two blobs and adds whether it is binary (a side that is not UTF-8, or
+///   holds a NUL in its first 8,000 bytes) and, for text, the lines it inserts and deletes;
+///   `unified` adds its kinds and blob ids and, for text, its hunks, with `context` unchanged
+///   lines around each change. A `unified` page stops before the first file that would take
+///   its files, as the JSON array they print as, past `max_bytes`; its first file comes all
+///   the same, its hunks cut to the first ones that fit (`hunks_truncated`) when they alone
+///   would pass it.
 /// - `ref_set` and `ref_delete` move a ref by compare-and-swap, recorded for the caller's agent,
 ///   and decide every move under the store's lock, after the write's tail check, never from a
 ///   reader's snapshot. A move that finds the ref as it asks already (at `new` for `ref_set`,
@@ -145,7 +164,8 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   the journal's last frame. It writes only the store's cache of derived values, so it needs
 ///   no identity.
 ///
-/// Limits of 0 (`limit`, `max_changes`) are `E_INVALID_ARG`, but for `derive`'s `limit`.
+/// Limits of 0 (`limit`, `max_changes`, and `diff`'s `max_bytes`) are `E_INVALID_ARG`, but for
+/// `derive`'s `limit`.
 ///
 /// # Errors
 ///
@@ -415,6 +435,219 @@ fn after_cursor(read: &Snapshot<'_>, cursor: &str) -> Result<Option<ChangesetId>
         .map_err(op)?
         .ok_or_else(|| bad("the store holds no such changeset"))?;
     Ok(stored.changeset.parents.first().copied())
+}
+
+/// The paths a `diff` looks at, from its request's `paths`: every path for none, else those at
+/// or below one of them ([`prefix_path`]).
+fn diff_filter(paths: &[String]) -> Result<PathFilter, OpError> {
+    if paths.is_empty() {
+        return Ok(PathFilter::all());
+    }
+    let prefixes = paths.iter().map(|path| prefix_path(path));
+    Ok(PathFilter::under(prefixes.collect::<Result<_, _>>()?))
+}
+
+/// Where a `diff` page resumes: after `cursor`, the last path of the page before, in path
+/// order. `E_INVALID_ARG` for a cursor that is not a repository path.
+fn diff_cursor(cursor: &str) -> Result<RepoPath, OpError> {
+    RepoPath::new(cursor).map_err(|_| {
+        error(
+            ErrorCode::InvalidArg,
+            format!("{cursor:?} is not a diff cursor: a diff cursor is a repository path"),
+        )
+        .with_details(details([("cursor", cursor.into())]))
+        .with_hint("pass the previous page's cursor as it was given, or none to start over")
+    })
+}
+
+/// A `diff` page of `changes`, the changes after the request's cursor: at most `limit` files,
+/// each as `format` says it; a `unified` page also within `max_bytes` bytes of its files as
+/// JSON, its first file whatever its size, that file's hunks cut to fit.
+fn diff_page(
+    read: &Snapshot<'_>,
+    changes: &[TreeChange],
+    format: DiffFormat,
+    context: u32,
+    limit: usize,
+    max_bytes: u64,
+) -> Result<Vec<FileDiff>, OpError> {
+    let mut page: Vec<FileDiff> = Vec::new();
+    // The bytes of the page's files as the JSON array they print as: `[]` so far.
+    let mut used = 2;
+    for change in changes.iter().take(limit) {
+        let mut file = file_diff(read, change, format, context)?;
+        if format == DiffFormat::Unified {
+            let comma = u64::from(!page.is_empty());
+            let room = max_bytes.saturating_sub(used + comma);
+            if json_len(|out| serde_json::to_writer(out, &file)) > room {
+                if !page.is_empty() {
+                    // The page stops before the first file that would take it past `max_bytes`.
+                    break;
+                }
+                cut_hunks(&mut file, room);
+            }
+            used += comma + json_len(|out| serde_json::to_writer(out, &file));
+        }
+        page.push(file);
+    }
+    Ok(page)
+}
+
+/// What a `diff` page says of `change` in `format`: its path and status; for `stat` and
+/// `unified`, read from the blobs of its two sides (a blob both share read once), whether it is
+/// binary and, for text, the lines it inserts and deletes; for `unified`, also its kinds, its
+/// blobs and, for text, its hunks with `context` unchanged lines around each change.
+fn file_diff(
+    read: &Snapshot<'_>,
+    change: &TreeChange,
+    format: DiffFormat,
+    context: u32,
+) -> Result<FileDiff, OpError> {
+    let (before, after) = (change.kind.before(), change.kind.after());
+    let mut file = FileDiff {
+        path: change.path.to_string(),
+        status: diff_status(change.kind),
+        old_kind: None,
+        new_kind: None,
+        old_blob: None,
+        new_blob: None,
+        binary: None,
+        insertions: None,
+        deletions: None,
+        hunks: None,
+        hunks_truncated: None,
+    };
+    if format == DiffFormat::Names {
+        return Ok(file);
+    }
+    if format == DiffFormat::Unified {
+        file.old_kind = before.map(|leaf| file_kind(leaf.kind));
+        file.new_kind = after.map(|leaf| file_kind(leaf.kind));
+        file.old_blob = before.map(|leaf| leaf.blob.to_string());
+        file.new_blob = after.map(|leaf| leaf.blob.to_string());
+    }
+    // Each side's bytes, none where the file is not. Two sides that share a blob differ in the
+    // exec bit or the kind only.
+    let shared = before
+        .zip(after)
+        .is_some_and(|(old, new)| old.blob == new.blob);
+    let old = before
+        .map(|leaf| read.blob(leaf.blob))
+        .transpose()
+        .map_err(op)?;
+    let new = match after {
+        Some(leaf) if !shared => Some(read.blob(leaf.blob).map_err(op)?),
+        _ => None,
+    };
+    let old = old.as_deref().unwrap_or_default();
+    let new = if shared {
+        old
+    } else {
+        new.as_deref().unwrap_or_default()
+    };
+    let text = is_text(old) && is_text(new);
+    file.binary = Some(!text);
+    if !text {
+        return Ok(file);
+    }
+    let hunks = if shared {
+        Vec::new()
+    } else {
+        line_hunks(old, new)
+    };
+    let stats = line_stats(&hunks);
+    file.insertions = Some(stats.insertions);
+    file.deletions = Some(stats.deletions);
+    if format == DiffFormat::Unified {
+        let shown = unified(old, new, &hunks, context);
+        file.hunks = Some(shown.iter().map(diff_hunk).collect());
+    }
+    Ok(file)
+}
+
+/// What happened to a file, as `diff` names it.
+fn diff_status(kind: ChangeKind) -> DiffStatus {
+    match kind {
+        ChangeKind::Added { .. } => DiffStatus::Added,
+        ChangeKind::Deleted { .. } => DiffStatus::Deleted,
+        ChangeKind::Modified { .. } => DiffStatus::Modified,
+        ChangeKind::TypeChanged { .. } => DiffStatus::TypeChanged,
+    }
+}
+
+/// `hunk` as a `unified` page gives it. Its lines are UTF-8: a file gets hunks only when both
+/// its sides are text, and a line ends after a `\n`, a byte no other character holds.
+fn diff_hunk(hunk: &UnifiedHunk<'_>) -> DiffHunk {
+    DiffHunk {
+        old_start: u64::from(hunk.before_start),
+        old_lines: u64::from(hunk.before_lines),
+        new_start: u64::from(hunk.after_start),
+        new_lines: u64::from(hunk.after_lines),
+        lines: hunk
+            .lines
+            .iter()
+            .map(|line| {
+                let (op, text) = match *line {
+                    DiffLine::Context(text) => (LineOp::Context, text),
+                    DiffLine::Removed(text) => (LineOp::Remove, text),
+                    DiffLine::Added(text) => (LineOp::Add, text),
+                };
+                DiffLineOut {
+                    op,
+                    text: lossy(text),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// Cuts `file`'s hunks to the first ones that fit with it in `room` bytes of JSON, and marks it
+/// cut (`hunks_truncated`); with room for none, it keeps none. A file without hunks to cut (a
+/// binary one, or one whose content did not change) stays as it is.
+fn cut_hunks(file: &mut FileDiff, room: u64) {
+    let hunks = match file.hunks.take() {
+        Some(hunks) if !hunks.is_empty() => hunks,
+        none => {
+            file.hunks = none;
+            return;
+        }
+    };
+    file.hunks = Some(Vec::new());
+    file.hunks_truncated = Some(true);
+    let mut size = json_len(|out| serde_json::to_writer(out, &*file));
+    let mut kept = Vec::new();
+    for hunk in hunks {
+        let more = json_len(|out| serde_json::to_writer(out, &hunk)) + u64::from(!kept.is_empty());
+        if size + more > room {
+            break;
+        }
+        size += more;
+        kept.push(hunk);
+    }
+    file.hunks = Some(kept);
+}
+
+/// How many bytes `write`, a serialization of an API value, writes: the value's length as the
+/// envelope prints it (compact JSON).
+fn json_len(write: impl FnOnce(&mut ByteCount) -> serde_json::Result<()>) -> u64 {
+    let mut count = ByteCount(0);
+    // An API value always serializes: its maps have string keys, its impls never fail.
+    write(&mut count).expect("an API value serializes");
+    count.0
+}
+
+/// A writer that keeps nothing but the number of bytes written to it.
+struct ByteCount(u64);
+
+impl io::Write for ByteCount {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 += to_u64(bytes.len());
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The revisions one request resolved: each as given, and the full changeset id it named. The
@@ -855,6 +1088,47 @@ impl StoreOps for Recording<'_> {
         })
     }
 
+    fn diff(&self, req: DiffReq) -> Result<Diff, OpError> {
+        let DiffReq {
+            from,
+            to,
+            paths,
+            format,
+            context,
+            limit,
+            cursor,
+            max_bytes,
+        } = req;
+        at_least_one("limit", limit)?;
+        if max_bytes == 0 {
+            return Err(error(ErrorCode::InvalidArg, "max_bytes must be at least 1")
+                .with_details(details([("max_bytes", max_bytes.into())])));
+        }
+        let filter = diff_filter(&paths)?;
+        let after = cursor.as_deref().map(diff_cursor).transpose()?;
+        // Both revisions resolve in one snapshot, which every read of the diff is made in.
+        let read = self.snapshot()?;
+        let (old, new) = (self.resolve(&read, &from)?, self.resolve(&read, &to)?);
+        let changes = read.diff(old, new, &filter).map_err(op)?;
+        let start = after.map_or(0, |after| {
+            changes.partition_point(|change| change.path <= after)
+        });
+        let rest = &changes[start..];
+        let files = diff_page(&read, rest, format, context, limit, max_bytes)?;
+        let truncated = files.len() < rest.len();
+        let cursor = files
+            .last()
+            .filter(|_| truncated)
+            .map(|last| last.path.clone());
+        Ok(Diff {
+            from: old.to_string(),
+            to: new.to_string(),
+            files,
+            truncated,
+            cursor,
+        })
+    }
+
     fn ref_list(&self, _req: RefListReq) -> Result<RefListResp, OpError> {
         let refs = self.ops.repo.list_refs().map_err(op)?;
         Ok(RefListResp {
@@ -1025,6 +1299,10 @@ impl StoreOps for LocalOps {
 
     fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
         self.recording(&Resolved::default()).path_history(req)
+    }
+
+    fn diff(&self, req: DiffReq) -> Result<Diff, OpError> {
+        self.recording(&Resolved::default()).diff(req)
     }
 
     fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError> {
@@ -2018,6 +2296,68 @@ mod tests {
             };
             ops.log(log).unwrap();
             assert_eq!(witness_reads(), 1, "log with paths");
+        }
+        /// A diff resolves both its revisions in one snapshot (operations spec §4), the one all
+        /// its reads are made in: the witness ref is read once, and the request records both
+        /// revisions as resolved.
+        #[test]
+        fn diff_resolves_both_revisions_in_one_snapshot() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (setup, _) = LocalOps::init(&root, "acme").unwrap();
+            let who = Identity::parse("agent/worker-17").unwrap();
+            let commit = |parent: Option<&str>, content: &str| {
+                let req = CommitReq {
+                    parent: parent.map(Rev::from),
+                    changes: vec![ChangeInput {
+                        path: "src/f".to_owned(),
+                        op: ChangeOp::Put,
+                        content: Some(ContentInput::Inline(content.to_owned())),
+                        mode: None,
+                    }],
+                    message: "m".to_owned(),
+                    advance: Some("main".to_owned()),
+                    allow_empty: false,
+                };
+                setup.commit(&who, req).unwrap().changeset
+            };
+            let c1 = commit(None, "1");
+            let c2 = commit(Some(&c1), "2");
+            let witness = RefSetReq {
+                name: "release/witness".to_owned(),
+                new: c1.as_str().into(),
+                expected_old: None,
+                create: true,
+            };
+            setup.ref_set(&who, witness).unwrap();
+            drop(setup);
+            MetaStore::open(&root).unwrap().flush().unwrap();
+
+            let (fs, calls) = RecordingFs::new();
+            let ops = ops_on(&root, fs.naming_paths_in(root.clone().into_std_path_buf()));
+            let resolved = Resolved::default();
+            let req = DiffReq {
+                from: "main~1".into(),
+                to: "main".into(),
+                paths: Vec::new(),
+                format: DiffFormat::Unified,
+                context: 3,
+                limit: 500,
+                cursor: None,
+                max_bytes: 32_768,
+            };
+            let page = ops.recording(&resolved).diff(req).unwrap();
+            let witness = "read meta/refs/release/witness";
+            let snapshots = calls().into_iter().filter(|call| call == witness).count();
+            assert_eq!(snapshots, 1, "snapshots of one diff");
+            assert_eq!(
+                resolved.take(),
+                BTreeMap::from([
+                    ("main".to_owned(), c2.clone()),
+                    ("main~1".to_owned(), c1.clone()),
+                ])
+            );
+            assert_eq!((page.from, page.to, page.files.len()), (c1, c2, 1));
         }
     }
 }

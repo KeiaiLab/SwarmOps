@@ -38,16 +38,16 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
-    ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, Envelope,
-    ErrorCode, InfoReq, LineRange, LogReq, Meta, OpError, PathHistoryReq, ReadFileReq, ReadTreeReq,
-    RecoveredOut, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev, ShowReq, StoreOps,
-    VerifyReport, VerifyReq, schema_for_all,
+    ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
+    DiffReq, Envelope, ErrorCode, InfoReq, LineRange, LogReq, Meta, OpError, PathHistoryReq,
+    ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev,
+    ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Resolved, shell_word};
 
-use crate::cli::{self, BlobCommand, Command, Global, RefCommand};
+use crate::cli::{self, BlobCommand, Command, DiffArgs, DiffFormatArg, Global, RefCommand};
 use crate::context::{self, Env};
 use crate::mcp;
 use crate::output::{self, Format, Printed};
@@ -200,6 +200,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             limit,
             cursor,
         } => history(ctx, op, &target, limit, cursor),
+        Command::Diff(args) => diff(ctx, op, args),
         Command::Ref(command) => run_ref(ctx, op, command),
         Command::Verify { deep } => ctx.on_store(
             op,
@@ -375,6 +376,36 @@ fn write_now(text: &str) -> io::Result<()> {
     let mut stdout = io::stdout().lock();
     stdout.write_all(text.as_bytes())?;
     stdout.flush()
+}
+
+/// Runs `diff`, which names operation `op`: the files that differ between `args`' two
+/// revisions, a page at a time.
+fn diff(ctx: &Ctx<'_>, op: &'static str, args: DiffArgs) -> Printed {
+    let DiffArgs {
+        from,
+        to,
+        paths,
+        format,
+        context,
+        limit,
+        cursor,
+        max_bytes,
+    } = args;
+    let req = DiffReq {
+        from: from.into(),
+        to: to.into(),
+        paths,
+        format: match format {
+            DiffFormatArg::Names => DiffFormat::Names,
+            DiffFormatArg::Stat => DiffFormat::Stat,
+            DiffFormatArg::Unified => DiffFormat::Unified,
+        },
+        context,
+        limit,
+        cursor,
+        max_bytes,
+    };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.diff(req))
 }
 
 /// Runs a `ref` subcommand, which names operation `op`.

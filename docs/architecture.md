@@ -481,10 +481,10 @@ What an agent sees (operations §4):
 
 Every operation is a function from a request type to a response type or an `OpError`, and
 every type is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore
-fields they do not know, so versions can differ (operations §0). `StoreOps` has fourteen operations:
+fields they do not know, so versions can differ (operations §0). `StoreOps` has fifteen operations:
 `repo_info`, `commit`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`, `log`,
-`path_history`, `ref_list`, `ref_set`, `ref_delete`, `verify` and `derive`; `init`, `whoami` and
-`schema` live in the CLI.
+`path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `verify` and `derive`; `init`, `whoami`
+and `schema` live in the CLI.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
 plain text, and `mcp`, below, speaks MCP there instead):
@@ -496,7 +496,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 24 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
 kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 55 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 63 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

@@ -322,6 +322,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   derived something. Commits derive nothing. It writes only the cache of derived values, so it
   needs no identity, and it has no MCP tool. Its API is `StoreOps::derive` (`DeriveReq`,
   `DeriveResp`) over `Repo::derive_eager`.
+- `swarmops diff FROM TO`, the operation `diff` and its MCP tool: the files that differ between
+  two revisions, in path order, a page at a time (`--limit`, 500 by default, and an opaque
+  `--cursor`), within `--path`s if given. `--format names` (the default) gives each file's path
+  and status (`added`, `deleted`, `modified`, `type_changed`; no renames); `stat` also whether
+  it is binary and the lines it inserts and deletes; `unified` also its kinds, its blob ids and
+  its hunks, with `--context` lines (3 by default) around each change, the page within
+  `--max-bytes` of JSON (32 KiB by default; its first file comes all the same, its hunks cut to
+  those that fit, `hunks_truncated`). Both revisions resolve in one snapshot. Below it,
+  `RepoRead::diff` gives the leaf-level changes between two changesets' trees.
 
 ### Changed
 

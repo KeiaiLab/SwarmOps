@@ -23,6 +23,7 @@ const REQUESTS: &[&str] = &[
     "ChangeInput",
     "CommitReq",
     "DeriveReq",
+    "DiffReq",
     "Identity",
     "InfoReq",
     "InitReq",
@@ -49,8 +50,12 @@ const RESPONSES: &[&str] = &[
     "ChangesetSummary",
     "CommitResp",
     "DeriveResp",
+    "Diff",
+    "DiffHunk",
+    "DiffLineOut",
     "Envelope",
     "FileContent",
+    "FileDiff",
     "IdentityInfo",
     "LogCutOut",
     "LogPage",
@@ -76,9 +81,12 @@ const SCALARS: &[&str] = &[
     "ChangeOp",
     "ContentEncoding",
     "ContentInput",
+    "DiffFormat",
+    "DiffStatus",
     "EntryKindOut",
     "ErrorCode",
     "FileKind",
+    "LineOp",
     "ModeInput",
     "Rev",
 ];
@@ -165,6 +173,7 @@ fn store_ops_signatures<S: StoreOps + ?Sized>() {
     let _: fn(&S, LogReq) -> Result<LogPage, OpError> = S::log;
     let _: fn(&S, swarmops_api::PathHistoryReq) -> Result<swarmops_api::PathHistoryPage, OpError> =
         S::path_history;
+    let _: fn(&S, swarmops_api::DiffReq) -> Result<swarmops_api::Diff, OpError> = S::diff;
     let _: fn(&S, RefListReq) -> Result<RefListResp, OpError> = S::ref_list;
     let _: fn(&S, &Identity, RefSetReq) -> Result<RefSetResp, OpError> = S::ref_set;
     let _: fn(&S, &Identity, RefDeleteReq) -> Result<RefSetResp, OpError> = S::ref_delete;
@@ -1463,6 +1472,156 @@ mod derive {
         assert_eq!(
             printed, r#"{"derived":1,"cached":2}"#,
             "in this order, next omitted"
+        );
+    }
+}
+
+/// `diff`'s request and page on the wire (operations spec §1).
+mod diff {
+    use swarmops_api::{
+        DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, Diff, DiffFormat,
+        DiffHunk, DiffLineOut, DiffReq, DiffStatus, FileDiff, LineOp,
+    };
+
+    use super::*;
+
+    /// A request needs only `from` and `to`: the rest default to `names`, three lines of
+    /// context, 500 files and 32 KiB, and an unknown field is ignored. It writes its fields in
+    /// the spec's order, without nulls or an empty `paths`; its limits start at 1; and its
+    /// format and a page's statuses and line operations have their wire names.
+    #[test]
+    fn diff_requests_keep_their_defaults_and_wire_names() {
+        assert_eq!(
+            (
+                DEFAULT_DIFF_LIMIT,
+                DEFAULT_DIFF_MAX_BYTES,
+                DEFAULT_DIFF_CONTEXT
+            ),
+            (500, 32_768, 3)
+        );
+        let minimal = json!({"from": "main~1", "to": "main"});
+        let req: DiffReq = serde_json::from_value(minimal.clone()).unwrap();
+        assert_eq!(
+            req,
+            DiffReq {
+                from: Rev::from("main~1"),
+                to: Rev::from("main"),
+                paths: Vec::new(),
+                format: DiffFormat::Names,
+                context: DEFAULT_DIFF_CONTEXT,
+                limit: DEFAULT_DIFF_LIMIT,
+                cursor: None,
+                max_bytes: DEFAULT_DIFF_MAX_BYTES,
+            }
+        );
+        assert_ignores_unknown_fields::<DiffReq>("DiffReq", minimal);
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"from":"main~1","to":"main","format":"names","context":3,"limit":500,"max_bytes":32768}"#
+        );
+        let full = DiffReq {
+            paths: vec!["src".to_owned()],
+            format: DiffFormat::Unified,
+            cursor: Some("src/a.rs".to_owned()),
+            ..req
+        };
+        assert_eq!(
+            serde_json::to_string(&full).unwrap(),
+            r#"{"from":"main~1","to":"main","paths":["src"],"format":"unified","context":3,"limit":500,"cursor":"src/a.rs","max_bytes":32768}"#
+        );
+        let all = schema_for_all();
+        let schema = &all["DiffReq"];
+        assert_eq!(schema["required"], json!(["from", "to"]));
+        for field in ["limit", "max_bytes"] {
+            assert_eq!(schema["properties"][field]["minimum"], 1, "{field}");
+        }
+        assert_eq!(
+            serde_json::to_value([DiffFormat::Names, DiffFormat::Stat, DiffFormat::Unified])
+                .unwrap(),
+            json!(["names", "stat", "unified"])
+        );
+        assert_eq!(
+            serde_json::to_value([
+                DiffStatus::Added,
+                DiffStatus::Deleted,
+                DiffStatus::Modified,
+                DiffStatus::TypeChanged
+            ])
+            .unwrap(),
+            json!(["added", "deleted", "modified", "type_changed"])
+        );
+        assert_eq!(
+            serde_json::to_value([LineOp::Context, LineOp::Add, LineOp::Remove]).unwrap(),
+            json!(["context", "add", "remove"])
+        );
+        assert!(serde_json::from_value::<DiffFormat>(json!("patch")).is_err());
+    }
+
+    /// A page: each file writes only the fields its format gives (a `names` file its path and
+    /// status, a `unified` one everything), in the spec's order, without nulls; the page reads
+    /// back as written, and ignores fields it does not know, a file's too.
+    #[test]
+    fn diff_pages_write_what_each_format_gives() {
+        let named = FileDiff {
+            path: "a.txt".to_owned(),
+            status: DiffStatus::Deleted,
+            old_kind: None,
+            new_kind: None,
+            old_blob: None,
+            new_blob: None,
+            binary: None,
+            insertions: None,
+            deletions: None,
+            hunks: None,
+            hunks_truncated: None,
+        };
+        let line = |op, text: &str| DiffLineOut {
+            op,
+            text: text.to_owned(),
+        };
+        let unified = FileDiff {
+            path: "b.txt".to_owned(),
+            status: DiffStatus::Modified,
+            old_kind: Some(FileKind::File),
+            new_kind: Some(FileKind::Exec),
+            old_blob: Some("b0".to_owned()),
+            new_blob: Some("b1".to_owned()),
+            binary: Some(false),
+            insertions: Some(1),
+            deletions: Some(1),
+            hunks: Some(vec![DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                lines: vec![line(LineOp::Remove, "x\n"), line(LineOp::Add, "y")],
+            }]),
+            hunks_truncated: Some(true),
+        };
+        let page = Diff {
+            from: "c0".to_owned(),
+            to: "c1".to_owned(),
+            files: vec![named, unified],
+            truncated: true,
+            cursor: Some("b.txt".to_owned()),
+        };
+        let text = serde_json::to_string(&page).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"from":"c0","to":"c1","files":[{"path":"a.txt","status":"deleted"},"#,
+                r#"{"path":"b.txt","status":"modified","old_kind":"file","new_kind":"exec","#,
+                r#""old_blob":"b0","new_blob":"b1","binary":false,"insertions":1,"deletions":1,"#,
+                r#""hunks":[{"old_start":1,"old_lines":1,"new_start":1,"new_lines":1,"lines":"#,
+                r#"[{"op":"remove","text":"x\n"},{"op":"add","text":"y"}]}],"#,
+                r#""hunks_truncated":true}],"truncated":true,"cursor":"b.txt"}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<Diff>(&text).unwrap(), page);
+        assert_ignores_unknown_fields::<Diff>(
+            "Diff",
+            json!({"from": "c0", "to": "c1", "files": [{"path": "a", "status": "added", "zz_nested": 1}], "truncated": false}),
         );
     }
 }
