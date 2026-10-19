@@ -2,7 +2,7 @@
 
 use super::codec::{CodecError, check_strictly_sorted, put_count, put_len_prefixed, reader};
 use crate::id::{BlobId, ObjectId, ObjectKind, TreeId, hash_object};
-use crate::path::RepoPath;
+use crate::path::check_component;
 
 const MAGIC: &[u8; 4] = b"SWTR";
 const VERSION: u8 = 1;
@@ -179,10 +179,7 @@ impl Tree {
 
     fn validate(entries: &[TreeEntry]) -> Result<(), CodecError> {
         for e in entries {
-            if e.name.contains('/') {
-                return Err(CodecError::BadPath(crate::error::PathError::EmptyComponent));
-            }
-            RepoPath::new(e.name.as_str())?;
+            check_component(&e.name)?;
         }
         check_strictly_sorted(entries, |e| e.name.as_bytes())
     }
