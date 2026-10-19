@@ -52,8 +52,9 @@ use swarmops_repo::Change;
 /// The most bytes a put's content may hold: 512 MiB.
 pub const MAX_CONTENT_BYTES: u64 = 512 * 1024 * 1024;
 
-/// The suffix of a metadata key whose value `show` gives in base64.
-const BASE64_KEY_SUFFIX: &str = ":b64";
+/// The suffix of a metadata key whose value `show` gives in base64: the one the repository
+/// refuses at the end of a stored key ([`swarmops_repo::check_metadata`]).
+const BASE64_KEY_SUFFIX: &str = swarmops_repo::RESERVED_METADATA_KEY_SUFFIX;
 
 /// The bytes `content` stands for: inline text as its UTF-8 bytes, base64 decoded, a client
 /// file read. `E_INVALID_ARG` for base64 that is not standard and padded, or a file that
@@ -221,22 +222,10 @@ fn starts_with_char(bytes: &[u8]) -> bool {
 
 /// Refuses metadata with a key that ends in `:b64`, the suffix `show` puts on a key whose value
 /// is not UTF-8, so that `k:b64` always means `k`'s value in base64: `E_INVALID_ARG` with the
-/// `key` in `details`.
+/// `key` in `details`. The rule is the repository's ([`swarmops_repo::check_metadata`]), which
+/// every writer of changesets runs, `Repo::commit` among them.
 pub(crate) fn check_metadata(metadata: &[(String, Vec<u8>)]) -> Result<(), OpError> {
-    match metadata
-        .iter()
-        .find(|(key, _)| key.ends_with(BASE64_KEY_SUFFIX))
-    {
-        Some((key, _)) => Err(OpError::new(
-            ErrorCode::InvalidArg,
-            format!("metadata key {key:?} ends in {BASE64_KEY_SUFFIX:?}, which show reserves"),
-        )
-        .with_details(Map::from_iter([(
-            "key".to_owned(),
-            Value::from(key.as_str()),
-        )]))),
-        None => Ok(()),
-    }
+    swarmops_repo::check_metadata(metadata).map_err(crate::error::op)
 }
 
 /// How `show` returns metadata entry `key`, `value`: the value as UTF-8 text when it is UTF-8,

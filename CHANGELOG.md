@@ -338,6 +338,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   it again lists the frame. In the Rust API it is `StoreError::NotCommitted`, where it was
   `StoreError::Io`.
 
+#### M3: git import (2026-10-19)
+
+- The repository library refuses a metadata key that ends in `:b64` for every writer, where only
+  the operations' `commit` did: `Repo::commit` checks it before it writes anything
+  (`RepoError::ReservedMetadataKey`, which the operations report as before, `E_INVALID_ARG` with
+  `details.key`), and `swarmops_repo::check_metadata` is the rule a writer below the API, such as
+  the git import, runs, so that `show`'s `k:b64` is always the base64 of `k`'s value. For the
+  import, `Repo` also gains `put_objects`, `contains_object`, `changeset_meta` (a changeset's
+  index record, its object unread) and `flush_metadata` (the index synced and the checkpoint
+  moved to the end of the journal).
+
 ### Fixed
 
 #### M1.6: the code-review follow-ups (2026-10-19)

@@ -22,6 +22,18 @@ pub enum RepoError {
     /// signature with a non-zero offset). A commit checks this before it writes anything.
     #[error("not a canonical object: {0}")]
     Codec(#[from] CodecError),
+    /// A metadata key ends in `:b64` ([`crate::RESERVED_METADATA_KEY_SUFFIX`]), which the
+    /// operations' `show` reserves: it gives a value that is not UTF-8 in base64, under its key
+    /// with that suffix appended, so a stored key that ended in it could not be told from such
+    /// an entry. Every writer refuses it before it writes anything ([`crate::check_metadata`]).
+    #[error(
+        "metadata key {key:?} ends in {suffix:?}, which show reserves",
+        suffix = crate::RESERVED_METADATA_KEY_SUFFIX
+    )]
+    ReservedMetadataKey {
+        /// The first key of the metadata that ends in it, as given.
+        key: String,
+    },
     /// A change puts a file below a file, or where a directory is, or deletes a directory: in
     /// the first parent's tree, or against another change of the same request.
     #[error("{path}: a file and a directory conflict there")]

@@ -336,6 +336,49 @@ impl LocalRepo {
 }
 
 impl<O: ObjectStore> Repo<O> {
+    /// Stores `objects`, each a kind and its canonical payload, in one batch, and returns their
+    /// ids in input order; an object the store holds already is not written again
+    /// ([`ObjectStore::put_batch`]). The payloads are stored as given: nothing here checks that a
+    /// tree or a changeset decodes. Each object's file is durable on return, its name once this
+    /// handle next flushes its objects, which a commit does before it records its changeset
+    /// (storage spec §2 rule 2): until then no metadata may name the objects, since a power loss
+    /// could take their names back.
+    pub fn put_objects(
+        &self,
+        objects: Vec<(ObjectKind, Vec<u8>)>,
+    ) -> Result<Vec<ObjectId>, RepoError> {
+        Ok(self.objects.put_batch(objects)?)
+    }
+
+    /// Whether the store holds an object file for `id`. The file is not read, so neither its
+    /// kind nor its bytes are checked ([`ObjectStore::contains`]); [`Repo::verify`] with `deep`
+    /// checks them.
+    pub fn contains_object(&self, id: ObjectId) -> Result<bool, RepoError> {
+        Ok(self.objects.contains(id)?)
+    }
+
+    /// Changeset `id`'s record in the metadata, from a snapshot of its own: its seq, its
+    /// generation, the hash of its delta and its parents in their order; `None` if the store
+    /// does not hold it. No object is read, where [`Repo::changeset`] also reads and decodes the
+    /// changeset's object.
+    pub fn changeset_meta(
+        &self,
+        id: ChangesetId,
+    ) -> Result<Option<swarmops_store::ChangesetMeta>, RepoError> {
+        Ok(self.meta.read()?.changeset(id)?)
+    }
+
+    /// Makes the metadata's projections durable now ([`MetaStore::flush`]): takes the writer
+    /// lock as a commit does ([`StoreError::Busy`] if the wait runs out), repairs and replays what
+    /// earlier writers left, and, if a journal frame lies past the checkpoint, syncs the index
+    /// files and moves the checkpoint to the end of the journal. It records no changeset and
+    /// moves no ref, so a failure leaves what is committed as it was. A commit moves the
+    /// checkpoint only every 32 frames, so a bulk writer flushes once it is done: until the
+    /// checkpoint passes its frames, every snapshot reads them again.
+    pub fn flush_metadata(&self) -> Result<(), RepoError> {
+        Ok(self.meta.flush()?)
+    }
+
     /// Ref `name`, as a snapshot of the metadata shows it; `None` if it does not exist.
     /// [`RepoError::RefName`] for a name that is not `main` or `release/<x>`.
     pub fn get_ref(&self, name: &str) -> Result<Option<RefState>, RepoError> {

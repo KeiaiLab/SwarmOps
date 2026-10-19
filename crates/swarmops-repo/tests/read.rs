@@ -314,6 +314,83 @@ fn log_first_parent_order_and_limit() {
     assert_eq!(names, ["a", "b", "m"]);
 }
 
+/// `changeset_meta` gives the record the metadata holds for a changeset (its seq, generation,
+/// delta hash and parents in their order) without reading its object: with the object file gone,
+/// the record still reads, where `changeset` fails. An id the store does not hold is `None`.
+#[test]
+fn changeset_meta_reads_the_index_record() {
+    use swarmops_store::Layout;
+
+    let (_dir, root, repo) = new_repo();
+    let c1 = commit(&repo, &[], vec![put("a", b"a")]);
+    let c2 = commit(&repo, &[c1], vec![put("b", b"b")]);
+    let side = commit(&repo, &[c1], vec![put("side", b"side")]);
+    let merge = commit(&repo, &[c2, side], vec![put("m", b"m")]);
+
+    let record = |id: ChangesetId, seq: u64, generation: u64, parents: &[ChangesetId]| {
+        let stored = repo
+            .changeset(id)
+            .unwrap()
+            .expect("the changeset is stored");
+        ChangesetMeta {
+            id,
+            seq,
+            generation,
+            delta_hash: stored.changeset.delta_hash().unwrap(),
+            parents: parents.to_vec(),
+        }
+    };
+    let meta = |id: ChangesetId| repo.changeset_meta(id).unwrap();
+    assert_eq!(meta(c1), Some(record(c1, 0, 1, &[])));
+    assert_eq!(meta(c2), Some(record(c2, 1, 2, &[c1])));
+    assert_eq!(meta(side), Some(record(side, 2, 2, &[c1])));
+    let merged = record(merge, 3, 3, &[c2, side]);
+    assert_eq!(meta(merge), Some(merged.clone()));
+    assert_eq!(meta(unknown_id()), None);
+
+    fs::remove_file(Layout::new(&root).object_path(merge.0)).unwrap();
+    assert!(
+        matches!(repo.changeset(merge), Err(RepoError::MissingObject { .. })),
+        "the object is gone"
+    );
+    assert_eq!(meta(merge), Some(merged), "read without the object");
+}
+
+/// `put_objects` stores objects in one batch and gives their ids in input order, each the hash
+/// of its kind and payload; each reads back as it was put, and `contains_object` finds it and no
+/// object that was never put. Putting them again gives the same ids.
+#[test]
+fn put_objects_then_contains_object() {
+    use swarmops_core::{Tree, TreeEntry};
+    use swarmops_store::{FsObjectStore, Layout, ObjectStore, RealFs};
+
+    let (_dir, root, repo) = new_repo();
+    let content = b"stored before any changeset names it\n".to_vec();
+    let file = blob(&content);
+    let entry = TreeEntry {
+        name: "file".to_owned(),
+        kind: EntryKind::File,
+        id: file.0,
+    };
+    let tree = Tree::new(vec![entry]).unwrap();
+    let objects = vec![
+        (ObjectKind::Blob, content),
+        (ObjectKind::Tree, tree.encode()),
+    ];
+    let ids = repo.put_objects(objects.clone()).unwrap();
+    assert_eq!(ids, [file.0, tree.id().0]);
+
+    let store = FsObjectStore::open(Layout::new(&root), Box::new(RealFs));
+    for (&id, object) in ids.iter().zip(&objects) {
+        assert!(repo.contains_object(id).unwrap(), "{id}");
+        assert_eq!(store.get(id).unwrap().as_ref(), Some(object), "{id}");
+    }
+    let never_put = hash_object(ObjectKind::Blob, b"never put");
+    assert!(!repo.contains_object(never_put).unwrap());
+
+    assert_eq!(repo.put_objects(objects).unwrap(), ids);
+}
+
 #[test]
 fn cas_ref_through_repo_records_reflog() {
     let (_dir, root, repo) = new_repo();
