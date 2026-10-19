@@ -320,11 +320,12 @@ lock (I4). The tests that hold the code to them:
   `E_IO_TRANSIENT` says `details.committed = false`, an abort is one of the documented ones, and
   the store takes the next write;
 - **write-ordering checks** (M1.5): `SWARMOPS_TEST_ORDER_CHECK=1` checks every filesystem call
-  against the store's write-ordering rules, R1 to R7 (a frame is listed only once it is durable,
-  a ref file changes only after its frame is durable, the checkpoint moves only over synced
-  index records, objects are durable before a frame names them, `FORMAT` is linked last, and
-  more), and panics at the first call that breaks one. Every run of the binary in the CLI tests
-  has it on, and so do the store's and the repository's crash sweeps;
+  against the store's write-ordering rules, W1 to W7 of storage §2 rule 4 (a frame is listed
+  only once it is durable, a ref file changes only after its frame is durable, the checkpoint
+  moves only over synced index records, objects are durable before a frame names them,
+  `FORMAT` is linked last, and more), and panics at the first call that breaks one. Every run
+  of the binary in the CLI tests has it on, and so do the store's and the repository's crash
+  sweeps;
 - **a model of fsync failures on Linux** (M1.5): the bytes a failed sync did not cover stay
   lost, even when a later sync succeeds; under it, the journal must never list a frame that is
   not on disk;

@@ -98,8 +98,9 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
   (`SWARMOPS_TEST_NOW`), so that call k is the same call in every run.
 - **Writes are checked against the ordering rules.** Every run of the binary in the CLI tests,
   and the store's and the repository's crash sweeps, check each filesystem call against the
-  store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`; rules R1 to R7, listed in
-  `crates/swarmops-store/src/order_check.rs`), and panic at the first call that breaks one.
+  store's write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`; rules W1 to W7, stated in
+  storage spec §2 rule 4 and checked by `crates/swarmops-store/src/order_check.rs`), and panic
+  at the first call that breaks one.
 - **Child processes have deadlines.** A test that runs processes uses the runner of
   `swarmops-testkit` (the dev-dependency that holds the support the tests share: filesystem
   doubles, power-loss images, and builders of stores, repositories and runs of the binary),

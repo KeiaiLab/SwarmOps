@@ -1,5 +1,5 @@
 //! [`OrderCheckFs`] (feature `test-hooks`): an online check of the store's write-ordering
-//! rules (storage spec §2–§3), in the manner of SQLite's journal-test VFS, which makes sure
+//! rules (storage spec §2 rule 4), in the manner of SQLite's journal-test VFS, which makes sure
 //! that nothing reaches the database file that was not first written and synced to the
 //! journal. It wraps the [`FsOps`] the stores write through, follows what each call does to
 //! the files and directories, and panics, naming the rule and the call, at the first call that
@@ -9,38 +9,41 @@
 //!
 //! # The rules
 //!
-//! - **R1, the journal.** A frame is listed in `journal.off` only once it is durable in
+//! W1 to W7, which storage spec §2 rule 4 states: the write protocol of the spec's §2 and §3,
+//! restated as this checker judges it, call by call. They add no protocol of their own.
+//!
+//! - **W1, the journal.** A frame is listed in `journal.off` only once it is durable in
 //!   `journal.log`: synced in this process after it was written, or listed already (each listed
 //!   frame was durable before it was listed). And neither journal file is appended to while a
 //!   failed sync has left some of its bytes not durable: Linux reports a failed writeback once,
 //!   to the sync that meets it, and may drop the pages it could not write, so a later sync that
 //!   succeeds does not make those bytes durable, and a frame or an entry written after them
 //!   would outlive them in a power loss.
-//! - **R2, the refs.** A ref file is replaced or removed only while every byte of `journal.log`
+//! - **W2, the refs.** A ref file is replaced or removed only while every byte of `journal.log`
 //!   is durable: the frame that moves the ref is durable before its projection changes.
-//! - **R3, the checkpoint.** `journal.ckpt` moves to an offset past 0 only when the five index
+//! - **W3, the checkpoint.** `journal.ckpt` moves to an offset past 0 only when the five index
 //!   files (`parents.log`, `par.col`, `gen.col`, `dh.col`, `ids.col`) were synced in this process
 //!   since they last changed, no failed sync coming between; the offset is within what
 //!   `journal.log` holds durably; and no change of a ref file (a replace, a removal, a new
 //!   directory) still waits for its directory's fsync. (A store without index files, as some
 //!   journal tests lay out, has no index clause.)
-//! - **R4, the sorted views.** A view file is renamed into place only from a temp file synced
-//!   since it was written (R6), only while the five index files are synced since they last
+//! - **W4, the sorted views.** A view file is renamed into place only from a temp file synced
+//!   since it was written (W6), only while the five index files are synced since they last
 //!   changed (a view must never cover records a power loss could take back), and only so that
 //!   the four view files' entry counts never grow along `ids.key`, `ids.rec`, `dh.key`, `dh.rec`,
 //!   the order a compaction renames them in, so that a crash between two renames leaves views a
 //!   reader takes. The directory fsync after each rename is [`FsOps::rename_durable`]'s own.
-//! - **R5, the objects.** An object file is linked into its fan-out directory only from data
+//! - **W5, the objects.** An object file is linked into its fan-out directory only from data
 //!   synced first, and a journal frame that records a changeset is appended only once every
 //!   object name linked, and every fan-out directory made, in this process is durable (its
 //!   directory fsynced since): the objects a changeset names are durable before its record.
-//! - **R6, durable renames.** [`FsOps::rename_durable`] moves only durable data: a file synced in
+//! - **W6, durable renames.** [`FsOps::rename_durable`] moves only durable data: a file synced in
 //!   this process since it was last written, or a directory whose tree has no change waiting for
 //!   a directory fsync and no data waiting for a sync.
-//! - **R7, `FORMAT`.** A store's `FORMAT` file, the mark that the store is complete, is linked
+//! - **W7, `FORMAT`.** A store's `FORMAT` file, the mark that the store is complete, is linked
 //!   only from synced data, and only once the rest of the store is durable: no entry under the
 //!   store root (or the root's own) waits for its directory's fsync, `objects/tmp/` and the
-//!   staging `meta.tmp/` aside, and no file there holds data not synced. R7 judges durability,
+//!   staging `meta.tmp/` aside, and no file there holds data not synced. W7 judges durability,
 //!   not completeness: it does not check that `meta/`, `REPO` and the fan-out directories exist.
 //!   The pinned call sequence of `LocalRepo::create` and the create sweeps' oracle hold that
 //!   they are made before `FORMAT`.
@@ -51,7 +54,7 @@
 //! durable (another process made it so, or a crash left it for recovery to judge), except that
 //! of `journal.log` only the frames `journal.off` lists do. A call that fails is judged by what
 //! it left behind, read back from the files themselves: a failed sync leaves the bytes that it
-//! did not cover not durable, for good (R1's lost writeback; the index files too, so that R3
+//! did not cover not durable, for good (W1's lost writeback; the index files too, so that W3
 //! catches a checkpoint past records a failed sync may have lost); a failed replace or rename
 //! that took effect leaves its new name waiting for a directory fsync. It reads the files with
 //! `std::fs`, never through the [`FsOps`] it wraps, so that it changes no call count, and it
@@ -91,7 +94,7 @@ const VIEWS: [(&str, u64); 4] = [
 /// The store's [`FsOps`] with its write-ordering rules checked on every call: see [the module
 /// documentation](self). A call that breaks a rule panics before it runs (or, for a rename
 /// that leaves the view files out of order, right after), with a message that starts
-/// `order check: R<n> violated by <method> <paths>`.
+/// `order check: W<n> violated by <method> <paths>`.
 pub struct OrderCheckFs<F: FsOps> {
     inner: F,
     state: Mutex<State>,
@@ -343,7 +346,7 @@ impl State {
             .and_then(|file| file.lost_from)
     }
 
-    /// R1 for an append of `entries` to `off`, the `journal.off` of `meta`.
+    /// W1 for an append of `entries` to `off`, the `journal.off` of `meta`.
     fn listing(&self, off: &Path, meta: &Path, entries: &[u8]) -> Option<String> {
         if let Some(lost) = self.files.get(off).and_then(|file| file.lost_from) {
             return Some(format!(
@@ -387,12 +390,12 @@ impl State {
         None
     }
 
-    /// R1 and R5 for an append of `frame` to `log`, the `journal.log` of `meta`: the rule
+    /// W1 and W5 for an append of `frame` to `log`, the `journal.log` of `meta`: the rule
     /// broken, and how.
-    fn frame(&self, log: &Path, meta: &Path, frame: &[u8]) -> Option<(&'static str, String)> {
+    fn frame(&self, log: &Path, meta: &Path, frame: &[u8]) -> Option<(Rule, String)> {
         if let Some(lost) = self.files.get(log).and_then(|file| file.lost_from) {
             return Some((
-                "R1",
+                Rule::W1,
                 format!(
                     "journal.log holds bytes from {lost} on that a failed sync left not durable, \
                      and the frame would follow them"
@@ -420,7 +423,7 @@ impl State {
                 .find(|change| change.added && change.path != tmp)
             {
                 return Some((
-                    "R5",
+                    Rule::W5,
                     format!(
                         "the frame records a changeset while {} is not durable: no fsync of {} \
                          since it was made",
@@ -433,7 +436,7 @@ impl State {
         None
     }
 
-    /// R2 for a change of a ref file of `meta`.
+    /// W2 for a change of a ref file of `meta`.
     fn ref_change(&self, meta: &Path) -> Option<String> {
         let len = real_len(&meta.join("journal.log"));
         if let Some(lost) = self.log_lost_from(meta)
@@ -452,7 +455,7 @@ impl State {
         })
     }
 
-    /// R3 for `journal.ckpt` of `meta` set to `bytes`.
+    /// W3 for `journal.ckpt` of `meta` set to `bytes`.
     fn checkpoint(&self, meta: &Path, bytes: &[u8]) -> Option<String> {
         let Ok(offset) = <[u8; 8]>::try_from(bytes) else {
             return Some(format!("journal.ckpt would hold {} bytes", bytes.len()));
@@ -515,7 +518,7 @@ impl State {
         })
     }
 
-    /// R6 for a rename of `from`, a directory or else a file.
+    /// W6 for a rename of `from`, a directory or else a file.
     fn rename(&self, from: &Path, from_is_dir: bool) -> Option<String> {
         if !from_is_dir {
             return match self.files.get(from) {
@@ -543,7 +546,7 @@ impl State {
         })
     }
 
-    /// R5 and R7: the data of `from`, about to be linked into place, must be durable.
+    /// W5 and W7: the data of `from`, about to be linked into place, must be durable.
     fn linked_data(&self, from: &Path) -> Option<String> {
         match self.files.get(from) {
             Some(file) if file.synced_whole(real_len(from)) => None,
@@ -554,7 +557,7 @@ impl State {
         }
     }
 
-    /// R7 for the link of `root`'s `FORMAT`.
+    /// W7 for the link of `root`'s `FORMAT`.
     fn store_complete(&self, root: &Path) -> Option<String> {
         let staging = [root.join("objects/tmp"), root.join("meta.tmp")];
         let staged = |path: &Path| staging.iter().any(|dir| path.starts_with(dir));
@@ -579,8 +582,56 @@ impl State {
     }
 }
 
+/// A write-ordering rule, as [the module documentation](self) states it; a violation's panic
+/// names it by its id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rule {
+    /// The journal.
+    W1,
+    /// The refs.
+    W2,
+    /// The checkpoint.
+    W3,
+    /// The sorted views.
+    W4,
+    /// The objects.
+    W5,
+    /// Durable renames.
+    W6,
+    /// `FORMAT`.
+    W7,
+}
+
+#[cfg(test)]
+impl Rule {
+    /// Every rule, in order.
+    const ALL: [Rule; 7] = [
+        Rule::W1,
+        Rule::W2,
+        Rule::W3,
+        Rule::W4,
+        Rule::W5,
+        Rule::W6,
+        Rule::W7,
+    ];
+}
+
+impl fmt::Display for Rule {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Rule::W1 => "W1",
+            Rule::W2 => "W2",
+            Rule::W3 => "W3",
+            Rule::W4 => "W4",
+            Rule::W5 => "W5",
+            Rule::W6 => "W6",
+            Rule::W7 => "W7",
+        })
+    }
+}
+
 /// Panics if `violation` holds one: rule `rule` is broken by `method` on `paths`.
-fn verdict(rule: &str, method: &str, paths: &[&Path], violation: Option<String>) {
+fn verdict(rule: Rule, method: &str, paths: &[&Path], violation: Option<String>) {
     if let Some(why) = violation {
         let paths: Vec<String> = paths
             .iter()
@@ -728,21 +779,23 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
     }
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        let (rule, violation) = {
+        let violation = {
             let state = self.state();
             if name(to) == Some("FORMAT") {
                 let root = to.parent().unwrap_or(Path::new("."));
-                let why = state
+                state
                     .linked_data(from)
-                    .or_else(|| state.store_complete(root));
-                ("R7", why)
+                    .or_else(|| state.store_complete(root))
+                    .map(|why| (Rule::W7, why))
             } else if is_object(to) {
-                ("R5", state.linked_data(from))
+                state.linked_data(from).map(|why| (Rule::W5, why))
             } else {
-                ("", None)
+                None
             }
         };
-        verdict(rule, "link_noclobber", &[from, to], violation);
+        if let Some((rule, why)) = violation {
+            verdict(rule, "link_noclobber", &[from, to], Some(why));
+        }
         let existed = to.exists();
         let result = self.inner.link_noclobber(from, to);
         let mut state = self.state();
@@ -786,7 +839,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
 
     fn remove(&self, p: &Path) -> io::Result<()> {
         let violation = ref_meta(p).and_then(|meta| self.state().ref_change(meta));
-        verdict("R2", "remove", &[p], violation);
+        verdict(Rule::W2, "remove", &[p], violation);
         let result = self.inner.remove(p);
         if result.is_ok() {
             let mut state = self.state();
@@ -802,7 +855,7 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
             state.track(path);
             match journal_file(path) {
                 Some((JournalFile::Off, meta)) => {
-                    state.listing(path, meta, bytes).map(|why| ("R1", why))
+                    state.listing(path, meta, bytes).map(|why| (Rule::W1, why))
                 }
                 Some((JournalFile::Log, meta)) => state.frame(path, meta, bytes),
                 _ => None,
@@ -840,9 +893,9 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         let violation = {
             let state = self.state();
             if let Some((JournalFile::Ckpt, meta)) = journal_file(path) {
-                state.checkpoint(meta, bytes).map(|why| ("R3", why))
+                state.checkpoint(meta, bytes).map(|why| (Rule::W3, why))
             } else if let Some(meta) = ref_meta(path) {
-                state.ref_change(meta).map(|why| ("R2", why))
+                state.ref_change(meta).map(|why| (Rule::W2, why))
             } else {
                 None
             }
@@ -907,10 +960,10 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         let violation = {
             let state = self.state();
             match state.rename(from, from_is_dir) {
-                Some(why) => Some(("R6", why)),
+                Some(why) => Some((Rule::W6, why)),
                 None => view.and_then(|meta| state.index_unsynced(meta)).map(|why| {
                     (
-                        "R4",
+                        Rule::W4,
                         format!(
                             "a sorted view is renamed into place while {why}: it could \
                                  cover records a power loss takes back"
@@ -942,13 +995,13 @@ impl<F: FsOps> FsOps for OrderCheckFs<F> {
         if result.is_ok()
             && let Some(meta) = view
         {
-            verdict("R4", "rename_durable", &[from, to], view_counts(meta));
+            verdict(Rule::W4, "rename_durable", &[from, to], view_counts(meta));
         }
         result
     }
 }
 
-/// R4 after a view file of `meta` was renamed into place: the four files' entry counts must
+/// W4 after a view file of `meta` was renamed into place: the four files' entry counts must
 /// not grow along the order a compaction renames them in, nor end in a partial entry.
 fn view_counts(meta: &Path) -> Option<String> {
     let sorted = meta.join("sorted");
@@ -1019,14 +1072,21 @@ mod tests {
         }])
     }
 
+    /// The message `run` panics with; `None` if it does not panic.
+    fn panic_message(run: impl FnOnce()) -> Option<String> {
+        let payload = panic::catch_unwind(AssertUnwindSafe(run)).err()?;
+        Some(
+            payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                .unwrap_or_default(),
+        )
+    }
+
     /// The rule `run` breaks, from its panic; `None` if it does not panic.
     fn broken(run: impl FnOnce()) -> Option<String> {
-        let payload = panic::catch_unwind(AssertUnwindSafe(run)).err()?;
-        let message = payload
-            .downcast_ref::<String>()
-            .cloned()
-            .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-            .unwrap_or_default();
+        let message = panic_message(run)?;
         let rule = message.strip_prefix("order check: ")?.split(' ').next()?;
         Some(rule.to_owned())
     }
@@ -1034,6 +1094,56 @@ mod tests {
     #[track_caller]
     fn assert_breaks(rule: &str, run: impl FnOnce()) {
         assert_eq!(broken(run).as_deref(), Some(rule));
+    }
+
+    /// The rule ids are W1 to W7, the names storage spec §2 rule 4 states the rules under, and
+    /// a violation's panic starts with its rule's id.
+    #[test]
+    fn rule_ids_are_w1_to_w7() {
+        let ids: Vec<String> = Rule::ALL.iter().map(ToString::to_string).collect();
+        assert_eq!(ids, ["W1", "W2", "W3", "W4", "W5", "W6", "W7"]);
+        let off = Path::new("meta/journal.off");
+        for (n, rule) in (1..).zip(Rule::ALL) {
+            let message = panic_message(|| {
+                verdict(rule, "append_durable", &[off], Some("why".to_owned()));
+            });
+            let expected = format!(
+                "order check: W{n} violated by append_durable {}: why",
+                off.display()
+            );
+            assert_eq!(message.as_deref(), Some(expected.as_str()));
+        }
+    }
+
+    /// Storage spec §2 rule 4 states every rule the checker enforces, under its id, and the
+    /// checker's old ids are gone from the spec: "R1" is only §6's first review invariant.
+    #[test]
+    fn the_spec_states_every_write_order_rule() {
+        const SPEC: &str = include_str!(
+            "../../../docs/superpowers/specs/2026-10-15-swarmops-storage-core-design.md"
+        );
+        let section = |n: u32| {
+            let start = SPEC
+                .find(&format!("\n## {n}. "))
+                .expect("the section's heading");
+            let len = SPEC[start + 1..]
+                .find("\n## ")
+                .map_or(SPEC.len() - start, |end| end + 1);
+            &SPEC[start..start + len]
+        };
+        let disk = section(2);
+        for rule in Rule::ALL {
+            assert!(
+                disk.contains(&format!("- {rule} ")),
+                "storage spec §2 does not state {rule}"
+            );
+        }
+        let review = section(6);
+        assert_eq!(
+            SPEC.matches("R1").count(),
+            review.matches("R1").count(),
+            "storage spec names R1 outside §6"
+        );
     }
 
     /// `RealFs` whose `k`-th call fails with `EIO` once: a flushing call does its work first.
@@ -1047,13 +1157,13 @@ mod tests {
     }
 
     #[test]
-    fn r1_a_frame_is_listed_only_once_it_is_durable() {
+    fn w1_a_frame_is_listed_only_once_it_is_durable() {
         let (_dir, root) = root();
         let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
         let fs = OrderCheckFs::new(RealFs);
-        // Written, never synced: listing it breaks R1.
+        // Written, never synced: listing it breaks W1.
         let at = fs.append(&log, &compacted()).unwrap();
-        assert_breaks("R1", || {
+        assert_breaks("W1", || {
             fs.append_durable(&off, &at.to_le_bytes()).unwrap();
         });
         // Synced first, it may be listed.
@@ -1065,20 +1175,20 @@ mod tests {
     }
 
     /// The fsyncgate pattern: a frame whose sync failed, then listed after a later sync that
-    /// succeeds, breaks R1 (Linux reports a failed writeback once); and so does any append to a
+    /// succeeds, breaks W1 (Linux reports a failed writeback once); and so does any append to a
     /// journal file after bytes a failed sync left behind, until a cut takes them off.
     #[test]
-    fn r1_a_failed_sync_is_not_made_good_by_a_later_one() {
+    fn w1_a_failed_sync_is_not_made_good_by_a_later_one() {
         let (_dir, root) = root();
         let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
         let fs = OrderCheckFs::new(eio_at(1));
         let start: u64 = 0;
         fs.append_durable(&log, &compacted()).unwrap_err();
         fs.sync_data(&log).unwrap();
-        assert_breaks("R1", || {
+        assert_breaks("W1", || {
             fs.append_durable(&off, &start.to_le_bytes()).unwrap();
         });
-        assert_breaks("R1", || {
+        assert_breaks("W1", || {
             fs.append_durable(&log, &compacted()).unwrap();
         });
         // Cut back to where the frame started, the journal takes appends again.
@@ -1091,26 +1201,26 @@ mod tests {
         let at = fs.append_durable(&log, &compacted()).unwrap();
         fs.append_durable(&off, &at.to_le_bytes()).unwrap_err();
         let next = fs.append_durable(&log, &compacted()).unwrap();
-        assert_breaks("R1", || {
+        assert_breaks("W1", || {
             fs.append_durable(&off, &next.to_le_bytes()).unwrap();
         });
     }
 
     #[test]
-    fn r2_a_ref_moves_only_once_its_frame_is_durable() {
+    fn w2_a_ref_moves_only_once_its_frame_is_durable() {
         let (_dir, root) = root();
         let (log, main) = (root.join("meta/journal.log"), root.join("meta/refs/main"));
         let fs = OrderCheckFs::new(RealFs);
         fs.append(&log, &compacted()).unwrap();
-        assert_breaks("R2", || fs.atomic_replace(&main, b"x").unwrap());
+        assert_breaks("W2", || fs.atomic_replace(&main, b"x").unwrap());
         fs.sync_data(&log).unwrap();
         fs.atomic_replace(&main, b"x").unwrap();
         fs.append(&log, &compacted()).unwrap();
-        assert_breaks("R2", || fs.remove(&main).unwrap());
+        assert_breaks("W2", || fs.remove(&main).unwrap());
     }
 
     #[test]
-    fn r3_the_checkpoint_waits_for_the_index_the_journal_and_the_refs() {
+    fn w3_the_checkpoint_waits_for_the_index_the_journal_and_the_refs() {
         let (_dir, root) = root();
         let meta = root.join("meta");
         let (log, ckpt) = (meta.join("journal.log"), meta.join("journal.ckpt"));
@@ -1122,23 +1232,23 @@ mod tests {
         let ckpt_at = |offset: u64| {
             fs.atomic_replace(&ckpt, &offset.to_le_bytes()).unwrap();
         };
-        assert_breaks("R3", || ckpt_at(end));
+        assert_breaks("W3", || ckpt_at(end));
         ckpt_at(0); // covers nothing
         for path in index_files(&meta) {
             fs.sync_data(&path).unwrap();
         }
-        assert_breaks("R3", || ckpt_at(end + 1));
+        assert_breaks("W3", || ckpt_at(end + 1));
         ckpt_at(end);
         // A ref file's removal not yet made durable.
         let old = meta.join("refs/old");
         fs.atomic_replace(&old, b"x").unwrap();
         fs.remove(&old).unwrap();
-        assert_breaks("R3", || ckpt_at(end));
+        assert_breaks("W3", || ckpt_at(end));
         fs.fsync_dir(&meta.join("refs")).unwrap();
         ckpt_at(end);
         // Synced, then written again: not synced since it last changed.
         fs.append(&meta.join("idx/ids.col"), &[0; 32]).unwrap();
-        assert_breaks("R3", || ckpt_at(end));
+        assert_breaks("W3", || ckpt_at(end));
         fs.sync_data(&meta.join("idx/ids.col")).unwrap();
         ckpt_at(end);
         // A failed index sync leaves records not durable, whatever later syncs say.
@@ -1152,7 +1262,7 @@ mod tests {
         let checkpoint = || {
             fs.atomic_replace(&ckpt, &end.to_le_bytes()).unwrap();
         };
-        assert_breaks("R3", checkpoint);
+        assert_breaks("W3", checkpoint);
     }
 
     /// The view files of `meta`, `entries` each, written through `fs` to temp files and synced.
@@ -1195,44 +1305,44 @@ mod tests {
     }
 
     #[test]
-    fn r4_views_are_renamed_synced_after_the_index_and_in_order() {
+    fn w4_views_are_renamed_synced_after_the_index_and_in_order() {
         let (_dir, _root, fs, rename) = compacting(false);
-        assert_breaks("R4", || rename(&fs, "ids.key")); // the index is not synced
+        assert_breaks("W4", || rename(&fs, "ids.key")); // the index is not synced
         let (_dir, _root, fs, rename) = compacting(true);
-        assert_breaks("R4", || rename(&fs, "dh.key")); // the counts grow along the order
+        assert_breaks("W4", || rename(&fs, "dh.key")); // the counts grow along the order
         let (_dir, root, fs, rename) = compacting(true);
         for view in ["ids.key", "ids.rec", "dh.key", "dh.rec"] {
             rename(&fs, view);
         }
-        // A temp file written since its sync breaks R6.
+        // A temp file written since its sync breaks W6.
         temp_views(&fs, &root.join("meta"), 2);
         fs.append(&root.join("meta/sorted/ids.key.tmp"), &[0; 32])
             .unwrap();
-        assert_breaks("R6", || rename(&fs, "ids.key"));
-        // The index synced, then written again: not synced since it last changed (R4), even
-        // with the temp synced (R6 kept).
+        assert_breaks("W6", || rename(&fs, "ids.key"));
+        // The index synced, then written again: not synced since it last changed (W4), even
+        // with the temp synced (W6 kept).
         fs.sync_data(&root.join("meta/sorted/ids.key.tmp")).unwrap();
         fs.append(&root.join("meta/idx/ids.col"), &[0; 32]).unwrap();
-        assert_breaks("R4", || rename(&fs, "ids.key"));
+        assert_breaks("W4", || rename(&fs, "ids.key"));
         fs.sync_data(&root.join("meta/idx/ids.col")).unwrap();
         rename(&fs, "ids.key");
     }
 
     #[test]
-    fn r5_objects_are_durable_before_the_frame_that_names_them() {
+    fn w5_objects_are_durable_before_the_frame_that_names_them() {
         let (_dir, root) = root();
         let (log, staging) = (root.join("meta/journal.log"), root.join("objects/tmp"));
         let object = root.join("objects/ab/cdef");
         let fs = OrderCheckFs::new(RealFs);
         let unsynced = staging.join("unsynced");
         fs.append(&unsynced, b"object").unwrap();
-        assert_breaks("R5", || {
+        assert_breaks("W5", || {
             fs.link_noclobber(&unsynced, &object).unwrap();
         });
         let temp = fs.write_durable_temp(&staging, b"object").unwrap();
         fs.link_noclobber(&temp, &object).unwrap();
         fs.append_durable(&log, &compacted()).unwrap(); // records no changeset
-        assert_breaks("R5", || {
+        assert_breaks("W5", || {
             fs.append_durable(&log, &changeset()).unwrap();
         });
         fs.fsync_dir(&root.join("objects/ab")).unwrap();
@@ -1240,7 +1350,7 @@ mod tests {
     }
 
     #[test]
-    fn r6_a_directory_is_renamed_only_once_its_tree_is_durable() {
+    fn w6_a_directory_is_renamed_only_once_its_tree_is_durable() {
         let (_dir, root) = root();
         let staged = root.join("meta.tmp/meta");
         let fs = OrderCheckFs::new(RealFs);
@@ -1248,19 +1358,19 @@ mod tests {
         fs.append(&staged.join("idx/ids.col"), &[0; 8]).unwrap();
         fs.sync_data(&staged.join("idx/ids.col")).unwrap();
         let to = root.join("staged");
-        assert_breaks("R6", || fs.rename_durable(&staged, &to).unwrap());
+        assert_breaks("W6", || fs.rename_durable(&staged, &to).unwrap());
         fs.fsync_dir(&staged).unwrap(); // `idx` is durable, the entry `ids.col` in it is not
-        assert_breaks("R6", || fs.rename_durable(&staged, &to).unwrap());
+        assert_breaks("W6", || fs.rename_durable(&staged, &to).unwrap());
         fs.fsync_dir(&staged.join("idx")).unwrap();
         // Every entry durable, the file written since its sync.
         fs.append(&staged.join("idx/ids.col"), &[0; 8]).unwrap();
-        assert_breaks("R6", || fs.rename_durable(&staged, &to).unwrap());
+        assert_breaks("W6", || fs.rename_durable(&staged, &to).unwrap());
         fs.sync_data(&staged.join("idx/ids.col")).unwrap();
         fs.rename_durable(&staged, &to).unwrap();
     }
 
     #[test]
-    fn r7_format_is_linked_last() {
+    fn w7_format_is_linked_last() {
         let (_dir, root) = root();
         let fs = OrderCheckFs::new(RealFs);
         fs.create_dir_all(&root.join("objects/cd")).unwrap();
@@ -1271,7 +1381,7 @@ mod tests {
                 .unwrap();
             fs.link_noclobber(&temp, &format).unwrap();
         };
-        assert_breaks("R7", || link(&fs));
+        assert_breaks("W7", || link(&fs));
         fs.fsync_dir(&root.join("objects")).unwrap();
         link(&fs);
     }
