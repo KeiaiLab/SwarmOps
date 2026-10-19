@@ -1564,7 +1564,7 @@ fn failing_store(root: &Utf8Path) -> (MetaStore, Failing) {
 }
 
 /// [`failing_store`] without the order checker: for the one test that pins a hazard the
-/// checker rightly refuses (R3: a checkpoint past index records a failed sync may have lost,
+/// checker rightly refuses (W3: a checkpoint past index records a failed sync may have lost,
 /// once cutting them back failed too), which storage spec §3 documents as open until the next
 /// successful sync.
 fn unchecked_failing_store(root: &Utf8Path) -> (MetaStore, Failing) {
@@ -2196,7 +2196,7 @@ fn a_failed_log_sync_cuts_the_frame_and_reports_not_committed() {
 /// the transaction finds it done. When the entry reached journal.off and its sync failed, the
 /// writer first cuts journal.off back to the entries before it: an entry a failed writeback may
 /// have lost must not stay listed while later entries are made durable after it, a hole a power
-/// loss would leave among the listed frames (the order checker refuses that: R1).
+/// loss would leave among the listed frames (the order checker refuses that: W1).
 #[test]
 fn a_failed_off_append_after_the_log_sync_is_post_commit() {
     for strike in [Strike::After, Strike::Before] {
@@ -2743,7 +2743,7 @@ fn hooks_child(dir: &Utf8Path) {
             .collect();
         println!("{REPORT}calls: {}", errnos.join(" "));
     } else {
-        // Written, never synced, then listed: R1 refuses it.
+        // Written, never synced, then listed: W1 refuses it.
         let at = fs.append(&log, b"\x01\0\0\0crc!x").unwrap();
         fs.append_durable(&off, &at.to_le_bytes()).unwrap();
         println!("{REPORT}listed an unsynced frame");
@@ -2769,7 +2769,7 @@ fn the_test_hooks_build_the_filesystem_they_name() {
         .env(swarmops_store::ORDER_CHECK_ENV, "1"));
     let stderr = String::from_utf8_lossy(&checked.stderr);
     assert!(
-        !checked.status.success() && stderr.contains("order check: R1 violated by append_durable"),
+        !checked.status.success() && stderr.contains("order check: W1 violated by append_durable"),
         "{:?}\n{stderr}",
         checked.status
     );

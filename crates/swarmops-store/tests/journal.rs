@@ -2021,7 +2021,7 @@ fn assert_listed_frames_durable(layout: &Layout, model: &FsyncModelFs) {
 /// appended again and synced) and lists them then: Linux reports a failed writeback once, so no
 /// later sync could vouch for them, and the next tail check's sync, succeeding without them,
 /// would list a frame that is not on disk (the fsyncgate pattern, through the tail check). Under
-/// the Linux fsync-failure model ([`FsyncModelFs`]) and the order checker (R1), its first sync
+/// the Linux fsync-failure model ([`FsyncModelFs`]) and the order checker (W1), its first sync
 /// of `journal.log` failing:
 ///
 /// - a frame a crashed writer wrote and never synced is listed only once it is durable;

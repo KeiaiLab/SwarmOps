@@ -239,8 +239,8 @@ fn sweep_checked(template: &Store, what: &str, args: impl Fn(&Store) -> Vec<Stri
     calls
 }
 
-/// Every crash sweep runs under the order checker (`swarmops_store::OrderCheckFs`, rules R1 to
-/// R7): the tests set `SWARMOPS_TEST_ORDER_CHECK=1` for every run of the binary, and the store's
+/// Every crash sweep runs under the order checker (`swarmops_store::OrderCheckFs`, rules W1 to
+/// W7): the tests set `SWARMOPS_TEST_ORDER_CHECK=1` for every run of the binary, and the store's
 /// and the repository's sweeps wrap their crashing child's filesystem in it, so a write that
 /// breaks a rule panics in the run crashed at any call or in a dry run, and, for the sweeps
 /// through the binary and the metadata store's own, in the command that recovers from the crash

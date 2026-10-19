@@ -177,4 +177,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   none of them. Its numbers, in the M1.5 section of [docs/perf.md](docs/perf.md), are the
   quiet-window run's at the plan's sizes (2026-10-17), no longer provisional.
 
+### Changed
+
+#### M1.6: the code-review follow-ups (2026-10-19)
+
+- The write-ordering rules that `SWARMOPS_TEST_ORDER_CHECK=1` checks are W1–W7, stated in
+  storage spec §2 rule 4, and a violation panics with `order check: W<n> violated by …`. They
+  were R1–R7, defined only in `crates/swarmops-store/src/order_check.rs`, under the names the
+  spec's review invariants (§6) also use.
+
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
