@@ -19,9 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, ObjectId, ObjectKind, hash_object};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{
-    CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError, MetaWrite,
-};
+use swarmops_store::{CRASH_AT_ENV, CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
 use swarmops_store::{
     CasResult, ChangesetMeta, CommitInfo, Frame, FsOps, Index, InsertOutcome, Journal,
     JournalEntry, Layout, LimitKind, MetaLock, MetaRead, MetaStore, RealFs, Record, RefMoveEntry,
@@ -30,6 +28,11 @@ use swarmops_store::{
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, NoSyncFs, RecordingFs, Watch, Watched, When, copy_dir};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::store::sweep::{
+    SWEEP_PLAN, SWEEP_ROOT, Said, assert_recovers, calls_of, changeset, copy_of, run_sweep_child,
+    said, sweep_child, sweep_template, swept,
+};
 use swarmops_testkit::store::temp_dir as new_root;
 use swarmops_testkit::store::{append_bytes, file_len, set_len};
 use swarmops_testkit::test_name;
@@ -2431,203 +2434,6 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
     }
 }
 
-/// Set only in the children of the store-level error sweeps: the store root.
-#[cfg(feature = "test-hooks")]
-const SWEEP_ROOT: &str = "SWARMOPS_TEST_META_SWEEP_ROOT";
-
-/// Set with [`SWEEP_ROOT`]: what the child does, `fail:<k>:<errno>:<n>` (the swept transaction
-/// `n`, its k-th call and every mutating one after it failing) or `crash:<k>:<n>` (its k-th call
-/// aborting it).
-#[cfg(feature = "test-hooks")]
-const SWEEP_PLAN: &str = "SWARMOPS_TEST_META_SWEEP_PLAN";
-
-/// The transaction the store-level sweeps fail or crash: changeset `n`, a root, and
-/// `release/swept` created at it, in one frame.
-#[cfg(feature = "test-hooks")]
-fn swept(store: &MetaStore, n: u64) -> Result<CommitInfo, StoreError> {
-    let mut write = store.write()?;
-    write.insert_changeset(cs(n, &[]))?;
-    write.cas_ref("release/swept", None, Some(id(n)), ACTOR)?;
-    write.commit()
-}
-
-/// What a transaction's outcome says of it.
-#[cfg(feature = "test-hooks")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Said {
-    /// It returned, or failed after its commit point ([`StoreError::PostCommit`]).
-    Committed,
-    /// It failed otherwise: nothing of it may be in the store.
-    NotCommitted,
-    /// It aborted (a crash, or the documented abort after a failed cut): either may hold.
-    Aborted,
-}
-
-#[cfg(feature = "test-hooks")]
-fn said(outcome: &Result<CommitInfo, StoreError>) -> Said {
-    match outcome {
-        Ok(_) | Err(StoreError::PostCommit { .. }) => Said::Committed,
-        Err(_) => Said::NotCommitted,
-    }
-}
-
-/// A store for the error sweeps, on a filesystem that never syncs (durability is not their
-/// subject): changesets `0..n` past the checkpoint, `n` returned, so that the swept transaction
-/// `n` moves the checkpoint (31 frames of one changeset each, the 32nd swept) or, `compacting`,
-/// compacts (1,024 changesets in one frame: the swept one takes the tail past the threshold).
-#[cfg(feature = "test-hooks")]
-fn sweep_template(compacting: bool) -> (TempDir, Utf8PathBuf, u64) {
-    let (dir, root) = new_root();
-    let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
-    let n = if compacting {
-        let mut write = store.write().unwrap();
-        for m in 0..Index::COMPACT_THRESHOLD {
-            write.insert_changeset(cs(m, &[])).unwrap();
-        }
-        write.commit().unwrap();
-        Index::COMPACT_THRESHOLD
-    } else {
-        for m in 0..31 {
-            insert(&store, &[cs(m, &[])]);
-        }
-        31
-    };
-    assert_eq!(ckpt(&root), 0);
-    (dir, root, n)
-}
-
-/// A copy of the store at `template`, in a temp dir of its own.
-#[cfg(feature = "test-hooks")]
-fn copy_of(template: &Utf8Path) -> (TempDir, Utf8PathBuf) {
-    let (dir, root) = new_root();
-    copy_dir(template.as_std_path(), root.as_std_path());
-    (dir, root)
-}
-
-/// How many filesystem calls `run` makes on a copy of the store at `template`, one index file
-/// synced at a time, no call failing.
-#[cfg(feature = "test-hooks")]
-fn calls_of(template: &Utf8Path, run: impl FnOnce(&MetaStore)) -> u64 {
-    let (_dir, root) = copy_of(template);
-    let counter = Arc::new(CrashAtFs::new(NoSyncFs, 0));
-    let mut store = MetaStore::open_with_fs(&root, Arc::clone(&counter) as Arc<dyn FsOps>).unwrap();
-    store.set_parallelism(1);
-    run(&store);
-    counter.calls()
-}
-
-/// The store at `root`, after transactions that each `said` what they did of their changeset
-/// (`(n, said)`), on a template of changesets `0..template`, the first of them the swept one
-/// (with `release/swept`): it opens (on a filesystem that never syncs, under the order checker:
-/// durability is not the subject here), takes a write (its recovery runs) and a flush; the
-/// template's changesets are all there; a transaction's changeset is there exactly when it said
-/// it committed (either, after an abort), the swept one's ref with it; and the index holds each
-/// changeset once, the checkpoint at the journal's end.
-#[cfg(feature = "test-hooks")]
-#[track_caller]
-fn assert_recovers(root: &Utf8Path, template: u64, outcomes: &[(u64, Said)], what: &str) {
-    let store = MetaStore::open_with_fs(root, checked(NoSyncFs))
-        .unwrap_or_else(|e| panic!("{what}: the store does not open: {e}"));
-    store
-        .write()
-        .and_then(MetaWrite::commit)
-        .unwrap_or_else(|e| panic!("{what}: the next write fails: {e}"));
-    store
-        .flush()
-        .unwrap_or_else(|e| panic!("{what}: the flush fails: {e}"));
-    let read = store.read().unwrap();
-    let mut held = template;
-    for (at, &(n, said)) in outcomes.iter().enumerate() {
-        let there = read.changeset(id(n)).unwrap().is_some();
-        match said {
-            Said::Committed => assert!(there, "{what}: changeset {n} said it committed"),
-            Said::NotCommitted => assert!(!there, "{what}: changeset {n} said it did not commit"),
-            Said::Aborted => {}
-        }
-        if at == 0 {
-            let swept_ref = read.get_ref("release/swept").unwrap();
-            assert_eq!(swept_ref.is_some(), there, "{what}: one frame holds both");
-        }
-        held += u64::from(there);
-    }
-    assert_eq!(read.count_changesets().unwrap(), held, "{what}");
-    for m in [0, template / 2, template - 1] {
-        assert!(
-            read.changeset(id(m)).unwrap().is_some(),
-            "{what}: changeset {m} is lost"
-        );
-    }
-    drop(read);
-    let index = index(root);
-    assert_eq!(
-        index.len(),
-        held,
-        "{what}: each changeset once in the index"
-    );
-    assert_eq!(
-        ckpt(root),
-        log_len(root),
-        "{what}: the flush checkpointed it all"
-    );
-}
-
-/// What a child of the store-level sweeps does: the swept transaction `n` on the store at
-/// `root`, its calls failing or crashing as `plan` says; reports what it said.
-#[cfg(feature = "test-hooks")]
-fn sweep_child(root: &Utf8Path, plan: &str) {
-    let parts: Vec<&str> = plan.split(':').collect();
-    let k: u64 = parts[1].parse().unwrap();
-    let (fs, n): (Arc<dyn FsOps>, u64) = match parts[0] {
-        "fail" => {
-            let error = match parts[2] {
-                "eio" => InjectedError::Eio,
-                _ => InjectedError::Enospc,
-            };
-            let fail = FailAt {
-                at: k,
-                mode: FailMode::Persistent,
-                error,
-            };
-            (
-                checked(FailAtFs::new(NoSyncFs, fail)),
-                parts[3].parse().unwrap(),
-            )
-        }
-        _ => (
-            checked(CrashAtFs::new(NoSyncFs, k)),
-            parts[2].parse().unwrap(),
-        ),
-    };
-    let mut store = MetaStore::open_with_fs(root, fs).unwrap();
-    store.set_parallelism(1);
-    let outcome = swept(&store, n);
-    println!("{REPORT}{:?}", said(&outcome));
-}
-
-/// Runs a child of the store-level sweeps on `root` with `plan` (see [`SWEEP_PLAN`]) and
-/// returns what its transaction said: aborted only by the documented abort (a cut after a
-/// failed journal append that fails too), which says why on stderr, or by a planned crash.
-#[cfg(feature = "test-hooks")]
-fn run_sweep_child(test: &str, root: &Utf8Path, plan: &str) -> Said {
-    let child = run(this_test(&test_name!(test))
-        .env(SWEEP_ROOT, root)
-        .env(SWEEP_PLAN, plan));
-    let stderr = String::from_utf8_lossy(&child.stderr);
-    if child.status.signal() == Some(SIGABRT) {
-        assert!(
-            plan.starts_with("crash") || stderr.contains("could not be cut back off it"),
-            "{plan}: an abort that is not the documented one\n{stderr}"
-        );
-        return Said::Aborted;
-    }
-    let stdout = String::from_utf8_lossy(&child.stdout);
-    match report(0, &child).as_str() {
-        "Committed" => Said::Committed,
-        "NotCommitted" => Said::NotCommitted,
-        other => panic!("{plan}: {other:?}\n{stdout}\n{stderr}"),
-    }
-}
-
 /// An injected I/O error at any filesystem call of a write transaction, and of one that
 /// compacts, is reported honestly: a transaction that returns, or says it committed
 /// ([`StoreError::PostCommit`]), is in the store; one that fails otherwise is not; and the store
@@ -2712,7 +2518,8 @@ fn persistent_failures_at_every_store_call_report_honestly() {
             for k in 1..=calls {
                 let what = format!("{kind}, calls {k}.. of {calls} failing with {errno}");
                 let (_dir, root) = copy_of(&template);
-                let said = run_sweep_child(TEST, &root, &format!("fail:{k}:{errno}:{n}"));
+                let said =
+                    run_sweep_child(&test_name!(TEST), &root, &format!("fail:{k}:{errno}:{n}"));
                 aborted += usize::from(said == Said::Aborted);
                 assert_recovers(&root, n, &[(n, said)], &what);
             }
@@ -2743,7 +2550,7 @@ fn errors_during_recovery_leave_the_store_openable() {
     }
     let next = |store: &MetaStore| -> Result<CommitInfo, StoreError> {
         let mut write = store.write()?;
-        write.insert_changeset(cs(NEXT, &[]))?;
+        write.insert_changeset(changeset(NEXT))?;
         write.commit()
     };
     let (_dir, template, n) = sweep_template(false);
@@ -2753,7 +2560,7 @@ fn errors_during_recovery_leave_the_store_openable() {
     let mut most = 0;
     for k1 in 1..=calls {
         let (_crashed_dir, crashed) = copy_of(&template);
-        let crashed_said = run_sweep_child(TEST, &crashed, &format!("crash:{k1}:{n}"));
+        let crashed_said = run_sweep_child(&test_name!(TEST), &crashed, &format!("crash:{k1}:{n}"));
         assert_eq!(crashed_said, Said::Aborted, "crash at {k1}");
         let recovery = calls_of(&crashed, |store| {
             drop(store.write().unwrap());
