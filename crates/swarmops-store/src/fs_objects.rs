@@ -24,7 +24,7 @@ use swarmops_core::bytes::to_u64;
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 
 use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
-use crate::fs_ops::{FsMethod, FsOps, HookedFs, RealFs, StoreFs};
+use crate::fs_ops::{FsMethod, FsOps, HookedFs, LinkOutcome, RealFs, StoreFs};
 use crate::layout::Layout;
 
 const MAGIC: [u8; 4] = *b"SOB1";
@@ -165,26 +165,6 @@ impl FsObjectStore {
         self.pool = Some(pool);
     }
 
-    /// One `fsync_dir` of each of `dirs`, every one made whatever the others return; the
-    /// results in `dirs`' order. One after another on this thread when the pool has one
-    /// thread (or there is one dir); otherwise on the pool, as many at once as it has threads.
-    fn fsync_dirs(&self, dirs: &[Utf8PathBuf]) -> Vec<Result<(), IoFailure>> {
-        let fsync = |dir: &Utf8PathBuf| self.fs.fsync_dir(dir.as_std_path());
-        let threads = self
-            .pool
-            .as_ref()
-            .map_or_else(rayon::current_num_threads, ThreadPool::current_num_threads);
-        if threads <= 1 || dirs.len() <= 1 {
-            return dirs.iter().map(fsync).collect();
-        }
-        // `flush` holds `flush_lock` meanwhile, and nothing on the pool takes it.
-        let fsync_all = || dirs.par_iter().map(fsync).collect();
-        match &self.pool {
-            Some(pool) => pool.install(fsync_all),
-            None => fsync_all(),
-        }
-    }
-
     fn touched(&self) -> MutexGuard<'_, BTreeSet<Utf8PathBuf>> {
         // Every update is a single insert or take, so the set is valid even if a holder
         // panicked; poisoning carries no information here.
@@ -192,7 +172,7 @@ impl FsObjectStore {
     }
 
     /// Writes the file for an object that is not stored yet: temp file, `sync_all`,
-    /// no-clobber link into its fan-out directory `fanout`.
+    /// no-clobber link into its fan-out directory `fanout` ([`link_new_file`]).
     fn write_new(
         &self,
         kind: ObjectKind,
@@ -204,14 +184,9 @@ impl FsObjectStore {
         let tmp_dir = self.layout.objects_tmp();
         self.fs.create_dir_all(tmp_dir.as_std_path())?;
         self.ensure_fanout(fanout)?;
-        let temp = self.fs.write_durable_temp(tmp_dir.as_std_path(), &file)?;
         // `AlreadyExists` counts as success: a racing writer placed the same id, which in a
         // content-addressed store means the same bytes.
-        if let Err(err) = self.fs.link_noclobber(&temp, path.as_std_path()) {
-            // Best effort: a leftover temp file is harmless; the link error is what to report.
-            let _ = self.fs.remove(&temp);
-            return Err(err.into());
-        }
+        link_new_file(&self.fs, &tmp_dir, &file, path)?;
         Ok(())
     }
 
@@ -329,7 +304,8 @@ impl ObjectStore for FsObjectStore {
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
         let pending: Vec<Utf8PathBuf> = std::mem::take(&mut *self.touched()).into_iter().collect();
-        let results = self.fsync_dirs(&pending);
+        // `flush_lock` is held meanwhile, and nothing on the pool takes it.
+        let results = fsync_dirs(&self.fs, self.pool.as_ref(), &pending);
         let mut first_error = None;
         for (dir, result) in pending.into_iter().zip(results) {
             if let Err(err) = result {
@@ -356,6 +332,53 @@ fn within_object_limit(payload: &[u8]) -> Result<(), StoreError> {
         });
     }
     Ok(())
+}
+
+/// Places `bytes` at `path` by the sequence every file of the store that never changes once
+/// written takes (storage spec §2 rule 1): an object here, and the entries of M3's external id
+/// index (storage spec §7). A temp file in `tmp_dir` (`objects/tmp/`, on the filesystem every such
+/// file is on, as a hard link needs) is written and synced ([`FsOps::write_durable_temp`]), then
+/// linked at `path` without replacing anything ([`FsOps::link_noclobber`], which removes the temp
+/// file either way). A link that fails removes the temp file too, best effort: a leftover temp
+/// file is harmless, and the link's failure is what is reported. What it returns says whether
+/// `path` was there already. `path`'s directory must exist, and the new name is durable only once
+/// that directory is fsynced ([`fsync_dirs`]), which is the caller's to do. Both go through this
+/// one sequence, so that the order checker's rules for them (W5 for objects) watch one sequence,
+/// not two copies.
+pub(crate) fn link_new_file(
+    fs: &StoreFs,
+    tmp_dir: &Utf8Path,
+    bytes: &[u8],
+    path: &Utf8Path,
+) -> Result<LinkOutcome, StoreError> {
+    let temp = fs.write_durable_temp(tmp_dir.as_std_path(), bytes)?;
+    fs.link_noclobber(&temp, path.as_std_path()).map_err(|err| {
+        let _ = fs.remove(&temp);
+        err.into()
+    })
+}
+
+/// One `fsync_dir` of each of `dirs`, every one made whatever the others return; the results in
+/// `dirs`' order. One after another on this thread when `pool` has one thread (or there is one
+/// dir); otherwise on `pool` (rayon's global pool for `None`), as many at once as it has threads:
+/// while any process has metadata pending, ext4 turns each directory fsync into a journal commit
+/// of its own, and fsyncs made at once share commits (docs/perf.md). The object store's flush
+/// makes its names durable through it, and so does an external id put.
+pub(crate) fn fsync_dirs(
+    fs: &StoreFs,
+    pool: Option<&ThreadPool>,
+    dirs: &[Utf8PathBuf],
+) -> Vec<Result<(), IoFailure>> {
+    let fsync = |dir: &Utf8PathBuf| fs.fsync_dir(dir.as_std_path());
+    let threads = pool.map_or_else(rayon::current_num_threads, ThreadPool::current_num_threads);
+    if threads <= 1 || dirs.len() <= 1 {
+        return dirs.iter().map(fsync).collect();
+    }
+    let fsync_all = || dirs.par_iter().map(fsync).collect();
+    match pool {
+        Some(pool) => pool.install(fsync_all),
+        None => fsync_all(),
+    }
 }
 
 /// Whether `name` is what an object file in a fan-out directory is named: the last 62 hex
