@@ -2,14 +2,19 @@
 //! change list into blobs, rebuilt trees and a changeset ([`Repo::commit`]), reads files and
 //! directories at a changeset without a checkout ([`Repo::read_blob_at`], [`Repo::list_tree`]),
 //! resolves revisions ([`Repo::resolve`]), walks first-parent history
-//! ([`Repo::log_first_parent`]), moves refs by compare-and-swap ([`Repo::cas_ref`]), and checks
-//! a whole store ([`Repo::verify`]). For the git import it records changesets whose every field
-//! the caller gives, many in one journal frame ([`Repo::commit_raw_batch`]).
+//! ([`Repo::log_first_parent`]) and ancestry (the [`history`] module: [`RepoRead::ancestor`],
+//! [`RepoRead::is_ancestor`], [`RepoRead::merge_base`]), moves refs by compare-and-swap
+//! ([`Repo::cas_ref`]), and checks a whole store ([`Repo::verify`]). For the git import it records
+//! changesets whose every field the caller gives, many in one journal frame
+//! ([`Repo::commit_raw_batch`]).
 //!
 //! A request reads in one snapshot of the metadata ([`Repo::snapshot`], a [`RepoRead`]), which
 //! resolves every revision and ref it names in the same view, and commits on the parents it
 //! resolved there ([`Repo::commit_in`]); [`Repo`]'s read methods each take a snapshot of their
-//! own.
+//! own. A snapshot also reads part of a file, keeping only that part while it verifies the whole
+//! blob ([`RepoRead::read_file_span`]), and lists the directories below one to a depth, with each
+//! leaf's size ([`RepoRead::list_tree_depth`]). A diff of two changesets reads both their trees in
+//! one ([`RepoRead::diff`]).
 //!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
@@ -22,7 +27,9 @@
 
 pub mod commit;
 pub mod derive;
+pub mod diff;
 pub mod error;
+pub mod history;
 pub mod log;
 pub mod path_history;
 pub mod raw;
@@ -40,9 +47,10 @@ pub use derive::{
     PathKey, Registry, SkipList, Subject,
 };
 pub use error::RepoError;
+pub use history::{FirstParents, SKIP_AFTER};
 pub use path_history::PathEvent;
 pub use raw::{MAX_RAW_BATCH, RawBatch, RawBatchOutcome, RawChangeset, RawOutcome};
-pub use read::{RepoRead, StoredChangeset};
+pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, TreePage};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
 pub use verify::{MismatchCause, VerifyProblem, VerifyReport};

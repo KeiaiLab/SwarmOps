@@ -36,7 +36,7 @@ and review (M7) come later, in the order of umbrella §13.
 | `swarmops-store` | The loose object files (`FsObjectStore`), the store's layout (`Layout`), the native metadata store (`MetaStore`): the journal, the writer lock, the changeset index and the ref files; and the cache of derived values beside it (`DerivedStore`). The object store's filesystem access, every metadata write and the derived values' reads and writes go through the `FsOps` seam, which the crash tests hook. |
 | `swarmops-merge` | Pure algorithms over trees and lines, with no I/O and no store: the tree diff (leaf-level changes, canonical deltas and three-way path entries) and the line diff (histogram hunks, by `imara-diff`) from M2, and the three-way merge from M4. `swarmops-repo` re-exports it as `swarmops_repo::merge`. |
 | `swarmops-git` | git's side of the import, from M3: git's commit and tree bytes parsed into their fields and rendered back byte for byte (`raw`), the ids git gives objects (`GitOid`, `git_hash`), and `GitSource`, what the import reads from a repository: refs resolved to commits, and objects' bytes, each checked against its id. `GixSource` reads a repository on disk through gix, pinned and seen by that one module, so that git2 could replace it there. `Converter` turns git's commits, trees and blobs into a changeset's fields, trees and blobs, and checks that a commit it took without loss renders back to its own id (`render`); what a changeset cannot hold is refused by class (`LossyClass`) unless the import allows the class. |
-| `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, `verify`, and the derivation engine, which derives values from the immutable objects when they are asked for and caches them in `meta/derived/` (`Repo::derived`). `LocalRepo` is a `Repo` on the local filesystem. |
+| `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, `verify`, and the derivation engine, which derives values from the immutable objects when they are asked for and caches them in `meta/derived/` (`Repo::derived`), the eager ones also ahead of any reader as the journal grows (`Repo::derive_eager`, which `swarmops derive` runs). `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
@@ -211,6 +211,20 @@ stores, for a chain of more than n redirects, the end's value at the chain's sta
 steps along it, so that a later walk is short. A node met again while it is on the stack is a
 cycle, an error (`RepoError::Derived`, `E_INTERNAL`: a derivation that fails on immutable inputs
 fails every time). A put that fails is dropped: the run keeps the value in memory, and returns it.
+
+**Eager derivations** (storage §5). A derivation marked eager, whose key is `()`, is also derived
+ahead of any reader: today the built-in `FirstParentSkipList`, each changeset's first-parent
+ancestors 1, 2, 4, … steps back. `swarmops derive` (`StoreOps::derive`, over `Repo::derive_eager`)
+reads the journal's frames after a given frame, at most 1,000 by default, and derives the eager
+values of each changeset they record, in journal order, so that a changeset's parents have theirs
+first; it reports how many values it derived, how many the store held already, and `next`, the last
+frame it read, after which the next call goes on. `swarmops derive --follow` runs until it is
+killed, from the journal's end (from its first frame with `--from-start`, or after `--after N`): it
+looks again every `--interval-ms` once it has caught up, and prints one envelope a line for each run
+that derived something. A commit derives nothing, so commits keep their latency and their filesystem
+calls, and a value no follower has derived yet is derived by the first reader that asks for it.
+`derive` writes only the cache of derived values, so it needs no identity, and it has no MCP tool:
+it is maintenance beside the store, no agent's work.
 
 **Path history** (storage §5). The built-in derivation `LastModified` gives, for a changeset and a
 path, the newest changeset on its first-parent chain, itself included, whose delta has an entry
@@ -476,9 +490,10 @@ What an agent sees (operations §4):
 
 Every operation is a function from a request type to a response type or an `OpError`, and
 every type is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore
-fields they do not know, so versions can differ (operations §0). `StoreOps` has ten operations:
-`repo_info`, `commit`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
-`ref_delete` and `verify`; `init`, `whoami` and `schema` live in the CLI.
+fields they do not know, so versions can differ (operations §0). `StoreOps` has sixteen operations:
+`repo_info`, `commit`, `resolve_rev`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`,
+`log`, `path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `verify` and `derive`; `init`,
+`whoami` and `schema` live in the CLI.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
 plain text, and `mcp`, below, speaks MCP there instead):
@@ -490,7 +505,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 32 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
 kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 58 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 72 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what
@@ -511,8 +526,9 @@ opaque cursor for the next one; and `show` lists at most `max_changes` changes (
 and says when it cut the list.
 
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
-stdio: one tool per `StoreOps` operation, whose input schema is the request type's JSON Schema
-and whose result is the envelope the CLI prints.
+stdio: one tool per `StoreOps` operation but `derive`, maintenance that `swarmops derive` runs
+beside the store; a tool's input schema is the request type's JSON Schema and its result is the
+envelope the CLI prints.
 
 ## Where to read more
 

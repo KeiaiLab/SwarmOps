@@ -1,7 +1,8 @@
 //! SwarmOps store: content-addressed object files plus metadata.
 //!
-//! Objects live in loose, self-verifying files ([`FsObjectStore`]) under a store root
-//! whose paths [`Layout`] computes. Metadata lives in `meta/` ([`meta`]), behind the
+//! Objects live in loose, self-verifying files ([`FsObjectStore`]), read whole or handed over in
+//! pieces as they decode ([`ObjectStore::read_chunks`]), under a store root whose paths
+//! [`Layout`] computes. Metadata lives in `meta/` ([`meta`]), behind the
 //! [`MetaStore`] facade: a CRC-framed, append-only [`Journal`] is its source of truth,
 //! [`MetaLock`] serializes its writers, the columnar changeset [`Index`] answers lookups by
 //! id, id prefix and delta hash, and ref files hold the refs. Values derived from the objects

@@ -26,26 +26,29 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Write as _};
 use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
-    ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, InfoReq, LogReq, Meta, OpError,
-    PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq,
-    RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
+    DiffReq, Envelope, ErrorCode, InfoReq, LineRange, LogReq, Meta, OpError, PathHistoryReq,
+    ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev,
+    ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Resolved, shell_word};
 
-use crate::cli::{self, BlobCommand, Command, Global, RefCommand};
+use crate::cli::{self, BlobCommand, Command, DiffArgs, DiffFormatArg, Global, RefCommand};
 use crate::context::{self, Env};
 use crate::mcp;
 use crate::output::{self, Format, Printed};
@@ -148,20 +151,20 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             |ops, (who, req)| ops.commit(&who, req),
         ),
         Command::Blob(command) => run_blob(ctx, op, command),
-        Command::Cat { target, max_bytes } => ctx.on_store(
+        Command::Resolve { rev } => resolve_rev(ctx, op, rev),
+        Command::Cat {
+            target,
+            offset,
+            lines,
+            max_bytes,
+        } => ctx.on_store(
             op,
-            || {
-                let (rev, path) = file_target(&target)?;
-                Ok(ReadFileReq {
-                    rev: rev.into(),
-                    path: path.to_owned(),
-                    max_bytes,
-                })
-            },
+            || cat_request(&target, offset, lines, max_bytes),
             |ops, req| ops.read_file(req),
         ),
         Command::Ls {
             target,
+            depth,
             limit,
             cursor,
         } => ctx.on_store(
@@ -171,22 +174,20 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                 Ok(ReadTreeReq {
                     rev: rev.into(),
                     path: path.map(str::to_owned),
+                    depth,
                     limit,
                     cursor,
                 })
             },
             |ops, req| ops.read_tree(req),
         ),
-        Command::Show { rev, max_changes } => ctx.on_store(
-            op,
-            || {
-                Ok(ShowReq {
-                    rev: rev.into(),
-                    max_changes,
-                })
-            },
-            |ops, req| ops.show(req),
-        ),
+        Command::Show { rev, max_changes } => {
+            let req = ShowReq {
+                rev: rev.into(),
+                max_changes,
+            };
+            ctx.on_store(op, || Ok(req), |ops, req| ops.show(req))
+        }
         Command::Log {
             rev,
             limit,
@@ -198,6 +199,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             limit,
             cursor,
         } => history(ctx, op, &target, limit, cursor),
+        Command::Diff(args) => diff(ctx, op, args),
         Command::Ref(command) => run_ref(ctx, op, command),
         Command::Verify { deep } => ctx.on_store(
             op,
@@ -205,6 +207,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             |ops, req| ops.verify(req).and_then(|report| clean(report, deep)),
         ),
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
+        derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
     }
 }
 
@@ -271,6 +274,143 @@ fn run_blob(ctx: &Ctx<'_>, op: &'static str, command: BlobCommand) -> Printed {
             ctx.on_store(op, || Ok(BlobHasReq { ids }), |ops, req| ops.blob_has(req))
         }
     }
+}
+
+/// Runs `derive`, which names operation `op`: once, or with `--follow` until it is killed.
+fn run_derive(ctx: &Ctx<'_>, op: &'static str, command: &Command) -> Printed {
+    let &Command::Derive {
+        after,
+        follow,
+        interval_ms,
+        from_start,
+    } = command
+    else {
+        unreachable!("run passes derive its own command alone");
+    };
+    if follow {
+        let interval = Duration::from_millis(interval_ms);
+        return follow_journal(ctx, op, after, from_start, interval);
+    }
+    ctx.on_store(
+        op,
+        || {
+            Ok(DeriveReq {
+                after,
+                limit: DEFAULT_DERIVE_LIMIT,
+            })
+        },
+        |ops, req| ops.derive(req),
+    )
+}
+
+/// `derive --follow`: `derive` on the store, run after run, until the process is killed: from
+/// the journal's end, from its first frame with `from_start`, or after frame `after`. A run that
+/// read frames is followed by the next at once, one that read none after a wait of `interval`.
+/// Each run that derived something prints its envelope at once, so that a reader of the output
+/// has it as it comes. A run that fails, or a store that does not open, ends the command with its
+/// envelope, which [`crate::run`] prints last, and its exit code; output that cannot be written
+/// ends it with exit code 1, said on stderr.
+fn follow_journal(
+    ctx: &Ctx<'_>,
+    op: &str,
+    after: Option<u64>,
+    from_start: bool,
+    interval: Duration,
+) -> Printed {
+    let named = context::store_named(ctx.global.repo.as_deref(), ctx.env);
+    if let Ok(Some(store)) = &named {
+        ctx.used.repo.replace(Some(store.clone()));
+    }
+    let opened = named.and_then(|named| {
+        let store = named.ok_or_else(|| context::no_store_named(ctx.global.repo.as_deref()))?;
+        LocalOps::open(Utf8Path::new(&store))
+    });
+    let local = match opened {
+        Ok(local) => local,
+        Err(error) => return ctx.finish(op, ctx.used.meta(), Err::<DeriveResp, _>(error)),
+    };
+    let ops = local.recording(&ctx.used.resolved);
+    let failed = |error, started| {
+        let envelope = envelope::<DeriveResp>(op, ctx.used.meta(), Err(error), started);
+        output::render(&envelope, ctx.format)
+    };
+    let mut after = after;
+    if after.is_none() && !from_start {
+        // A run of no frame gives where the journal ends: what it holds is left to readers.
+        let started = Instant::now();
+        match ops.derive(DeriveReq { after, limit: 0 }) {
+            Ok(end) => after = end.next,
+            Err(error) => return failed(error, started),
+        }
+    }
+    loop {
+        let started = Instant::now();
+        let limit = DEFAULT_DERIVE_LIMIT;
+        let run = match ops.derive(DeriveReq { after, limit }) {
+            Ok(run) => run,
+            Err(error) => return failed(error, started),
+        };
+        let caught_up = run.next.is_none();
+        after = run.next.or(after);
+        if run.derived > 0 {
+            let envelope = envelope(op, ctx.used.meta(), Ok(run), started);
+            if let Err(e) = write_now(&output::render(&envelope, ctx.format).stdout) {
+                // The reader is gone, or stdout is broken: nobody gets what follows.
+                let _ = writeln!(io::stderr(), "swarmops: cannot write the envelope: {e}");
+                return Printed {
+                    stdout: String::new(),
+                    exit: 1,
+                };
+            }
+        }
+        if caught_up {
+            thread::sleep(interval);
+        }
+    }
+}
+
+/// Writes `text` to stdout and flushes it, so that a reader has it at once: one envelope of
+/// `derive --follow`'s output.
+fn write_now(text: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()
+}
+
+/// Runs `diff`, which names operation `op`: the files that differ between `args`' two
+/// revisions, a page at a time.
+fn diff(ctx: &Ctx<'_>, op: &'static str, args: DiffArgs) -> Printed {
+    let DiffArgs {
+        from,
+        to,
+        paths,
+        format,
+        context,
+        limit,
+        cursor,
+        max_bytes,
+    } = args;
+    let req = DiffReq {
+        from: from.into(),
+        to: to.into(),
+        paths,
+        format: match format {
+            DiffFormatArg::Names => DiffFormat::Names,
+            DiffFormatArg::Stat => DiffFormat::Stat,
+            DiffFormatArg::Unified => DiffFormat::Unified,
+        },
+        context,
+        limit,
+        cursor,
+        max_bytes,
+    };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.diff(req))
+}
+
+/// Runs `resolve`, which names operation `op`: the changeset `rev` names, and its kind.
+fn resolve_rev(ctx: &Ctx<'_>, op: &'static str, rev: String) -> Printed {
+    let req = ResolveRevReq { rev: rev.into() };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.resolve_rev(req))
 }
 
 /// Runs a `ref` subcommand, which names operation `op`.
@@ -653,6 +793,24 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
         Some((rev, path)) => (rev, Some(path)),
         None => (target, None),
     }
+}
+
+/// `cat`'s request: `target`'s revision and path ([`file_target`]), read from `offset` or by
+/// `lines`, `max_bytes` at most.
+fn cat_request(
+    target: &str,
+    offset: u64,
+    lines: Option<LineRange>,
+    max_bytes: u64,
+) -> Result<ReadFileReq, OpError> {
+    let (rev, path) = file_target(target)?;
+    Ok(ReadFileReq {
+        rev: rev.into(),
+        path: path.to_owned(),
+        offset,
+        lines,
+        max_bytes,
+    })
 }
 
 /// `cat`'s `<rev>:<path>`, as [`split_target`] splits it; a target without a path is

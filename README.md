@@ -71,7 +71,7 @@ planned, each with its milestone.
 | Offline, on one host | ✅ M1: no network code; every operation runs against the host's own store. | **Parity.** |
 | Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s. | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
 | Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
-| Breadth of reads | Today one file or one directory per call. 📋 M2: ranged reads, depths and sizes. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, recursive listings, `git grep <tree>` and sparse checkouts. |
+| Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, `git grep <tree>` and sparse checkouts. |
 | Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
 | Conflicts | Today the one signal is `E_CAS_MISMATCH`, with the ref's actual target. 📋 M4: three-way merge, conflicts reported per hunk as JSON and resolved without a checkout. | **Behind** today: git merges without a checkout (`git merge-tree`), with typed conflict records. M4 is **not yet comparable**. |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
@@ -190,12 +190,12 @@ Every command, its revisions and change lists, and its output are in [Commands](
 
 `swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
 agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
-as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `ref_list`,
-`ref_set`, `ref_delete`, `commit`, `blob_put`, `blob_has` and `verify`. A tool's arguments are
-the operation's request: its `inputSchema` is the request type's schema, as `swarmops schema
-<Type>` prints it, with the definitions it refers to written in place, and kept a plain object:
-a rule across fields that the type's schema states with a top-level `oneOf`, which the Claude
-API refuses in a tool, is left to the description and to the server's own check, and the
+as tools: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`,
+`diff`, `ref_list`, `ref_set`, `ref_delete`, `commit`, `blob_put`, `blob_has` and `verify`. A tool's
+arguments are the operation's request: its `inputSchema` is the request type's schema, as `swarmops
+schema <Type>` prints it, with the definitions it refers to written in place, and kept a plain
+object: a rule across fields that the type's schema states with a top-level `oneOf`, which the
+Claude API refuses in a tool, is left to the description and to the server's own check, and the
 `expected_old` of `ref_set` and `ref_delete` asks for a full changeset id. Its result is the
 envelope the CLI prints for that request, as `structuredContent` and as text, and a failed
 operation sets `isError`, with the envelope's `error` saying why. The server speaks MCP
@@ -293,13 +293,16 @@ and starts no server either.
 | `whoami` | The identity this caller's changes carry. |
 | `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. |
 | `blob put FILE\|-`, `blob has ID…` | Store a file's content (stdin's for `-`) as a blob, outside any commit, and print its id; or list which of the ids the store holds blobs under. A change names a stored blob by id. |
-| `cat REV:PATH [--max-bytes N]` | One file at a revision: UTF-8 text, or base64. |
-| `ls REV[:PATH] [--limit N] [--cursor C]` | One directory at a revision, a page at a time. |
+| `resolve REV` | The full id of the changeset REV names, and its kind: `ref` when REV is exactly a ref's name, `changeset` otherwise. |
+| `cat REV:PATH [--offset N \| --lines A-B] [--max-bytes N]` | One file at a revision, or part of it, from byte N or lines A to B: UTF-8 text, or base64. A read cut short gives `next_offset`, where `--offset` reads on. |
+| `ls REV[:PATH] [--depth N] [--limit N] [--cursor C]` | One directory at a revision, a page at a time, each file with its size; with `--depth`, the directories below it too, each entry with its path. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
 | `log [REV] [-n N] [--cursor C] [--path P]...` | History along first parents, newest first (from `main` by default); with `--path`, only the changesets that change those paths. |
+| `diff FROM TO [--path P]... [--format names\|stat\|unified] [--context N] [--limit N] [--cursor C] [--max-bytes N]` | The files that differ between two revisions, in path order, a page at a time: each one's path and status (`added`, `deleted`, `modified`, `type_changed`); with `stat` also whether it is binary and its inserted and deleted lines; with `unified` also its kinds, blobs and hunks, the page within `--max-bytes` (32 KiB) of JSON. `--path` keeps the files at or below some paths. |
 | `history REV:PATH [-n N] [--cursor C]` | The changesets that changed a file, or anything below a directory, newest first, each with what the path holds after it. |
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
+| `derive [--after N] [--follow] [--interval-ms N] [--from-start]` | Derive ahead of any reader the eager derived values (the first-parent skip list) of the changesets the journal records. Once: up to 1,000 journal frames, from the first or after `--after N`, its `next` saying where to go on. With `--follow`: as they are committed, from the journal's end (its start with `--from-start`), until killed, one envelope a line for each run that derived something. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
 | `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([MCP](#mcp)). |
 

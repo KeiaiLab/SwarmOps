@@ -22,11 +22,14 @@ const REQUESTS: &[&str] = &[
     "BlobPutReq",
     "ChangeInput",
     "CommitReq",
+    "DeriveReq",
+    "DiffReq",
     "GitExportReq",
     "GitImportReq",
     "Identity",
     "InfoReq",
     "InitReq",
+    "LineRange",
     "LogReq",
     "PathHistoryReq",
     "ReadFileReq",
@@ -34,6 +37,7 @@ const REQUESTS: &[&str] = &[
     "RefDeleteReq",
     "RefListReq",
     "RefSetReq",
+    "ResolveRevReq",
     "ShowReq",
     "VerifyReq",
 ];
@@ -48,8 +52,13 @@ const RESPONSES: &[&str] = &[
     "ChangesetDetail",
     "ChangesetSummary",
     "CommitResp",
+    "DeriveResp",
+    "Diff",
+    "DiffHunk",
+    "DiffLineOut",
     "Envelope",
     "FileContent",
+    "FileDiff",
     "GitExportResp",
     "GitImportResp",
     "IdentityInfo",
@@ -65,6 +74,7 @@ const RESPONSES: &[&str] = &[
     "RefOut",
     "RefSetResp",
     "RepoInfo",
+    "ResolvedRev",
     "SignatureOut",
     "Signatures",
     "TreeEntryOut",
@@ -78,12 +88,16 @@ const SCALARS: &[&str] = &[
     "ChangeOp",
     "ContentEncoding",
     "ContentInput",
+    "DiffFormat",
+    "DiffStatus",
     "EntryKindOut",
     "ErrorCode",
     "FileKind",
+    "LineOp",
     "LossyClass",
     "ModeInput",
     "Rev",
+    "RevKind",
 ];
 
 #[test]
@@ -162,12 +176,15 @@ fn schema_descriptions_name_no_rust_items() {
 fn store_ops_signatures<S: StoreOps + ?Sized>() {
     let _: fn(&S, InfoReq) -> Result<RepoInfo, OpError> = S::repo_info;
     let _: fn(&S, &Identity, CommitReq) -> Result<CommitResp, OpError> = S::commit;
+    let _: fn(&S, swarmops_api::ResolveRevReq) -> Result<swarmops_api::ResolvedRev, OpError> =
+        S::resolve_rev;
     let _: fn(&S, ReadFileReq) -> Result<FileContent, OpError> = S::read_file;
     let _: fn(&S, ReadTreeReq) -> Result<TreeListing, OpError> = S::read_tree;
     let _: fn(&S, ShowReq) -> Result<ChangesetDetail, OpError> = S::show;
     let _: fn(&S, LogReq) -> Result<LogPage, OpError> = S::log;
     let _: fn(&S, swarmops_api::PathHistoryReq) -> Result<swarmops_api::PathHistoryPage, OpError> =
         S::path_history;
+    let _: fn(&S, swarmops_api::DiffReq) -> Result<swarmops_api::Diff, OpError> = S::diff;
     let _: fn(&S, RefListReq) -> Result<RefListResp, OpError> = S::ref_list;
     let _: fn(&S, &Identity, RefSetReq) -> Result<RefSetResp, OpError> = S::ref_set;
     let _: fn(&S, &Identity, RefDeleteReq) -> Result<RefSetResp, OpError> = S::ref_delete;
@@ -179,6 +196,7 @@ fn store_ops_signatures<S: StoreOps + ?Sized>() {
     ) -> Result<swarmops_api::BlobPutResp, OpError> = S::blob_put;
     let _: fn(&S, swarmops_api::BlobHasReq) -> Result<swarmops_api::BlobHasResp, OpError> =
         S::blob_has;
+    let _: fn(&S, swarmops_api::DeriveReq) -> Result<swarmops_api::DeriveResp, OpError> = S::derive;
 }
 
 #[test]
@@ -693,6 +711,8 @@ fn omitted_request_fields_take_their_defaults() {
         ReadFileReq {
             rev: Rev("main".to_owned()),
             path: "src/lib.rs".to_owned(),
+            offset: 0,
+            lines: None,
             max_bytes: DEFAULT_MAX_BYTES,
         }
     );
@@ -973,6 +993,9 @@ fn responses_follow_the_spec_shape_and_field_order() {
         encoding: ContentEncoding::Utf8,
         content: "hi\n".to_owned(),
         truncated: false,
+        offset: None,
+        lines: None,
+        next_offset: None,
     };
     assert_eq!(
         serde_json::to_string(&file).unwrap(),
@@ -1141,7 +1164,7 @@ fn verify_report_carries_findings_beside_problems() {
 #[test]
 fn listings_page_with_truncated_and_cursor() {
     // Default pages within the operations spec's 64 KiB target for a default response (§9).
-    assert_eq!(DEFAULT_READ_TREE_LIMIT, 500);
+    assert_eq!(DEFAULT_READ_TREE_LIMIT, 250);
     assert_eq!(DEFAULT_MAX_CHANGES, 400);
     assert_eq!(DEFAULT_LOG_LIMIT, 50);
     // An empty page is a mistake: limits start at 1, and 0 is `E_INVALID_ARG`.
@@ -1161,6 +1184,7 @@ fn listings_page_with_truncated_and_cursor() {
         ReadTreeReq {
             rev: Rev("main".to_owned()),
             path: None,
+            depth: 1,
             limit: DEFAULT_READ_TREE_LIMIT,
             cursor: None,
         }
@@ -1173,6 +1197,7 @@ fn listings_page_with_truncated_and_cursor() {
         ReadTreeReq {
             rev: Rev("main".to_owned()),
             path: Some("src".to_owned()),
+            depth: 1,
             limit: 2,
             cursor: Some("b.rs".to_owned()),
         }
@@ -1196,7 +1221,9 @@ fn listings_page_with_truncated_and_cursor() {
 
     let entry = |name: &str| TreeEntryOut {
         name: name.to_owned(),
+        path: None,
         kind: EntryKindOut::File,
+        size: None,
         id: "b1".to_owned(),
     };
     let page = TreeListing {
@@ -1370,6 +1397,276 @@ fn blobs_by_id_use_their_wire_forms() {
         serde_json::to_string(&present).unwrap(),
         format!(r#"{{"present":["{id}"]}}"#)
     );
+}
+
+/// `read_file` at an offset or by lines, and `read_tree` to a depth with sizes (operations spec
+/// §1): their defaults, their bounds in the schema, and their wire forms.
+mod spans {
+    use swarmops_api::{LineRange, MAX_TREE_DEPTH};
+
+    use super::*;
+
+    #[test]
+    fn offsets_lines_and_depths_take_their_defaults_and_bounds() {
+        assert_eq!(MAX_TREE_DEPTH, 64);
+        let all = schema_for_all();
+        assert_eq!(all["ReadFileReq"]["properties"]["offset"]["default"], 0);
+        let depth = &all["ReadTreeReq"]["properties"]["depth"];
+        assert_eq!(
+            (&depth["default"], &depth["minimum"], &depth["maximum"]),
+            (&json!(1), &json!(1), &json!(MAX_TREE_DEPTH))
+        );
+        for field in ["first", "last"] {
+            assert_eq!(
+                all["LineRange"]["properties"][field]["minimum"], 1,
+                "{field}"
+            );
+        }
+        let by_lines = json!({"rev": "main", "path": "a", "lines": {"first": 3, "last": 5}});
+        let req: ReadFileReq = serde_json::from_value(by_lines).unwrap();
+        assert_eq!(
+            (req.offset, req.lines),
+            (0, Some(LineRange { first: 3, last: 5 }))
+        );
+        let req: ReadTreeReq = serde_json::from_value(json!({"rev": "main"})).unwrap();
+        assert_eq!(req.depth, 1);
+    }
+
+    #[test]
+    fn a_part_of_a_file_and_an_entry_below_say_where_they_are() {
+        let part = FileContent {
+            blob: "b1".to_owned(),
+            size: 30,
+            kind: FileKind::File,
+            encoding: ContentEncoding::Utf8,
+            content: "x\n".to_owned(),
+            truncated: true,
+            offset: Some(10),
+            lines: Some(LineRange { first: 3, last: 5 }),
+            next_offset: Some(12),
+        };
+        assert_eq!(
+            serde_json::to_string(&part).unwrap(),
+            r#"{"blob":"b1","size":30,"kind":"file","encoding":"utf8","content":"x\n","truncated":true,"offset":10,"lines":{"first":3,"last":5},"next_offset":12}"#
+        );
+        let below = TreeEntryOut {
+            name: "b.rs".to_owned(),
+            path: Some("a/b.rs".to_owned()),
+            kind: EntryKindOut::File,
+            size: Some(10),
+            id: "b1".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&below).unwrap(),
+            r#"{"name":"b.rs","path":"a/b.rs","kind":"file","size":10,"id":"b1"}"#
+        );
+    }
+}
+
+/// `derive`'s request and response (operations spec §1): `after` and `limit`, 1,000 frames by
+/// default, in; the counts and `next` out, `next` omitted when there is none.
+mod derive {
+    use swarmops_api::{DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp};
+
+    use super::*;
+
+    #[test]
+    fn derive_takes_after_and_limit_and_gives_counts_and_next() {
+        assert_eq!(DEFAULT_DERIVE_LIMIT, 1000);
+        let defaults: DeriveReq = serde_json::from_value(json!({})).unwrap();
+        let limit = DEFAULT_DERIVE_LIMIT;
+        assert_eq!(defaults, DeriveReq { after: None, limit });
+        assert_ignores_unknown_fields::<DeriveReq>("DeriveReq", json!({"after": 7}));
+        assert_ignores_unknown_fields::<DeriveResp>(
+            "DeriveResp",
+            json!({"derived": 1, "cached": 2, "next": 7}),
+        );
+        let req = DeriveReq {
+            after: None,
+            limit: 5,
+        };
+        assert_eq!(serde_json::to_value(&req).unwrap(), json!({"limit": 5}));
+        let resp = DeriveResp {
+            derived: 1,
+            cached: 2,
+            next: None,
+        };
+        let printed = serde_json::to_string(&resp).unwrap();
+        assert_eq!(
+            printed, r#"{"derived":1,"cached":2}"#,
+            "in this order, next omitted"
+        );
+    }
+}
+
+/// `diff`'s request and page on the wire (operations spec §1).
+mod diff {
+    use swarmops_api::{
+        DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, Diff, DiffFormat,
+        DiffHunk, DiffLineOut, DiffReq, DiffStatus, FileDiff, LineOp,
+    };
+
+    use super::*;
+
+    /// A request needs only `from` and `to`: the rest default to `names`, three lines of
+    /// context, 500 files and 32 KiB, and an unknown field is ignored. It writes its fields in
+    /// the spec's order, without nulls or an empty `paths`; its limits start at 1; and its
+    /// format and a page's statuses and line operations have their wire names.
+    #[test]
+    fn diff_requests_keep_their_defaults_and_wire_names() {
+        assert_eq!(
+            (
+                DEFAULT_DIFF_LIMIT,
+                DEFAULT_DIFF_MAX_BYTES,
+                DEFAULT_DIFF_CONTEXT
+            ),
+            (500, 32_768, 3)
+        );
+        let minimal = json!({"from": "main~1", "to": "main"});
+        let req: DiffReq = serde_json::from_value(minimal.clone()).unwrap();
+        assert_eq!(
+            req,
+            DiffReq {
+                from: Rev::from("main~1"),
+                to: Rev::from("main"),
+                paths: Vec::new(),
+                format: DiffFormat::Names,
+                context: DEFAULT_DIFF_CONTEXT,
+                limit: DEFAULT_DIFF_LIMIT,
+                cursor: None,
+                max_bytes: DEFAULT_DIFF_MAX_BYTES,
+            }
+        );
+        assert_ignores_unknown_fields::<DiffReq>("DiffReq", minimal);
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"from":"main~1","to":"main","format":"names","context":3,"limit":500,"max_bytes":32768}"#
+        );
+        let full = DiffReq {
+            paths: vec!["src".to_owned()],
+            format: DiffFormat::Unified,
+            cursor: Some("src/a.rs".to_owned()),
+            ..req
+        };
+        assert_eq!(
+            serde_json::to_string(&full).unwrap(),
+            r#"{"from":"main~1","to":"main","paths":["src"],"format":"unified","context":3,"limit":500,"cursor":"src/a.rs","max_bytes":32768}"#
+        );
+        let all = schema_for_all();
+        let schema = &all["DiffReq"];
+        assert_eq!(schema["required"], json!(["from", "to"]));
+        for field in ["limit", "max_bytes"] {
+            assert_eq!(schema["properties"][field]["minimum"], 1, "{field}");
+        }
+        assert_eq!(
+            serde_json::to_value([DiffFormat::Names, DiffFormat::Stat, DiffFormat::Unified])
+                .unwrap(),
+            json!(["names", "stat", "unified"])
+        );
+        assert_eq!(
+            serde_json::to_value([
+                DiffStatus::Added,
+                DiffStatus::Deleted,
+                DiffStatus::Modified,
+                DiffStatus::TypeChanged
+            ])
+            .unwrap(),
+            json!(["added", "deleted", "modified", "type_changed"])
+        );
+        assert_eq!(
+            serde_json::to_value([LineOp::Context, LineOp::Add, LineOp::Remove]).unwrap(),
+            json!(["context", "add", "remove"])
+        );
+        assert!(serde_json::from_value::<DiffFormat>(json!("patch")).is_err());
+    }
+
+    /// A page: each file writes only the fields its format gives (a `names` file its path and
+    /// status, a `unified` one everything), in the spec's order, without nulls; the page reads
+    /// back as written, and ignores fields it does not know, a file's too.
+    #[test]
+    fn diff_pages_write_what_each_format_gives() {
+        let named = FileDiff {
+            path: "a.txt".to_owned(),
+            status: DiffStatus::Deleted,
+            old_kind: None,
+            new_kind: None,
+            old_blob: None,
+            new_blob: None,
+            binary: None,
+            insertions: None,
+            deletions: None,
+            hunks: None,
+            hunks_truncated: None,
+        };
+        let line = |op, text: &str| DiffLineOut {
+            op,
+            text: text.to_owned(),
+        };
+        let unified = FileDiff {
+            path: "b.txt".to_owned(),
+            status: DiffStatus::Modified,
+            old_kind: Some(FileKind::File),
+            new_kind: Some(FileKind::Exec),
+            old_blob: Some("b0".to_owned()),
+            new_blob: Some("b1".to_owned()),
+            binary: Some(false),
+            insertions: Some(1),
+            deletions: Some(1),
+            hunks: Some(vec![DiffHunk {
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                lines: vec![line(LineOp::Remove, "x\n"), line(LineOp::Add, "y")],
+            }]),
+            hunks_truncated: Some(true),
+        };
+        let page = Diff {
+            from: "c0".to_owned(),
+            to: "c1".to_owned(),
+            files: vec![named, unified],
+            truncated: true,
+            cursor: Some("b.txt".to_owned()),
+        };
+        let text = serde_json::to_string(&page).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"from":"c0","to":"c1","files":[{"path":"a.txt","status":"deleted"},"#,
+                r#"{"path":"b.txt","status":"modified","old_kind":"file","new_kind":"exec","#,
+                r#""old_blob":"b0","new_blob":"b1","binary":false,"insertions":1,"deletions":1,"#,
+                r#""hunks":[{"old_start":1,"old_lines":1,"new_start":1,"new_lines":1,"lines":"#,
+                r#"[{"op":"remove","text":"x\n"},{"op":"add","text":"y"}]}],"#,
+                r#""hunks_truncated":true}],"truncated":true,"cursor":"b.txt"}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<Diff>(&text).unwrap(), page);
+        assert_ignores_unknown_fields::<Diff>(
+            "Diff",
+            json!({"from": "c0", "to": "c1", "files": [{"path": "a", "status": "added", "zz_nested": 1}], "truncated": false}),
+        );
+    }
+}
+
+/// `resolve_rev` takes a revision and answers with the full id of the changeset it names and its
+/// kind, `ref` or `changeset` in snake case; both ignore fields they do not know, as every request
+/// and response does.
+#[test]
+fn resolve_rev_uses_its_wire_forms() {
+    use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
+
+    assert_ignores_unknown_fields::<ResolveRevReq>("ResolveRevReq", json!({"rev": "main~1"}));
+    assert_ignores_unknown_fields::<ResolvedRev>("ResolvedRev", json!({"id": "c", "kind": "ref"}));
+    let resolved = ResolvedRev {
+        id: "c".to_owned(),
+        kind: RevKind::Changeset,
+    };
+    assert_eq!(
+        serde_json::to_value(&resolved).unwrap(),
+        json!({"id": "c", "kind": "changeset"})
+    );
+    assert_eq!(serde_json::to_value(RevKind::Ref).unwrap(), "ref");
 }
 
 /// `git import`'s contract (M3 Decisions 7, 13 and 14): a request with its defaults, the

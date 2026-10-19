@@ -182,8 +182,10 @@ fn commit_twice(s: &mut Session, store: &str) -> [String; 2] {
     [c1, c2]
 }
 
-/// cat: text, base64, a file at an older revision, a symlink, a truncated read. A rev is
-/// split from its path at the first ':', so a path may hold more.
+/// cat: text, base64, a file at an older revision, a symlink, a truncated read and the read on
+/// from its `next_offset`, a range of lines, and `--offset` with `--lines` or a range that is no
+/// A-B, which are usage errors. A rev is split from its path at the first ':', so a path may hold
+/// more.
 fn cat_at(s: &mut Session, store: &str, c1: &str) {
     let readme = s.run(&["--repo", store, "cat", "main:README.md"]);
     assert_eq!(readme["result"]["content"], "# acme\n\nversion 2\n");
@@ -209,12 +211,29 @@ fn cat_at(s: &mut Session, store: &str, c1: &str) {
     ]);
     assert_eq!(cut["result"]["content"], "fn m");
     assert_eq!(cut["result"]["truncated"], true);
+    assert_eq!(cut["result"]["next_offset"], 4);
+    let rest = s.run(&["--repo", store, "cat", "main:src/main.rs", "--offset", "4"]);
+    assert_eq!(rest["result"]["content"], "ain() {}\n");
+    assert_eq!(rest["result"]["offset"], 4);
+    let third = s.run(&["--repo", store, "cat", "main:README.md", "--lines", "3-3"]);
+    assert_eq!(third["result"]["content"], "version 2\n");
+    assert_eq!(third["result"]["lines"], json!({"first": 3, "last": 3}));
+    for refused in [&["--offset", "1", "--lines", "1-2"][..], &["--lines", "3"]] {
+        let args = [&["--repo", store, "cat", "main:README.md"][..], refused].concat();
+        let usage = s.run(&args);
+        assert_eq!(
+            (usage.exit, usage.code()),
+            (2, "E_INVALID_ARG"),
+            "{refused:?}"
+        );
+    }
     let colon = s.run(&["--repo", store, "cat", "main:no:such:file"]);
     assert_eq!(colon["error"]["details"]["path"], "no:such:file");
 }
 
 /// ls (the root without a path or with an empty one, a directory with or without a trailing
-/// `/`, pages), show (by ref and by prefix) and log (from main, a page at a time).
+/// `/`, pages, `--depth` with each entry's path, and its pages), show (by ref and by prefix) and
+/// log (from main, a page at a time).
 fn ls_show_log(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
     let root = s.run(&["--repo", store, "ls", "main"]);
     let names: Vec<&str> = root["result"]["entries"]
@@ -236,6 +255,30 @@ fn ls_show_log(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
         "--repo", store, "ls", "main", "--limit", "2", "--cursor", "bin",
     ]);
     assert_eq!(rest["result"]["entries"][0]["name"], "latest");
+    let deep = s.run(&["--repo", store, "ls", "main", "--depth", "2"]);
+    let paths: Vec<&str> = deep["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "README.md",
+            "bin",
+            "bin/run",
+            "latest",
+            "logo.bin",
+            "src",
+            "src/main.rs"
+        ]
+    );
+    let deep_page = s.run(&[
+        "--repo", store, "ls", "main", "--depth", "2", "--limit", "2", "--cursor", "bin",
+    ]);
+    assert_eq!(deep_page["result"]["entries"][0]["path"], "bin/run");
+    assert_eq!(deep_page["result"]["cursor"], "latest");
 
     let shown = s.run(&["--repo", store, "show", "main"]);
     assert_eq!(shown["result"]["id"], c2);
@@ -251,6 +294,41 @@ fn ls_show_log(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
     assert_eq!(one["result"]["cursor"], c2);
     let older = s.run(&["--repo", store, "log", "--cursor", c2]);
     assert_eq!(older["result"]["entries"][0]["id"], c1);
+}
+
+/// `resolve`: the full id of the changeset a revision names and its kind, `ref` for exactly a
+/// ref's name and `changeset` for a `~N` walk, a prefix or a full id, with the revision in
+/// `meta.resolved`; a revision that names nothing is `E_REV_NOT_FOUND` (exit 6), and one that is
+/// no revision `E_INVALID_ARG` (exit 2).
+#[test]
+fn resolve_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store, "--name", "acme"]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+    let [c1, c2] = commit_twice(&mut s, &store);
+    let resolve = |s: &mut Session, rev: &str| s.run(&["--repo", &store, "resolve", rev]);
+
+    let main = resolve(&mut s, "main");
+    assert_eq!(main["result"], json!({"id": c2, "kind": "ref"}));
+    assert_eq!(main["meta"]["resolved"], json!({"main": c2}));
+    let back = resolve(&mut s, "main~1");
+    assert_eq!(back["result"], json!({"id": c1, "kind": "changeset"}));
+    let prefix = &c1[..12];
+    s.name(prefix, "c1:12");
+    let by_prefix = resolve(&mut s, prefix);
+    assert_eq!(by_prefix["result"], json!({"id": c1, "kind": "changeset"}));
+    assert_eq!(by_prefix["meta"]["resolved"], json!({prefix: c1}));
+    let full = resolve(&mut s, &c2);
+    assert_eq!(full["result"], json!({"id": c2, "kind": "changeset"}));
+
+    let missing = resolve(&mut s, "release/none");
+    assert_eq!((missing.exit, missing.code()), (6, "E_REV_NOT_FOUND"));
+    let past_root = resolve(&mut s, "main~2");
+    assert_eq!((past_root.exit, past_root.code()), (6, "E_REV_NOT_FOUND"));
+    let bad = resolve(&mut s, "HEAD");
+    assert_eq!((bad.exit, bad.code()), (2, "E_INVALID_ARG"));
+    insta::assert_json_snapshot!(s.transcript());
 }
 
 /// `history` and `log --path`: a file's history and a directory's, a page at a time with its
@@ -324,6 +402,150 @@ fn history_and_log_path_golden() {
     let zero = s.run(&["--repo", &store, "history", "main:src", "-n", "0"]);
     assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
     insta::assert_json_snapshot!(s.transcript());
+}
+
+/// diff: the files that differ between two changesets, by name (the default), with line counts
+/// (`stat`) and with unified hunks (`--context` lines around each change), every status among
+/// them and binary content too; a page at a time (`--limit`, `--cursor`), within `--path`s, and
+/// within `--max-bytes`; a changeset against itself; and its revision and usage errors.
+#[test]
+fn diff_names_stat_unified_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store, "--name", "acme"]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+    let [c1, c2] = changesets_to_diff(&mut s, &store);
+    diff_formats(&mut s, &store, [&c1, &c2]);
+    diff_pages_and_errors(&mut s, &store, [&c1, &c2]);
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// Two changesets to diff, the second on the first, with each status between them and binary
+/// content too; their ids, named `[c1]` and `[c2]`.
+fn changesets_to_diff(s: &mut Session, store: &str) -> [String; 2] {
+    let mutate = ["--repo", store, "--as", AGENT];
+    let first = s.file(
+        "first.json",
+        &json!([
+            {"path": "README.md", "op": "put", "content": {"inline": "# acme\n\nline 3\nline 4\n"}},
+            {"path": "bin/run", "op": "put", "content": {"inline": "#!/bin/sh\necho hi\n"}},
+            {"path": "latest", "op": "put", "mode": "symlink", "content": {"inline": "README.md"}},
+            {"path": "logo.bin", "op": "put", "content": {"base64": "AAEC/w=="}},
+            {"path": "notes.txt", "op": "put", "content": {"inline": "kept\n"}},
+        ])
+        .to_string(),
+    );
+    let c1 = s.run(&[&mutate[..], &["commit", "-m", "first", "--changes", &first]].concat());
+    let c1 = s.name_at(&c1, "/result/changeset", "c1");
+    let second = s.file(
+        "second.json",
+        &json!([
+            {"path": "README.md", "op": "put",
+             "content": {"inline": "# acme\n\nline three\nline 4\n"}},
+            {"path": "bin/run", "op": "put", "mode": "exec",
+             "content": {"inline": "#!/bin/sh\necho hi\n"}},
+            {"path": "latest", "op": "put", "content": {"inline": "README.md"}},
+            {"path": "logo.bin", "op": "put", "content": {"base64": "AAEC/g=="}},
+            {"path": "notes.txt", "op": "delete"},
+            {"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() {}\n"}},
+        ])
+        .to_string(),
+    );
+    let args = [
+        "commit",
+        "-m",
+        "second",
+        "--parent",
+        &c1,
+        "--changes",
+        &second,
+    ];
+    let c2 = s.run(&[&mutate[..], &args].concat());
+    let c2 = s.name_at(&c2, "/result/changeset", "c2");
+    [c1, c2]
+}
+
+/// diff of `c1` to `c2` in each format: names (the default, and both revisions resolved), stat,
+/// and unified with the default context and with none.
+fn diff_formats(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
+    let diff = ["--repo", store, "diff", c1, c2];
+    let with = |more: &[&'static str]| [&diff[..], more].concat();
+    let names = s.run(&diff);
+    let statuses: Vec<(&str, &str)> = names["result"]["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| {
+            (
+                file["path"].as_str().unwrap(),
+                file["status"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        statuses,
+        [
+            ("README.md", "modified"),
+            ("bin/run", "modified"),
+            ("latest", "type_changed"),
+            ("logo.bin", "modified"),
+            ("notes.txt", "deleted"),
+            ("src/lib.rs", "added"),
+        ]
+    );
+    assert_eq!(names["meta"]["resolved"], json!({c1: c1, c2: c2}));
+    let stat = s.run(&with(&["--format", "stat"]));
+    assert_eq!(
+        stat["result"]["files"][3],
+        json!({"path": "logo.bin", "status": "modified", "binary": true})
+    );
+    let unified = s.run(&with(&["--format", "unified"]));
+    assert_eq!(
+        unified["result"]["files"][0]["hunks"][0]["lines"][2],
+        json!({"op": "remove", "text": "line 3\n"})
+    );
+    let tight = s.run(&with(&["--format", "unified", "--context", "0"]));
+    assert_eq!(tight["result"]["files"][0]["hunks"][0]["old_start"], 3);
+}
+
+/// diff of `c1` to `c2` a page at a time, within paths, and within --max-bytes; of a changeset
+/// against itself; and its errors: a revision that names nothing, a limit of 0, a format it does
+/// not know.
+fn diff_pages_and_errors(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
+    let diff = ["--repo", store, "diff", c1, c2];
+    let with = |more: &[&'static str]| [&diff[..], more].concat();
+    let page = s.run(&with(&["--limit", "2"]));
+    assert_eq!(
+        (&page["result"]["truncated"], &page["result"]["cursor"]),
+        (&json!(true), &json!("bin/run"))
+    );
+    let next = s.run(&with(&["--limit", "2", "--cursor", "bin/run"]));
+    assert_eq!(next["result"]["files"][0]["path"], "latest");
+    let within = s.run(&with(&[
+        "--path",
+        "src/",
+        "--path",
+        "README.md",
+        "--format",
+        "stat",
+    ]));
+    assert_eq!(within["result"]["files"].as_array().unwrap().len(), 2);
+    // The first file comes whatever --max-bytes says, its hunks cut to those that fit.
+    let cut = s.run(&with(&["--format", "unified", "--max-bytes", "1"]));
+    assert_eq!(cut["result"]["files"].as_array().unwrap().len(), 1);
+    assert_eq!(cut["result"]["files"][0]["hunks_truncated"], true);
+    let same = s.run(&["--repo", store, "diff", c2, c2]);
+    assert_eq!(same["result"]["files"], json!([]));
+
+    let unknown = s.run(&["--repo", store, "diff", c1, "release/nope"]);
+    assert_eq!((unknown.exit, unknown.code()), (6, "E_REV_NOT_FOUND"));
+    let zero = s.run(&with(&["--limit", "0"]));
+    assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
+    let format = s.run(&with(&["--format", "patch"]));
+    assert_eq!(
+        (format.exit, format.code(), &format["op"]),
+        (2, "E_INVALID_ARG", &json!("diff"))
+    );
 }
 
 #[test]
@@ -1808,5 +2030,184 @@ impl Serialize for Json {
                 map.end()
             }
         }
+    }
+}
+
+/// `swarmops derive` (operations spec §1, storage spec §5's eager mode): the skip lists of new
+/// changesets derived ahead of any reader, once or, with `--follow`, as they are committed.
+mod derive {
+    use std::path::Path;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use serde_json::{Value, json};
+    use swarmops_testkit::child::Child;
+
+    use crate::support::{self, Store};
+
+    /// The agent the commits act as.
+    const WRITER: &str = "agent/worker-18";
+
+    /// Whether `store` holds changeset `id`'s first-parent skip list, the value of the built-in
+    /// eager derivation.
+    fn has_list(store: &Store, id: &str) -> bool {
+        let lists = Path::new(store.path()).join("meta/derived/first_parent_skip_list/1");
+        lists.join(&id[..2]).join(&id[2..]).is_file()
+    }
+
+    /// Whether `store` holds `id`'s skip list by `deadline`, looking every 10 ms.
+    fn listed_by(store: &Store, id: &str, deadline: Instant) -> bool {
+        loop {
+            if has_list(store, id) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `swarmops --repo <store> derive --follow`, then `args`: a child that runs until it is
+    /// killed, and is killed and reaped when dropped.
+    fn follower(store: &Store, args: &[&str]) -> Child {
+        let mut line = vec!["--repo", store.path(), "derive", "--follow"];
+        line.extend(args);
+        Child::spawn(&mut support::swarmops(&line, &[]))
+    }
+
+    /// Kills `child`, a follower of `store`, reaps it, and gives the `derived` count of each
+    /// envelope it printed: one compact line each, a success of `derive` on that store, printed
+    /// for a run that derived something, and none of whose values was stored already (a
+    /// follower reads each frame once, and nothing else derives here). Nothing on stderr.
+    fn rounds(child: &mut Child, store: &Store) -> Vec<u64> {
+        let (output, killed) = child.finish(Instant::now());
+        let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+        let stderr = String::from_utf8(output.stderr).expect("UTF-8 stderr");
+        assert!(
+            killed,
+            "it follows until killed: {:?}\n{stdout}",
+            output.status
+        );
+        assert_eq!(stderr, "", "nothing on stderr");
+        let round = |line: &str| {
+            let envelope: Value = serde_json::from_str(line).expect("one envelope a line");
+            assert_eq!(envelope["ok"], true, "{line}");
+            assert_eq!(envelope["op"], "derive", "{line}");
+            assert_eq!(envelope["meta"]["repo"], store.path(), "{line}");
+            let derived = envelope["result"]["derived"].as_u64().expect("a count");
+            assert!(
+                derived > 0,
+                "only a run that derived something prints: {line}"
+            );
+            assert_eq!(
+                envelope["result"]["cached"], 0,
+                "each frame read once: {line}"
+            );
+            derived
+        };
+        stdout.lines().map(round).collect()
+    }
+
+    /// Once, `swarmops derive` derives the skip lists of what the journal records, up to 1,000
+    /// frames, and says where to go on (`next`); after that frame nothing is left, and `next` is
+    /// omitted; from the first frame again, the lists are found stored. It needs no identity.
+    /// `--from-start` and `--interval-ms` without `--follow`, `--after` with `--from-start`, and
+    /// an interval of 0 are usage errors; and a follower of a store that is not there fails at
+    /// once, as any command does.
+    #[test]
+    fn derive_runs_once_and_says_where_to_go_on() {
+        let store = Store::init();
+        let derive = |args: &[&str]| store.read(&[&["derive"][..], args].concat()).ok();
+        assert_eq!(derive(&[]), json!({"derived": 0, "cached": 0}));
+        let c0 = store.commit(WRITER, "f", "0", None);
+        let c1 = store.commit(WRITER, "f", "1", Some(&c0));
+
+        assert_eq!(derive(&[]), json!({"derived": 2, "cached": 0, "next": 1}));
+        assert!(has_list(&store, &c0) && has_list(&store, &c1));
+        assert_eq!(
+            derive(&["--after", "1"]),
+            json!({"derived": 0, "cached": 0})
+        );
+        assert_eq!(derive(&[]), json!({"derived": 0, "cached": 2, "next": 1}));
+
+        for refused in [
+            &["derive", "--from-start"][..],
+            &["derive", "--interval-ms", "10"],
+            &["derive", "--follow", "--after", "1", "--from-start"],
+            &["derive", "--follow", "--interval-ms", "0"],
+        ] {
+            let run = store.read(refused);
+            assert_eq!(run.exit(), 2, "{run}");
+            run.err("E_INVALID_ARG");
+        }
+        let gone = format!("{}/gone", store.tmp().to_str().expect("UTF-8 temp paths"));
+        let missing = support::run(&["--repo", &gone, "derive", "--follow"], &[]);
+        assert_eq!(missing.exit(), 6, "{missing}");
+        missing.err("E_NOT_A_REPO");
+    }
+
+    /// A follower derives the skip lists of what is committed while it runs, and leaves to
+    /// readers what was there when it started (it starts at the journal's end). Three commits
+    /// come before it; then probes, one at a time, until it has derived one, so that it is past
+    /// its start; then three more commits, whose lists are all there within 5 s. What it printed
+    /// counts at most the probes and the three: never the three made before it.
+    #[test]
+    fn derive_follow_derives_commits_made_while_it_runs() {
+        let store = Store::init();
+        let mut parent: Option<String> = None;
+        let mut commit = |content: &str| {
+            let id = store.commit(WRITER, "f", content, parent.as_deref());
+            parent = Some(id.clone());
+            id
+        };
+        for i in 0..3 {
+            commit(&format!("before {i}"));
+        }
+        let mut child = follower(&store, &["--interval-ms", "50"]);
+
+        let ready_by = Instant::now() + Duration::from_secs(60);
+        let mut probes = 0_u64;
+        loop {
+            probes += 1;
+            let probe = commit(&format!("probe {probes}"));
+            let wait = Instant::now() + Duration::from_millis(500);
+            if listed_by(&store, &probe, wait) {
+                break;
+            }
+            assert!(Instant::now() < ready_by, "{probes} probes, none derived");
+        }
+        let made: Vec<String> = (0..3).map(|i| commit(&format!("after {i}"))).collect();
+        let by = Instant::now() + Duration::from_secs(5);
+        for id in &made {
+            assert!(listed_by(&store, id, by), "{id}'s list within 5 s");
+        }
+
+        let derived: u64 = rounds(&mut child, &store).iter().sum();
+        assert!(
+            derived <= probes + 3,
+            "{derived} values derived for {probes} probes and 3 commits"
+        );
+    }
+
+    /// With `--from-start` a follower first derives what the journal holds: three commits made
+    /// before it starts are its first run, of 3 values; a fourth, made once their lists are
+    /// there, is derived as it comes.
+    #[test]
+    fn derive_follow_from_the_start_derives_what_is_there_first() {
+        let store = Store::init();
+        let c0 = store.commit(WRITER, "f", "0", None);
+        let c1 = store.commit(WRITER, "f", "1", Some(&c0));
+        let c2 = store.commit(WRITER, "f", "2", Some(&c1));
+        let mut child = follower(&store, &["--from-start", "--interval-ms", "50"]);
+
+        let within = |seconds| Instant::now() + Duration::from_secs(seconds);
+        assert!(listed_by(&store, &c2, within(60)), "the lists there before");
+        let c3 = store.commit(WRITER, "f", "3", Some(&c2));
+        assert!(listed_by(&store, &c3, within(5)), "a list as it comes");
+
+        let rounds = rounds(&mut child, &store);
+        assert_eq!(rounds.first(), Some(&3), "{rounds:?}");
+        assert!(rounds.iter().sum::<u64>() <= 4, "{rounds:?}");
     }
 }

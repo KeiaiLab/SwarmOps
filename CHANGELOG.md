@@ -289,6 +289,61 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   the Rust API: `ContentInput::Blob`, `BlobPutReq`, `BlobPutResp`, `BlobHasReq`, `BlobHasResp`,
   `StoreOps::{blob_put, blob_has}`, `ChangeOp::PutBlob`, `Repo::put_blob`, `Repo::has_blob`,
   `BlobPut` and `RepoError::MissingBlob`.
+- `swarmops-store`: `ObjectStore::read_chunks` reads an object as `get` does, with the same
+  checks and errors, but hands its payload over in pieces, in order, instead of returning it: a
+  raw payload from the buffer its file was read into, a zstd one 64 KiB at a time as its stream
+  decodes. The pieces are hashed as they go and the id checked at the end, so `Corrupt` comes
+  after the pieces before the damage went by, and the caller drops what it kept of them.
+- `swarmops-repo`: `RepoRead::read_file_span` reads part of a file (`FileSpan::Bytes` from an
+  offset, or `FileSpan::Lines`, a 1-based range of lines, of which those that exist) and keeps
+  only that part, its first `max` bytes, while the whole blob is verified (`FileSpanRead`).
+  `RepoRead::list_tree_depth` lists a directory and the directories below it to a depth, in
+  pre-order and a page at a time after a path, each leaf with its size from its object's header
+  (`ListedEntry`, `TreePage`); a page reads the trees it enters, and none to learn that more
+  entries follow.
+- `read_file` (`swarmops cat`) reads part of a file: from `offset` (`--offset N`), or the lines a
+  `lines` range names (`--lines A-B`, numbered from 1, both included; those that exist). Its
+  result says where the content starts (`offset`), which lines it holds (`lines`) and, when it
+  is cut short, where the next page starts (`next_offset`), so that text paged by it stays
+  text; an offset inside a character gives base64, and an offset past the end empty content. It
+  keeps only the bytes it returns while it verifies the whole blob. An MCP agent, which the
+  server asks for 32 KiB or less at a time, can now read all of a larger file.
+- `read_tree` (`swarmops ls`) takes `depth` (`--depth N`, 1 to 64): the directories below the
+  listed one too, in pre-order, a directory before the entries below it, each entry past depth
+  1 with its `path`, and a page's cursor its last entry's path. Every file entry carries its
+  `size`, from its object's header. The two tools' descriptions in `swarmops mcp` say so.
+- `swarmops derive`: the eager derived values (storage spec §5; today each changeset's
+  first-parent skip list) derived ahead of any reader. Once, it derives those of the changesets
+  the journal records in up to 1,000 frames, from the first or after `--after N`, and reports
+  how many it `derived`, how many were `cached` already, and `next`, the last frame it read, to
+  go on from. With `--follow` it runs until it is killed: from the journal's end (its start with
+  `--from-start`), it derives the changesets as they are committed, looking again every
+  `--interval-ms` (500) once it has caught up, and prints one envelope a line for each run that
+  derived something. Commits derive nothing. It writes only the cache of derived values, so it
+  needs no identity, and it has no MCP tool. Its API is `StoreOps::derive` (`DeriveReq`,
+  `DeriveResp`) over `Repo::derive_eager`.
+- `swarmops diff FROM TO`, the operation `diff` and its MCP tool: the files that differ between
+  two revisions, in path order, a page at a time (`--limit`, 500 by default, and an opaque
+  `--cursor`), within `--path`s if given. `--format names` (the default) gives each file's path
+  and status (`added`, `deleted`, `modified`, `type_changed`; no renames); `stat` also whether
+  it is binary and the lines it inserts and deletes; `unified` also its kinds, its blob ids and
+  its hunks, with `--context` lines (3 by default) around each change, the page within
+  `--max-bytes` of JSON (32 KiB by default; its first file comes all the same, its hunks cut to
+  those that fit, `hunks_truncated`). Both revisions resolve in one snapshot. Below it,
+  `RepoRead::diff` gives the leaf-level changes between two changesets' trees.
+- `swarmops-repo`: first-parent ancestry in a snapshot (`RepoRead`): `first_parents(from)` walks
+  back through first parents, `ancestor(cs, n)` gives the changeset `n` first-parent steps back,
+  `is_ancestor(a, of)` says whether `a` is on `of`'s first-parent chain, and `merge_base(a, b)`
+  gives the newest changeset on both chains. Generations prune every walk: a gap of up to
+  `SKIP_AFTER` (1,024) generations is walked by narrow index lookups, and a wider one lifts along
+  the first-parent skip list, a jump per bit of the distance, deriving the lists the store lacks
+  (the first derivation of a list derives the whole chain below it, once). A revision's `~N` walks
+  through `ancestor`, so a long one takes a few lookups, and one that reaches past a root by more
+  than its changeset's generation is `E_REV_NOT_FOUND` without a walk.
+- `resolve_rev`, as `swarmops resolve <rev>` and the MCP tool `resolve_rev`: the full id of the
+  changeset a revision names, resolved as every operation resolves one, and its kind, `ref` when
+  the revision is exactly a ref's name and `changeset` otherwise (M5 adds `workspace`). The schema
+  gains `ResolveRevReq`, `ResolvedRev` and `RevKind`, and `StoreOps` gains `resolve_rev`.
 
 #### M3: git import (2026-10-19)
 
@@ -572,6 +627,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   contents' together, and its hint stores them with `blob put` to name them by id) or
   `request` (the CLI's, before parsing); an MCP line over the limit is a JSON-RPC `-32600`
   without an `id`, its rest passed over, and the server serves on.
+- `read_tree`'s default page holds 250 entries, where it held 500: entries carry a `size` now,
+  and a `path` past depth 1, and 500 of them print past the 64 KiB target for a default response
+  even at depth 1 (70,780 bytes, with 30-byte names), where 250 at depth 3 print in 60,971 (a
+  test of `swarmops-ops` measures it). A `read_tree` cursor that is no repository path is
+  `E_INVALID_ARG`, where any string was taken as a name to resume after.
 
 #### M3: git import (2026-10-19)
 
