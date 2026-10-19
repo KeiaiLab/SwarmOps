@@ -1,5 +1,5 @@
-//! SwarmOps' reading of git: the repositories `git import` takes history from, and the exact
-//! bytes of git's commits and trees.
+//! SwarmOps' git side: the repositories `git import` takes history from and `git export` writes
+//! it to, and the exact bytes of git's commits and trees.
 //!
 //! - [`oid`]: git's object ids ([`GitOid`]), its object kinds ([`RawKind`]) and formats
 //!   ([`ObjectFormat`]), and [`git_hash`], the id git gives an object's bytes.
@@ -16,25 +16,33 @@
 //!   fields ([`Converted`]), trees and blobs, refusing what the classes it allows do not cover
 //!   ([`ConvertError`]); a commit is converted without loss only if it renders back to its own
 //!   id.
+//! - [`sink`]: [`GitSink`], what the export writes to a repository: objects, made durable before a
+//!   branch moves, and the branch, moved by compare-and-swap.
+//! - [`gix_sink`]: [`GixSink`], the [`GitSink`] of a repository on disk.
 //!
 //! Umbrella decision 3: gix is pinned (`=0.89.0`, its `sha1` feature alone, no default features)
-//! and seen by [`gix_source`] alone, which also computes the SHA-1 behind [`git_hash`]. Everything
-//! above [`GitSource`] reads raw bytes and parses them with this crate's own parsers, never with
-//! gix's, so git2 (0.21.0, the fallback) would be a second [`GitSource`] in place of
-//! [`gix_source`], and nothing else would change.
+//! and seen by [`gix_source`] and [`gix_sink`] alone; the first also computes the SHA-1 behind
+//! [`git_hash`]. Everything above [`GitSource`] and [`GitSink`] reads and writes raw bytes, parsed
+//! and rendered with this crate's own code, never with gix's, so git2 (0.21.0, the fallback) would
+//! be a second [`GitSource`] and [`GitSink`] in place of those two modules, and nothing else would
+//! change.
 
 pub mod convert;
+pub mod gix_sink;
 pub mod gix_source;
 pub mod lossy;
 pub mod oid;
 pub mod raw;
 pub mod render;
+pub mod sink;
 pub mod source;
 
 pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
+pub use gix_sink::GixSink;
 pub use gix_source::GixSource;
 pub use lossy::{LossyClass, LossySet};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
 pub use raw::{RawCommit, RawError, RawIdent, RawTree, RawTreeEntry};
 pub use render::{commit_bytes, tree_bytes};
+pub use sink::{BranchUpdate, GitSink, SinkError, Stored};
 pub use source::{GitSource, SourceError, Unsupported};

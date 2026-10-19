@@ -1,6 +1,6 @@
 [package]
 name = "swarmops-git"
-description = "SwarmOps git reading: git's commit and tree bytes parsed and rendered exactly, and the repositories they come from, read through gix behind one trait"
+description = "SwarmOps' git side: git's commit and tree bytes parsed and rendered exactly, the repositories the import reads through gix behind one trait, and those the export writes behind another"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,13 +13,22 @@ autotests = false
 [lints]
 workspace = true
 
-# gix is seen by `src/gix_source.rs` alone (umbrella decision 3): git2 0.21.0 would be a second
-# `GitSource` there.
+[features]
+# The test hooks of `GixSink`: `GixSink::open_recording_syncs`, which records each path it
+# fsyncs, and `GixSink::on_lock_retry`, which the ref lock's retry loop runs between two
+# attempts. Off unless asked for, so that every other build (a release build included) holds
+# neither; the workspace's gates turn it on with `--all-features`.
+test-hooks = []
+
+# gix is seen by `src/gix_source.rs` and `src/gix_sink.rs` alone (umbrella decision 3): git2
+# 0.21.0 would be a second `GitSource` and a second `GitSink` there. rayon syncs the objects an
+# export writes in parallel.
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 # The object length limit (`MAX_OBJECT_LEN`), which the conversion refuses a longer blob against.
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 gix.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

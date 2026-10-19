@@ -1,7 +1,7 @@
-//! [`GixSource`], the [`GitSource`] of a repository on disk, read through gix: the crate's one
-//! contact with gix (umbrella decision 3), which also computes the SHA-1 behind
-//! [`git_hash`](crate::git_hash). Replacing gix, by git2 0.21.0 for instance, replaces this module
-//! alone.
+//! [`GixSource`], the [`GitSource`] of a repository on disk, read through gix: with
+//! [`gix_sink`](crate::gix_sink), the crate's contact with gix (umbrella decision 3), and what
+//! computes the SHA-1 behind [`git_hash`](crate::git_hash). Replacing gix, by git2 0.21.0 for
+//! instance, replaces these two modules alone.
 
 use std::fmt;
 use std::path::Path;
@@ -129,8 +129,9 @@ impl GitSource for GixSource {
 /// (`<path>/.git`, or else `path` itself), with `gix::open::Options::isolated()`: no global or
 /// system configuration and no `GIT_*` variable, and replacement objects never applied. It
 /// refuses, before any read, a repository whose objects are named by another hash than SHA-1, one
-/// whose refs are kept otherwise than as files, and a shallow clone. [`GixSource::open`] opens
-/// through it.
+/// whose refs are kept otherwise than as files, and a shallow clone. [`GixSource::open`] and
+/// [`GixSink::open`](crate::GixSink::open) both open through it, so that the export writes only
+/// repositories the import reads.
 pub(crate) fn open_repository(path: &Path) -> Result<gix::Repository, SourceError> {
     // gix cannot open a SHA-256 repository without its `sha256` feature, and says so without the
     // format's name: the repository's own configuration is read first, to name it.

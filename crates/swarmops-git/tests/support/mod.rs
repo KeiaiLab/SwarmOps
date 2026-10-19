@@ -2,6 +2,13 @@
 //! repositories no fixture holds (a tree 10,000 directories deep, a blob whose header claims more
 //! than an object holds, an object of the wrong kind). A module directory, so that Cargo does not
 //! take it for a test target of its own.
+//!
+//! [`MemSink`] (`mem_sink.rs`) is a [`GitSink`](swarmops_git::GitSink) held in memory, for the
+//! export's tests: its log replays into the images a power loss could leave.
+
+mod mem_sink;
+
+pub use mem_sink::{Keep, MemImage, MemSink, SinkCall, reaches_only_kept};
 
 use std::collections::HashMap;
 

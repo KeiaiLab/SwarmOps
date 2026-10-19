@@ -5,6 +5,7 @@
 
 mod convert;
 mod raw;
+mod sink;
 mod source;
 mod support;
 
