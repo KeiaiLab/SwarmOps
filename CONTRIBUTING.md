@@ -23,7 +23,7 @@ alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here
   [`docs/superpowers/plans/`](docs/superpowers/plans/) with its tasks and acceptance tests, and
   cites the spec sections it implements. Small fixes need no plan.
 - **Check what is already known.** [docs/known-limitations.md](docs/known-limitations.md) lists
-  what M1 and M1.5 leave open and the milestone that is meant to close each item.
+  what M1, M1.5 and M1.6 leave open and the milestone that is meant to close each item.
 
 ## Setup
 
@@ -75,7 +75,9 @@ Every cargo build, test, clippy and doc step uses `--locked`, so `Cargo.lock` (c
 `fuzz/Cargo.lock`) is exactly what is built. `scripts/check.sh` runs the same steps on a machine
 without `just`. Lints are strict: `unsafe` is forbidden, every exported item must be documented
 (`missing_docs`), clippy's `all` group is denied and `pedantic` warns (so fails under
-`-D warnings`), apart from five noisy lints the workspace `Cargo.toml` allows.
+`-D warnings`), apart from five noisy lints the workspace `Cargo.toml` allows. `missing_docs`
+reaches test builds too: a `pub` item under `#[cfg(test)]` that the crate root reaches needs its
+`///` comment, and a new test, bench or binary crate root its `//!` one.
 
 ## Tests
 

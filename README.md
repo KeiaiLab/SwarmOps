@@ -28,7 +28,7 @@
 
 SwarmOps is source control built for a swarm of coding agents: 10 to 50 Claude Code or LangGraph
 processes on one host, committing to one repository at once. It is written in Rust and fully
-embedded: one program, no external database, no daemon. It is pre-release, at milestone M1.5:
+embedded: one program, no external database, no daemon. It is pre-release, at milestone M1.6:
 usable by one agent, with a store that already takes commits from many processes at once;
 merging and landing, which a swarm needs, come in M4 ([roadmap](#roadmap)).
 
@@ -64,9 +64,9 @@ planned, each with its milestone.
 | Order of writes | ✅ M1: every commit and ref move is a frame of one journal, appended under one lock, so all of them have a single global order. | **Ahead by design.** |
 | Stale locks | ✅ M1: the writer lock is an `flock`, which the kernel releases when its holder dies. | **Ahead by design.** A git process killed with `SIGKILL` while it holds `index.lock` or a ref's `.lock` leaves the file behind, to be removed by hand (git removes its lock files on the signals it can catch). |
 | Durability | ✅ M1: full fsync is the only mode; an object is synced before a journal frame names it, and a commit returns after its frame's `fdatasync`. ✅ M1.5: the policy for a failed fsync. | **Ahead by design.** Git's defaults (2.43) sync packs, pack metadata and the commit graph, not loose objects, refs or the index. |
-| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gap: four codes are not raised yet. |
-| Commits from many writers | ✅ M1: concurrent commits all succeed, short of a lock wait past 10 s (the retryable `E_BUSY`). | **Parity** with agents in separate git worktrees, on lost commits and lock failures. |
-| One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
+| Machine-readable contract | ✅ M1: one JSON envelope per command, with a stable `E_*` code, a fixed exit code, `retryable`, `details` and a `hint`; a JSON Schema for every request and response. ✅ M1.6: an I/O failure names its operation and store file, never a host path; a write reports what its recovery repaired (`meta.recovered`); `verify` lists typed findings. | **Ahead by design** for errors, which git reports as free text on stderr. Git's plumbing and `--porcelain` formats narrow the gap for output. Known gap: four codes are not raised yet. |
+| Commits from many writers | ✅ M1: concurrent commits all succeed, short of a lock wait past 10 s or, since M1.6, a snapshot that meets a new commit in each of its 32 rounds (the retryable `E_BUSY`). | **Parity** with agents in separate git worktrees, on lost commits and lock failures. |
+| One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. ✅ M1.6: `commit --advance` moves a ref to the new changeset in the commit's own transaction, or records nothing. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
 | Reading a path at a revision | ✅ M1: `cat REV:PATH` and `ls REV[:PATH]`, without a checkout. | **Parity** with `git show REV:PATH` and `git ls-tree`. |
 | Offline, on one host | ✅ M1: no network code; every operation runs against the host's own store. | **Parity.** |
 | Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s. | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
@@ -334,9 +334,12 @@ spec §2) prints no envelope: the process aborts, saying why on stderr.
 ```
 
 `op` names the operation (`cat` is `read_file`), and `meta.resolved` what each revision named.
-A failure's `error` carries a stable `E_*` code, whether running it again can succeed (as it
-is, or after re-reading what the error names), machine-readable `details`, and a `hint`, often
-the next command to run. The exit code is
+After a `commit`, `ref set` or `ref delete` whose write first repaired what an earlier writer
+left behind, `meta.recovered` says what it repaired, on success and on `E_CAS_MISMATCH` alike;
+it is no warning. A failure's `error` carries a stable `E_*` code, whether running it again can
+succeed (as it is, or after re-reading what the error names), machine-readable `details` (for
+an I/O failure, `fs_op` and `store_file`: the file operation that failed and its file in the
+store, never a host path), and a `hint`, often the next command to run. The exit code is
 `error.exit`:
 
 | Exit | Meaning | For example |
@@ -363,6 +366,7 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | ✅ | M0 | Bootstrap: the workspace and its gates, the canonical codec and its golden vectors, the fsync experiment. |
 | ✅ | M1 | The single-agent core: `init`, `commit`, `cat`, `ls`, `log` and ref compare-and-swap, over the native metadata store and object files; crash sweeps. |
 | ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, `--locked` everywhere; I/O-error injection, write-ordering checks and the fsync-failure policy; power-loss images; the project policies; the tests' shared support in one crate; benchmarks of the metadata store against embedded databases; the MCP server and `so`. |
+| ✅ | M1.6 | The code-review follow-ups, before M2: the error contract an agent sees (typed refusals, I/O failures that name the store file and never a host path, a report of what a write's recovery repaired); a bound on the lock-free reader's retries; structured `verify` findings, and MCP tool schemas kept plain objects; object reads without a second copy or an allocation of the size a file claims; the test doubles M1.5 left, in one place; spec hygiene (the write-ordering rules W1–W7, §8 in step with the code); the harness for the measurements M2's sync decision needs, whose quiet-window runs are still to come; and `commit --advance`, the commit primitive M4's landing reuses. |
 | 📋 | M2 | Diff, history and the derived-data engine. |
 | 📋 | M3 | git import. |
 | 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |

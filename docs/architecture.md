@@ -1,6 +1,6 @@
 # SwarmOps architecture
 
-An overview, in English, of how SwarmOps is built, as of M1.5. The design specs are the
+An overview, in English, of how SwarmOps is built, as of M1.6. The design specs are the
 authority, and they are in Korean:
 
 - [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md) ("umbrella" below),
@@ -22,11 +22,12 @@ general-purpose git replacement. Its main users are LLM agents, so every operati
 function and the command line is a thin shell that prints JSON. It is fully embedded: one
 program, no external database, no daemon.
 
-M0 (bootstrap), M1 (the single-agent core) and M1.5 (hardening and opening) are done. Since M1,
+M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening) and M1.6 (the
+code-review follow-ups, its quiet-window measurements aside) are done. Since M1,
 SwarmOps is usable by one agent: its store already takes commits from many processes at once, safely, but
 nothing merges yet. Merging and landing (M4), git import and export (M3, M8), workspaces (M5)
 and review (M7) come later, in the order of umbrella §13.
-[known-limitations.md](known-limitations.md) lists what M1 and M1.5 leave open.
+[known-limitations.md](known-limitations.md) lists what M1, M1.5 and M1.6 leave open.
 
 ## Crates and layering
 
@@ -227,7 +228,10 @@ What a failure means depends on which side of the commit point it falls (storage
   either, so the writer writes the unlisted frames afresh from the bytes it read (it cuts them
   off, appends them again and syncs them) and lists them only then. Only if the rewrite fails
   too does the frame stay cut off; then that transaction did not commit, and neither did the
-  writer's own, whose write fails with `E_IO_TRANSIENT`: the second way that error arises.
+  writer's own, whose write fails with `E_IO_TRANSIENT`: the second way that error arises. The
+  third: that writer's listing of such a frame in `journal.off` fails. It cuts what reached
+  `journal.off` back off, and its own transaction, which never began, fails with
+  `E_IO_TRANSIENT`; the frame stays whole, and the next writer lists it.
 - **After it**: any failure once the `fdatasync` has returned (listing the frame in
   `journal.off`, materializing it, syncing the index, moving the checkpoint) leaves the
   transaction committed and durable. It is reported as a warning beside the result, and the
@@ -423,7 +427,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 24 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
 kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 44 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 45 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what
@@ -444,8 +448,10 @@ opaque cursor for the next one; and `show` lists at most `max_changes` changes (
 and says when it cut the list.
 
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
-stdio: one tool per `StoreOps` operation, whose input schema is the request type's JSON Schema
-and whose result is the envelope the CLI prints.
+stdio: one tool per `StoreOps` operation, whose input schema is the request type's JSON Schema,
+kept a plain object (a rule across fields that the type's schema states with a top-level `oneOf`
+goes into the description and the server's own check), and whose result is the envelope the
+CLI prints.
 
 ## Where to read more
 
