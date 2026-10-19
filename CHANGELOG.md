@@ -341,6 +341,20 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   on disk through gix 0.89.0 (pinned, its `sha1` feature alone, the workspace's one new runtime
   dependency): it refuses a SHA-256 repository, reftable refs and a shallow clone before any read,
   and never follows replacement refs.
+- `Repo::commit_raw` and `Repo::commit_raw_batch`, the git import's writer: changesets whose
+  fields the caller gives, with parents in their order (none makes a root changeset whatever refs
+  exist, so a store can hold a second root), signatures, extra headers, message and metadata kept
+  verbatim, and a root tree stored first (`Repo::put_objects`). The delta is the tree diff from
+  the first parent's root to that root, so it agrees with the root by construction. A batch is
+  one journal frame, one commit point: its changesets' objects are put and flushed first, with
+  every object put on the handle since its last flush, then inserted in one transaction; a
+  changeset the store holds is `AlreadyPresent`, and a batch of none new appends no frame. Each
+  raw is checked before anything is written: at most 255 parents, none twice, metadata keys
+  ascending and none ending in `:b64`, a root the store holds as a tree, parents in the store or
+  earlier in the batch, and at most 65,535 changesets to a batch. `Repo::raw_batch` builds a
+  batch a changeset at a time and gives each one's id before anything is written, so that a
+  later one can name it as a parent. The power-loss run ends with a batch of three, a second
+  root, its child and a merge: every image holds all three or none.
 
 ### Changed
 
