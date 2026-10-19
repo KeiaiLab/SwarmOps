@@ -49,7 +49,8 @@ pub enum RepoError {
     /// one, what is there is a store a create left half done, and create finishes it.)
     #[error("a store exists there already")]
     Exists,
-    /// A parent the commit names is not in the store.
+    /// A parent the commit names is not in the store, nor, for a raw changeset, earlier in its
+    /// batch ([`crate::Repo::commit_raw_batch`]).
     #[error("parent changeset {0} is not in the store")]
     UnknownParent(ChangesetId),
     /// What was asked for is not in the store: the changeset a revision, an id or a ref names,
@@ -107,7 +108,9 @@ pub enum RepoError {
         id: BlobId,
     },
     /// The store lacks an object that its metadata or its trees reference, or holds an object
-    /// of another kind under that id: a damaged store ([`crate::Repo::verify`] says more).
+    /// of another kind under that id: a damaged store ([`crate::Repo::verify`] says more). For a
+    /// raw changeset ([`crate::Repo::commit_raw_batch`]) it is the root it names, or a tree below
+    /// that its delta's diff reads, which the caller was to store first: nothing was written.
     #[error("the store lacks {kind:?} object {id}")]
     MissingObject {
         /// The id referenced.

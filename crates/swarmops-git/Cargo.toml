@@ -17,6 +17,8 @@ workspace = true
 # `GitSource` there.
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+# The object length limit (`MAX_OBJECT_LEN`), which the conversion refuses a longer blob against.
+swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 gix.workspace = true
 thiserror.workspace = true
 

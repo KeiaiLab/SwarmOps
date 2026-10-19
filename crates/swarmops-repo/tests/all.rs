@@ -6,6 +6,7 @@
 mod commit;
 mod derive;
 mod path_history;
+mod raw;
 mod read;
 mod verify;
 

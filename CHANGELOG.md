@@ -360,6 +360,45 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   on disk through gix 0.89.0 (pinned, its `sha1` feature alone, the workspace's one new runtime
   dependency): it refuses a SHA-256 repository, reftable refs and a shallow clone before any read,
   and never follows replacement refs.
+- `Repo::commit_raw` and `Repo::commit_raw_batch`, the git import's writer: changesets whose
+  fields the caller gives, with parents in their order (none makes a root changeset whatever refs
+  exist, so a store can hold a second root), signatures, extra headers, message and metadata kept
+  verbatim, and a root tree stored first (`Repo::put_objects`). The delta is the tree diff from
+  the first parent's root to that root, so it agrees with the root by construction. A batch is
+  one journal frame, one commit point: its changesets' objects are put and flushed first, with
+  every object put on the handle since its last flush, then inserted in one transaction; a
+  changeset the store holds is `AlreadyPresent`, and a batch of none new appends no frame. Each
+  raw is checked before anything is written: at most 255 parents, none twice, metadata keys
+  ascending and none ending in `:b64`, a root the store holds as a tree, parents in the store or
+  earlier in the batch, and at most 65,535 changesets to a batch. `Repo::raw_batch` builds a
+  batch a changeset at a time and gives each one's id before anything is written, so that a
+  later one can name it as a parent. The power-loss run ends with a batch of three, a second
+  root, its child and a merge: every image holds all three or none.
+- Git fixtures that need a newer git: a script whose first lines say `# needs git X.Y` is skipped,
+  and said to be, by an older git (`regenerate`, `check`, the fixture tests), so that it has no
+  archive while the declared git is older. `swarmops_testkit::git::names()` lists only the
+  fixtures at hand, `skipped(name)` says why one is not, and `check` writes the version of the
+  git it ran to `<dir>/GIT_VERSION`. The first is `reftable` (`git init --ref-format=reftable`,
+  git 2.45 and newer), which `GixSource::open` refuses as `Unsupported(RefStorage("reftable"))`:
+  `a_reftable_repository_is_unsupported` checks that on the fixture the version matrix's newest
+  git makes, and says why it checks nothing where there is none.
+- The git version matrix: `scheduled.yml`'s weekly `git-matrix` job builds git 2.39.5, 2.43.0
+  and 2.56.0 (the newest on 2026-10-19) from kernel.org's release tarballs, each checked against
+  its pinned SHA-256 and cached by release. With each it rebuilds every git fixture and names
+  each difference from the archives' manifests (`check_git_fixtures`), then runs the fixture
+  tests and the git import's on the fixtures that git made (`SWARMOPS_GIT_FIXTURES_DIR`).
+- The conversion of git's objects (`swarmops_git::Converter`, storage spec §7): a commit becomes
+  the fields of a changeset (its parents in order, each once; its author, committer, message and
+  other headers as they are, a time before 1970 included; `git.oid` metadata, and `git.lossy`
+  before it when anything was lost), and its trees and blobs SwarmOps trees and blobs, each git
+  tree and blob converted once. A commit is taken without loss only if it renders back to its own
+  git id, trees in git's order and with git's modes (`render::tree_bytes`, `render::commit_bytes`,
+  which M8's export reuses), and the conversion checks that for every commit. What a changeset
+  cannot hold is refused naming the commit, the path and the class (`LossyClass`: `gitlinks`,
+  `paths`, `modes`, `tree_order`, `empty_trees`, `nonstandard`), unless that class is allowed,
+  when it is dropped or normalized and named in `git.lossy`; a mode of no file, directory,
+  symlink or gitlink, more than 255 parents and a blob longer than an object holds are refused
+  whatever is allowed, the blob before it is read.
 
 ### Changed
 
