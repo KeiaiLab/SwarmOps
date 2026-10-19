@@ -3,6 +3,7 @@
 //! test target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod`
 //! line here.
 
+mod conflict;
 mod line_diff;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
