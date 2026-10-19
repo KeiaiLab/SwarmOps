@@ -203,6 +203,16 @@ steps along it, so that a later walk is short. A node met again while it is on t
 cycle, an error (`RepoError::Derived`, `E_INTERNAL`: a derivation that fails on immutable inputs
 fails every time). A put that fails is dropped: the run keeps the value in memory, and returns it.
 
+**Path history** (storage §5). The built-in derivation `LastModified` gives, for a changeset and a
+path, the newest changeset on its first-parent chain, itself included, whose delta has an entry
+at the path or below it. A changeset that does not touch the path redirects to its first parent,
+so a value is derived only where the path changed (and at a root that never had it), and a chain
+of more than 64 redirects stores its value every 64 steps, so that a later query walks at most 64
+changesets. A path's history (`RepoRead::path_history`) chases that value: the last touch, then
+the last touch from its first parent, each with what the path holds after it. `log_paths` lists
+the changesets that touch any of several paths, newest first, from each path's chase along the
+one chain.
+
 **A commit** (`Repo::commit`; storage §2 rule 2, §3):
 
 1. The request is checked, its blobs hashed, and the changed directories rebuilt in memory,

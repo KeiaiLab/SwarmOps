@@ -39,8 +39,10 @@
 //! takes none. A read of the store that fails is the run's error.
 
 mod engine;
+mod last_modified;
 mod skiplist;
 
+pub use self::last_modified::{LastModified, LastTouch, PathKey};
 pub use self::skiplist::{FirstParentSkipList, SkipList};
 
 use std::any::TypeId;
@@ -255,12 +257,15 @@ impl Registry {
     }
 
     /// The registry a repository opens with: the built-in derivations of storage spec §5 that this
-    /// build has, [`FirstParentSkipList`].
+    /// build has, [`FirstParentSkipList`] and [`LastModified`].
     pub fn builtins() -> Registry {
         let mut registry = Registry::new();
         // A built-in keeps every rule `register` checks, so this never fails.
         registry
             .register(FirstParentSkipList)
+            .expect("a built-in derivation is one the engine keeps");
+        registry
+            .register(LastModified)
             .expect("a built-in derivation is one the engine keeps");
         registry
     }

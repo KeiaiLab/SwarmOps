@@ -16,12 +16,14 @@
 //! boundary later; only [`LocalRepo::create`] and [`LocalRepo::open`] take the store's path.
 //!
 //! Values derived from the immutable objects are made when they are asked for, and cached in the
-//! store ([`Repo::derived`]; the [`derive`](mod@derive) module).
+//! store ([`Repo::derived`]; the [`derive`](mod@derive) module). A path's history chases one of
+//! them, the changeset that last touched the path ([`LastModified`]; the [`path_history`] module).
 
 pub mod commit;
 pub mod derive;
 pub mod error;
 pub mod log;
+pub mod path_history;
 pub mod read;
 pub mod repo;
 mod tree_edit;
@@ -29,9 +31,11 @@ pub mod verify;
 
 pub use commit::{Advance, Advanced, Change, ChangeOp, CommitOutcome, CommitRequest};
 pub use derive::{
-    Derivation, DeriveCtx, DeriveError, FirstParentSkipList, Need, Registry, SkipList, Subject,
+    Derivation, DeriveCtx, DeriveError, FirstParentSkipList, LastModified, LastTouch, Need,
+    PathKey, Registry, SkipList, Subject,
 };
 pub use error::RepoError;
+pub use path_history::PathEvent;
 pub use read::{RepoRead, StoredChangeset};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
