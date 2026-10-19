@@ -52,8 +52,9 @@ pub enum StoreError {
     #[error("the metadata journal is corrupt at offset {offset}")]
     JournalCorrupt {
         /// Where in `journal.log` the bad frame starts (for a bad `journal.off` entry, the
-        /// offset the entry holds); from [`crate::Record::decode`], the position in its
-        /// input where decoding stopped.
+        /// offset the entry holds): always a position in `journal.log`. A record's own bytes
+        /// that do not decode are a [`crate::BadRecord`] of [`crate::Record::decode`], at a
+        /// position in those bytes.
         offset: u64,
     },
     /// A changeset names a parent that is not in the index.

@@ -1,9 +1,11 @@
 //! Journal record and frame decoding never panics: whatever decodes re-encodes to exactly the
 //! bytes it was decoded from, and every error is `StoreError::JournalCorrupt` where the frame
-//! layout says (storage spec §3).
+//! layout says (storage spec §3), or, for a record's own bytes, `BadRecord` at a position in
+//! them.
 //!
 //! The input is read three ways:
-//! 1. as records back to back, through `Record::decode`;
+//! 1. as records back to back, through `Record::decode`, whose errors are `BadRecord`s within
+//!    the bytes it was given;
 //! 2. as `journal.log` itself, nothing listed in `journal.off`: `tail_frames_from(0)` returns the
 //!    whole frames from offset 0 up to a torn tail (a frame cut short, one failing its CRC, or a
 //!    header whose length reads 0, which never reached the disk), or `JournalCorrupt` at the
@@ -21,7 +23,7 @@ use std::sync::Arc;
 
 use libfuzzer_sys::fuzz_target;
 use swarmops_fuzz::{Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_length};
-use swarmops_store::{Frame, Journal, Layout, RealFs, Record, StoreError};
+use swarmops_store::{BadRecord, Frame, Journal, Layout, RealFs, Record, StoreError};
 
 fuzz_target!(|data: &[u8]| {
     records_back_to_back(data);
@@ -93,20 +95,19 @@ fn records_back_to_back(data: &[u8]) {
                 );
                 let short = Record::decode(&rest[..used - 1]);
                 assert!(
-                    matches!(short, Err(StoreError::JournalCorrupt { .. })),
+                    matches!(short, Err(BadRecord { at }) if at < used),
                     "{record:?} cut short by a byte decodes: {short:?}"
                 );
                 rest = &rest[used..];
             }
-            Err(StoreError::JournalCorrupt { offset }) => {
+            Err(BadRecord { at }) => {
                 assert!(
-                    offset <= to_u64(rest.len()),
-                    "JournalCorrupt at {offset}, past the {} bytes decoded",
+                    at <= rest.len(),
+                    "decoding stopped at {at}, past the {} bytes decoded",
                     rest.len()
                 );
                 return;
             }
-            Err(e) => panic!("Record::decode failed with {e:?}, not JournalCorrupt"),
         }
     }
 }

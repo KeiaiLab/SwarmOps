@@ -26,11 +26,11 @@ use std::time::{Duration, Instant};
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
 use swarmops_core::{ChangesetId, ObjectId};
+use swarmops_store::{
+    BadRecord, Frame, FsOps, Journal, Layout, LimitKind, MetaLock, RealFs, Record, StoreError,
+};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
-use swarmops_store::{
-    Frame, FsOps, Journal, Layout, LimitKind, MetaLock, RealFs, Record, StoreError,
-};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::{FsyncModelFs, checked};
@@ -305,6 +305,8 @@ fn records_and_frames_use_the_fixed_byte_layout() {
 
 #[test]
 fn record_decode_rejects_truncations_unknown_kinds_and_bad_flags() {
+    // Bytes that are not a record are a `BadRecord` at the position in them where decoding
+    // stopped, never a `JournalCorrupt`, whose offset is always one in `journal.log`.
     for record in [
         root_changeset(),
         child_changeset(),
@@ -315,7 +317,7 @@ fn record_decode_rejects_truncations_unknown_kinds_and_bad_flags() {
         for cut in 0..bytes.len() {
             let got = Record::decode(&bytes[..cut]);
             assert!(
-                matches!(got, Err(StoreError::JournalCorrupt { .. })),
+                matches!(got, Err(BadRecord { at }) if at <= cut),
                 "{record:?} cut to {cut} bytes: {got:?}"
             );
         }
@@ -323,7 +325,7 @@ fn record_decode_rejects_truncations_unknown_kinds_and_bad_flags() {
     for kind in [0, 3, 5, 0xff] {
         let got = Record::decode(&[kind; 80]);
         assert!(
-            matches!(got, Err(StoreError::JournalCorrupt { offset: 0 })),
+            matches!(got, Err(BadRecord { at: 0 })),
             "kind {kind}: {got:?}"
         );
     }
@@ -331,18 +333,12 @@ fn record_decode_rejects_truncations_unknown_kinds_and_bad_flags() {
     let mut bad_flag = encoded(&main_created());
     bad_flag[6] = 2;
     let got = Record::decode(&bad_flag);
-    assert!(
-        matches!(got, Err(StoreError::JournalCorrupt { offset: 6 })),
-        "{got:?}"
-    );
-    // A ref name that is not UTF-8.
+    assert!(matches!(got, Err(BadRecord { at: 6 })), "{got:?}");
+    // A ref name that is not UTF-8: decoding stops where the name starts.
     let mut not_utf8 = encoded(&main_created());
     not_utf8[2] = 0xff;
     let got = Record::decode(&not_utf8);
-    assert!(
-        matches!(got, Err(StoreError::JournalCorrupt { .. })),
-        "{got:?}"
-    );
+    assert!(matches!(got, Err(BadRecord { at: 2 })), "{got:?}");
 }
 
 fn arb_id() -> impl Strategy<Value = ChangesetId> {

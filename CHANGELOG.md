@@ -230,6 +230,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `StoreError` gains `Limit` (with `LimitKind`), `BadPrefix` and `BadCall`, its `Io` keeps the
   failures the filesystem reported, and `Record::encode` returns a `Result` instead of
   panicking on a record past the layout's lengths.
+- `StoreError::JournalCorrupt`'s `offset` is always a position in `journal.log`.
+  `Record::decode`, which gave it the position in its input where decoding stopped, returns a
+  `BadRecord { at }` with that position instead (Rust API only; the readers report a frame
+  that does not decode at its own offset, as before).
 
 ### Fixed
 

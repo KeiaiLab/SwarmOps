@@ -16,6 +16,7 @@
 
 use swarmops_core::bytes::Reader;
 use swarmops_core::{ChangesetId, ObjectId};
+use thiserror::Error;
 
 use super::to_u64;
 use crate::error::{LimitKind, StoreError};
@@ -64,6 +65,17 @@ pub enum Record {
     },
 }
 
+/// Bytes that are not a journal record: where [`Record::decode`] stopped in them. A position in
+/// the bytes it was given, not in `journal.log`: a reader of the journal reports a frame whose
+/// records do not decode as [`StoreError::JournalCorrupt`] at the frame's own offset there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("not a journal record: it does not decode at byte {at}")]
+pub struct BadRecord {
+    /// Where in the bytes decoding stopped: the start of the field it could not read, or of
+    /// the record for a kind it does not know.
+    pub at: usize,
+}
+
 /// One transaction as the journal holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
@@ -79,10 +91,10 @@ impl Record {
     /// Decodes the record at the start of `buf`, returning it and how many bytes it took;
     /// the bytes after it are left alone.
     ///
-    /// Malformed or truncated bytes give [`StoreError::JournalCorrupt`], with `offset` the
-    /// position in `buf` where decoding stopped.
-    pub fn decode(buf: &[u8]) -> Result<(Record, usize), StoreError> {
-        let mut r = Reader::new(buf, corrupt_at);
+    /// Malformed or truncated bytes give [`BadRecord`], at the position in `buf` where decoding
+    /// stopped.
+    pub fn decode(buf: &[u8]) -> Result<(Record, usize), BadRecord> {
+        let mut r = Reader::new(buf, bad_record);
         let record = match r.u8()? {
             KIND_CHANGESET => Self::Changeset {
                 id: r.id()?,
@@ -250,6 +262,9 @@ pub(crate) fn parse_frame(buf: &[u8]) -> Parsed {
 }
 
 /// The records of a frame payload: a count of at least 1, then exactly that many records.
+/// A record that does not decode makes the frame [`Parsed::Invalid`], which the journal's
+/// readers report as [`StoreError::JournalCorrupt`] at the frame's offset in `journal.log`: the
+/// position in the payload where its record stopped decoding goes no further.
 fn decode_payload(payload: &[u8]) -> Option<Vec<Record>> {
     let (count, mut rest) = payload.split_first_chunk::<2>()?;
     let count = usize::from(u16::from_le_bytes(*count));
@@ -266,31 +281,29 @@ fn decode_payload(payload: &[u8]) -> Option<Vec<Record>> {
     rest.is_empty().then_some(records)
 }
 
-/// What a record's bytes that do not decode are: [`StoreError::JournalCorrupt`] at `pos`, the
-/// position in them where decoding stopped.
-fn corrupt_at(pos: usize) -> StoreError {
-    StoreError::JournalCorrupt {
-        offset: to_u64(pos),
-    }
+/// What a record's bytes that do not decode are: [`BadRecord`] at `at`, the position in them
+/// where decoding stopped.
+fn bad_record(at: usize) -> BadRecord {
+    BadRecord { at }
 }
 
 /// The reads of a record's fields beyond fixed-width integers.
 trait RecordReader {
-    fn id(&mut self) -> Result<ChangesetId, StoreError>;
+    fn id(&mut self) -> Result<ChangesetId, BadRecord>;
 
     /// A `u8` flag (0 or 1), then the id if the flag is 1.
-    fn optional_id(&mut self) -> Result<Option<ChangesetId>, StoreError>;
+    fn optional_id(&mut self) -> Result<Option<ChangesetId>, BadRecord>;
 
     /// A `u8` length, then that many bytes of UTF-8.
-    fn string(&mut self) -> Result<String, StoreError>;
+    fn string(&mut self) -> Result<String, BadRecord>;
 }
 
-impl RecordReader for Reader<'_, StoreError> {
-    fn id(&mut self) -> Result<ChangesetId, StoreError> {
+impl RecordReader for Reader<'_, BadRecord> {
+    fn id(&mut self) -> Result<ChangesetId, BadRecord> {
         self.array().map(|bytes| ChangesetId(ObjectId(bytes)))
     }
 
-    fn optional_id(&mut self) -> Result<Option<ChangesetId>, StoreError> {
+    fn optional_id(&mut self) -> Result<Option<ChangesetId>, BadRecord> {
         let flag_at = self.pos();
         match self.u8()? {
             0 => Ok(None),
@@ -299,7 +312,7 @@ impl RecordReader for Reader<'_, StoreError> {
         }
     }
 
-    fn string(&mut self) -> Result<String, StoreError> {
+    fn string(&mut self) -> Result<String, BadRecord> {
         let len = usize::from(self.u8()?);
         let start = self.pos();
         let bytes = self.bytes(len)?;
