@@ -37,6 +37,12 @@
 //!
 //! A new fixture, for the git import or for another milestone's corpus, is one more script and
 //! the archive `just git-fixtures` writes for it.
+//!
+//! A script whose first lines (the comment lines it starts with) say `# needs git X.Y` is made by
+//! that release of git or a later one only: an older git skips it and says so. While the
+//! declared git is older, the script has no archive, and the fixtures at hand lack it: [`names`]
+//! leaves it out, and [`skipped`] says why, for a test of it to ask first. `reftable` is one:
+//! the version matrix's newest git makes it.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -62,7 +68,7 @@ pub const REGEN_ENV: &str = "SWARMOPS_REGEN_GIT_FIXTURES";
 pub const CHECK_ENV: &str = "SWARMOPS_GIT_FIXTURES_CHECK";
 
 /// A directory of fixtures [`check`] built: [`fixture`] copies `<dir>/<name>/` instead of
-/// extracting `<name>.tar`.
+/// extracting `<name>.tar`, and `<dir>/GIT_VERSION` names the git that built them ([`skipped`]).
 pub const DIR_ENV: &str = "SWARMOPS_GIT_FIXTURES_DIR";
 
 /// The absolute path of the git binary to run, a file named `git` (its directory goes first on
@@ -155,17 +161,34 @@ pub struct ManifestCommit {
 
 /// A fixture, by name: its archive, `git-fixtures/<name>.tar`, extracted into a fresh temporary
 /// directory; with [`DIR_ENV`] set, a copy of `<dir>/<name>/` instead. A name with no archive
-/// fails the test, naming the script that builds it.
+/// fails the test, naming the script that builds it, and so does one the git that made the
+/// fixtures is too old for ([`skipped`]).
 pub fn fixture(name: &str) -> GitFixture {
+    if let Some(why) = skipped(name) {
+        panic!(
+            "the git fixture {name} is not at hand: {why}; a test that takes it asks \
+             git::skipped first"
+        );
+    }
     match std::env::var_os(DIR_ENV) {
         Some(dir) => copy_fixture(name, &Path::new(&dir).join(name)),
         None => extract_fixture(name),
     }
 }
 
-/// Every fixture's name: the scripts in `git-fixtures/scripts/` but `lib.sh`, without their
-/// `.sh`, sorted.
+/// The fixtures [`fixture`] takes, by name: the scripts in `git-fixtures/scripts/` but `lib.sh`,
+/// without their `.sh`, sorted, less those the git that made the fixtures is too old for
+/// ([`skipped`]).
 pub fn names() -> Vec<String> {
+    scripts()
+        .into_iter()
+        .filter(|name| skipped(name).is_none())
+        .collect()
+}
+
+/// Every fixture script's name: the scripts in `git-fixtures/scripts/` but `lib.sh`, without
+/// their `.sh`, sorted.
+fn scripts() -> Vec<String> {
     let scripts = scripts_dir();
     let mut names: Vec<String> = fs::read_dir(&scripts)
         .unwrap_or_else(|error| panic!("read {}: {error}", scripts.display()))
@@ -178,10 +201,23 @@ pub fn names() -> Vec<String> {
     names
 }
 
+/// Why fixture `name` is not at hand: its script's first lines say `# needs git X.Y`, and the git
+/// that made the fixtures [`fixture`] takes is older (the declared one, `git-fixtures/GIT_VERSION`,
+/// for the archives; with [`DIR_ENV`] set, the one [`check`] ran). `None` when [`fixture`] takes
+/// it. A test of such a fixture asks first, says why it is not there, and returns.
+pub fn skipped(name: &str) -> Option<String> {
+    // A name with no script is no fixture at all, which `fixture` says.
+    let script = fs::read_to_string(scripts_dir().join(format!("{name}.sh"))).ok()?;
+    let (version, whose) = fixtures_git();
+    let why = too_old(&version, &script)?;
+    Some(format!("{why} ({whose})"))
+}
+
 /// Rebuilds the archives of the fixtures `names` from their scripts, each in a fresh directory,
 /// and writes them to `git-fixtures/`. Refuses unless the git it runs ([`GIT_ENV`]) prints the
 /// line `git-fixtures/GIT_VERSION` holds, or [`ANY_GIT_ENV`] is `1`; fails the test with the
-/// script's stderr when a script fails.
+/// script's stderr when a script fails. A script that git is too old for (`# needs git X.Y`) is
+/// skipped, and said to be.
 pub fn regenerate(names: &[String]) {
     let git = Git::from_env();
     let version = git.version();
@@ -196,6 +232,10 @@ pub fn regenerate(names: &[String]) {
     );
     let scratch = tempfile::tempdir().expect("create a temp dir");
     for name in names {
+        if let Some(why) = too_old(&version, &script_text(name)) {
+            println!("{name}: skipped: {why}");
+            continue;
+        }
         let out = scratch.path().join(name);
         if let Err(failure) = build(&git, name, &out) {
             panic!("{failure}");
@@ -211,19 +251,40 @@ pub fn regenerate(names: &[String]) {
 }
 
 /// Rebuilds every fixture with the git it runs ([`GIT_ENV`]) into `<into>/<name>/`, archiving
-/// nothing, and compares each manifest field by field with its archive's (`git_version`
-/// aside): the differences, one line each, a script that fails among them.
+/// nothing, writes that git's `git --version` line to `<into>/GIT_VERSION` (for [`DIR_ENV`]),
+/// and compares each manifest field by field with its archive's (`git_version` aside): the
+/// differences, one line each, a script that fails among them. A script that git is too old for
+/// (`# needs git X.Y`) is skipped, and one the declared git is too old for, which has no archive,
+/// is built and compared with nothing; each is said to be.
 pub fn check(into: &Path) -> Vec<String> {
     let git = Git::from_env();
+    let version = git.version();
+    let declared = declared_version();
+    fs::create_dir_all(into).unwrap_or_else(|error| panic!("create {}: {error}", into.display()));
+    let marker = into.join("GIT_VERSION");
+    fs::write(&marker, format!("{version}\n"))
+        .unwrap_or_else(|error| panic!("write {}: {error}", marker.display()));
     let mut differences = Vec::new();
-    for name in names() {
+    for name in scripts() {
         let out = into.join(&name);
         if out.exists() {
             fs::remove_dir_all(&out)
                 .unwrap_or_else(|error| panic!("remove {}: {error}", out.display()));
         }
+        let script = script_text(&name);
+        if let Some(why) = too_old(&version, &script) {
+            println!("{name}: skipped: {why}");
+            continue;
+        }
         if let Err(failure) = build(&git, &name, &out) {
             differences.push(format!("{name}: {}", failure.replace('\n', " | ")));
+            continue;
+        }
+        if let Some(why) = too_old(&declared, &script) {
+            println!(
+                "{name}: built, and compared with nothing: the declared git makes no archive of \
+                 it ({why})"
+            );
             continue;
         }
         if !archive_path(&name).exists() {
@@ -260,6 +321,71 @@ fn declared_version() -> String {
     let text = fs::read_to_string(&path)
         .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
     text.trim_end().to_owned()
+}
+
+/// The text of fixture `name`'s script, `git-fixtures/scripts/<name>.sh`.
+fn script_text(name: &str) -> String {
+    let path = scripts_dir().join(format!("{name}.sh"));
+    fs::read_to_string(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
+}
+
+/// Why the git whose `git --version` printed `version` is too old for the fixture script
+/// `script`: a `# needs git X.Y` line among the comment lines the script starts with names a
+/// later release. `None` when they name none, or one no later than `version`'s.
+fn too_old(version: &str, script: &str) -> Option<String> {
+    let needed = script
+        .lines()
+        .take_while(|line| line.starts_with('#'))
+        .find_map(|line| line.strip_prefix("# needs git "))?
+        .trim_end();
+    let needs = release(needed)
+        .unwrap_or_else(|| panic!("`# needs git {needed}` names no git release X.Y"));
+    let has = version
+        .strip_prefix("git version ")
+        .and_then(release)
+        .unwrap_or_else(|| panic!("git --version printed {version:?}, which names no release"));
+    (has < needs).then(|| format!("it needs git {needed}, and {version} is older"))
+}
+
+/// The release of git `text` starts with, its numbers X.Y.Z: `2.45` (Z is 0), `2.43.0`, or the
+/// start of `2.45.0.rc1` or `2.47.1 (Apple Git-154)`. `None` when it starts with no X.Y.
+fn release(text: &str) -> Option<[u32; 3]> {
+    let end = text
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(text.len());
+    let mut parts = text[..end].split('.');
+    let mut numbers = [0; 3];
+    for (at, number) in numbers.iter_mut().enumerate() {
+        match parts.next().filter(|part| !part.is_empty()) {
+            Some(part) => *number = part.parse().ok()?,
+            None if at == 2 => break,
+            None => return None,
+        }
+    }
+    Some(numbers)
+}
+
+/// What `git --version` printed for the git that made the fixtures [`fixture`] takes, and which
+/// git that is: the declared one (`git-fixtures/GIT_VERSION`) for the archives; with [`DIR_ENV`]
+/// set, the one [`check`] ran, which wrote its line to `<dir>/GIT_VERSION`.
+fn fixtures_git() -> (String, String) {
+    let Some(dir) = std::env::var_os(DIR_ENV) else {
+        let whose = "the declared git of git-fixtures/GIT_VERSION, which made the archives";
+        return (declared_version(), whose.to_owned());
+    };
+    let path = Path::new(&dir).join("GIT_VERSION");
+    let text = fs::read_to_string(&path).unwrap_or_else(|error| {
+        panic!(
+            "read {}: {error}: {DIR_ENV} names a directory of fixtures that check_git_fixtures \
+             built, which names the git it ran there",
+            path.display(),
+        )
+    });
+    let whose = format!(
+        "the git that built the fixtures in {}",
+        Path::new(&dir).display()
+    );
+    (text.trim_end().to_owned(), whose)
 }
 
 /// Why fixture `name` has no archive, naming the script that builds it, if there is one.
@@ -948,15 +1074,18 @@ mod tests {
 
     #[test]
     fn the_fixture_scripts_have_archives_and_manifests() {
-        let names = names();
+        let scripts = scripts();
         assert!(
-            !names.is_empty(),
+            !scripts.is_empty(),
             "no fixture script in {}",
             scripts_dir().display()
         );
-        let declared = declared_version();
-        let from_archives = std::env::var_os(DIR_ENV).is_none();
-        for name in &names {
+        let (made_by, _) = fixtures_git();
+        for name in &scripts {
+            if let Some(why) = skipped(name) {
+                eprintln!("{name}: skipped: {why}");
+                continue;
+            }
             let fixture = fixture(name);
             if fixture.repo.is_none() {
                 continue;
@@ -965,12 +1094,7 @@ mod tests {
                 .manifest
                 .as_ref()
                 .unwrap_or_else(|| panic!("{name}: a repository without a manifest"));
-            if from_archives {
-                assert_eq!(
-                    manifest.git_version, declared,
-                    "{name}: made by another git"
-                );
-            }
+            assert_eq!(manifest.git_version, made_by, "{name}: made by another git");
             assert!(!manifest.commits.is_empty(), "{name}: no commit");
             let mut earlier = BTreeSet::new();
             for commit in &manifest.commits {
@@ -996,6 +1120,8 @@ mod tests {
                 );
             }
         }
+        // Every archive is a script's, and one the declared git makes.
+        let declared = declared_version();
         for item in fs::read_dir(fixtures_dir()).expect("read git-fixtures") {
             let path = item.expect("read a directory entry").path();
             if path.extension().is_some_and(|extension| extension == "tar") {
@@ -1004,8 +1130,14 @@ mod tests {
                     .and_then(|stem| stem.to_str())
                     .expect("a UTF-8 name");
                 assert!(
-                    names.iter().any(|name| name == stem),
+                    scripts.iter().any(|name| name == stem),
                     "{} has no script: scripts/{stem}.sh",
+                    path.display(),
+                );
+                assert_eq!(
+                    too_old(&declared, &script_text(stem)),
+                    None,
+                    "{} is an archive the declared git does not make",
                     path.display(),
                 );
             }
@@ -1490,7 +1622,12 @@ mod tests {
 
     #[test]
     fn every_archive_is_sorted_with_fixed_metadata() {
-        for name in names() {
+        // The fixtures that have archives: the declared git's, whatever the fixtures at hand.
+        let declared = declared_version();
+        let archived = scripts()
+            .into_iter()
+            .filter(|name| too_old(&declared, &script_text(name)).is_none());
+        for name in archived {
             let archive = archive_path(&name);
             let mut tar = tar::Archive::new(File::open(&archive).expect("open an archive"));
             let mut paths = Vec::new();
@@ -1596,13 +1733,48 @@ mod tests {
     }
 
     #[test]
+    fn a_script_that_needs_a_newer_git_is_skipped() {
+        let script = "# needs git 2.45\n# what it makes\n\n. \"$(dirname \"$0\")/lib.sh\"\n";
+        assert_eq!(
+            too_old("git version 2.43.0", script).as_deref(),
+            Some("it needs git 2.45, and git version 2.43.0 is older"),
+        );
+        for version in ["git version 2.39.5", "git version 2.44.4"] {
+            assert!(too_old(version, script).is_some(), "{version}");
+        }
+        // The release it names, and every later one, whatever follows their numbers.
+        for version in [
+            "git version 2.45.0",
+            "git version 2.45.0.rc1",
+            "git version 2.47.1 (Apple Git-154)",
+            "git version 2.56.0",
+            "git version 3.0.0",
+        ] {
+            assert_eq!(too_old(version, script), None, "{version}");
+        }
+        // It may follow other comment lines, but not a line that is not one.
+        let second = "# what it makes\n# needs git 2.45\n\n. lib.sh\n";
+        assert!(too_old("git version 2.43.0", second).is_some());
+        for script in [
+            "# what it makes\n\n. lib.sh\n",
+            "# what it makes\n\n# needs git 2.45\n",
+        ] {
+            assert_eq!(too_old("git version 2.39.5", script), None, "{script:?}");
+        }
+        // The fixture set's own: `reftable.sh` needs git 2.45.
+        let reftable = script_text("reftable");
+        assert!(too_old("git version 2.43.0", &reftable).is_some());
+        assert_eq!(too_old("git version 2.45.0", &reftable), None);
+    }
+
+    #[test]
     #[ignore = "rewrites crates/swarmops-testkit/git-fixtures with the declared git when SWARMOPS_REGEN_GIT_FIXTURES=1; run on purpose"]
     fn regenerate_git_fixtures() {
         if std::env::var_os(REGEN_ENV).is_none() {
             eprintln!("regenerate_git_fixtures: {REGEN_ENV} not set; nothing written");
             return;
         }
-        regenerate(&names());
+        regenerate(&scripts());
     }
 
     #[test]

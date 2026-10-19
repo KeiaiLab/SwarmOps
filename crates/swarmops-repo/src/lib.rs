@@ -3,7 +3,8 @@
 //! directories at a changeset without a checkout ([`Repo::read_blob_at`], [`Repo::list_tree`]),
 //! resolves revisions ([`Repo::resolve`]), walks first-parent history
 //! ([`Repo::log_first_parent`]), moves refs by compare-and-swap ([`Repo::cas_ref`]), and checks
-//! a whole store ([`Repo::verify`]).
+//! a whole store ([`Repo::verify`]). For the git import it records changesets whose every field
+//! the caller gives, many in one journal frame ([`Repo::commit_raw_batch`]).
 //!
 //! A request reads in one snapshot of the metadata ([`Repo::snapshot`], a [`RepoRead`]), which
 //! resolves every revision and ref it names in the same view, and commits on the parents it
@@ -24,6 +25,7 @@ pub mod derive;
 pub mod error;
 pub mod log;
 pub mod path_history;
+pub mod raw;
 pub mod read;
 pub mod repo;
 mod tree_edit;
@@ -39,6 +41,7 @@ pub use derive::{
 };
 pub use error::RepoError;
 pub use path_history::PathEvent;
+pub use raw::{MAX_RAW_BATCH, RawBatch, RawBatchOutcome, RawChangeset, RawOutcome};
 pub use read::{RepoRead, StoredChangeset};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};

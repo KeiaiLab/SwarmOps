@@ -157,10 +157,6 @@ left).
   listed. Native histories have no merge (`main` is linear, workspaces land squashed); git
   import's do. *Target: M3, if imported merge histories need it (`LogReq.first_parent`). Found:
   M2 Task 15 (M2 Decision 8).*
-- **No second root commit.** Once `main` exists, an omitted parent means `main`'s head (the
-  advanced ref's, for a `commit --advance`), so the API makes a root commit only with `advance`
-  naming a ref that does not exist yet. *Target: M3 (`commit_raw`, which git import needs).
-  Found: M1 Task 4a; final review, question 12.*
 - **`--expect` with a ref name cannot detect a move.** A ref name given as the expected target
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
@@ -277,8 +273,9 @@ left).
 - **`created_at` cannot show a time before 1970.** A changeset keeps its signatures' times as
   signed seconds (storage spec §1, §7), but the API's `created_at` in `show` and
   `log`, unsigned milliseconds derived from the committer's time, reports 0 for any time before
-  1970. Whether the git import keeps such commits as they are or refuses them unless asked to be
-  lossy is M3's choice. *Target: M3. Found: M1 Task 4a.*
+  1970. The git import keeps such commits as they are, without loss (the M3 plan's decision 4),
+  and `show`'s `signatures` give their exact times. *Documented (storage spec §7). Found: M1
+  Task 4a.*
 - **No test reads a real repository yet.** M1 had none, so the final review had nothing to judge
   (question 14). The first come with the git import, behind `SWARMOPS_HOST_REPOS=1`. *Target:
   M3.*
@@ -380,6 +377,6 @@ each ruling is tracked above:
 | 9 | Wide directories in `ls` | size and depth | M2, "`ls` of a wide directory" |
 | 10 | Parked helper threads | the daemon | M10, "An abandoned lock wait" |
 | 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | M6, "The crash model" |
-| 12 | Second root commits | `commit_raw` | M3, "No second root commit" |
+| 12 | Second root commits | `commit_raw` | closed in M3: `Repo::commit_raw`, the git import's writer, makes a root changeset whatever refs exist |
 | 13 | `--expect` with a ref name | documented | "`--expect` with a ref name" |
 | 14 | Tests that read host repositories | none in M1: nothing to judge | M3, "No test reads a real repository" |

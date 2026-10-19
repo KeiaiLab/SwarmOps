@@ -25,6 +25,12 @@
 //! durable ([`Op::ExternalIds`]): in every image each is whole and names its commit, or is
 //! absent, and it is absent from no image of a power failure after its put returned.
 //!
+//! Then three changesets whose fields the caller gives are recorded in one frame through
+//! `Repo::commit_raw_batch` ([`Op::Batch`]): a second root changeset, its child, and a merge of
+//! the child with an earlier commit, their trees and blobs put first and flushed with the
+//! changesets' objects before the frame. The frame is one transaction: every image holds all
+//! three changesets or none of them.
+//!
 //! Images that hold the same files are checked once.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -107,7 +113,15 @@ enum Op {
     ExternalIds {
         entries: &'static [(&'static str, usize)],
     },
+    /// [`BATCHED`] changesets with caller-given fields in one frame, through
+    /// `Repo::commit_raw_batch`: a second root changeset, a child of it, and a merge of that child
+    /// with commit number `merge`. Their trees and blobs are put first (`Repo::put_objects`), and
+    /// made durable by the batch's flush, with the changesets' objects, before its frame.
+    Batch { merge: usize },
 }
+
+/// How many changesets [`Op::Batch`] records in its one frame.
+const BATCHED: usize = 3;
 
 /// How many changesets [`Op::Bulk`] records in its one frame: more than the index's compaction
 /// threshold, whatever tail the run left before.
@@ -120,9 +134,11 @@ const BULK: u64 = Index::COMPACT_THRESHOLD + 1;
 /// sector boundary, its low byte alone in the first sector, its payload over 255 bytes, so that a
 /// lost first sector leaves it a length that is not 0 but wrong (the long actors of frames 12 and
 /// 13 place it).
-/// Frame 14 holds a changeset and main's move to it ([`Op::CommitAdvance`]); frame 15, the last, a
+/// Frame 14 holds a changeset and main's move to it ([`Op::CommitAdvance`]); frame 15, a
 /// changeset that names by id a blob whose put no flush followed ([`Op::CommitBlob`]); after it,
-/// [`Op::ExternalIds`] records external ids of commits 0 and 4, in two fan-out directories.
+/// [`Op::ExternalIds`] records external ids of commits 0 and 4, in two fan-out directories; and
+/// frame 16, the last, holds the three changesets of [`Op::Batch`], whose merge has commit 4 as
+/// its second parent.
 const RUN: &[Op] = &[
     Op::Commit {
         parent: None,
@@ -228,6 +244,7 @@ const RUN: &[Op] = &[
             ("fedcba9876543210fedcba9876543210fedcba98", 4),
         ],
     },
+    Op::Batch { merge: 4 },
 ];
 
 /// What one transaction of the run records in its frame.
@@ -244,6 +261,8 @@ enum Txn {
     },
     /// [`Op::CommitAdvance`]'s changeset and the move of ref `name` to it, in one frame.
     CommitAdvance { name: &'static str },
+    /// [`Op::Batch`]'s [`BATCHED`] changesets, in one frame.
+    Batch,
 }
 
 /// One frame of the run, in journal order.
@@ -351,6 +370,7 @@ fn record_ops(ops: &[Op]) -> Recorded {
         Op::Cas { name, new, .. } => vec![Some(Txn::Cas { name, new })],
         Op::Bulk => vec![Some(Txn::Bulk), None],
         Op::CommitAdvance { name, .. } => vec![Some(Txn::CommitAdvance { name })],
+        Op::Batch { .. } => vec![Some(Txn::Batch)],
         Op::Compact | Op::Flush | Op::ExternalIds { .. } => Vec::new(),
     });
     let (mut frames, mut compacted) = (Vec::new(), Vec::new());
@@ -490,6 +510,11 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
                 parents.push(parent);
             }
             Op::ExternalIds { entries } => record_external_ids(&repo, &commits, entries),
+            Op::Batch { merge } => {
+                let (first, merged) = (commits.len(), commits[merge]);
+                commits.extend(raw_batch(&repo, merged));
+                parents.extend([None, Some(first), Some(first + 1)]);
+            }
         }
         fs.mark(&format!("op {n}"));
     }
@@ -616,6 +641,82 @@ fn bulk(root: &Utf8Path, shared: &Arc<dyn FsOps>, fs: &ImageRecordingFs) -> Vec<
     ids
 }
 
+/// [`Op::Batch`] on `repo`: the trees and blobs of three changesets put, then the changesets,
+/// whose fields this gives, recorded in one frame by `Repo::commit_raw_batch`: a second root
+/// changeset, a child of it, and a merge of that child with `merged`. Their ids, in the order
+/// the frame records them.
+fn raw_batch(repo: &LocalRepo, merged: ChangesetId) -> Vec<ChangesetId> {
+    use swarmops_core::{BlobId, TreeEntry, TreeId, hash_object};
+    use swarmops_repo::RawChangeset;
+
+    // Each changeset's files, all in the directory `raw`: the root's, then what the child and the
+    // merge add to their first parent's.
+    let files: [&[(&str, &str)]; BATCHED] = [
+        &[("root.txt", "a second root\n")],
+        &[
+            ("child.txt", "its child\n"),
+            ("root.txt", "a second root\n"),
+        ],
+        &[
+            ("child.txt", "its child\n"),
+            ("merge.txt", "a merge\n"),
+            ("root.txt", "a second root\n"),
+        ],
+    ];
+    let mut objects = BTreeMap::new();
+    let roots: Vec<TreeId> = files
+        .iter()
+        .map(|files| {
+            let entries = files
+                .iter()
+                .map(|&(name, content)| {
+                    let blob = BlobId(hash_object(ObjectKind::Blob, content.as_bytes()));
+                    objects.insert(blob.0, (ObjectKind::Blob, content.as_bytes().to_vec()));
+                    TreeEntry::leaf(name, LeafKind::File, blob)
+                })
+                .collect();
+            let dir = Tree::new(entries).expect("a tree");
+            let root = Tree::new(vec![TreeEntry::dir("raw", dir.id())]).expect("a tree");
+            for tree in [&dir, &root] {
+                objects.insert(tree.id().0, (ObjectKind::Tree, tree.encode()));
+            }
+            root.id()
+        })
+        .collect();
+    repo.put_objects(objects.into_values().collect())
+        .expect("put the trees and blobs");
+
+    // The batch's later changesets name its earlier ones as parents, by the ids a batch gives
+    // them: learned first from a batch that is dropped uncommitted, which writes nothing.
+    let mut scratch = repo.raw_batch();
+    let (mut raws, mut ids) = (Vec::new(), Vec::new());
+    for (n, root) in roots.into_iter().enumerate() {
+        let parents = match n {
+            0 => Vec::new(),
+            1 => vec![ids[0]],
+            _ => vec![ids[1], merged],
+        };
+        let raw = RawChangeset {
+            parents,
+            root,
+            author: signature(),
+            committer: signature(),
+            message: format!("raw {n}").into_bytes(),
+            extra_headers: Vec::new(),
+            metadata: Vec::new(),
+        };
+        ids.push(scratch.push(raw.clone()).expect("a raw changeset"));
+        raws.push(raw);
+    }
+    drop(scratch);
+    let outcome = repo.commit_raw_batch(raws).expect("commit_raw_batch");
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert!(outcome.frame_seq.is_some(), "{outcome:?}");
+    let made: Vec<ChangesetId> = outcome.outcomes.iter().map(|made| made.id).collect();
+    assert_eq!(made, ids);
+    ids
+}
+
 /// The state of a store: its changesets and its refs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct State {
@@ -648,6 +749,7 @@ impl Recorded {
                     state.changesets += 1;
                     self.move_ref(&mut state, name, new);
                 }
+                Txn::Batch => state.changesets += BATCHED,
             }
         }
         state
@@ -803,8 +905,8 @@ struct Seen {
     /// What `show` gives as the seq of the last commit `info` counts and of the one after it,
     /// by number: `None` for `E_REV_NOT_FOUND`.
     shown: Vec<(usize, Option<u64>)>,
-    /// What `log` lists from the last commit `info` counts: every commit there is, since the
-    /// run's history is one line.
+    /// What `log` lists from the last commit `info` counts: its first-parent history, every
+    /// commit there is until [`Op::Batch`] makes a second root.
     history: Vec<String>,
 }
 
@@ -1479,9 +1581,15 @@ fn objects_referenced_by_a_durable_frame_survive_power_loss() {
         "some object is linked before its directory is synced"
     );
 
-    // Each commit's frame, the step after which it is durable, and the step that writes it.
+    // Each frame that records changesets (a commit's, the batch's), the step after which it is
+    // durable, and the step that writes it.
     let commits: Vec<(usize, usize, usize)> = (rec.frames.iter().enumerate())
-        .filter(|(_, frame)| matches!(frame.what, Txn::Commit | Txn::CommitAdvance { .. }))
+        .filter(|(_, frame)| {
+            matches!(
+                frame.what,
+                Txn::Commit | Txn::CommitAdvance { .. } | Txn::Batch
+            )
+        })
         .map(|(n, frame)| (n, frame.write + 2, frame.write))
         .collect();
     let first = commits.first().expect("the run commits").1;
