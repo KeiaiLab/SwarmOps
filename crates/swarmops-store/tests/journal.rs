@@ -1092,6 +1092,41 @@ impl Watch for CutAfterEachMeasurement {
         }
     }
 }
+
+#[test]
+fn a_single_entry_cut_after_a_reader_measured_it_is_read_again() {
+    // With one entry listed there is no last entry for the reader to check before the rest (the
+    // check that meets a cut of two or more entries first), so a cut of journal.off to nothing
+    // is met where the reader reads the entries: frames_from's read of them, and
+    // tail_frames_from's search for the first frame at or after its start. Both measure
+    // journal.off again, as at any cut, before they measure journal.log.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84, entry [0]
+    let cut_to_nothing = || -> Hook {
+        let off = layout.journal_off();
+        let cut = move || set_len(&off, 0);
+        (
+            "file_len journal.off".to_owned(),
+            When::After,
+            Box::new(cut),
+        )
+    };
+    let (off, log) = ("file_len journal.off", "file_len journal.log");
+
+    // Nothing is listed once the entry is cut, so frames_from returns nothing, before it ever
+    // measures journal.log.
+    let (reader, calls) = racing_journal(&layout, Some(cut_to_nothing()));
+    assert_eq!(reader.frames_from(0, 10).unwrap(), []);
+    assert_eq!(calls(), [off, off]);
+
+    // The frame is whole in journal.log, not listed any more: tail_frames_from reads it as such.
+    append_bytes(layout.journal_off(), &0_u64.to_le_bytes());
+    let (reader, calls) = racing_journal(&layout, Some(cut_to_nothing()));
+    assert_eq!(reader.tail_frames_from(0).unwrap(), [first]);
+    assert_eq!(calls(), [off, off, log]);
+}
+
 #[test]
 fn a_zeroed_entry_before_the_end_of_journal_off_is_journal_corrupt_for_readers_too() {
     // Zeroed entries at the end of journal.off are dropped, by readers and recovery alike

@@ -47,3 +47,16 @@ pub fn set_len(path: impl AsRef<Path>, len: u64) {
     let file = OpenOptions::new().write(true).open(path).unwrap();
     file.set_len(len).unwrap();
 }
+
+/// Makes `file`, the bytes of an object file, a zstd object whose header and frame both record
+/// `size`, around a frame holding one empty raw block: a lie that agrees with itself, so that the
+/// header check passes and only decoding finds it out (storage spec §2 rule 1). The frame asks
+/// for a 1 KiB window.
+pub fn lying_zstd(file: &mut Vec<u8>, size: u64) {
+    file.truncate(16); // "SOB1" | kind u8 | enc u8 | u16 rsvd | u64le ulen
+    file[5] = 1; // zstd
+    file[8..16].copy_from_slice(&size.to_le_bytes());
+    file.extend([0x28, 0xB5, 0x2F, 0xFD, 0xC0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
+    file.extend(size.to_le_bytes()); // frame content size
+    file.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
+}

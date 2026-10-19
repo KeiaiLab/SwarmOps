@@ -3755,13 +3755,17 @@ fn reader_racing_commits(commits: u32) -> (TempDir, Utf8PathBuf, MetaStore) {
 
 /// A snapshot reads the ref files and the frames past the checkpoint again when a commit lands
 /// in between, but not without end: when one lands during every one of its
-/// [`MetaStore::SNAPSHOT_ROUNDS`] rounds, it gives up with [`StoreError::SnapshotContended`]
-/// (the API's retryable `E_BUSY`) and leaves nothing behind. (It used to read again for as long
-/// as commits kept landing.) The 30th commit here moves the checkpoint while the reader holds
-/// the one it read first.
+/// [`MetaStore::SNAPSHOT_ROUNDS`] rounds, 32 as the specs and the documents say, it gives up
+/// with [`StoreError::SnapshotContended`] (the API's retryable `E_BUSY`) and leaves nothing
+/// behind. (It used to read again for as long as commits kept landing.) The 30th commit here
+/// moves the checkpoint while the reader holds the one it read first.
 #[test]
 fn a_snapshot_gives_up_as_contended_when_every_round_sees_a_new_frame() {
     let rounds = MetaStore::SNAPSHOT_ROUNDS;
+    assert_eq!(
+        rounds, 32,
+        "the bound storage spec §3 and operations spec §4 state"
+    );
     let (_dir, root, reader) = reader_racing_commits(rounds);
     match reader.read().map(|read| read.count_changesets()) {
         Err(StoreError::SnapshotContended { rounds: made }) => assert_eq!(made, rounds),
@@ -3901,6 +3905,70 @@ fn a_snapshot_racing_a_journal_off_cut_reads_again_and_reports_no_damage() {
         (listed(&root), frames(&root).len()),
         (2, 3),
         "the frame is whole in journal.log, unlisted"
+    );
+}
+
+/// Cuts the last entry off `journal.off` right after its `n`th measurement, once: a writer's cut
+/// of an entry whose own listing failed (storage spec §2 rule 3 (b)), landing between a reader's
+/// measurement and its read of the entries. Records every call, by name ([`Call::named`]).
+struct CutAfterMeasurement {
+    n: u32,
+    seen: AtomicU32,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl Watch for CutAfterMeasurement {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        self.calls.lock().unwrap().push(call.named());
+        Ok(())
+    }
+
+    fn after(&self, call: &Call<'_>) {
+        if call.named() == "file_len journal.off"
+            && self.seen.fetch_add(1, Ordering::SeqCst) + 1 == self.n
+        {
+            set_len(call.path(), file_len(call.path()) - 8);
+        }
+    }
+}
+
+/// A cut that a round's second read of the frames meets, the one after the ref files are read,
+/// takes that round as a cut its first read meets does: the snapshot reads the ref files and the
+/// frames again, and shows the store as the cut leaves it, the frame whose entry was cut whole
+/// in `journal.log` and read as one not listed yet. (Before Task 3 of M1.6, it reported the
+/// journal corrupt.)
+#[test]
+fn a_snapshot_whose_second_read_of_the_frames_meets_a_cut_takes_another_round() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]); // frame 0
+    cas(&store, "main", None, Some(1)); // frame 1
+    drop(store);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let cutting = CutAfterMeasurement {
+        n: 2,
+        seen: AtomicU32::new(0),
+        calls: Arc::clone(&calls),
+    };
+    let reader = MetaStore::open_with_fs(&root, checked(Watched(cutting, RealFs))).unwrap();
+    let read = match reader.read() {
+        Ok(read) => read,
+        Err(e) => panic!("expected a snapshot, got {e:?}"),
+    };
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+    assert_eq!(read.changeset(id(1)).unwrap(), Some(stored(1, &[], 0, 1)));
+    assert_eq!(read.count_changesets().unwrap(), 1);
+    // The first round: the frames read as the index opens, `main`, then the second read, which
+    // meets the cut before it measures journal.log. The next round reads `main` and the frames.
+    let (off, log) = ("file_len journal.off", "file_len journal.log");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [off, log, "read main", off, "read main", off, log],
+        "the second read met the cut, and one more round"
+    );
+    assert_eq!(
+        (listed(&root), frames(&root).len()),
+        (1, 2),
+        "frame 1 is whole in journal.log, unlisted"
     );
 }
 
