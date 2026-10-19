@@ -2,8 +2,8 @@
 //! [`CommitRequest`]'s changes to its first parent's tree and records the result.
 //!
 //! 1. Checks the request before it reads or writes anything: changes to make, unless
-//!    `allow_empty` ([`RepoError::EmptyChanges`]), no directory put ([`RepoError::DirPut`]),
-//!    each path once ([`RepoError::DuplicatePath`]), at most 255 parents (the metadata
+//!    `allow_empty` ([`RepoError::EmptyChanges`]), each path once
+//!    ([`RepoError::DuplicatePath`]), at most 255 parents (the metadata
 //!    store's [`StoreError::Limit`], as it gives at insert), distinct and in the store
 //!    ([`RepoError::UnknownParent`]), the name of the ref to advance, if any, a ref name
 //!    ([`RepoError::RefName`]), and no metadata key that ends in `:b64`
@@ -47,7 +47,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
-    BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, RepoPath,
+    BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, LeafKind, ObjectId, ObjectKind, RepoPath,
     Signature, TreeId, hash_object,
 };
 use swarmops_store::{ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, Recovered, StoreError};
@@ -81,7 +81,7 @@ pub enum ChangeOp {
     /// made.
     Put {
         /// File, Exec or Symlink.
-        kind: EntryKind,
+        kind: LeafKind,
         /// The bytes.
         content: Vec<u8>,
     },
@@ -398,25 +398,10 @@ pub fn check_metadata(metadata: &[(String, Vec<u8>)]) -> Result<(), RepoError> {
     }
 }
 
-/// `changes` sorted by path, once checked: not empty (unless `allow_empty`), no directory
-/// put, each path once.
+/// `changes` sorted by path, once checked: not empty (unless `allow_empty`), each path once.
 fn sorted_changes(mut changes: Vec<Change>, allow_empty: bool) -> Result<Vec<Change>, RepoError> {
     if changes.is_empty() && !allow_empty {
         return Err(RepoError::EmptyChanges);
-    }
-    let dir_put = changes.iter().find(|change| {
-        matches!(
-            change.op,
-            ChangeOp::Put {
-                kind: EntryKind::Dir,
-                ..
-            }
-        )
-    });
-    if let Some(change) = dir_put {
-        return Err(RepoError::DirPut {
-            path: change.path.clone(),
-        });
     }
     changes.sort_by(|a, b| a.path.cmp(&b.path));
     if let Some(pair) = changes.windows(2).find(|pair| pair[0].path == pair[1].path) {

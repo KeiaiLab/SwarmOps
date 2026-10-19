@@ -27,3 +27,7 @@ pub use read::StoredChangeset;
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
 pub use verify::{MismatchCause, VerifyProblem, VerifyReport};
+
+/// The merge algorithms (`swarmops-merge`): pure functions over trees and lines, with no I/O and
+/// no store, which the engine's operations call over the trees they read.
+pub use swarmops_merge as merge;

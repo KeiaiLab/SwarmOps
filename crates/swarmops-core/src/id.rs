@@ -27,15 +27,19 @@ impl ObjectId {
     }
 }
 
+/// The 64 lowercase hex digits, written from a buffer on the stack (no `String` per id);
+/// formatting flags such as a width are ignored, as `write_str` ignores them.
 impl fmt::Display for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.to_hex())
+        let mut buf = [0u8; 64];
+        hex::encode_to_slice(self.0, &mut buf).map_err(|_| fmt::Error)?;
+        f.write_str(std::str::from_utf8(&buf).map_err(|_| fmt::Error)?)
     }
 }
 
 impl fmt::Debug for ObjectId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ObjectId({})", self.to_hex())
+        write!(f, "ObjectId({self})")
     }
 }
 

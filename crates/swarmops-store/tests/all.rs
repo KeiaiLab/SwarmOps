@@ -4,6 +4,7 @@
 //! here.
 
 mod contention;
+mod derived;
 mod fsync_percentiles;
 mod index;
 mod journal;

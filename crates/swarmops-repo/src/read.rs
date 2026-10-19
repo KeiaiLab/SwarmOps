@@ -8,8 +8,8 @@
 //! of `~N` suffixes, each walking `N` first parents back (`main~2`, `main~1~1`).
 
 use swarmops_core::{
-    BlobId, Changeset, ChangesetId, EntryKind, ObjectId, ObjectKind, RepoPath, Tree, TreeEntry,
-    TreeId,
+    BlobId, Changeset, ChangesetId, EntryTarget, LeafKind, ObjectId, ObjectKind, RepoPath, Tree,
+    TreeEntry, TreeId,
 };
 use swarmops_store::{ChangesetMeta, MetaRead, ObjectStore, StoreError};
 
@@ -72,7 +72,7 @@ impl<O: ObjectStore> Repo<O> {
         &self,
         cs: ChangesetId,
         path: &RepoPath,
-    ) -> Result<Option<(EntryKind, BlobId, Vec<u8>)>, RepoError> {
+    ) -> Result<Option<(LeafKind, BlobId, Vec<u8>)>, RepoError> {
         let root = self.root_of(cs)?;
         let components: Vec<&str> = path.components().collect();
         let (&name, dirs) = components.split_last().expect("a path has a component");
@@ -80,12 +80,12 @@ impl<O: ObjectStore> Repo<O> {
             return Ok(None);
         };
         let tree = repo::tree(&self.objects, dir)?;
-        match find(&tree, name) {
-            Some(entry) if entry.kind != EntryKind::Dir => {
-                let content = repo::object(&self.objects, entry.id, ObjectKind::Blob)?;
-                Ok(Some((entry.kind, BlobId(entry.id), content)))
+        match find(&tree, name).map(|entry| entry.target) {
+            Some(EntryTarget::Leaf(kind, blob)) => {
+                let content = repo::object(&self.objects, blob.0, ObjectKind::Blob)?;
+                Ok(Some((kind, blob, content)))
             }
-            _ => Ok(None),
+            Some(EntryTarget::Dir(_)) | None => Ok(None),
         }
     }
 
@@ -131,9 +131,9 @@ impl<O: ObjectStore> Repo<O> {
         let mut at = root;
         for &dir in dirs {
             let tree = repo::tree(&self.objects, at)?;
-            match find(&tree, dir) {
-                Some(entry) if entry.kind == EntryKind::Dir => at = TreeId(entry.id),
-                _ => return Ok(None),
+            match find(&tree, dir).map(|entry| entry.target) {
+                Some(EntryTarget::Dir(tree)) => at = tree,
+                Some(EntryTarget::Leaf(..)) | None => return Ok(None),
             }
         }
         Ok(Some(at))

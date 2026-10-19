@@ -54,6 +54,26 @@ impl RepoPath {
     }
 }
 
+/// Checks that `name` is one valid path component, as a tree entry's name must be (storage spec
+/// §1): no `/`, not empty, no NUL, not `.` or `..`, checked in that order. Allocates nothing.
+/// For a name without `/` the error is the one [`RepoPath::new`] gives, which keeps its own
+/// loop: its `EmptyComponent` for `a//b` is not this check's `Empty` for a bare empty name.
+pub(crate) fn check_component(name: &str) -> Result<(), PathError> {
+    if name.contains('/') {
+        return Err(PathError::Slash);
+    }
+    if name.is_empty() {
+        return Err(PathError::Empty);
+    }
+    if name.contains('\0') {
+        return Err(PathError::Nul);
+    }
+    if name == "." || name == ".." {
+        return Err(PathError::DotComponent);
+    }
+    Ok(())
+}
+
 impl fmt::Display for RepoPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)

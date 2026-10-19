@@ -245,6 +245,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `ref set`), and the summary gives publishes/s and the journal frames, so the lock passes, each
   publish took. [docs/perf.md](docs/perf.md) has the section the quiet-window runs fill.
 
+#### M2: diff, history and derived data (2026-10-19)
+
+- `swarmops-store`: a store of derived values, `DerivedStore`, for the derivation engine to come:
+  each value in an immutable file of its own under `meta/derived/`, named by its slot
+  (`DerivedSlot`: the derivation's name and version, the object the value is about, and a key),
+  with a header of its own (`SWDV`, version 1) and a BLAKE3 trailer over the slot and the value.
+  The files are a cache outside the journal: written to a temp file and linked into place
+  without a sync or a lock, and a file that fails its checks reads as missing and is removed, so
+  that the value is derived again. `FORMAT` stays 1.
+
 #### M3: git import (2026-10-19)
 
 - `git import`'s contract, ahead of the command that serves it: `swarmops schema` lists

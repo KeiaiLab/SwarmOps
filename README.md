@@ -103,6 +103,7 @@ flowchart TB
   ops["swarmops-ops<br/>LocalOps: StoreOps<br/>over a local store"]
   repo["swarmops-repo<br/>the repository engine"]
   store["swarmops-store<br/>object files and<br/>the metadata store"]
+  merge["swarmops-merge<br/>tree and line diffs;<br/>no I/O"]
   core["swarmops-core<br/>ids, paths and the<br/>canonical codec; no I/O"]
   subgraph disk["A store: one directory"]
     direction LR
@@ -115,7 +116,9 @@ flowchart TB
   ops --> api
   ops --> repo
   repo --> store
+  repo --> merge
   store --> core
+  merge --> core
   store --> objects
   store --> meta
 ```

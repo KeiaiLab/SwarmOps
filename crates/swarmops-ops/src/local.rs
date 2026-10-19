@@ -18,7 +18,7 @@ use swarmops_api::{
 };
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
-    ChangesetId, DeltaEntry, DeltaOp, EntryKind, ObjectId, RepoPath, Signature, TreeEntry,
+    ChangesetId, DeltaEntry, DeltaOp, EntryKind, LeafKind, ObjectId, RepoPath, Signature, TreeEntry,
 };
 use swarmops_repo::{
     CasResult, CommitRequest, LocalRepo, MismatchCause, RepoError, StoredChangeset, VerifyProblem,
@@ -113,7 +113,7 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_REV_NOT_FOUND` `{rev}`: `NotFound`, and the store's `UnknownRefTarget`. The hint is
 ///   `swarmops ref list` for a ref name, `swarmops log` for an id or a `~N` walk.
 /// - `E_AMBIGUOUS_ID` `{rev}`: `Ambiguous`; the hint says to give more digits.
-/// - `E_INVALID_ARG`: `BadRev` `{rev}` (the hint gives the revision grammar), `DirPut` and
+/// - `E_INVALID_ARG`: `BadRev` `{rev}` (the hint gives the revision grammar),
 ///   `DuplicatePath` `{path}`, `ReservedMetadataKey` `{key}` (a metadata key that ends in
 ///   `:b64`), and the store's `DuplicateParent` `{parent}`, `Limit`
 ///   `{store_limit, max, got}` (a request past a limit of the store's layout: `store_limit` is
@@ -1003,23 +1003,22 @@ fn mismatch_cause(cause: MismatchCause) -> &'static str {
 fn tree_entry_out(entry: &TreeEntry) -> TreeEntryOut {
     TreeEntryOut {
         name: entry.name.clone(),
-        kind: match entry.kind {
+        kind: match entry.target.kind() {
             EntryKind::File => EntryKindOut::File,
             EntryKind::Exec => EntryKindOut::Exec,
             EntryKind::Symlink => EntryKindOut::Symlink,
             EntryKind::Dir => EntryKindOut::Dir,
         },
-        id: entry.id.to_hex(),
+        id: entry.target.id().to_hex(),
     }
 }
 
-/// The kind of a file entry: a leaf, which the codec never lets be a directory.
-fn file_kind(kind: EntryKind) -> FileKind {
+/// The kind of a file: a leaf, which a file entry and a delta put always are.
+fn file_kind(kind: LeafKind) -> FileKind {
     match kind {
-        EntryKind::File => FileKind::File,
-        EntryKind::Exec => FileKind::Exec,
-        EntryKind::Symlink => FileKind::Symlink,
-        EntryKind::Dir => unreachable!("a file entry or a delta put is never a directory"),
+        LeafKind::File => FileKind::File,
+        LeafKind::Exec => FileKind::Exec,
+        LeafKind::Symlink => FileKind::Symlink,
     }
 }
 
