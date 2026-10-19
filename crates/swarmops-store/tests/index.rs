@@ -534,19 +534,19 @@ fn read_at_binary_search_touches_only_key_column() {
     let mut keys: Vec<[u8; 32]> = metas.iter().map(|meta| meta.id.0.0).collect();
     keys.sort_unstable();
 
-    // ⌈log2 10,000⌉ = 14: a binary search over the key column reads at most 14 keys, and
-    // never the rec column.
+    // A search reads keys only, never the rec column. ⌈log2 10,000⌉ = 14: no more keys than a
+    // bisection reads, on keys spread as these are (storage §3 allows 2(⌊log2 m⌋ + 1) = 28 on
+    // any keys), and at most 6 on the mean.
     let mut probes = vec![[0; 32], [0xff; 32], keys[0], keys[9_999]];
     probes.extend(keys.iter().step_by(101).copied());
     probes.extend((10_000..10_100).map(|n| spread_id(n).0.0));
+    let mut all_reads = 0;
     for probe in &probes {
         let (keys_read, recs_read) = (view.probes(), view.rec_reads());
         let at = view.lower_bound(probe).unwrap();
-        assert!(
-            view.probes() - keys_read <= 14,
-            "{} probes",
-            view.probes() - keys_read
-        );
+        let reads = view.probes() - keys_read;
+        assert!(reads <= 14, "{reads} probes");
+        all_reads += reads;
         assert_eq!(view.rec_reads(), recs_read, "lower_bound reads keys only");
         let want = keys.partition_point(|key| key < probe);
         assert_eq!(at, to_u64(want), "{}", hex(probe));
@@ -554,6 +554,11 @@ fn read_at_binary_search_touches_only_key_column() {
             assert_eq!(view.key_at(at).unwrap(), keys[want]);
         }
     }
+    assert!(
+        all_reads <= 6 * to_u64(probes.len()),
+        "{all_reads} key reads for {} searches",
+        probes.len()
+    );
 
     // A whole lookup reads the keys its search reads and no other: the key at the bound it
     // returns is one the search read, kept, not read again to compare. Then one rec for a hit,
@@ -614,6 +619,184 @@ fn find_takes_the_key_at_the_bound_not_the_last_probe() {
         assert_eq!(index.find(cs(absent)).unwrap(), None, "{}", hex(&absent));
         assert_eq!(view.rec_reads(), recs_read, "no rec_at for a miss");
     }
+}
+
+/// In a fresh store root, an index of root records with ids `ids` and delta hashes `dhs`, in
+/// rec order, written straight to its files as `Index::append` and `Index::compact` lay them out,
+/// the sorted views covering every record, all of it sync-free: many records at the cost of a few
+/// writes. The ids must differ.
+fn compacted_index(ids: &[[u8; 32]], dhs: &[[u8; 32]]) -> (TempDir, Index) {
+    assert_eq!(ids.len(), dhs.len());
+    let (root, layout) = bare_root();
+    Index::create(&layout, Arc::new(NoSyncFs)).unwrap();
+    let write = |rel: &str, bytes: Vec<u8>| fs::write(layout.meta_path(rel), bytes).unwrap();
+    write("idx/ids.col", ids.concat());
+    write("idx/gen.col", 1_u64.to_le_bytes().repeat(ids.len()));
+    write("idx/dh.col", dhs.concat());
+    // No parents: every par.col entry is offset 0, count 0, and parents.log stays empty.
+    write("idx/par.col", vec![0; 8 * ids.len()]);
+    for (keys, view) in [(ids, "ids"), (dhs, "dh")] {
+        let mut sorted: Vec<([u8; 32], u64)> = keys.iter().copied().zip(0..).collect();
+        sorted.sort_unstable();
+        let key_file: Vec<u8> = sorted.iter().flat_map(|(key, _)| *key).collect();
+        let rec_file: Vec<u8> = sorted
+            .iter()
+            .flat_map(|(_, rec)| rec.to_le_bytes())
+            .collect();
+        write(&format!("sorted/{view}.key"), key_file);
+        write(&format!("sorted/{view}.rec"), rec_file);
+    }
+    (root, Index::open(&layout, Arc::new(NoSyncFs)).unwrap())
+}
+
+/// The most keys storage §3 lets a search of a view of `len` keys read: 2(⌊log2 len⌋ + 1).
+fn worst_case_probes(len: u64) -> u64 {
+    2 * u64::from(len.bit_width())
+}
+
+/// At most `max` keys of one of three spreads: over the whole key space, as BLAKE3 ids and
+/// delta hashes are; most sharing their first 4 to 7 bytes, the rest spread, so that the first
+/// 8 bytes say little about where a key lies; or a few keys, each many times, as the delta hashes
+/// of rebased changesets (or the tests' `[n; 32]`) are, whose first bytes say nothing.
+fn arb_spread_keys(max: usize) -> impl Strategy<Value = Vec<[u8; 32]>> {
+    prop_oneof![
+        prop::collection::vec(any::<[u8; 32]>(), 0..max),
+        (
+            4..=7_usize,
+            any::<[u8; 7]>(),
+            prop::collection::vec((0..8_u8, any::<[u8; 32]>()), 0..max),
+        )
+            .prop_map(|(shared, prefix, keys)| {
+                (keys.into_iter())
+                    .map(|(spread, mut key)| {
+                        if spread > 0 {
+                            key[..shared].copy_from_slice(&prefix[..shared]);
+                        }
+                        key
+                    })
+                    .collect()
+            }),
+        (
+            prop::collection::vec(any::<[u8; 32]>(), 1..4),
+            prop::collection::vec(any::<prop::sample::Index>(), 0..max),
+        )
+            .prop_map(|(few, picks)| {
+                (picks.iter())
+                    .map(|pick| few[pick.index(few.len())])
+                    .collect()
+            }),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn lower_bound_agrees_with_partition_point(
+        ids in arb_spread_keys(300),
+        dhs in arb_spread_keys(300),
+        random in prop::collection::vec(any::<[u8; 32]>(), 0..16),
+        near in prop::collection::vec(any::<prop::sample::Index>(), 0..16),
+    ) {
+        // Each id once, in the order drawn; as many delta hashes as ids.
+        let mut seen = std::collections::HashSet::new();
+        let ids: Vec<[u8; 32]> = ids.into_iter().filter(|id| seen.insert(*id)).collect();
+        let records = ids.len().min(dhs.len());
+        let (ids, dhs) = (&ids[..records], &dhs[..records]);
+        let (_root, index) = compacted_index(ids, dhs);
+        // `find` takes the key at the bound: the drawn ids, found at their recs.
+        for pick in near.iter().filter(|_| !ids.is_empty()) {
+            let rec = pick.index(ids.len());
+            prop_assert_eq!(index.find(cs(ids[rec])).unwrap(), Some(to_u64(rec)));
+        }
+        for (name, view, keys) in [("ids", index.ids_view(), ids), ("dh", index.dh_view(), dhs)] {
+            let mut sorted = keys.to_vec();
+            sorted.sort_unstable();
+            // Random keys, the ends of the key space, and keys at and next to drawn keys of
+            // the view: one apart in their last byte, and in their eighth.
+            let mut probes = random.clone();
+            probes.extend([[0; 32], [0xff; 32]]);
+            for pick in near.iter().filter(|_| !sorted.is_empty()) {
+                let key = sorted[pick.index(sorted.len())];
+                for (byte, step) in [(31, 0), (31, 1), (31, u8::MAX), (7, 1), (7, u8::MAX)] {
+                    let mut probe = key;
+                    probe[byte] = probe[byte].wrapping_add(step);
+                    probes.push(probe);
+                }
+            }
+            for probe in &probes {
+                let before = view.probes();
+                let at = view.lower_bound(probe).unwrap();
+                let reads = view.probes() - before;
+                let want = to_u64(sorted.partition_point(|key| key < probe));
+                prop_assert_eq!(at, want, "{} view, {}", name, hex(probe));
+                prop_assert!(
+                    reads <= worst_case_probes(view.len()),
+                    "{} view of {}: {} reads for {}", name, view.len(), reads, hex(probe)
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn uniform_ids_take_few_probes() {
+    // 100,000 ids spread as BLAKE3 ids are, all in the sorted view. A bisection reads 16 or 17
+    // keys per search (⌊log2 100,000⌋ + 1 = 17); interpolating on the first 8 bytes of the keys
+    // reads about log2 log2 100,000 + 1: at most 6 on the mean, hits and misses alike.
+    const RECORDS: u64 = 100_000;
+    let ids: Vec<[u8; 32]> = (0..RECORDS).map(|n| spread_id(n).0.0).collect();
+    let dhs: Vec<[u8; 32]> = (RECORDS..2 * RECORDS).map(|n| spread_id(n).0.0).collect();
+    let (_root, index) = compacted_index(&ids, &dhs);
+    let view = index.ids_view();
+    let hits = (0..RECORDS).step_by(20);
+    let misses = RECORDS..RECORDS + 5_000;
+    let (mut searches, mut reads) = (0, 0);
+    for n in hits.chain(misses) {
+        let before = view.probes();
+        let at = view.lower_bound(&spread_id(n).0.0).unwrap();
+        reads += view.probes() - before;
+        searches += 1;
+        if n < RECORDS {
+            assert_eq!(view.key_at(at).unwrap(), spread_id(n).0.0, "a hit's bound");
+        }
+    }
+    assert_eq!(searches, 10_000);
+    assert!(
+        reads <= 6 * searches,
+        "{reads} key reads for {searches} searches"
+    );
+}
+
+#[test]
+fn keys_that_share_their_first_8_bytes_take_about_a_bisection() {
+    // 4,096 ids that share their first 8 bytes, the bytes a search interpolates on: they give
+    // it nothing to go on. A bisection reads ⌊log2 4,096⌋ + 1 = 13 keys per search, and storage
+    // §3 allows 26; the search reads at most 16 on the mean, not crawling through them, since it
+    // bisects once both ends of its range share their first 8 bytes, and after two
+    // interpolations in a row that each left more than half of the range.
+    const RECORDS: u64 = 4_096;
+    let clustered = |n: u64| {
+        let mut key = spread_id(n).0.0;
+        key[..8].copy_from_slice(&[0xab; 8]);
+        key
+    };
+    let ids: Vec<[u8; 32]> = (0..RECORDS).map(clustered).collect();
+    let (_root, index) = compacted_index(&ids, &ids);
+    let view = index.ids_view();
+    let (mut searches, mut reads) = (0, 0);
+    for n in (0..RECORDS).step_by(4).chain(RECORDS..RECORDS + 1_024) {
+        let before = view.probes();
+        let at = view.lower_bound(&clustered(n)).unwrap();
+        let read = view.probes() - before;
+        assert!(read <= worst_case_probes(RECORDS), "{read} key reads");
+        (searches, reads) = (searches + 1, reads + read);
+        if n < RECORDS {
+            assert_eq!(view.key_at(at).unwrap(), clustered(n), "a hit's bound");
+        }
+    }
+    assert!(
+        reads <= 16 * searches,
+        "{reads} key reads for {searches} searches"
+    );
 }
 
 #[test]

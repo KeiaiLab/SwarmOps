@@ -18,7 +18,7 @@
 //! once for many appends. They shrink only at the end, when a writer cuts what a crash left
 //! of a record ([`Index::repair_tail`]) or, after a failed sync, the records past the
 //! checkpoint, never below what the sorted views cover ([`Index::truncate_to`]). Lookups
-//! binary-search a sorted view's key column, then scan the records past the view, the unsorted
+//! search a sorted view's key column, then scan the records past the view, the unsorted
 //! tail, read from `ids.col` (or `dh.col`) with one `read_at`; [`Index::compact`] merges the
 //! tail into the views.
 //!
@@ -448,8 +448,8 @@ impl Index {
             .copied())
     }
 
-    /// The rec of changeset `id`, if the index holds it: a binary search of the id view's
-    /// key column (one `read_at` per probe), which keeps the key it read at the bound it
+    /// The rec of changeset `id`, if the index holds it: a search of the id view's key
+    /// column (one `read_at` per probe), which keeps the key it read at the bound it
     /// returns, so that no key is read twice ([`SortedView::lower_bound`]); then, if the view
     /// lacks it, a scan of the tail of `ids.col`, read with one `read_at`. A rec the view names
     /// that the view does not cover (a view of m entries holds the recs `[0, m)`) is

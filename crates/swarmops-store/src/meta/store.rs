@@ -497,8 +497,8 @@ pub struct MetaRead<'a> {
 }
 
 impl MetaRead<'_> {
-    /// Changeset `id`: an index lookup (a binary search of the sorted view, then the tail),
-    /// then the frames past the checkpoint.
+    /// Changeset `id`: an index lookup (a search of the sorted view, then the tail), then the
+    /// frames past the checkpoint.
     pub fn changeset(&self, id: ChangesetId) -> Result<Option<ChangesetMeta>, StoreError> {
         match self.index.find(id)? {
             Some(rec) => self.index.get(rec).map(Some),
