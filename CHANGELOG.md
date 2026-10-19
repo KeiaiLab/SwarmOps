@@ -294,6 +294,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   raw payload from the buffer its file was read into, a zstd one 64 KiB at a time as its stream
   decodes. The pieces are hashed as they go and the id checked at the end, so `Corrupt` comes
   after the pieces before the damage went by, and the caller drops what it kept of them.
+- `swarmops-repo`: `RepoRead::read_file_span` reads part of a file (`FileSpan::Bytes` from an
+  offset, or `FileSpan::Lines`, a 1-based range of lines, of which those that exist) and keeps
+  only that part, its first `max` bytes, while the whole blob is verified (`FileSpanRead`).
+  `RepoRead::list_tree_depth` lists a directory and the directories below it to a depth, in
+  pre-order and a page at a time after a path, each leaf with its size from its object's header
+  (`ListedEntry`, `TreePage`); a page reads the trees it enters, and none to learn that more
+  entries follow.
 
 ### Changed
 
