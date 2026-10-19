@@ -952,6 +952,60 @@ mod advance {
         assert_eq!(journal_frames(&root), frames);
     }
 
+    /// The move expects the changeset's first parent, whatever its other parents are (the
+    /// expectation M4's `land` reuses): with main at the first of two parents the move applies;
+    /// with main at the second, it is `RefMoved` and records nothing.
+    #[test]
+    fn an_advancing_commit_with_two_parents_expects_the_first() {
+        let (_dir, root, repo, c0) = with_main();
+        let side = commit(&repo, &[], vec![put("s", b"s")]).id;
+
+        let out = repo
+            .commit(advancing(&[c0, side], vec![put("b", b"b")], "main"))
+            .unwrap();
+        assert_eq!(out.advanced, Some(moved("main", Some(c0), false)));
+        let main = repo.get_ref("main").unwrap().map(|state| state.target);
+        assert_eq!(main, Some(out.id));
+
+        let frames = journal_frames(&root);
+        let second = repo.commit(advancing(&[side, out.id], vec![put("c", b"c")], "main"));
+        assert_moved(second, "main", Some(out.id));
+        assert_eq!(journal_frames(&root), frames, "nothing recorded");
+    }
+
+    /// The warning of an advancing commit whose step after its commit point fails says what is
+    /// committed: the changeset and the ref's move, or the move alone for a changeset the store
+    /// held already.
+    #[test]
+    fn an_advancing_commit_s_warning_names_what_it_committed() {
+        let (_dir, root, repo, c0) = with_main();
+        drop(repo);
+        let out = listing_fails(&root)
+            .commit(advancing(&[c0], vec![put("b", b"b")], "main"))
+            .unwrap();
+        assert_eq!(out.insert, InsertOutcome::Inserted { seq: 1 });
+        let [warning] = &out.warnings[..] else {
+            panic!("expected one warning, got {:?}", out.warnings);
+        };
+        let both = "the changeset and the move of ref main is committed";
+        assert!(warning.starts_with(both), "{warning}");
+
+        let (_dir, root, repo, c0) = with_main();
+        let plain = request(&[c0], vec![put("b", b"b")]);
+        repo.commit(plain.clone()).unwrap();
+        drop(repo);
+        let advance = advancing(&[c0], vec![put("b", b"b")], "main").advance;
+        let out = listing_fails(&root)
+            .commit(CommitRequest { advance, ..plain })
+            .unwrap();
+        assert_eq!(out.insert, InsertOutcome::AlreadyPresent);
+        let [warning] = &out.warnings[..] else {
+            panic!("expected one warning, got {:?}", out.warnings);
+        };
+        let alone = "the move of ref main is committed";
+        assert!(warning.starts_with(alone), "{warning}");
+    }
+
     /// The commit the crash sweep's child makes: [`crash_request`]'s files, on main's head `base`,
     /// advancing main.
     #[cfg(feature = "test-hooks")]
