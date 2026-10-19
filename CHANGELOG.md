@@ -331,6 +331,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `NotCommitted` carry an `IoFailure` (`op`, `file`, `source`, `also`) in place of an
   `io::Error`, the new `StoreFs` locates the failure of every filesystem call the stores make,
   and neither `StoreError` nor `RepoError` converts from a bare `io::Error` any more.
+- A write whose tail check cannot list a frame that an earlier transaction left whole and
+  unlisted (that transaction's own listing in `journal.off` failed: committed, with a warning)
+  is the retryable `E_IO_TRANSIENT`, `committed: false`, its `details` naming the append that
+  failed, where it was the non-retryable `E_IO`: nothing of the write was committed, and running
+  it again lists the frame. In the Rust API it is `StoreError::NotCommitted`, where it was
+  `StoreError::Io`.
 
 ### Fixed
 

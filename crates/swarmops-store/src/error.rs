@@ -131,8 +131,10 @@ pub enum StoreError {
     /// transaction did not commit, and no later writer can list what the append wrote. The
     /// append is the transaction's own frame's, or, when the sync of the tail check that opens
     /// a write fails, its writing afresh of the frames `journal.off` did not list yet (those
-    /// frames are cut back off with it). Retrying the transaction is safe: nothing of it is in
-    /// the store. Retryable.
+    /// frames are cut back off with it). Or the tail check's listing of such a frame in
+    /// `journal.off` failed, and what reached `journal.off` of the entry was cut back off it:
+    /// the transaction never began, and the next tail check lists the frame. Retrying the
+    /// transaction is safe: nothing of it is in the store. Retryable.
     #[error(
         "the transaction did not commit: a journal append failed, and what it wrote was cut \
          back off the journal: {source}"

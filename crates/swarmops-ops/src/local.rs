@@ -1235,6 +1235,47 @@ mod tests {
         assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 0);
     }
 
+    /// A commit whose write cannot list the frame a commit before it left whole and unlisted (that
+    /// commit's own listing in journal.off failed: committed, with a warning) committed nothing
+    /// of its own: `E_IO_TRANSIENT`, retryable, `committed: false`, naming the append that failed,
+    /// where it was the non-retryable `E_IO`. Run again where journal.off takes the listing, it
+    /// commits, and the store holds both changesets.
+    #[test]
+    fn a_commit_whose_tail_check_cannot_list_a_frame_is_retryable_and_not_committed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        drop(LocalOps::init(&root, "acme").unwrap());
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let ops = ops_on(&root, failing("append_durable", "journal.off"));
+        let commit = |path: &str| CommitReq {
+            parent: None,
+            changes: vec![ChangeInput {
+                path: path.to_owned(),
+                op: ChangeOp::Put,
+                content: Some(ContentInput::Inline("x".to_owned())),
+                mode: None,
+            }],
+            message: "m".to_owned(),
+            allow_empty: false,
+            advance: None,
+        };
+        one_injected(&ops.commit(&who, commit("f")).unwrap().warnings);
+        let error = ops.commit(&who, commit("g")).unwrap_err();
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_IO_TRANSIENT", 4, true),
+            "{error:?}"
+        );
+        assert_eq!(error.details["committed"], false, "{error:?}");
+        assert_eq!(error.details["fs_op"], "append_durable", "{error:?}");
+        assert_eq!(error.details["store_file"], "meta/journal.off", "{error:?}");
+        drop(ops);
+
+        let fresh = LocalOps::open(&root).unwrap();
+        fresh.commit(&who, commit("g")).unwrap();
+        assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 2);
+    }
+
     /// What a request's write repaired first goes into that request's record alone, which the
     /// CLI and the MCP server report as `meta.recovered`, on `E_CAS_MISMATCH` too: after a ref
     /// move whose listing in `journal.off` failed, a mismatching `ref_set`'s write lists the

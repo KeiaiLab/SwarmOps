@@ -513,7 +513,11 @@ impl Journal {
     ///   where it starts), fails its CRC or does not decode (a listed frame's bytes were
     ///   durable before it was listed, so its loss is a filesystem's, never a torn write); a
     ///   listed frame that fails the check before a cut or a listing; an unlisted frame that
-    ///   matches its CRC but does not decode (a newer version may have written it).
+    ///   matches its CRC but does not decode (a newer version may have written it);
+    /// - a listing that fails is cut back off `journal.off` (what reached it of the entry), and
+    ///   is [`StoreError::NotCommitted`]: nothing of the caller's is committed, and the next call
+    ///   lists the frame; so is a failed rewrite of the frames whose sync failed (storage spec §2
+    ///   rule 3 (b), (c)).
     ///
     /// Only the last listed frame, the headers of the two frames before it, and what follows
     /// are read, unless there is something to cut or list: then every listed frame is.
@@ -820,7 +824,11 @@ impl Journal {
         for (at, offset) in (listed..).zip(&unlisted) {
             let entry = offset.to_le_bytes();
             if let Err(e) = self.fs.append_durable(self.off_path.as_std_path(), &entry) {
-                return Err(self.cut_failed_entries(at, e).into());
+                // The caller's own transaction never began: nothing of it is committed, and the
+                // next tail check lists the frame (storage spec §2 rule 3 (b)).
+                return Err(StoreError::NotCommitted {
+                    source: self.cut_failed_entries(at, e),
+                });
             }
         }
         // A rewrite cut journal.log back to the first unlisted frame, and the torn tail behind

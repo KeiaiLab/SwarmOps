@@ -2459,6 +2459,60 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
     }
 }
 
+/// A write whose tail check cannot list a frame that a transaction before it left whole and
+/// unlisted (its own listing failed: committed, [`StoreError::PostCommit`]) has committed nothing
+/// of its own: its transaction never began, and running it again lists the frame. So the error is
+/// [`StoreError::NotCommitted`], naming the append that failed (the API layer's retryable
+/// `E_IO_TRANSIENT`), not a plain [`StoreError::Io`]; what reached `journal.off` of the entry is
+/// cut back off it first, so nothing more is listed. The next write lists the frame, and the
+/// retried transaction finds it done.
+#[test]
+fn a_failed_listing_in_the_tail_check_is_not_committed() {
+    use swarmops_store::{FileOp, FsMethod};
+
+    for strike in [Strike::After, Strike::Before] {
+        let (_dir, root) = new_root();
+        let fails = Arc::new(Watched(
+            Fails::new("append_durable journal.off", strike),
+            RealFs,
+        ));
+        let store = store_on(&root, &fails);
+        insert(&store, &[cs(0, &[])]); // frame 0
+        fails.arm();
+        let mut write = store.write().unwrap();
+        write.insert_changeset(cs(1, &[0])).unwrap();
+        let committed = write.commit();
+        assert!(
+            matches!(committed, Err(StoreError::PostCommit { frame_seq: 1, .. })),
+            "{committed:?}"
+        );
+        assert_eq!(listed(&root), 1, "frame 1 is whole and unlisted");
+
+        // The next write's tail check lists frame 1, and that listing fails.
+        fails.arm();
+        match store.write() {
+            Err(StoreError::NotCommitted { source }) => assert_eq!(
+                (source.op, source.file.as_deref()),
+                (
+                    FileOp::Fs(FsMethod::AppendDurable),
+                    Some(Utf8Path::new("meta/journal.off"))
+                ),
+                "{source}"
+            ),
+            other => panic!("expected NotCommitted, got {other:?}"),
+        }
+        assert_eq!(listed(&root), 1, "nothing more is listed");
+
+        // Run again, the write lists the frame, and the retried transaction finds it done.
+        let mut write = store.write().unwrap();
+        assert_eq!(listed(&root), 2, "the write listed the frame");
+        let again = write.insert_changeset(cs(1, &[0])).unwrap();
+        assert_eq!(again, InsertOutcome::AlreadyPresent);
+        write.commit().unwrap();
+        assert_eq!(store.read().unwrap().count_changesets().unwrap(), 2);
+    }
+}
+
 /// What a write transaction on `store` repaired, as it reports it once open; the write is dropped
 /// uncommitted (its repairs stay made). Then the next write repairs nothing.
 #[track_caller]
