@@ -12,16 +12,18 @@ use serde_json::{Map, Value};
 use swarmops_api::{
     Attribution, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp,
     EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq, LogCutOut, LogPage, LogReq,
-    OpError, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefListResp, RefOut,
+    OpChangesetOut, OpError, OpLogPage, OpLogReq, OperationKind, OperationOut, ReadFileReq,
+    ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut,
     RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps,
-    TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
+    TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, LeafKind, ObjectId, RepoPath, Signature, TreeEntry,
 };
 use swarmops_repo::{
-    CasResult, CommitRequest, LocalRepo, MismatchCause, RepoError, StoredChangeset, VerifyProblem,
+    CasResult, CommitRequest, LocalRepo, MismatchCause, OpRecord, Operation, RepoError,
+    StoredChangeset, VerifyProblem,
 };
 use swarmops_store::{LogCut, Recovered};
 
@@ -30,6 +32,13 @@ use crate::error::{During, details, error, hint, one_line, op, repo_error, shell
 
 /// The agent a changeset is attributed to when its metadata names none.
 const UNKNOWN_AGENT: &str = "unknown/unknown";
+
+/// The metadata key that names who landed a changeset: every changeset a land makes carries it
+/// (M4's `land`), and the operation log tells a land from a publish by it.
+const LANDER_KEY: &str = "lander";
+
+/// The metadata key of a land's idempotency key, when it had one.
+const LAND_KEY_KEY: &str = "land_key";
 
 /// The operations over a store on the local filesystem: [`StoreOps`], run in this process with
 /// the repository library.
@@ -48,7 +57,7 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// # Recovery
 ///
 /// A write first repairs what earlier writers left when they crashed or failed after their
-/// commit point (storage spec §3). `commit`, `ref_set` and `ref_delete` made through
+/// commit point (storage spec §3). `commit`, `ref_set`, `ref_delete` and `undo` made through
 /// [`LocalOps::recording`] record what their write repaired, when it repaired anything, in the
 /// request's [`Resolved`], which the CLI and the MCP server report as `meta.recovered`: on
 /// success and on `E_CAS_MISMATCH` alike, never as a warning, and not when the operation then
@@ -111,6 +120,20 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   of the ref. So a `ref_set` whose `new` is the target it expects never moves the ref: it is a
 ///   replay where the ref holds that target, and a mismatch where it holds another.
 /// - `verify` checks the store and lists each problem as one line.
+/// - `op_log` lists the store's operations, newest first, below `before`: each one write
+///   transaction, a journal frame numbered from 0 in commit order, with its kind (read from its
+///   records: one changeset and a move of a ref to it is a `land` when the changeset's metadata
+///   names a lander, else a `publish`; changesets alone a `commit`; ref moves alone a
+///   `ref_move`; a compaction marker alone a `compaction`; anything else `mixed`), at most
+///   `max_changesets` of its changesets (each read from its object for its agent, time, title
+///   and land key; `changesets_total` counts them all) and its ref moves. A page is `truncated`
+///   when older operations follow its last.
+/// - `undo` moves every ref an operation moved back to what it named before the operation, for
+///   the caller's agent, by compare-and-swap in one transaction of its own, all of them or none:
+///   a ref that names that already is skipped, and one that names neither that nor what the
+///   operation set it to is `E_CAS_MISMATCH`, with nothing written. With every ref skipped,
+///   nothing is written: `already_applied`. Its `op` is the operation it recorded, which
+///   another undo can take back.
 ///
 /// Limits of 0 (`limit`, `max_changes`) are `E_INVALID_ARG`.
 ///
@@ -144,6 +167,15 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   parent (`actual` null when the ref does not exist), so that the commit recorded nothing.
 ///   The message says to commit the change again on top of `actual` (`--parent <actual>
 ///   --advance <name>`), and the hint only reads, as for a ref move's below.
+/// - `E_CAS_MISMATCH` (retryable) `{name, actual, op}`: `UndoBlocked`, an `undo` of operation
+///   `op` that found ref `name` at `actual` (null when it does not exist), moved since the
+///   operation, so that the undo wrote nothing. The message says to undo the operations that
+///   moved it since, newest first, or to land a change that reverses the operation; the hint is
+///   `swarmops op log`, which only reads.
+/// - `E_OP_NOT_FOUND` `{op, last}`: `OpNotFound`, an `undo` of an operation past the store's last
+///   (`last` null when the store has none); the hint is `swarmops op log`.
+/// - `E_NOTHING_TO_UNDO` `{op}`: `NothingToUndo`, an `undo` of an operation that left every ref
+///   where it found it; the hint is `swarmops op log`.
 /// - `E_BUSY` (retryable): the store's `Busy` (a writer's lock wait ran out) or
 ///   `SnapshotContended` (a read's snapshot rounds ran out); either way nothing was committed (a
 ///   commit's flushed objects may remain, for GC). The hint says which, and to retry.
@@ -305,12 +337,68 @@ impl LocalOps {
             .ok_or_else(|| bad("the store holds no such changeset"))?;
         Ok(stored.changeset.parents.first().copied())
     }
+
+    /// `operation` as `op_log` gives it: its kind ([`operation_kind`]), its first
+    /// `max_changesets` changesets, each read for its agent, time, title and land key, how many
+    /// it recorded in all, and its ref moves.
+    fn operation_out(
+        &self,
+        operation: Operation,
+        max_changesets: usize,
+    ) -> Result<OperationOut, OpError> {
+        let Operation { seq, records } = operation;
+        let ids: Vec<ChangesetId> = records
+            .iter()
+            .filter_map(|record| match record {
+                OpRecord::Changeset { id, .. } => Some(*id),
+                OpRecord::RefMove { .. } | OpRecord::Compacted => None,
+            })
+            .collect();
+        let listed = ids
+            .iter()
+            .take(max_changesets)
+            .map(|&id| self.stored(id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let kind = operation_kind(&records, |id| {
+            let lands = |stored: &StoredChangeset| metadata_value(stored, LANDER_KEY).is_some();
+            match listed.iter().find(|stored| stored.id == id) {
+                Some(stored) => Ok(lands(stored)),
+                None => Ok(lands(&self.stored(id)?)),
+            }
+        })?;
+        let ref_moves = records
+            .into_iter()
+            .filter_map(|record| match record {
+                OpRecord::RefMove {
+                    name,
+                    old,
+                    new,
+                    actor,
+                    ts,
+                } => Some(RefMoveOut {
+                    name,
+                    old: old.map(|id| id.to_string()),
+                    new: new.map(|id| id.to_string()),
+                    actor,
+                    at: ts,
+                }),
+                OpRecord::Changeset { .. } | OpRecord::Compacted => None,
+            })
+            .collect();
+        Ok(OperationOut {
+            op: seq,
+            kind,
+            changesets: listed.iter().map(op_changeset_out).collect(),
+            changesets_total: to_u64(ids.len()),
+            ref_moves,
+        })
+    }
 }
 
 /// The revisions one request resolved: each as given, and the full changeset id it named. The
 /// CLI and the MCP server report it as `meta.resolved`. And what the request's write repaired
-/// before its own work, if it repaired anything (`commit`, `ref_set` and `ref_delete` record it,
-/// on success and on `E_CAS_MISMATCH` alike), which they report as `meta.recovered`.
+/// before its own work, if it repaired anything (`commit`, `ref_set`, `ref_delete` and `undo`
+/// record it, on success and on `E_CAS_MISMATCH` alike), which they report as `meta.recovered`.
 ///
 /// Each request has its own: [`LocalOps::recording`] records into it what that request's
 /// operations resolve and repair, and nothing else does, so that what one request resolved or
@@ -820,6 +908,54 @@ impl StoreOps for Recording<'_> {
         })
     }
 
+    fn op_log(&self, req: OpLogReq) -> Result<OpLogPage, OpError> {
+        let OpLogReq {
+            before,
+            limit,
+            max_changesets,
+        } = req;
+        at_least_one("limit", limit)?;
+        let (operations, older) = self.ops.repo.op_log(before, limit).map_err(op)?;
+        let ops = operations
+            .into_iter()
+            .map(|operation| self.ops.operation_out(operation, max_changesets))
+            .collect::<Result<_, _>>()?;
+        Ok(OpLogPage {
+            ops,
+            truncated: older,
+        })
+    }
+
+    fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError> {
+        let outcome = self.ops.repo.undo(req.op, who.agent()).map_err(|e| {
+            // An undo refused under the lock is E_CAS_MISMATCH, which reports what the write
+            // repaired first, as a ref move's does.
+            if let RepoError::UndoBlocked { recovered, .. } = &e {
+                self.resolved.record_recovered(**recovered);
+            }
+            op(e)
+        })?;
+        self.resolved.record_recovered(outcome.recovered);
+        let ref_moves = outcome
+            .moves
+            .into_iter()
+            .map(|(name, old, new, at)| RefMoveOut {
+                name,
+                old: old.map(|id| id.to_string()),
+                new: new.map(|id| id.to_string()),
+                actor: who.agent().to_owned(),
+                at,
+            })
+            .collect();
+        Ok(UndoResp {
+            undone: outcome.undone,
+            op: outcome.frame_seq,
+            ref_moves,
+            already_applied: outcome.already_applied,
+            warnings: outcome.warnings,
+        })
+    }
+
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {
         let report = self.ops.repo.verify(req.deep).map_err(op)?;
         Ok(VerifyReport {
@@ -872,6 +1008,14 @@ impl StoreOps for LocalOps {
 
     fn ref_delete(&self, who: &Identity, req: RefDeleteReq) -> Result<RefSetResp, OpError> {
         self.recording(&Resolved::default()).ref_delete(who, req)
+    }
+
+    fn op_log(&self, req: OpLogReq) -> Result<OpLogPage, OpError> {
+        self.recording(&Resolved::default()).op_log(req)
+    }
+
+    fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError> {
+        self.recording(&Resolved::default()).undo(who, req)
     }
 
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {
@@ -1071,18 +1215,75 @@ fn created_at(committer: &Signature) -> u64 {
 
 fn summary(stored: &StoredChangeset) -> ChangesetSummary {
     let changeset = &stored.changeset;
-    let first_line = changeset
-        .message
-        .split(|&b| b == b'\n')
-        .next()
-        .unwrap_or_default();
     ChangesetSummary {
         id: stored.id.to_string(),
         parents: changeset.parents.iter().map(ToString::to_string).collect(),
         author_agent: attribution(&changeset.metadata).agent,
         created_at: created_at(&changeset.committer),
-        title: lossy(first_line.strip_suffix(b"\r").unwrap_or(first_line)),
+        title: title(&changeset.message),
     }
+}
+
+/// A message's first line, without its line break (`\n` or `\r\n`), as text.
+fn title(message: &[u8]) -> String {
+    let first_line = message.split(|&b| b == b'\n').next().unwrap_or_default();
+    lossy(first_line.strip_suffix(b"\r").unwrap_or(first_line))
+}
+
+/// What an operation that recorded `records` did: one changeset and a move of a ref to it is a
+/// land when `lands` says the changeset's metadata names a lander (every land's does; its
+/// `land_key` is optional), else a publish; changesets alone a commit; ref moves alone a ref
+/// move; a compaction marker alone a compaction; anything else a mix. `lands` is asked only of
+/// that one changeset.
+fn operation_kind(
+    records: &[OpRecord],
+    lands: impl FnOnce(ChangesetId) -> Result<bool, OpError>,
+) -> Result<OperationKind, OpError> {
+    let mut changesets = Vec::new();
+    let mut moved_to = Vec::new();
+    let mut compactions = 0_usize;
+    for record in records {
+        match record {
+            OpRecord::Changeset { id, .. } => changesets.push(*id),
+            OpRecord::RefMove { new, .. } => moved_to.push(*new),
+            OpRecord::Compacted => compactions += 1,
+        }
+    }
+    Ok(match (&changesets[..], &moved_to[..], compactions) {
+        ([id], [Some(to)], 0) if to == id => {
+            if lands(*id)? {
+                OperationKind::Land
+            } else {
+                OperationKind::Publish
+            }
+        }
+        ([_, ..], [], 0) => OperationKind::Commit,
+        ([], [_, ..], 0) => OperationKind::RefMove,
+        ([], [], 1) => OperationKind::Compaction,
+        _ => OperationKind::Mixed,
+    })
+}
+
+/// A changeset an operation recorded, as the operation log lists it.
+fn op_changeset_out(stored: &StoredChangeset) -> OpChangesetOut {
+    let changeset = &stored.changeset;
+    OpChangesetOut {
+        id: stored.id.to_string(),
+        agent: attribution(&changeset.metadata).agent,
+        created_at: created_at(&changeset.committer),
+        title: title(&changeset.message),
+        land_key: metadata_value(stored, LAND_KEY_KEY).map(lossy),
+    }
+}
+
+/// The value of metadata `key` of the changeset `stored`, if it has the key.
+fn metadata_value<'s>(stored: &'s StoredChangeset, key: &str) -> Option<&'s [u8]> {
+    stored
+        .changeset
+        .metadata
+        .iter()
+        .find(|(k, _)| k == key)
+        .map(|(_, value)| value.as_slice())
 }
 
 fn change_out(entry: &DeltaEntry) -> ChangeOut {
@@ -1225,6 +1426,63 @@ mod tests {
     fn ops_on(root: &Utf8Path, fs: impl FsOps + 'static) -> LocalOps {
         let repo = LocalRepo::open_with_fs(root, Arc::new(fs)).expect("open the store");
         LocalOps::with_repo(repo, root)
+    }
+
+    /// An operation's kind comes from its records alone, but for a land, told from a publish by
+    /// its changeset's metadata, which is read for that changeset only.
+    #[test]
+    fn an_operation_s_kind_comes_from_its_records() {
+        let (a, b) = (
+            ChangesetId(ObjectId([1; 32])),
+            ChangesetId(ObjectId([2; 32])),
+        );
+        let inserted = |id| OpRecord::Changeset {
+            id,
+            parents: Vec::new(),
+        };
+        let moved = |new| OpRecord::RefMove {
+            name: "main".to_owned(),
+            old: None,
+            new,
+            actor: "test/agent".to_owned(),
+            ts: 0,
+        };
+        let kind = |records: &[OpRecord], lander: bool| {
+            operation_kind(records, |id| {
+                assert_eq!(id, a, "only the published changeset is read");
+                Ok(lander)
+            })
+            .unwrap()
+        };
+        let publish = [inserted(a), moved(Some(a))];
+        assert_eq!(kind(&publish, false), OperationKind::Publish);
+        assert_eq!(kind(&publish, true), OperationKind::Land);
+        let moved_first = [moved(Some(a)), inserted(a)];
+        assert_eq!(kind(&moved_first, true), OperationKind::Land);
+        for (records, want) in [
+            (&[inserted(a)][..], OperationKind::Commit),
+            (&[inserted(a), inserted(b)], OperationKind::Commit),
+            (&[moved(Some(a))], OperationKind::RefMove),
+            (&[moved(Some(a)), moved(None)], OperationKind::RefMove),
+            (&[OpRecord::Compacted], OperationKind::Compaction),
+            (&[inserted(a), moved(Some(b))], OperationKind::Mixed),
+            (&[inserted(a), moved(None)], OperationKind::Mixed),
+            (
+                &[inserted(a), inserted(b), moved(Some(a))],
+                OperationKind::Mixed,
+            ),
+            (
+                &[inserted(a), moved(Some(a)), moved(Some(a))],
+                OperationKind::Mixed,
+            ),
+            (&[inserted(a), OpRecord::Compacted], OperationKind::Mixed),
+            (
+                &[OpRecord::Compacted, OpRecord::Compacted],
+                OperationKind::Mixed,
+            ),
+        ] {
+            assert_eq!(kind(records, true), want, "{records:?}");
+        }
     }
 
     /// The one warning `warnings` holds, which must name the injected failure.

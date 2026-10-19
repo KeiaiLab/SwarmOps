@@ -103,8 +103,8 @@ error_codes! {
     Busy => "E_BUSY", EXIT_RETRYABLE, true;
     /// A bug in SwarmOps, such as a caught panic.
     Internal => "E_INTERNAL", EXIT_ERROR, false;
-    // M4's merge and landing. Not raised yet: `land` (M4 Task 7) raises the first three and
-    // `undo` (M4 Task 9) the other two.
+    // M4's merge and landing. `land` (M4 Task 7) raises the first three, not yet; `undo` raises
+    // the other two.
     /// The change conflicts with the target: `details.report` lists each conflicting file with
     /// its kind, its hunks and who changed it on the target. Nothing was recorded; resolve the
     /// conflicts, then land again (the `hint` says how).

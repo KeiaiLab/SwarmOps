@@ -37,13 +37,13 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, InfoReq, LogReq, Meta, OpError,
-    ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev,
-    ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    OpLogReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq,
+    RepoInfo, Rev, ShowReq, StoreOps, UndoReq, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Resolved, shell_word};
 
-use crate::cli::{self, Command, Global, RefCommand};
+use crate::cli::{self, Command, Global, OpCommand, RefCommand};
 use crate::context::{self, Env};
 use crate::mcp;
 use crate::output::{self, Format, Printed};
@@ -191,6 +191,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             |ops, req| ops.log(req),
         ),
         Command::Ref(command) => run_ref(ctx, op, command),
+        Command::Op(command) => run_op(ctx, op, command),
         Command::Verify { deep } => ctx.on_store(
             op,
             || Ok(VerifyReq { deep }),
@@ -233,6 +234,35 @@ fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
                 Ok((context::mutator(agent, ctx.env)?, req))
             },
             |ops, (who, req)| ops.ref_delete(&who, req),
+        ),
+    }
+}
+
+/// Runs an `op` subcommand, which names operation `op`.
+fn run_op(ctx: &Ctx<'_>, op: &'static str, command: OpCommand) -> Printed {
+    match command {
+        OpCommand::Log {
+            before,
+            limit,
+            max_changesets,
+        } => ctx.on_store(
+            op,
+            || {
+                Ok(OpLogReq {
+                    before,
+                    limit,
+                    max_changesets,
+                })
+            },
+            |ops, req| ops.op_log(req),
+        ),
+        OpCommand::Undo { op: number } => ctx.on_store(
+            op,
+            || {
+                let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
+                Ok((who, UndoReq { op: number }))
+            },
+            |ops, (who, req)| ops.undo(&who, req),
         ),
     }
 }

@@ -96,7 +96,8 @@ const DEFAULT_PARALLELISM: usize = 5;
 /// the checkpoint.
 const CHECKPOINT_EVERY: u64 = 32;
 
-/// How many frames [`MetaRead::reflog`] reads with one call as it walks back.
+/// How many frames [`MetaRead::reflog`] and [`MetaRead::frames_before`] read with one call as
+/// they walk back.
 const REFLOG_BATCH: u64 = 256;
 
 /// The most bytes a ref move's actor may take: its length is one byte of the record.
@@ -611,6 +612,65 @@ impl MetaRead<'_> {
         Ok(frames.iter().flat_map(entries).collect())
     }
 
+    /// Up to `limit` of the snapshot's frames whose seq is below `before` (from its newest for
+    /// `None`), newest first, each whole: the operation log (storage spec §3). The frames past
+    /// the checkpoint come from the snapshot itself, then those before it from `journal.off`,
+    /// 256 at a time, as [`MetaRead::reflog`] reads them. The snapshot ends at its own newest
+    /// frame: a frame committed after it was taken is never among them.
+    pub fn frames_before(
+        &self,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Frame>, StoreError> {
+        let below = before.unwrap_or(u64::MAX);
+        let mut frames: Vec<Frame> = self
+            .frames
+            .iter()
+            .rev()
+            .filter(|frame| frame.seq < below)
+            .take(limit)
+            .cloned()
+            .collect();
+        if frames.len() == limit {
+            return Ok(frames);
+        }
+        // Then the frames before the checkpoint, a batch at a time; with no frames past the
+        // checkpoint, frames listed since the snapshot was taken are skipped.
+        let mut end = match self.frames.first() {
+            Some(frame) => frame.seq,
+            None => self.store.journal.frame_count()?,
+        }
+        .min(below);
+        while frames.len() < limit && end > 0 {
+            let start = end.saturating_sub(REFLOG_BATCH);
+            let batch = self
+                .store
+                .journal
+                .frames_from(start, to_usize(end - start))?;
+            let room = limit - frames.len();
+            let before_ckpt = batch
+                .into_iter()
+                .rev()
+                .filter(|frame| frame.offset < self.ckpt);
+            frames.extend(before_ckpt.take(room));
+            end = start;
+        }
+        Ok(frames)
+    }
+
+    /// Frame `seq` of the snapshot, whole: from the snapshot itself past the checkpoint, from
+    /// `journal.off` before it. `None` past the snapshot's newest frame, also once later frames
+    /// are committed.
+    pub fn frame(&self, seq: u64) -> Result<Option<Frame>, StoreError> {
+        if let Some(first) = self.frames.first()
+            && seq >= first.seq
+        {
+            return Ok(self.frames.iter().find(|frame| frame.seq == seq).cloned());
+        }
+        let listed = self.store.journal.frames_from(seq, 1)?;
+        Ok(listed.into_iter().find(|frame| frame.offset < self.ckpt))
+    }
+
     /// How many changesets the store holds.
     pub fn count_changesets(&self) -> Result<u64, StoreError> {
         Ok(self.index.len() + to_u64(self.overlay.extras().len()))
@@ -797,6 +857,13 @@ impl MetaWrite<'_> {
         });
         self.moved.insert(name.to_owned(), new);
         Ok(CasResult::Applied { old: current })
+    }
+
+    /// The records this transaction has queued, in order: the frame [`MetaWrite::commit`]
+    /// appends, each ref move with the time it records. A refused move queued none. It reads
+    /// nothing.
+    pub fn queued(&self) -> &[Record] {
+        &self.records
     }
 
     /// Commits what is queued as one journal frame, materializes it, and unlocks: see the

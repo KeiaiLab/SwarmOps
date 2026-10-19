@@ -174,6 +174,7 @@ so cat main:src/lib.rs
 so ls main:src
 so show main
 so log -n 20
+so op log -n 5                                            # the store's operations, newest first
 so verify --deep
 ```
 
@@ -184,14 +185,21 @@ is `so commit -m … --changes … --parent <the id main held when you read it> 
 move a ref past several changesets at once, commit them with `--parent`, then move it once with
 `so ref set main <last> --expect <old>` (or `--create`).
 
+`so op log` lists the store's operations, newest first: every commit, publish and ref move is
+one write transaction, numbered in commit order (`op`). `so op undo <op>` moves every ref that
+operation moved back to what it named before, all of them or none, by compare-and-swap: if
+another operation has moved one of them since, it refuses with `E_CAS_MISMATCH` and writes
+nothing. Changesets are never removed, and an undo is an operation of its own, which another
+undo takes back.
+
 Every command, its revisions and change lists, and its output are in [Commands](#commands).
 
 ## MCP
 
 `swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
 agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
-as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
-`ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
+as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `op_log`, `ref_list`, `ref_set`,
+`ref_delete`, `undo`, `commit` and `verify`. A tool's arguments are the operation's request: its
 `inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
 definitions it refers to written in place, and kept a plain object: a rule across fields that
 the type's schema states with a top-level `oneOf`, which the Claude API refuses in a tool, is
@@ -297,6 +305,8 @@ and starts no server either.
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
 | `log [REV] [-n N] [--cursor C]` | History along first parents, newest first (from `main` by default). |
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
+| `op log [--before OP] [-n N] [--max-changesets N]` | The store's operations, newest first, a page at a time: each write transaction with its kind, its changesets and its ref moves. |
+| `op undo OP` | Move every ref operation `OP` moved back to what it named before, by compare-and-swap in one transaction: all of them or none. |
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
 | `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([MCP](#mcp)). |

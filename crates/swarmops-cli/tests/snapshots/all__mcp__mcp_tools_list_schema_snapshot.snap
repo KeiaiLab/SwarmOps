@@ -203,6 +203,48 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
+      "description": "The store's operations, newest first: each write transaction, numbered as undo takes it, with its kind, the changesets it recorded and the refs it moved; pass a limit of 20 or less and page on with before, since clients limit long tool results.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`op_log` (CLI `op log`): the store's operations, newest first, a page at a time. An operation\nis one write transaction: a frame of the journal, numbered from 0 in commit order.",
+        "properties": {
+          "before": {
+            "description": "Start below this operation: the page holds the ones numbered less than it, so the last\n`op` of a page reads on from there. When omitted, from the newest.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 50,
+            "description": "The most operations to return: at least 1 (0 is `E_INVALID_ARG`).",
+            "format": "uint",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_changesets": {
+            "default": 20,
+            "description": "The most changesets to list for each operation; `changesets_total` counts them all.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "title": "OpLogReq",
+        "type": "object"
+      },
+      "name": "op_log",
+      "title": "List operations"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Every ref, the changeset it points at, and how many moves it has had.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -292,6 +334,34 @@ expression: listed
       },
       "name": "ref_delete",
       "title": "Delete a ref"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Moves every ref an operation of op_log moved back to what it named before, by compare-and-swap in one transaction: all of them or none. A ref moved since stops it (E_CAS_MISMATCH, nothing written: undo the later operations first); an undo run again is a replay (already_applied). Changesets are never removed.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by\ncompare-and-swap, in one transaction: all of them or none. Changesets are never removed.",
+        "properties": {
+          "op": {
+            "description": "The operation to undo: its `op` in the operation log.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "UndoReq",
+        "type": "object"
+      },
+      "name": "undo",
+      "title": "Undo an operation"
     },
     {
       "annotations": {

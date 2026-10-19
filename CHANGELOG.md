@@ -279,6 +279,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   with `--advance`, as `advanced.already_applied`. A key that is not a uuid v7 is
   `E_INVALID_ARG`. `replayed` is `true` for any commit that found its changeset in the store and
   wrote nothing.
+- `swarmops op log` and `swarmops op undo`, and the MCP tools `op_log` and `undo`: the journal
+  as the store's operation log, newest first (each write transaction with its number, its kind,
+  its changesets and its ref moves, a page at a time below `--before`), and an undo that moves
+  every ref an operation moved back to what it named before, by compare-and-swap in one
+  transaction of its own, all of them or none. A ref moved since refuses the undo with
+  `E_CAS_MISMATCH` (`details.op` names the operation) and nothing is written; an undo run again
+  is a replay (`already_applied`); changesets are never removed. They raise `E_OP_NOT_FOUND` and
+  `E_NOTHING_TO_UNDO`. The MCP server's instructions name the two tools, and leave the sizes of
+  small reads to each tool's description.
 
 ### Changed
 

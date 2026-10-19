@@ -512,6 +512,57 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 op undo 0",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "undo",
+      "api": 1,
+      "error": {
+        "code": "E_NOTHING_TO_UNDO",
+        "message": "operation 0 moved no ref, so there is nothing to undo",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "op": 0
+        },
+        "hint": "swarmops op log"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 op undo 99",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "undo",
+      "api": 1,
+      "error": {
+        "code": "E_OP_NOT_FOUND",
+        "message": "there is no operation 99 (the last is 2)",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "last": 2,
+          "op": 99
+        },
+        "hint": "swarmops op log"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store verify",
     "exit": 1,
     "stdout": {

@@ -3,7 +3,8 @@
 //! directories at a changeset without a checkout ([`Repo::read_blob_at`], [`Repo::list_tree`]),
 //! resolves revisions ([`Repo::resolve`]), walks first-parent history
 //! ([`Repo::log_first_parent`]), moves refs by compare-and-swap ([`Repo::cas_ref`]), and checks
-//! a whole store ([`Repo::verify`]).
+//! a whole store ([`Repo::verify`]). It reads the journal back as the store's operations
+//! ([`Repo::op_log`]), and undoes an operation's ref moves by compare-and-swap ([`Repo::undo`]).
 //!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
@@ -15,6 +16,7 @@ pub mod error;
 #[cfg(feature = "test-hooks")]
 pub mod land_models;
 pub mod log;
+pub mod oplog;
 pub mod read;
 pub mod repo;
 mod tree_edit;
@@ -22,6 +24,7 @@ pub mod verify;
 
 pub use commit::{Advance, Advanced, Change, ChangeOp, CommitOutcome, CommitRequest};
 pub use error::RepoError;
+pub use oplog::{OpRecord, Operation, UndoOutcome};
 pub use read::StoredChangeset;
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};

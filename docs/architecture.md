@@ -416,6 +416,11 @@ What an agent sees (operations §4):
   is checked against the store as it is, and fails rather than build on what was taken back.
   The first readers whose results leave the host (M8's git export, M11's `serve`) will read a
   committed snapshot taken under the lock instead.
+- `op undo` is a compare-and-swap too: it moves every ref the operation moved back to what it
+  named before, in one transaction, only while each still names what the operation set (or
+  what it named before, which is skipped); a ref moved since by another operation refuses it
+  with `E_CAS_MISMATCH`, and nothing is written. It reads the operation's frame under its own
+  write's lock, so it never undoes a frame that a failed sync took back.
 - M1 has no merge: an agent that loses a ref race and commits its change again on top of the
   winner's can overwrite the winner's edits to the same files. Merging and landing arrive in
   M4.
@@ -424,9 +429,11 @@ What an agent sees (operations §4):
 
 Every operation is a function from a request type to a response type or an `OpError`, and
 every type is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore
-fields they do not know, so versions can differ (operations §0). `StoreOps` has ten operations:
-`repo_info`, `commit`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
-`ref_delete` and `verify`; `init`, `whoami` and `schema` live in the CLI.
+fields they do not know, so versions can differ (operations §0). `StoreOps` has twelve
+operations: `repo_info`, `commit`, `read_file`, `read_tree`, `show`, `log`, `ref_list`,
+`ref_set`, `ref_delete`, `op_log`, `undo` and `verify`; `init`, `whoami` and `schema` live in
+the CLI. `op_log` shows the journal as the store's operations, a frame each (storage §3), and
+`undo` moves an operation's refs back by compare-and-swap.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
 plain text, and `mcp`, below, speaks MCP there instead):

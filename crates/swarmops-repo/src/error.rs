@@ -93,6 +93,45 @@ pub enum RepoError {
         /// The kind the reference expects.
         kind: ObjectKind,
     },
+    /// `undo` of an operation the journal does not hold: past its last one.
+    #[error(
+        "there is no operation {op} (the last is {})",
+        .last.map_or_else(|| "none: the store has no operation yet".to_owned(), |last| last.to_string())
+    )]
+    OpNotFound {
+        /// The operation asked for.
+        op: u64,
+        /// The store's last operation; `None` when it has none.
+        last: Option<u64>,
+    },
+    /// `undo` of an operation that left every ref where it found it: it moved none, or moved
+    /// each one back. Nothing was written.
+    #[error("operation {0} moved no ref, so there is nothing to undo")]
+    NothingToUndo(u64),
+    /// `undo` found a ref the operation moved naming neither what the operation set it to nor
+    /// what it named before: a later operation moved it. Nothing was written, the moves of the
+    /// operation's other refs included; undo the later operations first.
+    #[error(
+        "ref {name} has moved since operation {op} set it to {}: it names {} now, so nothing was \
+         undone",
+        .expected.map_or_else(|| "nothing".to_owned(), |id| id.to_string()),
+        .actual.map_or_else(|| "nothing".to_owned(), |id| id.to_string())
+    )]
+    UndoBlocked {
+        /// The operation the undo was of.
+        op: u64,
+        /// The ref.
+        name: String,
+        /// What the operation set it to, and the undo expected it to name; `None` for a
+        /// deletion.
+        expected: Option<ChangesetId>,
+        /// What it names; `None` if it does not exist.
+        actual: Option<ChangesetId>,
+        /// What the write transaction's recovery repaired before the undo was refused, of what
+        /// earlier writers left ([`swarmops_store::MetaWrite::recovered`]): those repairs stay
+        /// made. Boxed, as for [`RepoError::RefMoved`].
+        recovered: Box<Recovered>,
+    },
 }
 
 /// A filesystem failure of the store's, located ([`StoreError::Io`]).

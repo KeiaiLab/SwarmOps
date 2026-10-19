@@ -7,7 +7,8 @@ use std::path::Path;
 use clap::error::ErrorKind;
 use clap::{ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use swarmops_api::{
-    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT,
+    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS,
+    DEFAULT_OP_LOG_LIMIT, DEFAULT_READ_TREE_LIMIT,
 };
 
 use crate::output::printable;
@@ -216,6 +217,9 @@ pub enum Command {
     /// List refs, or move one by compare-and-swap.
     #[command(subcommand)]
     Ref(RefCommand),
+    /// List the store's operations, or undo one.
+    #[command(subcommand)]
+    Op(OpCommand),
     /// Check the store's consistency.
     Verify {
         /// Re-hash every object too.
@@ -224,13 +228,13 @@ pub enum Command {
     },
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
-    /// One tool per operation (repo_info, read_file, read_tree, show, log, ref_list, ref_set,
-    /// ref_delete, commit, verify), each taking the operation's request as its arguments and
-    /// returning the envelope the other commands print. The store and the identity are the
-    /// server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28,
-    /// and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope:
-    /// stdout carries the protocol until stdin ends, and a command line it refuses has its
-    /// envelope on stderr.
+    /// One tool per operation (repo_info, read_file, read_tree, show, log, op_log, ref_list,
+    /// ref_set, ref_delete, undo, commit, verify), each taking the operation's request as its
+    /// arguments and returning the envelope the other commands print. The store and the
+    /// identity are the server's, --repo and --as or their variables, never a call's. Speaks
+    /// MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with initialize.
+    /// Prints no envelope: stdout carries the protocol until stdin ends, and a command line it
+    /// refuses has its envelope on stderr.
     Mcp,
 }
 
@@ -259,6 +263,34 @@ pub enum RefCommand {
         name: String,
         #[arg(long, value_name = "REV", help = EXPECT_HELP, long_help = DELETE_EXPECT_LONG_HELP)]
         expect: String,
+    },
+}
+
+/// `op`'s operations: the operation log, and undo.
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum OpCommand {
+    /// List the store's operations, newest first: each write transaction, its changesets and
+    /// its ref moves.
+    Log {
+        /// List the operations numbered below OP: the last op of a page reads on from there.
+        #[arg(long, value_name = "OP")]
+        before: Option<u64>,
+        /// The most operations to list.
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_OP_LOG_LIMIT)]
+        limit: usize,
+        /// The most changesets to list for each operation.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CHANGESETS)]
+        max_changesets: usize,
+    },
+    /// Move every ref operation OP moved back to what it named before, all or none.
+    ///
+    /// Each ref must still name what the operation set it to (or what it named before, which
+    /// is skipped): one that was moved since stops the undo with E_CAS_MISMATCH, and nothing is
+    /// written. An undo run again is a replay (already_applied). Changesets are never removed.
+    Undo {
+        /// The operation, as op log numbers it.
+        #[arg(value_name = "OP")]
+        op: u64,
     },
 }
 
@@ -388,6 +420,8 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "list"] => "ref_list",
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
+        ["op", "log"] => "op_log",
+        ["op", "undo"] => "undo",
         ["verify"] => "verify",
         ["mcp"] => "mcp",
         _ => return None,
@@ -418,6 +452,7 @@ fn command() -> clap::Command {
     Cli::command()
         .arg_required_else_help(false)
         .mut_subcommand("ref", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("op", |cmd| cmd.arg_required_else_help(false))
 }
 
 /// Of `--json` and `--human`, keeps the one given last: clap's `overrides_with` settles them
@@ -497,11 +532,12 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 14);
+        assert_eq!(ops.len(), 16);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 14, "two subcommands name one op");
+        assert_eq!(ops.len(), 16, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
+        assert_eq!(op_name(&["op"]), None);
     }
 
     #[test]
@@ -554,7 +590,7 @@ mod tests {
             panic!("a usage error");
         };
         assert_eq!(path, Vec::<String>::new());
-        for line in [&[][..], &["ref"]] {
+        for line in [&[][..], &["ref"], &["op"]] {
             let Parsed::Usage { error, .. } = parse(&args(line)) else {
                 panic!("{line:?}: a usage error, not a help screen");
             };

@@ -807,6 +807,145 @@ fn journal_after_returns_global_order() {
     }
 }
 
+/// The seqs of `read.frames_before(before, limit)`, in the order it gives them.
+fn seqs_before(read: &MetaRead<'_>, before: Option<u64>, limit: usize) -> Vec<u64> {
+    let frames = read.frames_before(before, limit).unwrap();
+    frames.iter().map(|frame| frame.seq).collect()
+}
+
+/// The seqs from `newest` down to `oldest`, both included.
+fn down(newest: u64, oldest: u64) -> Vec<u64> {
+    (oldest..=newest).rev().collect()
+}
+
+/// `MetaRead::frames_before` lists a snapshot's frames newest first, below `before` when it is
+/// given: the frames past the checkpoint from the snapshot itself, then those before it from
+/// `journal.off`, each the journal's frame with its seq, offset and records. A snapshot ends at
+/// its own newest frame: one with no frame past its checkpoint skips the frames listed after it
+/// was taken, and one with some lists none committed after it.
+#[test]
+fn frames_before_reads_newest_first_across_the_checkpoint() {
+    let (_dir, root) = new_root();
+    // Durability is not the subject: 41 commits on a filesystem that never syncs.
+    let store = MetaStore::create_with_fs(&root, checked(NoSyncFs)).unwrap();
+    for n in 0..32 {
+        insert(&store, &[cs(n, &[])]);
+    }
+    // The 32nd frame's commit moved the checkpoint to the journal's end.
+    assert_eq!(ckpt(&root), log_len(&root));
+    let at_32 = store.read().unwrap();
+    for n in 32..40 {
+        insert(&store, &[cs(n, &[])]);
+    }
+    assert_eq!(seqs_before(&at_32, None, 3), down(31, 29));
+    assert_eq!(seqs_before(&at_32, Some(35), 3), down(31, 29));
+    assert_eq!(seqs_before(&at_32, Some(31), 2), down(30, 29));
+    drop(at_32);
+
+    let journal = frames(&root);
+    assert_eq!(journal.len(), 40);
+    assert_eq!(
+        ckpt(&root),
+        journal[32].offset,
+        "frames 32 to 39 lie past the checkpoint"
+    );
+    let read = store.read().unwrap();
+    assert_eq!(seqs_before(&read, None, 10), down(39, 30));
+    assert_eq!(seqs_before(&read, Some(31), 5), down(30, 26));
+    assert_eq!(
+        seqs_before(&read, Some(34), 4),
+        down(33, 30),
+        "across the checkpoint"
+    );
+    assert_eq!(seqs_before(&read, Some(u64::MAX), 2), down(39, 38));
+    assert_eq!(seqs_before(&read, Some(1), 5), [0]);
+    assert_eq!(seqs_before(&read, Some(0), 5), Vec::<u64>::new());
+    assert_eq!(seqs_before(&read, None, 0), Vec::<u64>::new());
+    let newest_first: Vec<Frame> = journal.iter().rev().cloned().collect();
+    assert_eq!(read.frames_before(None, usize::MAX).unwrap(), newest_first);
+    // A frame committed after the snapshot is not in it.
+    insert(&store, &[cs(40, &[])]);
+    assert_eq!(seqs_before(&read, None, 1), [39]);
+    assert_eq!(seqs_before(&store.read().unwrap(), None, 1), [40]);
+}
+
+/// `MetaRead::frame` reads one frame of a snapshot by its seq, past the checkpoint or before
+/// it, and none past the snapshot's newest frame, also once later frames are committed.
+#[test]
+fn frame_reads_one_frame_and_none_past_the_end() {
+    let (_dir, root, store) = new_store();
+    assert_eq!(
+        store.read().unwrap().frame(0).unwrap(),
+        None,
+        "an empty journal"
+    );
+    insert(&store, &[cs(1, &[])]); // frame 0
+    let mut write = store.write().unwrap(); // frame 1: a changeset and two ref moves
+    write.insert_changeset(cs(2, &[1])).unwrap();
+    write.cas_ref("main", None, Some(id(2)), ACTOR).unwrap();
+    write
+        .cas_ref("release/r", None, Some(id(1)), ACTOR)
+        .unwrap();
+    write.commit().unwrap();
+    let journal = frames(&root);
+    assert_eq!(journal.len(), 2);
+
+    // Past the checkpoint: the snapshot's own frames.
+    let read = store.read().unwrap();
+    for frame in &journal {
+        assert_eq!(read.frame(frame.seq).unwrap().as_ref(), Some(frame));
+    }
+    for past in [2, 3, u64::MAX] {
+        assert_eq!(read.frame(past).unwrap(), None, "frame {past}");
+    }
+    // Before the checkpoint: read from journal.off.
+    store.flush().unwrap();
+    assert_eq!(ckpt(&root), log_len(&root));
+    let read = store.read().unwrap();
+    for frame in &journal {
+        assert_eq!(read.frame(frame.seq).unwrap().as_ref(), Some(frame));
+    }
+    // A frame committed after a snapshot is past its end.
+    assert_eq!(
+        cas(&store, "main", Some(2), Some(1)),
+        CasResult::Applied { old: Some(id(2)) }
+    );
+    assert_eq!(read.frame(2).unwrap(), None);
+    let now = store.read().unwrap().frame(2).unwrap().expect("frame 2");
+    assert_eq!(now.records.len(), 1);
+}
+
+/// `MetaWrite::queued` lists what a write transaction has queued, in order, as the frame its
+/// commit appends holds it, each ref move with its time; a refused move adds nothing.
+#[test]
+fn queued_is_the_frame_a_commit_appends() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    let mut write = store.write().unwrap();
+    assert!(write.queued().is_empty(), "nothing is queued yet");
+    write.insert_changeset(cs(2, &[1])).unwrap();
+    let before = unix_now();
+    write.cas_ref("main", None, Some(id(2)), ACTOR).unwrap();
+    let refused = write.cas_ref("main", None, Some(id(1)), ACTOR).unwrap();
+    assert_eq!(
+        refused,
+        CasResult::Mismatch {
+            actual: Some(id(2))
+        }
+    );
+    let queued = write.queued().to_vec();
+    let after = unix_now();
+    assert_eq!(queued.len(), 2, "{queued:?}");
+    assert_eq!(queued[0], changeset_record(&cs(2, &[1]), 2));
+    let Record::RefMove { ts, .. } = queued[1] else {
+        panic!("a ref move: {queued:?}");
+    };
+    assert!((before..=after).contains(&ts), "{ts}");
+    assert_eq!(queued[1], ref_move("main", None, Some(2), ACTOR, ts));
+    write.commit().unwrap();
+    assert_eq!(frames(&root)[1].records, queued);
+}
+
 #[test]
 fn write_is_one_frame_for_insert_plus_cas() {
     let (_dir, root, store) = new_store();
