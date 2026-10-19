@@ -755,6 +755,51 @@ fn puts_over_512_mib_are_refused_before_their_content_is_read() {
         (&json!(limit + 1), &json!(limit))
     );
     assert_eq!(err.details["file"], huge.as_str());
+    assert_eq!(err.details["scope"], "put", "one content's limit");
+    assert_eq!(
+        ops.repo_info(InfoReq {}).unwrap().changesets,
+        0,
+        "nothing was written"
+    );
+}
+
+/// A commit's contents together are held to 1 GiB, measured by the sizes they declare before
+/// any is read: three sparse client files of 512 MiB each, each within a put's limit, are
+/// refused at the third (`E_TOO_LARGE`, scope `commit`, its `size` theirs together with it),
+/// and nothing is written. The hint stores large contents first, to name them by id.
+#[test]
+fn a_commit_s_contents_past_1_gib_together_are_refused_before_any_is_read() {
+    let (dir, _root, ops) = new_store();
+    let limit: u64 = 512 * 1024 * 1024;
+    let files: Vec<Utf8PathBuf> = (0..3)
+        .map(|n| {
+            let file = utf8(dir.path().join(format!("{n}.bin")));
+            fs::File::create(&file).unwrap().set_len(limit).unwrap();
+            file
+        })
+        .collect();
+    let changes = (files.iter().enumerate())
+        .map(|(n, file)| {
+            put(
+                &format!("big/{n}.bin"),
+                ContentInput::File(file.to_string()),
+                None,
+            )
+        })
+        .collect();
+    let err = expect_err(
+        ops.commit(&agent(), commit_req(None, changes)),
+        ErrorCode::TooLarge,
+    );
+    let hint = err.hint.clone().unwrap_or_default();
+    assert_eq!(
+        Value::Object(err.details),
+        json!({
+            "index": 2, "path": "big/2.bin", "file": files[2].as_str(),
+            "size": 3 * limit, "limit": 2 * limit, "scope": "commit",
+        })
+    );
+    assert!(hint.contains("swarmops blob put"), "{hint}");
     assert_eq!(
         ops.repo_info(InfoReq {}).unwrap().changesets,
         0,
@@ -2472,5 +2517,6 @@ mod blob {
             ),
             (&json!(limit + 1), &json!(limit), &json!(huge.as_str()))
         );
+        assert_eq!(err.details["scope"], "put", "one content's limit");
     }
 }

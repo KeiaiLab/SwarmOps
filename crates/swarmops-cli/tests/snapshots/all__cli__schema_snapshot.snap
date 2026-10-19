@@ -169,7 +169,7 @@ expression: s.redact(&all)
       "properties": {
         "content": {
           "$ref": "#/$defs/ContentInput",
-          "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE`).\nA `blob` names content the store holds already, and is `E_INVALID_ARG` here."
+          "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with\n`scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`\nhere."
         }
       },
       "required": [
@@ -312,7 +312,7 @@ expression: s.redact(&all)
               "type": "null"
             }
           ],
-          "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`\ntakes none."
+          "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
         },
         "mode": {
           "anyOf": [
@@ -720,7 +720,7 @@ expression: s.redact(&all)
                   "type": "null"
                 }
               ],
-              "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`\ntakes none."
+              "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
             },
             "mode": {
               "anyOf": [
@@ -861,7 +861,7 @@ expression: s.redact(&all)
           "type": "boolean"
         },
         "changes": {
-          "description": "What to change, relative to the parent.",
+          "description": "What to change, relative to the parent. The contents hold at most 1 GiB together, by the\nsizes they declare (inline text's length, the bytes base64 decodes to, a client file's\nlength; a `blob` named by id counts nothing): more is `E_TOO_LARGE` with `scope`\n`commit`, refused before any content is read. Store large contents with `blob_put` first,\nand name them by id.",
           "items": {
             "$ref": "#/$defs/ChangeInput"
           },

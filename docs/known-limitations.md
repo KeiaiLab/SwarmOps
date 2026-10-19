@@ -165,6 +165,11 @@ left).
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
   *Documented (`--expect` help). Found: M1 Task 5; final review, question 13.*
+- **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
+  together, and up to about two to three times that while their objects are encoded in
+  parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and
+  `{"blob": "<id>"}` take large contents out of the commit request. *Documented (bounded by the
+  limits since M2). Found: the 2026-10-16 code review, issue 10.*
 
 ## Verification and repair
 

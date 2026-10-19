@@ -377,7 +377,7 @@ expression: listed
             "type": "boolean"
           },
           "changes": {
-            "description": "What to change, relative to the parent.",
+            "description": "What to change, relative to the parent. The contents hold at most 1 GiB together, by the\nsizes they declare (inline text's length, the bytes base64 decodes to, a client file's\nlength; a `blob` named by id counts nothing): more is `E_TOO_LARGE` with `scope`\n`commit`, refused before any content is read. Store large contents with `blob_put` first,\nand name them by id.",
             "items": {
               "description": "One change of a commit.",
               "properties": {
@@ -444,7 +444,7 @@ expression: listed
                       "type": "null"
                     }
                   ],
-                  "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`\ntakes none."
+                  "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
                 },
                 "mode": {
                   "anyOf": [
@@ -542,7 +542,7 @@ expression: listed
         "description": "`blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's\nchange list can name it by its id (`{\"blob\": id}`) instead of carrying its bytes. The blob is\ndurable once the call returns; until a commit names it, nothing references it.",
         "properties": {
           "content": {
-            "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE`).\nA `blob` names content the store holds already, and is `E_INVALID_ARG` here. A `put`'s content, as an object with one key.",
+            "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with\n`scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`\nhere. A `put`'s content, as an object with one key.",
             "oneOf": [
               {
                 "additionalProperties": false,

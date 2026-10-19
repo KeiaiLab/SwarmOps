@@ -45,7 +45,7 @@
 //! | Code | Name | For |
 //! |---|---|---|
 //! | `-32700` | Parse error | a line that is not JSON, or not UTF-8 |
-//! | `-32600` | Invalid Request | a batch, or anything else that is not one object; an object whose `jsonrpc` is not `"2.0"`, whose `id` is not a string or an integer (null, a fraction, an object, an array, a boolean), or that has neither a string `method` nor a response's `result` or `error` |
+//! | `-32600` | Invalid Request | a batch, or anything else that is not one object; an object whose `jsonrpc` is not `"2.0"`, whose `id` is not a string or an integer (null, a fraction, an object, an array, a boolean), or that has neither a string `method` nor a response's `result` or `error`; a line longer than `MAX_REQUEST_BYTES` (64 MiB), read no further than one byte past it and the rest passed over to the next line break, always without an `id` |
 //! | `-32601` | Method not found | a method its revision does not have (`ping` in 2026-07-28, `initialize` in a request that names 2026-07-28) |
 //! | `-32602` | Invalid params | `params`, or a `params._meta`, that is not an object, or a protocol version in it that is not a string; before `initialize`, a request that names no version in `_meta` (but `ping`), and a `server/discover` that names none at any time; a 2026-07-28 `_meta` without the client's capabilities; an `initialize` without the client's `protocolVersion`; a `tools/call` without a known tool's name, or with `arguments` that are not an object; a `tools/list` cursor (there is one page) |
 //! | `-32603` | Internal error | a panic outside an operation (a bug) |
@@ -134,6 +134,7 @@ use swarmops_api::{
     PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq,
     StoreOps, VerifyReq, schema_for_all,
 };
+use swarmops_ops::content::MAX_REQUEST_BYTES;
 
 use crate::cli::Global;
 use crate::commands::{self, Ctx, Used};
@@ -171,8 +172,8 @@ const CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
 /// milliseconds: an hour.
 const TTL_MS: u64 = 60 * 60 * 1000;
 
-/// The most bytes the line buffer keeps between messages: a commit's line can be hundreds of
-/// MiB, which a long-lived server should not hold on to.
+/// The most bytes the line buffer keeps between messages: a line can be up to
+/// [`MAX_REQUEST_BYTES`], which a long-lived server should not hold on to.
 const LINE_KEEP: usize = 64 * 1024;
 
 /// JSON-RPC's error codes, and MCP's for a protocol version the server does not serve.
@@ -408,6 +409,8 @@ struct Server<'a> {
     /// The revision of the session `initialize` opened, one of [`HANDSHAKE`]; `None` before
     /// it.
     session: Option<&'static str>,
+    /// The most bytes a message line may hold: [`MAX_REQUEST_BYTES`], or less in a test.
+    max_line: u64,
 }
 
 /// The rules a request is served by.
@@ -439,6 +442,11 @@ struct Reply<'a> {
 
 impl<'a> Server<'a> {
     fn new(global: &'a Global, env: Env<'a>) -> Server<'a> {
+        Server::with_max_line(global, env, MAX_REQUEST_BYTES)
+    }
+
+    /// [`Server::new`], whose message lines hold at most `max_line` bytes.
+    fn with_max_line(global: &'a Global, env: Env<'a>, max_line: u64) -> Server<'a> {
         let all = schema_for_all();
         let tools = TOOLS
             .iter()
@@ -458,19 +466,40 @@ impl<'a> Server<'a> {
             env,
             tools,
             session: None,
+            max_line,
         }
     }
 
-    /// Answers each message `input` holds, a line each, on `output`, until `input` ends.
+    /// Answers each message `input` holds, a line each, on `output`, until `input` ends. A line
+    /// is read no further than one byte past `max_line`: a longer one is an Invalid Request
+    /// without an `id`, its rest passed over unread to the next line break.
     fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
         let mut line = Vec::new();
         loop {
             line.clear();
             line.shrink_to(LINE_KEEP);
-            if input.read_until(b'\n', &mut line)? == 0 {
+            let cap = self.max_line.saturating_add(1);
+            if io::Read::take(&mut input, cap).read_until(b'\n', &mut line)? == 0 {
                 return Ok(());
             }
-            if let Some(answer) = self.answer(&line) {
+            let over = line.last() != Some(&b'\n')
+                && u64::try_from(line.len()).unwrap_or(u64::MAX) > self.max_line;
+            let answer = if over {
+                input.skip_until(b'\n')?;
+                Some(error(
+                    None,
+                    INVALID_REQUEST,
+                    format!(
+                        "Invalid Request: a message line holds at most {} bytes; send large \
+                         contents as {{\"file\": path}}, or store them with blob_put first and \
+                         name them by id: {{\"blob\": id}}",
+                        self.max_line
+                    ),
+                ))
+            } else {
+                self.answer(&line)
+            };
+            if let Some(answer) = answer {
                 output.write_all(answer.as_bytes())?;
                 output.write_all(b"\n")?;
                 output.flush()?;
@@ -2014,6 +2043,44 @@ mod tests {
         assert!(message.ends_with(": boom after a read"), "{message}");
         assert_eq!(envelope["meta"]["repo"], store.as_str());
         assert_eq!(envelope["meta"]["resolved"], json!({"main": c1}));
+    }
+
+    /// A line longer than the server's cap (`MAX_REQUEST_BYTES`, small here) is answered with
+    /// `-32600` and no `id`, and the server serves on: the next request on the same input is
+    /// answered. A line of exactly the cap is served, and so is a last line without a line break.
+    #[test]
+    fn an_over_long_line_is_an_invalid_request_and_the_server_serves_on() {
+        let global = Global::default();
+        let env = |_: &str| -> Option<OsString> { None };
+        let cap = 64;
+        let mut server = Server::with_max_line(&global, &env, cap);
+        let ping = |id: &str| format!(r#"{{"jsonrpc":"2.0","id":"{id}","method":"ping"}}"#);
+        let long = ping(&"x".repeat(200));
+        // An id that pads the request to exactly the cap.
+        let at_cap_id = "y".repeat(64 - ping("").len());
+        let at_cap = ping(&at_cap_id);
+        assert_eq!(at_cap.len(), 64);
+        let input = format!("{long}\n{}\n{at_cap}\n{}", ping("after"), ping("last"));
+        let mut output = Vec::new();
+        server.serve(input.as_bytes(), &mut output).unwrap();
+        let answers: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(answers.len(), 4, "{answers:?}");
+        assert_eq!(answers[0]["error"]["code"], INVALID_REQUEST, "{answers:?}");
+        assert!(answers[0].get("id").is_none(), "{answers:?}");
+        let message = answers[0]["error"]["message"].as_str().unwrap();
+        assert!(message.contains("64 bytes"), "{message}");
+        for (answer, id) in answers[1..]
+            .iter()
+            .zip(["after", at_cap_id.as_str(), "last"])
+        {
+            assert_eq!(answer, &json!({"jsonrpc": "2.0", "id": id, "result": {}}));
+        }
+        // The server the CLI starts takes lines of up to `MAX_REQUEST_BYTES`.
+        assert_eq!(Server::new(&global, &env).max_line, MAX_REQUEST_BYTES);
     }
 
     /// Each tool's description is one line, without a run of spaces that a broken string

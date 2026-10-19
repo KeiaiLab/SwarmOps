@@ -202,8 +202,10 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 /// with `--expect <actual>`; to a `ref_delete`, to re-check before deleting; to a move of a ref
 /// that is gone, that it is gone — and whose hint only reads, `swarmops show <actual>` or
 /// `swarmops ref list`, so that an agent that runs it cannot undo the move that won; `E_TOO_LARGE`
-/// `{index, path, size, limit}` for a put over 512 MiB; and `E_INVALID_ARG` for limits, cursors
-/// and requests that break their own rules.
+/// `{index, path, size, limit, scope}` (and the client `file` for file content) for a put over
+/// 512 MiB (`scope` `put`) or a commit's contents over 1 GiB together (`commit`, whose `size` is
+/// theirs up to and with the change's), measured before any is read; and `E_INVALID_ARG` for
+/// limits, cursors and requests that break their own rules.
 pub struct LocalOps {
     repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.

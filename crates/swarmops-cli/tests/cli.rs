@@ -784,6 +784,39 @@ fn blob_put_then_a_commit_names_the_blob_by_id() {
     );
 }
 
+/// A change list past 64 MiB, the most a request's text may hold, is refused by its length
+/// (`E_TOO_LARGE`, scope `request`) before a byte of it is read or parsed: its bytes are zeros,
+/// which no JSON parser takes. Nothing is committed.
+#[test]
+fn a_change_list_past_64_mib_is_refused_before_it_is_parsed() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let limit = swarmops_ops::content::MAX_REQUEST_BYTES;
+    let huge = format!("{}/huge.json", s.tmp());
+    fs::File::create(&huge).unwrap().set_len(limit + 1).unwrap();
+    let refused = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "x",
+        "--changes",
+        &huge,
+    ]);
+    assert_eq!((refused.exit, refused.code()), (1, "E_TOO_LARGE"));
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"size": limit + 1, "limit": limit, "scope": "request", "changes": huge})
+    );
+    assert_eq!(
+        s.run(&["--repo", &store, "info"])["result"]["changesets"],
+        0
+    );
+}
+
 #[test]
 fn usage_error_exits_2_with_envelope() {
     let mut s = Session::new();

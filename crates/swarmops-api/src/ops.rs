@@ -127,7 +127,11 @@ pub struct CommitReq {
     /// limitation).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent: Option<Rev>,
-    /// What to change, relative to the parent.
+    /// What to change, relative to the parent. The contents hold at most 1 GiB together, by the
+    /// sizes they declare (inline text's length, the bytes base64 decodes to, a client file's
+    /// length; a `blob` named by id counts nothing): more is `E_TOO_LARGE` with `scope`
+    /// `commit`, refused before any content is read. Store large contents with `blob_put` first,
+    /// and name them by id.
     pub changes: Vec<ChangeInput>,
     /// The commit message.
     pub message: String,
@@ -156,8 +160,8 @@ pub struct ChangeInput {
     pub path: String,
     /// Whether to write the path or remove it.
     pub op: ChangeOp,
-    /// The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`
-    /// takes none.
+    /// The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs
+    /// it, a `delete` takes none.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ContentInput>,
     /// The kind of entry a `put` writes; `file` when omitted.
@@ -253,8 +257,9 @@ pub struct Advanced {
 /// durable once the call returns; until a commit names it, nothing references it.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct BlobPutReq {
-    /// The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE`).
-    /// A `blob` names content the store holds already, and is `E_INVALID_ARG` here.
+    /// The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with
+    /// `scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`
+    /// here.
     pub content: ContentInput,
 }
 

@@ -106,7 +106,9 @@ bytes, invalid names or paths), so each object has exactly one valid byte string
 
 A repository path is validated UTF-8: `/`-separated, with no empty, `.` or `..` component, no
 leading or trailing `/` and no NUL. Paths compare as bytes and are never normalized, so two
-Unicode spellings of a name are two paths. A file's content is at most 512 MiB.
+Unicode spellings of a name are two paths. A file's content is at most 512 MiB, a commit's
+contents at most 1 GiB together, and a request's text (a change list, an MCP message) at most
+64 MiB, each measured before it is read.
 
 ## The store on disk
 

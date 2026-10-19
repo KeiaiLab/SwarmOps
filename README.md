@@ -311,7 +311,9 @@ hex digits, then any number of `~N` (the N-th first parent). A change list is a 
 text>"}`, `{"base64": "<bytes>"}` or `{"file": "<path>"}` (read by the CLI, on the client), at
 most 512 MiB, or `{"blob": "<id>"}`, a blob stored before (`blob put`), whose bytes the commit
 neither sends nor reads; its `mode` is `file` (the default), `exec` or `symlink`; directories
-follow from the paths. A ref moves only by compare-and-swap: when another agent moved it first,
+follow from the paths. A commit's contents hold at most 1 GiB together (a blob named by id counts
+nothing) and a change list's text at most 64 MiB (`E_TOO_LARGE` past either), so a large file
+goes as `file` content, or through `blob put`. A ref moves only by compare-and-swap: when another agent moved it first,
 `ref set` and `commit --advance` fail with `E_CAS_MISMATCH` (exit 4) and the ref's target in
 `details.actual` (a `commit --advance` that fails so records nothing). Then read the files you
 changed at `<actual>`, re-apply your edits to them (M1 has no merge, so re-sending your old

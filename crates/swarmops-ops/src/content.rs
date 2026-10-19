@@ -15,17 +15,24 @@
 //!   to read a path; `blob` content names, by its id (64 hex digits, of either case), a blob the
 //!   store holds already, whose bytes the commit neither sends nor reads (an id the store holds
 //!   no blob under is the repository's refusal, `E_INVALID_ARG` too, when the commit runs).
-//! - A put's content is at most [`MAX_CONTENT_BYTES`], 512 MiB. Each form is measured before it
-//!   is converted: inline text by its length, base64 by the bytes it decodes to, and a file by
-//!   its length before it is read; a file that grows while it is read (or a device without a
-//!   length) is read no further than one byte past the limit.
+//! - A put's content is at most [`MAX_CONTENT_BYTES`], 512 MiB, and a commit's contents together
+//!   at most [`MAX_COMMIT_CONTENT_BYTES`], 1 GiB. Each form is measured before it is converted:
+//!   inline text by its length, base64 by the bytes it decodes to, and a file by its length
+//!   before it is read; a blob named by id counts nothing, since the commit holds none of its
+//!   bytes. The total is checked as the list's shape is, by the sizes the contents declare (a
+//!   file's length is `stat`ed, not read; one that cannot be counts 0, and its read reports
+//!   it), so a list past it costs no file reads. Then each content is converted, in order, and
+//!   a file that grows while it is read (or a device without a length) is read no further than
+//!   one byte past what either limit leaves it.
 //!
-//! A breach of the limit is `E_TOO_LARGE`, with the content's `size` and the `limit` in
-//! `details`; every other breach is `E_INVALID_ARG`. Either names the change, in its message
-//! and its `details`: its `index` in the list (from 0) and its `path`, and the client `file` for
-//! file content or the `blob` for blob content. The whole list is checked before any content is
-//! decoded or read, so a malformed list costs no file reads, and nothing is written for a
-//! refused one.
+//! A breach of a limit is `E_TOO_LARGE`, with the `size` and the `limit` in `details`, and the
+//! `scope` that says which: `put` for one content, whose `size` is its own, or `commit` for the
+//! contents together, whose `size` is theirs up to and with the change's (a client reading its
+//! request also refuses it whole, `request`, before parsing it: [`MAX_REQUEST_BYTES`]). Every other
+//! breach is `E_INVALID_ARG`. Either names the change, in its message and its `details`: its
+//! `index` in the list (from 0) and its `path`, and the client `file` for file content or the
+//! `blob` for blob content. The whole list is checked before any content is decoded or read, so a
+//! malformed list costs no file reads, and nothing is written for a refused one.
 //!
 //! # Content out
 //!
@@ -39,7 +46,7 @@
 //! value.
 
 use std::collections::BTreeSet;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{self, Read};
 
 use base64::Engine as _;
@@ -55,6 +62,81 @@ use swarmops_repo::Change;
 /// The most bytes a put's content may hold: 512 MiB.
 pub const MAX_CONTENT_BYTES: u64 = 512 * 1024 * 1024;
 
+/// The most bytes a commit's contents may hold together: 1 GiB, two puts of the most each may
+/// hold. A blob named by id counts nothing.
+pub const MAX_COMMIT_CONTENT_BYTES: u64 = 1 << 30;
+
+/// The most bytes of a request's text that a client reads (operations spec §0): 64 MiB, the CLI's
+/// `--changes` file or stdin, and each line of the MCP server's input. Larger contents go as a
+/// `file`, or are stored first (`blob_put`) and named by id.
+pub const MAX_REQUEST_BYTES: u64 = 64 << 20;
+
+/// What breaks the limit that an `E_TOO_LARGE` names (`details.scope`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// One put's content: [`MAX_CONTENT_BYTES`].
+    Put,
+    /// A commit's contents together: [`MAX_COMMIT_CONTENT_BYTES`].
+    Commit,
+}
+
+impl Scope {
+    /// The scope as `details.scope` gives it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Scope::Put => "put",
+            Scope::Commit => "commit",
+        }
+    }
+}
+
+/// The hint of a commit whose contents are past their total: what takes them out of it.
+const BLOB_HINT: &str =
+    "store large contents first with swarmops blob put, then name each by its id: {\"blob\": id}";
+
+/// What one content is measured against: a put's limit, and what the commit's limit leaves of
+/// itself once the contents converted before it are counted.
+#[derive(Debug, Clone, Copy)]
+struct Room {
+    /// The most bytes one content may hold.
+    put: u64,
+    /// The most bytes the contents may hold together.
+    total: u64,
+    /// The bytes of the contents converted before this one.
+    used: u64,
+}
+
+impl Room {
+    /// Room for one content alone, outside any commit: `blob_put`'s.
+    fn alone(put: u64) -> Room {
+        Room {
+            put,
+            total: u64::MAX,
+            used: 0,
+        }
+    }
+
+    /// `E_TOO_LARGE` when content of `size` bytes is more than a put may hold (scope `put`), or
+    /// brings the contents past what they may hold together (scope `commit`, the contents' size
+    /// with it).
+    fn check(self, size: u64) -> Result<(), OpError> {
+        if size > self.put {
+            return Err(too_large_for(size, self.put, Scope::Put));
+        }
+        let total = self.used.saturating_add(size);
+        if total > self.total {
+            return Err(too_large_for(total, self.total, Scope::Commit));
+        }
+        Ok(())
+    }
+
+    /// The most bytes of a file to read: one past the most either limit leaves the content.
+    fn read_cap(self) -> u64 {
+        let left = self.total.saturating_sub(self.used);
+        self.put.min(left).saturating_add(1)
+    }
+}
+
 /// The suffix of a metadata key whose value `show` gives in base64.
 const BASE64_KEY_SUFFIX: &str = ":b64";
 
@@ -69,13 +151,18 @@ pub fn bytes(content: ContentInput) -> Result<Vec<u8>, OpError> {
 
 /// [`bytes`], with at most `limit` bytes.
 fn bytes_within(content: ContentInput, limit: u64) -> Result<Vec<u8>, OpError> {
+    convert(content, Room::alone(limit))
+}
+
+/// The bytes `content` stands for, measured against `room` before it is converted.
+fn convert(content: ContentInput, room: Room) -> Result<Vec<u8>, OpError> {
     match content {
         ContentInput::Inline(text) => {
-            within(to_u64(text.len()), limit)?;
+            room.check(to_u64(text.len()))?;
             Ok(text.into_bytes())
         }
         ContentInput::Base64(encoded) => {
-            within(decoded_len(&encoded), limit)?;
+            room.check(decoded_len(&encoded))?;
             STANDARD.decode(encoded).map_err(|e| {
                 OpError::new(
                     ErrorCode::InvalidArg,
@@ -83,7 +170,7 @@ fn bytes_within(content: ContentInput, limit: u64) -> Result<Vec<u8>, OpError> {
                 )
             })
         }
-        ContentInput::File(file) => read_within(&file, limit).map_err(|mut e| {
+        ContentInput::File(file) => read_within(&file, room).map_err(|mut e| {
             e.details.insert("file".to_owned(), Value::from(file));
             e
         }),
@@ -108,10 +195,10 @@ pub(crate) fn blob_id(id: &str) -> Result<BlobId, OpError> {
     })
 }
 
-/// The bytes of client file `file`, at most `limit` of them: its length is checked before it is
+/// The bytes of client file `file`, measured against `room`: its length is checked before it is
 /// read, and a file that grows meanwhile, or a device without a length, is read no further than
-/// one byte past the limit.
-fn read_within(file: &str, limit: u64) -> Result<Vec<u8>, OpError> {
+/// one byte past what the limits leave it.
+fn read_within(file: &str, room: Room) -> Result<Vec<u8>, OpError> {
     let unreadable = |e: io::Error| {
         OpError::new(
             ErrorCode::InvalidArg,
@@ -120,13 +207,13 @@ fn read_within(file: &str, limit: u64) -> Result<Vec<u8>, OpError> {
     };
     let handle = File::open(file).map_err(unreadable)?;
     let len = handle.metadata().map_err(unreadable)?.len();
-    within(len, limit)?;
+    room.check(len)?;
     let mut bytes = Vec::with_capacity(usize::try_from(len).unwrap_or_default());
     handle
-        .take(limit.saturating_add(1))
+        .take(room.read_cap())
         .read_to_end(&mut bytes)
         .map_err(unreadable)?;
-    within(to_u64(bytes.len()), limit)?;
+    room.check(to_u64(bytes.len()))?;
     Ok(bytes)
 }
 
@@ -142,27 +229,56 @@ fn decoded_len(encoded: &str) -> u64 {
     to_u64((encoded.len() / 4 * 3).saturating_sub(padding))
 }
 
-/// `E_TOO_LARGE` when content of `size` bytes is more than `limit`, the most a put may hold.
-fn within(size: u64, limit: u64) -> Result<(), OpError> {
-    if size <= limit {
-        return Ok(());
+/// How many bytes `content` declares before it is converted: inline text's length, the bytes
+/// base64 decodes to, a client file's length (a `stat`, not a read: 0 for one that cannot be
+/// stat'ed, whose read then says why), and nothing for a blob named by id.
+fn declared(content: &ContentInput) -> u64 {
+    match content {
+        ContentInput::Inline(text) => to_u64(text.len()),
+        ContentInput::Base64(encoded) => decoded_len(encoded),
+        ContentInput::File(file) => fs::metadata(file).map_or(0, |meta| meta.len()),
+        ContentInput::Blob(_) => 0,
     }
-    Err(OpError::new(
-        ErrorCode::TooLarge,
-        format!("the content is {size} bytes, more than the {limit} a put may hold"),
-    )
-    .with_details(Map::from_iter([
+}
+
+/// `E_TOO_LARGE` for `size` bytes over `limit`, the most `scope` may hold: `{size, limit,
+/// scope}`, and for a commit's total, the hint that takes contents out of the request.
+fn too_large_for(size: u64, limit: u64, scope: Scope) -> OpError {
+    let message = match scope {
+        Scope::Put => format!("the content is {size} bytes, more than the {limit} a put may hold"),
+        Scope::Commit => format!(
+            "the contents come to {size} bytes with this change's, more than the {limit} a \
+             commit may hold together"
+        ),
+    };
+    let error = OpError::new(ErrorCode::TooLarge, message).with_details(Map::from_iter([
         ("size".to_owned(), Value::from(size)),
         ("limit".to_owned(), Value::from(limit)),
-    ])))
+        ("scope".to_owned(), Value::from(scope.as_str())),
+    ]));
+    match scope {
+        Scope::Put => error,
+        Scope::Commit => error.with_hint(BLOB_HINT),
+    }
 }
 
 /// The repository changes `inputs` describe, by the rules in
-/// [the module documentation](self): first every change's shape is checked, then the
-/// contents are decoded and read, in order.
+/// [the module documentation](self): first every change's shape is checked, with the contents'
+/// total, then the contents are decoded and read, in order.
 pub(crate) fn changes(inputs: Vec<ChangeInput>) -> Result<Vec<Change>, OpError> {
+    changes_within(inputs, MAX_CONTENT_BYTES, MAX_COMMIT_CONTENT_BYTES)
+}
+
+/// [`changes`], with at most `put_limit` bytes in a put's content and `total_limit` in all of
+/// them.
+fn changes_within(
+    inputs: Vec<ChangeInput>,
+    put_limit: u64,
+    total_limit: u64,
+) -> Result<Vec<Change>, OpError> {
     let mut named = BTreeSet::new();
     let mut shaped = Vec::with_capacity(inputs.len());
+    let mut declared_total: u64 = 0;
     for (index, input) in inputs.into_iter().enumerate() {
         let ChangeInput {
             path,
@@ -190,16 +306,36 @@ pub(crate) fn changes(inputs: Vec<ChangeInput>) -> Result<Vec<Change>, OpError> 
         if !named.insert(repo_path.clone()) {
             return Err(refuse("an earlier change names this path too"));
         }
+        if let Some((_, Content::Bytes(content))) = &content {
+            declared_total = declared_total.saturating_add(declared(content));
+            if declared_total > total_limit {
+                let mut error = too_large_for(declared_total, total_limit, Scope::Commit);
+                if let ContentInput::File(file) = content {
+                    error
+                        .details
+                        .insert("file".to_owned(), Value::from(file.as_str()));
+                }
+                return Err(in_change(error, index, &path));
+            }
+        }
         shaped.push((index, repo_path, content));
     }
+    let mut used: u64 = 0;
     shaped
         .into_iter()
         .map(|(index, path, content)| {
             let op = match content {
-                Some((kind, Content::Bytes(content))) => swarmops_repo::ChangeOp::Put {
-                    kind,
-                    content: bytes(content).map_err(|e| in_change(e, index, path.as_str()))?,
-                },
+                Some((kind, Content::Bytes(content))) => {
+                    let room = Room {
+                        put: put_limit,
+                        total: total_limit,
+                        used,
+                    };
+                    let content =
+                        convert(content, room).map_err(|e| in_change(e, index, path.as_str()))?;
+                    used = used.saturating_add(to_u64(content.len()));
+                    swarmops_repo::ChangeOp::Put { kind, content }
+                }
                 Some((kind, Content::Blob(id))) => swarmops_repo::ChangeOp::PutBlob { kind, id },
                 None => swarmops_repo::ChangeOp::Delete,
             };
@@ -311,14 +447,48 @@ mod tests {
 
     use super::*;
 
-    /// The error `result` holds, which must be `E_TOO_LARGE` for `size` bytes over `limit`.
+    /// The error `result` holds, which must be `E_TOO_LARGE` for one content of `size` bytes over
+    /// `limit` (scope `put`).
     #[track_caller]
     fn too_large(result: Result<Vec<u8>, OpError>, size: u64, limit: u64) -> OpError {
         let error = result.expect_err("over the limit");
         assert_eq!(error.code, ErrorCode::TooLarge.as_str(), "{error:?}");
         assert_eq!(error.details["size"], size, "{error:?}");
         assert_eq!(error.details["limit"], limit, "{error:?}");
+        assert_eq!(error.details["scope"], "put", "{error:?}");
         error
+    }
+
+    /// The error `result` holds, which must be `E_TOO_LARGE` for contents of `size` bytes
+    /// together over `limit` (scope `commit`), with the hint that takes contents out of the
+    /// request.
+    #[track_caller]
+    fn too_large_together(result: Result<Vec<Change>, OpError>, size: u64, limit: u64) -> OpError {
+        let error = result.expect_err("over the total");
+        assert_eq!(error.code, ErrorCode::TooLarge.as_str(), "{error:?}");
+        assert_eq!(error.details["size"], size, "{error:?}");
+        assert_eq!(error.details["limit"], limit, "{error:?}");
+        assert_eq!(error.details["scope"], "commit", "{error:?}");
+        assert_eq!(error.hint.as_deref(), Some(BLOB_HINT), "{error:?}");
+        error
+    }
+
+    /// A put of `content` at `path`.
+    fn put(path: &str, content: ContentInput) -> ChangeInput {
+        ChangeInput {
+            path: path.to_owned(),
+            op: ChangeOp::Put,
+            content: Some(content),
+            mode: None,
+        }
+    }
+
+    fn inline(text: &str) -> ContentInput {
+        ContentInput::Inline(text.to_owned())
+    }
+
+    fn file(path: &str) -> ContentInput {
+        ContentInput::File(path.to_owned())
     }
 
     #[test]
@@ -335,6 +505,91 @@ mod tests {
     #[test]
     fn the_limit_is_512_mib() {
         assert_eq!(MAX_CONTENT_BYTES, 512 * 1024 * 1024);
+    }
+
+    /// A commit's contents hold 1 GiB together, two puts of the most one may hold; a request's
+    /// text 64 MiB (Decision 11).
+    #[test]
+    fn a_commit_holds_1_gib_and_a_request_64_mib() {
+        assert_eq!(MAX_COMMIT_CONTENT_BYTES, 1 << 30);
+        assert_eq!(MAX_COMMIT_CONTENT_BYTES, 2 * MAX_CONTENT_BYTES);
+        assert_eq!(MAX_REQUEST_BYTES, 64 << 20);
+    }
+
+    /// The contents' total is checked with the list's shape, by the sizes they declare, before
+    /// any content is converted: inline puts of 3 and 2 bytes come to 5, past a total of 4, at
+    /// the second change; base64 counts the bytes it decodes to; at the total the list is taken,
+    /// and a blob named by id counts nothing.
+    #[test]
+    fn the_total_is_checked_with_the_lists_shape() {
+        let limit = MAX_CONTENT_BYTES;
+        let two = vec![put("a", inline("abc")), put("b", inline("de"))];
+        let error = too_large_together(changes_within(two, limit, 4), 5, 4);
+        assert_eq!(
+            (&error.details["index"], &error.details["path"]),
+            (&Value::from(1), &Value::from("b"))
+        );
+        assert!(error.message.starts_with("change 1 (\"b\"): "), "{error:?}");
+        let encoded = vec![put("a", ContentInput::Base64(STANDARD.encode(b"abcde")))];
+        too_large_together(changes_within(encoded, limit, 4), 5, 4);
+        let at_the_total = vec![put("a", inline("ab")), put("b", inline("de"))];
+        assert_eq!(changes_within(at_the_total, limit, 4).unwrap().len(), 2);
+        let by_id = ContentInput::Blob("ab".repeat(32));
+        let beside = vec![put("a", inline("abcd")), put("b", by_id)];
+        assert_eq!(changes_within(beside, limit, 4).unwrap().len(), 2);
+    }
+
+    /// A client file is counted by its length, not read: one that does not exist counts 0 (its
+    /// read would fail), so a list whose next change passes the total is refused for the total,
+    /// at that change, not for the file. A file past the total is refused by its length, unread,
+    /// and named.
+    #[test]
+    fn the_total_is_checked_before_any_file_is_read() {
+        let missing = vec![
+            put("a", file("/nonexistent/swarmops-test/x")),
+            put("b", inline("abcde")),
+        ];
+        let error = too_large_together(changes_within(missing, MAX_CONTENT_BYTES, 4), 5, 4);
+        assert_eq!(error.details["index"], 1, "{error:?}");
+        assert!(error.details.get("file").is_none(), "{error:?}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let five = dir.path().join("five.bin");
+        fs::write(&five, b"fives").unwrap();
+        let five = five.to_str().unwrap();
+        let past = vec![put("a", inline("a")), put("f", file(five))];
+        let error = too_large_together(changes_within(past, MAX_CONTENT_BYTES, 4), 6, 4);
+        assert_eq!(
+            (&error.details["index"], &error.details["file"]),
+            (&Value::from(1), &Value::from(five))
+        );
+    }
+
+    /// A file whose length says nothing (a device that never ends, which declares 0) meets the
+    /// growth guard: it is read no further than one byte past what the total leaves it, alone or
+    /// after contents converted before it; where a put's own limit is the smaller, that limit
+    /// binds, and the refusal is scope `put`.
+    #[test]
+    fn a_file_that_outgrows_its_length_meets_the_total() {
+        let alone = vec![put("z", file("/dev/zero"))];
+        let error = too_large_together(changes_within(alone, MAX_CONTENT_BYTES, 4), 5, 4);
+        assert_eq!(
+            (&error.details["index"], &error.details["file"]),
+            (&Value::from(0), &Value::from("/dev/zero"))
+        );
+        let after = vec![put("a", inline("abc")), put("z", file("/dev/zero"))];
+        let error = too_large_together(changes_within(after, MAX_CONTENT_BYTES, 4), 5, 4);
+        assert_eq!(error.details["index"], 1, "{error:?}");
+        let put_binds = vec![put("z", file("/dev/zero"))];
+        let error = changes_within(put_binds, 4, 100).expect_err("over a put's limit");
+        assert_eq!(
+            (
+                &error.details["size"],
+                &error.details["limit"],
+                &error.details["scope"]
+            ),
+            (&Value::from(5), &Value::from(4), &Value::from("put"))
+        );
     }
 
     #[test]

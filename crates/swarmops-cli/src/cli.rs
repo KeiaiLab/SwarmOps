@@ -138,7 +138,7 @@ pub enum Command {
         /// The commit message.
         #[arg(short, long)]
         message: String,
-        /// A JSON file holding an array of changes, or - for stdin.
+        /// A JSON file holding an array of changes, or - for stdin: at most 64 MiB.
         #[arg(long, value_name = "FILE")]
         changes: String,
         /// The changeset to commit on top of (default: main's head, if main exists).
@@ -238,7 +238,8 @@ pub enum Command {
 #[derive(Subcommand, Debug)]
 pub enum BlobCommand {
     /// Store FILE's content as a blob, outside any commit, and print its id, which a change
-    /// names it by: {"blob": ID}.
+    /// names it by: {"blob": ID}. A change list holds at most 64 MiB and a commit's contents
+    /// 1 GiB together; a blob named by id counts toward neither.
     Put {
         /// The file whose content to store, or - for stdin.
         #[arg(value_name = "FILE")]
