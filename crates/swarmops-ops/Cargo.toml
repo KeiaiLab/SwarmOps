@@ -24,6 +24,8 @@ test-hooks = [
 [dependencies]
 swarmops-api = { path = "../swarmops-api", version = "0.1.0" }
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+# `git import`: the import, which reads a git repository on the caller's host through gix.
+swarmops-git = { path = "../swarmops-git", version = "0.1.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 base64.workspace = true

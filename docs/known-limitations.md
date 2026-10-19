@@ -263,6 +263,12 @@ left).
 - **No test reads a real repository yet.** M1 had none, so the final review had nothing to judge
   (question 14). The first come with the git import, behind `SWARMOPS_HOST_REPOS=1`. *Target:
   M3.*
+- **A git import reports what its writes repaired only when it succeeds.** Its `meta.recovered`
+  adds up what its frames' and its ref move's write transactions repaired of what earlier writers
+  left. An import that fails reports none of it (the import's error carries no such record), and
+  the metadata flush before the ref move reports nothing either (`Repo::flush_metadata` returns no
+  record), so an import that has no commit to write and finds the store in need of repair does the
+  repair unreported. *Unscheduled. Found: M3 Task 12.*
 
 ## Platforms
 

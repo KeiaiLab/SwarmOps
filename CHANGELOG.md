@@ -395,6 +395,22 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   stopped at, lists the first 100 recorded with a loss, and carries what the import's writes
   repaired. An incremental run converts with the base's trees and blobs taken as made, so it
   reads only what the new commits changed.
+- `swarmops git import PATH`, the git import as a command, with `--ref GIT_REF` (`HEAD` by
+  default), `--into REF` (`main`), `--lossy CLASS` and `--gitlinks refuse|drop`. It reads the git
+  repository at `PATH` on the caller's host, and reports `GitImportResp`, and what its writes
+  repaired in `meta.recovered`. `--lossy` names a class to drop or normalize instead of refusing
+  it, repeatable, or `all`; `--gitlinks drop` is `--lossy gitlinks`, and `--gitlinks`, given,
+  decides that class whatever `--lossy` says. It needs an identity, checks the target's name
+  before it opens the repository, and raises the six `E_GIT_*` codes: `E_GIT_NOT_A_REPO`
+  (`git_path`), `E_GIT_REF_NOT_FOUND` (`git_ref`, `kind`), `E_GIT_UNSUPPORTED` (`reason`:
+  `object_format`, `ref_storage`, `shallow`, `parents` or `mode`), `E_GIT_READ` (`reason`:
+  `missing`, `corrupt`, `malformed` or `io`; `object`), `E_GIT_IMPORT_LOSSY` (`commit`, `class`,
+  `path`, and `path_base64` for a path that is not UTF-8) and `E_GIT_IMPORT_DIVERGED` (exit 3),
+  besides `E_TOO_LARGE` for a blob past the object limit, `E_CAS_MISMATCH` for a target moved
+  meanwhile and a store failure's own code, each of an import that stopped after it committed
+  frames saying how far it got (`imported`, `last_commit`) and hinting to run it again. Like
+  `init`, it is a client-side operation (`LocalOps::git_import`): no `StoreOps` method and no MCP
+  tool.
 
 ### Changed
 

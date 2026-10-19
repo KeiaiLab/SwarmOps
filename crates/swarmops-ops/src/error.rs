@@ -5,12 +5,15 @@
 
 use std::io;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
 use camino::Utf8Path;
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
+use swarmops_git::{ConvertError, GitOid, ImportError, SourceError, Unsupported};
 use swarmops_repo::{RepoError, StoreError};
-use swarmops_store::{IoFailure, Layout, LimitKind};
+use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN};
 
 use crate::local::cas_mismatch;
 
@@ -310,6 +313,205 @@ pub fn shell_word(word: &str) -> String {
     } else {
         format!("'{}'", word.replace('\'', r"'\''"))
     }
+}
+
+/// The hint of a `git import` that stopped after the frames it committed.
+const RESUME_HINT: &str =
+    "run the same git import again: it continues after the last committed frame";
+
+/// The operations-spec error for a `git import` of `git_ref` from the repository at `git_path`
+/// that failed with `e`: the table in [`crate::LocalOps`]'s documentation. The source and its
+/// objects are named as the caller gave them and by their git ids; an import that stopped after
+/// it committed frames says how far it got (`details.imported`, `details.last_commit`).
+pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) -> OpError {
+    let message = e.to_string();
+    match e {
+        ImportError::Source(e) => source_error(e, message, git_path, git_ref),
+        ImportError::Convert(e) => convert_error(e, message, git_path, git_ref),
+        ImportError::RefName(name) => ref_name_invalid(name, message),
+        ImportError::Diverged {
+            target_ref,
+            target_head,
+            base,
+            git_head,
+        } => {
+            let mut found = details([
+                ("target_ref", target_ref.as_str().into()),
+                ("target_head", target_head.to_string().into()),
+                ("git_head", git_head.to_string().into()),
+            ]);
+            if let Some(base) = base {
+                found.insert("base".to_owned(), base.to_string().into());
+            }
+            error(ErrorCode::GitImportDiverged, message)
+                .with_details(found)
+                .with_hint(hint(format!("swarmops log {}", shell_word(&target_ref))))
+        }
+        ImportError::CasMismatch { target_ref, actual } => {
+            let message = format!(
+                "{message}; every commit is recorded, and the same git import run again moves the \
+                 ref if what it names leads to the tip, or fails with E_GIT_IMPORT_DIVERGED"
+            );
+            cas_mismatch(&target_ref, actual, one_line(message))
+        }
+        ImportError::Store {
+            source,
+            imported,
+            last,
+        } => {
+            let stopped = OpError {
+                message: one_line(message),
+                ..op(source)
+            };
+            progress(stopped, imported, last)
+        }
+        ImportError::PostCommit {
+            warnings,
+            imported,
+            last,
+        } => {
+            // A step after the frame's commit point failed: an I/O failure that the store did not
+            // cut back, so the frame is committed.
+            let found = details([("committed", true.into()), ("warnings", warnings.into())]);
+            let stopped = error(ErrorCode::Io, message).with_details(found);
+            progress(stopped, imported, last)
+        }
+    }
+}
+
+/// [`git_import_error`] for the source's failure `e`, whose message is `message`.
+fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) -> OpError {
+    let refs = || hint(format!("git -C {} for-each-ref", shell_word(git_path)));
+    match e {
+        SourceError::NotARepo { .. } => error(ErrorCode::GitNotARepo, message)
+            .with_details(details([("git_path", git_path.into())])),
+        SourceError::RefNotFound { .. } => error(ErrorCode::GitRefNotFound, message)
+            .with_details(details([("git_ref", git_ref.into())]))
+            .with_hint(refs()),
+        SourceError::NotACommit { kind, .. } => error(ErrorCode::GitRefNotFound, message)
+            .with_details(details([
+                ("git_ref", git_ref.into()),
+                ("kind", kind.as_str().into()),
+            ]))
+            .with_hint(refs()),
+        SourceError::Unsupported(why) => {
+            let found = match why {
+                Unsupported::ObjectFormat(format) => details([
+                    ("reason", "object_format".into()),
+                    ("object_format", format.into()),
+                ]),
+                Unsupported::RefStorage(storage) => details([
+                    ("reason", "ref_storage".into()),
+                    ("ref_storage", storage.into()),
+                ]),
+                Unsupported::Shallow => {
+                    return error(ErrorCode::GitUnsupported, message)
+                        .with_details(details([("reason", "shallow".into())]))
+                        .with_hint(hint(format!(
+                            "git -C {} fetch --unshallow",
+                            shell_word(git_path)
+                        )));
+                }
+            };
+            error(ErrorCode::GitUnsupported, message).with_details(found)
+        }
+        SourceError::Missing { oid } => unreadable(message, Some(oid), "missing", git_path),
+        SourceError::Corrupt { oid, .. } => unreadable(message, Some(oid), "corrupt", git_path),
+        SourceError::Io { .. } => unreadable(message, None, "io", git_path),
+    }
+}
+
+/// [`git_import_error`] for the conversion's refusal `e`, whose message is `message`.
+fn convert_error(e: ConvertError, message: String, git_path: &str, git_ref: &str) -> OpError {
+    let commit_of = |commit: GitOid| details([("commit", commit.to_string().into())]);
+    match e {
+        ConvertError::Source(e) => source_error(e, message, git_path, git_ref),
+        ConvertError::Malformed { oid, .. } => {
+            unreadable(message, Some(oid), "malformed", git_path)
+        }
+        ConvertError::Lossy {
+            commit,
+            class,
+            path,
+            ..
+        } => {
+            let mut found = commit_of(commit);
+            found.insert("class".to_owned(), class.as_str().into());
+            put_path(&mut found, &path);
+            error(ErrorCode::GitImportLossy, message)
+                .with_details(found)
+                .with_hint(hint(format!(
+                    "run it again with --lossy {class} to drop or normalize it and mark the \
+                     changeset (git.lossy)"
+                )))
+        }
+        ConvertError::Parents { commit, parents } => {
+            let mut found = details([("reason", "parents".into())]);
+            found.extend(commit_of(commit));
+            found.insert("parents".to_owned(), parents.into());
+            // A changeset counts its parents in one byte (storage spec §1).
+            found.insert("max".to_owned(), u8::MAX.into());
+            error(ErrorCode::GitUnsupported, message).with_details(found)
+        }
+        ConvertError::Mode { commit, path, mode } => {
+            let mut found = details([("reason", "mode".into())]);
+            found.extend(commit_of(commit));
+            put_path(&mut found, &path);
+            found.insert("mode".to_owned(), mode.escape_ascii().to_string().into());
+            error(ErrorCode::GitUnsupported, message).with_details(found)
+        }
+        ConvertError::TooLarge { commit, path, size } => {
+            let mut found = commit_of(commit);
+            put_path(&mut found, &path);
+            found.insert("size".to_owned(), size.into());
+            found.insert("max".to_owned(), MAX_OBJECT_LEN.into());
+            error(ErrorCode::TooLarge, message).with_details(found)
+        }
+        ConvertError::Bug { commit } => {
+            error(ErrorCode::Internal, message).with_details(commit_of(commit))
+        }
+    }
+}
+
+/// `E_GIT_READ`: the source could not give an object, `object` when there is one, for `reason`
+/// (`missing`, `corrupt`, `malformed` or `io`); the hint checks the repository, but after an
+/// `io` failure, which names no object.
+fn unreadable(message: String, object: Option<GitOid>, reason: &str, git_path: &str) -> OpError {
+    let mut found = details([("reason", reason.into())]);
+    let Some(object) = object else {
+        return error(ErrorCode::GitRead, message).with_details(found);
+    };
+    found.insert("object".to_owned(), object.to_string().into());
+    error(ErrorCode::GitRead, message)
+        .with_details(found)
+        .with_hint(hint(format!("git -C {} fsck", shell_word(git_path))))
+}
+
+/// Puts `path`, an entry's path as git has it, into `found` as `path`; a path that is not UTF-8
+/// also as `path_base64`, its exact bytes, `path` then holding it with each byte that is not
+/// UTF-8 replaced (U+FFFD).
+fn put_path(found: &mut Map<String, Value>, path: &[u8]) {
+    let text = String::from_utf8_lossy(path);
+    if std::str::from_utf8(path).is_err() {
+        found.insert("path_base64".to_owned(), STANDARD.encode(path).into());
+    }
+    found.insert("path".to_owned(), text.into_owned().into());
+}
+
+/// `stopped`, the error of an import that stopped after it recorded `imported` commits, the last
+/// of them `last`: it says so (`details.imported`, and `details.last_commit`, null when none
+/// was recorded), and, unless it found the store damaged, which an import run again does not
+/// mend, its hint is to run the same import again.
+fn progress(mut stopped: OpError, imported: u64, last: Option<GitOid>) -> OpError {
+    let last = last.map_or(Value::Null, |last| last.to_string().into());
+    stopped
+        .details
+        .insert("imported".to_owned(), imported.into());
+    stopped.details.insert("last_commit".to_owned(), last);
+    if stopped.code != ErrorCode::StoreCorrupt.as_str() {
+        stopped.hint = Some(RESUME_HINT.to_owned());
+    }
+    stopped
 }
 
 #[cfg(test)]
@@ -783,5 +985,266 @@ mod tests {
         assert_eq!(rev_hint("release/1.2"), "swarmops ref list");
         assert_eq!(rev_hint("abcdef012345"), "swarmops log");
         assert_eq!(rev_hint("main~3"), "swarmops log main");
+    }
+
+    /// The source repository and git ids the `git import` mapping tests name.
+    const GIT_PATH: &str = "/nonexistent/swarmops-test/repo.git";
+    const GIT_REF: &str = "stable";
+    const COMMIT: GitOid = GitOid([0x11; 20]);
+    const OBJECT: GitOid = GitOid([0x22; 20]);
+
+    /// `e`, a `git import` of [`GIT_REF`] from [`GIT_PATH`] that failed, maps to `code`: its
+    /// string, exit code and retry advice, and `details` as `want`; the error.
+    #[track_caller]
+    fn git_maps(e: ImportError, code: ErrorCode, want: &Value) -> OpError {
+        let shown = format!("{e:?}");
+        let error = git_import_error(e, GIT_PATH, GIT_REF);
+        assert_eq!(error.code, code.as_str(), "{shown}");
+        let advice = (error.exit, error.retryable);
+        assert_eq!(advice, (code.exit(), code.retryable()), "{shown}");
+        assert_eq!(&Value::Object(error.details.clone()), want, "{shown}");
+        assert!(!error.message.is_empty(), "{shown}");
+        error
+    }
+
+    /// The source's refusals of a `git import`, read for the walk or for the conversion alike:
+    /// no repository, a ref that names nothing or no commit, a repository it does not read as it
+    /// is, and an object it cannot give; each with its `details`, and a hint where a git command
+    /// is the next step.
+    #[test]
+    fn git_import_source_errors_map_to_their_codes() {
+        use serde_json::json;
+        use swarmops_git::RawKind;
+
+        let source = ImportError::Source;
+        let not_a_repo = SourceError::NotARepo {
+            reason: "no HEAD".into(),
+        };
+        let want = json!({"git_path": GIT_PATH});
+        git_maps(source(not_a_repo), ErrorCode::GitNotARepo, &want);
+        let unknown = SourceError::RefNotFound {
+            name: GIT_REF.into(),
+        };
+        let want = json!({"git_ref": GIT_REF});
+        let error = git_maps(source(unknown), ErrorCode::GitRefNotFound, &want);
+        let refs = "git -C /nonexistent/swarmops-test/repo.git for-each-ref";
+        assert_eq!(error.hint.as_deref(), Some(refs));
+        let tree = SourceError::NotACommit {
+            name: GIT_REF.into(),
+            kind: RawKind::Tree,
+        };
+        let want = json!({"git_ref": GIT_REF, "kind": "tree"});
+        git_maps(source(tree), ErrorCode::GitRefNotFound, &want);
+        let unsupported = |why| source(SourceError::Unsupported(why));
+        let sha256 = unsupported(Unsupported::ObjectFormat("sha256".into()));
+        let want = json!({"reason": "object_format", "object_format": "sha256"});
+        git_maps(sha256, ErrorCode::GitUnsupported, &want);
+        let reftable = unsupported(Unsupported::RefStorage("reftable".into()));
+        let want = json!({"reason": "ref_storage", "ref_storage": "reftable"});
+        git_maps(reftable, ErrorCode::GitUnsupported, &want);
+        let shallow = unsupported(Unsupported::Shallow);
+        let want = json!({"reason": "shallow"});
+        let error = git_maps(shallow, ErrorCode::GitUnsupported, &want);
+        let deepen = "git -C /nonexistent/swarmops-test/repo.git fetch --unshallow";
+        assert_eq!(error.hint.as_deref(), Some(deepen));
+
+        let object = OBJECT.to_string();
+        let walked: fn(SourceError) -> ImportError = ImportError::Source;
+        let converted: fn(SourceError) -> ImportError =
+            |e| ImportError::Convert(ConvertError::Source(e));
+        for read in [walked, converted] {
+            let missing = read(SourceError::Missing { oid: OBJECT });
+            let want = json!({"reason": "missing", "object": object});
+            let error = git_maps(missing, ErrorCode::GitRead, &want);
+            let fsck = "git -C /nonexistent/swarmops-test/repo.git fsck";
+            assert_eq!(error.hint.as_deref(), Some(fsck));
+            let corrupt = read(SourceError::Corrupt {
+                oid: OBJECT,
+                reason: "its bytes hash to another id".into(),
+            });
+            let want = json!({"reason": "corrupt", "object": object});
+            git_maps(corrupt, ErrorCode::GitRead, &want);
+            let failed = read(SourceError::Io {
+                reason: "Input/output error".into(),
+            });
+            let error = git_maps(failed, ErrorCode::GitRead, &json!({"reason": "io"}));
+            assert_eq!(error.hint, None);
+        }
+    }
+
+    /// The conversion's refusals of a commit: an object that does not parse, content of a lossy
+    /// class the request does not allow (a path that is not UTF-8 given in base64 too, and no
+    /// path for `nonstandard`), what no class covers, a blob past the object limit, and a bug.
+    #[test]
+    fn git_import_conversion_errors_map_to_their_codes() {
+        use serde_json::json;
+        use swarmops_git::LossyClass;
+
+        let convert = ImportError::Convert;
+        let commit = COMMIT.to_string();
+        let malformed = ConvertError::Malformed {
+            oid: OBJECT,
+            what: "no tree line",
+        };
+        let want = json!({"reason": "malformed", "object": OBJECT.to_string()});
+        git_maps(convert(malformed), ErrorCode::GitRead, &want);
+        let lossy = |class, path: &[u8]| {
+            convert(ConvertError::Lossy {
+                commit: COMMIT,
+                class,
+                path: path.to_vec(),
+                detail: "what is wrong".into(),
+            })
+        };
+        let gitlink = lossy(LossyClass::Gitlinks, b"lib/sub");
+        let want = json!({"commit": commit, "class": "gitlinks", "path": "lib/sub"});
+        let error = git_maps(gitlink, ErrorCode::GitImportLossy, &want);
+        let hint = error.hint.unwrap_or_default();
+        assert!(hint.contains("--lossy gitlinks"), "{hint}");
+        let latin1 = lossy(LossyClass::Paths, b"caf\xe9.txt");
+        let want = json!({
+            "commit": commit,
+            "class": "paths",
+            "path": "caf\u{fffd}.txt",
+            "path_base64": "Y2Fm6S50eHQ=",
+        });
+        git_maps(latin1, ErrorCode::GitImportLossy, &want);
+        let headers = lossy(LossyClass::Nonstandard, b"");
+        let want = json!({"commit": commit, "class": "nonstandard", "path": ""});
+        git_maps(headers, ErrorCode::GitImportLossy, &want);
+        let parents = ConvertError::Parents {
+            commit: COMMIT,
+            parents: 256,
+        };
+        let want = json!({"reason": "parents", "commit": commit, "parents": 256, "max": 255});
+        git_maps(convert(parents), ErrorCode::GitUnsupported, &want);
+        let mode = ConvertError::Mode {
+            commit: COMMIT,
+            path: b"a/b".to_vec(),
+            mode: b"123".to_vec(),
+        };
+        let want = json!({"reason": "mode", "commit": commit, "path": "a/b", "mode": "123"});
+        git_maps(convert(mode), ErrorCode::GitUnsupported, &want);
+        let large = ConvertError::TooLarge {
+            commit: COMMIT,
+            path: b"big.bin".to_vec(),
+            size: MAX_OBJECT_LEN + 1,
+        };
+        let want = json!({
+            "commit": commit,
+            "path": "big.bin",
+            "size": MAX_OBJECT_LEN + 1,
+            "max": MAX_OBJECT_LEN,
+        });
+        git_maps(convert(large), ErrorCode::TooLarge, &want);
+        let bug = convert(ConvertError::Bug { commit: COMMIT });
+        git_maps(bug, ErrorCode::Internal, &json!({"commit": commit}));
+    }
+
+    /// A target that is no ref name; one whose head the tip does not lead from, whose `base` is
+    /// the git commit that head holds, if any (exit 3, the hint its log); and one that moved
+    /// during the import, `E_CAS_MISMATCH` with a hint that only reads.
+    #[test]
+    fn git_import_target_errors_map_to_their_codes() {
+        use serde_json::json;
+
+        let bad = ImportError::RefName("feature/x".into());
+        git_maps(
+            bad,
+            ErrorCode::RefNameInvalid,
+            &json!({"name": "feature/x"}),
+        );
+        let head = ChangesetId(ObjectId([7; 32]));
+        let diverged = |base| ImportError::Diverged {
+            target_ref: "main".into(),
+            target_head: head,
+            base,
+            git_head: COMMIT,
+        };
+        let want = json!({
+            "target_ref": "main",
+            "target_head": head.to_string(),
+            "base": OBJECT.to_string(),
+            "git_head": COMMIT.to_string(),
+        });
+        let error = git_maps(diverged(Some(OBJECT)), ErrorCode::GitImportDiverged, &want);
+        assert_eq!(error.exit, 3);
+        assert_eq!(error.hint.as_deref(), Some("swarmops log main"));
+        let want = json!({
+            "target_ref": "main",
+            "target_head": head.to_string(),
+            "git_head": COMMIT.to_string(),
+        });
+        git_maps(diverged(None), ErrorCode::GitImportDiverged, &want);
+        let actual = ChangesetId(ObjectId([8; 32]));
+        let moved = ImportError::CasMismatch {
+            target_ref: "main".into(),
+            actual: Some(actual),
+        };
+        let want = json!({"name": "main", "actual": actual.to_string()});
+        let error = git_maps(moved, ErrorCode::CasMismatch, &want);
+        assert_eq!(error.hint, Some(format!("swarmops show {actual}")));
+    }
+
+    /// A store failure stops an import with the code the operations give it, saying how far the
+    /// import got (`imported`, `last_commit`, null when no frame committed) beside its own
+    /// details, and hinting to run it again, but where it found the store damaged; a frame that
+    /// committed and failed after its commit point is `E_IO` with `committed: true` and its
+    /// warnings.
+    #[test]
+    fn git_import_store_failures_say_how_far_it_got() {
+        use serde_json::json;
+
+        let commit = COMMIT.to_string();
+        let stopped = |e: StoreError, imported, last| ImportError::Store {
+            source: RepoError::Store(e),
+            imported,
+            last,
+        };
+        let want = json!({"imported": 2, "last_commit": commit});
+        let busy = stopped(StoreError::Busy, 2, Some(COMMIT));
+        let error = git_maps(busy, ErrorCode::Busy, &want);
+        assert!(error.message.contains("after 2 commits"), "{error:?}");
+        assert_eq!(error.hint.as_deref(), Some(RESUME_HINT));
+        let cut = StoreError::NotCommitted {
+            source: IoFailure::new(
+                FileOp::Fs(FsMethod::AppendDurable),
+                Some("meta/journal.log".into()),
+                io::Error::from_raw_os_error(5),
+            ),
+        };
+        let want = json!({
+            "committed": false,
+            "fs_op": "append_durable",
+            "store_file": "meta/journal.log",
+            "imported": 0,
+            "last_commit": null,
+        });
+        let error = git_maps(stopped(cut, 0, None), ErrorCode::IoTransient, &want);
+        assert_eq!(error.hint.as_deref(), Some(RESUME_HINT));
+        let damaged = StoreError::Corrupt {
+            id: ObjectId([9; 32]),
+        };
+        let want = json!({
+            "object": ObjectId([9; 32]).to_hex(),
+            "imported": 1,
+            "last_commit": commit,
+        });
+        let damaged = stopped(damaged, 1, Some(COMMIT));
+        let error = git_maps(damaged, ErrorCode::StoreCorrupt, &want);
+        assert_eq!(error.hint.as_deref(), Some("swarmops verify --deep"));
+        let post = ImportError::PostCommit {
+            warnings: vec!["frame 3 committed, but its listing failed".into()],
+            imported: 4,
+            last: Some(COMMIT),
+        };
+        let want = json!({
+            "committed": true,
+            "warnings": ["frame 3 committed, but its listing failed"],
+            "imported": 4,
+            "last_commit": commit,
+        });
+        let error = git_maps(post, ErrorCode::Io, &want);
+        assert_eq!(error.hint.as_deref(), Some(RESUME_HINT));
     }
 }
