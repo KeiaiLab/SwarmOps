@@ -989,6 +989,13 @@ fn error_codes_reach_the_cli() {
             "E_MAINTENANCE_BUSY",
             "the maintenance lease arrives after M1",
         ),
+        // `git import`'s codes, in the schema before the command that raises them.
+        ("E_GIT_NOT_A_REPO", "no command imports from git yet"),
+        ("E_GIT_REF_NOT_FOUND", "no command imports from git yet"),
+        ("E_GIT_IMPORT_DIVERGED", "no command imports from git yet"),
+        ("E_GIT_IMPORT_LOSSY", "no command imports from git yet"),
+        ("E_GIT_UNSUPPORTED", "no command imports from git yet"),
+        ("E_GIT_READ", "no command imports from git yet"),
     ];
     let mut s = Session::new();
     let store = s.store();

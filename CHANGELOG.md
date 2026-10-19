@@ -245,6 +245,20 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `ref set`), and the summary gives publishes/s and the journal frames, so the lock passes, each
   publish took. [docs/perf.md](docs/perf.md) has the section the quiet-window runs fill.
 
+#### M3: git import (2026-10-19)
+
+- `git import`'s contract, ahead of the command that serves it: `swarmops schema` lists
+  `GitImportReq` (`git_path`, the source repository on the caller's host; `git_ref`, `HEAD` by
+  default; `target_ref`, `main` by default; `lossy`, the classes of content the import may drop
+  or normalize, none by default), `GitImportResp` (`imported`, `skipped`, `head_changeset`,
+  `git_head_sha`, `target_ref`, `ref_moved`, `old_head`, the first 100 commits taken lossily
+  and `lossy_total`, `warnings`), `LossyClass` (`gitlinks`, `paths`, `modes`, `tree_order`,
+  `empty_trees`, `nonstandard`) and `LossyCommitOut`, and six error codes, none retryable:
+  `E_GIT_NOT_A_REPO` and `E_GIT_REF_NOT_FOUND` (exit 6), `E_GIT_IMPORT_DIVERGED` (exit 3,
+  conflict), `E_GIT_IMPORT_LOSSY`, `E_GIT_UNSUPPORTED` and `E_GIT_READ` (exit 1). Like `init`,
+  `git import` runs on the client: it is no `StoreOps` operation and no MCP tool, and no server
+  receives its request (operations spec §0, §1 and §7).
+
 ### Changed
 
 #### M1.6: the code-review follow-ups (2026-10-19)

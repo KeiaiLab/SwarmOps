@@ -13,6 +13,9 @@ use thiserror::Error;
 const EXIT_ERROR: i32 = 1;
 /// Exit code 2: the request or the command line is malformed.
 const EXIT_USAGE: i32 = 2;
+/// Exit code 3: the change conflicts with what it lands on; resolve it, then run the operation
+/// again.
+const EXIT_CONFLICT: i32 = 3;
 /// Exit code 4: the operation can succeed when it is run again.
 const EXIT_RETRYABLE: i32 = 4;
 /// Exit code 5: an identity or policy requirement refused the operation.
@@ -107,6 +110,32 @@ error_codes! {
     PolicyDenied => "E_POLICY_DENIED", EXIT_AUTH, false;
     /// Maintenance (gc or verify) holds the store's maintenance lease.
     MaintenanceBusy => "E_MAINTENANCE_BUSY", EXIT_RETRYABLE, true;
+    // `git import` (M3): the source repository and its history.
+    /// `git import` found no git repository it can open at `git_path` (`details.git_path`).
+    GitNotARepo => "E_GIT_NOT_A_REPO", EXIT_NOT_FOUND, false;
+    /// `git import`: the source repository has no `git_ref`, or it names no commit
+    /// (`details.git_ref`; `details.kind` the object it names instead, such as a tree).
+    GitRefNotFound => "E_GIT_REF_NOT_FOUND", EXIT_NOT_FOUND, false;
+    /// `git import`: the target ref's head is not the import of `git_ref`'s commit or of an
+    /// ancestor of it, because the source was rewritten or a native changeset was committed on
+    /// the target, so nothing was written; there is no silent merge. `details` names
+    /// `target_ref`, `target_head`, `git_head` and, when the head was imported, its git commit
+    /// `base`.
+    GitImportDiverged => "E_GIT_IMPORT_DIVERGED", EXIT_CONFLICT, false;
+    /// `git import`: a commit holds content a changeset cannot keep as git has it; `details`
+    /// names the `commit`, the `path` (also as `path_base64` when it is not UTF-8) and the
+    /// lossy `class`, which the request's `lossy` can allow. The import stops before that
+    /// commit, and the target ref does not move.
+    GitImportLossy => "E_GIT_IMPORT_LOSSY", EXIT_ERROR, false;
+    /// `git import` does not read the source: a SHA-256 repository, reftable refs, a shallow
+    /// clone, a commit of more than 255 parents, or an entry whose mode is no kind of entry;
+    /// `details.reason` says which (`object_format`, `ref_storage`, `shallow`, `parents`,
+    /// `mode`), and `details.commit` names the commit of the last two.
+    GitUnsupported => "E_GIT_UNSUPPORTED", EXIT_ERROR, false;
+    /// `git import` could not read the source: an object is missing (as in a partial clone),
+    /// does not hash to its id or does not parse, or the filesystem refused a read
+    /// (`details.reason`; `details.object` names the object when there is one).
+    GitRead => "E_GIT_READ", EXIT_ERROR, false;
 }
 
 impl ErrorCode {
@@ -115,8 +144,8 @@ impl ErrorCode {
         self.row().0
     }
 
-    /// The process exit code: 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found
-    /// (3, conflict, has no M1 code).
+    /// The process exit code: 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6
+    /// not found.
     pub fn exit(&self) -> i32 {
         self.row().1
     }

@@ -1466,14 +1466,16 @@ mod tests {
     /// tool wired to the wrong one, fails here.
     #[test]
     fn the_tools_are_the_store_operations() {
-        // `init` runs on the client and is no `StoreOps` operation, so it has no tool.
+        // `init` and `git import` run on the client and are no `StoreOps` operations, so they
+        // have no tool.
+        let client_side = ["InitReq", "GitImportReq"];
         let all = schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
-            .filter(|name| name.ends_with("Req") && *name != "InitReq")
+            .filter(|name| name.ends_with("Req") && !client_side.contains(name))
             .collect();
         let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
         advertised.sort_unstable();

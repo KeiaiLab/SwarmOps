@@ -20,6 +20,7 @@ use swarmops_api::{
 const REQUESTS: &[&str] = &[
     "ChangeInput",
     "CommitReq",
+    "GitImportReq",
     "Identity",
     "InfoReq",
     "InitReq",
@@ -43,9 +44,11 @@ const RESPONSES: &[&str] = &[
     "CommitResp",
     "Envelope",
     "FileContent",
+    "GitImportResp",
     "IdentityInfo",
     "LogCutOut",
     "LogPage",
+    "LossyCommitOut",
     "Meta",
     "OpError",
     "RecoveredOut",
@@ -69,6 +72,7 @@ const SCALARS: &[&str] = &[
     "EntryKindOut",
     "ErrorCode",
     "FileKind",
+    "LossyClass",
     "ModeInput",
     "Rev",
 ];
@@ -195,6 +199,12 @@ fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
         ErrorCode::Auth => ("E_AUTH", 5, false),
         ErrorCode::PolicyDenied => ("E_POLICY_DENIED", 5, false),
         ErrorCode::MaintenanceBusy => ("E_MAINTENANCE_BUSY", 4, true),
+        ErrorCode::GitNotARepo => ("E_GIT_NOT_A_REPO", 6, false),
+        ErrorCode::GitRefNotFound => ("E_GIT_REF_NOT_FOUND", 6, false),
+        ErrorCode::GitImportDiverged => ("E_GIT_IMPORT_DIVERGED", 3, false),
+        ErrorCode::GitImportLossy => ("E_GIT_IMPORT_LOSSY", 1, false),
+        ErrorCode::GitUnsupported => ("E_GIT_UNSUPPORTED", 1, false),
+        ErrorCode::GitRead => ("E_GIT_READ", 1, false),
     }
 }
 
@@ -1184,4 +1194,213 @@ fn listings_page_with_truncated_and_cursor() {
         serde_json::to_string(&log).unwrap(),
         r#"{"entries":[{"id":"c9f1","parents":["b0b0"],"author_agent":"human/purple","created_at":1760000000000,"title":"add files"}],"truncated":true,"cursor":"c9f1"}"#
     );
+}
+
+/// `git import`'s contract (M3 Decisions 7, 13 and 14): a request with its defaults, the
+/// classes of content an import may take lossily, the response, and six error codes. The
+/// operation runs on the client, as `init` does, so it is no `StoreOps` method.
+mod git_import {
+    use serde_json::json;
+    use swarmops_api::{
+        ErrorCode, GitImportReq, GitImportResp, LossyClass, LossyCommitOut, OpError, schema_for_all,
+    };
+
+    use super::assert_ignores_unknown_fields;
+
+    /// A request names only the repository: it imports what `HEAD` reaches into `main`, and
+    /// takes nothing lossily. The schema gives the same defaults, and the other fields are taken
+    /// as given and written back in the operations spec's order.
+    #[test]
+    fn a_git_import_request_takes_its_defaults() {
+        assert_eq!(
+            serde_json::from_value::<GitImportReq>(json!({"git_path": "x"})).unwrap(),
+            GitImportReq {
+                git_path: "x".to_owned(),
+                git_ref: "HEAD".to_owned(),
+                target_ref: "main".to_owned(),
+                lossy: Vec::new(),
+            }
+        );
+        assert!(serde_json::from_value::<GitImportReq>(json!({"git_ref": "HEAD"})).is_err());
+        let schema = &schema_for_all()["GitImportReq"];
+        assert_eq!(schema["required"], json!(["git_path"]));
+        let properties = &schema["properties"];
+        assert_eq!(properties["git_ref"]["default"], "HEAD");
+        assert_eq!(properties["target_ref"]["default"], "main");
+        assert_eq!(properties["lossy"]["default"], json!([]));
+        assert_eq!(
+            properties["lossy"]["items"],
+            json!({"$ref": "#/$defs/LossyClass"})
+        );
+
+        let wire = r#"{"git_path":"../traders","git_ref":"refs/heads/stable","target_ref":"release/traders","lossy":["gitlinks","tree_order"]}"#;
+        let req: GitImportReq = serde_json::from_str(wire).unwrap();
+        assert_eq!(
+            req,
+            GitImportReq {
+                git_path: "../traders".to_owned(),
+                git_ref: "refs/heads/stable".to_owned(),
+                target_ref: "release/traders".to_owned(),
+                lossy: vec![LossyClass::Gitlinks, LossyClass::TreeOrder],
+            }
+        );
+        assert_eq!(serde_json::to_string(&req).unwrap(), wire);
+        assert_ignores_unknown_fields::<GitImportReq>("GitImportReq", json!({"git_path": "x"}));
+    }
+
+    /// The six classes have one spelling each, the one `git.lossy` metadata and the CLI's
+    /// `--lossy` use: snake case, as `as_str` gives it, in `ALL`'s order; the schema lists the
+    /// same six, each with what an import does to it.
+    #[test]
+    fn lossy_classes_are_snake_case() {
+        let names = [
+            "gitlinks",
+            "paths",
+            "modes",
+            "tree_order",
+            "empty_trees",
+            "nonstandard",
+        ];
+        assert_eq!(serde_json::to_value(LossyClass::ALL).unwrap(), json!(names));
+        for (class, name) in LossyClass::ALL.into_iter().zip(names) {
+            assert_eq!(class.as_str(), name);
+            assert_eq!(
+                serde_json::from_value::<LossyClass>(json!(name)).unwrap(),
+                class
+            );
+        }
+        for wrong in [
+            "TreeOrder",
+            "treeOrder",
+            "tree-order",
+            "empty_tree",
+            "all",
+            "",
+        ] {
+            assert!(
+                serde_json::from_value::<LossyClass>(json!(wrong)).is_err(),
+                "{wrong}"
+            );
+        }
+        let schema = &schema_for_all()["LossyClass"];
+        let listed: Vec<&str> = schema["oneOf"]
+            .as_array()
+            .expect("LossyClass's schema is a oneOf of its classes")
+            .iter()
+            .map(|class| {
+                assert!(class["description"].is_string(), "{class}");
+                class["const"].as_str().expect("one class a branch")
+            })
+            .collect();
+        assert_eq!(listed, names);
+    }
+
+    /// `E_GIT_IMPORT_DIVERGED` exits 3, the conflict exit; a repository or a ref that is not
+    /// there exits 6, as the store's own not-founds do; the rest exit 1. None is retryable:
+    /// running the same import again meets the same source.
+    #[test]
+    fn the_git_error_codes_have_their_exits() {
+        for (code, name, exit) in [
+            (ErrorCode::GitNotARepo, "E_GIT_NOT_A_REPO", 6),
+            (ErrorCode::GitRefNotFound, "E_GIT_REF_NOT_FOUND", 6),
+            (ErrorCode::GitImportDiverged, "E_GIT_IMPORT_DIVERGED", 3),
+            (ErrorCode::GitImportLossy, "E_GIT_IMPORT_LOSSY", 1),
+            (ErrorCode::GitUnsupported, "E_GIT_UNSUPPORTED", 1),
+            (ErrorCode::GitRead, "E_GIT_READ", 1),
+        ] {
+            assert_eq!(
+                (code.as_str(), code.exit(), code.retryable()),
+                (name, exit, false),
+                "{code:?}"
+            );
+            assert!(ErrorCode::ALL.contains(&code), "{name}");
+            assert_eq!(serde_json::to_value(code).unwrap(), name);
+            let error = OpError::new(code, "m");
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                (name, exit, false)
+            );
+        }
+    }
+
+    /// The response follows the operations spec's field order; `old_head` is omitted when the
+    /// import created the target, and `warnings` when there are none, while `lossy` and
+    /// `lossy_total` are always written. A lossy commit names the git commit, its changeset and
+    /// its classes.
+    #[test]
+    fn a_git_import_response_follows_the_spec_shape() {
+        let created = GitImportResp {
+            imported: 5,
+            skipped: 0,
+            head_changeset: "c9f1".to_owned(),
+            git_head_sha: "4b82".to_owned(),
+            target_ref: "main".to_owned(),
+            ref_moved: true,
+            old_head: None,
+            lossy: Vec::new(),
+            lossy_total: 0,
+            warnings: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&created).unwrap(),
+            r#"{"imported":5,"skipped":0,"head_changeset":"c9f1","git_head_sha":"4b82","target_ref":"main","ref_moved":true,"lossy":[],"lossy_total":0}"#
+        );
+        let again = GitImportResp {
+            imported: 3,
+            skipped: 1,
+            old_head: Some("b0b0".to_owned()),
+            lossy: vec![LossyCommitOut {
+                commit: "4b82".to_owned(),
+                changeset: "c9f1".to_owned(),
+                classes: vec![LossyClass::EmptyTrees, LossyClass::Gitlinks],
+            }],
+            lossy_total: 1,
+            warnings: vec!["the ref move is committed".to_owned()],
+            ..created
+        };
+        let text = serde_json::to_string(&again).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"imported":3,"skipped":1,"head_changeset":"c9f1","git_head_sha":"4b82","#,
+                r#""target_ref":"main","ref_moved":true,"old_head":"b0b0","#,
+                r#""lossy":[{"commit":"4b82","changeset":"c9f1","classes":["empty_trees","gitlinks"]}],"#,
+                r#""lossy_total":1,"warnings":["the ref move is committed"]}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(serde_json::from_str::<GitImportResp>(&text).unwrap(), again);
+
+        let all = schema_for_all();
+        assert_eq!(
+            all["GitImportResp"]["required"],
+            json!([
+                "imported",
+                "skipped",
+                "head_changeset",
+                "git_head_sha",
+                "target_ref",
+                "ref_moved",
+                "lossy",
+                "lossy_total"
+            ])
+        );
+        assert_eq!(
+            all["LossyCommitOut"]["required"],
+            json!(["commit", "changeset", "classes"])
+        );
+        assert_ignores_unknown_fields::<GitImportResp>(
+            "GitImportResp",
+            json!({
+                "imported": 0, "skipped": 1, "head_changeset": "c9f1", "git_head_sha": "4b82",
+                "target_ref": "main", "ref_moved": false, "old_head": "c9f1",
+                "lossy": [{"commit": "4b82", "changeset": "c9f1", "classes": ["paths"], "zz_nested": 1}],
+                "lossy_total": 1,
+            }),
+        );
+        assert_ignores_unknown_fields::<LossyCommitOut>(
+            "LossyCommitOut",
+            json!({"commit": "4b82", "changeset": "c9f1", "classes": []}),
+        );
+    }
 }
