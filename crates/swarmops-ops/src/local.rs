@@ -157,8 +157,10 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   hint says to run the same command again.
 /// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning (a
 ///   failure after the commit point, a failed listing in `journal.off` among them), so that it
-///   never reaches here; and the store's `BadCall`, a call its API does not take, which only a
-///   bug makes.
+///   never reaches here; the store's `BadCall`, a call its API does not take, which only a bug
+///   makes; and `Derived`, a derived value that cannot be made (a cycle among the values it
+///   needs, a key or a value that does not encode or decode, a derivation not registered),
+///   which only a bug of the derivation makes, as its inputs are immutable.
 ///
 /// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
 /// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does

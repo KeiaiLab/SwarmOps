@@ -84,6 +84,8 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
+        // A derivation that fails on immutable inputs fails again on every call: a bug.
+        RepoError::Derived { .. } => error(ErrorCode::Internal, message),
     }
 }
 
@@ -383,6 +385,11 @@ mod tests {
             op,
             ErrorCode::StoreCorrupt,
         );
+        let derived = RepoError::Derived {
+            name: "depth".into(),
+            why: "a cycle".into(),
+        };
+        maps(derived, op, ErrorCode::Internal);
     }
 
     /// A commit with `advance` whose ref moved first recorded nothing: `E_CAS_MISMATCH` (exit 4,

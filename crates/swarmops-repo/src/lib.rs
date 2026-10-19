@@ -9,8 +9,12 @@
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
 //! return plain values with no filesystem paths in them, so that they can move behind an RPC
 //! boundary later; only [`LocalRepo::create`] and [`LocalRepo::open`] take the store's path.
+//!
+//! Values derived from the immutable objects are made when they are asked for, and cached in the
+//! store ([`Repo::derived`]; the [`derive`](mod@derive) module).
 
 pub mod commit;
+pub mod derive;
 pub mod error;
 pub mod log;
 pub mod read;
@@ -19,6 +23,7 @@ mod tree_edit;
 pub mod verify;
 
 pub use commit::{Advance, Advanced, Change, ChangeOp, CommitOutcome, CommitRequest};
+pub use derive::{Derivation, DeriveCtx, DeriveError, Need, Registry, Subject};
 pub use error::RepoError;
 pub use read::StoredChangeset;
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};

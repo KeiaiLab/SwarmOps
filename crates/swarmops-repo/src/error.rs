@@ -93,6 +93,18 @@ pub enum RepoError {
         /// The kind the reference expects.
         kind: ObjectKind,
     },
+    /// A derived value cannot be made ([`crate::derive`]): its derivation is not registered, or
+    /// is refused at registration ([`crate::derive::Registry::register`] says what it refuses),
+    /// the values it needs form a cycle, a call returns `Missing` for a value it was given, or a
+    /// key or a value does not encode or decode. Its inputs are immutable, so asking again fails
+    /// again: a bug of the derivation.
+    #[error("derivation {name}: {why}")]
+    Derived {
+        /// The derivation's name ([`crate::derive::Derivation::NAME`]).
+        name: String,
+        /// What went wrong, as one line.
+        why: String,
+    },
 }
 
 /// A filesystem failure of the store's, located ([`StoreError::Io`]).

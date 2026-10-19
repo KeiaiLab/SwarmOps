@@ -35,7 +35,7 @@ and review (M7) come later, in the order of umbrella §13.
 | `swarmops-core` | Object ids, repository paths and the canonical object codec. It does no I/O; its byte layouts are the hash contract. |
 | `swarmops-store` | The loose object files (`FsObjectStore`), the store's layout (`Layout`), the native metadata store (`MetaStore`): the journal, the writer lock, the changeset index and the ref files; and the cache of derived values beside it (`DerivedStore`). The object store's filesystem access, every metadata write and the derived values' reads and writes go through the `FsOps` seam, which the crash tests hook. |
 | `swarmops-merge` | Pure algorithms over trees and lines, with no I/O and no store: the tree diff (leaf-level changes, canonical deltas and three-way path entries) and the line diff (histogram hunks, by `imara-diff`) from M2, and the three-way merge from M4. `swarmops-repo` re-exports it as `swarmops_repo::merge`. |
-| `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, and `verify`. `LocalRepo` is a `Repo` on the local filesystem. |
+| `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, `verify`, and the derivation engine, which derives values from the immutable objects when they are asked for and caches them in `meta/derived/` (`Repo::derived`). `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
@@ -186,6 +186,22 @@ leaves its file torn, costs a recomputation and nothing else. Each file holds it
 (`SWDV` header, then the key and the value, zstd over 4 KiB) and ends in a BLAKE3 trailer over the
 slot (name, version, object, key) and the value. A read that finds a file failing any of those
 checks removes it and reports the value missing, so that it is derived again.
+
+**Deriving a value** (storage §5). A `Derivation` says how one kind of value is made from a
+changeset and a key, out of objects and other derived values only (never a ref, the journal or
+the clock), so that a value never changes once derived: its name and version (its directory), the
+values it depends on (by default its parents', under the same key), an optional `canonical`
+redirect to a cheaper node of the same value, and `derive` itself. A repository's `Registry` holds
+the derivations it knows (`Repo::register`). `Repo::derived` reads a value back if the store holds
+it; otherwise the engine derives it, with every value it needs that the store lacks, and stores
+each. The engine never recurses on the Rust stack: it keeps an explicit stack of nodes
+(derivation, changeset, key) and evaluates bottom-up, deriving first a node's missing
+dependencies, and any value `derive` reads and finds missing (`DeriveError::Missing`), before it
+calls `derive` again. A redirect stores nothing, except that a derivation with `MEMO_EVERY = n`
+stores, for a chain of more than n redirects, the end's value at the chain's start and every n
+steps along it, so that a later walk is short. A node met again while it is on the stack is a
+cycle, an error (`RepoError::Derived`, `E_INTERNAL`: a derivation that fails on immutable inputs
+fails every time). A put that fails is dropped: the run keeps the value in memory, and returns it.
 
 **A commit** (`Repo::commit`; storage §2 rule 2, §3):
 
