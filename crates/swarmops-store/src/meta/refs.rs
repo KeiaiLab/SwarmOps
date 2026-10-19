@@ -76,7 +76,7 @@ pub(crate) fn read(
     fs: &dyn FsOps,
     name: &str,
 ) -> Result<Option<RefState>, StoreError> {
-    read_file(fs, &path(layout, name))
+    read_file(fs, &path(layout, name), name)
 }
 
 /// Every ref that has a file, by name. Entries of `meta/refs/` that are not refs (temp
@@ -166,7 +166,7 @@ pub(crate) fn write(
     target: Option<ChangesetId>,
 ) -> Result<(), StoreError> {
     let path = path(layout, name);
-    let current = read_file(fs, &path)?;
+    let current = read_file(fs, &path, name)?;
     match moved(current, target) {
         // It says that already: see above for why that is enough (rule 5).
         next if next == current => {}
@@ -204,18 +204,23 @@ fn make_dir(fs: &dyn FsOps, dir: &Utf8Path, parent: &Utf8Path) -> Result<(), Sto
     Ok(())
 }
 
-/// The state a ref file holds; `None` if there is no file. Anything but
-/// `<64 hex digits>\n<version>\n`, the version a decimal of at least 1, is `InvalidData`. A
-/// file longer than [`MAX_FILE_LEN`] is refused by its length, measured before it is read
-/// (through `std::fs`, no [`FsOps`] call), so that a crafted file of huge length is never read
-/// into memory; a missing file reaches the read, which reports it.
-fn read_file(fs: &dyn FsOps, path: &Utf8Path) -> Result<Option<RefState>, StoreError> {
+/// The state the file of ref `name`, at `path`, holds; `None` if there is no file. Anything
+/// but `<64 hex digits>\n<version>\n`, the version a decimal of at least 1, is
+/// `InvalidData`, its message naming the file by its place in the store, `meta/refs/<name>`
+/// (never the store's root, a host path). A file longer than [`MAX_FILE_LEN`] is refused by its
+/// length, measured before it is read (through `std::fs`, no [`FsOps`] call), so that a crafted
+/// file of huge length is never read into memory; a missing file reaches the read, which
+/// reports it.
+fn read_file(fs: &dyn FsOps, path: &Utf8Path, name: &str) -> Result<Option<RefState>, StoreError> {
     if let Ok(meta) = std::fs::metadata(path)
         && meta.len() > MAX_FILE_LEN
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{path} is {} bytes long, not a ref file", meta.len()),
+            format!(
+                "meta/refs/{name} is {} bytes long, not a ref file",
+                meta.len()
+            ),
         )
         .into());
     }
@@ -236,7 +241,7 @@ fn read_file(fs: &dyn FsOps, path: &Utf8Path) -> Result<Option<RefState>, StoreE
     parsed.map(Some).ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("{path} is not a ref file: \"<64 hex digits>\\n<version>\\n\""),
+            format!("meta/refs/{name} is not a ref file: \"<64 hex digits>\\n<version>\\n\""),
         )
         .into()
     })

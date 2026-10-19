@@ -547,12 +547,54 @@ fn a_huge_ref_file_is_not_a_ref_file_and_is_not_read_whole() {
     assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
     assert_eq!(
         e.to_string(),
-        format!("{main} is 1073741824 bytes long, not a ref file")
+        "meta/refs/main is 1073741824 bytes long, not a ref file"
     );
     assert!(
         started.elapsed() < Duration::from_secs(1),
         "read whole: {:?}",
         started.elapsed()
+    );
+}
+
+#[test]
+fn a_malformed_checkpoint_or_ref_file_is_reported_without_the_store_path() {
+    // The store's root is a host path, which no error carries to an agent (operations spec
+    // §0): a metadata file that does not read as one is named by its place in the store, and
+    // a store file that is not a regular file by its name.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]);
+    cas(&store, "main", None, Some(1));
+    let read_fails_with = |want: &str| {
+        let got = store.read().map(|_| ());
+        let Err(StoreError::Io(e)) = &got else {
+            panic!("{want}: expected InvalidData, got {got:?}");
+        };
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+        assert!(!e.to_string().contains(root.as_str()), "{e}");
+        assert_eq!(e.to_string(), want);
+    };
+    let layout = Layout::new(&root);
+    let ckpt = layout.journal_ckpt();
+    let kept = fs::read(&ckpt).unwrap();
+    fs::write(&ckpt, [0; 3]).unwrap();
+    read_fails_with("meta/journal.ckpt holds 3 bytes, not a u64le");
+    fs::remove_file(&ckpt).unwrap();
+    fs::create_dir(&ckpt).unwrap();
+    read_fails_with("journal.ckpt is not a regular file");
+    fs::remove_dir(&ckpt).unwrap();
+    fs::write(&ckpt, kept).unwrap();
+
+    let main = layout.meta_path("refs/main");
+    let kept = fs::read(&main).unwrap();
+    fs::write(&main, b"not a ref file\n").unwrap();
+    read_fails_with(r#"meta/refs/main is not a ref file: "<64 hex digits>\n<version>\n""#);
+    // One byte past what a ref file holds: refused by its length, before it is read.
+    fs::write(&main, [b'0'; 87]).unwrap();
+    read_fails_with("meta/refs/main is 87 bytes long, not a ref file");
+    fs::write(&main, kept).unwrap();
+    assert_eq!(
+        store.read().unwrap().get_ref("main").unwrap(),
+        Some(ref_state(1, 1))
     );
 }
 

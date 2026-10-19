@@ -246,6 +246,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (`IndexCorrupt`) on every lookup that reads it. Before, a lookup by id, prefix or delta hash
   answered with another changeset's record where the entry pointed into the unsorted tail, and
   failed with `E_IO` past the index's end.
+- No error from the store carries the store's absolute path any more. A malformed
+  `journal.ckpt` or ref file, and a ref file over its size cap, are named by their place in the
+  store (`meta/journal.ckpt`, `meta/refs/<name>`), and a store file that is not a regular file
+  by its name. A temp file that the store cannot create or write (an object write, or the
+  replacement of a ref file or of `journal.ckpt`) fails with the operating system's own error,
+  errno included, where tempfile's wrapper named the temp file's absolute path and dropped the
+  errno.
 
 ### Security
 
