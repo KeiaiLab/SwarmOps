@@ -397,6 +397,21 @@ const _: fn() = || {
 mod tests {
     use super::*;
 
+    /// The refusals of an id prefix and of a call the store does not take say what they
+    /// refused: the prefix as given, and what the call asked for.
+    #[test]
+    fn a_bad_prefix_and_a_bad_call_say_what_was_refused() {
+        assert_eq!(
+            StoreError::BadPrefix("xyz".to_owned()).to_string(),
+            r#"id prefix "xyz" is not 1 to 64 hex digits"#
+        );
+        let past = "entries 3..+1 are not within a sorted view of 3 entries";
+        assert_eq!(
+            StoreError::BadCall(past.to_owned()).to_string(),
+            format!("a call the store does not take: {past}")
+        );
+    }
+
     #[test]
     fn limit_errors_say_which_limit_and_by_how_much() {
         let limit = StoreError::Limit {

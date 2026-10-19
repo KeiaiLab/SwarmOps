@@ -2459,6 +2459,92 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
     }
 }
 
+/// When the cut that takes a failed listing back off `journal.off` fails too (the entry was
+/// written and its sync failed, then the cut is refused), the error tells both: the listing's
+/// failure, and the cut's as what else failed. The transaction committed all the same
+/// ([`StoreError::PostCommit`]).
+#[test]
+fn a_failed_listing_whose_cut_fails_too_tells_both() {
+    let (_dir, root) = new_root();
+    let mut fails = Fails::new("append_durable journal.off", Strike::After);
+    fails.cut = Some("truncate journal.off");
+    let fails = Arc::new(Watched(fails, RealFs));
+    let store = MetaStore::create_with_fs(&root, Arc::clone(&fails) as Arc<dyn FsOps>).unwrap();
+    insert(&store, &[cs(0, &[])]);
+    fails.arm();
+    let mut write = store.write().unwrap();
+    write.insert_changeset(cs(1, &[0])).unwrap();
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 1,
+            source,
+        }) => {
+            let StoreError::Io(failure) = &*source else {
+                panic!("expected the listing's I/O failure, got {source:?}");
+            };
+            let also = failure.also.as_deref().unwrap_or_default();
+            assert!(
+                also.starts_with(
+                    "cutting back what reached it failed too: truncate meta/journal.off: injected"
+                ),
+                "{failure}"
+            );
+        }
+        other => panic!("expected PostCommit at frame 1, got {other:?}"),
+    }
+}
+
+/// When the append of the `Compacted` marker after a compaction fails (refused before it wrote
+/// anything, so there is nothing to cut), the transaction, which committed before it, says so
+/// ([`StoreError::PostCommit`]) around the plain I/O failure the append was, saying what it was:
+/// not [`StoreError::NotCommitted`], which would say that the transaction did not commit.
+#[test]
+fn a_failed_compacted_marker_is_told_as_the_append_it_was() {
+    use std::sync::atomic::AtomicUsize;
+
+    use swarmops_testkit::fs::FailingFs;
+
+    let (_dir, root) = new_root();
+    let armed = Arc::new(AtomicBool::new(false));
+    let appends = Arc::new(AtomicUsize::new(0));
+    let fs = {
+        let (armed, appends) = (Arc::clone(&armed), Arc::clone(&appends));
+        // The second append to journal.log once armed: the frame's, then the marker's.
+        FailingFs::new(move |method, path| {
+            method == "append_durable"
+                && path.ends_with("journal.log")
+                && armed.load(Ordering::SeqCst)
+                && appends.fetch_add(1, Ordering::SeqCst) == 1
+        })
+    };
+    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    armed.store(true, Ordering::SeqCst);
+    let mut write = store.write().unwrap();
+    for n in 0..=Index::COMPACT_THRESHOLD {
+        write.insert_changeset(cs(n, &[])).unwrap();
+    }
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 0,
+            source,
+        }) => {
+            let StoreError::Io(failure) = &*source else {
+                panic!("expected the marker's I/O failure, got {source:?}");
+            };
+            assert_eq!(
+                failure.also.as_deref(),
+                Some(
+                    "it was appending the Compacted marker, which was cut back off the journal \
+                     (the compaction itself is done)"
+                ),
+                "{failure}"
+            );
+        }
+        other => panic!("expected PostCommit at frame 0, got {other:?}"),
+    }
+    assert_eq!(frames(&root).len(), 1, "no marker frame in the journal");
+}
+
 /// A write whose tail check cannot list a frame that a transaction before it left whole and
 /// unlisted (its own listing failed: committed, [`StoreError::PostCommit`]) has committed nothing
 /// of its own: its transaction never began, and running it again lists the frame. So the error is
@@ -4604,6 +4690,58 @@ fn a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer() {
     } else {
         assert_eq!(report, "checkpointed");
     }
+}
+
+/// Set only in the child of `a_temp_file_write_that_fails_keeps_the_os_error`: the directory it
+/// writes its temp files in.
+#[cfg(target_os = "linux")]
+const FSIZE_DIR: &str = "SWARMOPS_TEST_META_FSIZE_DIR";
+
+/// What the child of [`a_temp_file_write_that_fails_keeps_the_os_error`] reports of an object's
+/// temp file and of a replacement that `RealFs` could not write past one block: each one's errno,
+/// and whether its text names `dir`.
+#[cfg(target_os = "linux")]
+fn temp_write_failures(dir: &Utf8Path) {
+    let bytes = vec![0; 64 * 1024];
+    let reported = [
+        RealFs
+            .write_durable_temp(dir.as_std_path(), &bytes)
+            .map(drop),
+        RealFs.atomic_replace(dir.join("f").as_std_path(), &bytes),
+    ]
+    .map(|result| match result {
+        Ok(()) => "written".to_owned(),
+        Err(e) => format!(
+            "{:?} {}",
+            e.raw_os_error(),
+            e.to_string().contains(dir.as_str())
+        ),
+    });
+    println!("{REPORT}{}", reported.join(", "));
+}
+
+/// A temp file that `RealFs` cannot write, for an object or a replacement, fails with the
+/// operating system's own error, its errno kept and no path in its text: the store writes
+/// through the file itself, not through tempfile's `NamedTempFile`, whose writes wrap a failure
+/// with the temp file's absolute path and drop the errno. The child's files are limited to one
+/// block (`ulimit -f 1`, `RLIMIT_FSIZE`, which binds root too) and it ignores `SIGXFSZ`, so a
+/// write past the block fails with `EFBIG` (27).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_temp_file_write_that_fails_keeps_the_os_error() {
+    const TEST: &str = "a_temp_file_write_that_fails_keeps_the_os_error";
+    if let Some(dir) = std::env::var_os(FSIZE_DIR) {
+        temp_write_failures(&Utf8PathBuf::from_path_buf(dir.into()).unwrap());
+        return;
+    }
+    let (_dir, root) = new_root();
+    let child = run(Command::new("sh")
+        .arg("-c")
+        .arg("trap '' XFSZ; ulimit -f 1; exec \"$0\" \"$@\"")
+        .arg(std::env::current_exe().unwrap())
+        .args(test_args(&test_name!(TEST)))
+        .env(FSIZE_DIR, &root));
+    assert_eq!(report(0, &child), "Some(27) false, Some(27) false");
 }
 
 /// The five index syncs, sorted.
