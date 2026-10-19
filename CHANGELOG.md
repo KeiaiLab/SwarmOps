@@ -305,6 +305,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `VerifyProblem` has the three variants. The power-loss run records two external ids after
   their commits' frames: in every image each is whole or absent, and there once its put
   returned.
+- The git fixture set: seventeen fixtures more, each script saying what it makes and a test
+  holding it to that. What git writes and a changeset keeps faithfully: `roots` (three roots,
+  one of them the empty tree's; an empty commit; a message without a final line feed, and an
+  empty one), `signatures` (offsets from -1200 to +1400, `-0000`, a time before 1970, a Latin-1
+  author name), `headers` (`encoding`, `gpgsig`, `mergetag` and an unknown header),
+  `many_parents` (a merge of 255 roots, and one of 256, which the import refuses), `refs`
+  (branches for incremental imports and for divergence), `replace_ref` and `loose_and_packed`.
+  One for each class of content a changeset cannot hold, crafted with
+  `git hash-object --literally` where git would not write it: `gitlinks`, `paths`, `modes_odd`,
+  `tree_order`, `empty_trees` and `nonstandard`. And the repositories the import does not read:
+  `sha256`, `shallow`, `partial_clone` and `corrupt_object`.
 
 ### Changed
 
