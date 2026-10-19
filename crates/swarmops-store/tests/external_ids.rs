@@ -151,11 +151,12 @@ fn put_batch_then_get_reads_each_entry() {
     assert_eq!(index.systems().unwrap(), ["git"]);
 }
 
-/// The calls a put makes, one at a time: the directories it needs made first, each entry read
-/// (absent) and then written as an object is, and, after the last link, one fsync of each
-/// directory whose entries it changed: every fan-out directory it put an entry into, and the
-/// parent of each directory it made (`meta/`, `meta/external_ids/` and `meta/external_ids/git/`
-/// the first time); none of a fan-out directory it did not touch.
+/// What a put's calls do, one at a time (its reads, `exists` and `read`, are not pinned): the
+/// directories it needs are made first; each entry is written to a temp file in `objects/tmp/`
+/// and then linked into place; and after the last link come only fsyncs, one of each directory
+/// whose entries it changed: every fan-out directory it put an entry into, and the parent of each
+/// directory it made (`meta/`, `meta/external_ids/` and `meta/external_ids/git/` the first time);
+/// none of a fan-out directory it did not touch.
 #[test]
 fn put_batch_makes_its_names_durable_before_it_returns() {
     let (_dir, layout) = store_root();
@@ -167,67 +168,63 @@ fn put_batch_makes_its_names_durable_before_it_returns() {
         let hex = hex(key);
         format!("meta/external_ids/git/{}/{}", &hex[..2], &hex[2..])
     };
-    let written = |key: &[u8]| {
-        [
-            format!("read {}", file(key)),
-            "create_dir_all objects/tmp".to_owned(),
-            "write_durable_temp objects/tmp".to_owned(),
-            format!("link_noclobber {}", file(key)),
-        ]
-    };
-    let owned = |calls: &[&str]| {
-        calls
+    // The put of `entries`, which must fsync exactly `fsynced` after its last link.
+    let put = |entries: &[(Vec<u8>, ExternalEntry)], fsynced: &[&str]| {
+        index.put_batch(SYSTEM_GIT, entries).unwrap();
+        let made = calls();
+        let at = |method: &str| -> Vec<usize> {
+            let calls = made.iter().enumerate();
+            calls
+                .filter(|(_, call)| call.starts_with(method))
+                .map(|(at, _)| at)
+                .collect()
+        };
+        let (temps, links) = (at("write_durable_temp "), at("link_noclobber "));
+        let linked: Vec<&str> = (links.iter())
+            .map(|&at| made[at].strip_prefix("link_noclobber ").unwrap())
+            .collect();
+        let want: Vec<String> = entries.iter().map(|(key, _)| file(key)).collect();
+        assert_eq!(linked, want, "{made:#?}");
+        assert_eq!(temps.len(), links.len(), "{made:#?}");
+        for (temp, link) in temps.iter().zip(&links) {
+            assert_eq!(made[*temp], "write_durable_temp objects/tmp", "{made:#?}");
+            assert!(temp < link, "{made:#?}");
+        }
+        let dirs = at("create_dir_all meta/");
+        assert!(dirs.iter().all(|&dir| dir < temps[0]), "{made:#?}");
+        let after: Vec<&str> = made[links.last().unwrap() + 1..]
             .iter()
-            .map(|&call| call.to_owned())
-            .collect::<Vec<_>>()
+            .map(|call| call.strip_prefix("fsync_dir ").expect("only fsyncs"))
+            .collect();
+        let mut sorted = after.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, fsynced, "{made:#?}");
+        assert_eq!(at("fsync_dir ").len(), fsynced.len(), "{made:#?}");
     };
 
-    let entries = three();
-    index.put_batch(SYSTEM_GIT, &entries).unwrap();
-    let mut want = owned(&[
-        "exists meta/external_ids/git",
-        "exists meta/external_ids",
-        "create_dir_all meta/external_ids/git",
-        "exists meta/external_ids/git/aa",
-        "create_dir_all meta/external_ids/git/aa",
-        "exists meta/external_ids/git/bb",
-        "create_dir_all meta/external_ids/git/bb",
-    ]);
-    for (key, _) in &entries {
-        want.extend(written(key));
-    }
-    want.extend(owned(&[
-        "fsync_dir meta",
-        "fsync_dir meta/external_ids",
-        "fsync_dir meta/external_ids/git",
-        "fsync_dir meta/external_ids/git/aa",
-        "fsync_dir meta/external_ids/git/bb",
-    ]));
-    assert_eq!(calls(), want);
-
+    put(
+        &three(),
+        &[
+            "meta",
+            "meta/external_ids",
+            "meta/external_ids/git",
+            "meta/external_ids/git/aa",
+            "meta/external_ids/git/bb",
+        ],
+    );
     // With the directories there: an entry into `aa/` and one into a new `cc/` fsync those two
     // and `git/`, which holds `cc/` now; not `bb/`, `meta/` or `meta/external_ids/`.
-    let more = [
-        (key(0xaa, 4), entry(4, true)),
-        (key(0xcc, 5), entry(5, true)),
-    ];
-    index.put_batch(SYSTEM_GIT, &more).unwrap();
-    let mut want = owned(&[
-        "exists meta/external_ids/git",
-        "exists meta/external_ids/git/aa",
-        "exists meta/external_ids/git/cc",
-        "create_dir_all meta/external_ids/git/cc",
-    ]);
-    for (key, _) in &more {
-        want.extend(written(key));
-    }
-    want.extend(owned(&[
-        "fsync_dir meta/external_ids/git",
-        "fsync_dir meta/external_ids/git/aa",
-        "fsync_dir meta/external_ids/git/cc",
-    ]));
-    assert_eq!(calls(), want);
-
+    put(
+        &[
+            (key(0xaa, 4), entry(4, true)),
+            (key(0xcc, 5), entry(5, true)),
+        ],
+        &[
+            "meta/external_ids/git",
+            "meta/external_ids/git/aa",
+            "meta/external_ids/git/cc",
+        ],
+    );
     // Nothing to put, nothing done.
     assert_eq!(
         index.put_batch(SYSTEM_GIT, &[]).unwrap(),
