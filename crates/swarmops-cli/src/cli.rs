@@ -157,6 +157,12 @@ pub enum Command {
     /// holds.
     #[command(subcommand)]
     Blob(BlobCommand),
+    /// Name the changeset REV names, and whether REV is a ref's name.
+    Resolve {
+        /// The revision: a ref name, a full changeset id or a unique prefix of 12 or more of its
+        /// hex digits, then any number of ~N suffixes.
+        rev: String,
+    },
     /// Print one file at a revision, or part of it: from a byte, or a range of lines.
     Cat {
         // Split at the first ':' by commands::split_target: M1's revision grammar has no ':'.
@@ -240,14 +246,14 @@ pub enum Command {
     },
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
-    /// One tool per operation (repo_info, read_file, read_tree, show, log, path_history, diff,
-    /// ref_list, ref_set, ref_delete, commit, blob_put, blob_has, verify), each taking the
-    /// operation's request as its arguments and returning the envelope the other commands print.
-    /// The store and the identity are the server's, --repo and --as or their variables, never a
-    /// call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with
-    /// initialize. Prints no envelope: stdout carries the protocol until stdin ends, and a command
-    /// line it refuses has its envelope on stderr. The derive command has no tool: it is
-    /// maintenance, no agent's work.
+    /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log,
+    /// path_history, diff, ref_list, ref_set, ref_delete, commit, blob_put, blob_has, verify), each
+    /// taking the operation's request as its arguments and returning the envelope the other
+    /// commands print. The store and the identity are the server's, --repo and --as or their
+    /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients
+    /// that open with initialize. Prints no envelope: stdout carries the protocol until stdin ends,
+    /// and a command line it refuses has its envelope on stderr. The derive command has no tool: it
+    /// is maintenance, no agent's work.
     Mcp,
     /// Derive the eager derived values of new changesets, ahead of any reader.
     ///
@@ -486,6 +492,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["whoami"] => "whoami",
         ["schema"] => "schema",
         ["commit"] => "commit",
+        ["resolve"] => "resolve_rev",
         ["blob", "put"] => "blob_put",
         ["blob", "has"] => "blob_has",
         ["cat"] => "read_file",
@@ -624,10 +631,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 19);
+        assert_eq!(ops.len(), 20);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 19, "two subcommands name one op");
+        assert_eq!(ops.len(), 20, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
     }

@@ -20,6 +20,7 @@ use swarmops_api::{
     TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
@@ -103,6 +104,9 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 /// - `blob_has` gives the ids, of those asked for, that the store holds a blob under, in
 ///   lowercase, in the order first given and each once; a tree's or a changeset's id is not
 ///   among them.
+/// - `resolve_rev` names the changeset a revision names, resolved as every operation resolves
+///   one, with its kind: `ref` when the revision is exactly the name of a ref (whose target the
+///   id is now), `changeset` for any other revision (an id, a prefix, a `~N` walk).
 /// - `read_file` returns at most `max_bytes` bytes of the file: from `offset` (0, its start, by
 ///   default), or of the lines `lines` names (numbered from 1, both ends included: those that
 ///   exist). They are UTF-8 text when they are text, a cut inside a character moved back to the
@@ -886,6 +890,24 @@ impl StoreOps for Recording<'_> {
         Ok(BlobHasResp { present })
     }
 
+    fn resolve_rev(&self, req: ResolveRevReq) -> Result<ResolvedRev, OpError> {
+        let ResolveRevReq { rev } = req;
+        let read = self.snapshot()?;
+        let id = self.resolve(&read, &rev)?;
+        // The revision is a ref's name when the snapshot holds a ref by that very name, which is
+        // then what it resolved through; an id, a prefix, or anything with a `~N` is no ref name,
+        // and the lookup refuses it.
+        let kind = match read.get_ref(rev.as_str()) {
+            Ok(Some(_)) => RevKind::Ref,
+            Ok(None) | Err(RepoError::RefName(_)) => RevKind::Changeset,
+            Err(e) => return Err(op(e)),
+        };
+        Ok(ResolvedRev {
+            id: id.to_string(),
+            kind,
+        })
+    }
+
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError> {
         let ReadFileReq {
             rev,
@@ -1279,6 +1301,10 @@ impl StoreOps for LocalOps {
 
     fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError> {
         self.recording(&Resolved::default()).blob_has(req)
+    }
+
+    fn resolve_rev(&self, req: ResolveRevReq) -> Result<ResolvedRev, OpError> {
+        self.recording(&Resolved::default()).resolve_rev(req)
     }
 
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError> {

@@ -3648,11 +3648,86 @@ expression: s.redact(&all)
       "title": "RepoInfo",
       "type": "object"
     },
+    "ResolveRevReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it.",
+      "properties": {
+        "rev": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to resolve."
+        }
+      },
+      "required": [
+        "rev"
+      ],
+      "title": "ResolveRevReq",
+      "type": "object"
+    },
+    "ResolvedRev": {
+      "$defs": {
+        "RevKind": {
+          "description": "What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and\nthe edits not committed yet (`ws:<name>`).",
+          "oneOf": [
+            {
+              "const": "ref",
+              "description": "Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves\nwhen the ref does.",
+              "type": "string"
+            },
+            {
+              "const": "changeset",
+              "description": "Any other revision: a full changeset id, a unique prefix of one, or a revision followed by\n`~N` suffixes, a ref's name among them.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`resolve_rev` (CLI `resolve`): the changeset a revision names, and what kind of revision it is.",
+      "properties": {
+        "id": {
+          "description": "The full id of the changeset the revision names.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RevKind",
+          "description": "What the revision is: `ref` when it is exactly a ref's name, `changeset` otherwise."
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "ResolvedRev",
+      "type": "object"
+    },
     "Rev": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "title": "Rev",
       "type": "string"
+    },
+    "RevKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and\nthe edits not committed yet (`ws:<name>`).",
+      "oneOf": [
+        {
+          "const": "ref",
+          "description": "Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves\nwhen the ref does.",
+          "type": "string"
+        },
+        {
+          "const": "changeset",
+          "description": "Any other revision: a full changeset id, a unique prefix of one, or a revision followed by\n`~N` suffixes, a ref's name among them.",
+          "type": "string"
+        }
+      ],
+      "title": "RevKind"
     },
     "ShowReq": {
       "$defs": {

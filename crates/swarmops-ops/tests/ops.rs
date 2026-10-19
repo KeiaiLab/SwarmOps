@@ -3800,3 +3800,85 @@ mod diff {
         }
     }
 }
+
+/// `resolve_rev` (M2 Task 14).
+mod resolve_rev {
+    use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
+
+    use super::*;
+
+    fn resolve(ops: &LocalOps, rev: &str) -> Result<ResolvedRev, OpError> {
+        ops.resolve_rev(ResolveRevReq { rev: rev.into() })
+    }
+
+    fn named(id: &str, kind: RevKind) -> ResolvedRev {
+        ResolvedRev {
+            id: id.to_owned(),
+            kind,
+        }
+    }
+
+    /// `resolve_rev` names the full id of the changeset a revision names, resolved as every
+    /// operation resolves one, and its kind: `ref` for exactly a ref's name, `changeset` for a
+    /// full id (of either case), a prefix, or a `~N` walk (a ref's name with `~0` too). A revision
+    /// that names nothing is `E_REV_NOT_FOUND`, a prefix of two changesets `E_AMBIGUOUS_ID`, and
+    /// a string that is no revision `E_INVALID_ARG`, each with the revision in `details.rev`.
+    /// Made through a request's `recording`, the revision is in that request's `Resolved`.
+    #[test]
+    fn resolve_rev_names_the_kind() {
+        let (_dir, root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+        ops.ref_set(&agent(), set("main", &c2, None, true)).unwrap();
+        ops.ref_set(&agent(), set("release/1.0", &c1, None, true))
+            .unwrap();
+
+        assert_eq!(resolve(&ops, "main").unwrap(), named(&c2, RevKind::Ref));
+        assert_eq!(
+            resolve(&ops, "release/1.0").unwrap(),
+            named(&c1, RevKind::Ref)
+        );
+        for (rev, id) in [
+            ("main~1", &c1),
+            ("main~0", &c2),
+            ("release/1.0~0", &c1),
+            (c1.as_str(), &c1),
+            (&c2.to_uppercase(), &c2),
+            (&c2[..12], &c2),
+            (&format!("{}~1", &c2[..20]), &c1),
+        ] {
+            assert_eq!(
+                resolve(&ops, rev).unwrap(),
+                named(id, RevKind::Changeset),
+                "{rev}"
+            );
+        }
+
+        let unknown = "0".repeat(64);
+        for rev in ["release/2.0", "main~2", unknown.as_str(), &unknown[..12]] {
+            let err = expect_err(resolve(&ops, rev), ErrorCode::RevNotFound);
+            assert_eq!(err.details["rev"], rev);
+        }
+        for rev in ["", "HEAD", "main^", "feature/x", &c1[..11]] {
+            let err = expect_err(resolve(&ops, rev), ErrorCode::InvalidArg);
+            assert_eq!(err.details["rev"], rev);
+        }
+        insert_prefix_twins(&root);
+        let err = expect_err(resolve(&ops, "abababababab"), ErrorCode::AmbiguousId);
+        assert_eq!(err.details["rev"], "abababababab");
+
+        let resolved = Resolved::default();
+        let request = ops.recording(&resolved);
+        let req = ResolveRevReq {
+            rev: "main~1".into(),
+        };
+        assert_eq!(
+            request.resolve_rev(req).unwrap(),
+            named(&c1, RevKind::Changeset)
+        );
+        assert_eq!(
+            resolved.take(),
+            BTreeMap::from([("main~1".to_owned(), c1.clone())])
+        );
+    }
+}

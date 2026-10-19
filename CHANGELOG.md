@@ -331,6 +331,19 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `--max-bytes` of JSON (32 KiB by default; its first file comes all the same, its hunks cut to
   those that fit, `hunks_truncated`). Both revisions resolve in one snapshot. Below it,
   `RepoRead::diff` gives the leaf-level changes between two changesets' trees.
+- `swarmops-repo`: first-parent ancestry in a snapshot (`RepoRead`): `first_parents(from)` walks
+  back through first parents, `ancestor(cs, n)` gives the changeset `n` first-parent steps back,
+  `is_ancestor(a, of)` says whether `a` is on `of`'s first-parent chain, and `merge_base(a, b)`
+  gives the newest changeset on both chains. Generations prune every walk: a gap of up to
+  `SKIP_AFTER` (1,024) generations is walked by narrow index lookups, and a wider one lifts along
+  the first-parent skip list, a jump per bit of the distance, deriving the lists the store lacks
+  (the first derivation of a list derives the whole chain below it, once). A revision's `~N` walks
+  through `ancestor`, so a long one takes a few lookups, and one that reaches past a root by more
+  than its changeset's generation is `E_REV_NOT_FOUND` without a walk.
+- `resolve_rev`, as `swarmops resolve <rev>` and the MCP tool `resolve_rev`: the full id of the
+  changeset a revision names, resolved as every operation resolves one, and its kind, `ref` when
+  the revision is exactly a ref's name and `changeset` otherwise (M5 adds `workspace`). The schema
+  gains `ResolveRevReq`, `ResolvedRev` and `RevKind`, and `StoreOps` gains `resolve_rev`.
 
 ### Changed
 
