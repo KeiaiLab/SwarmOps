@@ -400,6 +400,18 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   symlink or gitlink, more than 255 parents and a blob longer than an object holds are refused
   whatever is allowed, the blob before it is read.
 
+#### M8: git export (2026-10-19)
+
+- `MetaStore::read_committed`, a snapshot of the committed metadata only, for the readers whose
+  results leave the host (M8's git export first, then M11's `serve` and `push`): it takes
+  `meta/lock` as a writer does, waiting up to the store's `lock_timeout` (then `StoreError::Busy`,
+  the retryable `E_BUSY`), runs the journal's tail check, takes the snapshot `MetaStore::read` takes
+  while it still holds the lock, and returns it with what the tail check repaired (`TailRepair`). No
+  writer is mid-commit meanwhile, so neither a power loss nor a failed sync's cut can take back what
+  it returns; on a clean tail it writes nothing. Local readers (the CLI, the MCP server) keep the
+  lock-free snapshot. In the test kit, `fs::HoldThenFail` holds one `append_durable` between its
+  write and its flush until the test lets it go, then fails it.
+
 ### Changed
 
 #### M1.6: the code-review follow-ups (2026-10-19)

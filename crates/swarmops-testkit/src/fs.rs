@@ -7,6 +7,8 @@
 //! - [`NoSyncFs`]: the real filesystem without a single flush to stable storage, failing where
 //!   it fails.
 //! - [`Rendezvous`]: tells calls made at once from calls made one after another.
+//! - [`HoldThenFail`]: the real filesystem, holding one `append_durable` between its write and
+//!   its flush until the test lets it go ([`hold`]: [`Hold`] and [`Held`]), then failing it.
 //!
 //! Each names a call's method with [`FsMethod`], the store's one list of the 14. The store's
 //! tests and benches use them, and so do the repository's, the operations' and the CLI's tests
@@ -16,7 +18,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use swarmops_store::{FsMethod, FsOps, LinkOutcome, RealFs};
@@ -535,6 +537,173 @@ impl Rendezvous {
     /// A call that [`Rendezvous::arrive`] counted is done.
     pub fn depart(&self) {
         self.0.0.lock().unwrap().now -= 1;
+    }
+}
+
+/// One call of a double held part-way until the test lets it go, the double's end: [`Hold::hold`]
+/// tells the test that the call is held, and waits. [`hold`] makes it together with the test's
+/// end, [`Held`]. Unlike a [`Rendezvous`], which lets calls go once enough are in flight, it hands
+/// the call over in order: held first, then let go.
+pub struct Hold {
+    /// Tells the test that the call is held.
+    held: mpsc::Sender<()>,
+    /// Never receives anything: it ends when the test drops its sender, letting the call go.
+    release: mpsc::Receiver<()>,
+}
+
+/// The test's end of a [`Hold`]: [`Held::wait`] waits until the call is held, and
+/// [`Held::release`], or dropping it, lets the call go on.
+pub struct Held {
+    /// Says that the call is held.
+    held: mpsc::Receiver<()>,
+    /// Dropped to let the call go.
+    _release: mpsc::Sender<()>,
+}
+
+/// A hold of one call: the double's end, and the test's.
+pub fn hold() -> (Hold, Held) {
+    let (tell, told) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let double = Hold {
+        held: tell,
+        release: released,
+    };
+    let test = Held {
+        held: told,
+        _release: release,
+    };
+    (double, test)
+}
+
+impl Hold {
+    /// How long either end waits for the other at most: longer than a loaded host delays a
+    /// thread, and short enough that a test that fails while a call is held ends rather than
+    /// hangs.
+    pub const PATIENCE: Duration = Duration::from_secs(60);
+
+    /// Tells the test that the call is held, then waits until the test lets it go (or has
+    /// dropped its end already), or until [`Hold::PATIENCE`] has passed.
+    pub fn hold(self) {
+        // A test that dropped its end lets the call go at once.
+        let _ = self.held.send(());
+        let _ = self.release.recv_timeout(Self::PATIENCE);
+    }
+}
+
+impl Held {
+    /// Waits until the call is held. Panics if it is not within [`Hold::PATIENCE`], or if the
+    /// double dropped its end without holding the call (the call failed before it got there).
+    pub fn wait(&self) {
+        if let Err(e) = self.held.recv_timeout(Hold::PATIENCE) {
+            panic!("the call to hold was never held: {e}");
+        }
+    }
+
+    /// Lets the held call go on, as dropping `self` does.
+    pub fn release(self) {
+        drop(self);
+    }
+}
+
+/// Linux's `EIO`: what an `fdatasync` reports when the writeback it waits for fails.
+const EIO: i32 = 5;
+
+/// [`RealFs`], or any filesystem `F`, with the first `append_durable` of one file held between
+/// its write and its flush, and then failed: the call appends its bytes without a flush
+/// ([`FsOps::append`]), is held there ([`Hold`]) until the test lets it go ([`Held`]), and fails
+/// with `EIO`, as an `fdatasync` whose writeback failed does, its bytes left in the file (the page
+/// cache) for the caller to cut back. On a store's `journal.log`: a writer between its frame's
+/// write and its sync, whose sync then fails, so that it cuts the frame back off the journal under
+/// the lock (storage spec §2 rule 3 (a)). Every other call, and every later `append_durable` of
+/// the file, goes to `F` as it is.
+pub struct HoldThenFail<F = RealFs> {
+    /// The file whose first `append_durable` is held, by the path the caller names it with.
+    path: PathBuf,
+    /// The hold, until that call takes it.
+    hold: Mutex<Option<Hold>>,
+    /// What every call runs on.
+    fs: F,
+}
+
+impl<F: FsOps> HoldThenFail<F> {
+    /// `fs`, with the first `append_durable` of `path` held and failed (a store names its files
+    /// by its root as it was given: `Layout::journal_log`, say), and the test's end of the hold.
+    pub fn new(path: impl Into<PathBuf>, fs: F) -> (HoldThenFail<F>, Held) {
+        let (double, test) = hold();
+        let fs = HoldThenFail {
+            path: path.into(),
+            hold: Mutex::new(Some(double)),
+            fs,
+        };
+        (fs, test)
+    }
+}
+
+impl<F: FsOps> FsOps for HoldThenFail<F> {
+    fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+        self.fs.create_dir_all(p)
+    }
+
+    fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+        self.fs.write_durable_temp(dir, bytes)
+    }
+
+    fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+        self.fs.link_noclobber(from, to)
+    }
+
+    fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+        self.fs.fsync_dir(p)
+    }
+
+    fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+        self.fs.read(p)
+    }
+
+    fn exists(&self, p: &Path) -> io::Result<bool> {
+        self.fs.exists(p)
+    }
+
+    fn remove(&self, p: &Path) -> io::Result<()> {
+        self.fs.remove(p)
+    }
+
+    fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        let hold = if path == self.path {
+            self.hold.lock().unwrap().take()
+        } else {
+            None
+        };
+        let Some(hold) = hold else {
+            return self.fs.append_durable(path, bytes);
+        };
+        self.fs.append(path, bytes)?;
+        hold.hold();
+        Err(io::Error::from_raw_os_error(EIO))
+    }
+
+    fn file_len(&self, path: &Path) -> io::Result<u64> {
+        self.fs.file_len(path)
+    }
+
+    fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+        self.fs.truncate(path, len)
+    }
+
+    fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+        self.fs.atomic_replace(path, bytes)
+    }
+
+    fn sync_data(&self, path: &Path) -> io::Result<()> {
+        self.fs.sync_data(path)
+    }
+
+    fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+        self.fs.append(path, bytes)
+    }
+
+    fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+        self.fs.rename_durable(from, to)
     }
 }
 

@@ -32,6 +32,11 @@
 //! three changesets or none of them.
 //!
 //! Images that hold the same files are checked once.
+//!
+//! One more run, of its own (`committed_read`), checks that a committed snapshot
+//! (`MetaStore::read_committed`, storage spec §3) holds nothing a power loss after it can take
+//! back, where a lock-free snapshot may; its images are read with the library, as the snapshot
+//! was taken.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
@@ -1612,5 +1617,432 @@ fn objects_referenced_by_a_durable_frame_survive_power_loss() {
     for &(n, durable, _) in &commits {
         let found = found_in(&rec, &least(durable), durable);
         assert_eq!(found, Ok(Found::Prefix(n + 1)), "frame {n} just durable");
+    }
+}
+
+/// The committed snapshot ([`MetaStore::read_committed`], storage spec §3 "읽기") under power
+/// loss: a recorded run of its own, its images read with the library, as the snapshot was taken.
+mod committed_read {
+    use std::collections::HashMap;
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::thread;
+    use std::time::Duration;
+
+    use camino::Utf8PathBuf;
+    use swarmops_core::{ChangesetId, LeafKind, RepoPath};
+    use swarmops_repo::{Advance, Change, ChangeOp, CommitRequest, LocalRepo};
+    use swarmops_store::{FsOps, LinkOutcome, MetaRead, MetaStore, StoreError, TailRepair};
+    use swarmops_testkit::fs::{Hold, NoSyncFs, hold};
+    use swarmops_testkit::power::{Image, ImageRecordingFs, RecordedCall, Seeded, Timeline};
+
+    use super::signature;
+
+    /// The recorder, holding, once armed, the next `append_durable` of the store's `journal.log`
+    /// between its write and its sync, as a writer is between its frame's write and its
+    /// `fdatasync`: the call appends without a sync ([`FsOps::append`]), is held ([`Hold`]),
+    /// then syncs the file ([`FsOps::sync_data`]) and succeeds. The recorder records the two
+    /// calls, whose steps are those of the one `append_durable`, its write and then its sync,
+    /// with what the test marks while the call is held between them.
+    struct Gated {
+        /// What every call runs on.
+        fs: Arc<ImageRecordingFs>,
+        /// The store's `journal.log`.
+        log: PathBuf,
+        /// The hold, once armed and until the call takes it.
+        hold: Mutex<Option<Hold>>,
+    }
+
+    impl FsOps for Gated {
+        fn create_dir_all(&self, p: &Path) -> io::Result<()> {
+            self.fs.create_dir_all(p)
+        }
+
+        fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
+            self.fs.write_durable_temp(dir, bytes)
+        }
+
+        fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
+            self.fs.link_noclobber(from, to)
+        }
+
+        fn fsync_dir(&self, p: &Path) -> io::Result<()> {
+            self.fs.fsync_dir(p)
+        }
+
+        fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
+            self.fs.read(p)
+        }
+
+        fn exists(&self, p: &Path) -> io::Result<bool> {
+            self.fs.exists(p)
+        }
+
+        fn remove(&self, p: &Path) -> io::Result<()> {
+            self.fs.remove(p)
+        }
+
+        fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+            let hold = if path == self.log {
+                self.hold.lock().unwrap().take()
+            } else {
+                None
+            };
+            let Some(hold) = hold else {
+                return self.fs.append_durable(path, bytes);
+            };
+            let at = self.fs.append(path, bytes)?;
+            hold.hold();
+            self.fs.sync_data(path)?;
+            Ok(at)
+        }
+
+        fn file_len(&self, path: &Path) -> io::Result<u64> {
+            self.fs.file_len(path)
+        }
+
+        fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
+            self.fs.truncate(path, len)
+        }
+
+        fn atomic_replace(&self, path: &Path, bytes: &[u8]) -> io::Result<()> {
+            self.fs.atomic_replace(path, bytes)
+        }
+
+        fn sync_data(&self, path: &Path) -> io::Result<()> {
+            self.fs.sync_data(path)
+        }
+
+        fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
+            self.fs.append(path, bytes)
+        }
+
+        fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
+            self.fs.rename_durable(from, to)
+        }
+    }
+
+    /// What a snapshot shows of the run.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Shown {
+        /// How many changesets it counts.
+        changesets: u64,
+        /// Which of the run's commits it holds, in their order.
+        holds: Vec<ChangesetId>,
+        /// Each ref, by name, and its target.
+        refs: Vec<(String, ChangesetId)>,
+    }
+
+    impl Shown {
+        /// Whether it holds every changeset and every ref target `snapshot` shows.
+        fn holds_all_of(&self, snapshot: &Shown) -> bool {
+            snapshot.holds.iter().all(|id| self.holds.contains(id))
+                && snapshot.refs.iter().all(|moved| self.refs.contains(moved))
+        }
+    }
+
+    /// What `read` shows of the run's commits `commits`.
+    fn shown(read: &MetaRead<'_>, commits: &[ChangesetId]) -> Result<Shown, StoreError> {
+        let mut holds = Vec::new();
+        for &id in commits {
+            if read.changeset(id)?.is_some() {
+                holds.push(id);
+            }
+        }
+        let refs = read.list_refs()?;
+        Ok(Shown {
+            changesets: read.count_changesets()?,
+            holds,
+            refs: refs
+                .into_iter()
+                .map(|(name, at)| (name, at.target))
+                .collect(),
+        })
+    }
+
+    /// What readers of the store in `image` find of the run's commits `commits`: a lock-free
+    /// snapshot, and then a committed snapshot, which repairs the journal's tail first as a
+    /// writer would, without a flush ([`NoSyncFs`]: what they see is the subject, and no power
+    /// fails after it).
+    fn shown_in(image: &Image, commits: &[ChangesetId]) -> Result<(Shown, Shown), String> {
+        let dir = tempfile::tempdir().map_err(|e| format!("a temp dir: {e}"))?;
+        image
+            .materialize(dir.path())
+            .map_err(|e| format!("writing the image: {e}"))?;
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).expect("UTF-8 paths");
+        let store =
+            MetaStore::open_with_fs(&root, Arc::new(NoSyncFs)).map_err(|e| format!("open: {e}"))?;
+        let read = store.read().map_err(|e| format!("a snapshot: {e}"))?;
+        let plain = shown(&read, commits).map_err(|e| format!("a snapshot: {e}"))?;
+        drop(read);
+        let (read, _) =
+            (store.read_committed()).map_err(|e| format!("a committed snapshot: {e}"))?;
+        let committed = shown(&read, commits).map_err(|e| format!("a committed snapshot: {e}"))?;
+        Ok((plain, committed))
+    }
+
+    /// Commit `n` of the run: the file `<n>.txt` put on commit `parent` (a root for `None`), and
+    /// main advanced to it in the same transaction.
+    fn one_file(n: usize, parent: Option<ChangesetId>) -> CommitRequest {
+        CommitRequest {
+            parents: parent.into_iter().collect(),
+            changes: vec![Change {
+                path: RepoPath::new(format!("{n}.txt")).expect("a repo path"),
+                op: ChangeOp::Put {
+                    kind: LeafKind::File,
+                    content: format!("{n}\n").into_bytes(),
+                },
+            }],
+            author: signature(),
+            committer: signature(),
+            message: format!("commit {n}").into_bytes(),
+            metadata: Vec::new(),
+            allow_empty: false,
+            advance: Some(Advance {
+                name: "main".to_owned(),
+                actor: "test-power/worker-1".to_owned(),
+            }),
+        }
+    }
+
+    /// The recorded run of [`read_committed_snapshot_survives_power_loss`].
+    struct Run {
+        timeline: Timeline,
+        /// How many calls it made, marks aside.
+        calls: usize,
+        /// The step that syncs the third commit's frame.
+        synced: usize,
+        /// The three commits, in order.
+        commits: [ChangesetId; 3],
+        /// What a lock-free snapshot taken at the mark shows.
+        local: Shown,
+        /// What the committed snapshot started at the mark shows, and what its tail check
+        /// repaired.
+        committed: (Shown, TailRepair),
+    }
+
+    /// Records the run of [`read_committed_snapshot_survives_power_loss`]: `init`, two one-file
+    /// commits, then the third, its writer held at its frame's sync ([`Gated`]) on a thread of
+    /// its own while the run marks `committed-read`, takes a lock-free snapshot and starts a
+    /// committed one on another thread, which marks `committed-read returned` once it has its
+    /// snapshot. The writer is let go once that thread is waiting, 300 ms on; it must not have
+    /// its snapshot by then.
+    fn record_run() -> Run {
+        let dir = tempfile::tempdir().expect("make a temp dir");
+        let base = dir.path().canonicalize().expect("the temp dir's path");
+        let root = Utf8PathBuf::from_path_buf(base.join("store")).expect("UTF-8 temp paths");
+        let log = base.join("store/meta/journal.log");
+        let fs = Arc::new(ImageRecordingFs::new());
+        let gated = Arc::new(Gated {
+            fs: Arc::clone(&fs),
+            log: log.clone(),
+            hold: Mutex::new(None),
+        });
+        // One thread: the commits' objects are written, and their directories synced, in the
+        // same order every run.
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(1)
+            .build()
+            .expect("a one-thread pool");
+        let shared = Arc::clone(&gated) as Arc<dyn FsOps>;
+        let repo = pool
+            .install(|| LocalRepo::create_with_fs(&root, "power", shared))
+            .expect("init");
+        fs.mark("init");
+        let commit = |n, parent| {
+            pool.install(|| repo.commit(one_file(n, parent)))
+                .expect("commit")
+                .id
+        };
+        let first = commit(0, None);
+        let second = commit(1, Some(first));
+
+        let (gate, held) = hold();
+        *gated.hold.lock().unwrap() = Some(gate);
+        let readers = Arc::clone(&fs) as Arc<dyn FsOps>;
+        let open = || MetaStore::open_with_fs(&root, Arc::clone(&readers)).expect("open");
+        let recorder = &*fs;
+        let (third, local, committed) = thread::scope(|scope| {
+            let writer = scope.spawn(|| commit(2, Some(second)));
+            held.wait();
+            recorder.mark("committed-read");
+            // The frame is whole in journal.log and not synced: a lock-free snapshot holds it.
+            let local_store = open();
+            let local_read = local_store.read().expect("a snapshot");
+
+            let (started, starting) = mpsc::channel();
+            let (returned, has_returned) = mpsc::channel();
+            let (tell, told) = mpsc::channel();
+            let reader = scope.spawn(move || {
+                let store = open().with_lock_timeout(Duration::from_secs(60));
+                started.send(()).expect("the test waits");
+                let (read, repair) = store.read_committed().expect("a committed snapshot");
+                recorder.mark("committed-read returned");
+                returned.send(()).expect("the test waits");
+                let third = told.recv_timeout(Duration::from_secs(60));
+                let third = third.expect("the third commit's id");
+                let shows = shown(&read, &[first, second, third]).expect("what it shows");
+                (shows, repair)
+            });
+            starting
+                .recv_timeout(Duration::from_secs(60))
+                .expect("the reader started");
+            thread::sleep(Duration::from_millis(300));
+            assert!(
+                has_returned.try_recv().is_err(),
+                "a committed snapshot returned while the writer held the lock"
+            );
+            held.release();
+            let third = writer.join().expect("the writer");
+            tell.send(third).expect("the reader waits");
+            let committed = reader.join().expect("the reader");
+            let local = shown(&local_read, &[first, second, third]).expect("what it shows");
+            (third, local, committed)
+        });
+
+        let calls = fs.calls();
+        let timeline = Timeline::new(&base, &calls);
+        let at_mark = (calls.iter())
+            .position(|call| matches!(call, RecordedCall::Mark(label) if label == "committed-read"))
+            .expect("the mark");
+        let sync = (at_mark..calls.len())
+            .find(|&n| matches!(&calls[n], RecordedCall::SyncData(path) if *path == log))
+            .expect("the frame's sync");
+        Run {
+            synced: timeline.steps_of(sync).start,
+            calls: (calls.iter())
+                .filter(|call| !matches!(call, RecordedCall::Mark(_)))
+                .count(),
+            timeline,
+            commits: [first, second, third],
+            local,
+            committed,
+        }
+    }
+
+    /// Checks the image of every cut of the run after `mark`, for seeds 0 and 2 to 9
+    /// ([`Seeded`]): what it lacks of what `snapshot` shows ([`lacks`]), for each image that lacks
+    /// something. Each distinct image is checked once, built again from its first cut and seed,
+    /// `AT_ONCE` at a time. Returns how many distinct images there were, and the failures.
+    fn images_after(
+        timeline: &Timeline,
+        mark: usize,
+        commits: &[ChangesetId],
+        snapshot: &Shown,
+    ) -> (usize, Vec<String>) {
+        let mut distinct = HashMap::new();
+        for cut in mark + 1..=timeline.steps() {
+            for seed in [0, 2, 3, 4, 5, 6, 7, 8, 9] {
+                let image = timeline.image(cut, &mut Seeded::new(seed, cut));
+                distinct.entry(image.digest()).or_insert((cut, seed));
+            }
+        }
+        let mut distinct: Vec<(usize, u64)> = distinct.into_values().collect();
+        distinct.sort_unstable();
+        let mut failures = Vec::new();
+        for batch in distinct.chunks(super::AT_ONCE) {
+            thread::scope(|scope| {
+                let checks: Vec<_> = (batch.iter())
+                    .map(|&(cut, seed)| {
+                        scope.spawn(move || {
+                            let image = timeline.image(cut, &mut Seeded::new(seed, cut));
+                            lacks(&image, commits, snapshot).map(|why| {
+                                let lost = image.describe();
+                                format!("cut {cut}, seed {seed}: {why}\nlost:\n{lost}")
+                            })
+                        })
+                    })
+                    .collect();
+                for check in checks {
+                    let failed = check
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+                    failures.extend(failed);
+                }
+            });
+        }
+        (distinct.len(), failures)
+    }
+
+    /// What the store in `image` lacks of what `snapshot` shows, to a lock-free snapshot or to a
+    /// committed one ([`shown_in`]); `None` if it holds all of it.
+    fn lacks(image: &Image, commits: &[ChangesetId], snapshot: &Shown) -> Option<String> {
+        match shown_in(image, commits) {
+            Ok((plain, _)) if !plain.holds_all_of(snapshot) => {
+                Some(format!("a snapshot shows {plain:?}"))
+            }
+            Ok((_, committed)) if !committed.holds_all_of(snapshot) => {
+                Some(format!("a committed snapshot shows {committed:?}"))
+            }
+            Ok(_) => None,
+            Err(why) => Some(why),
+        }
+    }
+
+    /// A committed snapshot survives a power loss, where a lock-free one may not (design-L107
+    /// §5, test 3). The run ([`record_run`]): `init`, two one-file commits that each advance main,
+    /// and a third whose writer is held after its frame's bytes are written and before they are
+    /// synced ([`Gated`]), where the run marks `committed-read`. There a lock-free snapshot holds
+    /// the third frame, and the image of a power failure right then that keeps nothing unsynced
+    /// (seed 0) lacks it. A committed snapshot, started there on a thread of its own (a `flock`
+    /// is per open file, so the writer's thread could take it too), waits until the writer lets
+    /// the lock go, so that it returns after the frame's sync; and every image of a power
+    /// failure after the mark, keeping nothing unsynced or what seeds 2 to 9 pick, holds every
+    /// changeset and every ref target that snapshot returned, to a lock-free snapshot and to a
+    /// committed one alike. The default gate checks every cut after the mark: the run is short.
+    #[test]
+    fn read_committed_snapshot_survives_power_loss() {
+        let run = record_run();
+        let [first, second, third] = run.commits;
+        let after = Shown {
+            changesets: 3,
+            holds: vec![first, second, third],
+            refs: vec![("main".to_owned(), third)],
+        };
+        assert_eq!(run.local, after, "a lock-free snapshot at the mark");
+        assert_eq!(
+            run.committed,
+            (after.clone(), TailRepair::default()),
+            "the committed snapshot: the writer had listed its frame"
+        );
+        let mark = run.timeline.mark("committed-read");
+        assert_eq!(
+            run.synced, mark,
+            "the frame's sync is the step right after the mark"
+        );
+        let returned = run.timeline.mark("committed-read returned");
+        assert!(
+            returned > run.synced,
+            "the committed snapshot returned after {returned} steps, before the frame's sync \
+             (step {}): it did not wait for the writer",
+            run.synced
+        );
+
+        // A power failure at the mark, keeping nothing unsynced, loses the third frame.
+        let lost = run.timeline.image(mark, &mut Seeded::new(0, mark));
+        let before = Shown {
+            changesets: 2,
+            holds: vec![first, second],
+            refs: vec![("main".to_owned(), second)],
+        };
+        let found = shown_in(&lost, &run.commits).expect("the image at the mark");
+        assert_eq!(found, (before.clone(), before), "{}", lost.describe());
+
+        // Every power failure after the mark keeps what the committed snapshot returned.
+        let (images, failures) = images_after(&run.timeline, mark, &run.commits, &after);
+        assert!(
+            failures.is_empty(),
+            "{} of {images} distinct images lack what the committed snapshot returned \
+             ({after:?}); the first ones:\n\n{}",
+            failures.len(),
+            failures[..failures.len().min(5)].join("\n\n")
+        );
+        println!(
+            "committed read: {} calls in {} steps, the mark after {mark}, the snapshot returned \
+             after {returned}; {images} distinct images after the mark",
+            run.calls,
+            run.timeline.steps()
+        );
     }
 }

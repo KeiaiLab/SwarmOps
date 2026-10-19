@@ -465,8 +465,9 @@ What an agent sees (operations §4):
   of that frame (which the writer then cuts back), can therefore take back state that a local
   reader returned. A mutation that names such state (a parent, a ref's expected or new target)
   is checked against the store as it is, and fails rather than build on what was taken back.
-  The first readers whose results leave the host (M8's git export, M11's `serve`) will read a
-  committed snapshot taken under the lock instead.
+  The readers whose results leave the host (M8's git export, M11's `serve`) take a committed
+  snapshot instead (`MetaStore::read_committed`): under the lock, after the journal's tail check,
+  so that neither can take back what it returns, at the cost of a wait behind the current writer.
 - M1 has no merge: an agent that loses a ref race and commits its change again on top of the
   winner's can overwrite the winner's edits to the same files. Merging and landing arrive in
   M4.
