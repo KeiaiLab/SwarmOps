@@ -308,6 +308,7 @@ expression: s.transcript()
             "IdentityInfo",
             "InfoReq",
             "InitReq",
+            "LineRange",
             "LogCutOut",
             "LogPage",
             "LogReq",

@@ -1142,3 +1142,260 @@ mod snapshot {
         }
     }
 }
+
+/// `read_file_span` and `list_tree_depth`: a part of a file, of which only what is returned is
+/// kept while the whole blob is verified, and a listing to a depth, with sizes, that reads the
+/// trees it enters and no more.
+mod span {
+    use swarmops_core::{EntryTarget, TreeId};
+    use swarmops_repo::{FileSpan, FileSpanRead, ListedEntry};
+    use swarmops_store::Layout;
+
+    use super::*;
+
+    /// `len` bytes that zstd cannot shrink, so that the store keeps them raw.
+    fn incompressible(len: usize) -> Vec<u8> {
+        let mut state: u64 = 0x9e37_79b9_7f4a_7c15;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    /// A mebibyte of 16-byte lines numbered from 1 (`line 0000000001\n`): text zstd shrinks.
+    fn numbered_lines() -> Vec<u8> {
+        (1..=65_536_u32)
+            .flat_map(|n| format!("line {n:010}\n").into_bytes())
+            .collect()
+    }
+
+    /// A repository at `root`, made by `new_repo`, opened again on a `RecordingFs` that names
+    /// each call by its path in the store; and the function that returns the calls made since it
+    /// last ran.
+    fn recorded(root: &Utf8Path) -> (LocalRepo, impl Fn() -> Vec<String>) {
+        let (recording, calls) = RecordingFs::new();
+        let recording = recording.naming_paths_in(root.as_std_path().to_path_buf());
+        (
+            LocalRepo::open_with_fs(root, Arc::new(recording)).unwrap(),
+            calls,
+        )
+    }
+
+    /// `read objects/<2hex>/<62hex>`: how the recorder names a read of object `id`'s file.
+    fn read_of(id: ObjectId) -> String {
+        format!("read {}", Layout::new("").object_path(id))
+    }
+
+    /// Bytes 1000 to 1099 of a mebibyte stored raw and of one stored zstd: those bytes alone, with
+    /// the file's kind, blob and size, from one read of the blob's object file (after the
+    /// changeset's and the root tree's, which find it). A byte flipped far outside the span is
+    /// `Corrupt` all the same: the whole blob is verified.
+    #[test]
+    fn read_range_keeps_only_what_it_returns_and_verifies_the_whole() {
+        let (_dir, root, _) = new_repo();
+        let (repo, calls) = recorded(&root);
+        let raw = incompressible(1 << 20);
+        let text = numbered_lines();
+        let cs = commit(
+            &repo,
+            &[],
+            vec![put("raw.bin", &raw), put("text.txt", &text)],
+        );
+        let layout = Layout::new(root.clone());
+        let snap = repo.snapshot().unwrap();
+        let tree = snap.changeset(cs).unwrap().unwrap().changeset.root;
+        for (name, content, enc) in [("raw.bin", &raw, 0_u8), ("text.txt", &text, 1)] {
+            let id = blob(content);
+            let file = layout.object_path(id.0);
+            assert_eq!(fs::read(&file).unwrap()[5], enc, "{name}: raw 0, zstd 1");
+            calls();
+            let span = FileSpan::Bytes { start: 1000 };
+            let got = snap.read_file_span(cs, &path(name), span, 100).unwrap();
+            let want = FileSpanRead {
+                kind: LeafKind::File,
+                blob: id,
+                size: 1 << 20,
+                start: 1000,
+                bytes: content[1000..1100].to_vec(),
+                lines: None,
+            };
+            assert_eq!(got, Some(want), "{name}");
+            assert_eq!(
+                calls(),
+                [read_of(cs.0), read_of(tree.0), read_of(id.0)],
+                "{name}: one FsOps::read of the blob's file"
+            );
+
+            let pristine = fs::read(&file).unwrap();
+            let mut damaged = pristine.clone();
+            let far = damaged.len() * 3 / 4;
+            damaged[far] ^= 0x01;
+            fs::write(&file, &damaged).unwrap();
+            let got = snap.read_file_span(cs, &path(name), span, 100);
+            fs::write(&file, &pristine).unwrap();
+            match got {
+                Err(RepoError::Store(StoreError::Corrupt { id: bad })) => assert_eq!(bad, id.0),
+                other => panic!("{name}: expected Corrupt, got {other:?}"),
+            }
+        }
+        // No file there: a directory, or nothing.
+        let dir = commit(&repo, &[cs], vec![put("src/lib.rs", b"pub fn f() {}\n")]);
+        let snap = repo.snapshot().unwrap();
+        for nothing in ["src", "src/main.rs", "raw.bin/x"] {
+            let got = snap.read_file_span(dir, &path(nothing), FileSpan::Bytes { start: 0 }, 9);
+            assert_eq!(got.unwrap(), None, "{nothing}");
+        }
+    }
+
+    /// Lines of a zstd mebibyte whose 64 KiB pieces end inside them, and the lines of a range that
+    /// exist, by the pieces they came in: the bytes, where they start, and which lines they are.
+    #[test]
+    fn a_line_span_is_read_across_the_pieces_of_a_stream() {
+        let (_dir, _root, repo) = new_repo();
+        let text = numbered_lines();
+        let short = b"one\ntwo\nthree".to_vec();
+        let cs = commit(
+            &repo,
+            &[],
+            vec![put("text.txt", &text), put("short.txt", &short)],
+        );
+        let snap = repo.snapshot().unwrap();
+        let read = |name: &str, first: u64, last: u64, max: u64| {
+            let span = FileSpan::Lines { first, last };
+            let got = snap.read_file_span(cs, &path(name), span, max).unwrap();
+            let got = got.expect("a file");
+            (got.start, got.bytes, got.lines)
+        };
+        // Line n of the text starts at (n - 1) * 16: lines 4095 to 4097 cross 65,536.
+        assert_eq!(
+            read("text.txt", 4095, 4097, u64::MAX),
+            (65_504, text[65_504..65_552].to_vec(), Some((4095, 4097)))
+        );
+        // Kept up to `max`, while the lines are still counted to the range's end.
+        assert_eq!(
+            read("text.txt", 4095, 4097, 20),
+            (65_504, text[65_504..65_524].to_vec(), Some((4095, 4097)))
+        );
+        assert_eq!(
+            read("text.txt", 65_535, 70_000, u64::MAX),
+            (
+                1_048_544,
+                text[1_048_544..].to_vec(),
+                Some((65_535, 65_536))
+            )
+        );
+        assert_eq!(
+            read("text.txt", 65_537, 65_537, 9),
+            (1 << 20, Vec::new(), None)
+        );
+        // A last line without a newline is a line; a range before its start holds none.
+        assert_eq!(
+            read("short.txt", 2, 9, u64::MAX),
+            (4, b"two\nthree".to_vec(), Some((2, 3)))
+        );
+        assert_eq!(read("short.txt", 3, 2, u64::MAX), (13, Vec::new(), None));
+    }
+
+    /// A page of a depth listing reads the changeset, the trees on the way to the listed
+    /// directory and those of the directories it enters: none beyond the page to learn that more
+    /// follows, and no blob (a leaf's size comes from its object's header). A page that resumes
+    /// after a path reads the trees on that path the listing enters.
+    #[test]
+    fn a_listing_page_reads_the_trees_it_enters_and_no_more() {
+        let (_dir, root, _) = new_repo();
+        let (repo, calls) = recorded(&root);
+        let cs = commit(
+            &repo,
+            &[],
+            vec![
+                put("a.txt", b"12345"),
+                put("a/b.rs", b"fn b() {}\n"),
+                put("a/c/d.md", b"# d\n"),
+                put_as("bin/run", LeafKind::Exec, b"#!/bin/sh\n"),
+            ],
+        );
+        let snap = repo.snapshot().unwrap();
+        let root_tree = snap.changeset(cs).unwrap().unwrap().changeset.root;
+        let dir = |p: &str| match snap.entry_at(cs, &path(p)).unwrap() {
+            Some(EntryTarget::Dir(tree)) => tree,
+            other => panic!("{p}: {other:?}"),
+        };
+        let (a, c): (TreeId, TreeId) = (dir("a"), dir("a/c"));
+        let listed = |after: Option<&str>, limit: usize| {
+            calls();
+            let after = after.map(path);
+            let page = (snap.list_tree_depth(cs, None, 3, after.as_ref(), limit))
+                .unwrap()
+                .expect("the root is a directory");
+            let paths: Vec<String> = (page.entries.iter())
+                .map(|entry| entry.path.to_string())
+                .collect();
+            (paths, page.truncated, calls())
+        };
+
+        // A page that ends at a directory the listing enters: more follow, its tree unread.
+        assert_eq!(
+            listed(None, 1),
+            (
+                vec!["a".to_owned()],
+                true,
+                vec![read_of(cs.0), read_of(root_tree.0)]
+            )
+        );
+        assert_eq!(
+            listed(None, 2),
+            (
+                vec!["a".to_owned(), "a/b.rs".to_owned()],
+                true,
+                vec![read_of(cs.0), read_of(root_tree.0), read_of(a.0)]
+            )
+        );
+        assert_eq!(
+            listed(Some("a/b.rs"), 2),
+            (
+                vec!["a/c".to_owned(), "a/c/d.md".to_owned()],
+                true,
+                vec![
+                    read_of(cs.0),
+                    read_of(root_tree.0),
+                    read_of(a.0),
+                    read_of(c.0)
+                ]
+            )
+        );
+        let page = snap
+            .list_tree_depth(cs, Some(&path("a")), 2, None, 10)
+            .unwrap()
+            .expect("a directory");
+        assert!(!page.truncated);
+        assert_eq!(
+            page.entries,
+            [
+                ListedEntry {
+                    path: path("b.rs"),
+                    target: EntryTarget::Leaf(LeafKind::File, blob(b"fn b() {}\n")),
+                    size: Some(10),
+                },
+                ListedEntry {
+                    path: path("c"),
+                    target: EntryTarget::Dir(c),
+                    size: None,
+                },
+                ListedEntry {
+                    path: path("c/d.md"),
+                    target: EntryTarget::Leaf(LeafKind::File, blob(b"# d\n")),
+                    size: Some(4),
+                },
+            ]
+        );
+        // A file, or nothing, at the listed path.
+        for nothing in ["a.txt", "zz"] {
+            let got = snap.list_tree_depth(cs, Some(&path(nothing)), 1, None, 10);
+            assert_eq!(got.unwrap(), None, "{nothing}");
+        }
+    }
+}

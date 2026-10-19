@@ -25,6 +25,7 @@ const REQUESTS: &[&str] = &[
     "Identity",
     "InfoReq",
     "InitReq",
+    "LineRange",
     "LogReq",
     "PathHistoryReq",
     "ReadFileReq",
@@ -679,6 +680,8 @@ fn omitted_request_fields_take_their_defaults() {
         ReadFileReq {
             rev: Rev("main".to_owned()),
             path: "src/lib.rs".to_owned(),
+            offset: 0,
+            lines: None,
             max_bytes: DEFAULT_MAX_BYTES,
         }
     );
@@ -959,6 +962,9 @@ fn responses_follow_the_spec_shape_and_field_order() {
         encoding: ContentEncoding::Utf8,
         content: "hi\n".to_owned(),
         truncated: false,
+        offset: None,
+        lines: None,
+        next_offset: None,
     };
     assert_eq!(
         serde_json::to_string(&file).unwrap(),
@@ -1123,7 +1129,7 @@ fn verify_report_carries_findings_beside_problems() {
 #[test]
 fn listings_page_with_truncated_and_cursor() {
     // Default pages within the operations spec's 64 KiB target for a default response (§9).
-    assert_eq!(DEFAULT_READ_TREE_LIMIT, 500);
+    assert_eq!(DEFAULT_READ_TREE_LIMIT, 250);
     assert_eq!(DEFAULT_MAX_CHANGES, 400);
     assert_eq!(DEFAULT_LOG_LIMIT, 50);
     // An empty page is a mistake: limits start at 1, and 0 is `E_INVALID_ARG`.
@@ -1143,6 +1149,7 @@ fn listings_page_with_truncated_and_cursor() {
         ReadTreeReq {
             rev: Rev("main".to_owned()),
             path: None,
+            depth: 1,
             limit: DEFAULT_READ_TREE_LIMIT,
             cursor: None,
         }
@@ -1155,6 +1162,7 @@ fn listings_page_with_truncated_and_cursor() {
         ReadTreeReq {
             rev: Rev("main".to_owned()),
             path: Some("src".to_owned()),
+            depth: 1,
             limit: 2,
             cursor: Some("b.rs".to_owned()),
         }
@@ -1178,7 +1186,9 @@ fn listings_page_with_truncated_and_cursor() {
 
     let entry = |name: &str| TreeEntryOut {
         name: name.to_owned(),
+        path: None,
         kind: EntryKindOut::File,
+        size: None,
         id: "b1".to_owned(),
     };
     let page = TreeListing {
@@ -1352,4 +1362,68 @@ fn blobs_by_id_use_their_wire_forms() {
         serde_json::to_string(&present).unwrap(),
         format!(r#"{{"present":["{id}"]}}"#)
     );
+}
+
+/// `read_file` at an offset or by lines, and `read_tree` to a depth with sizes (operations spec
+/// §1): their defaults, their bounds in the schema, and their wire forms.
+mod spans {
+    use swarmops_api::{LineRange, MAX_TREE_DEPTH};
+
+    use super::*;
+
+    #[test]
+    fn offsets_lines_and_depths_take_their_defaults_and_bounds() {
+        assert_eq!(MAX_TREE_DEPTH, 64);
+        let all = schema_for_all();
+        assert_eq!(all["ReadFileReq"]["properties"]["offset"]["default"], 0);
+        let depth = &all["ReadTreeReq"]["properties"]["depth"];
+        assert_eq!(
+            (&depth["default"], &depth["minimum"], &depth["maximum"]),
+            (&json!(1), &json!(1), &json!(MAX_TREE_DEPTH))
+        );
+        for field in ["first", "last"] {
+            assert_eq!(
+                all["LineRange"]["properties"][field]["minimum"], 1,
+                "{field}"
+            );
+        }
+        let by_lines = json!({"rev": "main", "path": "a", "lines": {"first": 3, "last": 5}});
+        let req: ReadFileReq = serde_json::from_value(by_lines).unwrap();
+        assert_eq!(
+            (req.offset, req.lines),
+            (0, Some(LineRange { first: 3, last: 5 }))
+        );
+        let req: ReadTreeReq = serde_json::from_value(json!({"rev": "main"})).unwrap();
+        assert_eq!(req.depth, 1);
+    }
+
+    #[test]
+    fn a_part_of_a_file_and_an_entry_below_say_where_they_are() {
+        let part = FileContent {
+            blob: "b1".to_owned(),
+            size: 30,
+            kind: FileKind::File,
+            encoding: ContentEncoding::Utf8,
+            content: "x\n".to_owned(),
+            truncated: true,
+            offset: Some(10),
+            lines: Some(LineRange { first: 3, last: 5 }),
+            next_offset: Some(12),
+        };
+        assert_eq!(
+            serde_json::to_string(&part).unwrap(),
+            r#"{"blob":"b1","size":30,"kind":"file","encoding":"utf8","content":"x\n","truncated":true,"offset":10,"lines":{"first":3,"last":5},"next_offset":12}"#
+        );
+        let below = TreeEntryOut {
+            name: "b.rs".to_owned(),
+            path: Some("a/b.rs".to_owned()),
+            kind: EntryKindOut::File,
+            size: Some(10),
+            id: "b1".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_string(&below).unwrap(),
+            r#"{"name":"b.rs","path":"a/b.rs","kind":"file","size":10,"id":"b1"}"#
+        );
+    }
 }

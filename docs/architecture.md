@@ -481,7 +481,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 24 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
 kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 52 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 53 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

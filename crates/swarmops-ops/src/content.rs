@@ -37,9 +37,11 @@
 //! # Content out
 //!
 //! `read_file` returns bytes as UTF-8 text when they are UTF-8, and in standard, padded base64
-//! otherwise ([`ContentEncoding`]). Text stays text where `max_bytes` cuts it: a cut inside a
-//! character moves back to the character's start, so the text returned may be up to 3 bytes
-//! shorter than the cap; bytes that are not text are cut at exactly the cap. `show` returns a
+//! otherwise ([`ContentEncoding`]): the bytes it returns, so that bytes read from an offset inside
+//! a character, which do not start as text, come back in base64. Text stays text where
+//! `max_bytes` cuts it: a cut inside a character moves back to the character's start, so the text
+//! returned may be up to 3 bytes shorter than the cap, and the next page starts at that
+//! character; bytes that are not text are cut at exactly the cap. `show` returns a
 //! metadata value the same way, except that a base64 value goes under its key with `:b64`
 //! appended, since a metadata map has no field for the encoding. That suffix is reserved: a
 //! commit refuses a metadata key that ends in it, so `k:b64` is always the base64 of `k`'s
@@ -364,11 +366,28 @@ pub(crate) fn repo_path(path: &str) -> Result<RepoPath, OpError> {
     })
 }
 
-/// How `read_file` returns the first `keep` bytes of blob `bytes`: as UTF-8 text when they are
-/// text, a cut inside a character moved back to the character's start (at most 3 bytes) when
-/// the bytes after the cut complete that character; otherwise exactly the `keep` bytes, in
-/// base64.
-pub(crate) fn encode(bytes: &[u8], keep: usize) -> (ContentEncoding, String) {
+/// The most bytes of a character that can follow a cut inside it: what `read_file` reads past its
+/// `max_bytes`, so that [`encode`] can tell a cut character from bytes that only look like the
+/// start of one.
+pub(crate) const CHAR_TAIL: u64 = 3;
+
+/// Bytes as `read_file` returns them ([`encode`]).
+pub(crate) struct Encoded {
+    /// How `content` encodes the bytes.
+    pub(crate) encoding: ContentEncoding,
+    /// The bytes, as text or in base64.
+    pub(crate) content: String,
+    /// How many bytes `content` holds: where the next page starts, from the first of them.
+    pub(crate) len: usize,
+}
+
+/// How `read_file` returns the first `keep` bytes of `bytes`, which start where the read does
+/// (the file's start, an offset or a line) and run up to [`CHAR_TAIL`] bytes past the cut when
+/// the file does: as UTF-8 text when they are text, a cut inside a character moved back to the
+/// character's start (at most 3 bytes) when the bytes after the cut complete that character;
+/// otherwise exactly the `keep` bytes, in base64. Bytes that start inside a character are not
+/// text.
+pub(crate) fn encode(bytes: &[u8], keep: usize) -> Encoded {
     let kept = &bytes[..keep];
     let text = match std::str::from_utf8(kept) {
         Ok(text) => Some(text),
@@ -380,8 +399,16 @@ pub(crate) fn encode(bytes: &[u8], keep: usize) -> (ContentEncoding, String) {
         Err(_) => None,
     };
     match text {
-        Some(text) => (ContentEncoding::Utf8, text.to_owned()),
-        None => (ContentEncoding::Base64, STANDARD.encode(kept)),
+        Some(text) => Encoded {
+            encoding: ContentEncoding::Utf8,
+            content: text.to_owned(),
+            len: text.len(),
+        },
+        None => Encoded {
+            encoding: ContentEncoding::Base64,
+            content: STANDARD.encode(kept),
+            len: keep,
+        },
     }
 }
 

@@ -245,8 +245,10 @@ static TOOLS: [Spec; 13] = [
         request: "ReadFileReq",
         title: "Read a file",
         description: "Reads one file at a revision, without a checkout, as UTF-8 text or \
-                      base64; pass max_bytes of 32768 or less (less for a binary file), since \
-                      clients limit long tool results and this one holds the content twice.",
+                      base64, from offset or the lines a range names; pass max_bytes of 32768 or \
+                      less (less for a binary file), since clients limit long tool results and \
+                      this one holds the content twice, and read on from next_offset while the \
+                      result is truncated.",
         effect: Effect::Reads,
         result_chars: Some(READ_FILE_RESULT_CHARS),
     },
@@ -256,8 +258,9 @@ static TOOLS: [Spec; 13] = [
         request: "ReadTreeReq",
         title: "List a directory",
         description: "Lists one directory at a revision, without a checkout, a page of entries \
-                      at a time; pass a limit of 100 or less and page on with the cursor, since \
-                      clients limit long tool results.",
+                      at a time, each file with its size, and with depth the directories below it \
+                      too; pass a limit of 100 or less and page on with the cursor, since clients \
+                      limit long tool results.",
         effect: Effect::Reads,
         result_chars: None,
     },

@@ -8,7 +8,9 @@
 //! A request reads in one snapshot of the metadata ([`Repo::snapshot`], a [`RepoRead`]), which
 //! resolves every revision and ref it names in the same view, and commits on the parents it
 //! resolved there ([`Repo::commit_in`]); [`Repo`]'s read methods each take a snapshot of their
-//! own.
+//! own. A snapshot also reads part of a file, keeping only that part while it verifies the whole
+//! blob ([`RepoRead::read_file_span`]), and lists the directories below one to a depth, with each
+//! leaf's size ([`RepoRead::list_tree_depth`]).
 //!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
@@ -36,7 +38,7 @@ pub use derive::{
 };
 pub use error::RepoError;
 pub use path_history::PathEvent;
-pub use read::{RepoRead, StoredChangeset};
+pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, TreePage};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
 pub use verify::{MismatchCause, VerifyProblem, VerifyReport};

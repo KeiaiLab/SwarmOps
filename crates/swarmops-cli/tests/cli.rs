@@ -182,8 +182,10 @@ fn commit_twice(s: &mut Session, store: &str) -> [String; 2] {
     [c1, c2]
 }
 
-/// cat: text, base64, a file at an older revision, a symlink, a truncated read. A rev is
-/// split from its path at the first ':', so a path may hold more.
+/// cat: text, base64, a file at an older revision, a symlink, a truncated read and the read on
+/// from its `next_offset`, a range of lines, and `--offset` with `--lines` or a range that is no
+/// A-B, which are usage errors. A rev is split from its path at the first ':', so a path may hold
+/// more.
 fn cat_at(s: &mut Session, store: &str, c1: &str) {
     let readme = s.run(&["--repo", store, "cat", "main:README.md"]);
     assert_eq!(readme["result"]["content"], "# acme\n\nversion 2\n");
@@ -209,12 +211,29 @@ fn cat_at(s: &mut Session, store: &str, c1: &str) {
     ]);
     assert_eq!(cut["result"]["content"], "fn m");
     assert_eq!(cut["result"]["truncated"], true);
+    assert_eq!(cut["result"]["next_offset"], 4);
+    let rest = s.run(&["--repo", store, "cat", "main:src/main.rs", "--offset", "4"]);
+    assert_eq!(rest["result"]["content"], "ain() {}\n");
+    assert_eq!(rest["result"]["offset"], 4);
+    let third = s.run(&["--repo", store, "cat", "main:README.md", "--lines", "3-3"]);
+    assert_eq!(third["result"]["content"], "version 2\n");
+    assert_eq!(third["result"]["lines"], json!({"first": 3, "last": 3}));
+    for refused in [&["--offset", "1", "--lines", "1-2"][..], &["--lines", "3"]] {
+        let args = [&["--repo", store, "cat", "main:README.md"][..], refused].concat();
+        let usage = s.run(&args);
+        assert_eq!(
+            (usage.exit, usage.code()),
+            (2, "E_INVALID_ARG"),
+            "{refused:?}"
+        );
+    }
     let colon = s.run(&["--repo", store, "cat", "main:no:such:file"]);
     assert_eq!(colon["error"]["details"]["path"], "no:such:file");
 }
 
 /// ls (the root without a path or with an empty one, a directory with or without a trailing
-/// `/`, pages), show (by ref and by prefix) and log (from main, a page at a time).
+/// `/`, pages, `--depth` with each entry's path, and its pages), show (by ref and by prefix) and
+/// log (from main, a page at a time).
 fn ls_show_log(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
     let root = s.run(&["--repo", store, "ls", "main"]);
     let names: Vec<&str> = root["result"]["entries"]
@@ -236,6 +255,30 @@ fn ls_show_log(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
         "--repo", store, "ls", "main", "--limit", "2", "--cursor", "bin",
     ]);
     assert_eq!(rest["result"]["entries"][0]["name"], "latest");
+    let deep = s.run(&["--repo", store, "ls", "main", "--depth", "2"]);
+    let paths: Vec<&str> = deep["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "README.md",
+            "bin",
+            "bin/run",
+            "latest",
+            "logo.bin",
+            "src",
+            "src/main.rs"
+        ]
+    );
+    let deep_page = s.run(&[
+        "--repo", store, "ls", "main", "--depth", "2", "--limit", "2", "--cursor", "bin",
+    ]);
+    assert_eq!(deep_page["result"]["entries"][0]["path"], "bin/run");
+    assert_eq!(deep_page["result"]["cursor"], "latest");
 
     let shown = s.run(&["--repo", store, "show", "main"]);
     assert_eq!(shown["result"]["id"], c2);
