@@ -20,6 +20,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 use camino::{Utf8Path, Utf8PathBuf};
 use rayon::ThreadPool;
 use rayon::prelude::*;
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{ObjectId, ObjectKind, hash_object};
 
 use crate::error::StoreError;
@@ -336,7 +337,7 @@ fn encode(kind: ObjectKind, payload: &[u8]) -> io::Result<Vec<u8>> {
         Some(c) => (ENC_ZSTD, c.as_slice()),
         None => (ENC_RAW, payload),
     };
-    let ulen = u64::try_from(payload.len()).expect("payload length fits in u64");
+    let ulen = to_u64(payload.len());
     let mut file = Vec::with_capacity(HEADER_LEN + body.len());
     file.extend_from_slice(&MAGIC);
     file.push(kind_byte(kind));

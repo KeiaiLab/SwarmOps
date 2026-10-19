@@ -1,6 +1,9 @@
 //! A bounds-checked cursor for decoding byte layouts: every read checks that the bytes it
 //! takes are there before it takes them, so input cut short or crafted gives an error, never a
 //! panic. The object codec reads with it, and so do the store's journal records.
+//!
+//! [`to_u64`] turns a `usize` length, count or offset into the `u64` that the byte layouts,
+//! the store and the API hold.
 
 /// A cursor over an immutable buffer.
 ///
@@ -79,5 +82,26 @@ impl<'a, E> Reader<'a, E> {
     /// The next 8 bytes, as a little-endian `i64`.
     pub fn i64_le(&mut self) -> Result<i64, E> {
         self.array().map(i64::from_le_bytes)
+    }
+}
+
+/// `n`, a length, count or offset held in a `usize`, as the `u64` the byte layouts, the
+/// store and the API use. Lossless: no target Rust supports has a `usize` wider than 64 bits,
+/// as the assertion below checks when the crate compiles, so this never panics.
+pub fn to_u64(n: usize) -> u64 {
+    u64::try_from(n).expect("a usize fits in a u64")
+}
+
+const _: () = assert!(usize::BITS <= u64::BITS);
+
+#[cfg(test)]
+mod tests {
+    use super::to_u64;
+
+    #[test]
+    fn to_u64_is_lossless() {
+        assert_eq!(to_u64(0), 0);
+        assert_eq!(to_u64(1 << 20), 1 << 20);
+        assert_eq!(to_u64(usize::MAX), u64::try_from(usize::MAX).unwrap());
     }
 }

@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "test-hooks")]
 use camino::Utf8PathBuf;
 use proptest::prelude::*;
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{ChangesetId, ObjectId};
 #[cfg(feature = "test-hooks")]
 use swarmops_store::{CRASH_AT_ENV, CrashAtFs};
@@ -90,10 +91,6 @@ fn cs(bytes: [u8; 32]) -> ChangesetId {
 
 fn id_of(byte: u8) -> ChangesetId {
     cs([byte; 32])
-}
-
-fn to_u64(n: usize) -> u64 {
-    u64::try_from(n).unwrap()
 }
 
 /// A changeset to append. `seq` is left 0: the index numbers its records itself.

@@ -45,6 +45,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{
     ChangeInput, ChangeOp, ContentEncoding, ContentInput, ErrorCode, ModeInput, OpError,
 };
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{EntryKind, RepoPath};
 use swarmops_repo::Change;
 
@@ -66,7 +67,7 @@ pub fn bytes(content: ContentInput) -> Result<Vec<u8>, OpError> {
 fn bytes_within(content: ContentInput, limit: u64) -> Result<Vec<u8>, OpError> {
     match content {
         ContentInput::Inline(text) => {
-            within(count(text.len()), limit)?;
+            within(to_u64(text.len()), limit)?;
             Ok(text.into_bytes())
         }
         ContentInput::Base64(encoded) => {
@@ -103,7 +104,7 @@ fn read_within(file: &str, limit: u64) -> Result<Vec<u8>, OpError> {
         .take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .map_err(unreadable)?;
-    within(count(bytes.len()), limit)?;
+    within(to_u64(bytes.len()), limit)?;
     Ok(bytes)
 }
 
@@ -116,7 +117,7 @@ fn decoded_len(encoded: &str) -> u64 {
         .take(2)
         .take_while(|&b| b == b'=')
         .count();
-    count((encoded.len() / 4 * 3).saturating_sub(padding))
+    to_u64((encoded.len() / 4 * 3).saturating_sub(padding))
 }
 
 /// `E_TOO_LARGE` when content of `size` bytes is more than `limit`, the most a put may hold.
@@ -254,10 +255,6 @@ fn entry_kind(mode: Option<ModeInput>) -> EntryKind {
         Some(ModeInput::Exec) => EntryKind::Exec,
         Some(ModeInput::Symlink) => EntryKind::Symlink,
     }
-}
-
-fn count(n: usize) -> u64 {
-    u64::try_from(n).expect("a usize fits in a u64")
 }
 
 /// `error`, said of change `index` of the list, at `path`: its message prefixed with them,
