@@ -99,10 +99,11 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_INVALID_ARG`: `BadRev` `{rev}` (the hint gives the revision grammar), `DirPut` and
 ///   `DuplicatePath` `{path}`, and the store's `DuplicateParent` `{parent}`, `Limit`
 ///   `{store_limit, max, got}` (a request past a limit of the store's layout: `store_limit` is
-///   `parents`, `actor_bytes`, `ref_name_bytes` or `records`) and `BadPrefix` `{prefix}` (an id
-///   prefix that is not 1 to 64 hex digits). No request of these operations reaches the last
-///   two: a commit has one parent, the identity bounds the actor, and revision resolution takes
-///   12 to 63 hex digits.
+///   `parents`, `actor_bytes`, `ref_name_bytes`, `records` or `repo_name_bytes`) and `BadPrefix`
+///   `{prefix}` (an id prefix that is not 1 to 64 hex digits). Of the requests of these
+///   operations only `init`'s reaches either, with a name of more than 255 bytes
+///   (`repo_name_bytes`): a commit has one parent, the identity bounds the actor, and revision
+///   resolution takes 12 to 63 hex digits.
 /// - `E_EXISTS`: `Exists`; the hint is `swarmops --repo <path> info`.
 /// - `E_UNKNOWN_PARENT` `{parent}`: `UnknownParent`; the hint is `swarmops log`.
 /// - `E_EMPTY_COMMIT`: `EmptyChanges`; the hint names `--allow-empty`.
@@ -159,8 +160,10 @@ impl fmt::Debug for LocalOps {
 impl LocalOps {
     /// Creates a store at `path` for a repository named `name`, creating the directory if it is
     /// missing, and opens it (CLI `init`). `E_EXISTS` if a store is there already,
-    /// `E_UNSUPPORTED_FS` for a path under `/mnt/`. A store made whole whose reading back for
-    /// the report fails is that read's error, saying the store is made (`details.created`).
+    /// `E_UNSUPPORTED_FS` for a path under `/mnt/`, `E_INVALID_ARG` for a name of more than 255
+    /// bytes (`details.store_limit` `repo_name_bytes`), before anything is created. A store made
+    /// whole whose reading back for the report fails is that read's error, saying the store is
+    /// made (`details.created`).
     pub fn init(path: &Utf8Path, name: &str) -> Result<(LocalOps, RepoInfo), OpError> {
         let repo = LocalRepo::create(path, name).map_err(|e| repo_error(e, During::Init(path)))?;
         let ops = Self::with_repo(repo, path);

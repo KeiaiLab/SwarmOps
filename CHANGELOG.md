@@ -286,6 +286,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 - Test infrastructure: the crash sweeps of the journal, the index and the repository recover
   under the order checker too, as the sweeps through the binary did (they recovered on the real
   filesystem, unchecked), and so does the fsync-failure model's sweep of the journal, every run.
+- `init` refuses a repository name of more than 255 bytes with `E_INVALID_ARG` (`details`
+  `{"store_limit": "repo_name_bytes", "max": 255, "got": <bytes>}`) before it creates
+  anything, and `open` refuses a `REPO` longer than an id and a 255-byte name
+  (`E_NOT_A_REPO`): a store created with a longer name must be created again.
 
 ### Fixed
 
@@ -330,5 +334,8 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   really decompresses to a huge size is still decoded whole
   ([docs/known-limitations.md](docs/known-limitations.md), "A zstd bomb object is decoded
   whole").
+- `open` measures `REPO` before it reads it: a crafted `REPO` of huge length is refused by its
+  length (`E_NOT_A_REPO`), where it used to be read whole, at the cost of its length in memory
+  (M1.5 final review, security-2).
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable

@@ -1270,7 +1270,7 @@ expression: s.redact(&all)
       "description": "`init`: create a store.",
       "properties": {
         "name": {
-          "description": "The repository's name.",
+          "description": "The repository's name: at most 255 bytes of UTF-8.",
           "type": "string"
         },
         "path": {

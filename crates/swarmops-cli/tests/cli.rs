@@ -471,6 +471,27 @@ fn a_store_that_leads_under_mnt_is_refused_on_open() {
     );
 }
 
+/// `init` refuses a repository name of more than 255 bytes before it makes anything:
+/// `E_INVALID_ARG`, exit 2, with the store's limit in `details`. A name of 255 bytes is kept
+/// whole.
+#[test]
+fn init_refuses_a_name_of_more_than_255_bytes() {
+    let mut s = Session::new();
+    let store = s.store();
+    let refused = s.run(&["init", &store, "--name", &"n".repeat(256)]);
+    assert_eq!((refused.exit, refused.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"store_limit": "repo_name_bytes", "max": 255, "got": 256})
+    );
+    assert!(!fs::exists(&store).unwrap(), "nothing was made");
+
+    let made = s.run(&["init", &store, "--name", &"n".repeat(255)]);
+    assert_eq!(made.exit, 0, "{}", made.json);
+    let info = s.run(&["--repo", &store, "info"]);
+    assert_eq!(info["result"]["name"].as_str().map(str::len), Some(255));
+}
+
 /// `commit --changes -` has read the change list from stdin, so a change whose client file is
 /// this process's stdin would read what is left of it (nothing from a pipe, the list itself
 /// from a redirected file) and commit that: it is refused (`E_INVALID_ARG`, exit 2) and nothing
