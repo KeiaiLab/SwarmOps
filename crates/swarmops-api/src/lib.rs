@@ -19,11 +19,11 @@ pub use identity::Identity;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
     CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
-    DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, FileContent, FileKind,
-    IdentityInfo, InfoReq, InitReq, LogPage, LogReq, ModeInput, ReadFileReq, ReadTreeReq,
-    RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq,
-    SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport,
-    VerifyReq,
+    DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, EntryKindOut,
+    FileContent, FileKind, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, ModeInput,
+    PathHistoryEntry, PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq,
+    RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut,
+    Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
 };
 pub use rev::Rev;
 
@@ -84,6 +84,10 @@ pub fn schema_for_all() -> serde_json::Value {
         LogReq,
         LogPage,
         ChangesetSummary,
+        // path_history.
+        PathHistoryReq,
+        PathHistoryPage,
+        PathHistoryEntry,
         // ref list, ref set, ref delete, verify.
         RefListReq,
         RefListResp,

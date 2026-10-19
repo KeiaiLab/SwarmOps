@@ -270,6 +270,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   the length is the header's own, and a header the store does not write is `BadHeader`.
   `ObjectStore::retain` stats an object that a caller relies on without writing it and, when it
   is stored, has the next `flush` fsync its fan-out directory, as a put of a stored object does.
+- Path history: `swarmops history <rev>:<path>` (operation and MCP tool `path_history`) lists the
+  changesets that changed a file, or anything below a directory, newest first along first
+  parents, each with what the path holds after it (`put` with its kind and id, or `delete`), 50
+  a page with a cursor; a path nothing on the chain touched is `E_PATH_NOT_FOUND`. `log --path P`
+  (`LogReq.paths`) keeps only the changesets that change those paths. Both chase `LastModified`,
+  the second built-in derivation: the newest changeset on a first-parent chain whose delta has an
+  entry at the path or below it, derived where the path changed and stored every 64 changesets
+  of a quiet stretch, so that a later query walks at most 64. In the Rust API:
+  `RepoRead::{last_modified, path_history, log_paths}`, `PathEvent` and `PathFilter::prefixes`.
 
 ### Changed
 

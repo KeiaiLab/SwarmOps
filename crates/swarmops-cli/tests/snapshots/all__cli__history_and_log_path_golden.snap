@@ -1,0 +1,435 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store --name acme",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "acme",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c1 --changes [tmp]/c1.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[id1]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c2 --changes [tmp]/c2.json --parent [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c3 --changes [tmp]/c3.json --parent [c2]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c3]",
+        "parent": "[c2]",
+        "root": "[id3]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c4 --changes [tmp]/c4.json --parent [c3]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c4]",
+        "parent": "[c3]",
+        "root": "[id4]",
+        "files_changed": 1,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c3]": "[c3]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c4] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "new": "[c4]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c4]": "[c4]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store history main:src/lib.rs",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "path_history",
+      "api": 1,
+      "result": {
+        "path": "src/lib.rs",
+        "entries": [
+          {
+            "changeset": "[c3]",
+            "op": "put",
+            "kind": "file",
+            "id": "[id5]",
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c3"
+          },
+          {
+            "changeset": "[c1]",
+            "op": "put",
+            "kind": "file",
+            "id": "[id6]",
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c1"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c4]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store history main:src -n 1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "path_history",
+      "api": 1,
+      "result": {
+        "path": "src",
+        "entries": [
+          {
+            "changeset": "[c4]",
+            "op": "put",
+            "kind": "dir",
+            "id": "[id7]",
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c4"
+          }
+        ],
+        "truncated": true,
+        "cursor": "[c4]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c4]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store history main:src/ -n 1 --cursor [c4]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "path_history",
+      "api": 1,
+      "result": {
+        "path": "src",
+        "entries": [
+          {
+            "changeset": "[c3]",
+            "op": "put",
+            "kind": "dir",
+            "id": "[id8]",
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c3"
+          }
+        ],
+        "truncated": true,
+        "cursor": "[c3]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store history main:src --cursor [c3]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "path_history",
+      "api": 1,
+      "result": {
+        "path": "src",
+        "entries": [
+          {
+            "changeset": "[c1]",
+            "op": "put",
+            "kind": "dir",
+            "id": "[id9]",
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c1"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store log --path src",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "log",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "id": "[c4]",
+            "parents": [
+              "[c3]"
+            ],
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c4"
+          },
+          {
+            "id": "[c3]",
+            "parents": [
+              "[c2]"
+            ],
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c3"
+          },
+          {
+            "id": "[c1]",
+            "parents": [],
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c1"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c4]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store log -n 1 --path README.md --path src/main.rs",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "log",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "id": "[c4]",
+            "parents": [
+              "[c3]"
+            ],
+            "author_agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c4"
+          }
+        ],
+        "truncated": true,
+        "cursor": "[c4]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c4]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store history main:nope",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "path_history",
+      "api": 1,
+      "error": {
+        "code": "E_PATH_NOT_FOUND",
+        "message": "no changeset in the first-parent history of main touched \"nope\"",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "path": "nope",
+          "rev": "main"
+        },
+        "hint": "swarmops ls main"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c4]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store history main",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "path_history",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "\"main\" names no path: history takes <rev>:<path>",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "target": "main"
+        },
+        "hint": "swarmops ls main"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store history main:src -n 0",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "path_history",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "limit must be at least 1",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "limit": 0
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

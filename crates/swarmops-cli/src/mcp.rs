@@ -129,9 +129,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use swarmops_api::{
-    CommitReq, ContentInput, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError, ReadFileReq,
-    ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq, StoreOps, VerifyReq,
-    schema_for_all,
+    CommitReq, ContentInput, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
+    PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq,
+    StoreOps, VerifyReq, schema_for_all,
 };
 
 use crate::cli::Global;
@@ -226,7 +226,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 10] = [
+static TOOLS: [Spec; 11] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -278,6 +278,19 @@ static TOOLS: [Spec; 10] = [
         description: "History along first parents, newest first, from main unless rev says \
                       otherwise; pass a limit of 100 or less and page on with the cursor, since \
                       clients limit long tool results.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::PathHistory,
+        name: "path_history",
+        request: "PathHistoryReq",
+        title: "List a path's history",
+        description: "The changesets that changed a file, or anything below a directory, newest \
+                      first along first parents from main unless rev says otherwise, each with \
+                      what the path holds after it (the CLI command is history); pass a limit of \
+                      100 or less and page on with the cursor, since clients limit long tool \
+                      results.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -775,6 +788,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::ReadTree => how.read(|ops, req| ops.read_tree(req)),
         Tool::Show => how.read(|ops, req| ops.show(req)),
         Tool::Log => how.read(|ops, req| ops.log(req)),
+        Tool::PathHistory => how.read(|ops, req| ops.path_history(req)),
         Tool::RefList => how.read(|ops, req| ops.ref_list(req)),
         Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
         Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
@@ -900,6 +914,7 @@ impl Refuse for ReadFileReq {}
 impl Refuse for ReadTreeReq {}
 impl Refuse for ShowReq {}
 impl Refuse for LogReq {}
+impl Refuse for PathHistoryReq {}
 impl Refuse for RefListReq {}
 impl Refuse for VerifyReq {}
 
@@ -1276,6 +1291,7 @@ enum Tool {
     ReadTree,
     Show,
     Log,
+    PathHistory,
     RefList,
     RefSet,
     RefDelete,
@@ -1455,7 +1471,7 @@ mod tests {
     use camino::Utf8Path;
     use swarmops_api::{
         ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput, FileContent, LogPage,
-        RefListResp, RefSetResp, RepoInfo, TreeListing, VerifyReport,
+        PathHistoryPage, RefListResp, RefSetResp, RepoInfo, TreeListing, VerifyReport,
     };
     use swarmops_ops::LocalOps;
 
@@ -1570,6 +1586,10 @@ mod tests {
 
         fn log(&self, _: LogReq) -> Result<LogPage, OpError> {
             self.called("log", "LogReq")
+        }
+
+        fn path_history(&self, _: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
+            self.called("path_history", "PathHistoryReq")
         }
 
         fn ref_list(&self, _: RefListReq) -> Result<RefListResp, OpError> {

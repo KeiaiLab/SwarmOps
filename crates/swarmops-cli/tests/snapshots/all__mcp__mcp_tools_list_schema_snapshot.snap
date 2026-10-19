@@ -177,6 +177,13 @@ expression: listed
             "minimum": 1,
             "type": "integer"
           },
+          "paths": {
+            "description": "Only the changesets that change one of these paths: a file (its content or kind, or\nwhether it is there), or a directory and anything below it; one trailing `/` is taken.\nOmitted or empty for every changeset.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "rev": {
             "anyOf": [
               {
@@ -195,6 +202,58 @@ expression: listed
       },
       "name": "log",
       "title": "List history"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The changesets that changed a file, or anything below a directory, newest first along first parents from main unless rev says otherwise, each with what the path holds after it (the CLI command is history); pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`path_history` (CLI `history`): the changesets that changed what a path holds, newest first,\nfollowing first parents, a page at a time.",
+        "properties": {
+          "cursor": {
+            "description": "Resume a history: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page continues from the first parent of the\nchangeset it names, and `rev` is not used.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 50,
+            "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+            "format": "uint",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "The repository path: a file, whose history is that of its content and kind, or a\ndirectory, whose history is that of everything below it. One trailing `/` is taken.",
+            "type": "string"
+          },
+          "rev": {
+            "anyOf": [
+              {
+                "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where to start; `main` when omitted."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PathHistoryReq",
+        "type": "object"
+      },
+      "name": "path_history",
+      "title": "List a path's history"
     },
     {
       "annotations": {

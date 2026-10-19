@@ -1584,6 +1584,13 @@ expression: s.redact(&all)
           "minimum": 1,
           "type": "integer"
         },
+        "paths": {
+          "description": "Only the changesets that change one of these paths: a file (its content or kind, or\nwhether it is there), or a directory and anything below it; one trailing `/` is taken.\nOmitted or empty for every changeset.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "rev": {
           "anyOf": [
             {
@@ -1803,6 +1810,279 @@ expression: s.redact(&all)
         "hint"
       ],
       "title": "OpError",
+      "type": "object"
+    },
+    "PathHistoryEntry": {
+      "$defs": {
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
+        "EntryKindOut": {
+          "description": "What a tree entry is.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            },
+            {
+              "const": "dir",
+              "description": "A directory.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One changeset of a path's history, and what the path holds after it.",
+      "properties": {
+        "author_agent": {
+          "description": "The agent that wrote the changeset, as `log` gives it.",
+          "type": "string"
+        },
+        "changeset": {
+          "description": "The changeset's id.",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "description": "A blob id for a file, an executable or a symlink; a tree id for a directory; omitted after\na `delete`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntryKindOut"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What is at the path after it; omitted after a `delete`."
+        },
+        "op": {
+          "$ref": "#/$defs/ChangeOp",
+          "description": "`put` when something is at the path after the changeset, `delete` when nothing is."
+        },
+        "title": {
+          "description": "The message's first line.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeset",
+        "op",
+        "author_agent",
+        "created_at",
+        "title"
+      ],
+      "title": "PathHistoryEntry",
+      "type": "object"
+    },
+    "PathHistoryPage": {
+      "$defs": {
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
+        "EntryKindOut": {
+          "description": "What a tree entry is.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            },
+            {
+              "const": "dir",
+              "description": "A directory.",
+              "type": "string"
+            }
+          ]
+        },
+        "PathHistoryEntry": {
+          "description": "One changeset of a path's history, and what the path holds after it.",
+          "properties": {
+            "author_agent": {
+              "description": "The agent that wrote the changeset, as `log` gives it.",
+              "type": "string"
+            },
+            "changeset": {
+              "description": "The changeset's id.",
+              "type": "string"
+            },
+            "created_at": {
+              "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "description": "A blob id for a file, an executable or a symlink; a tree id for a directory; omitted after\na `delete`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EntryKindOut"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What is at the path after it; omitted after a `delete`."
+            },
+            "op": {
+              "$ref": "#/$defs/ChangeOp",
+              "description": "`put` when something is at the path after the changeset, `delete` when nothing is."
+            },
+            "title": {
+              "description": "The message's first line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeset",
+            "op",
+            "author_agent",
+            "created_at",
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`path_history` (CLI `history`): a page of a path's history, newest first.",
+      "properties": {
+        "cursor": {
+          "description": "When `truncated`: where the next page continues. Opaque: pass it back as given, as the\nnext request's `cursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entries": {
+          "description": "The changesets that changed what it holds.",
+          "items": {
+            "$ref": "#/$defs/PathHistoryEntry"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "The path, without a trailing `/`.",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "Whether an older changeset that changed it follows this page.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "entries",
+        "truncated"
+      ],
+      "title": "PathHistoryPage",
+      "type": "object"
+    },
+    "PathHistoryReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`path_history` (CLI `history`): the changesets that changed what a path holds, newest first,\nfollowing first parents, a page at a time.",
+      "properties": {
+        "cursor": {
+          "description": "Resume a history: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page continues from the first parent of the\nchangeset it names, and `rev` is not used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 50,
+          "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The repository path: a file, whose history is that of its content and kind, or a\ndirectory, whose history is that of everything below it. One trailing `/` is taken.",
+          "type": "string"
+        },
+        "rev": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where to start; `main` when omitted."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "PathHistoryReq",
       "type": "object"
     },
     "ReadFileReq": {

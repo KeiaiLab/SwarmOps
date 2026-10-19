@@ -12,7 +12,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_INVALID_ARG",
-        "message": "'swarmops' requires a subcommand but one was not provided [subcommands: init, info, whoami, schema, commit, cat, ls, show, log, verify, mcp, ref, help]",
+        "message": "'swarmops' requires a subcommand but one was not provided [subcommands: init, info, whoami, schema, commit, cat, ls, show, log, history, verify, mcp, ref, help]",
         "retryable": false,
         "exit": 2,
         "details": {},
@@ -310,6 +310,9 @@ expression: s.transcript()
             "Meta",
             "ModeInput",
             "OpError",
+            "PathHistoryEntry",
+            "PathHistoryPage",
+            "PathHistoryReq",
             "ReadFileReq",
             "ReadTreeReq",
             "RecoveredOut",

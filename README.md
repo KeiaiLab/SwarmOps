@@ -190,8 +190,8 @@ Every command, its revisions and change lists, and its output are in [Commands](
 
 `swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
 agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
-as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
-`ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
+as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `ref_list`,
+`ref_set`, `ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
 `inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
 definitions it refers to written in place, and kept a plain object: a rule across fields that
 the type's schema states with a top-level `oneOf`, which the Claude API refuses in a tool, is
@@ -295,7 +295,8 @@ and starts no server either.
 | `cat REV:PATH [--max-bytes N]` | One file at a revision: UTF-8 text, or base64. |
 | `ls REV[:PATH] [--limit N] [--cursor C]` | One directory at a revision, a page at a time. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
-| `log [REV] [-n N] [--cursor C]` | History along first parents, newest first (from `main` by default). |
+| `log [REV] [-n N] [--cursor C] [--path P]...` | History along first parents, newest first (from `main` by default); with `--path`, only the changesets that change those paths. |
+| `history REV:PATH [-n N] [--cursor C]` | The changesets that changed a file, or anything below a directory, newest first, each with what the path holds after it. |
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
