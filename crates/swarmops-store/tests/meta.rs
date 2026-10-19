@@ -2652,7 +2652,7 @@ fn a_write_reports_each_repair_it_makes() {
     // The entries of frames 1 and 2 zeroed at the end of journal.off, its length kept: what a
     // power loss leaves of entries appended and never synced. They are dropped, and the frames
     // listed again. A process that opens the store after the power loss repairs it, on the real
-    // filesystem.
+    // filesystem, under the order checker.
     let (_dir, root, store) = new_store();
     for n in 0..3 {
         insert(&store, &[cs(n, &[])]); // frames 0..=2
@@ -2662,7 +2662,7 @@ fn a_write_reports_each_repair_it_makes() {
     let mut entries = fs::read(&off).unwrap();
     entries[8..].fill(0);
     fs::write(&off, entries).unwrap();
-    let after_power_loss = MetaStore::open(&root).unwrap();
+    let after_power_loss = open_checked(&root).unwrap();
     let want = Recovered {
         frames_listed: 2,
         off_bytes_dropped: 16,
