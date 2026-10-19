@@ -1456,8 +1456,9 @@ fn crash_at_any_index_write_recovers_to_whole_records() {
                 assert_eq!(reader.get(rec).unwrap(), at_seq(meta, rec), "k={k}");
             }
         }
-        // The next writer repairs, appends what is missing (as replay would) and compacts.
-        let mut writer = open(&layout);
+        // The next writer repairs, appends what is missing (as replay would) and compacts,
+        // under the order checker as the crashed one was.
+        let mut writer = Index::open(&layout, checked(RealFs)).unwrap();
         writer.repair_tail().unwrap();
         assert_eq!(writer.len(), have, "k={k}");
         append_all(&mut writer, &metas[usize::try_from(have).unwrap()..]);

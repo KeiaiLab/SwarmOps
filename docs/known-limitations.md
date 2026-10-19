@@ -318,13 +318,6 @@ These do not change what SwarmOps does, only how well the tests can see it.
   the library crates it builds; the other targets (unit tests, binaries, benches, the other test
   files) are linted only with the features on. *Unscheduled. Found: M1 final fix pass; narrowed by
   the M1.5 final review.*
-- **The journal's, the index's and the repository's crash sweeps recover unchecked.** They run
-  their crashing child under the order checker (`checked(...)` in the store's,
-  `SWARMOPS_TEST_ORDER_CHECK=1` in the repository's) but recover in the parent on the real
-  filesystem (`reopen()`/`open()` in the journal and index sweeps, `LocalRepo::open`/`create` in
-  the repository sweeps), so a rule broken only during recovery would go unnoticed; the sweeps
-  through the binary and the metadata store's own recover under the checker. *Target: M1.6.
-  Found: M1.5 final review.*
 - **Coverage is not measured by the gate.** It was measured once, part-way through M1, for core
   and store only: 94.61 % of lines. *Unscheduled.*
 - **No test watches what a `RealFs` call does inside.** The order checker judges the order of

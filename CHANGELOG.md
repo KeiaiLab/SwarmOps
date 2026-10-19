@@ -275,6 +275,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   process synced or found there (the zeroed entries past frame 0 at its end aside, which list no
   frame). Before, `truncate` was only followed, and a wrong cut showed only when a sweep's oracle
   found the frames lost.
+- Test infrastructure: the crash sweeps of the journal, the index and the repository recover
+  under the order checker too, as the sweeps through the binary did (they recovered on the real
+  filesystem, unchecked), and so does the fsync-failure model's sweep of the journal, every run.
 
 ### Fixed
 

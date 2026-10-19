@@ -18,10 +18,12 @@ use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{ChangesetId, EntryKind, ObjectId, ObjectKind, hash_object};
 use swarmops_repo::{CasOutcome, CasResult, LocalRepo, RefState, RepoError, RepoInfo};
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
+use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV, RealFs};
 use swarmops_store::{ChangesetMeta, MetaStore, StoreError};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run, this_test};
+#[cfg(feature = "test-hooks")]
+use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::RecordingFs;
 use swarmops_testkit::repo::{blob, commit, new_repo, path, put, put_as, request};
 #[cfg(feature = "test-hooks")]
@@ -811,7 +813,8 @@ fn create_makes_the_documented_fs_calls() {
 /// One run of the create crash sweep: a child creates a store until its k-th filesystem call
 /// (of `total`) aborts it. A store must then open only if `FORMAT` is in place, and a create
 /// must otherwise pick up where the crashed one stopped; either way the store is fresh and
-/// takes a commit.
+/// takes a commit. This process opens, creates and commits under the order checker
+/// ([`checked`]), as the child ran.
 #[cfg(feature = "test-hooks")]
 fn create_crashing_at(k: u64, total: u64) {
     let dir = tempfile::tempdir().unwrap();
@@ -833,14 +836,14 @@ fn create_crashing_at(k: u64, total: u64) {
     assert!(finished || child.status.signal() == Some(SIGABRT), "k={k}");
 
     // The crash at the last call (the store root's sync) comes after FORMAT's link.
-    let repo = match LocalRepo::open(&root) {
+    let repo = match LocalRepo::open_with_fs(&root, checked(RealFs)) {
         Ok(repo) => {
             assert!(k >= total, "k={k}: a store opened before FORMAT was linked");
             repo
         }
         Err(RepoError::Store(StoreError::Format(_))) => {
             assert!(k < total, "k={k}");
-            LocalRepo::create(&root, "demo").unwrap()
+            LocalRepo::create_with_fs(&root, "demo", checked(RealFs)).unwrap()
         }
         Err(e) => panic!("k={k}: {e}"),
     };
@@ -848,7 +851,7 @@ fn create_crashing_at(k: u64, total: u64) {
     assert_eq!((info.name.as_str(), info.changesets), ("demo", 0), "k={k}");
     let id = commit(&repo, &[], vec![put("f", b"after the crash")]);
     assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
-    let reopened = LocalRepo::open(&root).unwrap();
+    let reopened = LocalRepo::open_with_fs(&root, checked(RealFs)).unwrap();
     assert_eq!(reopened.info().unwrap(), repo.info().unwrap(), "k={k}");
     assert!(reopened.changeset(id).unwrap().is_some(), "k={k}");
 }
