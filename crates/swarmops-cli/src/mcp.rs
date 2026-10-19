@@ -56,8 +56,8 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`, `ref_delete`, `commit` and
-//! `verify`, which `tools/list` gives in that order. A tool's `inputSchema` is its request
+//! `read_file`, `read_tree`, `show`, `log`, `op_log`, `ref_list`, `ref_set`, `ref_delete`,
+//! `undo`, `commit` and `verify`, in `tools/list`'s order. A tool's `inputSchema` is its request
 //! type's JSON Schema, as `swarmops schema <type>` prints it, with each `$ref` replaced by the
 //! definition it names so that the schema stands alone: a keyword beside the reference wins
 //! over the definition's, but for `description`, where the reference's comes first and the
@@ -91,9 +91,10 @@
 //! Clients limit long tool results. Claude Code saves a successful one over 25,000 tokens by
 //! default, or over 50,000 characters whatever its token count, to a file and gives the model
 //! its path instead; it cuts only the text of an error, past about 11,000 characters. A result
-//! holds its envelope twice, so the descriptions and [`INSTRUCTIONS`] ask the model for small
-//! reads (`max_bytes` of 32 KiB or less, `limit` and `max_changes` of 100 or less, paging with
-//! the `cursor`); the API's defaults stay as the operations spec gives them. `read_file`, the
+//! holds its envelope twice, so the descriptions ask the model for small reads (`max_bytes` of
+//! 32 KiB or less, `limit` and `max_changes` of 100 or less, paging with the `cursor`; an
+//! `op_log` `limit` of 20 or less, paging with `before`), and [`INSTRUCTIONS`] points it at
+//! them; the API's defaults stay as the operations spec gives them. `read_file`, the
 //! one tool whose result is file content the model sizes, raises that threshold for itself: its
 //! entry in `tools/list` carries `_meta: {"anthropic/maxResultSizeChars": 200000}`
 //! ([`READ_FILE_RESULT_CHARS`]), and Claude Code keeps a `read_file` result of up to that many
@@ -129,9 +130,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 use swarmops_api::{
-    CommitReq, ContentInput, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError, ReadFileReq,
-    ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq, StoreOps, VerifyReq,
-    schema_for_all,
+    CommitReq, ContentInput, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError, OpLogReq,
+    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq, StoreOps, UndoReq,
+    VerifyReq, schema_for_all,
 };
 
 use crate::cli::Global;
@@ -208,12 +209,11 @@ main never matches; an id prefix stops resolving once another changeset shares i
 refuses all three. After E_CAS_MISMATCH, commit your change again on top of details.actual, \
 re-applying your edits to the content there, then retry with expected_old set to it. A read \
 may show a commit that a failed sync then takes back; a mutation that names it fails under the \
-lock instead of building on it. Clients limit long tool results, so ask for little: max_bytes \
-of 32768 or less for read_file, a limit of \
-100 or less for read_tree and log, paging on with the cursor a result returns, and \
-max_changes of 100 or less for show. A {\"file\": path} content is read by this server, not \
-by your client: give an absolute path (a relative one, or the server's own stdin or stdout, \
-is refused). Every change is recorded for the agent the server runs as.";
+lock instead of building on it. op_log lists the store's transactions, newest first; undo \
+restores the refs one moved while they still hold what it set. Clients limit long tool results: \
+ask for little, as each tool's description says. A {\"file\": path} content is read by this \
+server, not by your client: give an absolute path (a relative one, or the server's own stdin or \
+stdout, is refused). Every change is recorded for the agent the server runs as.";
 
 /// The most characters of a `read_file` result that Claude Code keeps in the conversation
 /// instead of saving it to a file, which `read_file`'s entry in `tools/list` declares under
@@ -226,7 +226,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 10] = [
+static TOOLS: [Spec; 12] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -282,6 +282,18 @@ static TOOLS: [Spec; 10] = [
         result_chars: None,
     },
     Spec {
+        tool: Tool::OpLog,
+        name: "op_log",
+        request: "OpLogReq",
+        title: "List operations",
+        description: "The store's operations, newest first: each write transaction, numbered as \
+                      undo takes it, with its kind, the changesets it recorded and the refs it \
+                      moved; pass a limit of 20 or less and page on with before, since clients \
+                      limit long tool results.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
         tool: Tool::RefList,
         name: "ref_list",
         request: "RefListReq",
@@ -313,6 +325,19 @@ static TOOLS: [Spec; 10] = [
                       revision is refused, since it is read when the call runs instead of pinning \
                       the id you read, and so is an id prefix, which stops resolving once another \
                       changeset shares it.",
+        effect: Effect::Moves,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Undo,
+        name: "undo",
+        request: "UndoReq",
+        title: "Undo an operation",
+        description: "Moves every ref an operation of op_log moved back to what it named before, \
+                      by compare-and-swap in one transaction: all of them or none. A ref moved \
+                      since stops it (E_CAS_MISMATCH, nothing written: undo the later operations \
+                      first); an undo run again is a replay (already_applied). Changesets are \
+                      never removed.",
         effect: Effect::Moves,
         result_chars: None,
     },
@@ -777,9 +802,11 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::ReadTree => how.read(|ops, req| ops.read_tree(req)),
         Tool::Show => how.read(|ops, req| ops.show(req)),
         Tool::Log => how.read(|ops, req| ops.log(req)),
+        Tool::OpLog => how.read(|ops, req| ops.op_log(req)),
         Tool::RefList => how.read(|ops, req| ops.ref_list(req)),
         Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
         Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
+        Tool::Undo => how.mutate(|ops, who, req| ops.undo(who, req)),
         Tool::Commit => how.mutate(|ops, who, req| ops.commit(who, req)),
         Tool::Verify => how.read(|ops, req: VerifyReq| {
             let deep = req.deep;
@@ -902,7 +929,9 @@ impl Refuse for ReadFileReq {}
 impl Refuse for ReadTreeReq {}
 impl Refuse for ShowReq {}
 impl Refuse for LogReq {}
+impl Refuse for OpLogReq {}
 impl Refuse for RefListReq {}
+impl Refuse for UndoReq {}
 impl Refuse for VerifyReq {}
 
 /// A commit that advances a ref names its parent by its full id ([`full_parent`]). A change's
@@ -1278,9 +1307,11 @@ enum Tool {
     ReadTree,
     Show,
     Log,
+    OpLog,
     RefList,
     RefSet,
     RefDelete,
+    Undo,
     Commit,
     Verify,
 }
@@ -1295,9 +1326,9 @@ enum Effect {
     /// which makes the same call again a replay. A call without one is not idempotent, so the
     /// tool does not say it is.
     Adds,
-    /// It moves or deletes a ref by compare-and-swap, changing what the ref names; run again
-    /// with the same arguments, it finds the ref as it asked (`already_applied`) or not as it
-    /// expected (`E_CAS_MISMATCH`), and changes nothing more.
+    /// It moves or deletes refs by compare-and-swap, changing what they name (`ref_set`,
+    /// `ref_delete`, `undo`); run again with the same arguments, it finds them as it asked
+    /// (`already_applied`) or not as it expected (`E_CAS_MISMATCH`), and changes nothing more.
     Moves,
 }
 
@@ -1311,7 +1342,8 @@ impl Effect {
             // that is not a full id, so the same move again compares against the same changeset
             // and finds its work done (already_applied, nothing written) or the ref elsewhere
             // (E_CAS_MISMATCH). The ref's own name would match anew at every call and move the
-            // ref again.
+            // ref again. An undo compares against what its operation's frame recorded, the same at
+            // every call: run again, it finds the refs restored and writes nothing.
             Effect::Moves => (false, true, true),
         };
         json!({
@@ -1459,7 +1491,7 @@ mod tests {
     use camino::Utf8Path;
     use swarmops_api::{
         ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput, FileContent, LogPage,
-        RefListResp, RefSetResp, RepoInfo, TreeListing, VerifyReport,
+        OpLogPage, RefListResp, RefSetResp, RepoInfo, TreeListing, UndoResp, VerifyReport,
     };
     use swarmops_ops::LocalOps;
 
@@ -1471,10 +1503,9 @@ mod tests {
     #[test]
     fn the_tools_are_the_store_operations() {
         // `init` runs on the client and is no `StoreOps` operation, so it has no tool. M4's
-        // contract has the requests of `land` (M4 Task 7), `op_log` and `undo` (M4 Task 9)
-        // before their operations: each stays off the tools until its task adds the operation
-        // and the tool, and takes it off this list.
-        let without_tools_yet = ["LandReq", "OpLogReq", "UndoReq"];
+        // contract has the request of `land` (M4 Task 7) before its operation: it stays off the
+        // tools until that task adds the operation and the tool, and takes it off this list.
+        let without_tools_yet = ["LandReq"];
         let all = schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
@@ -1528,6 +1559,7 @@ mod tests {
             "expected_old": "0".repeat(64),
             "message": "m",
             "changes": [],
+            "op": 0,
         })
     }
 
@@ -1598,6 +1630,14 @@ mod tests {
 
         fn ref_delete(&self, _: &Identity, _: RefDeleteReq) -> Result<RefSetResp, OpError> {
             self.called("ref_delete", "RefDeleteReq")
+        }
+
+        fn op_log(&self, _: OpLogReq) -> Result<OpLogPage, OpError> {
+            self.called("op_log", "OpLogReq")
+        }
+
+        fn undo(&self, _: &Identity, _: UndoReq) -> Result<UndoResp, OpError> {
+            self.called("undo", "UndoReq")
         }
 
         fn verify(&self, _: VerifyReq) -> Result<VerifyReport, OpError> {

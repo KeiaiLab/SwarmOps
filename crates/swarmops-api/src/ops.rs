@@ -1055,6 +1055,13 @@ pub trait StoreOps {
     /// Removes a ref by compare-and-swap (CLI `ref delete`).
     fn ref_delete(&self, who: &Identity, req: RefDeleteReq) -> Result<RefSetResp, OpError>;
 
+    /// The store's operations, newest first, a page at a time (CLI `op log`).
+    fn op_log(&self, req: OpLogReq) -> Result<OpLogPage, OpError>;
+
+    /// Restores every ref an operation moved to what it named before, by compare-and-swap in one
+    /// transaction, all of them or none (CLI `op undo`).
+    fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError>;
+
     /// Checks the whole store's consistency (CLI `verify`).
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError>;
 }
