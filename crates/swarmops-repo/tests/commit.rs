@@ -22,20 +22,22 @@ use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::{
-    ChangesetId, CodecError, DeltaOp, EntryKind, ObjectId, ObjectKind, Tree, TreeEntry, hash_object,
+    Changeset, ChangesetId, CodecError, DeltaEntry, DeltaOp, EntryKind, ObjectId, ObjectKind, Tree,
+    TreeEntry, hash_object,
 };
 use swarmops_repo::{
-    CasResult, Change, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
+    CasResult, Change, ChangeOp, CommitOutcome, CommitRequest, InsertOutcome, LocalRepo, RepoError,
 };
 #[cfg(feature = "test-hooks")]
-use swarmops_store::{CRASH_AT_ENV, ORDER_CHECK_ENV};
+use swarmops_store::{CRASH_AT_ENV, FailAt, FailAtFs, FailMode, InjectedError, ORDER_CHECK_ENV};
 use swarmops_store::{ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
 use swarmops_testkit::child::{CHILD_TIMEOUT, Child, this_test};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{SIGABRT, run};
+use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::FailingFs;
 #[cfg(feature = "test-hooks")]
-use swarmops_testkit::fs::copy_dir;
+use swarmops_testkit::fs::{RecordingFs, copy_dir};
 use swarmops_testkit::repo::{blob, delete, new_repo, path, put, put_as, signature};
 use swarmops_testkit::test_name;
 
@@ -841,6 +843,239 @@ fn a_failed_object_flush_fails_the_commit_and_inserts_nothing() {
             assert!(e.to_string().contains("injected"), "{e}");
         }
         other => panic!("expected the flush's error, got {other:?}"),
+    }
+    assert_eq!(journal_frames(&root), 0, "no transaction");
+    let fresh = LocalRepo::open(&root).unwrap();
+    assert_eq!(fresh.info().unwrap().changesets, 0);
+    assert_eq!(fresh.verify(true).unwrap().problems, []);
+}
+
+/// The fan-out directory of object `id`, as a path in the store: `objects/<xx>`.
+fn fanout(id: ObjectId) -> String {
+    format!("objects/{:02x}", id.0[0])
+}
+
+/// What a root commit of `req`, one put of a file at the root, writes: its blob, its root tree
+/// and the changeset, built as `Repo::commit` builds them (which
+/// `root_commit_from_change_list_builds_trees_and_delta` pins).
+fn root_commit_objects(req: &CommitRequest) -> [ObjectId; 3] {
+    let [
+        Change {
+            path: file,
+            op: ChangeOp::Put { kind, content },
+        },
+    ] = &req.changes[..]
+    else {
+        panic!("a request of one put: {:?}", req.changes);
+    };
+    let blob = blob(content);
+    let root = tree(vec![entry(file.as_str(), *kind, blob.0)]).id();
+    let changeset = Changeset {
+        parents: Vec::new(),
+        root,
+        delta: vec![DeltaEntry {
+            path: file.clone(),
+            op: DeltaOp::Put {
+                kind: *kind,
+                id: blob,
+            },
+            renamed_from: None,
+        }],
+        author: req.author.clone(),
+        committer: req.committer.clone(),
+        message: req.message.clone(),
+        extra_headers: Vec::new(),
+        metadata: req.metadata.clone(),
+    };
+    [blob.0, root.0, changeset.id().unwrap().0]
+}
+
+/// A root commit of one file whose three objects lie in one fan-out directory, and that
+/// directory: the file's content is picked so that its blob and the root tree share one (about
+/// one candidate in 256 does, so a match turns up long before 10,000), then the message so that
+/// the changeset joins them. Its flush has that one directory to fsync, which it does on the
+/// calling thread: a store that writes its objects in parallel makes that fsync at the same call
+/// in every run.
+fn a_commit_in_one_fanout_dir() -> (CommitRequest, String) {
+    let share_a_dir = |req: &CommitRequest, a: usize, b: usize| {
+        let objects = root_commit_objects(req);
+        fanout(objects[a]) == fanout(objects[b])
+    };
+    let base = (0..10_000_u32)
+        .map(|i| {
+            let content = format!("one fan-out directory {i}\n");
+            request(&[], vec![put("one.txt", content.as_bytes())])
+        })
+        .find(|req| share_a_dir(req, 0, 1))
+        .expect("about one content in 256 fits");
+    let req = (0..10_000_u32)
+        .map(|i| CommitRequest {
+            message: format!("a test commit, take {i}").into_bytes(),
+            ..base.clone()
+        })
+        .find(|req| share_a_dir(req, 0, 2))
+        .expect("about one message in 256 fits");
+    let dir = fanout(root_commit_objects(&req)[0]);
+    (req, dir)
+}
+
+/// A root commit of one file none of whose objects lies in fan-out directory `dir`.
+fn a_commit_outside(dir: &str) -> CommitRequest {
+    (0..10_000_u32)
+        .map(|i| {
+            let content = format!("elsewhere {i}\n");
+            request(&[], vec![put("two.txt", content.as_bytes())])
+        })
+        .find(|req| root_commit_objects(req).iter().all(|&id| fanout(id) != dir))
+        .expect("most candidates fit")
+}
+
+/// A [`RecordingFs`] naming each call `"<method> <path in the store at root>"`, and the function
+/// that returns the calls made since it last ran.
+#[cfg(feature = "test-hooks")]
+fn recording_in(root: &Utf8Path) -> (RecordingFs, impl Fn() -> Vec<String>) {
+    let (fs, calls) = RecordingFs::new();
+    (fs.naming_paths_in(root.as_std_path().to_path_buf()), calls)
+}
+
+/// Asserts that `calls` has call `first`, and has it before call `then`.
+#[cfg(feature = "test-hooks")]
+#[track_caller]
+fn assert_called_before(calls: &[String], first: &str, then: &str) {
+    let at = |call: &str| {
+        calls
+            .iter()
+            .position(|made| made == call)
+            .unwrap_or_else(|| panic!("no {call:?} among {calls:?}"))
+    };
+    assert!(at(first) < at(then), "{first:?} after {then:?}: {calls:?}");
+}
+
+/// A fan-out fsync that fails before it runs (`ENOSPC` strikes before the call, as a directory
+/// that cannot be opened fails it: `EMFILE`, `ENOMEM`, `EACCES`) fails the commit, and the
+/// directory stays queued until a later flush fsyncs it. That is what the object store's re-queue
+/// is for: a failed fsync, one that ran (an `EIO` strikes after it), is fail-stop on the
+/// filesystems the store supports (storage spec §2 rule 5), so no later sync could succeed after
+/// it, as the second and third commits here do. A characterization test: any change that
+/// swallows a flush error, or drops `put()`'s re-touch or the re-queue, fails it.
+#[test]
+#[cfg(feature = "test-hooks")]
+fn a_failed_fanout_fsync_fails_the_commit_and_a_later_flush_syncs_the_directory() {
+    let (first, dir) = a_commit_in_one_fanout_dir();
+    let fsync = format!("fsync_dir {dir}");
+    let frame = "append_durable meta/journal.log";
+
+    // A dry run on a twin store: how many calls the open and the commit make before the flush's
+    // one fsync, which is then call k.
+    let k = {
+        let (_dir, root, repo) = new_repo();
+        drop(repo);
+        let (fs, calls) = recording_in(&root);
+        let repo = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
+        repo.commit(first.clone()).unwrap();
+        let calls = calls();
+        let fsyncs: Vec<&String> = calls
+            .iter()
+            .filter(|call| call.starts_with("fsync_dir objects"))
+            .collect();
+        assert_eq!(fsyncs, [&fsync], "the flush fsyncs the one directory");
+        u64::try_from(calls.iter().position(|call| *call == fsync).unwrap()).unwrap() + 1
+    };
+
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    let (recording, calls) = recording_in(&root);
+    let enospc = FailAt {
+        at: k,
+        mode: FailMode::Once,
+        error: InjectedError::Enospc,
+    };
+    let repo = LocalRepo::open_with_fs(&root, checked(FailAtFs::new(recording, enospc))).unwrap();
+    let journal = || {
+        let len = |file: &str| fs::metadata(root.join("meta").join(file)).unwrap().len();
+        (len("journal.log"), len("journal.off"))
+    };
+    let before = journal();
+    calls();
+
+    // 1. The commit fails with the fsync's error (E_IO), and nothing is recorded.
+    match repo.commit(first.clone()) {
+        Err(RepoError::Store(StoreError::Io(e))) => {
+            assert_eq!(e.raw_os_error(), Some(28), "ENOSPC: {e}");
+        }
+        other => panic!("expected the flush's error, got {other:?}"),
+    }
+    let failed = calls();
+    let linked = format!("link_noclobber {dir}/");
+    assert_eq!(
+        failed
+            .iter()
+            .filter(|call| call.starts_with(&linked))
+            .count(),
+        3,
+        "the three objects were linked into {dir}: {failed:?}"
+    );
+    assert!(!failed.contains(&fsync), "the fsync never ran: {failed:?}");
+    assert_eq!(journal(), before, "no frame, no listing");
+    let info = repo.info().unwrap();
+    assert_eq!((info.changesets, info.main), (0, None));
+
+    // 2. A commit whose objects all lie in other fan-out directories succeeds on the same
+    // handle, and its flush fsyncs the first commit's directory too: the re-queue.
+    let second = a_commit_outside(&dir);
+    let out = repo.commit(second.clone()).unwrap();
+    assert_eq!(out.insert, InsertOutcome::Inserted { seq: 0 });
+    let objects = root_commit_objects(&second);
+    assert_eq!((objects[1], objects[2]), (out.root.0, out.id.0));
+    assert!(
+        objects.iter().all(|&id| fanout(id) != dir),
+        "{objects:?} lie outside {dir}, so only the re-queue can fsync it"
+    );
+    assert_called_before(&calls(), &fsync, frame);
+
+    // 3. The first commit made again succeeds: its objects are there already, and `put()`'s
+    // re-touch queues their directory again, so that it is fsynced before the frame names them.
+    let again = repo.commit(first).unwrap();
+    assert_eq!(again.insert, InsertOutcome::Inserted { seq: 1 });
+    assert_eq!((again.blobs_written, again.trees_written), (0, 0));
+    let made = calls();
+    assert!(
+        !made.iter().any(|call| call.starts_with("link_noclobber")),
+        "nothing was linked again: {made:?}"
+    );
+    assert_called_before(&made, &fsync, frame);
+
+    // 4. Every call ran under the order checker, which judged W5 at both frames.
+    assert_eq!(repo.verify(true).unwrap().problems, []);
+}
+
+/// A fan-out directory whose fsync fails every time fails every later commit on the handle,
+/// even one whose objects all lie elsewhere, because the re-queue retries it on every flush:
+/// the stickiness storage spec §2 rule 5 assumes of a failed directory fsync. The failure is
+/// that one directory's (`FailAtFs`'s `persistent` mode would fail every later mutating call,
+/// and with it any store's next commit at its first write), and nothing is inserted.
+#[test]
+fn a_persistent_eio_on_a_fanout_fsync_fails_every_later_commit_on_the_handle() {
+    let (first, dir) = a_commit_in_one_fanout_dir();
+    let second = a_commit_outside(&dir);
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    let failing = root.join(&dir).into_std_path_buf();
+    let fs = FailingFs::new(move |method, p| method == "fsync_dir" && p == failing.as_path());
+    let repo = LocalRepo::open_with_fs(&root, checked(fs)).unwrap();
+    let commits = [
+        ("the first commit", &first),
+        ("a commit whose objects lie elsewhere", &second),
+        ("that commit again", &second),
+        ("the first commit again", &first),
+    ];
+    for (what, req) in commits {
+        match repo.commit(req.clone()) {
+            Err(RepoError::Store(StoreError::Io(e))) => {
+                assert!(e.to_string().ends_with(&dir), "{what}: {e}");
+            }
+            other => panic!("{what}: expected the fsync's error, got {other:?}"),
+        }
     }
     assert_eq!(journal_frames(&root), 0, "no transaction");
     let fresh = LocalRepo::open(&root).unwrap();

@@ -221,6 +221,9 @@ impl ObjectStore for FsObjectStore {
         }
         // Touched even when the object was already there: another process may have linked
         // it without having fsynced the directory yet, and the caller is about to rely on it.
+        // That the next flush's fsync then makes the name durable is storage spec §2 rule 5's
+        // assumption: a failed fsync of the directory before it, in any process, is fail-stop on
+        // the filesystems the store supports, so no later one succeeds over a name it lost.
         self.touched().insert(fanout.to_owned());
         Ok(id)
     }
@@ -280,8 +283,12 @@ impl ObjectStore for FsObjectStore {
     }
 
     /// Fsyncs every touched directory (see [`FsObjectStore::set_parallelism`] for how many at
-    /// once), all of them even when some fail. The ones that fail stay touched, so that a
-    /// later flush retries them, and the error of the first of those in path order comes back.
+    /// once), all of them even when some fail, and returns the error of the first that failed in
+    /// path order. A directory whose fsync fails stays touched, and the next flush tries it
+    /// again. That retry covers an fsync that never ran: the directory could not be opened
+    /// (`EMFILE`, `ENOMEM`, `EACCES`). It cannot make good a failed sync, and on the filesystems
+    /// the store supports it need not: there a failed directory fsync is fail-stop (storage spec
+    /// §2 rule 5), so every later sync fails too. The commit whose flush failed fails either way.
     ///
     /// It holds the store's flush lock until the last fsync is done, waiting on the store's
     /// pool: do not call it from a task on that pool (see [`FsObjectStore`]).

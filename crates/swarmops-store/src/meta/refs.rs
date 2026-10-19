@@ -154,7 +154,11 @@ pub(crate) fn moved(current: Option<RefState>, target: Option<ChangesetId>) -> O
 }
 
 /// Makes the file of ref `name` (a valid name) say what [`moved`] gives for `target`:
-/// replaces it, removes it, or leaves it alone if it says that already.
+/// replaces it, removes it, or leaves it alone if it says that already. Leaving it alone relies
+/// on storage spec §2 rule 5: the file may say it because of a replace whose directory fsync
+/// failed, and on the filesystems the store supports a failed directory fsync is fail-stop, so
+/// every later sync fails too and nothing that relies on the file (a checkpoint past its frame)
+/// is written after it.
 pub(crate) fn write(
     layout: &Layout,
     fs: &dyn FsOps,
@@ -164,6 +168,7 @@ pub(crate) fn write(
     let path = path(layout, name);
     let current = read_file(fs, &path)?;
     match moved(current, target) {
+        // It says that already: see above for why that is enough (rule 5).
         next if next == current => {}
         Some(state) => {
             let refs = layout.meta_path("refs");
