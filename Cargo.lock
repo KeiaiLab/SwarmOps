@@ -2162,6 +2162,7 @@ dependencies = [
  "serde_json",
  "swarmops-api",
  "swarmops-core",
+ "swarmops-git",
  "swarmops-repo",
  "swarmops-store",
  "swarmops-testkit",
