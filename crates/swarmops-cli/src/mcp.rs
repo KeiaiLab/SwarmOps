@@ -1466,17 +1466,29 @@ mod tests {
     /// tool wired to the wrong one, fails here.
     #[test]
     fn the_tools_are_the_store_operations() {
-        // `init` runs on the client and is no `StoreOps` operation, so it has no tool.
+        // `init` runs on the client and is no `StoreOps` operation, so it has no tool. M4's
+        // contract has the requests of `land` (M4 Task 7), `op_log` and `undo` (M4 Task 9)
+        // before their operations: each stays off the tools until its task adds the operation
+        // and the tool, and takes it off this list.
+        let without_tools_yet = ["LandReq", "OpLogReq", "UndoReq"];
         let all = schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
             .unwrap()
             .keys()
             .map(String::as_str)
-            .filter(|name| name.ends_with("Req") && *name != "InitReq")
+            .filter(|name| {
+                name.ends_with("Req") && *name != "InitReq" && !without_tools_yet.contains(name)
+            })
             .collect();
         let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
         advertised.sort_unstable();
+        for name in without_tools_yet {
+            assert!(
+                all.get(name).is_some() && !advertised.contains(&name),
+                "{name} has a tool now: take it off the requests without one"
+            );
+        }
         assert_eq!(
             advertised, requests,
             "one tool per operation's request type"
@@ -1757,6 +1769,7 @@ mod tests {
             message: "x".to_owned(),
             allow_empty: false,
             advance: None,
+            idempotency_key: None,
         }
     }
 
@@ -1863,6 +1876,7 @@ mod tests {
             message: "m".to_owned(),
             allow_empty: false,
             advance: None,
+            idempotency_key: None,
         };
         let c1 = ops.commit(&who, req).unwrap().changeset;
         let main = RefSetReq {

@@ -21,8 +21,8 @@ to the weakest:
    `FORMAT` it knows; any other, the CLI refuses as `E_NOT_A_REPO`.
 3. **The command-line contract.** One JSON envelope per run on stdout,
    `{ok, op, api, result | error{code, message, retryable, exit, details, hint}, meta}`, with
-   `api` 1; the `E_*` error codes, each with its fixed exit code (1, 2, 4, 5, 6; 0 is success,
-   3 is reserved for conflicts) and its `retryable` flag; the commands, their flags and the grammar
+   `api` 1; the `E_*` error codes, each with its fixed exit code (1 to 6, 3 for a conflict; 0
+   is success) and its `retryable` flag; the commands, their flags and the grammar
    of their arguments, such as revisions and change lists (operations spec §0, §1); and the
    environment variables `SWARMOPS_REPO` (operations spec §1, umbrella §4), `SWARMOPS_FORMAT`
    (operations spec §0), `SWARMOPS_AGENT` (operations spec §5) and `SWARMOPS_RUN_ID`, which no

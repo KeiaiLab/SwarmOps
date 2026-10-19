@@ -430,6 +430,13 @@ expression: listed
             },
             "type": "array"
           },
+          "idempotency_key": {
+            "description": "Makes a retry of this commit safe: a uuid v7 (anything else is `E_INVALID_ARG`). The\ncommit takes the key's time, to the second, as its signature time and records the key as\n`commit_key` metadata, so the same request on the same parent makes the same changeset,\nwhich the store holds already: the response says `replayed`, and nothing is written.\nWith `advance`, a ref whose head carries the key is a replay too. Give `parent` by its full\nid: without it, a retry after the head moved commits again, on the new head.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "message": {
             "description": "The commit message.",
             "type": "string"
