@@ -2918,6 +2918,81 @@ fn a_direct_read_that_fails_names_its_file() {
     }
 }
 
+/// More reads of the metadata store's own, off the `FsOps` seam, that name their file relative
+/// to the store's root and never the root, as [`a_direct_read_that_fails_names_its_file`]'s do:
+/// a `meta/refs/release` that is a regular file fails the listing of the release refs
+/// (`read_dir`, `ENOTDIR`); and a `journal.log`, an index column or a sorted view file that is
+/// a directory fails its open as damage (`InvalidData`: a store file that is not a regular file
+/// is refused before it is opened), not as a missing file. Root-safe: no file mode is
+/// involved.
+#[test]
+fn a_listing_or_an_open_that_fails_names_its_file() {
+    use swarmops_store::FileOp;
+
+    let (_dir, template, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    drop(store);
+    let index: fn(&Utf8Path) -> Result<(), StoreError> =
+        |root| Index::open(&Layout::new(root), Arc::new(RealFs)).map(drop);
+    let cases = [
+        DirectRead {
+            what: "refs/release a regular file",
+            damage: |meta| {
+                let release = meta.join("refs/release");
+                if release.is_dir() {
+                    fs::remove_dir(&release).unwrap();
+                }
+                fs::write(release, b"not a directory").unwrap();
+            },
+            run: |root| MetaStore::open(root).and_then(|store| store.read().map(drop)),
+            op: FileOp::ReadDir,
+            file: "meta/refs/release",
+            kind: io::ErrorKind::NotADirectory,
+        },
+        DirectRead {
+            what: "journal.log a directory",
+            damage: |meta| a_directory_for(meta, "journal.log"),
+            run: |root| MetaStore::open(root).map(drop),
+            op: FileOp::Open,
+            file: "meta/journal.log",
+            kind: io::ErrorKind::InvalidData,
+        },
+        DirectRead {
+            what: "idx/ids.col a directory",
+            damage: |meta| a_directory_for(meta, "idx/ids.col"),
+            run: index,
+            op: FileOp::Open,
+            file: "meta/idx/ids.col",
+            kind: io::ErrorKind::InvalidData,
+        },
+        DirectRead {
+            what: "sorted/dh.rec a directory",
+            damage: |meta| a_directory_for(meta, "sorted/dh.rec"),
+            run: index,
+            op: FileOp::Open,
+            file: "meta/sorted/dh.rec",
+            kind: io::ErrorKind::InvalidData,
+        },
+    ];
+    for case in cases {
+        let (_dir, root) = new_root();
+        copy_dir(template.as_std_path(), root.as_std_path());
+        (case.damage)(&Layout::new(&root).meta_dir());
+        let failure = match (case.run)(&root) {
+            Err(StoreError::Io(failure)) => failure,
+            other => panic!("{}: expected an I/O failure, got {other:?}", case.what),
+        };
+        assert_eq!(
+            (failure.op, failure.file.as_deref(), failure.kind()),
+            (case.op, Some(Utf8Path::new(case.file)), case.kind),
+            "{}: {failure}",
+            case.what
+        );
+        let text = failure.to_string();
+        assert!(!text.contains(root.as_str()), "{}: {text}", case.what);
+    }
+}
+
 /// The I/O failure `e` reports: its own, a [`StoreError::NotCommitted`]'s, or that of the step
 /// a [`StoreError::PostCommit`] says failed; `None` for an error of another kind.
 fn io_failure(e: &StoreError) -> Option<&swarmops_store::IoFailure> {

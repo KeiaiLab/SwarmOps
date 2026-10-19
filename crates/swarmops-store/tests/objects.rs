@@ -831,6 +831,36 @@ fn list_returns_every_stored_object_in_id_order() {
     assert_eq!(store.list().unwrap(), ids);
 }
 
+/// A fan-out directory that cannot be listed (a regular file in its place: `ENOTDIR`) fails
+/// `list` with the listing's failure (`read_dir`), named by its place in the store, never by
+/// the store's root. Root-safe: no file mode is involved.
+#[test]
+fn list_names_a_fanout_directory_it_cannot_list() {
+    use camino::Utf8Path;
+    use swarmops_store::FileOp;
+
+    let (_root, layout) = new_root();
+    let store = real_store(&layout);
+    fs::create_dir_all(layout.objects_dir()).unwrap();
+    fs::write(layout.objects_dir().join("ab"), b"not a directory").unwrap();
+    match store.list() {
+        Err(StoreError::Io(failure)) => {
+            assert_eq!(
+                (failure.op, failure.file.as_deref(), failure.kind()),
+                (
+                    FileOp::ReadDir,
+                    Some(Utf8Path::new("objects/ab")),
+                    io::ErrorKind::NotADirectory
+                ),
+                "{failure}"
+            );
+            let text = failure.to_string();
+            assert!(!text.contains(layout.root().as_str()), "{text}");
+        }
+        other => panic!("expected the listing's failure, got {other:?}"),
+    }
+}
+
 /// The batch the children of `open_default_under_crash_at_puts_one_object_at_a_time` put.
 #[cfg(feature = "test-hooks")]
 fn one_at_a_time_batch() -> Vec<(ObjectKind, Vec<u8>)> {
