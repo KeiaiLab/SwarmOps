@@ -1077,71 +1077,64 @@ mod tests {
     /// Each problem `verify` can find, `IndexMismatch` once for each cause, is a finding of its
     /// own kind with exactly the keys that kind names, its ids in lowercase hex, so that a
     /// program reads what is damaged without parsing the line. No two problems share a kind but
-    /// `IndexMismatch`'s causes, which `cause` tells apart.
+    /// `IndexMismatch`'s causes, which `cause` tells apart. The finding each problem should be
+    /// comes from an exhaustive match, as `finding` does its own: a new problem, or a new
+    /// cause, does not compile here until it is given its kind and keys, and with them a case.
     #[test]
     fn every_verify_problem_is_a_finding_with_its_keys() {
         let (object, child, parent) = ("ab".repeat(32), "cd".repeat(32), "ef".repeat(32));
         let id = |hex: &str| ObjectId::from_hex(&hex.to_uppercase()).unwrap();
         let changeset = |hex: &str| ChangesetId(id(hex));
         let mismatch = |cause| VerifyProblem::IndexMismatch { seq: 7, cause };
+        let expected = |problem: &VerifyProblem| match problem {
+            VerifyProblem::CorruptObject(_) => json!({"kind": "corrupt_object", "object": object}),
+            VerifyProblem::MissingObject { .. } => {
+                json!({"kind": "missing_object", "object": object, "changeset": child})
+            }
+            VerifyProblem::MissingParent { .. } => {
+                json!({"kind": "missing_parent", "changeset": child, "parent": parent})
+            }
+            VerifyProblem::RootMismatch(_) => json!({"kind": "root_mismatch", "changeset": child}),
+            VerifyProblem::DanglingRef(_) => json!({"kind": "dangling_ref", "ref": "main"}),
+            VerifyProblem::CorruptRef(_) => json!({"kind": "corrupt_ref", "ref": "release/1.0"}),
+            VerifyProblem::IndexMismatch { cause, .. } => {
+                let cause = match cause {
+                    MismatchCause::Journal => "journal",
+                    MismatchCause::SortedView => "sorted_view",
+                    MismatchCause::Object => "object",
+                };
+                json!({"kind": "index_mismatch", "seq": 7, "cause": cause})
+            }
+            VerifyProblem::JournalCorrupt { .. } => {
+                json!({"kind": "journal_corrupt", "offset": 4096})
+            }
+            VerifyProblem::MetaCorrupt(_) => json!({"kind": "meta_corrupt"}),
+        };
         let cases = [
-            (
-                VerifyProblem::CorruptObject(id(&object)),
-                json!({"kind": "corrupt_object", "object": object}),
-            ),
-            (
-                VerifyProblem::MissingObject {
-                    referenced_by: changeset(&child),
-                    id: id(&object),
-                },
-                json!({"kind": "missing_object", "object": object, "changeset": child}),
-            ),
-            (
-                VerifyProblem::MissingParent {
-                    child: changeset(&child),
-                    parent: changeset(&parent),
-                },
-                json!({"kind": "missing_parent", "changeset": child, "parent": parent}),
-            ),
-            (
-                VerifyProblem::RootMismatch(changeset(&child)),
-                json!({"kind": "root_mismatch", "changeset": child}),
-            ),
-            (
-                VerifyProblem::DanglingRef("main".to_owned()),
-                json!({"kind": "dangling_ref", "ref": "main"}),
-            ),
-            (
-                VerifyProblem::CorruptRef("release/1.0".to_owned()),
-                json!({"kind": "corrupt_ref", "ref": "release/1.0"}),
-            ),
-            (
-                mismatch(MismatchCause::Journal),
-                json!({"kind": "index_mismatch", "seq": 7, "cause": "journal"}),
-            ),
-            (
-                mismatch(MismatchCause::SortedView),
-                json!({"kind": "index_mismatch", "seq": 7, "cause": "sorted_view"}),
-            ),
-            (
-                mismatch(MismatchCause::Object),
-                json!({"kind": "index_mismatch", "seq": 7, "cause": "object"}),
-            ),
-            (
-                VerifyProblem::JournalCorrupt { offset: 4096 },
-                json!({"kind": "journal_corrupt", "offset": 4096}),
-            ),
-            (
-                VerifyProblem::MetaCorrupt("journal.off is missing".to_owned()),
-                json!({"kind": "meta_corrupt"}),
-            ),
+            VerifyProblem::CorruptObject(id(&object)),
+            VerifyProblem::MissingObject {
+                referenced_by: changeset(&child),
+                id: id(&object),
+            },
+            VerifyProblem::MissingParent {
+                child: changeset(&child),
+                parent: changeset(&parent),
+            },
+            VerifyProblem::RootMismatch(changeset(&child)),
+            VerifyProblem::DanglingRef("main".to_owned()),
+            VerifyProblem::CorruptRef("release/1.0".to_owned()),
+            mismatch(MismatchCause::Journal),
+            mismatch(MismatchCause::SortedView),
+            mismatch(MismatchCause::Object),
+            VerifyProblem::JournalCorrupt { offset: 4096 },
+            VerifyProblem::MetaCorrupt("journal.off is missing".to_owned()),
         ];
         let mut kinds: BTreeMap<String, Vec<&VerifyProblem>> = BTreeMap::new();
-        for (problem, expected) in &cases {
+        for problem in &cases {
             let found = finding(problem);
             assert_eq!(
                 serde_json::to_value(&found).unwrap(),
-                *expected,
+                expected(problem),
                 "{problem:?}"
             );
             kinds.entry(found.kind).or_default().push(problem);

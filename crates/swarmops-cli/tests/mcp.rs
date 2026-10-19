@@ -863,7 +863,8 @@ fn a_client_file_must_be_absolute_and_not_the_servers_stdio() {
 /// A `commit`'s client file that is not a regular file (a FIFO, whose open would block until
 /// something opens it for writing, a symlink to one, a device, a directory) is refused before
 /// anything is resolved, opened or read, with the change and the file named; the server serves
-/// on, and the store is untouched.
+/// on, and the store is untouched. The store's main names a commit, which a commit with no
+/// parent reads once it opens the store: a refusal made after that would show it resolved.
 #[test]
 fn a_client_file_that_is_not_a_regular_file_is_refused_without_blocking() {
     let store = Store::init();
@@ -879,6 +880,16 @@ fn a_client_file_that_is_not_a_regular_file_is_refused_without_blocking() {
     std::os::unix::fs::symlink(&fifo, &to_fifo).unwrap();
     let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
     server.initialize();
+    let first = json!({"message": "first", "changes": [{"path": "README.md", "op": "put",
+                                                       "content": {"inline": "# acme\n"}}]});
+    let first = server.ok("commit", first)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": first, "create": true}),
+    );
     for file in [
         fifo.as_path(),
         to_fifo.as_path(),
@@ -907,7 +918,7 @@ fn a_client_file_that_is_not_a_regular_file_is_refused_without_blocking() {
         assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
         assert_eq!(server.result("ping", json!({})), json!({}));
         let info = server.ok("repo_info", json!({}));
-        assert_eq!(info["result"]["changesets"], 0, "{file}: {info}");
+        assert_eq!(info["result"]["changesets"], 1, "{file}: {info}");
     }
     server.finish_clean();
     store.assert_clean("after the refused commits");

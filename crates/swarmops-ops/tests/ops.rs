@@ -1793,3 +1793,39 @@ fn verify_reports_each_problem_as_a_finding() {
         );
     }
 }
+
+/// With problems of two kinds, `findings[i]` is the finding of `problems[i]`, one for one and in
+/// the same order: a blob gone from the store and one whose file is damaged (which a deep
+/// verify reads) each name their object in the line and in the finding at its index.
+#[test]
+fn verify_findings_stand_beside_their_problems_one_for_one() {
+    let (_dir, root, ops) = new_store();
+    let c = commit(&ops, None, vec![text("f", "content"), text("g", "other")]);
+    let layout = Layout::new(root.clone());
+    let gone = hash_object(ObjectKind::Blob, b"content");
+    fs::remove_file(layout.object_path(gone)).unwrap();
+    let damaged = hash_object(ObjectKind::Blob, b"other");
+    let mut bytes = fs::read(layout.object_path(damaged)).unwrap();
+    *bytes.last_mut().unwrap() ^= 0x01;
+    fs::write(layout.object_path(damaged), bytes).unwrap();
+
+    let report = ops.verify(VerifyReq { deep: true }).unwrap();
+    assert_eq!(report.problems.len(), 2, "{report:?}");
+    assert_eq!(report.findings.len(), report.problems.len(), "{report:?}");
+    for (problem, finding) in report.problems.iter().zip(&report.findings) {
+        let (kind, object, changeset) = if problem.ends_with("is corrupt") {
+            ("corrupt_object", damaged, None)
+        } else {
+            ("missing_object", gone, Some(c.as_str()))
+        };
+        assert!(problem.contains(&object.to_hex()), "{problem}");
+        assert_eq!(finding.kind, kind, "{problem}: {finding:?}");
+        assert_eq!(
+            finding.object.as_deref(),
+            Some(object.to_hex().as_str()),
+            "{problem}"
+        );
+        assert_eq!(finding.changeset.as_deref(), changeset, "{problem}");
+    }
+    assert_ne!(report.findings[0].kind, report.findings[1].kind);
+}
