@@ -375,7 +375,10 @@ impl<O: ObjectStore> Repo<O> {
 }
 
 /// `changes` sorted by path, once checked: not empty (unless `allow_empty`), each path once.
-fn sorted_changes(mut changes: Vec<Change>, allow_empty: bool) -> Result<Vec<Change>, RepoError> {
+pub(crate) fn sorted_changes(
+    mut changes: Vec<Change>,
+    allow_empty: bool,
+) -> Result<Vec<Change>, RepoError> {
     if changes.is_empty() && !allow_empty {
         return Err(RepoError::EmptyChanges);
     }
@@ -390,7 +393,9 @@ fn sorted_changes(mut changes: Vec<Change>, allow_empty: bool) -> Result<Vec<Cha
 
 /// The delta `changes` (sorted, checked) would make, each put naming the blob of its content,
 /// with the contents by blob id.
-fn candidate_delta(changes: Vec<Change>) -> (Vec<DeltaEntry>, BTreeMap<ObjectId, Vec<u8>>) {
+pub(crate) fn candidate_delta(
+    changes: Vec<Change>,
+) -> (Vec<DeltaEntry>, BTreeMap<ObjectId, Vec<u8>>) {
     let mut contents = BTreeMap::new();
     let delta = changes
         .into_iter()
