@@ -36,7 +36,7 @@ and review (M7) come later, in the order of umbrella §13.
 | `swarmops-store` | The loose object files (`FsObjectStore`), the store's layout (`Layout`), the native metadata store (`MetaStore`): the journal, the writer lock, the changeset index and the ref files; and the cache of derived values beside it (`DerivedStore`). The object store's filesystem access, every metadata write and the derived values' reads and writes go through the `FsOps` seam, which the crash tests hook. |
 | `swarmops-merge` | Pure algorithms over trees and lines, with no I/O and no store: the tree diff (leaf-level changes, canonical deltas and three-way path entries) and the line diff (histogram hunks, by `imara-diff`) from M2, and the three-way merge from M4. `swarmops-repo` re-exports it as `swarmops_repo::merge`. |
 | `swarmops-git` | git's side of the import, from M3: git's commit and tree bytes parsed into their fields and rendered back byte for byte (`raw`), the ids git gives objects (`GitOid`, `git_hash`), and `GitSource`, what the import reads from a repository: refs resolved to commits, and objects' bytes, each checked against its id. `GixSource` reads a repository on disk through gix, pinned and seen by that one module, so that git2 could replace it there. |
-| `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, and `verify`. `LocalRepo` is a `Repo` on the local filesystem. |
+| `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, `verify`, and the derivation engine, which derives values from the immutable objects when they are asked for and caches them in `meta/derived/` (`Repo::derived`). `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
@@ -107,7 +107,9 @@ bytes, invalid names or paths), so each object has exactly one valid byte string
 
 A repository path is validated UTF-8: `/`-separated, with no empty, `.` or `..` component, no
 leading or trailing `/` and no NUL. Paths compare as bytes and are never normalized, so two
-Unicode spellings of a name are two paths. A file's content is at most 512 MiB.
+Unicode spellings of a name are two paths. A file's content is at most 512 MiB, a commit's
+contents at most 1 GiB together, and a request's text (a change list, an MCP message) at most
+64 MiB, each measured before it is read.
 
 ## The store on disk
 
@@ -194,12 +196,41 @@ leaves its file torn, costs a recomputation and nothing else. Each file holds it
 slot (name, version, object, key) and the value. A read that finds a file failing any of those
 checks removes it and reports the value missing, so that it is derived again.
 
+**Deriving a value** (storage §5). A `Derivation` says how one kind of value is made from a
+changeset and a key, out of objects and other derived values only (never a ref, the journal or
+the clock), so that a value never changes once derived: its name and version (its directory), the
+values it depends on (by default its parents', under the same key), an optional `canonical`
+redirect to a cheaper node of the same value, and `derive` itself. A repository's `Registry` holds
+the derivations it knows (`Repo::register`). `Repo::derived` reads a value back if the store holds
+it; otherwise the engine derives it, with every value it needs that the store lacks, and stores
+each. The engine never recurses on the Rust stack: it keeps an explicit stack of nodes
+(derivation, changeset, key) and evaluates bottom-up, deriving first a node's missing
+dependencies, and any value `derive` reads and finds missing (`DeriveError::Missing`), before it
+calls `derive` again. A redirect stores nothing, except that a derivation with `MEMO_EVERY = n`
+stores, for a chain of more than n redirects, the end's value at the chain's start and every n
+steps along it, so that a later walk is short. A node met again while it is on the stack is a
+cycle, an error (`RepoError::Derived`, `E_INTERNAL`: a derivation that fails on immutable inputs
+fails every time). A put that fails is dropped: the run keeps the value in memory, and returns it.
+
+**Path history** (storage §5). The built-in derivation `LastModified` gives, for a changeset and a
+path, the newest changeset on its first-parent chain, itself included, whose delta has an entry
+at the path or below it. A changeset that does not touch the path redirects to its first parent,
+so a value is derived only where the path changed (and at a root that never had it), and a chain
+of more than 64 redirects stores its value every 64 steps, so that a later query walks at most 64
+changesets. A path's history (`RepoRead::path_history`) chases that value: the last touch, then
+the last touch from its first parent, each with what the path holds after it. `log_paths` lists
+the changesets that touch any of several paths, newest first, from each path's chase along the
+one chain.
+
 **A commit** (`Repo::commit`; storage §2 rule 2, §3):
 
 1. The request is checked, its blobs hashed, and the changed directories rebuilt in memory,
-   bottom-up; then the changeset object is encoded.
-2. The new blobs, trees and the changeset are written in one parallel batch and flushed. Every
-   object is durable before any metadata names it.
+   bottom-up; then the changeset object is encoded. A blob a change names by its id
+   (`{"blob": id}`, stored before by `blob_put`) is neither read nor hashed: its header says the
+   store holds it, and the commit retains it.
+2. The new blobs, trees and the changeset are written in one parallel batch and flushed, and the
+   flush fsyncs the directories of the retained blobs too. Every object is durable before any
+   metadata names it.
 3. A metadata write transaction takes `meta/lock` (below), repairs what a crashed writer may
    have left (it cuts a torn journal tail, repairs the index tail, and replays the frames past
    `journal.ckpt` into the index and the ref files; what that repair did comes back in the
@@ -331,6 +362,15 @@ small byte ranges. Files and directories at a revision are read from the trees, 
 changeset's root: O(depth) object reads and no checkout.
 Every object read checks the object's header and hash.
 
+A request reads in one snapshot (storage §8, operations §4). `Repo::snapshot()` returns a
+`RepoRead`; `LocalOps` takes one when an operation starts and resolves every revision and ref
+of the request in it, and a `commit` checks its parent there too (`Repo::commit_in`), the
+insert's own check under the lock staying the one that counts. A snapshot is never read after
+the request's own write, and never kept from one request to the next: besides going stale, one
+that counted index records which a writer then cut back after a failed sync fails its lookups
+with an I/O error until a new one is taken. `Repo`'s own read methods each take a snapshot of
+their own.
+
 ## Durability
 
 Full fsync is the default and the only mode (umbrella §16, decision 5). An object is synced and
@@ -419,7 +459,8 @@ What an agent sees (operations §4):
 - Refs move only by compare-and-swap. When several agents expect the same target, exactly one
   wins each round; the others get `E_CAS_MISMATCH` and `details.actual`.
 - A read by changeset id is immutable, lock-free and cacheable. A ref named in a request is
-  resolved once, and the envelope's `meta.resolved` says what it named.
+  resolved once, and the envelope's `meta.resolved` says what it named. Every revision and ref
+  one request names is resolved in the same snapshot.
 - A reader may see a frame before its `fdatasync` has completed. A power loss, or a failed sync
   of that frame (which the writer then cuts back), can therefore take back state that a local
   reader returned. A mutation that names such state (a parent, a ref's expected or new target)
@@ -448,7 +489,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 24 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
 kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 44 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 52 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

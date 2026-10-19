@@ -5,25 +5,41 @@
 //! ([`Repo::log_first_parent`]), moves refs by compare-and-swap ([`Repo::cas_ref`]), and checks
 //! a whole store ([`Repo::verify`]).
 //!
+//! A request reads in one snapshot of the metadata ([`Repo::snapshot`], a [`RepoRead`]), which
+//! resolves every revision and ref it names in the same view, and commits on the parents it
+//! resolved there ([`Repo::commit_in`]); [`Repo`]'s read methods each take a snapshot of their
+//! own.
+//!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
 //! return plain values with no filesystem paths in them, so that they can move behind an RPC
 //! boundary later; only [`LocalRepo::create`] and [`LocalRepo::open`] take the store's path.
+//!
+//! Values derived from the immutable objects are made when they are asked for, and cached in the
+//! store ([`Repo::derived`]; the [`derive`](mod@derive) module). A path's history chases one of
+//! them, the changeset that last touched the path ([`LastModified`]; the [`path_history`] module).
 
 pub mod commit;
+pub mod derive;
 pub mod error;
 pub mod log;
+pub mod path_history;
 pub mod read;
 pub mod repo;
 mod tree_edit;
 pub mod verify;
 
 pub use commit::{
-    Advance, Advanced, Change, ChangeOp, CommitOutcome, CommitRequest,
+    Advance, Advanced, BlobPut, Change, ChangeOp, CommitOutcome, CommitRequest,
     RESERVED_METADATA_KEY_SUFFIX, check_metadata,
 };
+pub use derive::{
+    Derivation, DeriveCtx, DeriveError, FirstParentSkipList, LastModified, LastTouch, Need,
+    PathKey, Registry, SkipList, Subject,
+};
 pub use error::RepoError;
-pub use read::StoredChangeset;
+pub use path_history::PathEvent;
+pub use read::{RepoRead, StoredChangeset};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
 pub use verify::{MismatchCause, VerifyProblem, VerifyReport};

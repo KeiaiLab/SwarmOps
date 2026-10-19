@@ -18,6 +18,8 @@ use swarmops_api::{
 
 /// Requests and the input types inside them.
 const REQUESTS: &[&str] = &[
+    "BlobHasReq",
+    "BlobPutReq",
     "ChangeInput",
     "CommitReq",
     "GitImportReq",
@@ -25,6 +27,7 @@ const REQUESTS: &[&str] = &[
     "InfoReq",
     "InitReq",
     "LogReq",
+    "PathHistoryReq",
     "ReadFileReq",
     "ReadTreeReq",
     "RefDeleteReq",
@@ -38,6 +41,8 @@ const REQUESTS: &[&str] = &[
 const RESPONSES: &[&str] = &[
     "Advanced",
     "Attribution",
+    "BlobHasResp",
+    "BlobPutResp",
     "ChangeOut",
     "ChangesetDetail",
     "ChangesetSummary",
@@ -51,6 +56,8 @@ const RESPONSES: &[&str] = &[
     "LossyCommitOut",
     "Meta",
     "OpError",
+    "PathHistoryEntry",
+    "PathHistoryPage",
     "RecoveredOut",
     "RefListResp",
     "RefOut",
@@ -157,10 +164,19 @@ fn store_ops_signatures<S: StoreOps + ?Sized>() {
     let _: fn(&S, ReadTreeReq) -> Result<TreeListing, OpError> = S::read_tree;
     let _: fn(&S, ShowReq) -> Result<ChangesetDetail, OpError> = S::show;
     let _: fn(&S, LogReq) -> Result<LogPage, OpError> = S::log;
+    let _: fn(&S, swarmops_api::PathHistoryReq) -> Result<swarmops_api::PathHistoryPage, OpError> =
+        S::path_history;
     let _: fn(&S, RefListReq) -> Result<RefListResp, OpError> = S::ref_list;
     let _: fn(&S, &Identity, RefSetReq) -> Result<RefSetResp, OpError> = S::ref_set;
     let _: fn(&S, &Identity, RefDeleteReq) -> Result<RefSetResp, OpError> = S::ref_delete;
     let _: fn(&S, VerifyReq) -> Result<VerifyReport, OpError> = S::verify;
+    let _: fn(
+        &S,
+        &Identity,
+        swarmops_api::BlobPutReq,
+    ) -> Result<swarmops_api::BlobPutResp, OpError> = S::blob_put;
+    let _: fn(&S, swarmops_api::BlobHasReq) -> Result<swarmops_api::BlobHasResp, OpError> =
+        S::blob_has;
 }
 
 #[test]
@@ -573,6 +589,11 @@ fn requests_and_responses_ignore_unknown_fields() {
     assert_ignores_unknown_fields::<InfoReq>("InfoReq", json!({}));
     assert_ignores_unknown_fields::<RefListReq>("RefListReq", json!({}));
     assert_ignores_unknown_fields::<VerifyReq>("VerifyReq", json!({"deep": true}));
+    assert_ignores_unknown_fields::<swarmops_api::BlobPutReq>(
+        "BlobPutReq",
+        json!({"content": {"inline": "x"}}),
+    );
+    assert_ignores_unknown_fields::<swarmops_api::BlobHasReq>("BlobHasReq", json!({"ids": ["b1"]}));
 
     let signature = json!({"name": "human/purple", "email": "purple@human.swarmops.local", "secs": 0, "offset_secs": 0});
     assert_ignores_unknown_fields::<RepoInfo>(
@@ -610,6 +631,14 @@ fn requests_and_responses_ignore_unknown_fields() {
     assert_ignores_unknown_fields::<RefListResp>(
         "RefListResp",
         json!({"refs": [{"name": "main", "target": "c", "version": 1}]}),
+    );
+    assert_ignores_unknown_fields::<swarmops_api::BlobPutResp>(
+        "BlobPutResp",
+        json!({"blob": "b1", "size": 1, "written": true}),
+    );
+    assert_ignores_unknown_fields::<swarmops_api::BlobHasResp>(
+        "BlobHasResp",
+        json!({"present": ["b1"]}),
     );
     assert_ignores_unknown_fields::<RefSetResp>(
         "RefSetResp",
@@ -669,6 +698,7 @@ fn omitted_request_fields_take_their_defaults() {
             rev: None,
             limit: DEFAULT_LOG_LIMIT,
             cursor: None,
+            paths: Vec::new(),
         }
     );
     assert_eq!(
@@ -1156,6 +1186,7 @@ fn listings_page_with_truncated_and_cursor() {
             rev: None,
             limit: DEFAULT_LOG_LIMIT,
             cursor: Some("c9f1".to_owned()),
+            paths: Vec::new(),
         }
     );
 
@@ -1197,6 +1228,143 @@ fn listings_page_with_truncated_and_cursor() {
     assert_eq!(
         serde_json::to_string(&log).unwrap(),
         r#"{"entries":[{"id":"c9f1","parents":["b0b0"],"author_agent":"human/purple","created_at":1760000000000,"title":"add files"}],"truncated":true,"cursor":"c9f1"}"#
+    );
+}
+
+/// `path_history` and `log`'s `paths` (M2 Task 15).
+mod path_history {
+    use swarmops_api::{
+        DEFAULT_PATH_HISTORY_LIMIT, PathHistoryEntry, PathHistoryPage, PathHistoryReq,
+    };
+
+    use super::*;
+
+    /// A history request takes `main` and 50 entries by default, a limit of at least 1, and a
+    /// cursor; `log`'s `paths` default to none and are omitted when empty. A page keeps the spec's
+    /// field order, an entry after a delete has no kind and no id, and both ignore fields they do
+    /// not know.
+    #[test]
+    fn history_requests_and_pages_keep_their_wire_form() {
+        assert_eq!(DEFAULT_PATH_HISTORY_LIMIT, 50);
+        let all = schema_for_all();
+        assert_eq!(all["PathHistoryReq"]["properties"]["limit"]["minimum"], 1);
+        assert_eq!(all["PathHistoryReq"]["required"], json!(["path"]));
+        assert_eq!(
+            serde_json::from_value::<PathHistoryReq>(json!({"path": "src"})).unwrap(),
+            PathHistoryReq {
+                rev: None,
+                path: "src".to_owned(),
+                limit: DEFAULT_PATH_HISTORY_LIMIT,
+                cursor: None,
+            }
+        );
+        let req = PathHistoryReq {
+            rev: Some(Rev("main~1".to_owned())),
+            path: "src/".to_owned(),
+            limit: 2,
+            cursor: Some("c9f1".to_owned()),
+        };
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"rev":"main~1","path":"src/","limit":2,"cursor":"c9f1"}"#
+        );
+        assert_ignores_unknown_fields::<PathHistoryReq>("PathHistoryReq", json!({"path": "a"}));
+
+        let log = serde_json::from_value::<LogReq>(json!({"paths": ["src", "README.md"]})).unwrap();
+        assert_eq!(log.paths, ["src", "README.md"]);
+        let every = serde_json::to_value(LogReq {
+            paths: Vec::new(),
+            ..log.clone()
+        })
+        .unwrap();
+        assert!(every.get("paths").is_none(), "{every}");
+        assert_eq!(
+            serde_json::to_value(&log).unwrap()["paths"],
+            json!(["src", "README.md"])
+        );
+        assert!(
+            all["LogReq"]["required"]
+                .as_array()
+                .is_none_or(|required| !required.contains(&json!("paths")))
+        );
+
+        let entry = |changeset: &str, put: bool| PathHistoryEntry {
+            changeset: changeset.to_owned(),
+            op: if put { ChangeOp::Put } else { ChangeOp::Delete },
+            kind: put.then_some(EntryKindOut::Dir),
+            id: put.then(|| "7a0b".to_owned()),
+            author_agent: "human/purple".to_owned(),
+            created_at: 1_760_000_000_000,
+            title: "t".to_owned(),
+        };
+        let page = PathHistoryPage {
+            path: "src".to_owned(),
+            entries: vec![entry("c9f1", false), entry("b0b0", true)],
+            truncated: true,
+            cursor: Some("b0b0".to_owned()),
+        };
+        let text = serde_json::to_string(&page).unwrap();
+        assert_eq!(
+            text,
+            [
+                r#"{"path":"src","entries":["#,
+                r#"{"changeset":"c9f1","op":"delete","author_agent":"human/purple","created_at":1760000000000,"title":"t"},"#,
+                r#"{"changeset":"b0b0","op":"put","kind":"dir","id":"7a0b","author_agent":"human/purple","created_at":1760000000000,"title":"t"}"#,
+                r#"],"truncated":true,"cursor":"b0b0"}"#,
+            ]
+            .concat()
+        );
+        assert_eq!(
+            serde_json::from_str::<PathHistoryPage>(&text).unwrap(),
+            page
+        );
+        assert_ignores_unknown_fields::<PathHistoryPage>(
+            "PathHistoryPage",
+            json!({"path": "a", "entries": [{"changeset": "c", "op": "put", "kind": "file", "id": "b", "author_agent": "human/purple", "created_at": 0, "title": "t", "zz_nested": 1}], "truncated": false}),
+        );
+        assert_eq!(
+            all["PathHistoryEntry"]["properties"]["created_at"]["format"],
+            "uint64"
+        );
+    }
+}
+
+/// A blob named by id is `{"blob": "<id>"}` content, beside `inline`, `base64` and `file`, and
+/// `blob_put` and `blob_has` keep their wire forms: `blob_put` takes any content and answers
+/// with the blob's id, size and whether it wrote it; `blob_has` takes ids and gives the present
+/// ones.
+#[test]
+fn blobs_by_id_use_their_wire_forms() {
+    use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+
+    let id = "ab".repeat(32);
+    let change: ChangeInput =
+        serde_json::from_value(json!({"path": "a.bin", "op": "put", "content": {"blob": id}}))
+            .unwrap();
+    assert_eq!(change.content, Some(ContentInput::Blob(id.clone())));
+    assert_eq!(
+        serde_json::to_value(&change).unwrap(),
+        json!({"path": "a.bin", "op": "put", "content": {"blob": id}})
+    );
+    let put: BlobPutReq = serde_json::from_value(json!({"content": {"base64": "AAE="}})).unwrap();
+    assert_eq!(put.content, ContentInput::Base64("AAE=".to_owned()));
+    let stored = BlobPutResp {
+        blob: id.clone(),
+        size: 2,
+        written: false,
+    };
+    assert_eq!(
+        serde_json::to_string(&stored).unwrap(),
+        format!(r#"{{"blob":"{id}","size":2,"written":false}}"#)
+    );
+    let has: BlobHasReq = serde_json::from_value(json!({"ids": [id]})).unwrap();
+    assert_eq!(has.ids, vec![id.clone()]);
+    let present = BlobHasResp {
+        present: vec![id.clone()],
+    };
+    assert_eq!(
+        serde_json::to_string(&present).unwrap(),
+        format!(r#"{{"present":["{id}"]}}"#)
     );
 }
 

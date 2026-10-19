@@ -253,6 +253,79 @@ fn ls_show_log(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
     assert_eq!(older["result"]["entries"][0]["id"], c1);
 }
 
+/// `history` and `log --path`: a file's history and a directory's, a page at a time with its
+/// cursor (a directory may end in `/`); the log of the changesets that change some paths; and the
+/// errors: a path nothing ever touched (`E_PATH_NOT_FOUND`), a target without a path and a limit
+/// of 0 (`E_INVALID_ARG`).
+#[test]
+fn history_and_log_path_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store, "--name", "acme"]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+    let c1 = s.commit(&store, None, "src/lib.rs", "pub fn f() {}\n", "c1");
+    let c2 = s.commit(&store, Some(&c1), "README.md", "# acme\n", "c2");
+    let c3 = s.commit(
+        &store,
+        Some(&c2),
+        "src/lib.rs",
+        "pub fn f() -> u8 { 1 }\n",
+        "c3",
+    );
+    let c4 = s.commit(&store, Some(&c3), "src/main.rs", "fn main() {}\n", "c4");
+    let main = [
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c4, "--create",
+    ];
+    assert_eq!(s.run(&main).exit, 0);
+    let ids = |reply: &Reply, key: &str| -> Vec<String> {
+        let entries = reply["result"]["entries"].as_array().unwrap();
+        entries
+            .iter()
+            .map(|entry| entry[key].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let file = s.run(&["--repo", &store, "history", "main:src/lib.rs"]);
+    assert_eq!(ids(&file, "changeset"), [c3.as_str(), c1.as_str()]);
+    assert_eq!(file["result"]["entries"][0]["kind"], "file");
+    assert_eq!(file["meta"]["resolved"], json!({"main": c4}));
+    let first = s.run(&["--repo", &store, "history", "main:src", "-n", "1"]);
+    assert_eq!(ids(&first, "changeset"), [c4.as_str()]);
+    assert_eq!(first["result"]["entries"][0]["kind"], "dir");
+    assert_eq!(first["result"]["cursor"], c4.as_str());
+    let second = s.run(&[
+        "--repo",
+        &store,
+        "history",
+        "main:src/",
+        "-n",
+        "1",
+        "--cursor",
+        &c4,
+    ]);
+    assert_eq!(ids(&second, "changeset"), [c3.as_str()]);
+    assert_eq!(second["result"]["path"], "src");
+    let last = s.run(&["--repo", &store, "history", "main:src", "--cursor", &c3]);
+    assert_eq!(ids(&last, "changeset"), [c1.as_str()]);
+    assert_eq!(last["result"]["truncated"], false);
+
+    let logged = s.run(&["--repo", &store, "log", "--path", "src"]);
+    assert_eq!(ids(&logged, "id"), [c4.as_str(), c3.as_str(), c1.as_str()]);
+    let two = ["--path", "README.md", "--path", "src/main.rs"];
+    let paged = s.run(&[&["--repo", &store, "log", "-n", "1"][..], &two[..]].concat());
+    assert_eq!(ids(&paged, "id"), [c4.as_str()]);
+    assert_eq!(paged["result"]["cursor"], c4.as_str());
+
+    let nope = s.run(&["--repo", &store, "history", "main:nope"]);
+    let code = ErrorCode::PathNotFound;
+    assert_eq!((nope.exit, nope.code()), (code.exit(), code.as_str()));
+    let no_path = s.run(&["--repo", &store, "history", "main"]);
+    assert_eq!((no_path.exit, no_path.code()), (2, "E_INVALID_ARG"));
+    let zero = s.run(&["--repo", &store, "history", "main:src", "-n", "0"]);
+    assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 #[test]
 fn ref_set_expect_mismatch_exits_4() {
     let mut s = Session::new();
@@ -640,6 +713,108 @@ fn a_change_list_from_stdin_cannot_name_stdin_as_a_client_file() {
     let c1 = s.name_at(&committed, "/result/changeset", "c1");
     let piped = s.run(&["--repo", &store, "cat", &format!("{c1}:piped.txt")]);
     assert_eq!(piped["result"]["content"], "piped bytes\n");
+}
+
+/// `blob put` stores a file's content, or stdin's (`-`), as a blob and prints its id, its size
+/// and whether it wrote it; `blob has` gives those of the ids it is given that the store holds
+/// as blobs; and a commit names a stored blob by id (`{"blob": id}`), writing no blob. `blob
+/// put` is a mutation, so it needs an identity (exit 5 without one, and nothing is stored);
+/// `blob has` is a read, and an id that is not 64 hex digits is a usage error.
+#[test]
+fn blob_put_then_a_commit_names_the_blob_by_id() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let content = "named by id\n";
+    let id = hash_object(ObjectKind::Blob, content.as_bytes()).to_hex();
+    let file = s.file("payload.txt", content);
+    let put = s.run(&["--repo", &store, "--as", AGENT, "blob", "put", &file]);
+    assert_eq!(put.exit, 0, "{}", put.json);
+    assert_eq!(put["op"], "blob_put");
+    assert_eq!(
+        put["result"],
+        json!({"blob": id, "size": content.len(), "written": true})
+    );
+    let again = s.run_stdin(
+        content,
+        &["--repo", &store, "--as", AGENT, "blob", "put", "-"],
+    );
+    assert_eq!(again.exit, 0, "{}", again.json);
+    assert_eq!(
+        again["result"],
+        json!({"blob": id, "size": content.len(), "written": false})
+    );
+
+    let other = s.file("other.txt", "other\n");
+    let other_id = hash_object(ObjectKind::Blob, b"other\n").to_hex();
+    let anonymous = s.run(&["--repo", &store, "blob", "put", &other]);
+    assert_eq!(
+        (anonymous.exit, anonymous.code()),
+        (5, "E_IDENTITY_REQUIRED")
+    );
+    let has = s.run(&["--repo", &store, "blob", "has", &id, &other_id]);
+    assert_eq!(has.exit, 0, "{}", has.json);
+    assert_eq!(has["op"], "blob_has");
+    assert_eq!(has["result"], json!({"present": [id]}));
+    let bad = s.run(&["--repo", &store, "blob", "has", "xyz"]);
+    assert_eq!((bad.exit, bad.code()), (2, "E_INVALID_ARG"));
+
+    let changes = s.file(
+        "by-id.json",
+        &json!([{"path": "named.txt", "op": "put", "content": {"blob": id}}]).to_string(),
+    );
+    let commit = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "by id",
+        "--changes",
+        &changes,
+    ]);
+    assert_eq!(commit.exit, 0, "{}", commit.json);
+    assert_eq!(commit["result"]["blobs_written"], 0);
+    let c1 = s.name_at(&commit, "/result/changeset", "c1");
+    let cat = s.run(&["--repo", &store, "cat", &format!("{c1}:named.txt")]);
+    assert_eq!(
+        (&cat["result"]["content"], &cat["result"]["blob"]),
+        (&json!(content), &json!(id))
+    );
+}
+
+/// A change list past 64 MiB, the most a request's text may hold, is refused by its length
+/// (`E_TOO_LARGE`, scope `request`) before a byte of it is read or parsed: its bytes are zeros,
+/// which no JSON parser takes. Nothing is committed.
+#[test]
+fn a_change_list_past_64_mib_is_refused_before_it_is_parsed() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let limit = swarmops_ops::content::MAX_REQUEST_BYTES;
+    let huge = format!("{}/huge.json", s.tmp());
+    fs::File::create(&huge).unwrap().set_len(limit + 1).unwrap();
+    let refused = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "x",
+        "--changes",
+        &huge,
+    ]);
+    assert_eq!((refused.exit, refused.code()), (1, "E_TOO_LARGE"));
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"size": limit + 1, "limit": limit, "scope": "request", "changes": huge})
+    );
+    assert_eq!(
+        s.run(&["--repo", &store, "info"])["result"]["changesets"],
+        0
+    );
 }
 
 #[test]

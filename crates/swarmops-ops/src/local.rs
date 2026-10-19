@@ -3,7 +3,7 @@
 //! what each operation does and how failures map to error codes.
 
 use std::cell::{Cell, RefCell};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,24 +12,32 @@ use serde_json::{Map, Value};
 use swarmops_api::{
     Attribution, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq, CommitResp,
     EntryKindOut, ErrorCode, FileContent, FileKind, Identity, InfoReq, LogCutOut, LogPage, LogReq,
-    OpError, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefListResp, RefOut,
-    RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps,
-    TreeEntryOut, TreeListing, VerifyFinding, VerifyReport, VerifyReq,
+    OpError, PathHistoryEntry, PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq,
+    RecoveredOut, RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo,
+    Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding,
+    VerifyReport, VerifyReq,
 };
+use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
-    ChangesetId, DeltaEntry, DeltaOp, EntryKind, LeafKind, ObjectId, RepoPath, Signature, TreeEntry,
+    ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
+    Signature, TreeEntry,
 };
+use swarmops_repo::merge::tree_diff::PathFilter;
 use swarmops_repo::{
-    CasResult, CommitRequest, LocalRepo, MismatchCause, RepoError, StoredChangeset, VerifyProblem,
+    CasResult, CommitRequest, LocalRepo, MismatchCause, PathEvent, RepoError, RepoRead,
+    StoredChangeset, VerifyProblem,
 };
-use swarmops_store::{LogCut, Recovered};
+use swarmops_store::{FsObjectStore, LogCut, Recovered};
 
 use crate::content;
 use crate::error::{During, details, error, hint, one_line, op, repo_error, shell_word};
 
 /// The agent a changeset is attributed to when its metadata names none.
 const UNKNOWN_AGENT: &str = "unknown/unknown";
+
+/// A snapshot of the store's metadata, in which a request makes all its reads.
+type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 
 /// The operations over a store on the local filesystem: [`StoreOps`], run in this process with
 /// the repository library.
@@ -44,6 +52,11 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// the MCP server report as `meta.resolved`: requests that share a `LocalOps`, from one thread
 /// or from several, never see each other's. An operation called on `LocalOps` itself records
 /// nothing.
+///
+/// A request makes all its reads in one snapshot of the store's metadata, its own, taken when the
+/// operation starts (storage spec §8): the revisions and refs it names resolve in the same view
+/// (operations spec §4), and a `commit` checks its parent in the view it resolved it in. No
+/// operation reads in its snapshot after its own write.
 ///
 /// # Recovery
 ///
@@ -77,6 +90,14 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   recorded. Without `parent`, such a commit builds on that ref's head, recorded in the
 ///   request's [`Resolved`] under the ref's name, and on nothing if the ref does not exist (a
 ///   root changeset that creates it): the move then only detects a race from that moment on.
+///   A change's `blob` content names a blob the store holds by its id: the commit neither reads
+///   nor writes it again, and an id the store holds no blob under is `E_INVALID_ARG`.
+/// - `blob_put` stores its content as a blob, by the change list's rules for content (`blob`
+///   content aside, which names a blob already stored), durable when it returns, and says
+///   whether it placed it (`written`). It needs an identity, which it records nowhere.
+/// - `blob_has` gives the ids, of those asked for, that the store holds a blob under, in
+///   lowercase, in the order first given and each once; a tree's or a changeset's id is not
+///   among them.
 /// - `read_file` returns at most `max_bytes` bytes from the file's start: UTF-8 text when they
 ///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
 ///   fewer); otherwise exactly `max_bytes` bytes, in base64. A directory there is `E_IS_DIR`,
@@ -91,7 +112,16 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   value; `changes` holds at most `max_changes` entries.
 /// - `log` follows first parents from `rev` (`main` when omitted) or, given a `cursor`, from the
 ///   first parent of the changeset it names, which must be a full id the store holds; a page
-///   is `truncated` when older history follows its last entry.
+///   is `truncated` when older history follows its last entry. With `paths` (each a repository
+///   path, one trailing `/` taken), it lists only the changesets whose delta has an entry at one
+///   of them or below it, by the chase of each path's last modifier (the derived value
+///   `LastModified`), and a page is `truncated` exactly when another such changeset follows.
+/// - `path_history` lists the changesets that changed what `path` holds (a file's content or
+///   kind, or anything below a directory; one trailing `/` taken), newest first, from `rev`
+///   (`main` when omitted) or after a `cursor` as `log` does, each with what the path holds after
+///   it (`put` with its kind and id, `delete` with neither) and the changeset's agent, time and
+///   title. A path that no changeset on the first-parent chain touched is `E_PATH_NOT_FOUND` on
+///   a first page; a page after a cursor may be empty.
 /// - `ref_set` and `ref_delete` move a ref by compare-and-swap, recorded for the caller's agent,
 ///   and decide every move under the store's lock, after the write's tail check, never from a
 ///   reader's snapshot. A move that finds the ref as it asks already (at `new` for `ref_set`,
@@ -122,11 +152,13 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   `{prefix}` (an id prefix that is not 1 to 64 hex digits). Of the requests of these
 ///   operations only `init`'s reaches either, with a name of more than 255 bytes
 ///   (`repo_name_bytes`): a commit has one parent, the identity bounds the actor, and revision
-///   resolution takes 12 to 63 hex digits.
+///   resolution takes 12 to 63 hex digits. And `MissingBlob` `{index, path, blob}`: a change
+///   that names by id a blob the store does not hold (no object, or a tree or a changeset), a
+///   mistake in the request rather than damage; its hint is `swarmops blob put <file>`.
 /// - `E_TOO_LARGE` `{store_limit, max, got}`: the store's `Limit` of an object longer than an
 ///   object holds (`store_limit` `object_bytes`, `max` 512 MiB): a commit's tree or changeset
 ///   object past that size, since a put's content is refused at it first (`{index, path, size,
-///   limit}`, below).
+///   limit, scope}`, below).
 /// - `E_EXISTS`: `Exists`; the hint is `swarmops --repo <path> info`.
 /// - `E_UNKNOWN_PARENT` `{parent}`: `UnknownParent`; the hint is `swarmops log`.
 /// - `E_EMPTY_COMMIT`: `EmptyChanges`; the hint names `--allow-empty`.
@@ -163,8 +195,10 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   hint says to run the same command again.
 /// - `E_INTERNAL`: the store's `PostCommit`, which the repository turns into a warning (a
 ///   failure after the commit point, a failed listing in `journal.off` among them), so that it
-///   never reaches here; and the store's `BadCall`, a call its API does not take, which only a
-///   bug makes.
+///   never reaches here; the store's `BadCall`, a call its API does not take, which only a bug
+///   makes; and `Derived`, a derived value that cannot be made (a cycle among the values it
+///   needs, a key or a value that does not encode or decode, a derivation not registered),
+///   which only a bug of the derivation makes, as its inputs are immutable.
 ///
 /// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
 /// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does
@@ -174,8 +208,10 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// with `--expect <actual>`; to a `ref_delete`, to re-check before deleting; to a move of a ref
 /// that is gone, that it is gone — and whose hint only reads, `swarmops show <actual>` or
 /// `swarmops ref list`, so that an agent that runs it cannot undo the move that won; `E_TOO_LARGE`
-/// `{index, path, size, limit}` for a put over 512 MiB; and `E_INVALID_ARG` for limits, cursors
-/// and requests that break their own rules.
+/// `{index, path, size, limit, scope}` (and the client `file` for file content) for a put over
+/// 512 MiB (`scope` `put`) or a commit's contents over 1 GiB together (`commit`, whose `size` is
+/// theirs up to and with the change's), measured before any is read; and `E_INVALID_ARG` for
+/// limits, cursors and requests that break their own rules.
 pub struct LocalOps {
     repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.
@@ -233,73 +269,59 @@ impl LocalOps {
             store_path: path.to_owned(),
         }
     }
+}
 
-    /// Changeset `id`, which a revision has just named.
-    fn stored(&self, id: ChangesetId) -> Result<StoredChangeset, OpError> {
-        self.repo
-            .changeset(id)
-            .map_err(op)?
-            .ok_or_else(|| op(RepoError::NotFound(id.to_string())))
-    }
+/// Changeset `id`, which a revision has just named in `read`.
+fn stored(read: &Snapshot<'_>, id: ChangesetId) -> Result<StoredChangeset, OpError> {
+    read.changeset(id)
+        .map_err(op)?
+        .ok_or_else(|| op(RepoError::NotFound(id.to_string())))
+}
 
-    /// The entry at `path` in changeset `cs`'s tree, from its directory's listing; `None` if
-    /// nothing is there.
-    fn entry(&self, cs: ChangesetId, path: &RepoPath) -> Result<Option<TreeEntry>, OpError> {
-        let Some(mut entries) = self
-            .repo
-            .list_tree(cs, path.parent().as_ref())
-            .map_err(op)?
-        else {
-            return Ok(None);
-        };
-        let name = path.file_name().as_bytes();
-        Ok(entries
-            .binary_search_by(|entry| entry.name.as_bytes().cmp(name))
-            .ok()
-            .map(|at| entries.swap_remove(at)))
+/// Why `read_tree` has no directory at `dir` (the root for `None`) in changeset `cs`, which
+/// `rev` named in `read`: a file is there, or nothing is.
+fn no_directory(
+    read: &Snapshot<'_>,
+    cs: ChangesetId,
+    rev: &Rev,
+    dir: Option<&RepoPath>,
+) -> OpError {
+    let path = dir.map_or("", RepoPath::as_str);
+    match dir.map(|dir| read.entry_at(cs, dir).map_err(op)) {
+        Some(Ok(Some(_))) => error(
+            ErrorCode::PathNotFound,
+            format!("{path:?} is a file at {rev}, not a directory"),
+        )
+        .with_details(rev_and_path(rev, path))
+        .with_hint(hint(format!(
+            "swarmops cat {}",
+            shell_word(&format!("{rev}:{path}"))
+        ))),
+        Some(Err(e)) => e,
+        _ => path_not_found(rev, path),
     }
+}
 
-    /// Why `read_tree` has no directory at `dir` (the root for `None`) in changeset `cs`,
-    /// which `rev` named: a file is there, or nothing is.
-    fn no_directory(&self, cs: ChangesetId, rev: &Rev, dir: Option<&RepoPath>) -> OpError {
-        let path = dir.map_or("", RepoPath::as_str);
-        match dir.map(|dir| self.entry(cs, dir)) {
-            Some(Ok(Some(_))) => error(
-                ErrorCode::PathNotFound,
-                format!("{path:?} is a file at {rev}, not a directory"),
-            )
-            .with_details(rev_and_path(rev, path))
-            .with_hint(hint(format!(
-                "swarmops cat {}",
-                shell_word(&format!("{rev}:{path}"))
-            ))),
-            Some(Err(e)) => e,
-            _ => path_not_found(rev, path),
-        }
-    }
-
-    /// Where a log page resumes after `cursor`, the last id of the page before: that
-    /// changeset's first parent, or `None` at a root. `E_INVALID_ARG` for a cursor that is not
-    /// the full id of a changeset in the store.
-    fn after_cursor(&self, cursor: &str) -> Result<Option<ChangesetId>, OpError> {
-        let bad = |why: &str| {
-            error(
-                ErrorCode::InvalidArg,
-                format!("{cursor:?} is not a log cursor: {why}"),
-            )
-            .with_details(details([("cursor", cursor.into())]))
-            .with_hint("pass the previous page's cursor as it was given, or none to start over")
-        };
-        let id = ObjectId::from_hex(cursor)
-            .map(ChangesetId)
-            .map_err(|_| bad("a cursor is a full changeset id"))?;
-        let stored = self
-            .repo
-            .changeset(id)
-            .map_err(op)?
-            .ok_or_else(|| bad("the store holds no such changeset"))?;
-        Ok(stored.changeset.parents.first().copied())
-    }
+/// Where a log page resumes after `cursor`, the last id of the page before: that changeset's
+/// first parent as `read` records it, or `None` at a root. `E_INVALID_ARG` for a cursor that is
+/// not the full id of a changeset in the store.
+fn after_cursor(read: &Snapshot<'_>, cursor: &str) -> Result<Option<ChangesetId>, OpError> {
+    let bad = |why: &str| {
+        error(
+            ErrorCode::InvalidArg,
+            format!("{cursor:?} is not a log cursor: {why}"),
+        )
+        .with_details(details([("cursor", cursor.into())]))
+        .with_hint("pass the previous page's cursor as it was given, or none to start over")
+    };
+    let id = ObjectId::from_hex(cursor)
+        .map(ChangesetId)
+        .map_err(|_| bad("a cursor is a full changeset id"))?;
+    let stored = read
+        .changeset(id)
+        .map_err(op)?
+        .ok_or_else(|| bad("the store holds no such changeset"))?;
+    Ok(stored.changeset.parents.first().copied())
 }
 
 /// The revisions one request resolved: each as given, and the full changeset id it named. The
@@ -375,30 +397,31 @@ pub struct Recording<'a> {
     resolved: &'a Resolved,
 }
 
-impl Recording<'_> {
-    /// The changeset `rev` names, recorded as resolved.
-    fn resolve(&self, rev: &Rev) -> Result<ChangesetId, OpError> {
-        let id = self.ops.repo.resolve(rev.as_str()).map_err(op)?;
+impl<'a> Recording<'a> {
+    /// A snapshot of the store's metadata: the one in which the operation, taking it at its
+    /// start, makes all the reads of its request.
+    fn snapshot(&self) -> Result<Snapshot<'a>, OpError> {
+        self.ops.repo.snapshot().map_err(op)
+    }
+
+    /// The changeset `rev` names in `read`, recorded as resolved.
+    fn resolve(&self, read: &Snapshot<'_>, rev: &Rev) -> Result<ChangesetId, OpError> {
+        let id = read.resolve(rev.as_str()).map_err(op)?;
         self.resolved.record(rev.as_str(), id);
         Ok(id)
     }
 
-    /// What `main` names, if it exists, recorded as resolved: what an operation uses when its
-    /// request names no revision.
-    fn main_head(&self) -> Result<Option<ChangesetId>, OpError> {
-        self.head("main")
+    /// What `main` names in `read`, if it exists, recorded as resolved: what an operation uses
+    /// when its request names no revision.
+    fn main_head(&self, read: &Snapshot<'_>) -> Result<Option<ChangesetId>, OpError> {
+        self.head(read, "main")
     }
 
-    /// What ref `name` names, if it exists, recorded as resolved under the ref's name: `main`'s
-    /// head for an operation whose request names no revision, the advanced ref's for a commit
-    /// with `advance` and no parent.
-    fn head(&self, name: &str) -> Result<Option<ChangesetId>, OpError> {
-        let head = self
-            .ops
-            .repo
-            .get_ref(name)
-            .map_err(op)?
-            .map(|state| state.target);
+    /// What ref `name` names in `read`, if it exists, recorded as resolved under the ref's name:
+    /// `main`'s head for an operation whose request names no revision, the advanced ref's for a
+    /// commit with `advance` and no parent.
+    fn head(&self, read: &Snapshot<'_>, name: &str) -> Result<Option<ChangesetId>, OpError> {
+        let head = read.get_ref(name).map_err(op)?.map(|state| state.target);
         if let Some(id) = head {
             self.resolved.record(name, id);
         }
@@ -427,42 +450,65 @@ impl StoreOps for Recording<'_> {
             advance,
             allow_empty,
         } = req;
+        let read = self.snapshot()?;
         let parent = match (&parent, &advance) {
-            (Some(rev), _) => Some(self.resolve(rev)?),
+            (Some(rev), _) => Some(self.resolve(&read, rev)?),
             // A commit that advances a ref builds on that ref's head by default.
-            (None, Some(name)) => self.head(name)?,
-            (None, None) => self.main_head()?,
+            (None, Some(name)) => self.head(&read, name)?,
+            (None, None) => self.main_head(&read)?,
         };
         let changes = content::changes(changes)?;
+        // Where each blob named by id is in the list, to say which change names one the store
+        // lacks.
+        let named: BTreeMap<RepoPath, usize> = (changes.iter().enumerate())
+            .filter(|(_, change)| matches!(change.op, swarmops_repo::ChangeOp::PutBlob { .. }))
+            .map(|(index, change)| (change.path.clone(), index))
+            .collect();
         let signature = native_signature(who);
         let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
         if let Some(run_id) = who.run_id() {
             metadata.push(("run_id".to_owned(), run_id.as_bytes().to_vec()));
         }
         content::check_metadata(&metadata)?;
+        // The parent is checked in the snapshot it was resolved in, which is not read after the
+        // commit.
         let outcome = self
             .ops
             .repo
-            .commit(CommitRequest {
-                parents: parent.into_iter().collect(),
-                changes,
-                author: signature.clone(),
-                committer: signature,
-                message: message.into_bytes(),
-                metadata,
-                allow_empty,
-                advance: advance.map(|name| swarmops_repo::Advance {
-                    name,
-                    actor: who.agent().to_owned(),
-                }),
-            })
+            .commit_in(
+                &read,
+                CommitRequest {
+                    parents: parent.into_iter().collect(),
+                    changes,
+                    author: signature.clone(),
+                    committer: signature,
+                    message: message.into_bytes(),
+                    metadata,
+                    allow_empty,
+                    advance: advance.map(|name| swarmops_repo::Advance {
+                        name,
+                        actor: who.agent().to_owned(),
+                    }),
+                },
+            )
             .map_err(|e| {
                 // A move refused under the lock is E_CAS_MISMATCH, which reports what the write
                 // repaired first, as a ref move's does.
                 if let RepoError::RefMoved { recovered, .. } = &e {
                     self.resolved.record_recovered(**recovered);
                 }
-                op(e)
+                // A blob the list names that the store lacks is said of its change, as the list's
+                // other refusals are.
+                let at = match &e {
+                    RepoError::MissingBlob { path, .. } => named
+                        .get(path)
+                        .map(|&index| (index, path.as_str().to_owned())),
+                    _ => None,
+                };
+                match at {
+                    Some((index, path)) => content::in_change(op(e), index, &path),
+                    None => op(e),
+                }
             })?;
         self.resolved.record_recovered(outcome.recovered);
         Ok(CommitResp {
@@ -481,19 +527,52 @@ impl StoreOps for Recording<'_> {
         })
     }
 
+    fn blob_put(&self, _who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
+        let BlobPutReq { content } = req;
+        let stored = (self.ops.repo)
+            .put_blob(content::bytes(content)?)
+            .map_err(op)?;
+        Ok(BlobPutResp {
+            blob: stored.id.to_string(),
+            size: stored.size,
+            written: stored.written,
+        })
+    }
+
+    fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError> {
+        // Every id is checked before the store is asked about any.
+        let ids = (req.ids.iter().enumerate())
+            .map(|(index, id)| {
+                content::blob_id(id).map_err(|mut e| {
+                    e.message = format!("id {index}: {}", e.message);
+                    e.details.insert("index".to_owned(), index.into());
+                    e
+                })
+            })
+            .collect::<Result<Vec<_>, OpError>>()?;
+        let mut asked = BTreeSet::new();
+        let mut present = Vec::new();
+        for id in ids {
+            if asked.insert(id) && self.ops.repo.has_blob(id).map_err(op)? {
+                present.push(id.to_string());
+            }
+        }
+        Ok(BlobHasResp { present })
+    }
+
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError> {
         let ReadFileReq {
             rev,
             path,
             max_bytes,
         } = req;
-        let cs = self.resolve(&rev)?;
+        let read = self.snapshot()?;
+        let cs = self.resolve(&read, &rev)?;
         let repo_path = content::repo_path(&path)?;
-        let Some((kind, blob, bytes)) = self.ops.repo.read_blob_at(cs, &repo_path).map_err(op)?
-        else {
-            // No file is there: what is, if anything, can only be a directory.
-            return Err(match self.ops.entry(cs, &repo_path)? {
-                Some(_) => error(
+        let (kind, blob) = match read.entry_at(cs, &repo_path).map_err(op)? {
+            Some(EntryTarget::Leaf(kind, blob)) => (kind, blob),
+            Some(EntryTarget::Dir(_)) => {
+                return Err(error(
                     ErrorCode::IsDir,
                     format!("{path:?} is a directory at {rev}"),
                 )
@@ -501,10 +580,11 @@ impl StoreOps for Recording<'_> {
                 .with_hint(hint(format!(
                     "swarmops ls {}",
                     shell_word(&format!("{rev}:{path}"))
-                ))),
-                None => path_not_found(&rev, &path),
-            });
+                ))));
+            }
+            None => return Err(path_not_found(&rev, &path)),
         };
+        let bytes = read.blob(blob).map_err(op)?;
         let keep = usize::try_from(max_bytes).map_or(bytes.len(), |max| max.min(bytes.len()));
         let (encoding, content) = content::encode(&bytes, keep);
         Ok(FileContent {
@@ -525,7 +605,8 @@ impl StoreOps for Recording<'_> {
             cursor,
         } = req;
         at_least_one("limit", limit)?;
-        let cs = self.resolve(&rev)?;
+        let read = self.snapshot()?;
+        let cs = self.resolve(&read, &rev)?;
         // One trailing `/` is taken (`ls main:src/`). A path malformed even without it is
         // E_INVALID_ARG naming it as given; past that, an error (no directory there) names the
         // path without the `/`.
@@ -538,8 +619,8 @@ impl StoreOps for Recording<'_> {
                 Some(RepoPath::new(trimmed).or_else(|_| content::repo_path(path))?)
             }
         };
-        let Some(entries) = self.ops.repo.list_tree(cs, dir.as_ref()).map_err(op)? else {
-            return Err(self.ops.no_directory(cs, &rev, dir.as_ref()));
+        let Some(entries) = read.list_tree(cs, dir.as_ref()).map_err(op)? else {
+            return Err(no_directory(&read, cs, &rev, dir.as_ref()));
         };
         let start = cursor.as_deref().map_or(0, |after| {
             entries.partition_point(|entry| entry.name.as_bytes() <= after.as_bytes())
@@ -560,9 +641,10 @@ impl StoreOps for Recording<'_> {
     fn show(&self, req: ShowReq) -> Result<ChangesetDetail, OpError> {
         let ShowReq { rev, max_changes } = req;
         at_least_one("max_changes", max_changes)?;
+        let read = self.snapshot()?;
         let StoredChangeset {
             id, seq, changeset, ..
-        } = self.ops.stored(self.resolve(&rev)?)?;
+        } = stored(&read, self.resolve(&read, &rev)?)?;
         Ok(ChangesetDetail {
             id: id.to_string(),
             seq,
@@ -592,10 +674,17 @@ impl StoreOps for Recording<'_> {
     }
 
     fn log(&self, req: LogReq) -> Result<LogPage, OpError> {
-        let LogReq { rev, limit, cursor } = req;
+        let LogReq {
+            rev,
+            limit,
+            cursor,
+            paths,
+        } = req;
         at_least_one("limit", limit)?;
+        let filter = log_filter(&paths)?;
+        let read = self.snapshot()?;
         let from = match cursor {
-            Some(cursor) => match self.ops.after_cursor(&cursor)? {
+            Some(cursor) => match after_cursor(&read, &cursor)? {
                 Some(parent) => parent,
                 None => {
                     return Ok(LogPage {
@@ -605,9 +694,24 @@ impl StoreOps for Recording<'_> {
                     });
                 }
             },
-            None => self.resolve(&rev.unwrap_or_else(|| Rev::from("main")))?,
+            None => self.resolve(&read, &rev.unwrap_or_else(|| Rev::from("main")))?,
         };
-        let changesets = self.ops.repo.log_first_parent(from, limit).map_err(op)?;
+        if let Some(filter) = filter {
+            // One changeset more than the page: whether another that changes the paths follows.
+            let mut changesets = read
+                .log_paths(from, &filter, limit.saturating_add(1))
+                .map_err(op)?;
+            let truncated = changesets.len() > limit;
+            changesets.truncate(limit);
+            return Ok(LogPage {
+                entries: changesets.iter().map(summary).collect(),
+                truncated,
+                cursor: (changesets.last())
+                    .filter(|_| truncated)
+                    .map(|last| last.id.to_string()),
+            });
+        }
+        let changesets = read.log_first_parent(from, limit).map_err(op)?;
         // A full page whose last changeset has a parent has older history after it.
         let last = changesets
             .last()
@@ -616,6 +720,46 @@ impl StoreOps for Recording<'_> {
             entries: changesets.iter().map(summary).collect(),
             truncated: last.is_some(),
             cursor: last.map(|last| last.id.to_string()),
+        })
+    }
+
+    fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
+        let PathHistoryReq {
+            rev,
+            path,
+            limit,
+            cursor,
+        } = req;
+        at_least_one("limit", limit)?;
+        let path = prefix_path(&path)?;
+        let read = self.snapshot()?;
+        let rev = rev.unwrap_or_else(|| Rev::from("main"));
+        let from = match &cursor {
+            Some(cursor) => after_cursor(&read, cursor)?,
+            None => Some(self.resolve(&read, &rev)?),
+        };
+        // One event more than the page: whether an older one follows.
+        let mut events = match from {
+            Some(from) => read
+                .path_history(from, &path, limit.saturating_add(1))
+                .map_err(op)?,
+            None => Vec::new(),
+        };
+        if events.is_empty() && cursor.is_none() {
+            return Err(no_history(&rev, path.as_str()));
+        }
+        let truncated = events.len() > limit;
+        events.truncate(limit);
+        let entries = (events.iter())
+            .map(|event| history_entry(&read, event))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(PathHistoryPage {
+            path: path.to_string(),
+            entries,
+            truncated,
+            cursor: (events.last())
+                .filter(|_| truncated)
+                .map(|last| last.changeset.to_string()),
         })
     }
 
@@ -650,9 +794,11 @@ impl StoreOps for Recording<'_> {
                 "move a ref with --expect <its target now>, or make a new one with --create",
             ));
         }
-        let new = self.resolve(&new)?;
+        // Both revisions resolve in one snapshot, which is not read after the move.
+        let read = self.snapshot()?;
+        let new = self.resolve(&read, &new)?;
         let expected = match &expected_old {
-            Some(rev) => Some(self.resolve(rev)?),
+            Some(rev) => Some(self.resolve(&read, rev)?),
             None => None,
         };
         // Every move is compared under the lock, after the write's tail check, never on a reader's
@@ -697,7 +843,7 @@ impl StoreOps for Recording<'_> {
 
     fn ref_delete(&self, who: &Identity, req: RefDeleteReq) -> Result<RefSetResp, OpError> {
         let RefDeleteReq { name, expected_old } = req;
-        let expected = self.resolve(&expected_old)?;
+        let expected = self.resolve(&self.snapshot()?, &expected_old)?;
         let outcome = self
             .ops
             .repo
@@ -751,6 +897,14 @@ impl StoreOps for LocalOps {
         self.recording(&Resolved::default()).commit(who, req)
     }
 
+    fn blob_put(&self, who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
+        self.recording(&Resolved::default()).blob_put(who, req)
+    }
+
+    fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError> {
+        self.recording(&Resolved::default()).blob_has(req)
+    }
+
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError> {
         self.recording(&Resolved::default()).read_file(req)
     }
@@ -765,6 +919,10 @@ impl StoreOps for LocalOps {
 
     fn log(&self, req: LogReq) -> Result<LogPage, OpError> {
         self.recording(&Resolved::default()).log(req)
+    }
+
+    fn path_history(&self, req: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
+        self.recording(&Resolved::default()).path_history(req)
     }
 
     fn ref_list(&self, req: RefListReq) -> Result<RefListResp, OpError> {
@@ -790,16 +948,80 @@ fn rev_and_path(rev: &Rev, path: &str) -> Map<String, Value> {
 
 /// Nothing at `path` in the changeset `rev` named; the hint lists the directory it would be in.
 fn path_not_found(rev: &Rev, path: &str) -> OpError {
-    let listing = match path.rsplit_once('/') {
-        Some((dir, _)) => shell_word(&format!("{rev}:{dir}")),
-        None => shell_word(rev.as_str()),
-    };
     error(
         ErrorCode::PathNotFound,
         format!("nothing is at {path:?} in {rev}"),
     )
     .with_details(rev_and_path(rev, path))
-    .with_hint(hint(format!("swarmops ls {listing}")))
+    .with_hint(listing_hint(rev, path))
+}
+
+/// No changeset on `rev`'s first-parent history touched `path`: nothing was ever there. The hint
+/// lists the directory it would be in, as [`path_not_found`]'s does.
+fn no_history(rev: &Rev, path: &str) -> OpError {
+    error(
+        ErrorCode::PathNotFound,
+        format!("no changeset in the first-parent history of {rev} touched {path:?}"),
+    )
+    .with_details(rev_and_path(rev, path))
+    .with_hint(listing_hint(rev, path))
+}
+
+/// `swarmops ls` of the directory that `path` would be in at `rev`: the hint of a path that holds
+/// nothing there.
+fn listing_hint(rev: &Rev, path: &str) -> String {
+    let listing = match path.rsplit_once('/') {
+        Some((dir, _)) => shell_word(&format!("{rev}:{dir}")),
+        None => shell_word(rev.as_str()),
+    };
+    hint(format!("swarmops ls {listing}"))
+}
+
+/// `path` as a repository path, one trailing `/` taken (`src/` is `src`); `E_INVALID_ARG` naming
+/// the path as given for one that is not a path even without it (the root's empty path among
+/// them).
+fn prefix_path(path: &str) -> Result<RepoPath, OpError> {
+    let trimmed = path.strip_suffix('/').unwrap_or(path);
+    RepoPath::new(trimmed).or_else(|_| content::repo_path(path))
+}
+
+/// The filter of a `log` request's `paths`: `None` for none, which keeps every changeset; else
+/// the paths as prefixes ([`prefix_path`]).
+fn log_filter(paths: &[String]) -> Result<Option<PathFilter>, OpError> {
+    if paths.is_empty() {
+        return Ok(None);
+    }
+    let prefixes = paths.iter().map(|path| prefix_path(path));
+    Ok(Some(PathFilter::under(prefixes.collect::<Result<_, _>>()?)))
+}
+
+/// `event`, one changeset of a path's history in `read`, as `path_history` gives it: what the
+/// path holds after it, and the changeset's agent, time and title as `log` gives them.
+fn history_entry(read: &Snapshot<'_>, event: &PathEvent) -> Result<PathHistoryEntry, OpError> {
+    let ChangesetSummary {
+        id,
+        author_agent,
+        created_at,
+        title,
+        ..
+    } = summary(&stored(read, event.changeset)?);
+    let (op, kind, id_after) = match event.entry {
+        Some(target) => (
+            ChangeOp::Put,
+            Some(entry_kind_out(target.kind())),
+            Some(target.id().to_hex()),
+        ),
+        None => (ChangeOp::Delete, None, None),
+    };
+    Ok(PathHistoryEntry {
+        changeset: id,
+        op,
+        kind,
+        id: id_after,
+        author_agent,
+        created_at,
+        title,
+    })
 }
 
 /// The message of a `ref_set` that lost to another move, which left the ref at `actual`
@@ -1035,13 +1257,18 @@ fn mismatch_cause(cause: MismatchCause) -> &'static str {
 fn tree_entry_out(entry: &TreeEntry) -> TreeEntryOut {
     TreeEntryOut {
         name: entry.name.clone(),
-        kind: match entry.target.kind() {
-            EntryKind::File => EntryKindOut::File,
-            EntryKind::Exec => EntryKindOut::Exec,
-            EntryKind::Symlink => EntryKindOut::Symlink,
-            EntryKind::Dir => EntryKindOut::Dir,
-        },
+        kind: entry_kind_out(entry.target.kind()),
         id: entry.target.id().to_hex(),
+    }
+}
+
+/// What a tree entry of `kind` is, as the API names it.
+fn entry_kind_out(kind: EntryKind) -> EntryKindOut {
+    match kind {
+        EntryKind::File => EntryKindOut::File,
+        EntryKind::Exec => EntryKindOut::Exec,
+        EntryKind::Symlink => EntryKindOut::Symlink,
+        EntryKind::Dir => EntryKindOut::Dir,
     }
 }
 
@@ -1539,6 +1766,196 @@ mod tests {
                     "its write listed the frame before it answered, and wrote no frame of its own"
                 );
             }
+        }
+    }
+
+    /// One snapshot per request (storage spec §8, operations spec §4).
+    mod snapshot {
+        use swarmops_store::MetaStore;
+        use swarmops_testkit::fs::RecordingFs;
+
+        use super::*;
+
+        /// Each request reads in one snapshot of the metadata, counted by the reads of a witness
+        /// ref, `release/witness`, which no request names or moves: every snapshot reads every
+        /// ref file once, while a write reads only the refs it moves (its `cas_ref`, and its
+        /// replay of the frames past the checkpoint, which the witness's frame is not among once
+        /// the store is flushed after it). Exactly one, then, for `read_file` (a file, and
+        /// nothing there), `read_tree` (a directory, and a file there), `show`, `log` (from a
+        /// revision, and after a cursor), `commit` with a parent, `commit` with `advance` and no
+        /// parent, and `ref_set` both moving and replaying; and none for opening the store.
+        #[test]
+        fn each_request_takes_one_snapshot() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (setup, _) = LocalOps::init(&root, "acme").unwrap();
+            let who = Identity::parse("agent/worker-17").unwrap();
+            let commit = |parent: Option<&str>, content: &str, advance: Option<&str>| CommitReq {
+                parent: parent.map(Rev::from),
+                changes: vec![ChangeInput {
+                    path: "src/f".to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline(content.to_owned())),
+                    mode: None,
+                }],
+                message: "m".to_owned(),
+                advance: advance.map(str::to_owned),
+                allow_empty: false,
+            };
+            let set = |new: &str, expected_old: Option<&str>| RefSetReq {
+                name: "main".to_owned(),
+                new: new.into(),
+                expected_old: expected_old.map(Rev::from),
+                create: expected_old.is_none(),
+            };
+            let c1 = setup
+                .commit(&who, commit(None, "1", None))
+                .unwrap()
+                .changeset;
+            setup.ref_set(&who, set(&c1, None)).unwrap();
+            let witness = RefSetReq {
+                name: "release/witness".to_owned(),
+                ..set(&c1, None)
+            };
+            setup.ref_set(&who, witness).unwrap();
+            drop(setup);
+            // The frames so far checkpointed: no write replays the witness's move again.
+            MetaStore::open(&root).unwrap().flush().unwrap();
+
+            let (fs, calls) = RecordingFs::new();
+            let ops = ops_on(&root, fs.naming_paths_in(root.clone().into_std_path_buf()));
+            let mut counts: Vec<(&str, usize)> = Vec::new();
+            let mut count = |request: &'static str| {
+                let witness = "read meta/refs/release/witness";
+                let reads = calls().into_iter().filter(|call| call == witness).count();
+                counts.push((request, reads));
+            };
+            let cat = |path: &str| ReadFileReq {
+                rev: "main".into(),
+                path: path.to_owned(),
+                max_bytes: 1024,
+            };
+            let ls = |path: &str| ReadTreeReq {
+                rev: "main".into(),
+                path: Some(path.to_owned()),
+                limit: 100,
+                cursor: None,
+            };
+            let log = |rev: Option<&str>, cursor: Option<&str>| LogReq {
+                rev: rev.map(Rev::from),
+                limit: 1,
+                cursor: cursor.map(str::to_owned),
+                paths: Vec::new(),
+            };
+            count("open");
+
+            ops.read_file(cat("src/f")).unwrap();
+            count("read_file");
+            ops.read_file(cat("src/nothing")).unwrap_err();
+            count("read_file, nothing there");
+            ops.read_tree(ls("src")).unwrap();
+            count("read_tree");
+            ops.read_tree(ls("src/f")).unwrap_err();
+            count("read_tree, a file there");
+            let show = ShowReq {
+                rev: "main".into(),
+                max_changes: 10,
+            };
+            ops.show(show).unwrap();
+            count("show");
+            ops.log(log(Some("main"), None)).unwrap();
+            count("log");
+            let c2 = ops.commit(&who, commit(Some(&c1), "2", None)).unwrap();
+            count("commit with a parent");
+            let c3 = ops.commit(&who, commit(None, "3", Some("main"))).unwrap();
+            count("commit with advance and no parent");
+            let (c2, c3) = (c2.changeset, c3.changeset);
+            ops.log(log(None, Some(&c2))).unwrap();
+            count("log after a cursor");
+            assert!(
+                !ops.ref_set(&who, set(&c2, Some(&c3)))
+                    .unwrap()
+                    .already_applied
+            );
+            count("ref_set");
+            assert!(
+                ops.ref_set(&who, set(&c2, Some(&c2)))
+                    .unwrap()
+                    .already_applied
+            );
+            count("ref_set, a replay");
+
+            let one_each: Vec<(&str, usize)> = (counts.iter())
+                .map(|&(request, _)| (request, usize::from(request != "open")))
+                .collect();
+            assert_eq!(counts, one_each, "snapshots per request");
+        }
+
+        /// The history reads take one snapshot each, counted as in
+        /// [`each_request_takes_one_snapshot`]: `path_history` from `main`, after a cursor, and of a
+        /// path nothing ever touched, and `log` with paths; whatever values of `LastModified` they
+        /// derive and store on the way.
+        #[test]
+        fn history_reads_take_one_snapshot_each() {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (setup, _) = LocalOps::init(&root, "acme").unwrap();
+            let who = Identity::parse("agent/worker-17").unwrap();
+            let mut head: Option<String> = None;
+            for content in ["1", "2"] {
+                let req = CommitReq {
+                    parent: head.as_deref().map(Rev::from),
+                    changes: vec![ChangeInput {
+                        path: "src/f".to_owned(),
+                        op: ChangeOp::Put,
+                        content: Some(ContentInput::Inline(content.to_owned())),
+                        mode: None,
+                    }],
+                    message: "m".to_owned(),
+                    advance: Some("main".to_owned()),
+                    allow_empty: false,
+                };
+                head = Some(setup.commit(&who, req).unwrap().changeset);
+            }
+            let witness = RefSetReq {
+                name: "release/witness".to_owned(),
+                new: head.unwrap().as_str().into(),
+                expected_old: None,
+                create: true,
+            };
+            setup.ref_set(&who, witness).unwrap();
+            drop(setup);
+            // The frames so far checkpointed: no write replays the witness's move again.
+            MetaStore::open(&root).unwrap().flush().unwrap();
+
+            let (fs, calls) = RecordingFs::new();
+            let ops = ops_on(&root, fs.naming_paths_in(root.clone().into_std_path_buf()));
+            let witness_reads = || {
+                let witness = "read meta/refs/release/witness";
+                calls().into_iter().filter(|call| call == witness).count()
+            };
+            assert_eq!(witness_reads(), 0, "opening the store");
+            let history = |cursor: Option<&str>, path: &str| PathHistoryReq {
+                rev: None,
+                path: path.to_owned(),
+                limit: 1,
+                cursor: cursor.map(str::to_owned),
+            };
+            let page = ops.path_history(history(None, "src")).unwrap();
+            assert_eq!(witness_reads(), 1, "path_history");
+            let rest = ops.path_history(history(page.cursor.as_deref(), "src"));
+            assert_eq!(rest.unwrap().entries.len(), 1);
+            assert_eq!(witness_reads(), 1, "path_history after a cursor");
+            ops.path_history(history(None, "nothing")).unwrap_err();
+            assert_eq!(witness_reads(), 1, "path_history, nothing ever there");
+            let log = LogReq {
+                rev: None,
+                limit: 1,
+                cursor: None,
+                paths: vec!["src".to_owned()],
+            };
+            ops.log(log).unwrap();
+            assert_eq!(witness_reads(), 1, "log with paths");
         }
     }
 }
