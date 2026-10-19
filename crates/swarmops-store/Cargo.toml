@@ -62,3 +62,7 @@ harness = false
 [[bench]]
 name = "read_snapshot"
 harness = false
+
+[[bench]]
+name = "compaction"
+harness = false

@@ -186,6 +186,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   in the lock once `write()` returned (p50, p99 and max). A test in the default gate checks that
   the objects are new each time and durable before the lock is taken, and that none of their
   calls is made under it.
+- A criterion bench of a compaction on its own (`crates/swarmops-store/benches/compaction.rs`,
+  which `just bench` and `just perf` run): `Index::compact()` with every sync on, on an index of
+  100k and of 1M records whose unsorted tail has just passed the threshold (1,025 records), the
+  sorted views restored before each iteration, untimed. It prints the bytes each compaction
+  writes (both views whole, 80 per record); `SWARMOPS_BENCH_COMPACTION_RECORDS` sets other sizes
+  for a quick check.
 
 ### Changed
 
