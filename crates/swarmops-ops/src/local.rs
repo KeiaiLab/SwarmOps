@@ -1337,6 +1337,93 @@ mod tests {
         assert_eq!(second.take_recovered(), None, "its write repaired nothing");
     }
 
+    /// A `ref_delete` records what its write repaired first too, whether it deletes the ref or
+    /// finds it at another target (`E_CAS_MISMATCH`): after a ref move whose listing in
+    /// `journal.off` failed, the delete's write lists the frame and writes the ref file before it
+    /// compares.
+    #[test]
+    fn a_ref_delete_records_what_its_own_write_repaired() {
+        let who = Identity::parse("agent/worker-17").unwrap();
+        for deletes in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let commit = |content: &str| {
+                let put = ChangeInput {
+                    path: "f".to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline(content.to_owned())),
+                    mode: None,
+                };
+                let req = CommitReq {
+                    parent: None,
+                    changes: vec![put],
+                    message: "m".to_owned(),
+                    allow_empty: false,
+                    advance: None,
+                };
+                ops.commit(&who, req).unwrap().changeset
+            };
+            let (c1, c2) = (commit("1"), commit("2"));
+            let main = RefSetReq {
+                name: "main".to_owned(),
+                new: c1.as_str().into(),
+                expected_old: None,
+                create: true,
+            };
+            let created = ops_on(&root, failing("append_durable", "journal.off"))
+                .ref_set(&who, main)
+                .unwrap();
+            one_injected(&created.warnings);
+
+            let resolved = Resolved::default();
+            // main holds c1: the delete expects it, or c2.
+            let expected = if deletes { &c1 } else { &c2 };
+            let delete = RefDeleteReq {
+                name: "main".to_owned(),
+                expected_old: expected.as_str().into(),
+            };
+            match ops.recording(&resolved).ref_delete(&who, delete) {
+                Ok(deleted) => assert!(deletes && !deleted.already_applied, "{deleted:?}"),
+                Err(e) => assert!(!deletes && e.code == "E_CAS_MISMATCH", "{e:?}"),
+            }
+            let listed_and_written = RecoveredOut {
+                frames_listed: 1,
+                refs_replayed: 1,
+                ..RecoveredOut::default()
+            };
+            let recovered = resolved.take_recovered();
+            assert_eq!(recovered, Some(listed_and_written), "deletes: {deletes}");
+        }
+    }
+
+    /// `meta.recovered` gives each count of the store's report in its own field: eight distinct
+    /// values, the cut's two among them, each come back where they were.
+    #[test]
+    fn recovered_out_keeps_each_count_in_its_own_field() {
+        let recovered = Recovered {
+            log_cut: Some(LogCut { at: 1, bytes: 2 }),
+            frames_listed: 3,
+            frames_rewritten: 4,
+            off_bytes_dropped: 5,
+            index_records_dropped: 6,
+            views_rebuilt: true,
+            records_replayed: 7,
+            refs_replayed: 8,
+        };
+        let out = RecoveredOut {
+            log_cut: Some(LogCutOut { at: 1, bytes: 2 }),
+            frames_listed: 3,
+            frames_rewritten: 4,
+            off_bytes_dropped: 5,
+            index_records_dropped: 6,
+            views_rebuilt: true,
+            records_replayed: 7,
+            refs_replayed: 8,
+        };
+        assert_eq!(recovered_out(recovered), out);
+    }
+
     /// A commit with `advance` whose ref moved first is `E_CAS_MISMATCH`, which records what its
     /// write repaired first, as a ref move's does: after a ref move whose listing in
     /// `journal.off` failed, the losing commit's write lists the frame and writes the ref file.
