@@ -66,10 +66,12 @@ use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
-    CasResult, FileOp, FsObjectStore, FsOps, HookedFs, IoFailure, Layout, LinkOutcome, MetaStore,
-    ObjectStore, RealFs, Recovered, RefState, StoreError, StoreFs, is_native_linux_fs,
+    CasResult, DerivedStore, FileOp, FsObjectStore, FsOps, HookedFs, IoFailure, Layout,
+    LinkOutcome, MetaStore, ObjectStore, RealFs, Recovered, RefState, StoreError, StoreFs,
+    is_native_linux_fs,
 };
 
+use crate::derive::Registry;
 use crate::error::RepoError;
 
 /// What a store's `FORMAT` file holds: the store layout this build writes and reads.
@@ -94,6 +96,11 @@ pub struct Repo<O: ObjectStore> {
     pub(crate) layout: Layout,
     /// What both stores write through; verify's own handles on the metadata use it too.
     pub(crate) fs: Arc<dyn FsOps>,
+    /// The cache of derived values, `meta/derived/`, on the same filesystem ([`Repo::derived`]).
+    pub(crate) derived: DerivedStore,
+    /// The derivations whose values [`Repo::derived`] makes: the built-ins, and the ones
+    /// [`Repo::register`] adds.
+    pub(crate) derivations: Registry,
     identity: Identity,
 }
 
@@ -325,11 +332,14 @@ impl LocalRepo {
             objects.set_parallelism(1);
             meta.set_parallelism(1);
         }
+        let derived = DerivedStore::open(layout.clone(), Arc::clone(&fs));
         Repo {
             objects,
             meta,
             layout,
             fs,
+            derived,
+            derivations: Registry::builtins(),
             identity,
         }
     }
@@ -416,7 +426,7 @@ pub(crate) fn post_commit_warning(what: &str, frame_seq: u64, source: &StoreErro
 
 /// The payload of `kind` object `id`, verified against its id. [`RepoError::MissingObject`] if
 /// `objects` lacks it, or holds an object of another kind under that id.
-pub(crate) fn object<O: ObjectStore>(
+pub(crate) fn object<O: ObjectStore + ?Sized>(
     objects: &O,
     id: ObjectId,
     kind: ObjectKind,
@@ -428,7 +438,7 @@ pub(crate) fn object<O: ObjectStore>(
 }
 
 /// Tree `id`, decoded.
-pub(crate) fn tree<O: ObjectStore>(objects: &O, id: TreeId) -> Result<Tree, RepoError> {
+pub(crate) fn tree<O: ObjectStore + ?Sized>(objects: &O, id: TreeId) -> Result<Tree, RepoError> {
     Ok(Tree::decode(&object(objects, id.0, ObjectKind::Tree)?)?)
 }
 
