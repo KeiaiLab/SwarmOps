@@ -1197,6 +1197,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "postcard",
+ "proptest",
  "serde",
  "swarmops-core",
  "swarmops-merge",

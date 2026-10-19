@@ -9,6 +9,7 @@ pub mod conflict;
 pub mod diff3;
 pub mod line_diff;
 pub mod tree_diff;
+pub mod tree_merge;
 
 #[cfg(test)]
 mod tests {

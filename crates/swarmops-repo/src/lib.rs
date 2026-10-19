@@ -14,6 +14,10 @@
 //! leaf's size ([`RepoRead::list_tree_depth`]). A diff of two changesets reads both their trees in
 //! one ([`RepoRead::diff`]).
 //!
+//! A three-way merge of what one changeset changed onto another reads only the paths that change
+//! touches, and returns the delta, the contents it merged and the conflicts as data, writing
+//! nothing ([`Repo::merge_with`]; the [`merge`] module).
+//!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
 //! return plain values with no filesystem paths in them, so that they can move behind an RPC
@@ -30,6 +34,7 @@ pub mod error;
 #[cfg(feature = "test-hooks")]
 pub mod land_models;
 pub mod log;
+pub mod merge;
 pub mod oplog;
 pub mod path_history;
 pub mod read;
@@ -43,13 +48,10 @@ pub use derive::{
     PathKey, Registry, SkipList, Subject,
 };
 pub use error::RepoError;
+pub use merge::MergeOutcome;
 pub use oplog::{OpRecord, Operation, UndoOutcome};
 pub use path_history::PathEvent;
 pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, TreePage};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
 pub use verify::{MismatchCause, VerifyProblem, VerifyReport};
-
-/// The merge algorithms (`swarmops-merge`): pure functions over trees and lines, with no I/O and
-/// no store, which the engine's operations call over the trees they read.
-pub use swarmops_merge as merge;
