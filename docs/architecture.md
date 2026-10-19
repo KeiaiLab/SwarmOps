@@ -34,6 +34,7 @@ and review (M7) come later, in the order of umbrella §13.
 | --- | --- |
 | `swarmops-core` | Object ids, repository paths and the canonical object codec. It does no I/O; its byte layouts are the hash contract. |
 | `swarmops-store` | The loose object files (`FsObjectStore`), the store's layout (`Layout`), and the native metadata store (`MetaStore`): the journal, the writer lock, the changeset index and the ref files. The object store's filesystem access and every metadata write go through the `FsOps` seam, which the crash tests hook. |
+| `swarmops-merge` | Pure algorithms over trees and lines, with no I/O and no store: the tree diff (leaf-level changes, canonical deltas and three-way path entries) and the line diff (histogram hunks, by `imara-diff`) from M2, and the three-way merge from M4. `swarmops-repo` re-exports it as `swarmops_repo::merge`. |
 | `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, and `verify`. `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. |
@@ -46,15 +47,15 @@ Dependencies point one way, from the binary down to the codec, the test kit's de
 swarmops-core    depends on no SwarmOps crate
 swarmops-api     depends on no SwarmOps crate
 swarmops-store   core
-swarmops-repo    core, store
+swarmops-merge   core
+swarmops-repo    core, merge, store
 swarmops-ops     api, core, repo, store
 swarmops-cli     api, ops            (its tests also use core, repo, store and testkit)
 swarmops-testkit core, repo, store   (a dev-dependency of store, repo, ops and cli)
 ```
 
 `fuzz/` is a cargo workspace of its own, with four cargo-fuzz targets over the codec and the
-journal. The specs plan three more crates: `swarmops-merge` (its tree diff serves M2's `diff`,
-and its three-way merge M4's landing), `swarmops-git` (git import and export, M3 and M8) and
+journal. The specs plan two more crates: `swarmops-git` (git import and export, M3 and M8) and
 `swarmops-sim` (the simulation harness, M9).
 
 Two rules shape the layers (umbrella §1, AGENTS.md):
