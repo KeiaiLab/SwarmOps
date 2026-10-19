@@ -21,6 +21,9 @@ criterion = "0.8.2"
 tempfile = "3.27.0"
 # The git fixtures' archives (swarmops-testkit only); no xattrs, which they never carry.
 tar = { version = "0.4.46", default-features = false }
+# The git import's reader (swarmops-git only, behind its `GitSource`): pinned exactly, SHA-1
+# only, no default features (umbrella decision 3).
+gix = { version = "=0.89.0", default-features = false, features = ["sha1"] }
 zstd = "0.14.2"
 imara-diff = "0.2.0"
 rayon = "1.12.0"

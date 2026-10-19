@@ -1,0 +1,32 @@
+[package]
+name = "swarmops-git"
+description = "SwarmOps git reading: git's commit and tree bytes parsed and rendered exactly, and the repositories they come from, read through gix behind one trait"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+# The integration tests are one test binary, `tests/all.rs` (see `[[test]]`).
+autotests = false
+
+[lints]
+workspace = true
+
+# gix is seen by `src/gix_source.rs` alone (umbrella decision 3): git2 0.21.0 would be a second
+# `GitSource` there.
+[dependencies]
+swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+gix.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
+tempfile.workspace = true
+proptest.workspace = true
+
+# One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
+# its tests named `<file>::<test>`. Cargo builds no other test target from `tests/`
+# (`autotests = false`), so a new test file is a `mod` line there.
+[[test]]
+name = "all"

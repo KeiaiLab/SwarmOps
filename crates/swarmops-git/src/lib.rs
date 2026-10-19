@@ -1,0 +1,27 @@
+//! SwarmOps' reading of git: the repositories `git import` takes history from, and the exact
+//! bytes of git's commits and trees.
+//!
+//! - [`oid`]: git's object ids ([`GitOid`]), its object kinds ([`RawKind`]) and formats
+//!   ([`ObjectFormat`]), and [`git_hash`], the id git gives an object's bytes.
+//! - [`raw`]: git's commit and tree bytes parsed into their fields ([`RawCommit`], [`RawIdent`],
+//!   [`RawTree`]) and rendered back: a commit git wrote renders to its own bytes, and one written
+//!   another way to other bytes.
+//! - [`source`]: [`GitSource`], what the import reads from a repository: refs resolved to
+//!   commits, and objects' raw bytes, each checked against its id.
+//! - [`gix_source`]: [`GixSource`], the [`GitSource`] of a repository on disk.
+//!
+//! Umbrella decision 3: gix is pinned (`=0.89.0`, its `sha1` feature alone, no default features)
+//! and seen by [`gix_source`] alone, which also computes the SHA-1 behind [`git_hash`]. Everything
+//! above [`GitSource`] reads raw bytes and parses them with this crate's own parsers, never with
+//! gix's, so git2 (0.21.0, the fallback) would be a second [`GitSource`] in place of
+//! [`gix_source`], and nothing else would change.
+
+pub mod gix_source;
+pub mod oid;
+pub mod raw;
+pub mod source;
+
+pub use gix_source::GixSource;
+pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
+pub use raw::{RawCommit, RawError, RawIdent, RawTree, RawTreeEntry};
+pub use source::{GitSource, SourceError, Unsupported};

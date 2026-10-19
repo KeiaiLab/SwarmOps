@@ -1,0 +1,248 @@
+//! The repository the import reads, through gix: every object of the fixtures read by its id, refs
+//! resolved to commits as git resolves them, replacement refs never followed, and the repositories
+//! it does not read refused when it opens them.
+
+use std::fs;
+use std::path::Path;
+
+use swarmops_git::{GitOid, GitSource, GixSource, ObjectFormat, RawKind, SourceError, Unsupported};
+use swarmops_testkit::git::{self, GitFixture, Manifest};
+
+fn oid(hex: &str) -> GitOid {
+    hex.parse().unwrap_or_else(|error| panic!("{hex}: {error}"))
+}
+
+fn repo(fixture: &GitFixture) -> &Path {
+    fixture
+        .repo
+        .as_deref()
+        .expect("the fixture holds a repository")
+}
+
+fn manifest(fixture: &GitFixture) -> &Manifest {
+    fixture
+        .manifest
+        .as_ref()
+        .expect("the fixture has a manifest")
+}
+
+fn open(fixture: &GitFixture) -> GixSource {
+    GixSource::open(repo(fixture)).unwrap_or_else(|error| panic!("open: {error}"))
+}
+
+#[test]
+fn gix_source_reads_every_fixture_object_by_its_oid() {
+    let mut read = 0;
+    for name in git::names() {
+        let fixture = git::fixture(&name);
+        let (Some(repo), Some(manifest)) = (&fixture.repo, &fixture.manifest) else {
+            continue;
+        };
+        // What the source refuses when it opens it (`gix_source_refuses_what_it_does_not_read`).
+        if manifest.object_format != "sha1" || manifest.shallow {
+            continue;
+        }
+        let source = GixSource::open(repo).unwrap_or_else(|error| panic!("{name}: {error}"));
+        assert_eq!(source.object_format(), ObjectFormat::Sha1, "{name}");
+        for commit in &manifest.commits {
+            let id = oid(&commit.oid);
+            let got = source
+                .read(id)
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(
+                got == (RawKind::Commit, commit.raw.clone()),
+                "{name}: commit {id}"
+            );
+            let size = u64::try_from(commit.raw.len()).unwrap();
+            assert_eq!(
+                source.header(id),
+                Ok((RawKind::Commit, size)),
+                "{name}: {id}"
+            );
+            read += 1;
+        }
+        for (hex, bytes) in &manifest.trees {
+            let got = source
+                .read(oid(hex))
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(got == (RawKind::Tree, bytes.clone()), "{name}: tree {hex}");
+            read += 1;
+        }
+        for (hex, size) in &manifest.blobs {
+            assert_eq!(
+                source.header(oid(hex)),
+                Ok((RawKind::Blob, *size)),
+                "{name}: blob {hex}"
+            );
+            read += 1;
+        }
+    }
+    assert!(read > 0, "no fixture object was read");
+}
+
+#[test]
+fn resolve_peels_head_names_tags_and_ids() {
+    let fixture = git::fixture("merges");
+    let manifest = manifest(&fixture);
+    let source = open(&fixture);
+    let main = oid(&manifest.refs["refs/heads/main"]);
+    for name in ["HEAD", "main", "refs/heads/main", "heads/main"] {
+        assert_eq!(source.resolve(name), Ok(main), "{name}");
+    }
+    // An annotated tag peels to its commit, a lightweight one names it.
+    assert_eq!(
+        source.resolve("v1"),
+        Ok(oid(&manifest.refs["refs/tags/v1"]))
+    );
+    assert_eq!(
+        source.resolve("refs/tags/v1"),
+        Ok(oid(&manifest.refs["refs/tags/v1"]))
+    );
+    assert_eq!(
+        source.resolve("light"),
+        Ok(oid(&manifest.refs["refs/tags/light"]))
+    );
+    // 40 hex digits of either case name the object itself.
+    let first = &manifest.commits[0];
+    assert_eq!(source.resolve(&first.oid), Ok(oid(&first.oid)));
+    assert_eq!(
+        source.resolve(&first.oid.to_uppercase()),
+        Ok(oid(&first.oid))
+    );
+    // A tree is no commit.
+    assert_eq!(
+        source.resolve(&first.tree),
+        Err(SourceError::NotACommit {
+            name: first.tree.clone(),
+            kind: RawKind::Tree,
+        })
+    );
+    // No ref, no object of that id, and no revision syntax (gix's `revision` feature is off).
+    for name in [
+        "nope",
+        "main~3",
+        "a..b",
+        "0123456789abcdef0123456789abcdef01234567",
+    ] {
+        assert_eq!(
+            source.resolve(name),
+            Err(SourceError::RefNotFound {
+                name: name.to_owned()
+            }),
+            "{name}"
+        );
+    }
+    // A `HEAD` that names a branch with no commit yet.
+    fs::write(repo(&fixture).join("HEAD"), "ref: refs/heads/unborn\n").unwrap();
+    assert_eq!(
+        open(&fixture).resolve("HEAD"),
+        Err(SourceError::RefNotFound {
+            name: "HEAD".to_owned()
+        })
+    );
+}
+
+#[test]
+fn gix_source_refuses_what_it_does_not_read() {
+    // (the repository's `config`, what opening it gives)
+    let configs: [(&str, Result<(), SourceError>); 4] = [
+        (
+            "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
+             [extensions]\n\tobjectFormat = sha256\n",
+            Err(SourceError::Unsupported(Unsupported::ObjectFormat(
+                "sha256".to_owned(),
+            ))),
+        ),
+        (
+            "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
+             [extensions]\n\trefStorage = reftable\n",
+            Err(SourceError::Unsupported(Unsupported::RefStorage(
+                "reftable".to_owned(),
+            ))),
+        ),
+        // The files of `refs/` and `packed-refs` are what gix reads; naming them changes nothing.
+        (
+            "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
+             [extensions]\n\trefStorage = files\n\tobjectFormat = sha1\n",
+            Ok(()),
+        ),
+        // A partial clone's repository opens; its missing objects are `Missing` when read.
+        (
+            "[core]\n\trepositoryformatversion = 1\n\tbare = true\n\
+             [extensions]\n\tpartialclone = origin\n",
+            Ok(()),
+        ),
+    ];
+    for (config, expected) in configs {
+        let fixture = git::fixture("linear");
+        fs::write(repo(&fixture).join("config"), config).unwrap();
+        assert_eq!(
+            GixSource::open(repo(&fixture)).map(|_| ()),
+            expected,
+            "{config}"
+        );
+    }
+
+    // A shallow clone: a `shallow` file naming the commits whose parents it lacks.
+    let fixture = git::fixture("linear");
+    let root = &manifest(&fixture).commits[0].oid;
+    fs::write(repo(&fixture).join("shallow"), format!("{root}\n")).unwrap();
+    assert_eq!(
+        GixSource::open(repo(&fixture)).map(|_| ()),
+        Err(SourceError::Unsupported(Unsupported::Shallow))
+    );
+
+    // No repository: the fixture's directory, which holds one, and an empty directory.
+    let empty = tempfile::tempdir().unwrap();
+    for path in [fixture.dir.as_path(), empty.path()] {
+        assert!(
+            matches!(GixSource::open(path), Err(SourceError::NotARepo { .. })),
+            "{}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn replacement_refs_are_not_followed() {
+    let fixture = git::fixture("linear");
+    let commits = &manifest(&fixture).commits;
+    let (c2, c3) = (&commits[1], &commits[2]);
+    let replace = repo(&fixture).join("refs/replace");
+    fs::create_dir_all(&replace).unwrap();
+    fs::write(replace.join(&c2.oid), format!("{}\n", c3.oid)).unwrap();
+    let config = repo(&fixture).join("config");
+    let mut text = fs::read_to_string(&config).unwrap();
+    // git reads `refs/replace/<c2>` in place of `c2` unless told otherwise; and gix 0.89 loads
+    // the replacements when the repository's configuration says `core.useReplaceRefs = false`.
+    for told in ["", "[core]\n\tuseReplaceRefs = false\n"] {
+        text.push_str(told);
+        fs::write(&config, &text).unwrap();
+        let source = open(&fixture);
+        assert!(
+            source.read(oid(&c2.oid)) == Ok((RawKind::Commit, c2.raw.clone())),
+            "{told:?}: c2 reads as another commit"
+        );
+        let size = u64::try_from(c2.raw.len()).unwrap();
+        assert_eq!(
+            source.header(oid(&c2.oid)),
+            Ok((RawKind::Commit, size)),
+            "{told:?}"
+        );
+    }
+}
+
+#[test]
+fn an_object_the_repository_lacks_is_missing() {
+    let fixture = git::fixture("linear");
+    let source = open(&fixture);
+    let absent = oid("0123456789abcdef0123456789abcdef01234567");
+    assert_eq!(
+        source.read(absent),
+        Err(SourceError::Missing { oid: absent })
+    );
+    assert_eq!(
+        source.header(absent),
+        Err(SourceError::Missing { oid: absent })
+    );
+}

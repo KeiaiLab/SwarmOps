@@ -332,6 +332,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `git hash-object --literally` where git would not write it: `gitlinks`, `paths`, `modes_odd`,
   `tree_order`, `empty_trees` and `nonstandard`. And the repositories the import does not read:
   `sha256`, `shallow`, `partial_clone` and `corrupt_object`.
+- `swarmops-git`, the git import's reading of git: git's commit and tree bytes parsed into their
+  fields and rendered back byte for byte (`RawCommit`, `RawIdent`, `RawTree`), lenient where the
+  fields can still hold a commit git would not write, which then renders to other bytes; the ids
+  git gives objects (`GitOid`, `git_hash`); and `GitSource`, what the import reads from a
+  repository: `HEAD`, a ref's full or short name or 40 hex digits resolved to a commit through
+  annotated tags, and objects' bytes, each checked against its id. `GixSource` reads a repository
+  on disk through gix 0.89.0 (pinned, its `sha1` feature alone, the workspace's one new runtime
+  dependency): it refuses a SHA-256 repository, reftable refs and a shallow clone before any read,
+  and never follows replacement refs.
 
 ### Changed
 
