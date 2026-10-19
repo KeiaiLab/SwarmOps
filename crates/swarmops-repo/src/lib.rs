@@ -3,7 +3,8 @@
 //! directories at a changeset without a checkout ([`Repo::read_blob_at`], [`Repo::list_tree`]),
 //! resolves revisions ([`Repo::resolve`]), walks first-parent history
 //! ([`Repo::log_first_parent`]), moves refs by compare-and-swap ([`Repo::cas_ref`]), and checks
-//! a whole store ([`Repo::verify`]).
+//! a whole store ([`Repo::verify`]). For the git import it records changesets whose every field
+//! the caller gives, many in one journal frame ([`Repo::commit_raw_batch`]).
 //!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
@@ -13,6 +14,7 @@
 pub mod commit;
 pub mod error;
 pub mod log;
+pub mod raw;
 pub mod read;
 pub mod repo;
 mod tree_edit;
@@ -23,6 +25,7 @@ pub use commit::{
     RESERVED_METADATA_KEY_SUFFIX, check_metadata,
 };
 pub use error::RepoError;
+pub use raw::{MAX_RAW_BATCH, RawBatch, RawBatchOutcome, RawChangeset, RawOutcome};
 pub use read::StoredChangeset;
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};

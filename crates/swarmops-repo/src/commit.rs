@@ -269,19 +269,7 @@ impl<O: ObjectStore> Repo<O> {
     /// metadata store gives at insert), a parent listed twice ([`StoreError::DuplicateParent`]),
     /// or one not in the store ([`RepoError::UnknownParent`]).
     fn check_parents(&self, parents: &[ChangesetId]) -> Result<(), RepoError> {
-        if parents.len() > MAX_PARENTS {
-            return Err(StoreError::Limit {
-                what: LimitKind::Parents,
-                max: to_u64(MAX_PARENTS),
-                got: to_u64(parents.len()),
-            }
-            .into());
-        }
-        for (at, parent) in parents.iter().enumerate() {
-            if parents[..at].contains(parent) {
-                return Err(StoreError::DuplicateParent(*parent).into());
-            }
-        }
+        check_parent_list(parents)?;
         if parents.is_empty() {
             return Ok(());
         }
@@ -383,6 +371,27 @@ pub fn check_metadata(metadata: &[(String, Vec<u8>)]) -> Result<(), RepoError> {
         Some((key, _)) => Err(RepoError::ReservedMetadataKey { key: key.clone() }),
         None => Ok(()),
     }
+}
+
+/// Refuses more parents than a journal record holds ([`StoreError::Limit`], as the metadata
+/// store gives at insert) or a parent listed twice ([`StoreError::DuplicateParent`]): what every
+/// writer of changesets checks of a parent list before it looks a parent up, [`Repo::commit`] and
+/// [`Repo::commit_raw_batch`] among them.
+pub(crate) fn check_parent_list(parents: &[ChangesetId]) -> Result<(), RepoError> {
+    if parents.len() > MAX_PARENTS {
+        return Err(StoreError::Limit {
+            what: LimitKind::Parents,
+            max: to_u64(MAX_PARENTS),
+            got: to_u64(parents.len()),
+        }
+        .into());
+    }
+    for (at, parent) in parents.iter().enumerate() {
+        if parents[..at].contains(parent) {
+            return Err(StoreError::DuplicateParent(*parent).into());
+        }
+    }
+    Ok(())
 }
 
 /// `changes` sorted by path, once checked: not empty (unless `allow_empty`), each path once.

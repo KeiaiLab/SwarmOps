@@ -4,6 +4,7 @@
 //! here.
 
 mod commit;
+mod raw;
 mod read;
 mod verify;
 

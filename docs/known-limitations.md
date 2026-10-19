@@ -148,10 +148,6 @@ left).
   a commit's outcome is unknown (its process died before it answered) and it is run again, a
   first attempt that did commit stays as an unreferenced changeset beside the second. An
   idempotency key (`commit --key`) closes this. *Target: M4. Found: M1 final fix pass.*
-- **No second root commit.** Once `main` exists, an omitted parent means `main`'s head (the
-  advanced ref's, for a `commit --advance`), so the API makes a root commit only with `advance`
-  naming a ref that does not exist yet. *Target: M3 (`commit_raw`, which git import needs).
-  Found: M1 Task 4a; final review, question 12.*
 - **`--expect` with a ref name cannot detect a move.** A ref name given as the expected target
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
@@ -368,6 +364,6 @@ each ruling is tracked above:
 | 9 | Wide directories in `ls` | size and depth | M2, "`ls` of a wide directory" |
 | 10 | Parked helper threads | the daemon | M10, "An abandoned lock wait" |
 | 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | M6, "The crash model" |
-| 12 | Second root commits | `commit_raw` | M3, "No second root commit" |
+| 12 | Second root commits | `commit_raw` | closed in M3: `Repo::commit_raw`, the git import's writer, makes a root changeset whatever refs exist |
 | 13 | `--expect` with a ref name | documented | "`--expect` with a ref name" |
 | 14 | Tests that read host repositories | none in M1: nothing to judge | M3, "No test reads a real repository" |
