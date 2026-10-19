@@ -177,6 +177,16 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   none of them. Its numbers, in the M1.5 section of [docs/perf.md](docs/perf.md), are the
   quiet-window run's at the plan's sizes (2026-10-17), no longer provisional.
 
+#### M1.6: the code-review follow-ups (2026-10-19)
+
+- The store-level 32-process contention measurement (`crates/swarmops-store/tests/contention.rs`)
+  can add other writers' object syncs: with `SWARMOPS_TEST_CONTENTION_OBJECT_SYNCS=<n>` each
+  writer puts and flushes n new 4 KiB blobs of its own before each transaction, outside the
+  lock, as a CLI commit writes its objects, and the table gives n and each transaction's time
+  in the lock once `write()` returned (p50, p99 and max). A test in the default gate checks that
+  the objects are new each time and durable before the lock is taken, and that none of their
+  calls is made under it.
+
 ### Changed
 
 #### M1.6: the code-review follow-ups (2026-10-19)
