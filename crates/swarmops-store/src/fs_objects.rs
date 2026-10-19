@@ -2,12 +2,14 @@
 //!
 //! An object file is `"SOB1" | kind u8 {0 blob, 1 tree, 2 changeset} | enc u8 {0 raw,
 //! 1 zstd} | u16le 0 | u64le ulen | payload`; the id is always the hash of the decoded
-//! payload, so every read is verified.
+//! payload, so every read of an object is verified. [`ObjectStore::stat`] reads the header
+//! alone, for the kind and the length it records, and verifies nothing.
 //!
-//! A write hashes the payload, skips the work if the object file exists, writes and
-//! `sync_all`s a temp file in `objects/tmp/`, and links it into `objects/<2hex>/`
-//! without replacing anything. [`ObjectStore::flush`] then fsyncs each touched fan-out
-//! directory once, plus `objects/` itself when a put created a fan-out directory, which
+//! A write takes the payload with its id ([`Hashed`]: its caller hashed it, once;
+//! [`ObjectStore::put`] hashes its own), skips the work if the object file exists, writes and
+//! `sync_all`s a temp file in `objects/tmp/` (made at most once a batch), and links it into
+//! `objects/<2hex>/` without replacing anything. [`ObjectStore::flush`] then fsyncs each touched
+//! fan-out directory once, plus `objects/` itself when a put created a fan-out directory, which
 //! is what makes the new names survive power loss. It makes those fsyncs at once, on
 //! `put_batch`'s pool: while any process has metadata pending, ext4 turns each directory
 //! fsync into a journal commit of its own, and concurrent fsyncs share commits
@@ -15,16 +17,17 @@
 
 use std::collections::BTreeSet;
 use std::io::{self, Read};
+use std::os::unix::fs::FileExt;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use rayon::ThreadPool;
 use rayon::prelude::*;
 use swarmops_core::bytes::to_u64;
-use swarmops_core::{ObjectId, ObjectKind, hash_object};
+use swarmops_core::{Hashed, ObjectId, ObjectKind, hash_object};
 
 use crate::error::{FileOp, IoFailure, LimitKind, StoreError};
-use crate::fs_ops::{FsMethod, FsOps, HookedFs, LinkOutcome, RealFs, StoreFs};
+use crate::fs_ops::{FsMethod, FsOps, HookedFs, LinkOutcome, RealFs, StoreFs, open_regular};
 use crate::layout::Layout;
 
 const MAGIC: [u8; 4] = *b"SOB1";
@@ -62,6 +65,14 @@ pub trait ObjectStore: Send + Sync {
     /// before any object of the batch is hashed or written.
     fn put_batch(&self, items: Vec<(ObjectKind, Vec<u8>)>) -> Result<Vec<ObjectId>, StoreError>;
 
+    /// Stores objects their caller hashed, in parallel as [`ObjectStore::put_batch`] does, and
+    /// says of each, in input order, whether this call placed its file
+    /// ([`PutOutcome::written`]). The store hashes none of them again: a [`Hashed`] carries the
+    /// id of its own payload, which only hashing makes. A payload longer than [`MAX_OBJECT_LEN`]
+    /// anywhere in `items` is refused as `put_batch` refuses it, before any object of the batch
+    /// is written.
+    fn put_hashed_batch(&self, items: Vec<Hashed>) -> Result<Vec<PutOutcome>, StoreError>;
+
     /// Reads one object, verified against `id`; `None` if it is not stored. An object file whose
     /// header records a payload longer than [`MAX_OBJECT_LEN`] is [`StoreError::BadHeader`],
     /// refused before anything is allocated for the payload.
@@ -70,8 +81,23 @@ pub trait ObjectStore: Send + Sync {
     /// Whether an object file for `id` exists (not verified).
     fn contains(&self, id: ObjectId) -> Result<bool, StoreError>;
 
-    /// Makes every object put since the last flush durable. An implementation may wait on a
-    /// thread pool meanwhile, as [`FsObjectStore`]'s does: see there what that rules out.
+    /// The kind and the payload length of object `id`, as its file's 16-byte header records
+    /// them; `None` if it is not stored. Reads the header alone ([`FsObjectStore`]: through
+    /// `std::fs`, with no [`FsOps`] call), so it neither reads the payload nor verifies it
+    /// ([`ObjectStore::get`] does): the length is the header's own, however large, since nothing
+    /// is allocated by it. A header this store does not write (its magic, kind, encoding or
+    /// reserved bytes), or a file shorter than one, is [`StoreError::BadHeader`].
+    fn stat(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError>;
+
+    /// [`ObjectStore::stat`]; and when the object is stored, its fan-out directory joins the next
+    /// [`ObjectStore::flush`]'s fsyncs, as a put of an object stored already does: for a caller
+    /// about to rely on an object it did not write, which another writer may have linked without
+    /// having fsynced its directory yet.
+    fn retain(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError>;
+
+    /// Makes every object put or retained since the last flush durable. An implementation may
+    /// wait on a thread pool meanwhile, as [`FsObjectStore`]'s does: see there what that rules
+    /// out.
     fn flush(&self) -> Result<(), StoreError>;
 
     /// The id of every object stored, in ascending order. Reads no object, so it verifies
@@ -79,29 +105,78 @@ pub trait ObjectStore: Send + Sync {
     fn list(&self) -> Result<Vec<ObjectId>, StoreError>;
 }
 
+/// What [`ObjectStore::put_hashed_batch`] did with one object.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PutOutcome {
+    /// The object's id.
+    pub id: ObjectId,
+    /// Whether this call placed the object's file: its no-clobber link made the name
+    /// ([`LinkOutcome::Placed`]). Not when the object was stored already, nor when a writer
+    /// racing this one linked it first (the file then holds the same bytes all the same).
+    pub written: bool,
+}
+
+/// An object's kind and payload length, as its file's header records them
+/// ([`ObjectStore::stat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ObjectStat {
+    /// The object's kind.
+    pub kind: ObjectKind,
+    /// The length of its payload, decoded: of what [`ObjectStore::get`] returns, if the file is
+    /// whole.
+    pub size: u64,
+}
+
+/// `objects/tmp`, made at most once a batch: by the batch's first put that writes a file, and not
+/// again once that has succeeded. A failed attempt fails that put, and the next put that writes
+/// tries again.
+#[derive(Default)]
+struct TmpOnce {
+    /// Whether this batch has made `objects/tmp`.
+    made: Mutex<bool>,
+}
+
+impl TmpOnce {
+    /// Makes `objects/tmp` through `store`'s filesystem, unless this batch has made it.
+    fn make(&self, store: &FsObjectStore) -> Result<(), IoFailure> {
+        // The flag is set only once the directory is made, so a holder that panicked left it
+        // true to what happened; poisoning carries no information here.
+        let mut made = self.made.lock().unwrap_or_else(PoisonError::into_inner);
+        if !*made {
+            store
+                .fs
+                .create_dir_all(store.layout.objects_tmp().as_std_path())?;
+            *made = true;
+        }
+        Ok(())
+    }
+}
+
 /// [`ObjectStore`] over loose files in a store's `objects/` directory.
 ///
 /// Needs no lock between processes: no write ever replaces a file, and writers racing
 /// on one id produce identical bytes.
 ///
-/// `put_batch` and `flush` run their work on a rayon pool: the store's own once
-/// [`FsObjectStore::set_parallelism`] is called, else rayon's global pool. `flush` holds a
+/// `put_batch`, `put_hashed_batch` and `flush` run their work on a rayon pool: the store's own
+/// once [`FsObjectStore::set_parallelism`] is called, else rayon's global pool. `flush` holds a
 /// lock of the store while it waits for its fsyncs on that pool, and a pool thread that waits
 /// may run other tasks of the pool meanwhile. So never call `flush` (or anything that
 /// flushes, such as a commit) from a task on that same pool: if such a task flushed the same
 /// store while another flush waited, the two would deadlock.
 pub struct FsObjectStore {
     layout: Layout,
-    /// Every filesystem call goes through it, its failure located in the store.
+    /// Every filesystem call but those of `list` and `stat` goes through it, its failure located
+    /// in the store; theirs are located through it too.
     fs: StoreFs,
-    /// Directories `flush` must fsync: the fan-out directory of every object put since
-    /// the last flush, and `objects/` if one of those fan-out directories was created.
+    /// Directories `flush` must fsync: the fan-out directory of every object put or retained
+    /// since the last flush, and `objects/` if one of those fan-out directories was created.
     touched: Mutex<BTreeSet<Utf8PathBuf>>,
     /// Held by `flush` from taking the touched set through its last fsync, so that no
     /// flush returns while an earlier one is still fsyncing directories the caller's
-    /// objects rely on. Lock order: `flush_lock`, then `touched`; `put` takes only `touched`.
+    /// objects rely on. Lock order: `flush_lock`, then `touched`; `put` and `retain` take only
+    /// `touched`.
     flush_lock: Mutex<()>,
-    /// The pool of `put_batch` and of `flush`'s fsyncs once
+    /// The pool of `put_batch`, `put_hashed_batch` and `flush`'s fsyncs once
     /// [`FsObjectStore::set_parallelism`] is called; until then, rayon's global pool.
     pool: Option<ThreadPool>,
 }
@@ -147,12 +222,12 @@ impl FsObjectStore {
         }
     }
 
-    /// Runs [`ObjectStore::put_batch`], and the directory fsyncs of [`ObjectStore::flush`], on
-    /// a pool of its own with `threads` threads (0: one per available core). With 1 both go
-    /// one at a time, `flush` on the calling thread and in path order, so that a test counting
-    /// [`FsOps`] calls (a crash sweep's `CrashAtFs`) meets the same call at the same count in
-    /// every run. Until this is called, both use rayon's global pool, which by default also has
-    /// one thread per available core.
+    /// Runs [`ObjectStore::put_batch`] and [`ObjectStore::put_hashed_batch`], and the directory
+    /// fsyncs of [`ObjectStore::flush`], on a pool of its own with `threads` threads (0: one per
+    /// available core). With 1 the puts and the fsyncs go one at a time, `flush` on the calling
+    /// thread and in path order, so that a test counting [`FsOps`] calls (a crash sweep's
+    /// `CrashAtFs`) meets the same call at the same count in every run. Until this is called,
+    /// they use rayon's global pool, which by default also has one thread per available core.
     ///
     /// # Panics
     ///
@@ -171,23 +246,72 @@ impl FsObjectStore {
         self.touched.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Writes the file for an object that is not stored yet: temp file, `sync_all`,
-    /// no-clobber link into its fan-out directory `fanout` ([`link_new_file`]).
+    /// Writes the file for an object that is not stored yet: temp file in `objects/tmp` (which
+    /// `tmp_dir` makes once a batch), `sync_all`, no-clobber link into its fan-out directory
+    /// `fanout` ([`link_new_file`]). Returns whether the link placed the file.
     fn write_new(
         &self,
         kind: ObjectKind,
         payload: &[u8],
         path: &Utf8Path,
         fanout: &Utf8Path,
-    ) -> Result<(), StoreError> {
+        tmp_dir: &TmpOnce,
+    ) -> Result<bool, StoreError> {
         let file = encode(kind, payload).map_err(|e| self.fs.locate(FileOp::Compress, path, e))?;
-        let tmp_dir = self.layout.objects_tmp();
-        self.fs.create_dir_all(tmp_dir.as_std_path())?;
+        tmp_dir.make(self)?;
         self.ensure_fanout(fanout)?;
-        // `AlreadyExists` counts as success: a racing writer placed the same id, which in a
-        // content-addressed store means the same bytes.
-        link_new_file(&self.fs, &tmp_dir, &file, path)?;
-        Ok(())
+        // `AlreadyExists` counts as success, but not as this call's write: a racing writer placed
+        // the same id, which in a content-addressed store means the same bytes.
+        let outcome = link_new_file(&self.fs, &self.layout.objects_tmp(), &file, path)?;
+        Ok(outcome == LinkOutcome::Placed)
+    }
+
+    /// Stores object `kind`/`payload`, whose id its caller hashed it to, making `objects/tmp`
+    /// through `tmp_dir` if it writes the file. Returns whether this call placed the file.
+    fn put_object(
+        &self,
+        kind: ObjectKind,
+        id: ObjectId,
+        payload: &[u8],
+        tmp_dir: &TmpOnce,
+    ) -> Result<bool, StoreError> {
+        let path = self.layout.object_path(id);
+        let fanout = path
+            .parent()
+            .expect("an object path has a fan-out directory");
+        let placed = if self.fs.exists(path.as_std_path())? {
+            false
+        } else {
+            self.write_new(kind, payload, &path, fanout, tmp_dir)?
+        };
+        // Touched even when the object was already there: another process may have linked
+        // it without having fsynced the directory yet, and the caller is about to rely on it.
+        // That the next flush's fsync then makes the name durable is storage spec §2 rule 5's
+        // assumption: a failed fsync of the directory before it, in any process, is fail-stop on
+        // the filesystems the store supports, so no later one succeeds over a name it lost.
+        self.touched().insert(fanout.to_owned());
+        Ok(placed)
+    }
+
+    /// Puts `items` in parallel on the store's pool (see [`FsObjectStore::set_parallelism`]),
+    /// `objects/tmp` made at most once for all of them; the outcomes in input order.
+    fn put_all(
+        &self,
+        items: impl IndexedParallelIterator<Item = Hashed>,
+    ) -> Result<Vec<PutOutcome>, StoreError> {
+        let tmp_dir = TmpOnce::default();
+        let put = |item: Hashed| {
+            let written = self.put_object(item.kind(), item.id(), item.payload(), &tmp_dir)?;
+            Ok(PutOutcome {
+                id: item.id(),
+                written,
+            })
+        };
+        let put_all = || items.map(put).collect();
+        match &self.pool {
+            Some(pool) => pool.install(put_all),
+            None => put_all(),
+        }
     }
 
     /// Creates fan-out directory `fanout` if it is missing. A new directory's own entry
@@ -210,38 +334,28 @@ impl ObjectStore for FsObjectStore {
     fn put(&self, kind: ObjectKind, payload: &[u8]) -> Result<ObjectId, StoreError> {
         within_object_limit(payload)?;
         let id = hash_object(kind, payload);
-        let path = self.layout.object_path(id);
-        let fanout = path
-            .parent()
-            .expect("an object path has a fan-out directory");
-        if !self.fs.exists(path.as_std_path())? {
-            self.write_new(kind, payload, &path, fanout)?;
-        }
-        // Touched even when the object was already there: another process may have linked
-        // it without having fsynced the directory yet, and the caller is about to rely on it.
-        // That the next flush's fsync then makes the name durable is storage spec §2 rule 5's
-        // assumption: a failed fsync of the directory before it, in any process, is fail-stop on
-        // the filesystems the store supports, so no later one succeeds over a name it lost.
-        self.touched().insert(fanout.to_owned());
+        self.put_object(kind, id, payload, &TmpOnce::default())?;
         Ok(id)
     }
 
+    /// [`ObjectStore::put_hashed_batch`] of the items, each hashed on the pool as it is put.
     fn put_batch(&self, items: Vec<(ObjectKind, Vec<u8>)>) -> Result<Vec<ObjectId>, StoreError> {
         // Every payload is measured before any is put, so that one past the limit leaves
         // nothing of the batch written.
         for (_, payload) in &items {
             within_object_limit(payload)?;
         }
-        let put_all = || {
-            items
-                .into_par_iter()
-                .map(|(kind, payload)| self.put(kind, &payload))
-                .collect()
-        };
-        match &self.pool {
-            Some(pool) => pool.install(put_all),
-            None => put_all(),
+        let items = (items.into_par_iter()).map(|(kind, payload)| Hashed::new(kind, payload));
+        let outcomes = self.put_all(items)?;
+        Ok(outcomes.into_iter().map(|outcome| outcome.id).collect())
+    }
+
+    fn put_hashed_batch(&self, items: Vec<Hashed>) -> Result<Vec<PutOutcome>, StoreError> {
+        // As in `put_batch`: every payload is measured before any is put.
+        for item in &items {
+            within_object_limit(item.payload())?;
         }
+        self.put_all(items.into_par_iter())
     }
 
     fn get(&self, id: ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, StoreError> {
@@ -253,6 +367,42 @@ impl ObjectStore for FsObjectStore {
 
     fn contains(&self, id: ObjectId) -> Result<bool, StoreError> {
         Ok(self.fs.exists(self.layout.object_path(id).as_std_path())?)
+    }
+
+    /// Opens the object's file as every store file is read on a handle of its own
+    /// (`open_regular`: a path that is no regular file is refused before it is opened, as
+    /// [`ObjectStore::get`] refuses it), and reads its first 16 bytes.
+    fn stat(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError> {
+        let path = self.layout.object_path(id);
+        let file = match open_regular(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(self.fs.locate(FileOp::Open, &path, e).into()),
+        };
+        let mut header = [0; HEADER_LEN];
+        if let Err(e) = file.read_exact_at(&mut header, 0) {
+            return Err(if e.kind() == io::ErrorKind::UnexpectedEof {
+                // Shorter than a header: no object file this store writes.
+                StoreError::BadHeader { id }
+            } else {
+                self.fs.locate(FileOp::ReadAt, &path, e).into()
+            });
+        }
+        let (kind, _, size) = header_fields(&header).ok_or(StoreError::BadHeader { id })?;
+        Ok(Some(ObjectStat { kind, size }))
+    }
+
+    fn retain(&self, id: ObjectId) -> Result<Option<ObjectStat>, StoreError> {
+        let stat = self.stat(id)?;
+        if stat.is_some() {
+            let path = self.layout.object_path(id);
+            let fanout = path
+                .parent()
+                .expect("an object path has a fan-out directory");
+            // As `put_object` touches the fan-out directory of an object stored already.
+            self.touched().insert(fanout.to_owned());
+        }
+        Ok(stat)
     }
 
     /// The files of the 256 fan-out directories whose names are object ids (62 lowercase hex
@@ -404,6 +554,18 @@ fn kind_from_byte(byte: u8) -> Option<ObjectKind> {
     }
 }
 
+/// The kind, the encoding and the payload length an object file's header records; `None` if its
+/// magic, kind, encoding or reserved bytes are not ones this store writes.
+fn header_fields(header: &[u8; HEADER_LEN]) -> Option<(ObjectKind, u8, u64)> {
+    let enc = header[5];
+    if header[..4] != MAGIC || header[6..8] != [0, 0] || !matches!(enc, ENC_RAW | ENC_ZSTD) {
+        return None;
+    }
+    let kind = kind_from_byte(header[4])?;
+    let ulen = u64::from_le_bytes(header[8..].try_into().expect("8 bytes"));
+    Some((kind, enc, ulen))
+}
+
 /// The object file for `payload`: zstd when the payload has at least 128 bytes and
 /// compresses smaller, raw otherwise.
 fn encode(kind: ObjectKind, payload: &[u8]) -> io::Result<Vec<u8>> {
@@ -457,17 +619,13 @@ fn decode_capped(
     let (header, body) = file
         .split_first_chunk::<HEADER_LEN>()
         .ok_or_else(bad_header)?;
-    if header[..4] != MAGIC || header[6..8] != [0, 0] {
-        return Err(bad_header());
-    }
-    let kind = kind_from_byte(header[4]).ok_or_else(bad_header)?;
-    let ulen = u64::from_le_bytes(header[8..].try_into().expect("8 bytes"));
+    let (kind, enc, ulen) = header_fields(header).ok_or_else(bad_header)?;
     // No object holds more, whatever its encoding: refused before a buffer is sized by it.
     if ulen > MAX_OBJECT_LEN {
         return Err(bad_header());
     }
     let ulen = usize::try_from(ulen).map_err(|_| bad_header())?;
-    let payload = match header[5] {
+    let payload = match enc {
         ENC_RAW if body.len() == ulen => {
             // One move of the payload to the front of the buffer it was read into.
             file.drain(..HEADER_LEN);

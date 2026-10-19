@@ -5,6 +5,9 @@
 //! hold: the repository engine re-exports this crate as `swarmops_repo::merge`, and M3's
 //! importer diffs the trees it has just built in memory.
 
+pub mod line_diff;
+pub mod tree_diff;
+
 #[cfg(test)]
 mod tests {
     use imara_diff::{Algorithm, Diff, Hunk, InternedInput};
