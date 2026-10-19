@@ -90,7 +90,10 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
   on purpose, byte for byte the same when nothing changed, with the git that
   `git-fixtures/GIT_VERSION` declares (2.43.0; `SWARMOPS_GIT` names the binary, and any other
   version is refused unless `SWARMOPS_GIT_FIXTURES_ANY_GIT=1`): review the diff and commit it
-  with the scripts. A new fixture is one more script and the archive that command writes.
+  with the scripts. A new fixture is one more script and the archive that command writes. A
+  script whose first lines say `# needs git X.Y` is made by that release or a later one only: an
+  older git skips it and says so. While the declared git is older, such a script has no archive,
+  and only the version matrix's newest git makes it (`reftable`).
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
   build without the feature can name), and a release build honours no test hook. The hooks are
@@ -179,9 +182,10 @@ there belongs in a regression test.
 GitHub Actions runs `just check` on every push to `stable` and to `feat/**` branches and on every
 pull request to `stable`. The one check to look at is `tests-pass`: it passes only when every job
 it depends on passed. A weekly scheduled workflow runs `just check-ci-slow`, a 60-second fuzz
-smoke of every target, and the format, lint and test commands of `bench/compare` (a cargo
-workspace of its own that `just check` does not build). Dependabot proposes grouped, weekly
-updates for Cargo and GitHub Actions, after a cooldown; review them like any other change.
+smoke of every target, the format, lint and test commands of `bench/compare` (a cargo workspace
+of its own that `just check` does not build) and the git version matrix. Dependabot proposes
+grouped, weekly updates for Cargo and GitHub Actions, after a cooldown; review them like any
+other change.
 
 - **Hung tests are killed and named.** The `ci` nextest profile ends a test after 10 minutes and
   the weekly `ci-slow` profile after 20; either way the test appears as a failure in the JUnit
@@ -193,6 +197,14 @@ updates for Cargo and GitHub Actions, after a cooldown; review them like any oth
   (`fallback: none`) takes only releases in the manifest of the pinned `install-action`, so move
   its pins in a `ci:` commit after Dependabot has bumped the action; CI's tools may therefore be
   older than the local ones (nextest 0.9.146 against 0.9.148 at M1.5).
+- **The git fixtures meet three gits a week.** The `git-matrix` job builds git 2.39.5, 2.43.0
+  (the declared one) and 2.56.0 from kernel.org's release tarballs, each checked against the
+  SHA-256 pinned beside it in `scheduled.yml` and cached by release. With each it rebuilds every
+  fixture and names each difference from the archives' manifests (`check_git_fixtures`), then
+  runs the fixture tests and the git import's on what that git made
+  (`SWARMOPS_GIT_FIXTURES_DIR`). A script a git is too old for (`# needs git X.Y`) is skipped
+  there and said to be. The newest release is moved by hand, in a `ci:` commit, with the SHA-256
+  that kernel.org's signed `sha256sums.asc` gives: Dependabot does not know it.
 - **A new RustSec advisory turns every push red** through `cargo deny check`, on purpose. Update
   the affected crate; if no fixed release exists and the advisory cannot affect SwarmOps, add an
   `ignore` entry with the advisory id and the reason to `[advisories]` in `deny.toml`, in a

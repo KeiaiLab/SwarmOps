@@ -38,8 +38,11 @@ fn gix_source_reads_every_fixture_object_by_its_oid() {
         let (Some(repo), Some(manifest)) = (&fixture.repo, &fixture.manifest) else {
             continue;
         };
-        // What the source refuses when it opens it (`gix_source_refuses_what_it_does_not_read`).
-        if manifest.object_format != "sha1" || manifest.shallow {
+        // What the source refuses when it opens it (`gix_source_refuses_what_it_does_not_read`,
+        // `a_reftable_repository_is_unsupported`): another object format, a shallow clone, and
+        // refs git keeps in a reftable (its `reftable/` directory), which only a git of 2.45 or
+        // newer makes.
+        if manifest.object_format != "sha1" || manifest.shallow || repo.join("reftable").is_dir() {
             continue;
         }
         let source = GixSource::open(repo).unwrap_or_else(|error| panic!("{name}: {error}"));
@@ -201,6 +204,26 @@ fn gix_source_refuses_what_it_does_not_read() {
             path.display()
         );
     }
+}
+
+#[test]
+fn a_reftable_repository_is_unsupported() {
+    // Only git 2.45 and newer keep refs in a reftable (`reftable.sh` needs it): the version
+    // matrix's newest git builds the fixture and hands it over in `SWARMOPS_GIT_FIXTURES_DIR`.
+    // The archives, which the declared git 2.43.0 made, lack it.
+    if let Some(why) = git::skipped("reftable") {
+        eprintln!("a_reftable_repository_is_unsupported: no reftable fixture at hand: {why}");
+        return;
+    }
+    let fixture = git::fixture("reftable");
+    // git kept the refs in a reftable, not as files with a configuration that says otherwise.
+    assert!(repo(&fixture).join("reftable/tables.list").is_file());
+    assert_eq!(
+        GixSource::open(repo(&fixture)).map(|_| ()),
+        Err(SourceError::Unsupported(Unsupported::RefStorage(
+            "reftable".to_owned()
+        )))
+    );
 }
 
 #[test]

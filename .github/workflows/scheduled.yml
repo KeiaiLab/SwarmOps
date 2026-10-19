@@ -1,8 +1,9 @@
 # What is too slow for every push, weekly and on demand: `just check-ci-slow` (the regular suite
 # at 2,000 proptest cases plus the ignored slow tests, crash sweeps included, without the
 # 32-process contention measurements), a 60-second fuzz smoke of every fuzz target on nightly,
-# and the formatting, lints and tests of bench/compare, a workspace of its own that `just check`
-# does not build. Hardened and pinned to ubuntu-24.04 as ci.yml is.
+# the formatting, lints and tests of bench/compare, a workspace of its own that `just check`
+# does not build, and the git version matrix, which rebuilds the git fixtures with three gits and
+# runs the git import's tests on what each made. Hardened and pinned to ubuntu-24.04 as ci.yml is.
 name: Scheduled
 
 on:
@@ -134,3 +135,87 @@ jobs:
       - run: cargo fmt --manifest-path bench/compare/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path bench/compare/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path bench/compare/Cargo.toml
+
+  # The git fixtures (crates/swarmops-testkit/git-fixtures/) rebuilt by three gits: 2.39.5, the
+  # oldest the import is tried with; 2.43.0, which makes the committed archives
+  # (git-fixtures/GIT_VERSION); and 2.56.0, the newest 2.x on 2026-10-19, moved by hand. Each git
+  # is built from kernel.org's release tarball, checked against the SHA-256 that kernel.org's
+  # signed sha256sums.asc gives, and cached by release. `check_git_fixtures` rebuilds every
+  # fixture into $RUNNER_TEMP/fx and names each difference from the archives' manifests (a script
+  # that git is too old for, `# needs git X.Y`, is skipped and said to be); the tests of the
+  # testkit's fixtures and of the git import then run on those fixtures instead of the archives.
+  git-matrix:
+    name: git matrix (${{ matrix.git }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - git: 2.39.5
+            sha256: c58da92c378df4a986ca33266897a7397e86c22ee266a284d8c2432c39066b59
+          - git: 2.43.0
+            sha256: 5446603e73d911781d259e565750dcd277a42836c8e392cac91cf137aa9b76ec
+          - git: 2.56.0
+            sha256: 26c56c296b38c0695b26fa95f475f1d01704d2d38e73465ca30b0b2f5dc789d3
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-nextest@0.9.146
+          fallback: none
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # The cache CI's `check` job saves on its pushes; restored here, never saved.
+          shared-key: check
+          workspaces: |
+            . -> target
+            fuzz -> target
+          cache-bin: false
+          save-if: false
+      # The install prefix is the cache, by release and tarball; the job saves it when it passes.
+      - name: Restore git ${{ matrix.git }}, built before
+        id: git-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/git
+          key: git-${{ matrix.git }}-${{ matrix.sha256 }}-ubuntu-24.04
+      # Without what the fixtures do not use (Tcl/Tk, gettext, Perl, Python, curl, expat), so
+      # that zlib's headers are the one package the build needs beyond the image's compiler.
+      - name: Build git ${{ matrix.git }} from kernel.org's release tarball
+        if: steps.git-cache.outputs.cache-hit != 'true'
+        env:
+          GIT_RELEASE: ${{ matrix.git }}
+          GIT_SHA256: ${{ matrix.sha256 }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends zlib1g-dev
+          tarball="$RUNNER_TEMP/git-$GIT_RELEASE.tar.xz"
+          curl -fsSL --retry 3 -o "$tarball" \
+            "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$GIT_RELEASE.tar.xz"
+          echo "$GIT_SHA256  $tarball" | sha256sum -c -
+          mkdir "$RUNNER_TEMP/git-src"
+          tar -xJf "$tarball" -C "$RUNNER_TEMP/git-src" --strip-components=1
+          make -C "$RUNNER_TEMP/git-src" -j"$(nproc)" prefix="$RUNNER_TEMP/git" NO_TCLTK=1 \
+            NO_GETTEXT=1 NO_PERL=1 NO_PYTHON=1 NO_CURL=1 NO_EXPAT=1 install
+      - name: Rebuild every fixture with git ${{ matrix.git }} and compare the manifests
+        run: |
+          "$RUNNER_TEMP/git/bin/git" --version
+          SWARMOPS_GIT="$RUNNER_TEMP/git/bin/git" SWARMOPS_GIT_FIXTURES_CHECK="$RUNNER_TEMP/fx" \
+            cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
+            --run-ignored ignored-only -E 'test(check_git_fixtures)' --no-capture
+      # The testkit's fixture tests and the git import's (`raw`, `source`, and `convert` and
+      # `import` once they exist), on the fixtures this git made.
+      - name: The git import's tests on the fixtures git ${{ matrix.git }} made
+        run: |
+          SWARMOPS_GIT_FIXTURES_DIR="$RUNNER_TEMP/fx" \
+            cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
+            -E 'test(/^git::/) | test(/^(raw|source|convert|import)::/)' --no-capture
