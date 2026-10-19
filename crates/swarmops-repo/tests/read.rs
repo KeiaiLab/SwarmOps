@@ -1007,3 +1007,138 @@ fn create_resumes_after_a_crash_at_any_call() {
         });
     }
 }
+
+/// One snapshot per request (storage spec §8, operations spec §4): what a [`RepoRead`] reads,
+/// it reads in one view of the metadata, which later commits and ref moves do not change.
+///
+/// [`RepoRead`]: swarmops_repo::RepoRead
+mod snapshot {
+    use swarmops_core::{BlobId, EntryTarget, TreeId};
+
+    use super::*;
+
+    /// A snapshot taken before another handle commits on `main` and moves it still resolves
+    /// `main` (with `~N`) to the old head, shows the refs as they were, reads the old head's files
+    /// and history, and holds none of what came after; a new snapshot sees the commit and the
+    /// move.
+    #[test]
+    fn a_snapshot_reads_every_revision_of_a_request_in_one_view() {
+        let (_dir, root, repo) = new_repo();
+        let c1 = commit(&repo, &[], vec![put("f", b"1")]);
+        let c2 = commit(&repo, &[c1], vec![put("f", b"2")]);
+        repo.cas_ref("main", None, Some(c2), "test/agent").unwrap();
+
+        let snap = repo.snapshot().unwrap();
+        // Another handle on the store commits on main and moves it.
+        let other = LocalRepo::open(&root).unwrap();
+        let c3 = commit(&other, &[c2], vec![put("f", b"3")]);
+        other
+            .cas_ref("main", Some(c2), Some(c3), "test/other")
+            .unwrap();
+
+        assert_eq!(
+            snap.resolve("main").unwrap(),
+            c2,
+            "main as the snapshot saw it"
+        );
+        assert_eq!(snap.resolve("main~1").unwrap(), c1);
+        let main = RefState {
+            target: c2,
+            version: 1,
+        };
+        assert_eq!(snap.get_ref("main").unwrap(), Some(main));
+        assert_eq!(snap.list_refs().unwrap(), [("main".to_owned(), main)]);
+        let info = snap.info().unwrap();
+        assert_eq!((info.changesets, info.main), (2, Some(c2)));
+        assert_eq!(
+            snap.read_blob_at(c2, &path("f")).unwrap(),
+            Some((LeafKind::File, blob(b"2"), b"2".to_vec()))
+        );
+        let log: Vec<ChangesetId> = (snap.log_first_parent(c2, 10).unwrap().iter())
+            .map(|cs| cs.id)
+            .collect();
+        assert_eq!(log, [c2, c1]);
+        // What came after the snapshot is not in it.
+        assert_eq!(snap.changeset(c3).unwrap(), None);
+        let after = c3.to_string();
+        assert_not_found(snap.resolve(&after), &after);
+        assert_not_found(snap.read_blob_at(c3, &path("f")), &after);
+
+        let fresh = repo.snapshot().unwrap();
+        assert_eq!(fresh.resolve("main").unwrap(), c3);
+        assert_eq!(fresh.resolve("main~1").unwrap(), c2);
+        assert_eq!(fresh.changeset(c3).unwrap().map(|cs| cs.id), Some(c3));
+        assert_eq!(fresh.info().unwrap().main, Some(c3));
+    }
+
+    /// `entry_at` names what a path holds at a changeset: a file with its kind and blob, a
+    /// directory with its tree (the one its parent's listing gives), or nothing, also below a
+    /// file or a missing directory. A changeset the store does not hold is `NotFound`.
+    #[test]
+    fn entry_at_names_what_a_path_holds() {
+        let (_dir, _root, repo) = new_repo();
+        let id = commit(
+            &repo,
+            &[],
+            vec![
+                put("src/lib.rs", b"pub fn f() {}\n"),
+                put_as("bin/run", LeafKind::Exec, b"#!/bin/sh\n"),
+            ],
+        );
+        let snap = repo.snapshot().unwrap();
+        let at = |p: &str| snap.entry_at(id, &path(p)).unwrap();
+        assert_eq!(
+            at("src/lib.rs"),
+            Some(EntryTarget::Leaf(LeafKind::File, blob(b"pub fn f() {}\n")))
+        );
+        assert_eq!(
+            at("bin/run"),
+            Some(EntryTarget::Leaf(LeafKind::Exec, blob(b"#!/bin/sh\n")))
+        );
+        let listed = snap.list_tree(id, None).unwrap().unwrap();
+        let src = listed.iter().find(|entry| entry.name == "src").unwrap();
+        assert!(matches!(src.target, EntryTarget::Dir(_)), "{src:?}");
+        assert_eq!(at("src"), Some(src.target));
+        for nothing in ["README.md", "src/main.rs", "src/lib.rs/x", "docs/a.md"] {
+            assert_eq!(at(nothing), None, "{nothing}");
+        }
+        let unknown = unknown_id();
+        assert_not_found(snap.entry_at(unknown, &path("src")), &unknown.to_string());
+    }
+
+    /// `tree` and `blob` read an object by id, verified as every object read is: a tree decoded,
+    /// a blob's bytes; an id the store lacks, or that names an object of the other kind, is
+    /// `MissingObject` with the kind asked for.
+    #[test]
+    fn tree_and_blob_read_verified_objects_by_id() {
+        let (_dir, _root, repo) = new_repo();
+        let id = commit(&repo, &[], vec![put("src/lib.rs", b"pub fn f() {}\n")]);
+        let snap = repo.snapshot().unwrap();
+        let Some(EntryTarget::Dir(src)) = snap.entry_at(id, &path("src")).unwrap() else {
+            panic!("src is a directory");
+        };
+        let tree = snap.tree(src).unwrap();
+        let names: Vec<&str> = tree.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["lib.rs"]);
+        let lib = blob(b"pub fn f() {}\n");
+        assert_eq!(snap.blob(lib).unwrap(), b"pub fn f() {}\n");
+
+        match snap.blob(BlobId(src.0)) {
+            Err(RepoError::MissingObject { id, kind }) => {
+                assert_eq!((id, kind), (src.0, ObjectKind::Blob));
+            }
+            other => panic!("expected MissingObject, got {other:?}"),
+        }
+        match snap.tree(TreeId(lib.0)) {
+            Err(RepoError::MissingObject { id, kind }) => {
+                assert_eq!((id, kind), (lib.0, ObjectKind::Tree));
+            }
+            other => panic!("expected MissingObject, got {other:?}"),
+        }
+        let absent = hash_object(ObjectKind::Blob, b"never stored");
+        match snap.blob(BlobId(absent)) {
+            Err(RepoError::MissingObject { id, .. }) => assert_eq!(id, absent),
+            other => panic!("expected MissingObject, got {other:?}"),
+        }
+    }
+}

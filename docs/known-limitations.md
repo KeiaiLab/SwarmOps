@@ -128,10 +128,13 @@ left).
   is read; size and depth (`ReadTreeReq.depth`, each entry's `size`) come later, and the default
   page sizes are measured again then, because `size` makes every entry longer. *Target: M2.
   Found: M1 Task 5; final review, question 9.*
-- **Every read takes a full metadata snapshot**, and a snapshot reads every ref file: cheap with
-  a few refs, linear in their number. A commit takes two; passing one through
-  is the fix once measurements ask for it. *Target: M2 (with the other commit-path costs below).
-  Found: M1 Tasks 2c, 3 and 4b.*
+- **A snapshot reads every ref file**: cheap with a few refs, linear in their number. Each
+  request reads in one snapshot of the metadata (a commit, `cat`, `ls`, `show` and `log` take one
+  each, a ref move one besides its write), so a request pays it once. Refs are `main` and
+  `release/*` alone by design; should they grow past dozens, a snapshot's reading them calls for
+  a validated lazy read, a per-handle map of refs or a packed refs file (a FORMAT change), and
+  the `read_snapshot` bench measures 0, 16 and 256 refs to tell. *Unscheduled: when refs grow
+  past dozens. Found: M1 Tasks 2c, 3 and 4b.*
 - **A large frame past the checkpoint is parsed by every read.** After a bulk write, such as a
   git import, every `read()` parses the big frame again until the next checkpoint; the import
   should flush, or the store checkpoint once the frames past it grow large. *Target: M3. Found:
