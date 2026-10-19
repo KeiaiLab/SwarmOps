@@ -499,6 +499,112 @@ fn cas_ref_rejects_unknown_target_and_bad_name() {
     assert!(listed.iter().all(|(_, state)| *state == ref_state(1, 1)));
 }
 
+/// Inside a write transaction, `get_ref` reads a ref as the transaction's own recovery left it,
+/// which is what `cas_ref` compares against: here a crashed writer's whole frame, never listed,
+/// moved `main` from changeset 1 to 2, and the next write lists and replays it before it reads.
+/// A compare-and-swap that expects what it read is applied.
+#[test]
+fn a_write_reads_a_ref_as_its_tail_check_left_it() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[]), cs(2, &[1]), cs(3, &[2])]);
+    cas(&store, "main", None, Some(1));
+    // The crashed writer's frame: whole in journal.log, its entry never in journal.off.
+    append_unmaterialized(
+        &root,
+        &[ref_move("main", Some(1), Some(2), ACTOR, unix_now())],
+    );
+    let off = Layout::new(&root).journal_off();
+    set_len(&off, file_len(&off) - 8);
+    assert_eq!(ref_file(&root, "main"), Some(ref_content(1, 1)));
+
+    let mut write = store.write().unwrap();
+    assert_eq!(write.recovered().frames_listed, 1, "the frame is listed");
+    assert_eq!(write.get_ref("main").unwrap(), Some(id(2)));
+    assert_eq!(write.get_ref("release/v1").unwrap(), None, "no such ref");
+    let moved = write
+        .cas_ref("main", Some(id(2)), Some(id(3)), ACTOR)
+        .unwrap();
+    assert_eq!(moved, CasResult::Applied { old: Some(id(2)) });
+    write.commit().unwrap();
+    let read = store.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(3, 3)));
+}
+
+/// `get_ref` reads the target this transaction's last queued move of a ref leaves, before the
+/// ref's file: a move, a delete, a ref the transaction creates, and a move to a changeset it
+/// queued itself. Dropped uncommitted, the transaction moved nothing.
+#[test]
+fn a_write_reads_its_own_queued_move_first() {
+    let (_dir, _root, store) = new_store();
+    insert(&store, &[cs(1, &[]), cs(2, &[1])]);
+    cas(&store, "main", None, Some(1));
+
+    let mut write = store.write().unwrap();
+    assert_eq!(write.get_ref("main").unwrap(), Some(id(1)), "the file's");
+    write
+        .cas_ref("main", Some(id(1)), Some(id(2)), ACTOR)
+        .unwrap();
+    assert_eq!(write.get_ref("main").unwrap(), Some(id(2)), "the move");
+    write.cas_ref("main", Some(id(2)), None, ACTOR).unwrap();
+    assert_eq!(write.get_ref("main").unwrap(), None, "the delete");
+    write.insert_changeset(cs(3, &[2])).unwrap();
+    write
+        .cas_ref("release/v1", None, Some(id(3)), ACTOR)
+        .unwrap();
+    assert_eq!(write.get_ref("release/v1").unwrap(), Some(id(3)));
+    drop(write);
+
+    let read = store.read().unwrap();
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+    assert_eq!(read.get_ref("release/v1").unwrap(), None);
+}
+
+/// `changeset` reads an indexed changeset's record, or one this transaction queued as the
+/// index will hold it once committed: at the seq the insert returned, with its generation,
+/// delta hash and parents, whatever else the queue holds between them; `None` for a changeset
+/// in neither.
+#[test]
+fn a_write_reads_a_changeset_from_the_index_or_its_queue() {
+    let (_dir, _root, store) = new_store();
+    insert(&store, &[cs(1, &[]), cs(2, &[1])]);
+
+    let mut write = store.write().unwrap();
+    assert_eq!(write.changeset(id(2)).unwrap(), Some(stored(2, &[1], 1, 2)));
+    let third = write.insert_changeset(cs(3, &[2])).unwrap();
+    write.cas_ref("main", None, Some(id(3)), ACTOR).unwrap();
+    let fourth = write.insert_changeset(cs(4, &[3, 1])).unwrap();
+    assert_eq!(
+        (third, fourth),
+        (
+            InsertOutcome::Inserted { seq: 2 },
+            InsertOutcome::Inserted { seq: 3 }
+        )
+    );
+    assert_eq!(write.changeset(id(3)).unwrap(), Some(stored(3, &[2], 2, 3)));
+    let queued = Some(stored(4, &[3, 1], 3, 4));
+    assert_eq!(write.changeset(id(4)).unwrap(), queued);
+    assert_eq!(write.changeset(id(5)).unwrap(), None);
+    write.commit().unwrap();
+    assert_eq!(store.read().unwrap().changeset(id(4)).unwrap(), queued);
+}
+
+/// `get_ref` refuses a name that is not `main` or `release/<x>`, as `cas_ref` does.
+#[test]
+fn a_write_refuses_to_read_a_bad_ref_name() {
+    let (_dir, _root, store) = new_store();
+    let write = store.write().unwrap();
+    for name in [
+        "",
+        "master",
+        "release/",
+        "release/a/b",
+        "release/.x",
+        "../main",
+    ] {
+        assert_ref_name(write.get_ref(name), name);
+    }
+}
+
 #[test]
 fn ref_files_lists_each_ref_file_even_when_one_is_damaged() {
     let (_dir, root, store) = new_store();
