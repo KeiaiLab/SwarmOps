@@ -1,6 +1,6 @@
 [package]
 name = "swarmops-git"
-description = "SwarmOps git reading: git's commit and tree bytes parsed and rendered exactly, and the repositories they come from, read through gix behind one trait"
+description = "SwarmOps git import: git's commit and tree bytes parsed and rendered exactly, the repositories they come from read through gix behind one trait, and their history brought into a store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -17,6 +17,8 @@ workspace = true
 # `GitSource` there.
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+# The repository the import writes into: objects, raw changesets, external ids and refs.
+swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 # The object length limit (`MAX_OBJECT_LEN`), which the conversion refuses a longer blob against.
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 gix.workspace = true
@@ -24,6 +26,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
+camino.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 

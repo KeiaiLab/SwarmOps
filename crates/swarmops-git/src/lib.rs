@@ -1,5 +1,5 @@
-//! SwarmOps' reading of git: the repositories `git import` takes history from, and the exact
-//! bytes of git's commits and trees.
+//! SwarmOps' git import: the repositories `git import` takes history from, the exact bytes of
+//! git's commits and trees, and the import that brings that history into a store.
 //!
 //! - [`oid`]: git's object ids ([`GitOid`]), its object kinds ([`RawKind`]) and formats
 //!   ([`ObjectFormat`]), and [`git_hash`], the id git gives an object's bytes.
@@ -16,6 +16,10 @@
 //!   fields ([`Converted`]), trees and blobs, refusing what the classes it allows do not cover
 //!   ([`ConvertError`]); a commit is converted without loss only if it renders back to its own
 //!   id.
+//! - [`import`](mod@import): [`import()`], which brings every commit a git ref reaches that the
+//!   store does not hold into a store, parents first and many to a journal frame, then moves a
+//!   target ref to the tip's changeset ([`ImportRequest`], [`ImportReport`]); run again, it takes
+//!   only what is new, and it refuses a target that diverged ([`ImportError`]).
 //!
 //! Umbrella decision 3: gix is pinned (`=0.89.0`, its `sha1` feature alone, no default features)
 //! and seen by [`gix_source`] alone, which also computes the SHA-1 behind [`git_hash`]. Everything
@@ -25,6 +29,7 @@
 
 pub mod convert;
 pub mod gix_source;
+pub mod import;
 pub mod lossy;
 pub mod oid;
 pub mod raw;
@@ -33,6 +38,7 @@ pub mod source;
 
 pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
 pub use gix_source::GixSource;
+pub use import::{ImportError, ImportReport, ImportRequest, LossyCommit, import};
 pub use lossy::{LossyClass, LossySet};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};
 pub use raw::{RawCommit, RawError, RawIdent, RawTree, RawTreeEntry};

@@ -380,6 +380,21 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   when it is dropped or normalized and named in `git.lossy`; a mode of no file, directory,
   symlink or gitlink, more than 255 parents and a blob longer than an object holds are refused
   whatever is allowed, the blob before it is read.
+- The git import (`swarmops_git::import`, storage spec §7): every commit a git ref reaches that the
+  store does not hold becomes a changeset, parents first with all its parents in their order (a
+  merge's other side included), 8,192 to a journal frame, and each frame's external ids are
+  written once it is durable; then the metadata is flushed, so that no reader parses the import's
+  frames again, and the target ref (`main` by default) moves to the tip's changeset by
+  compare-and-swap. Run again, it takes only the commits after the one the target's head holds
+  (`git.oid`), even one the tip reaches through a merge's second parent, and writes nothing when
+  that is the tip; a target whose head holds no git commit, or one the tip does not reach, is
+  diverged, and nothing is written. A store failure, or a frame that fails after its commit point,
+  stops it after its last committed frame (a busy writer lock is retried three times), and the
+  same import run again continues there; a commit the conversion refuses stops it before the
+  frame that would hold it. The report counts the commits imported and the known ones the walk
+  stopped at, lists the first 100 recorded with a loss, and carries what the import's writes
+  repaired. An incremental run converts with the base's trees and blobs taken as made, so it
+  reads only what the new commits changed.
 
 ### Changed
 
