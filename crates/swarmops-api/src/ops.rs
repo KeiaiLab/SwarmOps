@@ -203,7 +203,8 @@ pub struct CommitResp {
     pub root: String,
     /// How many paths the changeset changes.
     pub files_changed: u64,
-    /// How many blobs the commit wrote to the object store.
+    /// How many blobs this commit's own writes placed in the object store; blobs that were there
+    /// already, or that a concurrent writer placed first, count 0.
     pub blobs_written: u64,
     /// The move of the ref the request's `advance` named: present exactly when the ref names
     /// `changeset` because of this request, or of an identical one before it

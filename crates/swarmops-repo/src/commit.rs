@@ -7,7 +7,7 @@
 //!    store's [`StoreError::Limit`], as it gives at insert), distinct and in the store
 //!    ([`RepoError::UnknownParent`]), and the name of the ref to advance, if any, a ref name
 //!    ([`RepoError::RefName`]).
-//! 2. Hashes each put's content into its blob id, and applies the changes to the first
+//! 2. Hashes each put's content into its blob id, once, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
 //!    or where a directory is, or a delete of a directory, is a [`RepoError::TypeConflict`]; a
 //!    delete of a path that is no file, a [`RepoError::PathNotFound`]. A put of what its path
@@ -15,10 +15,12 @@
 //!    [`RepoError::EmptyChanges`], unless `allow_empty`: then the changeset keeps its first
 //!    parent's root (the empty tree for a root changeset), with an empty delta.
 //! 3. Encodes the changed directories bottom-up, then the changeset: its delta is the changes
-//!    that changed the tree, sorted by path.
+//!    that changed the tree, sorted by path. Each is encoded and hashed once.
 //! 4. Writes the blobs the delta puts, the changed trees and the changeset object in one
-//!    `put_batch`, then flushes: every object is durable before any metadata names it (I1). A
-//!    flush error fails the commit, and nothing is recorded.
+//!    `put_hashed_batch`, each with the id it was hashed to, which the store does not compute
+//!    again, then flushes: every object is durable before any metadata names it (I1). A
+//!    flush error fails the commit, and nothing is recorded. The store says which objects this
+//!    commit's writes placed, and the outcome counts them.
 //! 5. Inserts the changeset in a write transaction of its own, beside the move of the ref that
 //!    `advance` names if any (below), and commits that: its journal frame is the commit point.
 //!    A failure after it ([`StoreError::PostCommit`]) leaves the changeset committed, and is
@@ -46,10 +48,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
-    BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, LeafKind, ObjectId, ObjectKind, RepoPath,
-    Signature, TreeId, hash_object,
+    BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, Hashed, LeafKind, ObjectId, ObjectKind,
+    RepoPath, Signature, TreeId,
 };
-use swarmops_store::{ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, Recovered, StoreError};
+use swarmops_store::{
+    ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, PutOutcome, Recovered, StoreError,
+};
 
 use crate::error::RepoError;
 use crate::repo::{Repo, post_commit_warning, ref_error};
@@ -140,9 +144,11 @@ pub struct CommitOutcome {
     /// How many paths the changeset changes: the length of its delta, which leaves out the
     /// puts of what a path held already.
     pub files_changed: usize,
-    /// How many blobs this call wrote that the store did not hold yet.
+    /// How many blobs this commit's own writes placed in the object store; blobs that were
+    /// there already, or that a concurrent writer placed first, count 0.
     pub blobs_written: usize,
-    /// How many trees this call wrote that the store did not hold yet.
+    /// How many trees this commit's own writes placed in the object store; trees that were
+    /// there already, or that a concurrent writer placed first, count 0.
     pub trees_written: usize,
     /// What the insert did: [`InsertOutcome::AlreadyPresent`] when an identical request was
     /// committed before.
@@ -216,33 +222,25 @@ impl<O: ObjectStore> Repo<O> {
             extra_headers: Vec::new(),
             metadata,
         };
-        let bytes = changeset.encode()?;
-        let id = ChangesetId(hash_object(ObjectKind::Changeset, &bytes));
+        let (object, delta_hash) = changeset.encode_hashed()?;
+        let id = ChangesetId(object.id());
         let meta = ChangesetMeta {
             id,
             seq: 0,
             generation: 0,
-            delta_hash: changeset.delta_hash()?,
+            delta_hash,
             parents: changeset.parents,
         };
 
-        let blobs_written = self.count_missing(contents.keys().copied())?;
-        let trees_written = self.count_missing(trees.iter().map(|(tree, _)| tree.0))?;
-        let ids: Vec<ObjectId> = contents
-            .keys()
-            .copied()
-            .chain(trees.iter().map(|(tree, _)| tree.0))
-            .chain([id.0])
-            .collect();
-        let mut batch = Vec::with_capacity(ids.len());
-        batch.extend(contents.into_values().map(|blob| (ObjectKind::Blob, blob)));
-        batch.extend(trees.into_iter().map(|(_, tree)| (ObjectKind::Tree, tree)));
-        batch.push((ObjectKind::Changeset, bytes));
-        let stored = self.objects.put_batch(batch)?;
-        debug_assert_eq!(
-            stored, ids,
-            "the store hashed the objects as the commit did"
-        );
+        let (blob_count, tree_count) = (contents.len(), trees.len());
+        let mut batch = Vec::with_capacity(blob_count + tree_count + 1);
+        batch.extend(contents.into_values());
+        batch.extend(trees);
+        batch.push(object);
+        let outcomes = self.objects.put_hashed_batch(batch)?;
+        let placed = |outcomes: &[PutOutcome]| outcomes.iter().filter(|o| o.written).count();
+        let (blobs, trees) = outcomes.split_at(blob_count);
+        let (blobs_written, trees_written) = (placed(blobs), placed(&trees[..tree_count]));
         self.objects.flush()?;
 
         let (insert, advanced, warnings, recovered) = self.record(meta, advance)?;
@@ -286,17 +284,6 @@ impl<O: ObjectStore> Repo<O> {
             }
         }
         Ok(())
-    }
-
-    /// How many of `ids` the object store does not hold.
-    fn count_missing(&self, ids: impl IntoIterator<Item = ObjectId>) -> Result<usize, RepoError> {
-        let mut missing = 0;
-        for id in ids {
-            if !self.objects.contains(id)? {
-                missing += 1;
-            }
-        }
-        Ok(missing)
     }
 
     /// Inserts `meta` in a write transaction of its own, with `advance` beside the move of that
@@ -389,16 +376,17 @@ fn sorted_changes(mut changes: Vec<Change>, allow_empty: bool) -> Result<Vec<Cha
 }
 
 /// The delta `changes` (sorted, checked) would make, each put naming the blob of its content,
-/// with the contents by blob id.
-fn candidate_delta(changes: Vec<Change>) -> (Vec<DeltaEntry>, BTreeMap<ObjectId, Vec<u8>>) {
+/// with the contents as blob objects by id: each content hashed once.
+fn candidate_delta(changes: Vec<Change>) -> (Vec<DeltaEntry>, BTreeMap<ObjectId, Hashed>) {
     let mut contents = BTreeMap::new();
     let delta = changes
         .into_iter()
         .map(|Change { path, op }| {
             let op = match op {
                 ChangeOp::Put { kind, content } => {
-                    let id = hash_object(ObjectKind::Blob, &content);
-                    contents.entry(id).or_insert(content);
+                    let blob = Hashed::new(ObjectKind::Blob, content);
+                    let id = blob.id();
+                    contents.entry(id).or_insert(blob);
                     DeltaOp::Put {
                         kind,
                         id: BlobId(id),

@@ -298,7 +298,7 @@ left).
   makes) and every 13.75 ms through the binary; the difference appears only with the commits'
   own object writes on the same filesystem. *Target: M1.6 (docs/perf.md),
   then M2. Found: M1 Task 7b.*
-- **Commit-path costs.** Each blob is hashed twice (for its id, then when stored); every
+- **Commit-path costs.** Every
   commit's materialization scans the index tail; and the reflog walks frames past the snapshot
   only to drop them. *Target: M2. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the

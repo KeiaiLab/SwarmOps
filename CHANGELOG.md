@@ -265,6 +265,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   1,024 records in the index's unsorted tail, and `reflog("main", 100)` with 31 frames past the
   checkpoint, each with its percentiles. `SWARMOPS_BENCH_HISTORY_CHANGESETS` sets other sizes
   for a quick check.
+- `swarmops-store`: `ObjectStore::stat` gives an object's kind and payload length
+  (`ObjectStat`) from its file's 16-byte header alone: the payload is neither read nor verified,
+  the length is the header's own, and a header the store does not write is `BadHeader`.
+  `ObjectStore::retain` stats an object that a caller relies on without writing it and, when it
+  is stored, has the next `flush` fsync its fan-out directory, as a put of a stored object does.
 
 ### Changed
 
@@ -415,6 +420,19 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   frames were (another writer's bytes in between) is cut back and refused as damage
   (`JournalCorrupt` at the frames' offset, `E_STORE_CORRUPT`) before anything is listed, where it
   used to list entries that pointed into other bytes.
+
+#### M2: diff, history and derived data (2026-10-19)
+
+- `blobs_written` in `commit`'s result (and `blobs_written`, `trees_written` of
+  `swarmops_repo::CommitOutcome`) counts exactly what the commit's own writes placed in the
+  object store: of processes that commit one new file at once, one counts its blob, where each
+  that found it missing used to (eight reported 8). A commit also hashes, encodes and looks up
+  each of its objects once (it hashed each object twice, encoded its changeset twice and checked
+  each blob and tree for existence twice), and makes `objects/tmp` once, not once per object:
+  `swarmops_core::Hashed`, which only hashing makes, carries an object with its id to the new
+  `ObjectStore::put_hashed_batch` (whose `PutOutcome.written` says whether the call placed the
+  file), and `Changeset::encode_hashed` gives the changeset's object and its delta hash from one
+  encoding.
 
 ### Security
 
