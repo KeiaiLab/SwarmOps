@@ -212,11 +212,6 @@ left).
   the abort is no panic, so `swarmops mcp` dies with it. SwarmOps never writes such a file.
   *Target: M1.6 (bounded reads, beside Task 5's object reads). Found: M1.5 final review
   (security-1).*
-- **`REPO` is read whole, however long.** `meta/REPO` holds the repository id and the name
-  `init` was given, which nothing bounds, so a crafted `REPO` of huge length is read into a
-  buffer of that length (`E_IO` "out of memory" when the allocator refuses). `FORMAT`,
-  `journal.ckpt` and the ref files are capped at their fixed sizes. *Target: M1.6 (a name-length
-  limit, with its spec line). Found: M1.5 final review (security-2).*
 - **Crafted `journal.off` entries can mis-number a read.** Entries crafted to agree with each
   other (one pointing into a payload whose bytes read as a frame header ending where the next
   entry starts), three or more links before the end, pass the two links recovery and readers

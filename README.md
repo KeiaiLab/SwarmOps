@@ -278,7 +278,7 @@ and starts no server either.
 
 | Command | What it does |
 | --- | --- |
-| `init <dir> [--name N]` | Create a store in `<dir>` (made if missing) and describe it. |
+| `init <dir> [--name N]` | Create a store in `<dir>` (made if missing) and describe it. The name `N` (by default the directory's name) takes at most 255 bytes. |
 | `info` | Describe the store: its id, name, `main`, and how many changesets and refs it holds. |
 | `whoami` | The identity this caller's changes carry. |
 | `commit -m MSG --changes FILE\|- [--parent REV] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head. It moves no ref. |

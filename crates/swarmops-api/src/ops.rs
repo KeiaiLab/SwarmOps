@@ -67,7 +67,7 @@ fn default_max_changes() -> usize {
 pub struct InitReq {
     /// The directory to create the store in.
     pub path: String,
-    /// The repository's name.
+    /// The repository's name: at most 255 bytes of UTF-8.
     pub name: String,
 }
 

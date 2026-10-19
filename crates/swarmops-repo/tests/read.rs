@@ -575,6 +575,98 @@ fn a_format_file_one_byte_too_long_is_refused_by_its_length() {
 }
 
 #[test]
+fn a_huge_repo_file_is_not_a_store_and_is_not_read_whole() {
+    // REPO holds an id line and a name of at most 255 bytes, 288 bytes in all. A crafted one
+    // of huge length (a sparse file, which costs no disk, and whose zeros after the id line are
+    // UTF-8, so they would read as a name) is refused by its length, before any of it is read,
+    // with the Format error a malformed REPO gets (E_NOT_A_REPO).
+    let (_dir, root, repo) = new_repo();
+    drop(repo);
+    fs::OpenOptions::new()
+        .write(true)
+        .open(root.join("REPO"))
+        .unwrap()
+        .set_len(1 << 30)
+        .unwrap();
+    let started = std::time::Instant::now();
+    match LocalRepo::open(&root) {
+        Err(RepoError::Store(StoreError::Format(what))) => assert_eq!(
+            what,
+            format!(
+                "{root}/REPO is 1073741824 bytes long, more than a repository id and a name of \
+                 at most 255 bytes"
+            )
+        ),
+        // The name's length, not the name: one read whole is a gigabyte long.
+        other => panic!(
+            "expected Format, got {:?}",
+            other.map(|r| r.info().map(|info| info.name.len()))
+        ),
+    }
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "read whole: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn a_repo_file_holds_a_name_of_at_most_255_bytes() {
+    // The length check's boundary: a REPO of the id line and a 255-byte name (288 bytes) opens
+    // with that name; one byte more is refused by its length, before it is read.
+    let (_dir, root, repo) = new_repo();
+    let repo_id = repo.info().unwrap().repo_id;
+    drop(repo);
+    let repo_file = root.join("REPO");
+    let name = "n".repeat(255);
+    fs::write(&repo_file, format!("{repo_id}\n{name}")).unwrap();
+    let info = LocalRepo::open(&root).unwrap().info().unwrap();
+    assert_eq!((&info.repo_id, &info.name), (&repo_id, &name));
+    fs::write(&repo_file, format!("{repo_id}\n{name}n")).unwrap();
+    match LocalRepo::open(&root) {
+        Err(RepoError::Store(StoreError::Format(what))) => assert_eq!(
+            what,
+            format!(
+                "{root}/REPO is 289 bytes long, more than a repository id and a name of at most \
+                 255 bytes"
+            )
+        ),
+        other => panic!("expected Format, got {:?}", other.map(|r| r.info())),
+    }
+}
+
+#[test]
+fn create_refuses_a_name_of_more_than_255_bytes_before_touching_anything() {
+    // A name is counted in bytes, not characters: 128 "é" are 256 bytes. One past the limit is
+    // refused before create makes any filesystem call, so nothing is made; one of 255 bytes
+    // fills REPO to its 288 bytes and reads back whole.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+    for name in ["n".repeat(256), "é".repeat(128)] {
+        let chars = name.chars().count();
+        let (recording, calls) = RecordingFs::new();
+        match LocalRepo::create_with_fs(&store, &name, Arc::new(recording)) {
+            Err(RepoError::Store(StoreError::Limit {
+                what: swarmops_store::LimitKind::RepoNameBytes,
+                max: 255,
+                got: 256,
+            })) => {}
+            other => panic!(
+                "{chars} characters: expected Limit, got {:?}",
+                other.map(|r| r.info())
+            ),
+        }
+        assert_eq!(calls(), Vec::<String>::new(), "{chars} characters");
+        assert!(!store.exists(), "{chars} characters: {store} was made");
+    }
+    let name = "n".repeat(255);
+    let (recording, _calls) = RecordingFs::new();
+    LocalRepo::create_with_fs(&store, &name, Arc::new(recording)).unwrap();
+    assert_eq!(fs::metadata(store.join("REPO")).unwrap().len(), 288);
+    assert_eq!(LocalRepo::open(&store).unwrap().info().unwrap().name, name);
+}
+
+#[test]
 fn create_refuses_mnt_paths_before_touching_them() {
     // WSL mounts Windows drives under /mnt/ (drvfs): no store may live there. The check is
     // made before anything is created, so this test leaves no trace on the drive.

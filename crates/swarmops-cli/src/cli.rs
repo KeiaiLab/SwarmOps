@@ -96,7 +96,7 @@ pub enum Command {
     Init {
         /// The directory to create the store in.
         dir: String,
-        /// The repository's name (default: the directory's name).
+        /// The repository's name, at most 255 bytes (default: the directory's name).
         #[arg(long)]
         name: Option<String>,
     },

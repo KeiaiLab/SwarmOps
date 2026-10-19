@@ -13,8 +13,8 @@
 //! # The `REPO` file
 //!
 //! `REPO` holds the repository's identity: a line with its id, 32 lowercase hex digits chosen
-//! at random by create, then its name, verbatim (any UTF-8, line breaks included) to the end
-//! of the file, with no line break added:
+//! at random by create, then its name, verbatim (any UTF-8, line breaks included, at most 255
+//! bytes) to the end of the file, with no line break added:
 //!
 //! ```text
 //! 3f9c2d0a8e1b4c7f6a5d2e9b0c8f1a37
@@ -26,8 +26,9 @@
 //! store with `FORMAT` always has it; a create that resumes after a crash writes it again,
 //! with a new id. Open requires it alongside `FORMAT`: after refusing a path that leads under
 //! `/mnt/` as create does ([`StoreError::UnsupportedFs`]) and checking `FORMAT`, it reads
-//! `REPO`, and refuses a store whose `REPO` is missing, not UTF-8, or does not start with an
-//! id line ([`StoreError::Format`]).
+//! `REPO`, and refuses a store whose `REPO` is missing, longer than an id line and a 255-byte
+//! name (measured before it is read, so a crafted one of huge length is never read into
+//! memory), not UTF-8, or does not start with an id line ([`StoreError::Format`]).
 //!
 //! # Create
 //!
@@ -76,6 +77,14 @@ const FORMAT: &[u8] = b"swarmops-store 1\n";
 
 /// The version number `FORMAT` names.
 const STORE_VERSION: u32 = 1;
+
+/// The most bytes a repository's name may have: create refuses a longer one
+/// ([`swarmops_store::LimitKind::RepoNameBytes`]).
+const MAX_NAME_LEN: usize = 255;
+
+/// The most bytes `REPO` may hold: the id line (32 hex digits and a line break) and a name of
+/// at most [`MAX_NAME_LEN`] bytes. Open refuses a longer `REPO` by its length, unread.
+const MAX_REPO_LEN: u64 = 32 + 1 + 255;
 
 /// A repository: objects in `O`, metadata in the native [`MetaStore`].
 pub struct Repo<O: ObjectStore> {
@@ -128,7 +137,10 @@ impl LocalRepo {
     /// Creates a store at `store` (the directory is created if missing) for a repository
     /// named `name`, and opens it: see [the module documentation](self) for the steps.
     /// [`RepoError::Exists`] if the directory holds a store already (its `FORMAT` file);
-    /// [`StoreError::UnsupportedFs`] for a path under `/mnt/`. Any name is kept verbatim.
+    /// [`StoreError::UnsupportedFs`] for a path under `/mnt/`. A name of more than 255 bytes is
+    /// refused with [`StoreError::Limit`]
+    /// ([`RepoNameBytes`](swarmops_store::LimitKind::RepoNameBytes)) before anything is
+    /// created; any other is kept verbatim.
     ///
     /// With `SWARMOPS_TEST_CRASH_AT=<k>` set (crash tests; only in a build with the store's
     /// `test-hooks` feature, which this crate's turns on), the object store and the metadata
@@ -158,10 +170,10 @@ impl LocalRepo {
 
     /// Opens the store at `store`. Checks `FORMAT` first, then reads `REPO`:
     /// [`StoreError::Format`] if `FORMAT` is missing (no store there) or names another layout
-    /// version, if `REPO` is missing or malformed, or if `meta/` is missing; and, before any of
-    /// that, [`StoreError::UnsupportedFs`] if the path leads under `/mnt/`, as `create` refuses
-    /// it. Honors `SWARMOPS_TEST_CRASH_AT` and `SWARMOPS_TEST_FS_CALLS` as [`LocalRepo::create`]
-    /// does.
+    /// version, if `REPO` is missing, malformed or longer than an id line and a 255-byte name,
+    /// or if `meta/` is missing; and, before any of that, [`StoreError::UnsupportedFs`] if the
+    /// path leads under `/mnt/`, as `create` refuses it. Honors `SWARMOPS_TEST_CRASH_AT` and
+    /// `SWARMOPS_TEST_FS_CALLS` as [`LocalRepo::create`] does.
     pub fn open(store: &Utf8Path) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
         Self::open_on(store, fs, one_thread)
@@ -191,6 +203,16 @@ impl LocalRepo {
         fs: Arc<dyn FsOps>,
         one_thread: bool,
     ) -> Result<LocalRepo, RepoError> {
+        // A name longer than open reads back from REPO is refused before anything is made, and
+        // before the directory is checked for a store already there.
+        if name.len() > MAX_NAME_LEN {
+            return Err(StoreError::Limit {
+                what: swarmops_store::LimitKind::RepoNameBytes,
+                max: to_u64(MAX_NAME_LEN),
+                got: to_u64(name.len()),
+            }
+            .into());
+        }
         let root = native_root(store, &*fs)?;
         let layout = Layout::new(root.clone());
         if fs.exists(layout.format_file().as_std_path())? {
@@ -529,6 +551,19 @@ fn components(path: &Utf8Path) -> Vec<String> {
 fn read_identity(layout: &Layout, fs: &dyn FsOps) -> Result<Identity, RepoError> {
     let path = layout.repo_file();
     let bad = |what: &str| RepoError::from(StoreError::Format(format!("{path} {what}")));
+    // A REPO longer than an id line and the longest name create writes holds no identity this
+    // build reads, however long it is: measured before it is read (through `std::fs`, no
+    // `FsOps` call), so that a crafted file of huge length is never read into memory. A missing
+    // one reaches the read.
+    if let Ok(meta) = std::fs::metadata(path.as_std_path())
+        && meta.len() > MAX_REPO_LEN
+    {
+        return Err(bad(&format!(
+            "is {} bytes long, more than a repository id and a name of at most {MAX_NAME_LEN} \
+             bytes",
+            meta.len()
+        )));
+    }
     let bytes = fs
         .read(path.as_std_path())?
         .ok_or_else(|| bad("is missing"))?;

@@ -139,7 +139,7 @@ pub enum StoreError {
 }
 
 /// Which limit of the store's layout a request went past ([`StoreError::Limit`]; storage spec
-/// §3, "커밋 결과·오류·한도").
+/// §2's `REPO` line, and §3, "커밋 결과·오류·한도").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKind {
     /// A changeset's parents: a journal record and `par.col` count them in one byte (255).
@@ -151,31 +151,37 @@ pub enum LimitKind {
     RefNameBytes,
     /// The records of one transaction: a frame counts them in a `u16le` (65,535).
     Records,
+    /// A repository's name, in bytes (255): `REPO` holds it after the id line with no length
+    /// field, so the limit is a choice, the one ref names and actors have. The repository's
+    /// create refuses a longer name before it makes anything.
+    RepoNameBytes,
 }
 
 impl LimitKind {
     /// Every limit, in declaration order.
-    pub const ALL: [LimitKind; 4] = [
+    pub const ALL: [LimitKind; 5] = [
         Self::Parents,
         Self::ActorBytes,
         Self::RefNameBytes,
         Self::Records,
+        Self::RepoNameBytes,
     ];
 
     /// Its name in the API's `details.store_limit`: `"parents"`, `"actor_bytes"`,
-    /// `"ref_name_bytes"` or `"records"`.
+    /// `"ref_name_bytes"`, `"records"` or `"repo_name_bytes"`.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Parents => "parents",
             Self::ActorBytes => "actor_bytes",
             Self::RefNameBytes => "ref_name_bytes",
             Self::Records => "records",
+            Self::RepoNameBytes => "repo_name_bytes",
         }
     }
 }
 
 /// What the limit counts, as a message says it: "a changeset's parents", "an actor's bytes",
-/// "a ref name's bytes", "a transaction's records".
+/// "a ref name's bytes", "a transaction's records", "a repository name's bytes".
 impl fmt::Display for LimitKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -183,6 +189,7 @@ impl fmt::Display for LimitKind {
             Self::ActorBytes => "an actor's bytes",
             Self::RefNameBytes => "a ref name's bytes",
             Self::Records => "a transaction's records",
+            Self::RepoNameBytes => "a repository name's bytes",
         })
     }
 }
@@ -204,7 +211,13 @@ mod tests {
         );
         assert_eq!(
             LimitKind::ALL.map(LimitKind::as_str),
-            ["parents", "actor_bytes", "ref_name_bytes", "records"]
+            [
+                "parents",
+                "actor_bytes",
+                "ref_name_bytes",
+                "records",
+                "repo_name_bytes",
+            ]
         );
         assert_eq!(
             LimitKind::ALL.map(|what| what.to_string()),
@@ -213,6 +226,7 @@ mod tests {
                 "an actor's bytes",
                 "a ref name's bytes",
                 "a transaction's records",
+                "a repository name's bytes",
             ]
         );
     }
