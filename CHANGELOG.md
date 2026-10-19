@@ -258,6 +258,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   record (`None` if the snapshot does not hold it, `Some(None)` for a root): the record's
   `par.col` entry and 32 bytes of `parents.log`, where `changeset` reads four columns and every
   parent. `Index::id`, `Index::generation` and `Index::first_parent` read one field of a record.
+- A criterion bench of history lookups (`crates/swarmops-store/benches/history.rs`, which
+  `just bench` and `just perf` run), on linear chains of 200,000 and 1,000,000 changesets:
+  100-step first-parent walks by `MetaRead::changeset` and by `MetaRead::first_parent`,
+  `Index::find` hits and misses beside a plain bisection, an insert with no record and with
+  1,024 records in the index's unsorted tail, and `reflog("main", 100)` with 31 frames past the
+  checkpoint, each with its percentiles. `SWARMOPS_BENCH_HISTORY_CHANGESETS` sets other sizes
+  for a quick check.
 
 ### Changed
 
