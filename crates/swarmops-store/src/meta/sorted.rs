@@ -125,16 +125,30 @@ impl<const K: usize> SortedView<K> {
     /// slices), or `len()` if every key is less. A binary search that reads one key per
     /// probe with `read_at`, at most ⌊log2 len⌋ + 1 of them, and nothing of the rec file.
     pub fn lower_bound(&self, key: &[u8]) -> Result<u64, StoreError> {
-        let (mut low, mut high) = (0, self.len);
+        self.lower_bound_with_key(key).map(|(at, _)| at)
+    }
+
+    /// [`SortedView::lower_bound`], with the key at the index it returns, if that index is a
+    /// key of the view (`None` when it is `len()`): the key the search read when it last moved
+    /// its upper bound there. Every key at or past the upper bound is not less than `key`, and
+    /// the bound only moves down, so the key read there is the one at the index returned;
+    /// never the last key read, which may lie below it. A lookup compares it with what it asks
+    /// for instead of reading it again.
+    pub(crate) fn lower_bound_with_key(
+        &self,
+        key: &[u8],
+    ) -> Result<(u64, Option<[u8; K]>), StoreError> {
+        let (mut low, mut high, mut at_high) = (0, self.len, None);
         while low < high {
             let mid = low + (high - low) / 2;
-            if self.key_at(mid)?.as_slice() < key {
+            let probe = self.key_at(mid)?;
+            if probe.as_slice() < key {
                 low = mid + 1;
             } else {
-                high = mid;
+                (high, at_high) = (mid, Some(probe));
             }
         }
-        Ok(low)
+        Ok((low, at_high))
     }
 
     /// Key `i`, read with one `read_at`. `i` past the end is [`StoreError::BadCall`].

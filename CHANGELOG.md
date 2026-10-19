@@ -254,6 +254,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   The files are a cache outside the journal: written to a temp file and linked into place
   without a sync or a lock, and a file that fails its checks reads as missing and is removed, so
   that the value is derived again. `FORMAT` stays 1.
+- `MetaRead::first_parent(id)` gives a changeset's first parent without the rest of its index
+  record (`None` if the snapshot does not hold it, `Some(None)` for a root): the record's
+  `par.col` entry and 32 bytes of `parents.log`, where `changeset` reads four columns and every
+  parent. `Index::id`, `Index::generation` and `Index::first_parent` read one field of a record.
 
 ### Changed
 
@@ -347,6 +351,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   failed, where it was the non-retryable `E_IO`: nothing of the write was committed, and running
   it again lists the frame. In the Rust API it is `StoreError::NotCommitted`, where it was
   `StoreError::Io`.
+
+#### M2: diff, history and derived data (2026-10-19)
+
+- A lookup by id no longer reads the key it found a second time: the search keeps the key it
+  read where it stopped, so a lookup in a sorted view of 100,000 changesets reads 18 byte
+  ranges, not 19. `resolve_prefix` and `by_delta_hash` read only each result's id, and an
+  insert only each parent's generation, where both read the whole index record.
 
 ### Fixed
 

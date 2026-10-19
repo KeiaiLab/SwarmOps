@@ -394,14 +394,10 @@ impl Index {
     /// Record `rec`: four `read_at`s of the columns, and one of `parents.log` if it has
     /// parents. A rec this handle does not count is [`StoreError::BadCall`] (the lookups never
     /// give one: they check the recs they read from a sorted view); parents off `parents.log`
-    /// are [`StoreError::IndexCorrupt`].
+    /// are [`StoreError::IndexCorrupt`]. [`Index::id`], [`Index::generation`] and
+    /// [`Index::first_parent`] read one field of it.
     pub fn get(&self, rec: u64) -> Result<ChangesetMeta, StoreError> {
-        if rec >= self.len {
-            return Err(StoreError::BadCall(format!(
-                "rec {rec} is past the index's {} records",
-                self.len
-            )));
-        }
+        self.check_counted(rec)?;
         let id = self.ids.entry(rec)?;
         let generation = u64::from_le_bytes(self.gens.entry(rec)?);
         let delta_hash = self.dhs.entry(rec)?;
@@ -415,15 +411,55 @@ impl Index {
         })
     }
 
+    /// The id of record `rec`: one `read_at` of `ids.col`, and nothing else. A rec this handle
+    /// does not count is [`StoreError::BadCall`], as for [`Index::get`].
+    pub fn id(&self, rec: u64) -> Result<ChangesetId, StoreError> {
+        self.check_counted(rec)?;
+        Ok(ChangesetId(ObjectId(self.ids.entry(rec)?)))
+    }
+
+    /// The generation of record `rec`: one `read_at` of `gen.col`, and nothing else. A rec this
+    /// handle does not count is [`StoreError::BadCall`], as for [`Index::get`].
+    pub fn generation(&self, rec: u64) -> Result<u64, StoreError> {
+        self.check_counted(rec)?;
+        Ok(u64::from_le_bytes(self.gens.entry(rec)?))
+    }
+
+    /// The first parent of record `rec`, `None` for a root: one `read_at` of its `par.col`
+    /// entry, then, if it has parents, one of the first 32 bytes of them in `parents.log`, and
+    /// nothing else. A rec this handle does not count is [`StoreError::BadCall`], and parents
+    /// off `parents.log` [`StoreError::IndexCorrupt`], as for [`Index::get`]: the entry is
+    /// checked whole, though only its first parent is read.
+    pub fn first_parent(&self, rec: u64) -> Result<Option<ChangesetId>, StoreError> {
+        self.check_counted(rec)?;
+        let at = ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(rec)?));
+        // `parents::read` refuses parents that lie off `parents.log` before it reads any: an
+        // entry that does is passed whole, for that refusal; any other, cut to its first parent.
+        let first = if at.lies_within(self.parents_len) {
+            ParentsAt {
+                count: at.count.min(1),
+                ..at
+            }
+        } else {
+            at
+        };
+        Ok(parents::read(&self.parents, first, self.parents_len)?
+            .first()
+            .copied())
+    }
+
     /// The rec of changeset `id`, if the index holds it: a binary search of the id view's
-    /// key column (one `read_at` per probe), then, if the view lacks it, a scan of the
-    /// tail of `ids.col`, read with one `read_at`. A rec the view names that the view does not
-    /// cover (a view of m entries holds the recs `[0, m)`) is [`StoreError::IndexCorrupt`].
+    /// key column (one `read_at` per probe), which keeps the key it read at the bound it
+    /// returns, so that no key is read twice ([`SortedView::lower_bound`]); then, if the view
+    /// lacks it, a scan of the tail of `ids.col`, read with one `read_at`. A rec the view names
+    /// that the view does not cover (a view of m entries holds the recs `[0, m)`) is
+    /// [`StoreError::IndexCorrupt`].
     pub fn find(&self, id: ChangesetId) -> Result<Option<u64>, StoreError> {
         let key = id.0.0;
         let view = &self.views.ids;
-        let at = view.lower_bound(&key)?;
-        if at < view.len() && view.key_at(at)? == key {
+        if let (at, Some(found)) = view.lower_bound_with_key(&key)?
+            && found == key
+        {
             return covered_by(view, view.rec_at(at)?).map(Some);
         }
         let from = view.len();
@@ -1005,6 +1041,19 @@ impl Index {
             next = at.end();
         }
         Ok(held)
+    }
+
+    /// Refuses a rec this handle does not count: [`StoreError::BadCall`], since the lookups
+    /// never give one (they check the recs they read from a sorted view).
+    fn check_counted(&self, rec: u64) -> Result<(), StoreError> {
+        if rec < self.len {
+            Ok(())
+        } else {
+            Err(StoreError::BadCall(format!(
+                "rec {rec} is past the index's {} records",
+                self.len
+            )))
+        }
     }
 
     /// Whether the files end exactly where this handle's records do.

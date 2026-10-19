@@ -555,18 +555,303 @@ fn read_at_binary_search_touches_only_key_column() {
         }
     }
 
-    // A whole lookup: the search, one more key to compare, then one rec for a hit.
+    // A whole lookup reads the keys its search reads and no other: the key at the bound it
+    // returns is one the search read, kept, not read again to compare. Then one rec for a hit,
+    // none for a miss.
+    let search_reads = |key: &[u8; 32]| {
+        let before = view.probes();
+        view.lower_bound(key).unwrap();
+        view.probes() - before
+    };
     for (rec, meta) in (0..).zip(&metas).step_by(97) {
+        let searched = search_reads(&meta.id.0.0);
         let (keys_read, recs_read) = (view.probes(), view.rec_reads());
         assert_eq!(index.find(meta.id).unwrap(), Some(rec));
-        assert!(view.probes() - keys_read <= 15);
+        assert_eq!(
+            view.probes() - keys_read,
+            searched,
+            "a hit reads no key twice"
+        );
         assert_eq!(view.rec_reads() - recs_read, 1, "one rec_at per hit");
     }
     for n in 10_000..10_100 {
+        let searched = search_reads(&spread_id(n).0.0);
         let (keys_read, recs_read) = (view.probes(), view.rec_reads());
         assert_eq!(index.find(spread_id(n)).unwrap(), None);
-        assert!(view.probes() - keys_read <= 15);
+        assert_eq!(
+            view.probes() - keys_read,
+            searched,
+            "a miss reads no key twice"
+        );
         assert_eq!(view.rec_reads(), recs_read, "no rec_at for a miss");
+    }
+}
+
+#[test]
+fn find_takes_the_key_at_the_bound_not_the_last_probe() {
+    // Three ids, in key order k40 < k80 < kc0, all in the sorted view, appended out of that
+    // order so that no rec equals its key's place in the view. A search for k80 reads k80 (its
+    // upper bound moves there), then k40 (its lower bound moves past it), by bisection and by
+    // interpolation alike, since k80's first bytes lie in the middle of the key space: its last
+    // probe is a key below the one it found. `find` compares the key read when the upper bound
+    // last moved, never the last probe, which would report k80 missing.
+    let (k40, k80, kc0) = ([0x40; 32], [0x80; 32], [0xc0; 32]);
+    let (_root, layout) = new_root();
+    let mut index = open(&layout);
+    let metas = [k80, kc0, k40].map(|key| meta(cs(key), 1, key, vec![]));
+    append_all(&mut index, &metas);
+    assert_eq!(index.compact().unwrap(), 3);
+    let view = index.ids_view();
+    for (rec, key) in [(2, k40), (0, k80), (1, kc0)] {
+        let recs_read = view.rec_reads();
+        assert_eq!(index.find(cs(key)).unwrap(), Some(rec), "{}", hex(&key));
+        assert_eq!(view.rec_reads() - recs_read, 1, "one rec_at per hit");
+    }
+    // Between k80 and kc0, above kc0 and below k40: no key there is the one asked for, so no
+    // rec is read, and the tail is empty.
+    for absent in [[0xa0; 32], [0xd0; 32], [0x10; 32]] {
+        let recs_read = view.rec_reads();
+        assert_eq!(index.find(cs(absent)).unwrap(), None, "{}", hex(&absent));
+        assert_eq!(view.rec_reads(), recs_read, "no rec_at for a miss");
+    }
+}
+
+#[test]
+fn a_prefix_lookup_reads_only_the_id_column() {
+    use swarmops_store::MetaLock;
+    use swarmops_testkit::store::temp_dir;
+
+    // Three changesets whose ids share the prefix abcdef012345, two compacted into the sorted
+    // view and one in the tail, among others; three of them share a delta hash.
+    let shared = [0xab, 0xcd, 0xef, 0x01, 0x23, 0x45];
+    let change = [0xc1; 32];
+    let first = [
+        meta(id_with_prefix(&shared, 0x10, 0), 1, change, vec![]),
+        meta(spread_id(1), 1, [0xc2; 32], vec![]),
+        meta(id_with_prefix(&shared, 0x2f, 2), 1, change, vec![]),
+        meta(spread_id(3), 1, [0xc3; 32], vec![]),
+    ];
+    let second = [
+        meta(spread_id(4), 1, change, vec![]),
+        meta(id_with_prefix(&shared, 0x11, 5), 1, [0xc4; 32], vec![]),
+        meta(spread_id(6), 1, [0xc5; 32], vec![]),
+    ];
+    let (_dir, root) = temp_dir();
+    let layout = Layout::new(&root);
+    let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+    let insert = |metas: &[ChangesetMeta]| {
+        let mut write = store.write().unwrap();
+        for meta in metas {
+            write.insert_changeset(meta.clone()).unwrap();
+        }
+        write.commit().unwrap();
+    };
+    insert(&first);
+    {
+        // A compaction, as a writer makes one: under the lock.
+        let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+        assert_eq!(
+            Index::open(&layout, real_fs()).unwrap().compact().unwrap(),
+            4
+        );
+    }
+    insert(&second);
+    let read = store.read().unwrap();
+    let matches = [first[0].id, first[2].id, second[1].id];
+    let rebases = [first[0].id, first[2].id, second[0].id];
+    assert_eq!(read.resolve_prefix("abcdef012345").unwrap(), matches);
+    assert_eq!(read.by_delta_hash(&change).unwrap(), rebases);
+
+    // Every index file that holds neither the keys searched nor the ids, cut to nothing under
+    // the snapshot: a lookup that read a match's whole record would fail on the first of them.
+    for rel in ["idx/gen.col", "idx/par.col", "parents.log"] {
+        set_len(layout.meta_path(rel), 0);
+    }
+    assert_eq!(read.resolve_prefix("abcdef012345").unwrap(), matches);
+    assert_eq!(read.by_delta_hash(&change).unwrap(), rebases);
+    // A prefix lookup searches the id view and scans ids.col: dh.col goes too.
+    set_len(layout.meta_path("idx/dh.col"), 0);
+    assert_eq!(read.resolve_prefix("abcdef012345").unwrap(), matches);
+}
+
+/// Draws from a seeded sequence: [`mix`] of a counter.
+struct Draws(u64);
+
+impl Draws {
+    /// A draw below `n`.
+    fn below(&mut self, n: u64) -> u64 {
+        self.0 += 1;
+        mix(self.0) % n
+    }
+}
+
+/// `count` changesets in random chains with merges, their ids `spread_id(ids_from + n)`: now and
+/// then a root; otherwise a first parent that is mostly the changeset before, and up to two more
+/// parents drawn from those before. Each has the generation a store gives it.
+fn random_chains(draws: &mut Draws, count: u64, ids_from: u64) -> Vec<ChangesetMeta> {
+    let mut model: Vec<ChangesetMeta> = Vec::new();
+    for n in 0..count {
+        let mut parents = Vec::new();
+        let earlier = to_u64(model.len());
+        if earlier > 0 && draws.below(8) > 0 {
+            parents.push(match draws.below(4) {
+                0 => draws.below(earlier),
+                _ => earlier - 1,
+            });
+            for _ in 0..draws.below(3) {
+                let other = draws.below(earlier);
+                if !parents.contains(&other) {
+                    parents.push(other);
+                }
+            }
+        }
+        let at = |rec: u64| &model[usize::try_from(rec).unwrap()];
+        let generation = parents.iter().map(|&p| at(p).generation + 1).max();
+        let parents = parents.iter().map(|&p| at(p).id).collect();
+        let delta_hash = [u8::try_from(n % 7).unwrap(); 32];
+        let id = spread_id(ids_from + n);
+        model.push(meta(id, generation.unwrap_or(1), delta_hash, parents));
+    }
+    model
+}
+
+/// Appends `metas` to the journal of the store at `layout` as one frame, under the lock, and
+/// stops there: what a writer that died right after its commit point leaves behind, which a
+/// snapshot reads into its overlay and no index handle counts.
+fn append_unmaterialized(layout: &Layout, metas: &[ChangesetMeta]) {
+    use swarmops_store::{Journal, MetaLock, Record};
+
+    let _lock = MetaLock::acquire(layout, Duration::from_secs(10)).unwrap();
+    let journal = Journal::open(layout, real_fs()).unwrap();
+    journal.truncate_torn_tail().unwrap();
+    let records: Vec<Record> = (metas.iter())
+        .map(|meta| Record::Changeset {
+            id: meta.id,
+            generation: meta.generation,
+            delta_hash: meta.delta_hash,
+            parents: meta.parents.clone(),
+        })
+        .collect();
+    journal.append_frame(&records).unwrap();
+}
+
+#[test]
+fn first_parent_and_generation_match_get() {
+    use swarmops_store::MetaLock;
+    use swarmops_testkit::store::temp_dir;
+
+    // Random chains with merges, written in transactions of 1 to 12 changesets (no checkpoint:
+    // fewer than 32 frames), half of the seeds with the first half compacted into the sorted
+    // view, then 4 more changesets in a frame no writer has materialized: the snapshot's
+    // overlay. Every changeset's first parent, read narrowly, is the first of those
+    // `changeset` gives, wherever it is found; every record's narrow reads are `get`'s fields.
+    for seed in 0..4_u64 {
+        let mut draws = Draws(seed << 32);
+        let model = random_chains(&mut draws, 124, seed * 1_000);
+        let (stored, unmaterialized) = model.split_at(120);
+        let (_dir, root) = temp_dir();
+        let layout = Layout::new(&root);
+        let store = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+        let mut written = 0;
+        while written < stored.len() {
+            let take = usize::try_from(1 + draws.below(12)).unwrap();
+            let batch = &stored[written..stored.len().min(written + take)];
+            let mut write = store.write().unwrap();
+            for meta in batch {
+                write.insert_changeset(meta.clone()).unwrap();
+            }
+            write.commit().unwrap();
+            written += batch.len();
+            if seed % 2 == 1 && written >= 60 && written - batch.len() < 60 {
+                // A compaction, as a writer makes one: under the lock.
+                let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+                let mut index = Index::open(&layout, real_fs()).unwrap();
+                assert_eq!(index.compact().unwrap(), to_u64(written));
+            }
+        }
+        append_unmaterialized(&layout, unmaterialized);
+
+        let read = store.read().unwrap();
+        for (seq, meta) in (0..).zip(&model) {
+            let what = format!("seed {seed}, changeset {seq}");
+            let full = read.changeset(meta.id).unwrap().expect(&what);
+            assert_eq!(full, at_seq(meta, seq), "{what}");
+            assert_eq!(
+                read.first_parent(meta.id).unwrap(),
+                Some(full.parents.first().copied()),
+                "{what}"
+            );
+        }
+        for absent in [spread_id(999_999), id_of(0), id_of(0xff)] {
+            assert_eq!(read.first_parent(absent).unwrap(), None, "{absent}");
+        }
+
+        let index = Index::open(&layout, real_fs()).unwrap();
+        assert_eq!(index.len(), 120, "the last frame is not materialized");
+        for rec in 0..index.len() {
+            let full = index.get(rec).unwrap();
+            assert_eq!(index.id(rec).unwrap(), full.id, "seed {seed}, rec {rec}");
+            assert_eq!(index.generation(rec).unwrap(), full.generation);
+            assert_eq!(
+                index.first_parent(rec).unwrap(),
+                full.parents.first().copied()
+            );
+        }
+        for past in [index.len(), u64::MAX] {
+            assert_bad_call(index.id(past), "id past the end");
+            assert_bad_call(index.generation(past), "generation past the end");
+            assert_bad_call(index.first_parent(past), "first_parent past the end");
+        }
+    }
+}
+
+#[test]
+fn narrow_lookups_read_their_own_column_alone() {
+    // A root, a child and a merge. Each narrow lookup reads its own file and no other: with every
+    // other index file cut to nothing under the handle, it still answers for every record, where
+    // `get`, which reads them all, fails. The first parent of the merge is read without its
+    // second parent, which is cut off parents.log.
+    let metas = [
+        meta(id_of(1), 1, [0xd1; 32], vec![]),
+        meta(id_of(2), 2, [0xd2; 32], vec![id_of(1)]),
+        meta(id_of(3), 3, [0xd3; 32], vec![id_of(2), id_of(1)]),
+    ];
+    let lookups: [(&str, &[&str]); 3] = [
+        (
+            "id",
+            &["idx/gen.col", "idx/dh.col", "idx/par.col", "parents.log"],
+        ),
+        (
+            "generation",
+            &["idx/ids.col", "idx/dh.col", "idx/par.col", "parents.log"],
+        ),
+        (
+            "first_parent",
+            &["idx/ids.col", "idx/gen.col", "idx/dh.col"],
+        ),
+    ];
+    for (lookup, cut) in lookups {
+        let (_root, layout) = new_root();
+        let mut index = open(&layout);
+        append_all(&mut index, &metas);
+        for rel in cut {
+            set_len(layout.meta_path(rel), 0);
+        }
+        if lookup == "first_parent" {
+            // The child's parent and the merge's first parent: 64 of the 96 bytes.
+            set_len(layout.meta_path("parents.log"), 64);
+        }
+        for (rec, meta) in (0..).zip(&metas) {
+            match lookup {
+                "id" => assert_eq!(index.id(rec).unwrap(), meta.id),
+                "generation" => assert_eq!(index.generation(rec).unwrap(), meta.generation),
+                _ => assert_eq!(
+                    index.first_parent(rec).unwrap(),
+                    meta.parents.first().copied()
+                ),
+            }
+        }
+        assert!(index.get(2).is_err(), "{lookup}: get reads what was cut");
     }
 }
 
