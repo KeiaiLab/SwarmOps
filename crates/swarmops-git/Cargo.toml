@@ -13,6 +13,18 @@ autotests = false
 [lints]
 workspace = true
 
+[features]
+# The store's test hooks, which `LocalRepo::open` honors (`swarmops-repo/test-hooks`): for the
+# import's crash and fault sweeps (`tests/sweeps.rs`), which require them, so that `tests/all.rs`
+# holds that module only with the feature. It turns on the test kit's too, so that what the
+# sweeps' runs left is opened and imported again under the order checker
+# (`swarmops_testkit::faults::checked`).
+test-hooks = [
+    "swarmops-repo/test-hooks",
+    "swarmops-store/test-hooks",
+    "swarmops-testkit/test-hooks",
+]
+
 # gix is seen by `src/gix_source.rs` alone (umbrella decision 3): git2 0.21.0 would be a second
 # `GitSource` there.
 [dependencies]

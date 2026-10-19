@@ -411,6 +411,18 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   frames saying how far it got (`imported`, `last_commit`) and hinting to run it again. Like
   `init`, it is a client-side operation (`LocalOps::git_import`): no `StoreOps` method and no MCP
   tool.
+- The git import's crash and fault sweeps (`swarmops-git`'s `tests/sweeps.rs`, behind the crate's
+  new `test-hooks` feature, which the gates turn on): `refs`' `newer`, two changesets to a frame,
+  imported onto a fresh store and onto one that holds `older`, each run a child process under the
+  order checker, is crashed (`SWARMOPS_TEST_CRASH_AT`) or failed (`SWARMOPS_TEST_FAIL_AT`: once
+  with `EIO`, persistently with `ENOSPC`) at its filesystem calls. A failed import stops with a
+  store failure that names no host path, its committed frames recorded and nothing after them,
+  or succeeds with every commit recorded and a warning that says what failed. The store it leaves
+  verifies clean, and the same import run again ends with the changesets, the external ids and
+  the target an uninterrupted import leaves; after a crash it takes exactly the commits whose
+  external ids the crash left out. The default gate takes every fifth call (and fails them onto
+  the fresh store alone); `just check-slow` takes every call, and imports 100,000 synthetic
+  commits: 13 frames, at most 14 compactions, a peak resident memory under 1 GiB.
 
 ### Changed
 
