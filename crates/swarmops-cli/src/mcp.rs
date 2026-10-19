@@ -878,7 +878,8 @@ fn request_of<R: Refuse>(spec: &Spec, arguments: Value) -> Result<R, OpError> {
             output::printable(&format!("the arguments are not a {}: {e}", spec.request)),
         )
         .with_hint(format!(
-            "the {} tool's inputSchema gives its arguments, as swarmops schema {} does",
+            "the {} tool's inputSchema gives its arguments; swarmops schema {} gives the \
+             request type, without the rules this server adds",
             spec.name, spec.request
         ))
     })?;
@@ -982,14 +983,14 @@ fn full_id_pattern() -> String {
 }
 
 /// `E_INVALID_ARG` unless `expected`, the target a move or a delete of ref `name` expects, is a
-/// full changeset id ([`is_full_id`]), as the resolver takes them. Anything else (a ref name, a
-/// relative revision, an id's prefix) is read from the store when the call runs instead of
-/// pinning the id the caller read. The ref's own name always matches, so the compare-and-swap
-/// protects nothing: a move computed on a stale read would silently drop what another agent
-/// moved the ref to, and a move to `main~1` made twice would move the ref twice. `main~1` on
-/// `main` names main's parent and never matches, and a prefix stops resolving
-/// (`E_AMBIGUOUS_ID`) once another changeset shares it. The CLI takes any revision for
-/// `--expect`, whose help warns of this; an agent through this server gets the rule enforced.
+/// full changeset id ([`is_full_id`]), as the resolver takes them. A ref name or a relative
+/// revision is read from the store when the call runs instead of pinning the id the caller read.
+/// The ref's own name always matches, so the compare-and-swap protects nothing: a move computed
+/// on a stale read would silently drop what another agent moved the ref to, and a move to
+/// `main~1` made twice would move the ref twice. `main~1` on `main` names main's parent and never
+/// matches. An id's prefix names one changeset, but stops resolving (`E_AMBIGUOUS_ID`) once
+/// another changeset shares it. The CLI takes any revision for `--expect`, whose help warns of
+/// this; an agent through this server gets the rule enforced.
 fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
     let rev = expected.as_str();
     if is_full_id(rev) {
@@ -999,10 +1000,11 @@ fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
         ErrorCode::InvalidArg,
         output::printable(&format!(
             "expected_old {rev:?} is not a full changeset id, which a compare-and-swap needs: a \
-             ref name, a relative revision or an id prefix is read when the call runs instead \
-             of pinning the id you read ({name} itself always matches, so the compare-and-swap \
-             would protect nothing, and {name}~1 never matches); pass the 64-hex id the ref \
-             held when you read it, from ref_list, show, log or a commit's result"
+             ref name or a relative revision is read when the call runs instead of pinning the \
+             id you read ({name} itself always matches, so the compare-and-swap would protect \
+             nothing, and {name}~1 never matches), and an id prefix stops resolving once another \
+             changeset shares it; pass the 64-hex id the ref held when you read it, from \
+             ref_list, show, log or a commit's result"
         )),
     )
     .with_details(Map::from_iter([
@@ -1016,10 +1018,10 @@ fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
 /// changeset id ([`is_full_id`]). The move expects the ref to name the parent, so the parent is
 /// a compare-and-swap's expectation, which must pin the id the caller read
 /// ([`concrete_expectation`]): an omitted parent is the ref's head when the call runs, and a ref
-/// name, a relative revision or an id prefix is read when the call runs too, so the
-/// compare-and-swap would protect nothing. The CLI takes any parent with `--advance`, as a
-/// one-step fast-forward that detects a race from the moment it runs; an agent through this
-/// server gets the rule enforced.
+/// name or a relative revision is read when the call runs too, so the compare-and-swap would
+/// protect nothing; an id prefix stops resolving once another changeset shares it. The CLI takes
+/// any parent with `--advance`, as a one-step fast-forward that detects a race from the moment
+/// it runs; an agent through this server gets the rule enforced.
 fn full_parent(name: &str, parent: Option<&Rev>) -> Result<(), OpError> {
     let rev = parent.map(Rev::as_str);
     if rev.is_some_and(is_full_id) {
@@ -1038,9 +1040,10 @@ fn full_parent(name: &str, parent: Option<&Rev>) -> Result<(), OpError> {
         output::printable(&format!(
             "advance {name:?} needs a parent given as a full changeset id, {given}: its \
              compare-and-swap expects the ref to name the parent, and an omitted parent, a ref \
-             name, a relative revision or an id prefix is read when the call runs instead of \
-             pinning the id you read, so the compare-and-swap would protect nothing; pass the id \
-             the ref held when you read it, from ref_list, show, log or a commit's result"
+             name or a relative revision is read when the call runs instead of pinning the id \
+             you read, so the compare-and-swap would protect nothing, while an id prefix stops \
+             resolving once another changeset shares it; pass the id the ref held when you read \
+             it, from ref_list, show, log or a commit's result"
         )),
     )
     .with_details(details)

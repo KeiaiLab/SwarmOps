@@ -337,6 +337,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   failed, where it was the non-retryable `E_IO`: nothing of the write was committed, and running
   it again lists the frame. In the Rust API it is `StoreError::NotCommitted`, where it was
   `StoreError::Io`.
+- `swarmops mcp`: refusing a `ref_set` or `ref_delete` whose `expected_old`, or a `commit` with
+  `advance` whose `parent`, is no full changeset id, the server says what an id prefix does
+  apart from a ref name and a relative revision (it stops resolving once another changeset
+  shares it), as the tool descriptions do; and arguments that do not fit a tool's request type
+  get a hint that the tool's `inputSchema` gives them, where `swarmops schema` gives the
+  request type without the rules the server adds. In the schema, `VerifyFinding.object` says
+  that `missing_object` also names an object the store holds as another kind.
 
 ### Fixed
 

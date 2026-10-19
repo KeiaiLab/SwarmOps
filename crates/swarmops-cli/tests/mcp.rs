@@ -670,12 +670,13 @@ fn mcp_calls_do_not_share_resolution() {
     server.finish_clean();
 }
 
-/// A ref move through the server is a compare-and-swap only when it names what it expects: an
-/// `expected_old` that is not a full changeset id (a ref name, a relative revision, an id
-/// prefix) is read when the call runs instead of pinning the id the caller read; the server
-/// refuses it with `E_INVALID_ARG` and moves nothing. With the full id the caller last read, a
-/// stale expectation is `E_CAS_MISMATCH`, and the same move again finds its work done. The CLI
-/// keeps taking any revision for `--expect`.
+/// A ref move through the server is a compare-and-swap only when it names what it expects: the
+/// server refuses an `expected_old` that is not a full changeset id with `E_INVALID_ARG`, and
+/// moves nothing. A ref name or a relative revision is read when the call runs instead of
+/// pinning the id the caller read, and an id prefix stops resolving once another changeset
+/// shares it. With the full id the caller last read, a stale expectation is `E_CAS_MISMATCH`,
+/// and the same move again finds its work done. The CLI keeps taking any revision for
+/// `--expect`.
 #[test]
 fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
     let store = Store::init();
@@ -715,10 +716,11 @@ fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
 }
 
 /// `commit` with `advance` compares and swaps on its `parent`, so the server refuses it without a
-/// full 64-hex `parent`: an omitted one is the ref's head when the call runs, and a ref name, a
-/// relative revision or an id prefix is read when the call runs too, instead of pinning the id
-/// the agent read. Each refusal is `E_INVALID_ARG` with the `advance` and the `parent` given,
-/// before anything is resolved, and nothing is written; the full id publishes.
+/// full 64-hex `parent`: an omitted one is the ref's head when the call runs, a ref name or a
+/// relative revision is read when the call runs too, instead of pinning the id the agent read,
+/// and an id prefix stops resolving once another changeset shares it. Each refusal is
+/// `E_INVALID_ARG` with the `advance` and the `parent` given, before anything is resolved, and
+/// nothing is written; the full id publishes.
 #[test]
 fn mcp_commit_with_advance_needs_a_full_parent() {
     let store = Store::init();
