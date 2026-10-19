@@ -18,7 +18,7 @@ pub mod repo;
 mod tree_edit;
 pub mod verify;
 
-pub use commit::{Change, ChangeOp, CommitOutcome, CommitRequest};
+pub use commit::{Advance, Advanced, Change, ChangeOp, CommitOutcome, CommitRequest};
 pub use error::RepoError;
 pub use read::StoredChangeset;
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};

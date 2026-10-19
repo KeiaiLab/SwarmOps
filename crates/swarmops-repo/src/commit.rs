@@ -5,7 +5,8 @@
 //!    `allow_empty` ([`RepoError::EmptyChanges`]), no directory put ([`RepoError::DirPut`]),
 //!    each path once ([`RepoError::DuplicatePath`]), at most 255 parents (the metadata
 //!    store's [`StoreError::Limit`], as it gives at insert), distinct and in the store
-//!    ([`RepoError::UnknownParent`]).
+//!    ([`RepoError::UnknownParent`]), and the name of the ref to advance, if any, a ref name
+//!    ([`RepoError::RefName`]).
 //! 2. Hashes each put's content into its blob id, and applies the changes to the first
 //!    parent's root tree in memory, the deletes first: a put below a file
 //!    or where a directory is, or a delete of a directory, is a [`RepoError::TypeConflict`]; a
@@ -18,9 +19,10 @@
 //! 4. Writes the blobs the delta puts, the changed trees and the changeset object in one
 //!    `put_batch`, then flushes: every object is durable before any metadata names it (I1). A
 //!    flush error fails the commit, and nothing is recorded.
-//! 5. Inserts the changeset in a write transaction of its own and commits that: its journal
-//!    frame is the commit point. A failure after it ([`StoreError::PostCommit`]) leaves the
-//!    changeset committed, and is reported as a warning; the next write to the store repairs
+//! 5. Inserts the changeset in a write transaction of its own, beside the move of the ref that
+//!    `advance` names if any (below), and commits that: its journal frame is the commit point.
+//!    A failure after it ([`StoreError::PostCommit`]) leaves the changeset committed, and is
+//!    reported as a warning; the next write to the store repairs
 //!    what is missing. A journal append that fails ([`StoreError::NotCommitted`]) is returned
 //!    as it is: the frame was cut back off the journal, so the changeset is not recorded, and
 //!    the same request made again records it. What the transaction's recovery repaired first,
@@ -29,6 +31,16 @@
 //! An identical request computes the same objects and the same changeset: the store has them
 //! all, so nothing is written, and the insert finds the changeset
 //! ([`InsertOutcome::AlreadyPresent`]) without appending a transaction.
+//!
+//! A request with `advance` ([`Advance`]) publishes the changeset: the same transaction moves
+//! that ref from the changeset's first parent to it (for a root changeset, creates the ref), so
+//! the changeset and the move are one journal frame, one commit point, and recorded together
+//! or not at all. The expectation is the first parent, never a value of its own, so the move
+//! is always a one-step fast-forward along first parents. A ref that names anything else, or
+//! for a root changeset exists, drops the transaction: [`RepoError::RefMoved`], and neither the
+//! changeset nor the move is recorded (the objects step 4 flushed stay, unreferenced, for
+//! GC). A ref that names the changeset already is an identical request made before: nothing
+//! is written, and the outcome says so ([`Advanced::already_applied`]).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -40,7 +52,7 @@ use swarmops_core::{
 use swarmops_store::{ChangesetMeta, InsertOutcome, LimitKind, ObjectStore, Recovered, StoreError};
 
 use crate::error::RepoError;
-use crate::repo::{Repo, post_commit_warning};
+use crate::repo::{Repo, post_commit_warning, ref_error};
 use crate::tree_edit::{Encoded, TreeEdit};
 
 /// The most parents a changeset may have: what a journal record holds (its count is a byte).
@@ -90,6 +102,32 @@ pub struct CommitRequest {
     /// Whether a changeset that changes nothing may be made (no changes, or only puts of what
     /// their paths hold already); otherwise that is [`RepoError::EmptyChanges`].
     pub allow_empty: bool,
+    /// A ref to move to the changeset in the same transaction, from the first parent (see [the
+    /// module documentation](self)); `None` moves no ref.
+    pub advance: Option<Advance>,
+}
+
+/// The ref a commit publishes its changeset on ([`CommitRequest::advance`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advance {
+    /// The ref: `main` or `release/<x>`.
+    pub name: String,
+    /// Who moves it, as the journal's record of the move (the reflog) names them: at most 255
+    /// bytes.
+    pub actor: String,
+}
+
+/// The move of the ref a commit advanced ([`CommitOutcome::advanced`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advanced {
+    /// The ref.
+    pub name: String,
+    /// What it named before the move: the changeset's first parent; `None` for a root changeset,
+    /// whose move created the ref.
+    pub old: Option<ChangesetId>,
+    /// Whether the ref named the changeset already, so that nothing was written: an identical
+    /// request committed it before (the insert is then [`InsertOutcome::AlreadyPresent`]).
+    pub already_applied: bool,
 }
 
 /// What [`Repo::commit`] did.
@@ -109,6 +147,8 @@ pub struct CommitOutcome {
     /// What the insert did: [`InsertOutcome::AlreadyPresent`] when an identical request was
     /// committed before.
     pub insert: InsertOutcome,
+    /// The move of the ref the request advanced; `None` without `advance`.
+    pub advanced: Option<Advanced>,
     /// Steps after the commit point that failed, one line each: the changeset is committed
     /// all the same.
     pub warnings: Vec<String>,
@@ -132,7 +172,11 @@ impl<O: ObjectStore> Repo<O> {
             message,
             metadata,
             allow_empty,
+            advance,
         } = req;
+        if let Some(Advance { name, .. }) = &advance {
+            swarmops_store::check_ref_name(name).map_err(ref_error)?;
+        }
         let changes = sorted_changes(changes, allow_empty)?;
         self.check_parents(&parents)?;
         let (candidates, mut contents) = candidate_delta(changes);
@@ -201,7 +245,7 @@ impl<O: ObjectStore> Repo<O> {
         );
         self.objects.flush()?;
 
-        let (insert, warnings, recovered) = self.record(meta)?;
+        let (insert, advanced, warnings, recovered) = self.record(meta, advance)?;
         Ok(CommitOutcome {
             id,
             root,
@@ -209,6 +253,7 @@ impl<O: ObjectStore> Repo<O> {
             blobs_written,
             trees_written,
             insert,
+            advanced,
             warnings,
             recovered,
         })
@@ -254,32 +299,78 @@ impl<O: ObjectStore> Repo<O> {
         Ok(missing)
     }
 
-    /// Inserts `meta` in a write transaction of its own and commits it, if the store does
-    /// not hold the changeset yet. Returns what the insert did, a warning if a step after
-    /// the commit point failed, and what the transaction's recovery repaired.
+    /// Inserts `meta` in a write transaction of its own, with `advance` beside the move of that
+    /// ref from the changeset's first parent to it, and commits it if it queued anything: see
+    /// [the module documentation](self). Returns what the insert did, the move, a warning if a
+    /// step after the commit point failed, and what the transaction's recovery repaired.
     fn record(
         &self,
         meta: ChangesetMeta,
-    ) -> Result<(InsertOutcome, Vec<String>, Recovered), RepoError> {
+        advance: Option<Advance>,
+    ) -> Result<(InsertOutcome, Option<Advanced>, Vec<String>, Recovered), RepoError> {
+        use swarmops_store::CasResult;
+
+        // The move expects the first parent, never a value of its own: an expectation of
+        // another head would drop that head from the ref's first-parent history.
+        let (id, expected) = (meta.id, meta.parents.first().copied());
         let mut write = self.meta.write()?;
         let recovered = write.recovered();
         let insert = write.insert_changeset(meta).map_err(|e| match e {
             StoreError::MissingParent(parent) => RepoError::UnknownParent(parent),
             other => other.into(),
         })?;
+        let advanced = match advance {
+            None => None,
+            Some(Advance { name, actor }) => {
+                let moved = write
+                    .cas_ref(&name, expected, Some(id), &actor)
+                    .map_err(ref_error)?;
+                let already_applied = match moved {
+                    CasResult::Applied { .. } => false,
+                    // The ref names the changeset already: an identical request committed it,
+                    // so the insert found it too.
+                    CasResult::Mismatch { actual } if actual == Some(id) => true,
+                    // Another move came first. Returning drops the write, which appends nothing
+                    // and releases the lock: neither the changeset nor the move is recorded.
+                    CasResult::Mismatch { actual } => {
+                        return Err(RepoError::RefMoved {
+                            name,
+                            actual,
+                            recovered: Box::new(recovered),
+                        });
+                    }
+                };
+                Some(Advanced {
+                    name,
+                    old: expected,
+                    already_applied,
+                })
+            }
+        };
+        let inserted = matches!(insert, InsertOutcome::Inserted { .. });
+        let moved = advanced
+            .as_ref()
+            .filter(|advanced| !advanced.already_applied);
         let mut warnings = Vec::new();
-        // An insert that found the changeset queued nothing: dropping the write releases the
-        // lock and appends nothing.
-        if let InsertOutcome::Inserted { .. } = insert {
+        // An insert that found the changeset, and a move the ref had made already, queued
+        // nothing: then dropping the write releases the lock and appends nothing.
+        if inserted || moved.is_some() {
             match write.commit() {
                 Ok(_) => {}
                 Err(StoreError::PostCommit { frame_seq, source }) => {
-                    warnings.push(post_commit_warning("the changeset", frame_seq, &source));
+                    let what = match moved {
+                        Some(moved) if inserted => {
+                            format!("the changeset and the move of ref {}", moved.name)
+                        }
+                        Some(moved) => format!("the move of ref {}", moved.name),
+                        None => "the changeset".to_owned(),
+                    };
+                    warnings.push(post_commit_warning(&what, frame_seq, &source));
                 }
                 Err(e) => return Err(e.into()),
             }
         }
-        Ok((insert, warnings, recovered))
+        Ok((insert, advanced, warnings, recovered))
     }
 }
 

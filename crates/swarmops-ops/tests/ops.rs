@@ -82,6 +82,7 @@ fn commit_req(parent: Option<&str>, changes: Vec<ChangeInput>) -> CommitReq {
         changes,
         message: "a test commit".to_owned(),
         allow_empty: false,
+        advance: None,
     }
 }
 
@@ -312,6 +313,7 @@ fn commit_from_inline_and_base64_contents_then_cat_ls_show_log() {
                 ],
                 message: "add the readme\n\nand a tool".to_owned(),
                 allow_empty: false,
+                advance: None,
             },
         )
         .unwrap();
@@ -458,6 +460,7 @@ fn commit_on_main_by_default(ops: &LocalOps, who: &Identity, c1: &str) {
                 changes: vec![text("README.md", "# acme, v2\n"), delete("docs/latest")],
                 message: "update the readme".to_owned(),
                 allow_empty: false,
+                advance: None,
             },
         )
         .unwrap();
@@ -1017,6 +1020,175 @@ fn cas_mismatch_hints_never_overwrite_the_winner() {
     );
 }
 
+/// `commit` with `advance`: the changeset and its ref's move in one call and one transaction
+/// (operations spec §1, §4).
+mod advance {
+    use swarmops_api::Advanced;
+
+    use super::*;
+
+    /// A request for `changes` on `parent` ([`commit_req`]) that advances ref `name`.
+    fn advancing(parent: Option<&str>, changes: Vec<ChangeInput>, name: &str) -> CommitReq {
+        CommitReq {
+            advance: Some(name.to_owned()),
+            ..commit_req(parent, changes)
+        }
+    }
+
+    /// The journal frames of the store at `root`, each as the kinds of its records.
+    fn frames(root: &Utf8Path) -> Vec<Vec<&'static str>> {
+        let meta = MetaStore::open(root).unwrap();
+        let entries = meta.read().unwrap().journal_after(None, 1_000).unwrap();
+        let mut frames: Vec<(u64, Vec<&'static str>)> = Vec::new();
+        for entry in entries {
+            match frames.last_mut() {
+                Some((seq, kinds)) if *seq == entry.seq => kinds.push(entry.kind),
+                _ => frames.push((entry.seq, vec![entry.kind])),
+            }
+        }
+        frames.into_iter().map(|(_, kinds)| kinds).collect()
+    }
+
+    /// A commit with `advance` moves the ref in the same call and the same journal frame as its
+    /// changeset, and says so in `advanced`; `ref_list` shows the move.
+    #[test]
+    fn commit_with_advance_moves_the_ref_in_one_call() {
+        let (_dir, root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let before = frames(&root);
+
+        let resp = ops
+            .commit(&who, advancing(Some(&c1), vec![text("f", "2")], "main"))
+            .unwrap();
+        let c2 = resp.changeset.clone();
+        assert_eq!(resp.parent.as_deref(), Some(c1.as_str()));
+        let moved = Advanced {
+            name: "main".to_owned(),
+            old: Some(c1.clone()),
+            new: c2.clone(),
+            already_applied: false,
+        };
+        assert_eq!(resp.advanced, Some(moved));
+        assert_eq!(resp.warnings, Vec::<String>::new());
+        let refs = ops.ref_list(RefListReq {}).unwrap().refs;
+        let main = RefOut {
+            name: "main".to_owned(),
+            target: c2,
+            version: 2,
+        };
+        assert_eq!(refs, [main]);
+        let after = frames(&root);
+        assert_eq!(after[..before.len()], before[..]);
+        assert_eq!(
+            after[before.len()..],
+            [vec!["changeset", "ref_move"]],
+            "one frame"
+        );
+
+        // A commit without `advance` still moves no ref, and reports no move.
+        let plain = ops
+            .commit(&who, commit_req(None, vec![text("f", "3")]))
+            .unwrap();
+        assert_eq!(plain.advanced, None);
+        let main = ops.repo_info(InfoReq {}).unwrap().main;
+        assert_eq!(main.as_deref(), Some(resp.changeset.as_str()));
+    }
+
+    /// A commit with `advance` whose ref moved since its parent was read records nothing:
+    /// `E_CAS_MISMATCH` (exit 4, retryable) with what the ref names and `committed: false`, a
+    /// message that says to commit again on top of it, `--parent <actual> --advance main`, and a
+    /// hint that only reads. The store's changesets and main are as they were.
+    #[test]
+    fn commit_with_advance_that_loses_is_cas_mismatch_and_records_nothing() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        // Another agent publishes c2 on c1 first.
+        let won = ops
+            .commit(&who, advancing(Some(&c1), vec![text("f", "2")], "main"))
+            .unwrap();
+        let c2 = won.changeset;
+        let before = ops.repo_info(InfoReq {}).unwrap();
+
+        let lost = ops.commit(&who, advancing(Some(&c1), vec![text("f", "3")], "main"));
+        let err = expect_err(lost, ErrorCode::CasMismatch);
+        assert_eq!((err.exit, err.retryable), (4, true));
+        assert_eq!(
+            Value::Object(err.details.clone()),
+            json!({"name": "main", "actual": c2, "committed": false})
+        );
+        let advice = format!("--parent {c2} --advance main");
+        assert!(err.message.contains(&advice), "{err:?}");
+        assert!(err.message.contains("recorded nothing"), "{err:?}");
+        let hint = err.hint.clone().unwrap();
+        assert_eq!(hint, format!("swarmops show {c2}"), "the hint only reads");
+        assert_eq!(
+            ops.repo_info(InfoReq {}).unwrap(),
+            before,
+            "nothing recorded"
+        );
+    }
+
+    /// Without `parent`, a commit with `advance` builds on that ref's head, not main's, and the
+    /// envelope's `meta.resolved` records the ref under its name; a ref that does not exist makes
+    /// the commit a root commit that creates it.
+    #[test]
+    fn commit_with_advance_and_no_parent_builds_on_that_ref() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let r1 = commit(&ops, Some(&c1), vec![text("r", "1")]);
+        ops.ref_set(&who, set("release/r1", &r1, None, true))
+            .unwrap();
+        let resolved = Resolved::default();
+        let request = ops.recording(&resolved);
+
+        let on_r1 = request
+            .commit(&who, advancing(None, vec![text("r", "2")], "release/r1"))
+            .unwrap();
+        assert_eq!(on_r1.parent.as_deref(), Some(r1.as_str()), "r1's head");
+        assert_eq!(
+            resolved.take(),
+            BTreeMap::from([("release/r1".to_owned(), r1.clone())])
+        );
+        let moved = on_r1.advanced.unwrap();
+        assert_eq!(
+            (moved.old.as_deref(), moved.new.as_str()),
+            (Some(r1.as_str()), on_r1.changeset.as_str())
+        );
+
+        let fresh = request
+            .commit(&who, advancing(None, vec![text("n", "1")], "release/new"))
+            .unwrap();
+        assert_eq!(fresh.parent, None, "a root commit");
+        assert!(resolved.take().is_empty(), "nothing resolved");
+        let created = fresh.advanced.unwrap();
+        assert_eq!((created.old, created.new), (None, fresh.changeset.clone()));
+        let refs = ops.ref_list(RefListReq {}).unwrap().refs;
+        let names: Vec<(&str, &str)> = (refs.iter())
+            .map(|r| (r.name.as_str(), r.target.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("main", c1.as_str()),
+                ("release/new", fresh.changeset.as_str()),
+                ("release/r1", on_r1.changeset.as_str()),
+            ]
+        );
+
+        // A bad ref name is refused before anything is resolved or written.
+        let bad = request.commit(&who, advancing(None, vec![text("x", "1")], "feature/x"));
+        let err = expect_err(bad, ErrorCode::RefNameInvalid);
+        assert_eq!(err.details["name"], "feature/x");
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 4);
+    }
+}
+
 #[test]
 fn hints_quote_what_they_interpolate() {
     let (dir, root, ops) = new_store();
@@ -1543,6 +1715,7 @@ fn show_and_log_decode_what_native_commits_do_not_write() {
                 ("note".to_owned(), b"hi".to_vec()),
             ],
             allow_empty: false,
+            advance: None,
         })
         .unwrap();
     let id = outcome.id.to_string();

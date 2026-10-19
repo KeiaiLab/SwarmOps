@@ -8,9 +8,11 @@ use std::io;
 use camino::Utf8Path;
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
-use swarmops_core::{ObjectId, RepoPath};
+use swarmops_core::{ChangesetId, ObjectId, RepoPath};
 use swarmops_repo::{RepoError, StoreError};
 use swarmops_store::Layout;
+
+use crate::local::cas_mismatch;
 
 /// What was being done when a repository error arose: a few errors mean something else while
 /// a store is created or opened.
@@ -77,6 +79,7 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             error(ErrorCode::PathNotFound, message).with_details(path(&at))
         }
         RepoError::RefName(name) => ref_name_invalid(name, message),
+        RepoError::RefMoved { name, actual, .. } => ref_moved(&name, actual),
         RepoError::MissingObject { id, .. } => {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
@@ -220,6 +223,27 @@ fn not_a_repo(at: &Utf8Path, what: String) -> OpError {
     }
 }
 
+/// A commit with `advance` that recorded nothing because ref `name` named `actual` (`None`: it
+/// did not exist), not the commit's parent: `E_CAS_MISMATCH` `{name, actual, committed: false}`,
+/// whose message says to commit the change again on top of `actual`, and whose hint only reads,
+/// as for a ref move ([`crate::local::cas_mismatch`]).
+fn ref_moved(name: &str, actual: Option<ChangesetId>) -> OpError {
+    let message = match actual {
+        Some(actual) => format!(
+            "ref {name} moved to {actual}, so this commit recorded nothing: commit your change on \
+             top of it (--parent {actual} --advance {name}), re-applying your edits to the \
+             content at {actual} rather than re-sending your old files"
+        ),
+        None => format!(
+            "ref {name} does not exist, so it does not name this commit's parent, and this commit \
+             recorded nothing"
+        ),
+    };
+    let mut error = cas_mismatch(name, actual, message);
+    error.details.insert("committed".to_owned(), false.into());
+    error
+}
+
 fn ref_name_invalid(name: String, message: String) -> OpError {
     error(ErrorCode::RefNameInvalid, message)
         .with_details(details([("name", name.into())]))
@@ -333,6 +357,12 @@ mod tests {
             op,
             ErrorCode::RefNameInvalid,
         );
+        let moved = RepoError::RefMoved {
+            name: "main".into(),
+            actual: Some(id()),
+            recovered: Box::default(),
+        };
+        maps(moved, op, ErrorCode::CasMismatch);
         let missing = RepoError::MissingObject {
             id: id().0,
             kind: ObjectKind::Blob,
@@ -343,6 +373,44 @@ mod tests {
             op,
             ErrorCode::StoreCorrupt,
         );
+    }
+
+    /// A commit with `advance` whose ref moved first recorded nothing: `E_CAS_MISMATCH` (exit 4,
+    /// retryable) with what the ref names and `committed: false`, a message that says to commit
+    /// again on top of it, and a hint that only reads; `actual` is null, and the hint the refs,
+    /// for a ref that is gone.
+    #[test]
+    fn a_commit_whose_ref_moved_is_a_cas_mismatch_that_committed_nothing() {
+        let moved = |actual| {
+            let e = RepoError::RefMoved {
+                name: "main".into(),
+                actual,
+                recovered: Box::default(),
+            };
+            repo_error(e, During::Op)
+        };
+        let error = moved(Some(id()));
+        assert_eq!(error.code, ErrorCode::CasMismatch.as_str());
+        assert_eq!((error.exit, error.retryable), (4, true));
+        let actual = Value::from(id().to_string());
+        let want = details([
+            ("name", "main".into()),
+            ("actual", actual),
+            ("committed", false.into()),
+        ]);
+        assert_eq!(error.details, want);
+        let advice = format!("--parent {} --advance main", id());
+        assert!(error.message.contains(&advice), "{error:?}");
+        assert_eq!(error.hint, Some(format!("swarmops show {}", id())));
+
+        let gone = moved(None);
+        let want = details([
+            ("name", "main".into()),
+            ("actual", Value::Null),
+            ("committed", false.into()),
+        ]);
+        assert_eq!(gone.details, want);
+        assert_eq!(gone.hint.as_deref(), Some("swarmops ref list"));
     }
 
     #[test]

@@ -35,6 +35,7 @@ const REQUESTS: &[&str] = &[
 
 /// Responses and the output types inside them.
 const RESPONSES: &[&str] = &[
+    "Advanced",
     "Attribution",
     "ChangeOut",
     "ChangesetDetail",
@@ -277,6 +278,7 @@ fn envelope_serializes_without_nulls_for_success() {
         root: "7a0b".to_owned(),
         files_changed: 2,
         blobs_written: 1,
+        advanced: None,
         warnings: Vec::new(),
     };
     let envelope = Envelope::ok("commit", result, meta());
@@ -675,6 +677,7 @@ fn omitted_request_fields_take_their_defaults() {
             message: "m".to_owned(),
             changes: Vec::new(),
             allow_empty: false,
+            advance: None,
         }
     );
 }
@@ -722,6 +725,7 @@ fn change_lists_and_enums_use_their_wire_forms() {
                 },
             ],
             allow_empty: false,
+            advance: None,
         }
     );
     // Serializing writes no nulls for the options left out, and keeps the spec's field order
@@ -731,6 +735,7 @@ fn change_lists_and_enums_use_their_wire_forms() {
         changes: vec![commit.changes[3].clone()],
         message: "m".to_owned(),
         allow_empty: true,
+        advance: None,
     };
     assert_eq!(
         serde_json::to_string(&rooted).unwrap(),
@@ -776,6 +781,56 @@ fn change_lists_and_enums_use_their_wire_forms() {
     assert!(serde_json::from_value::<ChangeOp>(json!("rename")).is_err());
     assert!(serde_json::from_value::<ModeInput>(json!("dir")).is_err());
     assert!(serde_json::from_value::<FileKind>(json!("dir")).is_err());
+}
+
+/// A commit's `advance` sits between `message` and `allow_empty`, as the operations spec's row
+/// has it. A commit that advanced a ref says so in `advanced`, whose `old` is omitted for a root
+/// commit's move, which created the ref; a commit that advanced none omits `advanced` (no null).
+#[test]
+fn a_commit_that_advances_a_ref_says_so() {
+    let advancing = CommitReq {
+        parent: Some(Rev("c9f0".to_owned())),
+        changes: Vec::new(),
+        message: "m".to_owned(),
+        advance: Some("main".to_owned()),
+        allow_empty: true,
+    };
+    assert_eq!(
+        serde_json::to_string(&advancing).unwrap(),
+        r#"{"parent":"c9f0","changes":[],"message":"m","advance":"main","allow_empty":true}"#
+    );
+    let moved = |old: Option<&str>| swarmops_api::Advanced {
+        name: "main".to_owned(),
+        old: old.map(str::to_owned),
+        new: "c9f1".to_owned(),
+        already_applied: false,
+    };
+    let resp = |parent: Option<&str>, advanced| CommitResp {
+        changeset: "c9f1".to_owned(),
+        parent: parent.map(str::to_owned),
+        root: "7a0b".to_owned(),
+        files_changed: 1,
+        blobs_written: 1,
+        advanced,
+        warnings: Vec::new(),
+    };
+    let cases = [
+        (
+            resp(Some("c9f0"), Some(moved(Some("c9f0")))),
+            json!({"name": "main", "old": "c9f0", "new": "c9f1", "already_applied": false}),
+        ),
+        (
+            resp(None, Some(moved(None))),
+            json!({"name": "main", "new": "c9f1", "already_applied": false}),
+        ),
+    ];
+    for (resp, advanced) in cases {
+        let value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(value["advanced"], advanced);
+        assert_eq!(serde_json::from_value::<CommitResp>(value).unwrap(), resp);
+    }
+    let plain = serde_json::to_value(resp(Some("c9f0"), None)).unwrap();
+    assert!(plain.get("advanced").is_none(), "{plain}");
 }
 
 fn signature() -> SignatureOut {

@@ -211,7 +211,7 @@ fn ref_targets(frames: &[Frame]) -> Result<BTreeMap<&str, Option<ChangesetId>>, 
     for frame in frames {
         for record in &frame.records {
             if let Record::RefMove { name, new, .. } = record {
-                refs::check_name(name).map_err(|_| StoreError::JournalCorrupt {
+                refs::check_ref_name(name).map_err(|_| StoreError::JournalCorrupt {
                     offset: frame.offset,
                 })?;
                 targets.insert(name.as_str(), *new);

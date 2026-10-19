@@ -237,6 +237,154 @@ fn the_commit_sweeps_reach_the_index_sync_and_the_checkpoint() {
     dry_commit(&commit_template());
 }
 
+/// The commit sweep for a publish, `commit --advance main`: its changeset and main's move are
+/// one journal frame, so whatever a run with an injected failure ends with, the store holds both
+/// or neither.
+mod advance {
+    use serde_json::json;
+    use swarmops_store::FS_CALLS_ENV;
+
+    use super::*;
+    use crate::support::sweep::{DryRun, calls_file, reported_calls};
+
+    /// [`swept_commit`]'s change on `base`, main's head, advancing main, as `agent(1)` with `env`
+    /// set: the commit the advancing sweep fails. The changeset is the swept commit's.
+    fn swept_advance(store: &Store, base: &str, env: &[(&str, &str)]) -> Run {
+        let changes = store.changes_of("swept", &SWEPT_PUTS);
+        let args = [
+            "commit",
+            "-m",
+            "swept",
+            "--changes",
+            &changes,
+            "--parent",
+            base,
+            "--advance",
+            "main",
+        ];
+        store.run_as(&agent(1), &args, env)
+    }
+
+    /// What main names in `store`, if it exists.
+    fn main_of(store: &Store) -> Option<String> {
+        let refs = store.read(&["ref", "list"]).ok();
+        let main = (refs["refs"].as_array().unwrap().iter()).find(|r| r["name"] == "main");
+        main.map(|r| r["target"].as_str().unwrap().to_owned())
+    }
+
+    /// [`swept_advance`] on a copy of `template` with nothing failing it, counting its calls;
+    /// with main's head before it. It commits the swept commit's changeset and moves main to it,
+    /// in the transaction that moves the checkpoint, and makes more calls than the swept commit
+    /// (the ref file's), so a sweep of its calls reaches the move, the index sync and the
+    /// checkpoint's move.
+    fn dry_advance(template: &Store) -> (DryRun, String) {
+        let plain = dry_commit(template);
+        let store = Store::copy_of(template);
+        let base = main_of(&store).expect("the template's main");
+        let file = calls_file(&store);
+        let env = [(FS_CALLS_ENV, file.to_str().unwrap())];
+        let result = swept_advance(&store, &base, &env).ok();
+        assert_eq!(
+            store.checkpoint(),
+            store.journal_len(),
+            "the 32nd frame past the checkpoint moves it to the journal's end"
+        );
+        assert_eq!(result["changeset"], plain.changeset.as_str());
+        assert_eq!(
+            result["advanced"],
+            json!({"name": "main", "old": base, "new": plain.changeset, "already_applied": false})
+        );
+        let dry = DryRun {
+            calls: reported_calls(&file),
+            changeset: plain.changeset.clone(),
+        };
+        assert!(
+            dry.calls > plain.calls,
+            "the move adds calls: {dry:?} {plain:?}"
+        );
+        (dry, base)
+    }
+
+    /// One run of the advancing sweep: [`swept_advance`] on a copy of `template`, failing as
+    /// `failure` says from call `k`. Then, the fault cleared: the store verifies clean, and holds
+    /// the commit's changeset (`changeset`, the dry run's) exactly when main names it, main at
+    /// `base` otherwise; both when the run succeeded, a warning or not, and neither when it
+    /// failed (either, after the documented abort); and the same publish made again ends with
+    /// both. Returns how the run ended.
+    fn advance_failing_at(
+        template: &Store,
+        k: u64,
+        failure: &str,
+        dry: &(DryRun, String),
+    ) -> Ended {
+        let (DryRun { changeset, .. }, base) = dry;
+        let store = Store::copy_of(template);
+        let what = format!("advance, call {k} failing {failure}");
+        let fail_at = format!("{k}:{failure}");
+        let run = swept_advance(&store, base, &[(FAIL_AT_ENV, fail_at.as_str())]);
+        let ended = ended(&run);
+        if let Ended::Succeeded(result) = &ended {
+            assert_eq!(
+                result["advanced"]["new"],
+                changeset.as_str(),
+                "{what}: {run}"
+            );
+        }
+        store.assert_clean(&format!("{what}: after the failed run"));
+        let present = store.read(&["show", changeset]).exit() == 0;
+        let expected = if present { changeset } else { base };
+        assert_eq!(
+            main_of(&store).as_ref(),
+            Some(expected),
+            "{what}: the changeset is there exactly when main names it: {run}"
+        );
+        match ended {
+            Ended::Succeeded(_) => assert!(present, "{what}: a success records both: {run}"),
+            Ended::Failed(_) => assert!(!present, "{what}: a failure records neither: {run}"),
+            Ended::Aborted => {}
+        }
+        let again = swept_advance(&store, base, &[]).ok();
+        assert_eq!(again["advanced"]["new"], changeset.as_str(), "{what}");
+        assert_eq!(again["advanced"]["already_applied"], present, "{what}");
+        assert_eq!(main_of(&store).as_ref(), Some(changeset), "{what}");
+        store.assert_clean(&format!("{what}: after the same publish again"));
+        ended
+    }
+
+    /// An injected I/O error at any filesystem call of a `commit --advance` leaves its changeset
+    /// and main's move both recorded or neither (Review Focus 3): each call of the dry run fails
+    /// in turn, once and persistently, with `EIO` and with `ENOSPC` ([`FAILURES`]). A success
+    /// records both, a warning or not; `E_IO_TRANSIENT` with `committed: false`, as every other
+    /// failure, neither; the documented aborts either. No run panics, and the sweep reaches each
+    /// outcome the commit sweep exists for ([`COMMIT_OUTCOMES`]).
+    #[test]
+    #[ignore = "slow, ~2 min: ~500 failed runs of commit --advance; just check-slow runs it"]
+    fn fail_at_every_call_of_an_advancing_commit_reports_honestly() {
+        let template = commit_template();
+        let dry = dry_advance(&template);
+        let mut ended = Vec::new();
+        for failure in FAILURES {
+            let runs = sweep(1..=dry.0.calls, |k| {
+                advance_failing_at(&template, k, failure, &dry)
+            });
+            ended.extend(runs.into_iter().map(|run| (failure, run)));
+        }
+        let missing = unreached(&ended);
+        assert!(
+            missing.is_empty(),
+            "no run of the advancing sweep ended so: {missing:?}"
+        );
+    }
+
+    /// The advancing sweep's dry run, in the default gate ([`dry_advance`] asserts what it
+    /// does): a change to the publish, the template or the checkpoint's batching that would take
+    /// the move, the index sync or the checkpoint out of the slow sweep fails here at once.
+    #[test]
+    fn the_advancing_commit_sweep_reaches_the_move_and_the_checkpoint() {
+        dry_advance(&commit_template());
+    }
+}
+
 /// The documented abort of a commit (a failed journal append whose cut back off the journal
 /// fails too, [`ABORTS`]) ends the process by `std::process::abort` even when its reason cannot
 /// be written: here the run's stderr is a pipe nobody reads (its read end dropped before the

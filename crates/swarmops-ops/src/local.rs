@@ -70,6 +70,13 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   since its caller starts it, as its own user, to serve that caller alone over stdio, and it
 ///   reads such content as the CLI does. A metadata key may not end in
 ///   `:b64`, which `show` reserves (`E_INVALID_ARG`).
+///   With `advance`, the commit also moves that ref to its changeset, in the same transaction,
+///   if the ref names the commit's parent (for a root commit, if the ref does not exist):
+///   `advanced` reports the move, `already_applied` where an identical request made it before.
+///   A ref that names anything else fails the commit with `E_CAS_MISMATCH`, and nothing is
+///   recorded. Without `parent`, such a commit builds on that ref's head, recorded in the
+///   request's [`Resolved`] under the ref's name, and on nothing if the ref does not exist (a
+///   root changeset that creates it): the move then only detects a race from that moment on.
 /// - `read_file` returns at most `max_bytes` bytes from the file's start: UTF-8 text when they
 ///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
 ///   fewer); otherwise exactly `max_bytes` bytes, in base64. A directory there is `E_IS_DIR`,
@@ -121,6 +128,11 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_PATH_NOT_FOUND` `{path}`: `PathNotFound`.
 /// - `E_REF_NAME_INVALID` `{name}`: `RefName`, the repository's or the store's; the hint gives
 ///   the ref grammar.
+/// - `E_CAS_MISMATCH` (retryable) `{name, actual, committed}`, `committed` always `false`:
+///   `RefMoved`, a `commit` with `advance` whose ref named something else than the commit's
+///   parent (`actual` null when the ref does not exist), so that the commit recorded nothing.
+///   The message says to commit the change again on top of `actual` (`--parent <actual>
+///   --advance <name>`), and the hint only reads, as for a ref move's below.
 /// - `E_BUSY` (retryable): the store's `Busy` (a writer's lock wait ran out) or
 ///   `SnapshotContended` (a read's snapshot rounds ran out); either way nothing was committed (a
 ///   commit's flushed objects may remain, for GC). The hint says which, and to retry.
@@ -363,14 +375,21 @@ impl Recording<'_> {
     /// What `main` names, if it exists, recorded as resolved: what an operation uses when its
     /// request names no revision.
     fn main_head(&self) -> Result<Option<ChangesetId>, OpError> {
+        self.head("main")
+    }
+
+    /// What ref `name` names, if it exists, recorded as resolved under the ref's name: `main`'s
+    /// head for an operation whose request names no revision, the advanced ref's for a commit
+    /// with `advance` and no parent.
+    fn head(&self, name: &str) -> Result<Option<ChangesetId>, OpError> {
         let head = self
             .ops
             .repo
-            .get_ref("main")
+            .get_ref(name)
             .map_err(op)?
             .map(|state| state.target);
         if let Some(id) = head {
-            self.resolved.record("main", id);
+            self.resolved.record(name, id);
         }
         Ok(head)
     }
@@ -394,11 +413,14 @@ impl StoreOps for Recording<'_> {
             parent,
             changes,
             message,
+            advance,
             allow_empty,
         } = req;
-        let parent = match &parent {
-            Some(rev) => Some(self.resolve(rev)?),
-            None => self.main_head()?,
+        let parent = match (&parent, &advance) {
+            (Some(rev), _) => Some(self.resolve(rev)?),
+            // A commit that advances a ref builds on that ref's head by default.
+            (None, Some(name)) => self.head(name)?,
+            (None, None) => self.main_head()?,
         };
         let changes = content::changes(changes)?;
         let signature = native_signature(who);
@@ -418,8 +440,19 @@ impl StoreOps for Recording<'_> {
                 message: message.into_bytes(),
                 metadata,
                 allow_empty,
+                advance: advance.map(|name| swarmops_repo::Advance {
+                    name,
+                    actor: who.agent().to_owned(),
+                }),
             })
-            .map_err(op)?;
+            .map_err(|e| {
+                // A move refused under the lock is E_CAS_MISMATCH, which reports what the write
+                // repaired first, as a ref move's does.
+                if let RepoError::RefMoved { recovered, .. } = &e {
+                    self.resolved.record_recovered(**recovered);
+                }
+                op(e)
+            })?;
         self.resolved.record_recovered(outcome.recovered);
         Ok(CommitResp {
             changeset: outcome.id.to_string(),
@@ -427,6 +460,12 @@ impl StoreOps for Recording<'_> {
             root: outcome.root.to_string(),
             files_changed: to_u64(outcome.files_changed),
             blobs_written: to_u64(outcome.blobs_written),
+            advanced: outcome.advanced.map(|moved| swarmops_api::Advanced {
+                name: moved.name,
+                old: moved.old.map(|id| id.to_string()),
+                new: outcome.id.to_string(),
+                already_applied: moved.already_applied,
+            }),
             warnings: outcome.warnings,
         })
     }
@@ -768,7 +807,7 @@ fn retry_on(what: &str, actual: ChangesetId) -> String {
 /// the move expected; `message` says so and how to retry. The hint only reads (what the ref
 /// names now, or the refs when it is gone), so that an agent that runs it cannot undo the move
 /// that won.
-fn cas_mismatch(name: &str, actual: Option<ChangesetId>, message: String) -> OpError {
+pub(crate) fn cas_mismatch(name: &str, actual: Option<ChangesetId>, message: String) -> OpError {
     let next = match actual {
         Some(actual) => format!("swarmops show {actual}"),
         None => "swarmops ref list".to_owned(),
@@ -1127,6 +1166,7 @@ mod tests {
             changes: vec![put],
             message: "m".to_owned(),
             allow_empty: false,
+            advance: None,
         };
         let committed = ops.commit(&who, req).unwrap();
         one_injected(&committed.warnings);
@@ -1174,6 +1214,7 @@ mod tests {
             changes: vec![put],
             message: "m".to_owned(),
             allow_empty: false,
+            advance: None,
         };
         let error = ops.commit(&who, req).unwrap_err();
         assert_eq!(
@@ -1212,6 +1253,7 @@ mod tests {
                 changes: vec![put],
                 message: "m".to_owned(),
                 allow_empty: false,
+                advance: None,
             };
             ops.commit(&who, req).unwrap().changeset
         };
@@ -1246,6 +1288,57 @@ mod tests {
         assert_eq!(second.take_recovered(), None, "its write repaired nothing");
     }
 
+    /// A commit with `advance` whose ref moved first is `E_CAS_MISMATCH`, which records what its
+    /// write repaired first, as a ref move's does: after a ref move whose listing in
+    /// `journal.off` failed, the losing commit's write lists the frame and writes the ref file.
+    #[test]
+    fn an_advancing_commit_that_loses_records_what_its_write_repaired() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let req = |parent: Option<&str>, content: &str, advance: Option<&str>| CommitReq {
+            parent: parent.map(Rev::from),
+            changes: vec![ChangeInput {
+                path: "f".to_owned(),
+                op: ChangeOp::Put,
+                content: Some(ContentInput::Inline(content.to_owned())),
+                mode: None,
+            }],
+            message: "m".to_owned(),
+            advance: advance.map(str::to_owned),
+            allow_empty: false,
+        };
+        let c0 = ops.commit(&who, req(None, "0", None)).unwrap().changeset;
+        let c1 = ops.commit(&who, req(None, "1", None)).unwrap().changeset;
+        let main = RefSetReq {
+            name: "main".to_owned(),
+            new: c1.as_str().into(),
+            expected_old: None,
+            create: true,
+        };
+        let created = ops_on(&root, failing("append_durable", "journal.off"))
+            .ref_set(&who, main)
+            .unwrap();
+        one_injected(&created.warnings);
+
+        let resolved = Resolved::default();
+        // main holds c1, not c0.
+        let lost = ops
+            .recording(&resolved)
+            .commit(&who, req(Some(&c0), "2", Some("main")))
+            .unwrap_err();
+        assert_eq!(lost.code.as_str(), "E_CAS_MISMATCH", "{lost:?}");
+        assert_eq!(lost.details["committed"], false, "{lost:?}");
+        let listed_and_written = RecoveredOut {
+            frames_listed: 1,
+            refs_replayed: 1,
+            ..RecoveredOut::default()
+        };
+        assert_eq!(resolved.take_recovered(), Some(listed_and_written));
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 2);
+    }
+
     /// A `ref_set` to the target it expects is decided under the lock, after its write's tail
     /// check, as every `ref_set` is (operations spec §4): never from a snapshot, which shows a
     /// whole frame `journal.off` does not list as if it were committed, though its writer may not
@@ -1273,6 +1366,7 @@ mod tests {
                     changes: vec![put],
                     message: "m".to_owned(),
                     allow_empty: false,
+                    advance: None,
                 };
                 ops.commit(&who, req).unwrap().changeset
             };

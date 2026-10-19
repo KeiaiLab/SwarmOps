@@ -354,6 +354,35 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m x --changes [tmp]/advance.json --parent [c2] --advance main",
+    "exit": 4,
+    "stdout": {
+      "ok": false,
+      "op": "commit",
+      "api": 1,
+      "error": {
+        "code": "E_CAS_MISMATCH",
+        "message": "ref main moved to [c1], so this commit recorded nothing: commit your change on top of it (--parent [c1] --advance main), re-applying your edits to the content at [c1] rather than re-sending your old files",
+        "retryable": true,
+        "exit": 4,
+        "details": {
+          "actual": "[c1]",
+          "committed": false,
+          "name": "main"
+        },
+        "hint": "swarmops show [c1]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store --as agent/worker-17 ref set feature/x main --create",
     "exit": 1,
     "stdout": {

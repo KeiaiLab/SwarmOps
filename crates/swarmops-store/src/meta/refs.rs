@@ -54,8 +54,11 @@ pub struct RefFile {
     pub state: Result<RefState, StoreError>,
 }
 
-/// Refuses, with [`StoreError::RefName`], a name that is not `main` or `release/<x>`.
-pub(crate) fn check_name(name: &str) -> Result<(), StoreError> {
+/// Refuses, with [`StoreError::RefName`], a name that is not `main` or `release/<x>` (see [the
+/// module documentation](self)), or that is longer than 255 bytes. Every ref operation checks
+/// its name so first; a caller that must refuse a bad name before it writes anything else, as
+/// a commit that advances a ref does before it puts its objects, calls it itself.
+pub fn check_ref_name(name: &str) -> Result<(), StoreError> {
     let release = |x: &str| {
         !x.is_empty()
             && !x.starts_with('.')
@@ -131,7 +134,7 @@ fn release_names(layout: &Layout) -> Result<Vec<String>, StoreError> {
             continue; // not UTF-8, so not a ref
         };
         let name = format!("release/{file_name}");
-        if check_name(&name).is_ok() {
+        if check_ref_name(&name).is_ok() {
             names.push(name);
         }
     }

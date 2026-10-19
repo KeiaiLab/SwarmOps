@@ -714,6 +714,108 @@ fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
     assert_eq!(deleted.ok()["old"], c1.as_str());
 }
 
+/// `commit` with `advance` compares and swaps on its `parent`, so the server refuses it without a
+/// full 64-hex `parent`: an omitted one is the ref's head when the call runs, and a ref name, a
+/// relative revision or an id prefix is read when the call runs too, instead of pinning the id
+/// the agent read. Each refusal is `E_INVALID_ARG` with the `advance` and the `parent` given,
+/// before anything is resolved, and nothing is written; the full id publishes.
+#[test]
+fn mcp_commit_with_advance_needs_a_full_parent() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let first = json!({"message": "c1", "changes": [{"path": "c1", "op": "put",
+                                                    "content": {"inline": "c1"}}]});
+    let c1 = server.ok("commit", first)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": c1, "create": true}),
+    );
+    let changes = json!([{"path": "c2", "op": "put", "content": {"inline": "c2"}}]);
+    for parent in [
+        None,
+        Some("main".to_owned()),
+        Some(c1[..12].to_owned()),
+        Some(format!("{c1}~0")),
+    ] {
+        let mut arguments = json!({"message": "c2", "changes": changes, "advance": "main"});
+        let mut details = json!({"advance": "main"});
+        if let Some(parent) = &parent {
+            arguments["parent"] = json!(parent);
+            details["parent"] = json!(parent);
+        }
+        let refused = server.err("commit", arguments, "E_INVALID_ARG");
+        assert_eq!(refused["error"]["details"], details, "{refused}");
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(
+            message.contains("full changeset id") && message.contains("compare-and-swap"),
+            "{message}"
+        );
+        assert_eq!(refused["error"]["hint"], "swarmops ref list", "{refused}");
+        assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
+        let info = server.ok("repo_info", json!({}));
+        assert_eq!(info["result"]["changesets"], 1, "{parent:?}: {info}");
+    }
+    commit_and_advance_main(&mut server, &c1);
+    server.finish_clean();
+    store.assert_clean("after the commits that advance main");
+}
+
+/// [`commit_and_move_main`] in one call: a commit on main's head `c1`, by its full id, that
+/// advances main, which `result.advanced` reports; the log, the refs and the store's description
+/// then show the move. The same commit against the stale `c1` records nothing:
+/// `E_CAS_MISMATCH` with `committed: false`. Its id.
+fn commit_and_advance_main(server: &mut Server, c1: &str) -> String {
+    let arguments = json!({
+        "message": "second",
+        "parent": c1,
+        "advance": "main",
+        "changes": [{"path": "README.md", "op": "put", "content": {"inline": "# acme\n\nv2\n"}}],
+    });
+    let second = server.ok("commit", arguments.clone());
+    let c2 = second["result"]["changeset"].as_str().unwrap().to_owned();
+    assert_eq!(
+        second["result"]["advanced"],
+        json!({"name": "main", "old": c1, "new": c2, "already_applied": false})
+    );
+    assert_eq!(second["meta"]["resolved"], json!({c1: c1}));
+    let log = server.ok("log", json!({}));
+    let ids: Vec<&str> = log["result"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [c2.as_str(), c1]);
+    assert_eq!(
+        refs_of(server),
+        json!([{"name": "main", "target": c2, "version": 2}])
+    );
+
+    let stale = json!({
+        "message": "third",
+        "parent": c1,
+        "advance": "main",
+        "changes": [{"path": "README.md", "op": "put", "content": {"inline": "# acme\n\nv3\n"}}],
+    });
+    let lost = server.err("commit", stale, "E_CAS_MISMATCH");
+    assert_eq!(
+        lost["error"]["details"],
+        json!({"name": "main", "actual": c2, "committed": false})
+    );
+    assert_eq!(lost["error"]["retryable"], true, "{lost}");
+    let info = server.ok("repo_info", json!({}));
+    assert_eq!(
+        (&info["result"]["main"], &info["result"]["changesets"]),
+        (&json!(c2), &json!(2)),
+        "the lost commit recorded nothing"
+    );
+    c2
+}
+
 /// A `commit`'s client file is read by this server, so a relative path (which the server would
 /// read from a working directory the agent cannot see: here the crate's, where `src/lib.rs`
 /// exists) and a path that is this process's own stdin or stdout (the protocol's pipes, which

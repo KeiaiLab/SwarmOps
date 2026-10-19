@@ -17,8 +17,8 @@ pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
 pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
-    Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary, CommitReq,
-    CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
+    Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
+    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES,
     DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, EntryKindOut, FileContent, FileKind,
     IdentityInfo, InfoReq, InitReq, LogPage, LogReq, ModeInput, ReadFileReq, ReadTreeReq,
     RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq,
@@ -64,6 +64,7 @@ pub fn schema_for_all() -> serde_json::Value {
         ContentInput,
         ModeInput,
         CommitResp,
+        Advanced,
         // read_file, read_tree.
         ReadFileReq,
         FileContent,

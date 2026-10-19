@@ -238,6 +238,7 @@ mod tests {
             changes: vec![change],
             message: "m".to_owned(),
             allow_empty: false,
+            advance: None,
         };
         let id = ops.commit(&who, req).unwrap().changeset;
         drop(ops);

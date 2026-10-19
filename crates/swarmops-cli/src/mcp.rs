@@ -197,18 +197,19 @@ operation sets isError and gives error {code, message, retryable, exit, details,
 retryable says whether the operation can succeed when it is run again, as it is or after \
 re-reading what the hint names, and a hint is often a swarmops command, \
 whose operation is the tool of the same name (ref list is ref_list, cat read_file, ls \
-read_tree, info repo_info). commit records a changeset and moves no ref. ref_set and \
-ref_delete change a ref by compare-and-swap, so their expected_old is the full 64-hex \
-changeset id the ref held when you read it (from ref_list, show, log or a commit's result). A \
+read_tree, info repo_info). commit records a changeset; with advance it also moves that ref \
+to it in the same transaction, if the ref still names parent: check result.advanced. ref_set \
+and ref_delete change a ref by compare-and-swap, so their expected_old, like commit's parent \
+with advance, is the full 64-hex changeset id the ref held when you read it (from ref_list, \
+show, log or a commit's result). A \
 ref name or a relative revision is read when the call runs instead of pinning the id you read: \
 the ref's own name always matches, so the compare-and-swap protects nothing, and main~1 on ref \
 main never matches; an id prefix stops resolving once another changeset shares it; the server \
 refuses all three. After E_CAS_MISMATCH, commit your change again on top of details.actual, \
 re-applying your edits to the content there, then retry with expected_old set to it. A read \
 may show a commit that a failed sync then takes back; a mutation that names it fails under the \
-lock instead of building on it. Clients limit long tool results and each result carries its \
-envelope twice, so ask for little: max_bytes of \
-32768 or less for read_file (less for a binary file, which comes back in base64), a limit of \
+lock instead of building on it. Clients limit long tool results, so ask for little: max_bytes \
+of 32768 or less for read_file, a limit of \
 100 or less for read_tree and log, paging on with the cursor a result returns, and \
 max_changes of 100 or less for show. A {\"file\": path} content is read by this server, not \
 by your client: give an absolute path (a relative one, or the server's own stdin or stdout, \
@@ -321,7 +322,11 @@ static TOOLS: [Spec; 10] = [
         request: "CommitReq",
         title: "Commit a changeset",
         description: "Records a changeset from an explicit change list, on parent or else on \
-                      main's head; it moves no ref. A {\"file\": path} content is read by this \
+                      main's head. With advance it also moves that ref to the changeset in the \
+                      same transaction, only if the ref still names parent, which must then be \
+                      the full 64-hex id you read; otherwise it records nothing (E_CAS_MISMATCH, \
+                      details.committed false). Check result.advanced: a server that does not \
+                      know advance moves no ref. A {\"file\": path} content is read by this \
                       server: give an absolute path.",
         effect: Effect::Adds,
         result_chars: None,
@@ -898,7 +903,8 @@ impl Refuse for LogReq {}
 impl Refuse for RefListReq {}
 impl Refuse for VerifyReq {}
 
-/// A change's client file is read by this server, so its path must be absolute (the agent
+/// A commit that advances a ref names its parent by its full id ([`full_parent`]). A change's
+/// client file is read by this server, so its path must be absolute (the agent
 /// cannot see the server's working directory), must not be this process's own stdin or
 /// stdout, which carry the protocol, and must name a regular file, a symlink to one included:
 /// opening a FIFO blocks until something opens it for writing, and a device can block or never
@@ -907,6 +913,9 @@ impl Refuse for VerifyReq {}
 /// the error.
 impl Refuse for CommitReq {
     fn refuse(&self) -> Result<(), OpError> {
+        if let Some(name) = &self.advance {
+            full_parent(name, self.parent.as_ref())?;
+        }
         for (index, change) in self.changes.iter().enumerate() {
             let Some(ContentInput::File(file)) = &change.content else {
                 continue;
@@ -1000,6 +1009,41 @@ fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
         ("name".to_owned(), Value::from(name)),
         ("expected_old".to_owned(), Value::from(rev)),
     ]))
+    .with_hint("swarmops ref list"))
+}
+
+/// `E_INVALID_ARG` unless `parent`, the parent of a commit that advances ref `name`, is a full
+/// changeset id ([`is_full_id`]). The move expects the ref to name the parent, so the parent is
+/// a compare-and-swap's expectation, which must pin the id the caller read
+/// ([`concrete_expectation`]): an omitted parent is the ref's head when the call runs, and a ref
+/// name, a relative revision or an id prefix is read when the call runs too, so the
+/// compare-and-swap would protect nothing. The CLI takes any parent with `--advance`, as a
+/// one-step fast-forward that detects a race from the moment it runs; an agent through this
+/// server gets the rule enforced.
+fn full_parent(name: &str, parent: Option<&Rev>) -> Result<(), OpError> {
+    let rev = parent.map(Rev::as_str);
+    if rev.is_some_and(is_full_id) {
+        return Ok(());
+    }
+    let mut details = Map::from_iter([("advance".to_owned(), Value::from(name))]);
+    let given = match rev {
+        Some(rev) => {
+            details.insert("parent".to_owned(), Value::from(rev));
+            format!("not {rev:?}")
+        }
+        None => "and none is given".to_owned(),
+    };
+    Err(OpError::new(
+        ErrorCode::InvalidArg,
+        output::printable(&format!(
+            "advance {name:?} needs a parent given as a full changeset id, {given}: its \
+             compare-and-swap expects the ref to name the parent, and an omitted parent, a ref \
+             name, a relative revision or an id prefix is read when the call runs instead of \
+             pinning the id you read, so the compare-and-swap would protect nothing; pass the id \
+             the ref held when you read it, from ref_list, show, log or a commit's result"
+        )),
+    )
+    .with_details(details)
     .with_hint("swarmops ref list"))
 }
 
@@ -1712,6 +1756,7 @@ mod tests {
             ],
             message: "x".to_owned(),
             allow_empty: false,
+            advance: None,
         }
     }
 
@@ -1817,6 +1862,7 @@ mod tests {
             changes: vec![change],
             message: "m".to_owned(),
             allow_empty: false,
+            advance: None,
         };
         let c1 = ops.commit(&who, req).unwrap().changeset;
         let main = RefSetReq {

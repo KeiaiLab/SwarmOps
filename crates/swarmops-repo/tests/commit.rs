@@ -705,6 +705,356 @@ fn commit_is_idempotent_for_identical_request() {
     assert_eq!(repo.info().unwrap().changesets, 2);
 }
 
+/// Commits with `advance` (storage spec §4, `commit`): the changeset and its ref's move in one
+/// transaction, so in one journal frame, recorded together or not at all, and only as a one-step
+/// fast-forward from the first parent.
+mod advance {
+    use swarmops_repo::{Advance, Advanced};
+    use swarmops_store::{JournalEntry, RefState};
+    use swarmops_testkit::fs::RecordingFs;
+
+    use super::*;
+
+    /// Who the tests' moves are recorded for.
+    const ACTOR: &str = "test/agent";
+
+    /// A request for `changes` on `parents` ([`request`]) that advances ref `name`.
+    fn advancing(parents: &[ChangesetId], changes: Vec<Change>, name: &str) -> CommitRequest {
+        CommitRequest {
+            advance: Some(Advance {
+                name: name.to_owned(),
+                actor: ACTOR.to_owned(),
+            }),
+            ..request(parents, changes)
+        }
+    }
+
+    /// The move `advancing(.., name)` reports: from `old`, made now or before.
+    fn moved(name: &str, old: Option<ChangesetId>, already_applied: bool) -> Advanced {
+        Advanced {
+            name: name.to_owned(),
+            old,
+            already_applied,
+        }
+    }
+
+    /// A store with changeset `c0` (a file `a`) and main at it.
+    fn with_main() -> (tempfile::TempDir, Utf8PathBuf, LocalRepo, ChangesetId) {
+        let (dir, root, repo) = new_repo();
+        let c0 = commit(&repo, &[], vec![put("a", b"a")]).id;
+        repo.cas_ref("main", None, Some(c0), ACTOR).unwrap();
+        (dir, root, repo, c0)
+    }
+
+    /// The records of the frames past the first `frames` of the store at `root`: each frame's
+    /// seq, the record's kind and its key.
+    fn records_past(root: &Utf8Path, frames: u64) -> Vec<(u64, &'static str, Vec<u8>)> {
+        let meta = MetaStore::open(root).unwrap();
+        let entries: Vec<JournalEntry> = meta
+            .read()
+            .unwrap()
+            .journal_after(frames.checked_sub(1), 100)
+            .unwrap();
+        entries
+            .into_iter()
+            .map(|entry| (entry.seq, entry.kind, entry.key))
+            .collect()
+    }
+
+    /// The error `got` holds, which must be `RefMoved` for ref `name`, naming `actual`.
+    #[track_caller]
+    fn assert_moved(
+        got: Result<CommitOutcome, RepoError>,
+        name: &str,
+        actual: Option<ChangesetId>,
+    ) {
+        match got {
+            Err(RepoError::RefMoved {
+                name: moved,
+                actual: found,
+                ..
+            }) => assert_eq!((moved.as_str(), found), (name, actual)),
+            other => panic!("expected RefMoved for {name}, got {other:?}"),
+        }
+    }
+
+    /// A commit with `advance` records its changeset and the ref's move in one new journal frame,
+    /// the changeset first, under one seq: one append of `journal.log`, where the same work as a
+    /// commit and then a compare-and-swap makes two.
+    #[test]
+    fn commit_advancing_is_one_frame() {
+        let (_dir, root, repo, c0) = with_main();
+        let version = repo.get_ref("main").unwrap().unwrap().version;
+        drop(repo);
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(root.as_std_path().to_path_buf());
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(fs)).unwrap();
+        let appends = |calls: Vec<String>| {
+            (calls.iter())
+                .filter(|call| *call == "append_durable meta/journal.log")
+                .count()
+        };
+        let frames = journal_frames(&root);
+        calls();
+
+        let out = repo
+            .commit(advancing(&[c0], vec![put("b", b"b")], "main"))
+            .unwrap();
+        assert_eq!(appends(calls()), 1, "one frame");
+        assert_eq!(out.insert, InsertOutcome::Inserted { seq: 1 });
+        assert_eq!(out.advanced, Some(moved("main", Some(c0), false)));
+        assert_eq!(out.warnings, Vec::<String>::new());
+        let main = RefState {
+            target: out.id,
+            version: version + 1,
+        };
+        assert_eq!(repo.get_ref("main").unwrap(), Some(main));
+        assert_eq!(
+            records_past(&root, frames),
+            [
+                (frames, "changeset", out.id.0.0.to_vec()),
+                (frames, "ref_move", b"main".to_vec())
+            ]
+        );
+        assert_eq!(journal_frames(&root), frames + 1);
+
+        // The same work in two steps: two frames, two appends.
+        let two = repo
+            .commit(request(&[out.id], vec![put("c", b"c")]))
+            .unwrap();
+        repo.cas_ref("main", Some(out.id), Some(two.id), ACTOR)
+            .unwrap();
+        assert_eq!(appends(calls()), 2, "two frames");
+    }
+
+    /// A commit with `advance` whose ref moved meanwhile (main read at X, then moved X to Y)
+    /// records nothing, neither its changeset nor the move: `RefMoved` with what main names. The
+    /// store's changesets, its journal and main are as they were, and it verifies clean (the
+    /// objects the commit flushed are unreferenced, which is no problem).
+    #[test]
+    fn a_commit_advancing_that_loses_records_nothing() {
+        let (_dir, root, repo, x) = with_main();
+        let y = commit(&repo, &[x], vec![put("a", b"y")]).id;
+        repo.cas_ref("main", Some(x), Some(y), "test/other")
+            .unwrap();
+        let count = || {
+            MetaStore::open(&root)
+                .unwrap()
+                .read()
+                .unwrap()
+                .count_changesets()
+        };
+        let before = (
+            count().unwrap(),
+            journal_frames(&root),
+            repo.get_ref("main").unwrap(),
+        );
+
+        let lost = repo.commit(advancing(&[x], vec![put("b", b"b")], "main"));
+        assert_moved(lost, "main", Some(y));
+        let after = (
+            count().unwrap(),
+            journal_frames(&root),
+            repo.get_ref("main").unwrap(),
+        );
+        assert_eq!(after, before, "nothing recorded");
+        assert_eq!(repo.verify(true).unwrap().problems, []);
+    }
+
+    /// The same request made again, the ref at its changeset already, is a replay: the insert
+    /// finds the changeset, the move is `already_applied`, and nothing is written, no frame and
+    /// no new version of the ref.
+    #[test]
+    fn an_identical_advancing_commit_is_a_replay() {
+        let (_dir, root, repo, c0) = with_main();
+        let req = advancing(&[c0], vec![put("b", b"b")], "main");
+        let first = repo.commit(req.clone()).unwrap();
+        assert_eq!(first.advanced, Some(moved("main", Some(c0), false)));
+        let (frames, main) = (journal_frames(&root), repo.get_ref("main").unwrap());
+
+        let again = repo.commit(req).unwrap();
+        assert_eq!(again.id, first.id);
+        assert_eq!(again.insert, InsertOutcome::AlreadyPresent);
+        assert_eq!(again.advanced, Some(moved("main", Some(c0), true)));
+        assert_eq!(again.warnings, Vec::<String>::new());
+        assert_eq!(journal_frames(&root), frames, "no new frame");
+        assert_eq!(repo.get_ref("main").unwrap(), main, "main's version stays");
+    }
+
+    /// A root commit with `advance` creates the ref, in the changeset's frame. Once the ref
+    /// exists, another root commit that advances it records nothing.
+    #[test]
+    fn a_root_commit_advancing_creates_the_ref() {
+        let (_dir, root, repo) = new_repo();
+        let out = repo
+            .commit(advancing(&[], vec![put("a", b"a")], "main"))
+            .unwrap();
+        assert_eq!(out.insert, InsertOutcome::Inserted { seq: 0 });
+        assert_eq!(out.advanced, Some(moved("main", None, false)));
+        let main = RefState {
+            target: out.id,
+            version: 1,
+        };
+        assert_eq!(repo.get_ref("main").unwrap(), Some(main));
+        assert_eq!(journal_frames(&root), 1, "one frame for both");
+
+        let other = repo.commit(advancing(&[], vec![put("b", b"b")], "main"));
+        assert_moved(other, "main", Some(out.id));
+        assert_eq!(journal_frames(&root), 1, "nothing recorded");
+        assert_eq!(repo.info().unwrap().changesets, 1);
+        assert_eq!(repo.get_ref("main").unwrap(), Some(main));
+    }
+
+    /// A changeset the store holds already, committed again with `advance`, moves the ref: the
+    /// insert finds the changeset, and the new frame holds the move alone.
+    #[test]
+    fn an_advance_of_a_present_changeset_moves_the_ref() {
+        let (_dir, root, repo, c0) = with_main();
+        let plain = request(&[c0], vec![put("b", b"b")]);
+        let c1 = repo.commit(plain.clone()).unwrap().id;
+        let frames = journal_frames(&root);
+
+        let advance = advancing(&[c0], vec![put("b", b"b")], "main").advance;
+        let out = repo.commit(CommitRequest { advance, ..plain }).unwrap();
+        assert_eq!(out.id, c1);
+        assert_eq!(out.insert, InsertOutcome::AlreadyPresent);
+        assert_eq!(out.advanced, Some(moved("main", Some(c0), false)));
+        let main = repo.get_ref("main").unwrap().map(|state| state.target);
+        assert_eq!(main, Some(c1));
+        assert_eq!(
+            records_past(&root, frames),
+            [(frames, "ref_move", b"main".to_vec())]
+        );
+    }
+
+    /// A ref name that is not `main` or `release/<x>` (at most 255 bytes) is refused before
+    /// anything is written: no object file, no frame.
+    #[test]
+    fn an_advance_with_a_bad_ref_name_writes_nothing() {
+        let (_dir, root, repo, c0) = with_main();
+        let objects = object_files(&root);
+        let frames = journal_frames(&root);
+        let long = format!("release/{}", "x".repeat(248));
+        for name in [
+            "feature/x",
+            "release/",
+            "release/.x",
+            "Main",
+            "",
+            long.as_str(),
+        ] {
+            match repo.commit(advancing(&[c0], vec![put("new", b"new")], name)) {
+                Err(RepoError::RefName(refused)) => assert_eq!(refused, name),
+                other => panic!("{name:?}: expected RefName, got {other:?}"),
+            }
+        }
+        assert_eq!(object_files(&root), objects, "no object was put");
+        assert_eq!(journal_frames(&root), frames);
+    }
+
+    /// The commit the crash sweep's child makes: [`crash_request`]'s files, on main's head `base`,
+    /// advancing main.
+    #[cfg(feature = "test-hooks")]
+    fn advancing_crash_request(base: ChangesetId) -> CommitRequest {
+        let files = crash_request().changes;
+        advancing(&[base], files, "main")
+    }
+
+    /// One run of the advancing crash sweep: a child commits [`advancing_crash_request`] on a
+    /// copy of `template` (main at `base`) until its k-th filesystem call aborts it. The changeset
+    /// `want` must then be in the store exactly when main names it, the store must verify clean,
+    /// and the same request made again must end with both. Returns whether the child finished,
+    /// and whether the changeset was committed.
+    #[cfg(feature = "test-hooks")]
+    fn advancing_commit_crashing_at(
+        template: &Utf8Path,
+        base: ChangesetId,
+        want: ChangesetId,
+        k: u64,
+    ) -> (bool, bool) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        copy_dir(template.as_std_path(), root.as_std_path());
+        let child = crash_child(
+            "advance::an_advancing_commit_crashing_at_any_call_leaves_both_or_neither",
+            &root,
+            k,
+        );
+        let finished = child.status.success();
+        assert!(
+            finished || child.status.signal() == Some(SIGABRT),
+            "k={k}: {:?}\n{}",
+            child.status,
+            String::from_utf8_lossy(&child.stderr)
+        );
+
+        // Both or neither: the changeset is there exactly when main names it.
+        let repo = LocalRepo::open(&root).unwrap();
+        let committed = repo.changeset(want).unwrap().is_some();
+        let main = repo.get_ref("main").unwrap().map(|state| state.target);
+        let expected = if committed { want } else { base };
+        assert_eq!(main, Some(expected), "k={k}: committed {committed}");
+        assert!(
+            committed || !finished,
+            "k={k}: the commit returned but is not stored"
+        );
+        assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+
+        // The same request made again ends with both.
+        let again = repo.commit(advancing_crash_request(base)).unwrap();
+        assert_eq!(again.id, want, "k={k}");
+        assert_eq!(
+            again.advanced,
+            Some(moved("main", Some(base), committed)),
+            "k={k}"
+        );
+        let main = repo.get_ref("main").unwrap().map(|state| state.target);
+        assert_eq!(main, Some(want), "k={k}");
+        assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
+        (finished, committed)
+    }
+
+    /// A commit with `advance` that crashes at any filesystem call leaves its changeset and the
+    /// ref's move both recorded or neither, never one: for every k, the changeset is in the store
+    /// exactly when main names it, the store verifies clean, and the request made again ends
+    /// with both. Some crash comes after the commit point. The two-step flow (a commit, then a
+    /// compare-and-swap) fails this at every k between its two frames.
+    #[test]
+    #[cfg(feature = "test-hooks")]
+    fn an_advancing_commit_crashing_at_any_call_leaves_both_or_neither() {
+        if let Some(root) = child_root() {
+            // SWARMOPS_TEST_CRASH_AT is set: `open` shares one CrashAtFs between the stores
+            // and writes one object at a time, so call k is the same call in every run.
+            let repo = LocalRepo::open(&root).unwrap();
+            let base = repo.get_ref("main").unwrap().expect("main").target;
+            repo.commit(advancing_crash_request(base)).unwrap();
+            return;
+        }
+        let (_template_dir, template, repo, base) = with_main();
+        drop(repo);
+        let want = {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            copy_dir(template.as_std_path(), root.as_std_path());
+            let repo = LocalRepo::open(&root).unwrap();
+            repo.commit(advancing_crash_request(base)).unwrap().id
+        };
+        let past_the_commit_point = AtomicBool::new(false);
+        let calls = sweep(|k| {
+            let (finished, committed) = advancing_commit_crashing_at(&template, base, want, k);
+            if committed && !finished {
+                past_the_commit_point.store(true, Ordering::Relaxed);
+            }
+            finished
+        });
+        assert!(calls > 20, "the child finished after {calls} calls");
+        assert!(
+            past_the_commit_point.load(Ordering::Relaxed),
+            "no crash came after the commit point"
+        );
+    }
+}
+
 #[test]
 fn commit_rejects_duplicate_paths_and_deletes_of_missing_paths() {
     let (_dir, root, repo) = new_repo();

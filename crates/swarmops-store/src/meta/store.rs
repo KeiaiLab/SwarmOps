@@ -530,7 +530,7 @@ impl MetaRead<'_> {
     /// Ref `name`; `None` if it does not exist. [`StoreError::RefName`] for a name that is
     /// not `main` or `release/<x>`.
     pub fn get_ref(&self, name: &str) -> Result<Option<RefState>, StoreError> {
-        refs::check_name(name)?;
+        refs::check_ref_name(name)?;
         Ok(self.overlay.refs().get(name).copied())
     }
 
@@ -547,7 +547,7 @@ impl MetaRead<'_> {
     /// The last `limit` moves of ref `name`, newest first: the journal's `RefMove` records
     /// for it, read back from the end of the snapshot (`O(frames)` until `limit` are found).
     pub fn reflog(&self, name: &str, limit: usize) -> Result<Vec<RefMoveEntry>, StoreError> {
-        refs::check_name(name)?;
+        refs::check_ref_name(name)?;
         let mut log = Vec::new();
         collect_moves(self.frames.iter().rev(), name, limit, &mut log);
         // Then the frames before the checkpoint, a batch at a time; with no frames past the
@@ -714,7 +714,7 @@ impl MetaWrite<'_> {
         new: Option<ChangesetId>,
         actor: &str,
     ) -> Result<CasResult, StoreError> {
-        refs::check_name(name)?;
+        refs::check_ref_name(name)?;
         if actor.len() > MAX_ACTOR_LEN {
             return Err(StoreError::Limit {
                 what: LimitKind::ActorBytes,

@@ -423,7 +423,7 @@ pub(crate) fn tree<O: ObjectStore>(objects: &O, id: TreeId) -> Result<Tree, Repo
 }
 
 /// A store error of a ref operation, its ref-specific variants lifted to the repo's own.
-fn ref_error(e: StoreError) -> RepoError {
+pub(crate) fn ref_error(e: StoreError) -> RepoError {
     match e {
         StoreError::RefName(name) => RepoError::RefName(name),
         StoreError::UnknownRefTarget(id) => RepoError::NotFound(id.to_string()),

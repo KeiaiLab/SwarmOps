@@ -69,6 +69,7 @@ pub fn request(parents: &[ChangesetId], changes: Vec<Change>, message: &str) -> 
         message: message.as_bytes().to_vec(),
         metadata: Vec::new(),
         allow_empty: false,
+        advance: None,
     }
 }
 

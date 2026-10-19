@@ -139,15 +139,18 @@ left).
 ## Commits, refs and history
 
 - **No merge.** An agent that loses a ref race and commits its change again on top of the
-  winner's can overwrite the winner's edits to the same files: M1 has no three-way merge.
-  *Target: M4 (merge and landing). Found: M1 Task 4b.*
+  winner's can overwrite the winner's edits to the same files: M1 has no three-way merge. So
+  can a `commit --advance` without `--parent`: it builds on the ref's head when it runs, and its
+  move catches only a race from then on, not edits that landed since the agent read the files
+  it puts whole. *Target: M4 (merge and landing). Found: M1 Task 4b.*
 - **A retried commit can record a second changeset.** A commit signs at its own time, so when
   a commit's outcome is unknown (its process died before it answered) and it is run again, a
   first attempt that did commit stays as an unreferenced changeset beside the second. An
   idempotency key (`commit --key`) closes this. *Target: M4. Found: M1 final fix pass.*
-- **No second root commit.** Once `main` exists, an omitted parent means `main`'s head, so the
-  API cannot make a root commit. *Target: M3 (`commit_raw`, which git import needs). Found: M1
-  Task 4a; final review, question 12.*
+- **No second root commit.** Once `main` exists, an omitted parent means `main`'s head (the
+  advanced ref's, for a `commit --advance`), so the API makes a root commit only with `advance`
+  naming a ref that does not exist yet. *Target: M3 (`commit_raw`, which git import needs).
+  Found: M1 Task 4a; final review, question 12.*
 - **`--expect` with a ref name cannot detect a move.** A ref name given as the expected target
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.

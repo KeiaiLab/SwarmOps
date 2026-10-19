@@ -78,6 +78,13 @@ enum Op {
     /// frame takes the index's tail past [`Index::COMPACT_THRESHOLD`], so its writer syncs the
     /// index, compacts, appends a `Compacted` frame (no transaction's) and moves the checkpoint.
     Bulk,
+    /// A commit of `puts` on commit number `parent` that advances ref `name` from it (a commit
+    /// with `advance`): its frame holds its changeset and the ref's move to it, together.
+    CommitAdvance {
+        parent: Option<usize>,
+        puts: &'static [(&'static str, &'static str)],
+        name: &'static str,
+    },
 }
 
 /// How many changesets [`Op::Bulk`] records in its one frame: more than the index's compaction
@@ -91,6 +98,7 @@ const BULK: u64 = Index::COMPACT_THRESHOLD + 1;
 /// sector boundary, its low byte alone in the first sector, its payload over 255 bytes, so that a
 /// lost first sector leaves it a length that is not 0 but wrong (the long actors of frames 12 and
 /// 13 place it).
+/// Frame 14, the last, holds a changeset and main's move to it ([`Op::CommitAdvance`]).
 const RUN: &[Op] = &[
     Op::Commit {
         parent: None,
@@ -180,6 +188,11 @@ const RUN: &[Op] = &[
             "01234567890123456789012345678901234567890123456789",
         ),
     },
+    Op::CommitAdvance {
+        parent: Some(5),
+        puts: &[("src/lib.rs", "pub fn f() -> u8 { 6 }\n")],
+        name: "main",
+    },
 ];
 
 /// What one transaction of the run records in its frame.
@@ -194,6 +207,8 @@ enum Txn {
         name: &'static str,
         new: Option<usize>,
     },
+    /// [`Op::CommitAdvance`]'s changeset and the move of ref `name` to it, in one frame.
+    CommitAdvance { name: &'static str },
 }
 
 /// One frame of the run, in journal order.
@@ -273,6 +288,7 @@ fn record_ops(ops: &[Op]) -> Recorded {
         Op::Commit { .. } => vec![Some(Txn::Commit)],
         Op::Cas { name, new, .. } => vec![Some(Txn::Cas { name, new })],
         Op::Bulk => vec![Some(Txn::Bulk), None],
+        Op::CommitAdvance { name, .. } => vec![Some(Txn::CommitAdvance { name })],
         Op::Compact | Op::Flush => Vec::new(),
     });
     let (mut frames, mut compacted) = (Vec::new(), Vec::new());
@@ -315,7 +331,15 @@ fn run(
     let (mut commits, mut parents) = (Vec::new(), Vec::new());
     for (n, op) in ops.iter().enumerate() {
         match *op {
-            Op::Commit { parent, puts } => {
+            Op::Commit { parent, puts } | Op::CommitAdvance { parent, puts, .. } => {
+                let advance = match *op {
+                    Op::CommitAdvance { name, .. } => Some(swarmops_repo::Advance {
+                        name: name.to_owned(),
+                        actor: "test-power/worker-1".to_owned(),
+                    }),
+                    _ => None,
+                };
+                let advancing = advance.is_some();
                 let changes = puts
                     .iter()
                     .map(|(path, content)| Change {
@@ -334,9 +358,12 @@ fn run(
                     message: format!("commit {}", commits.len()).into_bytes(),
                     metadata: Vec::new(),
                     allow_empty: false,
+                    advance,
                 };
                 let outcome = repo.commit(request).expect("commit");
                 assert!(outcome.warnings.is_empty(), "{outcome:?}");
+                let moved = outcome.advanced.as_ref().map(|moved| moved.already_applied);
+                assert_eq!(moved, advancing.then_some(false), "{outcome:?}");
                 commits.push(outcome.id);
                 parents.push(parent);
             }
@@ -451,18 +478,27 @@ impl Recorded {
                 Txn::Cas {
                     name,
                     new: Some(new),
-                } => {
-                    let target = self.commits[new].clone();
-                    let version = match state.refs.get(name) {
-                        Some((old, version)) if *old == target => *version,
-                        Some((_, version)) => version + 1,
-                        None => 1,
-                    };
-                    state.refs.insert(name.to_owned(), (target, version));
+                } => self.move_ref(&mut state, name, new),
+                Txn::CommitAdvance { name } => {
+                    let new = state.changesets;
+                    state.changesets += 1;
+                    self.move_ref(&mut state, name, new);
                 }
             }
         }
         state
+    }
+
+    /// `state` with ref `name` moved to commit number `new`: its version grows by one when its
+    /// target changes, and is 1 for a new ref.
+    fn move_ref(&self, state: &mut State, name: &str, new: usize) {
+        let target = self.commits[new].clone();
+        let version = match state.refs.get(name) {
+            Some((old, version)) if *old == target => *version,
+            Some((_, version)) => version + 1,
+            None => 1,
+        };
+        state.refs.insert(name.to_owned(), (target, version));
     }
 
     /// The first-parent history from the commit whose id is `id` (in hex), newest first.
@@ -1235,7 +1271,7 @@ fn objects_referenced_by_a_durable_frame_survive_power_loss() {
 
     // Each commit's frame, the step after which it is durable, and the step that writes it.
     let commits: Vec<(usize, usize, usize)> = (rec.frames.iter().enumerate())
-        .filter(|(_, frame)| matches!(frame.what, Txn::Commit))
+        .filter(|(_, frame)| matches!(frame.what, Txn::Commit | Txn::CommitAdvance { .. }))
         .map(|(n, frame)| (n, frame.write + 2, frame.write))
         .collect();
     let first = commits.first().expect("the run commits").1;

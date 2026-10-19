@@ -284,6 +284,7 @@ expression: s.transcript()
         "details": {
           "name": "NoSuchType",
           "types": [
+            "Advanced",
             "Attribution",
             "ChangeInput",
             "ChangeOp",
