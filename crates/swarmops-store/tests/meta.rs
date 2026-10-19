@@ -2000,6 +2000,134 @@ fn a_snapshot_whose_index_a_writer_cuts_after_it_opened_fails_with_an_io_error()
     }
 }
 
+/// Records 0 to 2 of a chain through `writer` (frames 0 to 2), flushed, so that the checkpoint
+/// passes them, then records 3 and 4 past it (frames 3 and 4); then a payload byte of frame 2
+/// flipped, so that its CRC fails. A writer's tail check reads only the last listed frame whole,
+/// and the headers of the two before it, so the writer still writes. A reader whose index holds
+/// none of the changesets past the checkpoint among its last records walks the journal back
+/// from the checkpoint to its last changeset, meets frame 2, and counts the records by their
+/// lengths.
+fn chain_past_a_damaged_frame(writer: &MetaStore, root: &Utf8Path) {
+    for n in 0..3 {
+        insert(writer, &[chained(n)]);
+    }
+    writer.flush().unwrap();
+    for n in 3..5 {
+        insert(writer, &[chained(n)]);
+    }
+    assert_eq!(chained_lens(root), chained_want(5));
+    let layout = Layout::new(root);
+    let frame_2 = usize::try_from(frames(root)[2].offset).unwrap();
+    let mut log = fs::read(layout.journal_log()).unwrap();
+    log[frame_2 + 12] ^= 0x01; // a payload byte: its CRC fails
+    fs::write(layout.journal_log(), log).unwrap();
+}
+
+/// Where the journal cannot vouch for the index's records past the checkpoint, the index counts
+/// them by their lengths ([`chain_past_a_damaged_frame`]); a writer may cut those records after
+/// they were measured (a flush whose index sync fails, [`Index::truncate_to`]). The count reads
+/// `par.col` as the cut leaves it, and counts the records the cut keeps, as a vouched count does:
+/// every record the checkpoint passed, the changesets past it coming from the frames. (It read
+/// `par.col` as it was measured, and failed with an I/O error, `UnexpectedEof`, on a single cut,
+/// where storage spec §3 allows the error only if the index is cut again meanwhile.)
+#[test]
+fn counting_by_length_as_a_writer_cuts_counts_the_records_the_cut_keeps() {
+    let (_dir, root) = new_root();
+    let (writer, fail) = failing_store(&root);
+    chain_past_a_damaged_frame(&writer, &root);
+    fail.set("sync_data ids.col");
+    // The reader's first FsOps call measures journal.off, to read the frames past the
+    // checkpoint, once it has measured the index files: right then, the writer's flush fails its
+    // index sync and cuts records 3 and 4. The reader's index then holds none of their changesets.
+    let (fs, _calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "file_len journal.off".to_owned(),
+        When::Before,
+        Box::new(move || {
+            let cut = writer.flush();
+            assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+
+    let read = match reader.read() {
+        Ok(read) => read,
+        Err(e) => panic!("expected a snapshot, got {e:?}"),
+    };
+    assert_eq!(chained_lens(&root), chained_want(3), "cut");
+    assert_eq!(read.count_changesets().unwrap(), 5);
+    for n in 0..5 {
+        let got = read.changeset(id(n)).unwrap();
+        assert_eq!(got, Some(chained_stored(n)), "changeset {n}");
+    }
+}
+
+/// The same, with the reader counting by length while the cut is made: after the writer has cut
+/// `ids.col`, which it cuts first, and before it cuts `par.col`. What `ids.col` holds once
+/// `par.col` is read bounds the count, so the snapshot counts the records the cut keeps, not
+/// records whose ids are gone, which it would look for in `ids.col` and fail on with an I/O
+/// error, the index cut only once.
+#[test]
+fn counting_by_length_in_the_middle_of_a_cut_counts_the_records_the_cut_keeps() {
+    let (_dir, root) = new_root();
+    let (paused_tx, paused_rx) = mpsc::channel();
+    let (resume_tx, resume_rx) = mpsc::channel::<()>();
+    let (fs, _calls) = RecordingFs::new();
+    let fail = fs.failing();
+    // The writer's cut waits before par.col until the reader has counted.
+    let fs = fs.with_hook((
+        "truncate par.col".to_owned(),
+        When::Before,
+        Box::new(move || {
+            paused_tx.send(()).unwrap();
+            let resumed = resume_rx.recv_timeout(PATIENCE);
+            resumed.expect("the reader counts");
+        }),
+    ));
+    let mut writer = MetaStore::create_with_fs(&root, checked(fs)).unwrap();
+    writer.set_parallelism(1);
+    chain_past_a_damaged_frame(&writer, &root);
+    fail.set("sync_data ids.col");
+    // The reader's first FsOps call measures journal.off, once it has measured the index files:
+    // right then, the writer's flush starts, and the reader goes on once the cut has reached
+    // par.col.
+    let (go_tx, go_rx) = mpsc::channel::<()>();
+    let (fs, _calls) = RecordingFs::new();
+    let fs = fs.with_hook((
+        "file_len journal.off".to_owned(),
+        When::Before,
+        Box::new(move || {
+            go_tx.send(()).unwrap();
+            let paused = paused_rx.recv_timeout(PATIENCE);
+            paused.expect("the writer cuts ids.col");
+        }),
+    ));
+    let reader = MetaStore::open_with_fs(&root, checked(fs)).unwrap();
+
+    let writer = &writer;
+    thread::scope(|scope| {
+        let flush = scope.spawn(move || {
+            let go = go_rx.recv_timeout(PATIENCE);
+            go.expect("the reader opens its index");
+            writer.flush()
+        });
+        let read = reader.read();
+        resume_tx.send(()).unwrap();
+        let cut = flush.join().unwrap();
+        assert!(matches!(cut, Err(StoreError::Io(_))), "{cut:?}");
+        let read = match read {
+            Ok(read) => read,
+            Err(e) => panic!("expected a snapshot, got {e:?}"),
+        };
+        assert_eq!(chained_lens(&root), chained_want(3), "cut");
+        assert_eq!(read.count_changesets().unwrap(), 5);
+        for n in 0..5 {
+            let got = read.changeset(id(n)).unwrap();
+            assert_eq!(got, Some(chained_stored(n)), "changeset {n}");
+        }
+    });
+}
+
 /// How many frames `journal.off` at `root` lists.
 fn listed(root: &Utf8Path) -> u64 {
     file_len(Layout::new(root).journal_off()) / 8

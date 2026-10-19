@@ -231,6 +231,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   failed, or the zeroed entries a crash left at its end) reads it again instead of reporting the
   journal corrupt: snapshots, paging, `reflog`, `journal_after` and `verify` no longer give a
   transient `E_STORE_CORRUPT` or report a `JournalCorrupt` problem that a second run does not.
+- A snapshot or `verify` whose index counts its records by their lengths (the journal cannot
+  vouch for them) no longer fails with an I/O error when a writer cuts the index as it opens:
+  it counts the records the cut keeps, and fails only if the index is cut again meanwhile.
 
 ### Security
 

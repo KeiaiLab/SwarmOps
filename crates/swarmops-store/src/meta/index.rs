@@ -521,8 +521,9 @@ impl Index {
     /// so a new snapshot, reads the index as cut, the journal's frames over it. A handle that
     /// opens while the cut is made, its files measured before it and read after, counts every
     /// record the checkpoint passed or the sorted views cover, which the cut keeps, and of the
-    /// others only those it still finds whole that the journal vouches for, or fails as one
-    /// opened before the cut does: it never counts fewer.
+    /// others only those it still finds whole that the journal vouches for (where the journal
+    /// cannot vouch, those the cut keeps, counted by their lengths), and fails as one opened
+    /// before the cut does only if the files are cut again meanwhile: it never counts fewer.
     pub fn truncate_to(&mut self, records: u64) -> Result<u64, StoreError> {
         let keep = records.max(self.views.covered());
         if keep >= self.len {
@@ -905,14 +906,29 @@ impl Index {
     /// for, or synced before the views were written) are checked, with one read of their
     /// `par.col` entries and the one before them: a record out of that layout is
     /// [`StoreError::IndexCorrupt`].
+    ///
+    /// A writer may cut the records past the checkpoint after `records` were measured (a failed
+    /// sync's [`Index::truncate_to`], or a repair after a power loss), never one the checkpoint
+    /// passed nor one the sorted views cover. So the entries are read as `par.col` holds them
+    /// when they are read ([`held_entries`]: measured again after a short read), and the count
+    /// is of the records the cut keeps: those `par.col` still holds, and of them no more than
+    /// `ids.col`, which a cut takes first, holds once they are read. A count below the records
+    /// this handle counts or the views cover is no cut but damage, which the callers report
+    /// ([`StoreError::IndexCorrupt`]). As the vouched count does, it fails with an I/O error
+    /// (`UnexpectedEof`) only if the files are cut again meanwhile.
     fn by_length(&self, records: u64) -> Result<u64, StoreError> {
         let trusted = self.len.max(self.views.covered());
         if trusted >= records {
             return Ok(records);
         }
         let from = trusted.saturating_sub(1);
-        let entries = self.pars.entries(from, records)?;
-        let mut ats = (entries.as_chunks::<8>().0.iter())
+        let entries = held_entries(&self.pars, from, records)?;
+        let entries = entries.as_chunks::<8>().0;
+        // What the cut keeps: the records par.col holds, bounded by ids.col measured after it.
+        let ids = AppendOnlyColumn::<32>::whole(self.ids.len()?);
+        let held = (from + to_u64(entries.len())).min(ids);
+        let checked = usize::try_from(held.saturating_sub(from)).unwrap_or(usize::MAX);
+        let mut ats = (entries.iter().take(checked))
             .map(|entry| ParentsAt::from_entry(u64::from_le_bytes(*entry)));
         // Where the record before the first one checked leaves off: at 0 before record 0.
         let mut next = match trusted {
@@ -928,7 +944,7 @@ impl Index {
             }
             next = at.end();
         }
-        Ok(records)
+        Ok(held)
     }
 
     /// Whether the files end exactly where this handle's records do.
