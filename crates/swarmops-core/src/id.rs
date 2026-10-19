@@ -83,6 +83,57 @@ pub fn hash_object(kind: ObjectKind, payload: &[u8]) -> ObjectId {
     ObjectId(*h.finalize().as_bytes())
 }
 
+/// An object's payload with its id, which only hashing makes: the id is always
+/// `hash_object(kind, payload)`. The object store takes an object with its id only as a `Hashed`
+/// (storage spec §2 rule 1, §8), so a caller that hashed an object once hands the store the id it
+/// computed, and no caller can hand it an id of other bytes. There is no other constructor, and no
+/// way to change the payload in place.
+#[derive(Clone, PartialEq, Eq)]
+pub struct Hashed {
+    kind: ObjectKind,
+    id: ObjectId,
+    payload: Vec<u8>,
+}
+
+impl Hashed {
+    /// Hashes `payload` as an object of `kind`, once, and keeps it (no copy).
+    pub fn new(kind: ObjectKind, payload: Vec<u8>) -> Hashed {
+        let id = hash_object(kind, &payload);
+        Hashed { kind, id, payload }
+    }
+
+    /// The object's kind.
+    pub fn kind(&self) -> ObjectKind {
+        self.kind
+    }
+
+    /// The object's id: `hash_object(self.kind(), self.payload())`.
+    pub fn id(&self) -> ObjectId {
+        self.id
+    }
+
+    /// The object's payload.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    /// The payload, given back as it was given to [`Hashed::new`].
+    pub fn into_payload(self) -> Vec<u8> {
+        self.payload
+    }
+}
+
+/// The kind, the id and the payload's length; not the payload, which may be large.
+impl fmt::Debug for Hashed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Hashed")
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .field("len", &self.payload.len())
+            .finish()
+    }
+}
+
 macro_rules! typed_id {
     ($(#[$doc:meta])* $name:ident) => {
         $(#[$doc])*

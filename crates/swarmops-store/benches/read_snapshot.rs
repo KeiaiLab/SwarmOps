@@ -24,6 +24,19 @@
 //!   as `Journal` does it, copied here since `Journal`'s is private: what caching the
 //!   checkpoint's frame would save.
 //!
+//! A third store, of 10,000 changesets with `main` naming the newest, holds 0, then 16, then
+//! 256 `release/*` refs besides `main`, every ref move checkpointed (`10k_refs0`, `10k_refs16`,
+//! `10k_refs256`). A snapshot reads every ref file (storage spec §3), so these give what each
+//! ref adds to a read: the number that known-limitations' "A snapshot reads every ref file"
+//! weighs once refs grow past dozens. The store's handle is opened once and kept, as a
+//! long-lived server keeps its own (a warm server), and its variants are:
+//!
+//! - `read_changeset` and `read`, as above;
+//! - `show_two_snapshots`: what `show main` read of the metadata before each request read in
+//!   one snapshot (storage spec §8): `main` resolved in one snapshot (its ref, and its changeset
+//!   checked to be there), then its changeset read in a second;
+//! - `show_one_snapshot`: the same reads in one snapshot, as `show` makes them now.
+//!
 //! Besides criterion's estimate, each variant prints the nearest-rank percentiles of every
 //! operation it timed, warm-up included (`percentiles read_snapshot/<store>/<variant>: …`),
 //! for comparison with Task 2b's per-lookup `find` percentiles (`tests/index.rs`,
@@ -39,7 +52,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 use criterion::measurement::WallTime;
 use criterion::{BenchmarkGroup, Criterion, criterion_group, criterion_main};
 use swarmops_core::{ChangesetId, ObjectKind, hash_object};
-use swarmops_store::{ChangesetMeta, Journal, Layout, MetaStore, RealFs, StoreError};
+use swarmops_store::{
+    CasResult, ChangesetMeta, Journal, Layout, MetaRead, MetaStore, RealFs, StoreError,
+};
 use swarmops_testkit::fs::NoSyncFs;
 use swarmops_testkit::measure::{base_dir, mix};
 
@@ -54,6 +69,12 @@ const TARGETS: usize = 1_024;
 
 /// The size of one `journal.off` entry.
 const ENTRY_LEN: u64 = 8;
+
+/// How many changesets the store of the ref variants holds.
+const REF_STORE: u64 = 10_000;
+
+/// How many `release/*` refs the ref variants' store holds besides `main`, in turn.
+const REF_COUNTS: [u64; 3] = [0, 16, 256];
 
 /// The id of changeset `n`: a real hash, so the ids are spread as a store's are.
 fn id(n: u64) -> ChangesetId {
@@ -78,6 +99,30 @@ fn insert(store: &MetaStore, from: u64, to: u64) {
         write.insert_changeset(changeset(n)).expect("insert");
         write.commit().expect("commit");
     }
+}
+
+/// Creates each ref of `refs`, naming the changeset given, in one write transaction, then
+/// checkpoints it: a snapshot reads every ref from its file then, and no frame past the
+/// checkpoint.
+fn create_refs(store: &MetaStore, refs: &[(String, u64)]) {
+    let mut write = store.write().expect("a write transaction");
+    for (name, n) in refs {
+        let created = write
+            .cas_ref(name, None, Some(id(*n)), "bench/refs")
+            .expect("a ref move");
+        assert_eq!(created, CasResult::Applied { old: None }, "{name}");
+    }
+    write.commit().expect("commit");
+    store.flush().expect("flush");
+}
+
+/// What `main` names in snapshot `read`, checked to be a changeset the snapshot holds, as
+/// `swarmops_repo::RepoRead::resolve` resolves a ref.
+fn resolve_main(read: &MetaRead<'_>) -> Result<ChangesetId, StoreError> {
+    let head = read.get_ref("main")?.expect("main exists").target;
+    let found = read.changeset(head)?;
+    black_box(found.expect("main names a changeset of the store"));
+    Ok(head)
 }
 
 /// [`TARGETS`] changesets of `0..count` in a scattered order, the same every run.
@@ -167,6 +212,40 @@ impl<'a> Snapshot<'a> {
     fn bench(&self, group: &mut BenchmarkGroup<'_, WallTime>) {
         let ckpt = self.journal.ckpt().expect("journal.ckpt");
         let listed = self.listed();
+        self.bench_reads(group);
+        timed(group, &format!("{}/tail_frames", self.name), |_| {
+            let frames = self.journal.tail_frames_from(ckpt)?;
+            assert_eq!(frames.len(), usize::try_from(self.tail).expect("fits"));
+            Ok(())
+        });
+        timed(group, &format!("{}/off_search", self.name), |_| {
+            black_box(off_search(&self.off, ckpt, listed));
+            Ok(())
+        });
+    }
+
+    /// The ref variants, on a store that holds `refs` refs besides `main`.
+    fn bench_refs(&self, group: &mut BenchmarkGroup<'_, WallTime>, refs: u64) {
+        let read = self.store.read().expect("a snapshot");
+        let shown = u64::try_from(read.list_refs().expect("the refs").len()).expect("fits");
+        assert_eq!(shown, refs + 1, "{}: main and the release refs", self.name);
+        drop(read);
+        self.bench_reads(group);
+        timed(group, &format!("{}/show_two_snapshots", self.name), |_| {
+            let head = resolve_main(&self.store.read()?)?;
+            black_box(self.store.read()?.changeset(head)?);
+            Ok(())
+        });
+        timed(group, &format!("{}/show_one_snapshot", self.name), |_| {
+            let read = self.store.read()?;
+            let head = resolve_main(&read)?;
+            black_box(read.changeset(head)?);
+            Ok(())
+        });
+    }
+
+    /// `read_changeset` and `read`, cycling through the store's targets.
+    fn bench_reads(&self, group: &mut BenchmarkGroup<'_, WallTime>) {
         let ids: Vec<ChangesetId> = self.targets.iter().map(|&n| id(n)).collect();
         timed(group, &format!("{}/read_changeset", self.name), |i| {
             let read = self.store.read()?;
@@ -175,15 +254,6 @@ impl<'a> Snapshot<'a> {
         });
         timed(group, &format!("{}/read", self.name), |_| {
             black_box(self.store.read()?);
-            Ok(())
-        });
-        timed(group, &format!("{}/tail_frames", self.name), |_| {
-            let frames = self.journal.tail_frames_from(ckpt)?;
-            assert_eq!(frames.len(), usize::try_from(self.tail).expect("fits"));
-            Ok(())
-        });
-        timed(group, &format!("{}/off_search", self.name), |_| {
-            black_box(off_search(&self.off, ckpt, listed));
             Ok(())
         });
     }
@@ -251,6 +321,24 @@ fn read_snapshot(c: &mut Criterion) {
         Snapshot::open(format!("{size}_ckpt_end"), &root, count, 0).bench(&mut group);
         insert(&builder, count, count + TAIL);
         Snapshot::open(format!("{size}_tail31"), &root, count + TAIL, TAIL).bench(&mut group);
+    }
+    let dir = tempfile::tempdir_in(&base).expect("a store dir");
+    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("UTF-8");
+    let builder = MetaStore::create_with_fs(&root, Arc::new(NoSyncFs)).expect("create");
+    insert(&builder, 0, REF_STORE);
+    create_refs(&builder, &[("main".to_owned(), REF_STORE - 1)]);
+    let size = format!("{}k", REF_STORE / 1_000);
+    let mut made = 0;
+    for count in REF_COUNTS {
+        if count > made {
+            let refs: Vec<(String, u64)> = (made..count)
+                .map(|n| (format!("release/r{n:03}"), n))
+                .collect();
+            create_refs(&builder, &refs);
+            made = count;
+        }
+        Snapshot::open(format!("{size}_refs{count}"), &root, REF_STORE, 0)
+            .bench_refs(&mut group, count);
     }
     group.finish();
 }

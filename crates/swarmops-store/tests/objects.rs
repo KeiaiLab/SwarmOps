@@ -847,10 +847,11 @@ fn open_default_under_crash_at_puts_one_object_at_a_time() {
         let outcome = store.put_batch(one_at_a_time_batch());
         panic!("the crash hook did not fire: put_batch returned {outcome:?}");
     }
-    // With its fan-out dir in place, a new object's put makes five FsOps calls: exists,
-    // create_dir_all objects/tmp, exists of the fan-out dir, write_durable_temp,
-    // link_noclobber. One object at a time, call 5 × 20 + 3 comes in the middle of the 21st
-    // object's put, after 20 whole ones: the first 20, in every run.
+    // With its fan-out dir in place, a new object's put makes four FsOps calls: exists, exists
+    // of the fan-out dir, write_durable_temp, link_noclobber; and the batch's first new object
+    // one more before its temp file, create_dir_all objects/tmp, made once a batch. One object
+    // at a time, call 1 + 4 × 20 + 3 comes in the middle of the 21st object's put, after 20
+    // whole ones: the first 20, in every run.
     let whole = 20;
     let want: BTreeSet<ObjectId> = one_at_a_time_batch()[..whole]
         .iter()
@@ -865,7 +866,7 @@ fn open_default_under_crash_at_puts_one_object_at_a_time() {
         let child = child::run(
             this_test(&test_name!(TEST))
                 .env(ONE_AT_A_TIME_ROOT, layout.root())
-                .env(CRASH_AT_ENV, (5 * whole + 3).to_string()),
+                .env(CRASH_AT_ENV, (1 + 4 * whole + 3).to_string()),
         );
         assert_eq!(
             child.status.signal(),
@@ -1022,6 +1023,483 @@ fn fs_calls_hook_reports_how_many_calls_a_process_made() {
         } else {
             assert!(output.status.success(), "{shown}");
             assert_eq!(fs::read_to_string(&report).unwrap(), calls.to_string());
+        }
+    }
+}
+
+/// Puts of objects their caller hashed ([`ObjectStore::put_hashed_batch`], storage spec §8): each
+/// object's file placed once, the outcome saying whether this call placed it, and `objects/tmp`
+/// made at most once a batch.
+mod hashed {
+    use std::os::unix::fs::MetadataExt;
+
+    use swarmops_core::Hashed;
+    use swarmops_store::PutOutcome;
+    use swarmops_testkit::fs::RecordingFs;
+
+    use super::*;
+
+    /// One object of `kind` for each of `payloads`, hashed.
+    fn hashed(kind: ObjectKind, payloads: &[&[u8]]) -> Vec<Hashed> {
+        payloads
+            .iter()
+            .map(|payload| Hashed::new(kind, payload.to_vec()))
+            .collect()
+    }
+
+    /// The outcome of a put of `kind`/`payload` that placed its file (`written`) or did not.
+    fn outcome(kind: ObjectKind, payload: &[u8], written: bool) -> PutOutcome {
+        PutOutcome {
+            id: hash_object(kind, payload),
+            written,
+        }
+    }
+
+    #[test]
+    fn put_hashed_batch_reports_what_it_placed() {
+        let (_root, layout) = new_root();
+        let mut store = real_store(&layout);
+        store.set_parallelism(4);
+        let three: [&[u8]; 3] = [b"one", b"two", b"three"];
+        let placed = store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &three))
+            .unwrap();
+        let want = |written| three.map(|p| outcome(ObjectKind::Blob, p, written));
+        assert_eq!(placed, want(true), "three new objects, in input order");
+        let again = store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &three))
+            .unwrap();
+        assert_eq!(again, want(false), "the same three again: none placed");
+
+        // A batch of new and stored objects, of each kind: only the new ones are placed.
+        let mut mixed = hashed(ObjectKind::Blob, &[b"two", b"four"]);
+        mixed.extend(hashed(ObjectKind::Tree, &[b"one", b"a tree"]));
+        mixed.push(Hashed::new(ObjectKind::Changeset, b"a changeset".to_vec()));
+        let placed = store.put_hashed_batch(mixed.clone()).unwrap();
+        assert_eq!(
+            placed,
+            [
+                outcome(ObjectKind::Blob, b"two", false),
+                outcome(ObjectKind::Blob, b"four", true),
+                outcome(ObjectKind::Tree, b"one", true),
+                outcome(ObjectKind::Tree, b"a tree", true),
+                outcome(ObjectKind::Changeset, b"a changeset", true),
+            ],
+            "a tree of the same bytes as a stored blob is another object"
+        );
+        for (item, put) in mixed.into_iter().zip(placed) {
+            let stored = store.get(put.id).unwrap();
+            assert_eq!(stored, Some((item.kind(), item.into_payload())), "{put:?}");
+        }
+        assert_eq!(store.put_hashed_batch(Vec::new()).unwrap(), []);
+    }
+
+    #[test]
+    fn racing_put_hashed_batches_place_each_object_once() {
+        const THREADS: usize = 8;
+        let (_root, layout) = new_root();
+        let store = real_store(&layout);
+        let payload = random_bytes(1 << 20);
+        let barrier = Barrier::new(THREADS);
+        let outcomes: Vec<PutOutcome> = thread::scope(|s| {
+            let workers: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    s.spawn(|| {
+                        let item = Hashed::new(ObjectKind::Blob, payload.clone());
+                        barrier.wait();
+                        store.put_hashed_batch(vec![item]).unwrap()
+                    })
+                })
+                .collect();
+            (workers.into_iter())
+                .flat_map(|worker| worker.join().unwrap())
+                .collect()
+        });
+
+        let id = hash_object(ObjectKind::Blob, &payload);
+        assert!(outcomes.iter().all(|o| o.id == id), "{outcomes:?}");
+        let placed = outcomes.iter().filter(|o| o.written).count();
+        assert_eq!(
+            placed, 1,
+            "exactly one thread placed the file: {outcomes:?}"
+        );
+        let file = layout.object_path(id).into_std_path_buf();
+        assert_eq!(
+            object_files(&layout),
+            std::slice::from_ref(&file),
+            "one object file"
+        );
+        assert_eq!(
+            fs::metadata(&file).unwrap().nlink(),
+            1,
+            "no temp file names it"
+        );
+        assert_eq!(
+            files_in(layout.objects_tmp().as_std_path()),
+            Vec::<PathBuf>::new(),
+            "every temp file is removed, the losers' included"
+        );
+    }
+
+    #[test]
+    fn put_hashed_batch_makes_objects_tmp_at_most_once() {
+        let (_root, layout) = new_root();
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(layout.root().as_std_path().to_path_buf());
+        let mut store = FsObjectStore::open(layout.clone(), Box::new(fs));
+        store.set_parallelism(4);
+        let made = |calls: Vec<String>| {
+            (calls.iter())
+                .filter(|call| *call == "create_dir_all objects/tmp")
+                .count()
+        };
+        let first: [&[u8]; 3] = [b"first 0", b"first 1", b"first 2"];
+
+        assert!(!layout.objects_tmp().exists(), "a fresh root has none");
+        let placed = store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &first))
+            .unwrap();
+        assert!(placed.iter().all(|o| o.written), "{placed:?}");
+        assert_eq!(made(calls()), 1, "made once for three new objects");
+        assert!(layout.objects_tmp().is_dir());
+
+        store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &first))
+            .unwrap();
+        assert_eq!(made(calls()), 0, "a batch of stored objects writes nothing");
+
+        let second: [&[u8]; 3] = [b"second 0", b"second 1", b"second 2"];
+        store
+            .put_hashed_batch(hashed(ObjectKind::Blob, &second))
+            .unwrap();
+        assert_eq!(made(calls()), 1, "once a batch, not once a store");
+    }
+}
+
+/// An object's kind and length from its file's header alone ([`ObjectStore::stat`]), and an
+/// object a caller relies on without writing it ([`ObjectStore::retain`]).
+mod stat {
+    use swarmops_store::{FileOp, ObjectStat};
+    use swarmops_testkit::fs::RecordingFs;
+
+    use super::*;
+
+    /// A store of `layout` on a [`RecordingFs`] that names each call by its path in the store,
+    /// and the function that returns the calls made since it last ran.
+    fn recording_store(layout: &Layout) -> (FsObjectStore, impl Fn() -> Vec<String>) {
+        let (fs, calls) = RecordingFs::new();
+        let fs = fs.naming_paths_in(layout.root().as_std_path().to_path_buf());
+        (FsObjectStore::open(layout.clone(), Box::new(fs)), calls)
+    }
+
+    /// Applies `damage` to the file of `id`, stats `id`, and restores the file.
+    fn stat_damaged(
+        store: &FsObjectStore,
+        layout: &Layout,
+        id: ObjectId,
+        damage: fn(&mut Vec<u8>),
+    ) -> Result<Option<ObjectStat>, StoreError> {
+        let path = layout.object_path(id);
+        let pristine = fs::read(&path).unwrap();
+        let mut damaged = pristine.clone();
+        damage(&mut damaged);
+        fs::write(&path, &damaged).unwrap();
+        let got = store.stat(id);
+        fs::write(&path, &pristine).unwrap();
+        got
+    }
+
+    /// A damage that leaves the header whole, and the length `stat` reports through it.
+    type PastTheHeader = (&'static str, fn(&mut Vec<u8>), u64);
+
+    /// What `stat` gives for a stored object of `kind` whose header records `size`.
+    fn stat_of(kind: ObjectKind, size: u64) -> ObjectStat {
+        ObjectStat { kind, size }
+    }
+
+    #[test]
+    fn stat_reads_the_header_only() {
+        let (_root, layout) = new_root();
+        let (store, calls) = recording_store(&layout);
+        let large = store
+            .put(ObjectKind::Blob, &random_bytes(10 << 20))
+            .unwrap();
+        let zstd = store.put(ObjectKind::Blob, &[b'a'; 4096]).unwrap();
+        let tree = store.put(ObjectKind::Tree, b"a tree's bytes").unwrap();
+        let raw = store.put(ObjectKind::Changeset, &[7; 100]).unwrap();
+        assert_eq!(fs::read(layout.object_path(large)).unwrap()[5], ENC_RAW);
+        assert_eq!(fs::read(layout.object_path(zstd)).unwrap()[5], ENC_ZSTD);
+        calls();
+
+        let stat = |id| store.stat(id).unwrap();
+        assert_eq!(stat(large), Some(stat_of(ObjectKind::Blob, 10 << 20)));
+        assert_eq!(
+            stat(zstd),
+            Some(stat_of(ObjectKind::Blob, 4096)),
+            "the payload's length, not the file's"
+        );
+        assert_eq!(stat(tree), Some(stat_of(ObjectKind::Tree, 14)));
+        assert_eq!(stat(raw), Some(stat_of(ObjectKind::Changeset, 100)));
+        assert_eq!(stat(hash_object(ObjectKind::Blob, b"never stored")), None);
+        assert_eq!(
+            calls(),
+            Vec::<String>::new(),
+            "no FsOps call: the header is read through std::fs"
+        );
+
+        // A header this store does not write is `BadHeader`, as `get` finds it.
+        let cases: [Damage; 6] = [
+            ("bad magic", raw, |file| file[0] = b'X'),
+            ("unknown kind", raw, |file| file[4] = 3),
+            ("unknown encoding", raw, |file| file[5] = 2),
+            ("nonzero reserved bytes", raw, |file| file[7] = 1),
+            ("header cut short", raw, |file| {
+                file.truncate(HEADER_LEN - 1);
+            }),
+            ("an empty file", raw, Vec::clear),
+        ];
+        for (what, id, damage) in cases {
+            let got = stat_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+                "{what}: {got:?}"
+            );
+        }
+        // Nothing past the header is read: the payload's damage is `get`'s to find, and the
+        // length is the header's own, however large, since nothing is allocated by it.
+        let past_the_header: [PastTheHeader; 2] = [
+            (
+                "raw payload cut short",
+                |file| {
+                    file.pop();
+                },
+                100,
+            ),
+            (
+                "a length no payload has",
+                |file| file[8..16].copy_from_slice(&u64::MAX.to_le_bytes()),
+                u64::MAX,
+            ),
+        ];
+        for (what, damage, size) in past_the_header {
+            let got = stat_damaged(&store, &layout, raw, damage);
+            let want = stat_of(ObjectKind::Changeset, size);
+            assert_eq!(got.unwrap(), Some(want), "{what}");
+        }
+
+        // A path that is no regular file fails as `get` fails, named by its place in the store.
+        let path = layout.object_path(raw);
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        match store.stat(raw) {
+            Err(StoreError::Io(failure)) => {
+                let file = path.strip_prefix(layout.root()).unwrap();
+                assert_eq!(
+                    (failure.op, failure.file.as_deref(), failure.kind()),
+                    (FileOp::Open, Some(file), io::ErrorKind::InvalidData),
+                    "{failure}"
+                );
+            }
+            other => panic!("expected an I/O failure, got {other:?}"),
+        }
+        assert_eq!(calls(), Vec::<String>::new(), "still no FsOps call");
+    }
+
+    #[test]
+    fn retain_makes_the_next_flush_sync_the_fan_out() {
+        let (_root, layout) = new_root();
+        // Another writer, in another process say, linked the object and has not flushed yet.
+        let id = real_store(&layout)
+            .put(ObjectKind::Blob, b"stored elsewhere")
+            .unwrap();
+        let fanout = format!("fsync_dir objects/{:02x}", id.0[0]);
+        let (store, calls) = recording_store(&layout);
+
+        assert_eq!(
+            store.retain(id).unwrap(),
+            Some(stat_of(ObjectKind::Blob, 16)),
+            "what stat gives"
+        );
+        assert_eq!(calls(), Vec::<String>::new(), "retain makes no FsOps call");
+        store.flush().unwrap();
+        assert_eq!(
+            calls(),
+            [fanout],
+            "one fsync, of the object's fan-out directory"
+        );
+        store.flush().unwrap();
+        assert_eq!(calls(), Vec::<String>::new(), "the flush took it");
+
+        // An object that is not stored, or whose header is damaged, leaves nothing to flush.
+        let missing = hash_object(ObjectKind::Blob, b"never stored");
+        assert_eq!(store.retain(missing).unwrap(), None);
+        let path = layout.object_path(id);
+        let mut file = fs::read(&path).unwrap();
+        file[0] = b'X';
+        fs::write(&path, &file).unwrap();
+        assert!(matches!(store.retain(id), Err(StoreError::BadHeader { id: bad }) if bad == id));
+        store.flush().unwrap();
+        assert_eq!(calls(), Vec::<String>::new(), "nothing to fsync");
+    }
+}
+
+/// `read_chunks`: an object's payload handed over in pieces as it decodes, and verified whole, as
+/// `get` verifies it (storage spec §2 rule 1, §8).
+mod read_chunks {
+    use swarmops_store::ObjectStat;
+
+    use super::*;
+
+    /// What `read_chunks` of an object returns, and the pieces it handed its visitor, in order.
+    type Visited = (Result<Option<ObjectStat>, StoreError>, Vec<Vec<u8>>);
+
+    /// The lines of [`numbered_lines`] in a payload of 240,000 bytes.
+    const LINES: u32 = 20_000;
+
+    /// `count` lines of 12 bytes, `line 000000\n` numbered from 0: text that zstd shrinks.
+    fn numbered_lines(count: u32) -> Vec<u8> {
+        (0..count)
+            .flat_map(|n| format!("line {n:06}\n").into_bytes())
+            .collect()
+    }
+
+    fn visit(store: &FsObjectStore, id: ObjectId) -> Visited {
+        let mut pieces = Vec::new();
+        let got = store.read_chunks(id, &mut |piece: &[u8]| pieces.push(piece.to_vec()));
+        (got, pieces)
+    }
+
+    /// Applies `damage` to the file of `id`, reads `id` in pieces, and restores the file.
+    fn visit_damaged(
+        store: &FsObjectStore,
+        layout: &Layout,
+        id: ObjectId,
+        damage: fn(&mut Vec<u8>),
+    ) -> Visited {
+        let path = layout.object_path(id);
+        let pristine = fs::read(&path).unwrap();
+        let mut damaged = pristine.clone();
+        damage(&mut damaged);
+        fs::write(&path, &damaged).unwrap();
+        let got = visit(store, id);
+        fs::write(&path, &pristine).unwrap();
+        got
+    }
+
+    /// Objects of each kind, raw and zstd, come back in pieces that concatenate to what `get`
+    /// returns, with their kind and payload length: a raw payload in one piece (none when it is
+    /// empty), from the buffer its file was read into; a zstd payload as its stream decodes, so a
+    /// megabyte of it in more than one. An object that is not stored is `None`, nothing visited.
+    #[test]
+    fn read_chunks_visits_the_payload_in_order() {
+        let (_root, layout) = new_root();
+        let store = real_store(&layout);
+        let cases = [
+            (ObjectKind::Blob, random_bytes(1 << 20), ENC_RAW),
+            (ObjectKind::Blob, numbered_lines(100_000), ENC_ZSTD),
+            (ObjectKind::Tree, b"a tree's bytes".to_vec(), ENC_RAW),
+            (ObjectKind::Changeset, vec![b'c'; 4096], ENC_ZSTD),
+            (ObjectKind::Blob, Vec::new(), ENC_RAW),
+        ];
+        for (kind, payload, enc) in cases {
+            let id = store.put(kind, &payload).unwrap();
+            let size = u64::try_from(payload.len()).unwrap();
+            let what = format!("{kind:?} of {size} bytes");
+            assert_eq!(fs::read(layout.object_path(id)).unwrap()[5], enc, "{what}");
+            let (got, pieces) = visit(&store, id);
+            assert_eq!(got.unwrap(), Some(ObjectStat { kind, size }), "{what}");
+            let whole = store.get(id).unwrap().expect("stored").1;
+            assert!(
+                pieces.concat() == whole,
+                "{what}: the pieces are the payload"
+            );
+            assert!(whole == payload, "{what}");
+            if enc == ENC_RAW {
+                assert_eq!(pieces.len(), usize::from(size > 0), "{what}");
+            } else if size > 1 << 20 {
+                assert!(pieces.len() > 1, "{what}: {} piece(s)", pieces.len());
+            }
+        }
+
+        let missing = hash_object(ObjectKind::Blob, b"never stored");
+        let (got, pieces) = visit(&store, missing);
+        assert_eq!((got.unwrap(), pieces.len()), (None, 0));
+    }
+
+    /// A damaged object fails as `get` fails it, wherever the damage lies: a header this store
+    /// does not write is `BadHeader` before any piece is visited, and bytes that are not the
+    /// object's are `Corrupt`, found once the pieces before the damage have gone by (the caller
+    /// drops what it kept of them).
+    #[test]
+    fn read_chunks_verifies_the_whole_payload() {
+        let (_root, layout) = new_root();
+        let store = real_store(&layout);
+        let raw = store
+            .put(ObjectKind::Blob, &random_bytes(200 << 10))
+            .unwrap();
+        let zstd = store.put(ObjectKind::Blob, &numbered_lines(LINES)).unwrap();
+        assert_eq!(fs::read(layout.object_path(raw)).unwrap()[5], ENC_RAW);
+        assert_eq!(fs::read(layout.object_path(zstd)).unwrap()[5], ENC_ZSTD);
+
+        let corrupt: [Damage; 6] = [
+            ("raw payload byte flipped near its end", raw, |file| {
+                file[HEADER_LEN + (190 << 10)] ^= 0x01;
+            }),
+            ("kind byte changed to another valid kind", raw, |file| {
+                file[4] = 1;
+            }),
+            ("zstd payload byte flipped mid-file", zstd, |file| {
+                let middle = file.len() / 2;
+                file[middle] ^= 0x01;
+            }),
+            ("zstd checksum flipped", zstd, |file| {
+                *file.last_mut().unwrap() ^= 0x01;
+            }),
+            ("zstd frame cut short", zstd, |file| {
+                file.pop();
+            }),
+            (
+                "a frame that records 4 KiB and makes nothing",
+                zstd,
+                |file| {
+                    lying_zstd(file, 4096);
+                },
+            ),
+        ];
+        for (what, id, damage) in corrupt {
+            let (got, _) = visit_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+                "{what}: {got:?}"
+            );
+        }
+
+        let bad_header: [Damage; 5] = [
+            ("bad magic", raw, |file| {
+                file[0] = b'X';
+            }),
+            ("header cut short", raw, |file| {
+                file.truncate(HEADER_LEN - 1);
+            }),
+            ("raw payload cut short", raw, |file| {
+                file.pop();
+            }),
+            ("zstd ulen below the frame size", zstd, |file| {
+                let size = u64::from(LINES) * 12 - 1;
+                file[8..16].copy_from_slice(&size.to_le_bytes());
+            }),
+            ("zstd ulen above the frame size", zstd, |file| {
+                let size = u64::from(LINES) * 12 + 1;
+                file[8..16].copy_from_slice(&size.to_le_bytes());
+            }),
+        ];
+        for (what, id, damage) in bad_header {
+            let (got, pieces) = visit_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+                "{what}: {got:?}"
+            );
+            assert_eq!(pieces.len(), 0, "{what}: no piece is visited");
         }
     }
 }

@@ -45,7 +45,7 @@
 //! | Code | Name | For |
 //! |---|---|---|
 //! | `-32700` | Parse error | a line that is not JSON, or not UTF-8 |
-//! | `-32600` | Invalid Request | a batch, or anything else that is not one object; an object whose `jsonrpc` is not `"2.0"`, whose `id` is not a string or an integer (null, a fraction, an object, an array, a boolean), or that has neither a string `method` nor a response's `result` or `error` |
+//! | `-32600` | Invalid Request | a batch, or anything else that is not one object; an object whose `jsonrpc` is not `"2.0"`, whose `id` is not a string or an integer (null, a fraction, an object, an array, a boolean), or that has neither a string `method` nor a response's `result` or `error`; a line longer than `MAX_REQUEST_BYTES` (64 MiB), read no further than one byte past it and the rest passed over to the next line break, always without an `id` |
 //! | `-32601` | Method not found | a method its revision does not have (`ping` in 2026-07-28, `initialize` in a request that names 2026-07-28) |
 //! | `-32602` | Invalid params | `params`, or a `params._meta`, that is not an object, or a protocol version in it that is not a string; before `initialize`, a request that names no version in `_meta` (but `ping`), and a `server/discover` that names none at any time; a 2026-07-28 `_meta` without the client's capabilities; an `initialize` without the client's `protocolVersion`; a `tools/call` without a known tool's name, or with `arguments` that are not an object; a `tools/list` cursor (there is one page) |
 //! | `-32603` | Internal error | a panic outside an operation (a bug) |
@@ -56,20 +56,23 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `read_file`, `read_tree`, `show`, `log`, `op_log`, `ref_list`, `ref_set`, `ref_delete`,
-//! `undo`, `commit` and `verify`, in `tools/list`'s order. A tool's `inputSchema` is its request
-//! type's JSON Schema, as `swarmops schema <type>` prints it, with each `$ref` replaced by the
-//! definition it names so that the schema stands alone: a keyword beside the reference wins
-//! over the definition's, but for `description`, where the reference's comes first and the
-//! definition's after it. It is kept a plain object ([`tool_input_schema`]): nothing at its top
-//! but `$schema`, `title`, `description`, `type`, `properties` and `required`, since the Claude
-//! API refuses a request whose tools hold an input schema with a combinator there, so that one
-//! such tool would stop every request of the session; a rule across fields that the request
-//! type's schema states with one (`RefSetReq`'s exactly one of `expected_old` and `create`) is
-//! the description's and the server's own check. The `expected_old` of `ref_set` and
-//! `ref_delete` is a string of the full-id pattern ([`full_id_pattern`]), not any revision. A
-//! tool's annotations say whether it changes the store and how; none reaches beyond the store
-//! (`openWorldHint: false`).
+//! `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`,
+//! `ref_set`, `ref_delete`, `undo`, `commit`, `blob_put`, `blob_has` and `verify`, in
+//! `tools/list`'s order. A tool's `inputSchema` is its request type's JSON Schema, as `swarmops
+//! schema <type>` prints it, with each `$ref` replaced by the definition it names so that the
+//! schema stands alone: a keyword beside the reference wins over the definition's, but for
+//! `description`, where the reference's comes first and the definition's after it. It is kept a
+//! plain object ([`tool_input_schema`]): nothing at its top but `$schema`, `title`,
+//! `description`, `type`, `properties` and `required`, since the Claude API refuses a request
+//! whose tools hold an input schema with a combinator there, so that one such tool would stop
+//! every request of the session; a rule across fields that the request type's schema states
+//! with one (`RefSetReq`'s exactly one of `expected_old` and `create`) is the description's and
+//! the server's own check. The `expected_old` of `ref_set` and `ref_delete` is a string of the
+//! full-id pattern ([`full_id_pattern`]), not any revision. A tool's annotations say whether it
+//! changes the store and how; none reaches beyond the store (`openWorldHint: false`).
+//!
+//! `derive` alone has no tool: `swarmops derive` runs it beside the store as maintenance,
+//! deriving values ahead of readers as the journal grows, which is no agent's work.
 //!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
 //! does not know is ignored, and arguments that do not fit the type are `E_INVALID_ARG`, as is
@@ -77,11 +80,11 @@
 //! `ref_delete` must name what it expects the ref to hold by its full changeset id, since a ref
 //! name or a relative revision resolves when the call runs and so defeats the compare-and-swap,
 //! and an id prefix stops resolving once another changeset shares it (the CLI takes any
-//! revision for `--expect`, and its help warns why not to); and a `commit` whose `{"file":
-//! <path>}` content names a relative path, this process's own stdin or stdout, or anything but
-//! a regular file, is refused, since the server would read the file from a working directory
-//! the agent cannot see, block on the pipe that carries the protocol, or block on a FIFO or a
-//! device. A mutation then
+//! revision for `--expect`, and its help warns why not to); and a `commit` or a `blob_put` whose
+//! `{"file": <path>}` content names a relative path, this process's own stdin or stdout, or
+//! anything but a regular file, is refused, since the server would read the file from a working
+//! directory the agent cannot see, block on the pipe that carries the protocol, or block on a
+//! FIFO or a device. A mutation then
 //! needs the server's identity, and last the store is opened and the operation runs; a
 //! `verify` that finds problems is `E_STORE_CORRUPT`, as `swarmops verify` is, and a panic in
 //! the operation is `E_INTERNAL`. The tool result holds the envelope the CLI prints for the
@@ -129,11 +132,13 @@ use std::time::Instant;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
+use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
-    CommitReq, ContentInput, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError, OpLogReq,
-    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev, ShowReq, StoreOps, UndoReq,
-    VerifyReq, schema_for_all,
+    CommitReq, ContentInput, DiffReq, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
+    OpLogReq, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev,
+    ShowReq, StoreOps, UndoReq, VerifyReq, schema_for_all,
 };
+use swarmops_ops::content::MAX_REQUEST_BYTES;
 
 use crate::cli::Global;
 use crate::commands::{self, Ctx, Used};
@@ -171,8 +176,8 @@ const CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
 /// milliseconds: an hour.
 const TTL_MS: u64 = 60 * 60 * 1000;
 
-/// The most bytes the line buffer keeps between messages: a commit's line can be hundreds of
-/// MiB, which a long-lived server should not hold on to.
+/// The most bytes the line buffer keeps between messages: a line can be up to
+/// [`MAX_REQUEST_BYTES`], which a long-lived server should not hold on to.
 const LINE_KEEP: usize = 64 * 1024;
 
 /// JSON-RPC's error codes, and MCP's for a protocol version the server does not serve.
@@ -226,7 +231,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 12] = [
+static TOOLS: [Spec; 16] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -243,8 +248,10 @@ static TOOLS: [Spec; 12] = [
         request: "ReadFileReq",
         title: "Read a file",
         description: "Reads one file at a revision, without a checkout, as UTF-8 text or \
-                      base64; pass max_bytes of 32768 or less (less for a binary file), since \
-                      clients limit long tool results and this one holds the content twice.",
+                      base64, from offset or the lines a range names; pass max_bytes of 32768 or \
+                      less (less for a binary file), since clients limit long tool results and \
+                      this one holds the content twice, and read on from next_offset while the \
+                      result is truncated.",
         effect: Effect::Reads,
         result_chars: Some(READ_FILE_RESULT_CHARS),
     },
@@ -254,8 +261,9 @@ static TOOLS: [Spec; 12] = [
         request: "ReadTreeReq",
         title: "List a directory",
         description: "Lists one directory at a revision, without a checkout, a page of entries \
-                      at a time; pass a limit of 100 or less and page on with the cursor, since \
-                      clients limit long tool results.",
+                      at a time, each file with its size, and with depth the directories below it \
+                      too; pass a limit of 100 or less and page on with the cursor, since clients \
+                      limit long tool results.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -277,6 +285,32 @@ static TOOLS: [Spec; 12] = [
         title: "List history",
         description: "History along first parents, newest first, from main unless rev says \
                       otherwise; pass a limit of 100 or less and page on with the cursor, since \
+                      clients limit long tool results.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::PathHistory,
+        name: "path_history",
+        request: "PathHistoryReq",
+        title: "List a path's history",
+        description: "The changesets that changed a file, or anything below a directory, newest \
+                      first along first parents from main unless rev says otherwise, each with \
+                      what the path holds after it (the CLI command is history); pass a limit of \
+                      100 or less and page on with the cursor, since clients limit long tool \
+                      results.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Diff,
+        name: "diff",
+        request: "DiffReq",
+        title: "Diff two revisions",
+        description: "The files that differ between two revisions, in path order: with format \
+                      names (the default) each one's path and status, with stat also its line \
+                      counts, with unified also its hunks; pass a limit of 100 or less, keep \
+                      max_bytes at 32768 or less for unified, and page on with the cursor, since \
                       clients limit long tool results.",
         effect: Effect::Reads,
         result_chars: None,
@@ -359,6 +393,29 @@ static TOOLS: [Spec; 12] = [
         result_chars: None,
     },
     Spec {
+        tool: Tool::BlobPut,
+        name: "blob_put",
+        request: "BlobPutReq",
+        title: "Store a blob",
+        description: "Stores content as a blob, outside any commit, and gives its id: a commit's \
+                      change then names it as {\"blob\": id} content instead of carrying its \
+                      bytes, the way to commit a large file. A {\"file\": path} content is \
+                      read by this server: give an absolute path. A hint's swarmops blob put \
+                      is this tool.",
+        effect: Effect::Adds,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::BlobHas,
+        name: "blob_has",
+        request: "BlobHasReq",
+        title: "Find stored blobs",
+        description: "Of the blob ids given, the ones the store holds blobs under: the \
+                      contents a commit can name by id without storing them again.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
         tool: Tool::Verify,
         name: "verify",
         request: "VerifyReq",
@@ -398,6 +455,8 @@ struct Server<'a> {
     /// The revision of the session `initialize` opened, one of [`HANDSHAKE`]; `None` before
     /// it.
     session: Option<&'static str>,
+    /// The most bytes a message line may hold: [`MAX_REQUEST_BYTES`], or less in a test.
+    max_line: u64,
 }
 
 /// The rules a request is served by.
@@ -429,6 +488,11 @@ struct Reply<'a> {
 
 impl<'a> Server<'a> {
     fn new(global: &'a Global, env: Env<'a>) -> Server<'a> {
+        Server::with_max_line(global, env, MAX_REQUEST_BYTES)
+    }
+
+    /// [`Server::new`], whose message lines hold at most `max_line` bytes.
+    fn with_max_line(global: &'a Global, env: Env<'a>, max_line: u64) -> Server<'a> {
         let all = schema_for_all();
         let tools = TOOLS
             .iter()
@@ -448,19 +512,40 @@ impl<'a> Server<'a> {
             env,
             tools,
             session: None,
+            max_line,
         }
     }
 
-    /// Answers each message `input` holds, a line each, on `output`, until `input` ends.
+    /// Answers each message `input` holds, a line each, on `output`, until `input` ends. A line
+    /// is read no further than one byte past `max_line`: a longer one is an Invalid Request
+    /// without an `id`, its rest passed over unread to the next line break.
     fn serve(&mut self, mut input: impl BufRead, mut output: impl Write) -> io::Result<()> {
         let mut line = Vec::new();
         loop {
             line.clear();
             line.shrink_to(LINE_KEEP);
-            if input.read_until(b'\n', &mut line)? == 0 {
+            let cap = self.max_line.saturating_add(1);
+            if io::Read::take(&mut input, cap).read_until(b'\n', &mut line)? == 0 {
                 return Ok(());
             }
-            if let Some(answer) = self.answer(&line) {
+            let over = line.last() != Some(&b'\n')
+                && u64::try_from(line.len()).unwrap_or(u64::MAX) > self.max_line;
+            let answer = if over {
+                input.skip_until(b'\n')?;
+                Some(error(
+                    None,
+                    INVALID_REQUEST,
+                    format!(
+                        "Invalid Request: a message line holds at most {} bytes; send large \
+                         contents as {{\"file\": path}}, or store them with blob_put first and \
+                         name them by id: {{\"blob\": id}}",
+                        self.max_line
+                    ),
+                ))
+            } else {
+                self.answer(&line)
+            };
+            if let Some(answer) = answer {
                 output.write_all(answer.as_bytes())?;
                 output.write_all(b"\n")?;
                 output.flush()?;
@@ -802,12 +887,16 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::ReadTree => how.read(|ops, req| ops.read_tree(req)),
         Tool::Show => how.read(|ops, req| ops.show(req)),
         Tool::Log => how.read(|ops, req| ops.log(req)),
+        Tool::PathHistory => how.read(|ops, req| ops.path_history(req)),
+        Tool::Diff => how.read(|ops, req| ops.diff(req)),
         Tool::OpLog => how.read(|ops, req| ops.op_log(req)),
         Tool::RefList => how.read(|ops, req| ops.ref_list(req)),
         Tool::RefSet => how.mutate(|ops, who, req| ops.ref_set(who, req)),
         Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
         Tool::Undo => how.mutate(|ops, who, req| ops.undo(who, req)),
         Tool::Commit => how.mutate(|ops, who, req| ops.commit(who, req)),
+        Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
+        Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
         Tool::Verify => how.read(|ops, req: VerifyReq| {
             let deep = req.deep;
             ops.verify(req)
@@ -929,10 +1018,13 @@ impl Refuse for ReadFileReq {}
 impl Refuse for ReadTreeReq {}
 impl Refuse for ShowReq {}
 impl Refuse for LogReq {}
+impl Refuse for PathHistoryReq {}
+impl Refuse for DiffReq {}
 impl Refuse for OpLogReq {}
 impl Refuse for RefListReq {}
 impl Refuse for UndoReq {}
 impl Refuse for VerifyReq {}
+impl Refuse for BlobHasReq {}
 
 /// A commit that advances a ref names its parent by its full id ([`full_parent`]). A change's
 /// client file is read by this server, so its path must be absolute (the agent
@@ -951,15 +1043,7 @@ impl Refuse for CommitReq {
             let Some(ContentInput::File(file)) = &change.content else {
                 continue;
             };
-            let why = if !Path::new(file).is_absolute() {
-                "is a relative path, which the server would read from its own working \
-                 directory, not yours"
-            } else if commands::is_own_stdio(file) {
-                "is this process's own stdin or stdout, which carry the protocol"
-            } else if fs::metadata(file).is_ok_and(|meta| !meta.is_file()) {
-                "is not a regular file (a FIFO, a socket, a device or a directory), which a \
-                 read could block on"
-            } else {
+            let Some(why) = unreadable(file) else {
                 continue;
             };
             return Err(OpError::new(
@@ -977,6 +1061,52 @@ impl Refuse for CommitReq {
             ])));
         }
         Ok(())
+    }
+}
+
+/// A blob's client file is read by this server as a commit's is, so the same rules hold
+/// ([`unreadable`]); the refusal names the `file`.
+impl Refuse for BlobPutReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        let ContentInput::File(file) = &self.content else {
+            return Ok(());
+        };
+        let Some(why) = unreadable(file) else {
+            return Ok(());
+        };
+        Err(OpError::new(
+            ErrorCode::InvalidArg,
+            output::printable(&format!(
+                "the client file {file:?} {why}: name a regular file by its absolute path, or send \
+                 the bytes as inline or base64 content"
+            )),
+        )
+        .with_details(Map::from_iter([(
+            "file".to_owned(),
+            Value::from(file.as_str()),
+        )])))
+    }
+}
+
+/// Why this server refuses to read client file `file`, which it would read for the caller
+/// ([`Refuse`] for `CommitReq` says why each): a relative path, this process's own stdin or
+/// stdout, or anything but a regular file. `None` for a file it reads. The path is `stat`ed,
+/// never opened.
+fn unreadable(file: &str) -> Option<&'static str> {
+    if !Path::new(file).is_absolute() {
+        Some(
+            "is a relative path, which the server would read from its own working directory, \
+             not yours",
+        )
+    } else if commands::is_own_stdio(file) {
+        Some("is this process's own stdin or stdout, which carry the protocol")
+    } else if fs::metadata(file).is_ok_and(|meta| !meta.is_file()) {
+        Some(
+            "is not a regular file (a FIFO, a socket, a device or a directory), which a read \
+             could block on",
+        )
+    } else {
+        None
     }
 }
 
@@ -1307,12 +1437,16 @@ enum Tool {
     ReadTree,
     Show,
     Log,
+    PathHistory,
+    Diff,
     OpLog,
     RefList,
     RefSet,
     RefDelete,
     Undo,
     Commit,
+    BlobPut,
+    BlobHas,
     Verify,
 }
 
@@ -1321,10 +1455,11 @@ enum Tool {
 enum Effect {
     /// It only reads.
     Reads,
-    /// It adds to the store and changes nothing there (`commit`); run again, it adds again,
-    /// another changeset signed at its own time, unless the call carries an `idempotency_key`,
-    /// which makes the same call again a replay. A call without one is not idempotent, so the
-    /// tool does not say it is.
+    /// It adds to the store and changes nothing there (`commit`, `blob_put`); run again, a
+    /// `commit` adds again, another changeset signed at its own time, unless the call carries
+    /// an `idempotency_key`, which makes the same call again a replay (a `blob_put` of the same
+    /// content finds it stored, and says so in its result). A `commit` without a key is not
+    /// idempotent, so the tool does not say it is.
     Adds,
     /// It moves or deletes refs by compare-and-swap, changing what they name (`ref_set`,
     /// `ref_delete`, `undo`); run again with the same arguments, it finds them as it asked
@@ -1490,8 +1625,9 @@ mod tests {
 
     use camino::Utf8Path;
     use swarmops_api::{
-        ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput, FileContent, LogPage,
-        OpLogPage, RefListResp, RefSetResp, RepoInfo, TreeListing, UndoResp, VerifyReport,
+        BlobHasResp, BlobPutResp, ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput,
+        DeriveReq, DeriveResp, FileContent, LogPage, OpLogPage, PathHistoryPage, RefListResp,
+        RefSetResp, RepoInfo, TreeListing, UndoResp, VerifyReport,
     };
     use swarmops_ops::LocalOps;
 
@@ -1502,9 +1638,11 @@ mod tests {
     /// tool wired to the wrong one, fails here.
     #[test]
     fn the_tools_are_the_store_operations() {
-        // `init` runs on the client and is no `StoreOps` operation, so it has no tool. M4's
-        // contract has the request of `land` (M4 Task 7) before its operation: it stays off the
-        // tools until that task adds the operation and the tool, and takes it off this list.
+        // `init` runs on the client and is no `StoreOps` operation, so it has no tool; `derive`
+        // is maintenance, which `swarmops derive` runs beside the store, and no agent's work.
+        // M4's contract has the request of `land` (M4 Task 7) before its operation: it stays
+        // off the tools until that task adds the operation and the tool, and takes it off this
+        // list.
         let without_tools_yet = ["LandReq"];
         let all = schema_for_all();
         let requests: Vec<&str> = all
@@ -1513,7 +1651,9 @@ mod tests {
             .keys()
             .map(String::as_str)
             .filter(|name| {
-                name.ends_with("Req") && *name != "InitReq" && !without_tools_yet.contains(name)
+                name.ends_with("Req")
+                    && !["InitReq", "DeriveReq"].contains(name)
+                    && !without_tools_yet.contains(name)
             })
             .collect();
         let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
@@ -1553,12 +1693,16 @@ mod tests {
     fn sample() -> Value {
         json!({
             "rev": "main",
+            "from": "main",
+            "to": "main",
             "path": "a",
             "name": "main",
             "new": "main",
             "expected_old": "0".repeat(64),
             "message": "m",
             "changes": [],
+            "content": {"inline": "x"},
+            "ids": [],
             "op": 0,
         })
     }
@@ -1620,6 +1764,14 @@ mod tests {
             self.called("log", "LogReq")
         }
 
+        fn path_history(&self, _: PathHistoryReq) -> Result<PathHistoryPage, OpError> {
+            self.called("path_history", "PathHistoryReq")
+        }
+
+        fn diff(&self, _: DiffReq) -> Result<swarmops_api::Diff, OpError> {
+            self.called("diff", "DiffReq")
+        }
+
         fn ref_list(&self, _: RefListReq) -> Result<RefListResp, OpError> {
             self.called("ref_list", "RefListReq")
         }
@@ -1642,6 +1794,18 @@ mod tests {
 
         fn verify(&self, _: VerifyReq) -> Result<VerifyReport, OpError> {
             self.called("verify", "VerifyReq")
+        }
+
+        fn blob_put(&self, _: &Identity, _: BlobPutReq) -> Result<BlobPutResp, OpError> {
+            self.called("blob_put", "BlobPutReq")
+        }
+
+        fn blob_has(&self, _: BlobHasReq) -> Result<BlobHasResp, OpError> {
+            self.called("blob_has", "BlobHasReq")
+        }
+
+        fn derive(&self, _: DeriveReq) -> Result<DeriveResp, OpError> {
+            self.called("derive", "DeriveReq")
         }
     }
 
@@ -1973,6 +2137,44 @@ mod tests {
         assert!(message.ends_with(": boom after a read"), "{message}");
         assert_eq!(envelope["meta"]["repo"], store.as_str());
         assert_eq!(envelope["meta"]["resolved"], json!({"main": c1}));
+    }
+
+    /// A line longer than the server's cap (`MAX_REQUEST_BYTES`, small here) is answered with
+    /// `-32600` and no `id`, and the server serves on: the next request on the same input is
+    /// answered. A line of exactly the cap is served, and so is a last line without a line break.
+    #[test]
+    fn an_over_long_line_is_an_invalid_request_and_the_server_serves_on() {
+        let global = Global::default();
+        let env = |_: &str| -> Option<OsString> { None };
+        let cap = 64;
+        let mut server = Server::with_max_line(&global, &env, cap);
+        let ping = |id: &str| format!(r#"{{"jsonrpc":"2.0","id":"{id}","method":"ping"}}"#);
+        let long = ping(&"x".repeat(200));
+        // An id that pads the request to exactly the cap.
+        let at_cap_id = "y".repeat(64 - ping("").len());
+        let at_cap = ping(&at_cap_id);
+        assert_eq!(at_cap.len(), 64);
+        let input = format!("{long}\n{}\n{at_cap}\n{}", ping("after"), ping("last"));
+        let mut output = Vec::new();
+        server.serve(input.as_bytes(), &mut output).unwrap();
+        let answers: Vec<Value> = String::from_utf8(output)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(answers.len(), 4, "{answers:?}");
+        assert_eq!(answers[0]["error"]["code"], INVALID_REQUEST, "{answers:?}");
+        assert!(answers[0].get("id").is_none(), "{answers:?}");
+        let message = answers[0]["error"]["message"].as_str().unwrap();
+        assert!(message.contains("64 bytes"), "{message}");
+        for (answer, id) in answers[1..]
+            .iter()
+            .zip(["after", at_cap_id.as_str(), "last"])
+        {
+            assert_eq!(answer, &json!({"jsonrpc": "2.0", "id": id, "result": {}}));
+        }
+        // The server the CLI starts takes lines of up to `MAX_REQUEST_BYTES`.
+        assert_eq!(Server::new(&global, &env).max_line, MAX_REQUEST_BYTES);
     }
 
     /// Each tool's description is one line, without a run of spaces that a broken string

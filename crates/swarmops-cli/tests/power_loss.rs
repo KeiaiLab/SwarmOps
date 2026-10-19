@@ -6,7 +6,8 @@
 //! run of a store's life is made in this process on an [`ImageRecordingFs`], deterministically
 //! (one thread, signatures at a fixed time): `init`; commits and ref moves (a create, moves, a
 //! delete) with a compaction and a checkpoint among them; then commits past the checkpoint, whose
-//! index records no sync has made durable. The slow variant's run ends with a transaction of
+//! index records no sync has made durable, the last of them naming by id a blob that a writer of
+//! its own linked and did not flush, so that only the commit makes its name durable. The slow variant's run ends with a transaction of
 //! more than 1,024 changesets, which its writer compacts after, as every writer does past that
 //! many records: an index sync, the compaction, a `Compacted` frame, the checkpoint. For a power failure after any step of the run, and a
 //! seed, the [`Image`] of what the disk may hold is written to a temp dir, and the binary must
@@ -85,6 +86,16 @@ enum Op {
         puts: &'static [(&'static str, &'static str)],
         name: &'static str,
     },
+    /// A commit on commit number `parent` of one change at `path` that names by id the blob of
+    /// `content` (`ChangeOp::PutBlob`): the blob is put first through an object store of its own,
+    /// which does not flush it, as a writer that linked it and crashed before its flush (or one
+    /// still running) leaves it, so that only the commit's retain of the blob makes its name
+    /// durable before the frame names it. Its frame holds its changeset.
+    CommitBlob {
+        parent: Option<usize>,
+        path: &'static str,
+        content: &'static str,
+    },
 }
 
 /// How many changesets [`Op::Bulk`] records in its one frame: more than the index's compaction
@@ -98,7 +109,8 @@ const BULK: u64 = Index::COMPACT_THRESHOLD + 1;
 /// sector boundary, its low byte alone in the first sector, its payload over 255 bytes, so that a
 /// lost first sector leaves it a length that is not 0 but wrong (the long actors of frames 12 and
 /// 13 place it).
-/// Frame 14, the last, holds a changeset and main's move to it ([`Op::CommitAdvance`]).
+/// Frame 14 holds a changeset and main's move to it ([`Op::CommitAdvance`]); frame 15, the last, a
+/// changeset that names by id a blob whose put no flush followed ([`Op::CommitBlob`]).
 const RUN: &[Op] = &[
     Op::Commit {
         parent: None,
@@ -193,6 +205,11 @@ const RUN: &[Op] = &[
         puts: &[("src/lib.rs", "pub fn f() -> u8 { 6 }\n")],
         name: "main",
     },
+    Op::CommitBlob {
+        parent: Some(6),
+        path: "blob.bin",
+        content: "a blob named by id\n",
+    },
 ];
 
 /// What one transaction of the run records in its frame.
@@ -229,6 +246,8 @@ struct Recorded {
     commits: Vec<String>,
     /// The first parent of each commit, by number.
     parents: Vec<Option<usize>>,
+    /// The blobs commits named by id ([`Op::CommitBlob`]): the commit's number and the blob.
+    named: Vec<(usize, swarmops_core::ObjectId)>,
     frames: Vec<Frame>,
     /// The step that writes each `Compacted` frame, which is no transaction's, so not one of
     /// `frames`.
@@ -278,14 +297,18 @@ fn record_ops(ops: &[Op]) -> Recorded {
         .num_threads(1)
         .build()
         .expect("a one-thread pool");
-    let (commits, parents) = pool.install(|| run(&root, &fs, ops));
+    let Ran {
+        commits,
+        parents,
+        named,
+    } = pool.install(|| run(&root, &fs, ops));
     let calls = fs.calls();
     let timeline = Timeline::new(&base, &calls);
     let log = base.join("store/meta/journal.log");
     // Each frame's transaction, in order; `None` for the `Compacted` frame that follows a bulk
     // transaction, which is no transaction's.
     let mut whats = ops.iter().flat_map(|op| match *op {
-        Op::Commit { .. } => vec![Some(Txn::Commit)],
+        Op::Commit { .. } | Op::CommitBlob { .. } => vec![Some(Txn::Commit)],
         Op::Cas { name, new, .. } => vec![Some(Txn::Cas { name, new })],
         Op::Bulk => vec![Some(Txn::Bulk), None],
         Op::CommitAdvance { name, .. } => vec![Some(Txn::CommitAdvance { name })],
@@ -313,22 +336,29 @@ fn record_ops(ops: &[Op]) -> Recorded {
         timeline,
         commits: commits.iter().map(ToString::to_string).collect(),
         parents,
+        named,
         frames,
         compacted,
         calls,
     }
 }
 
-/// The run itself, `init` then `ops`; the changesets' ids and first parents, in their order.
-fn run(
-    root: &Utf8Path,
-    fs: &Arc<ImageRecordingFs>,
-    ops: &[Op],
-) -> (Vec<ChangesetId>, Vec<Option<usize>>) {
+/// What [`run`] made.
+struct Ran {
+    /// The changesets' ids, in their order.
+    commits: Vec<ChangesetId>,
+    /// Their first parents, by number.
+    parents: Vec<Option<usize>>,
+    /// The blobs commits named by id: the commit's number and the blob.
+    named: Vec<(usize, swarmops_core::ObjectId)>,
+}
+
+/// The run itself, `init` then `ops`.
+fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
     let shared: Arc<dyn FsOps> = Arc::clone(fs) as Arc<dyn FsOps>;
     let repo = LocalRepo::create_with_fs(root, "power", Arc::clone(&shared)).expect("init");
     fs.mark("init");
-    let (mut commits, mut parents) = (Vec::new(), Vec::new());
+    let (mut commits, mut parents, mut named) = (Vec::new(), Vec::new(), Vec::new());
     for (n, op) in ops.iter().enumerate() {
         match *op {
             Op::Commit { parent, puts } | Op::CommitAdvance { parent, puts, .. } => {
@@ -396,10 +426,72 @@ fn run(
                 parents.extend(ids.iter().map(|_| None));
                 commits.extend(ids);
             }
+            Op::CommitBlob {
+                parent,
+                path,
+                content,
+            } => {
+                let on = parent.map(|p| commits[p]);
+                let (id, blob) =
+                    commit_blob(root, &shared, &repo, on, path, content, commits.len());
+                named.push((commits.len(), blob));
+                commits.push(id);
+                parents.push(parent);
+            }
         }
         fs.mark(&format!("op {n}"));
     }
-    (commits, parents)
+    Ran {
+        commits,
+        parents,
+        named,
+    }
+}
+
+/// [`Op::CommitBlob`] on the store at `root`, whose repository is `repo`, its calls through
+/// `shared`: the blob of `content` linked through an object store of its own, which never flushes
+/// it, then commit number `number`, on `parent`, of `path` naming that blob by id. The
+/// changeset's id, and the blob's.
+fn commit_blob(
+    root: &Utf8Path,
+    shared: &Arc<dyn FsOps>,
+    repo: &LocalRepo,
+    parent: Option<ChangesetId>,
+    path: &str,
+    content: &str,
+    number: usize,
+) -> (ChangesetId, swarmops_core::ObjectId) {
+    let writer = FsObjectStore::open(Layout::new(root), Box::new(Arc::clone(shared)));
+    let id = writer
+        .put(ObjectKind::Blob, content.as_bytes())
+        .expect("put the blob");
+    drop(writer);
+    let request = CommitRequest {
+        parents: parent.into_iter().collect(),
+        changes: vec![Change {
+            path: RepoPath::new(path).expect("a repo path"),
+            op: ChangeOp::PutBlob {
+                kind: LeafKind::File,
+                id: swarmops_core::BlobId(id),
+            },
+        }],
+        author: signature(),
+        committer: signature(),
+        message: format!("commit {number}").into_bytes(),
+        metadata: Vec::new(),
+        allow_empty: false,
+        advance: None,
+    };
+    let outcome = repo.commit(request).expect("commit");
+    assert!(outcome.warnings.is_empty(), "{outcome:?}");
+    assert_eq!(outcome.blobs_written, 0, "the blob was put before");
+    // None of the commit's own objects (its root tree and its changeset) lies in the blob's
+    // fan-out directory, so only the blob's retain has the commit fsync it.
+    assert!(
+        id.0[0] != outcome.root.0.0[0] && id.0[0] != outcome.id.0.0[0],
+        "the blob {id} shares a fan-out directory with the commit's {outcome:?}"
+    );
+    (outcome.id, id)
 }
 
 /// [`Op::Bulk`] on the store at `root`, its calls through `shared` (the recorder `fs`, which
@@ -813,6 +905,15 @@ fn a_store(
     let frames = (0..=rec.frames.len())
         .find(|&frames| seen.is_after(rec, frames))
         .ok_or_else(|| format!("the state of no prefix of the run: {seen:#?}"))?;
+    // A commit that names a blob by id relies on a blob it did not write: wherever its frame
+    // is, the blob is too (and `verify --deep` below hashes it).
+    let held = rec.state_after(frames).changesets;
+    let layout = Layout::new(Utf8PathBuf::from(store));
+    for &(n, id) in rec.named.iter().filter(|&&(n, _)| n < held) {
+        if !layout.object_path(id).is_file() {
+            return Err(format!("commit {n} names blob {id}, which the image lacks"));
+        }
+    }
     clean(store, "after the power loss")?;
     // The journal as the image holds it, which the next commit's write repairs.
     let journal = journal_of(store)?;
@@ -1228,7 +1329,8 @@ fn a_random_seed_picks_every_shape_of_loss() {
 }
 
 /// An object is linked into its fan-out directory and is durable only once that directory is
-/// synced (`ObjectStore::flush`); a commit flushes its objects before it appends its frame. So
+/// synced (`ObjectStore::flush`); a commit flushes its objects, and the fan-out directories of the
+/// blobs it names by id, which it retains, before it appends its frame. So
 /// once a commit's frame is durable, every object linked before it survives a power loss at any
 /// later point, whole, even when the disk keeps nothing else that was not durable; and the store
 /// verifies clean then. The images see what a process crash cannot: an object linked, its

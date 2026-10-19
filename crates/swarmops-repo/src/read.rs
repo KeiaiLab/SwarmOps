@@ -1,21 +1,53 @@
-//! Reading a repository without a checkout (storage spec §4): a changeset's record and object
-//! ([`Repo::changeset`]), revisions resolved to changesets ([`Repo::resolve`]), and files and
-//! directories at a changeset ([`Repo::read_blob_at`], [`Repo::list_tree`]), read by walking
-//! the trees from its root: one tree object per directory on the path.
+//! Reading a repository without a checkout (storage spec §4), in one snapshot of its metadata
+//! ([`Repo::snapshot`], a [`RepoRead`]): a changeset's record and object
+//! ([`RepoRead::changeset`]), revisions resolved to changesets ([`RepoRead::resolve`]), and
+//! files and directories at a changeset ([`RepoRead::read_blob_at`], [`RepoRead::list_tree`],
+//! [`RepoRead::entry_at`]), read by walking the trees from its root: one tree object per
+//! directory on the path. [`Repo`]'s methods of the same names each read in a snapshot of their
+//! own.
+//!
+//! A part of a file ([`RepoRead::read_file_span`]: from a byte offset, or a range of its lines)
+//! keeps only that part of the blob while it verifies the whole; a listing to a depth
+//! ([`RepoRead::list_tree_depth`]) walks the directories below one in pre-order, a page at a time,
+//! with each leaf's size from its object's header.
 //!
 //! A revision (operations spec §0) is a ref name (`main`, `release/<x>`), a full id (64 hex
 //! digits), or a unique id prefix of 12 to 63 hex digits, either case; followed by any number
 //! of `~N` suffixes, each walking `N` first parents back (`main~2`, `main~1~1`).
 
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     BlobId, Changeset, ChangesetId, EntryTarget, LeafKind, ObjectId, ObjectKind, RepoPath, Tree,
     TreeEntry, TreeId,
 };
-use swarmops_store::{ChangesetMeta, MetaRead, ObjectStore, StoreError};
+use swarmops_store::{ChangesetMeta, MetaRead, ObjectStat, ObjectStore, StoreError};
 
 use crate::error::RepoError;
-use crate::log::first_parent;
 use crate::repo::{self, Repo};
+
+/// One consistent snapshot of a repository's metadata, and the reads of one request in it
+/// ([`Repo::snapshot`]; storage spec §8): every revision and ref it resolves, it resolves in the
+/// same view, which later commits and ref moves do not change, so that a request that names
+/// several revisions reads them as of one moment. What it reads by id (changesets, trees, blobs)
+/// is immutable. Two rules hold for it:
+///
+/// 1. Never read in it after the request's own write: it does not show that write. Reading what
+///    the request wrote takes a new snapshot.
+/// 2. Never hold it across requests. Besides going stale, a snapshot that counted index records
+///    which a writer then cut back after a failed sync fails its lookups with an I/O error until
+///    a new one is taken (storage spec §3).
+pub struct RepoRead<'r, O: ObjectStore> {
+    pub(crate) repo: &'r Repo<O>,
+    pub(crate) meta: MetaRead<'r>,
+}
+
+impl<O: ObjectStore> std::fmt::Debug for RepoRead<'_, O> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RepoRead")
+            .field("meta", &self.meta)
+            .finish_non_exhaustive()
+    }
+}
 
 /// A changeset as the store holds it: its record in the index, and its object.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,81 +62,105 @@ pub struct StoredChangeset {
     pub changeset: Changeset,
 }
 
+/// Which part of a file [`RepoRead::read_file_span`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileSpan {
+    /// The bytes from offset `start` to the file's end: none when `start` is at or past the end.
+    Bytes {
+        /// Where the span starts, in bytes from the file's start.
+        start: u64,
+    },
+    /// Lines `first` to `last`, numbered from 1, both included: a line ends after its `\n`, and a
+    /// last line without one is a line too (an empty file has none). The lines of the range that
+    /// exist make the span: none when `first` is past the last line, or `last` before `first`.
+    Lines {
+        /// The range's first line.
+        first: u64,
+        /// The range's last line.
+        last: u64,
+    },
+}
+
+/// What [`RepoRead::read_file_span`] read of a file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileSpanRead {
+    /// The file's kind.
+    pub kind: LeafKind,
+    /// Its blob.
+    pub blob: BlobId,
+    /// The whole file's size in bytes.
+    pub size: u64,
+    /// Where the span starts in the file: [`FileSpan::Bytes`]' `start` as given, past the end if it
+    /// was; for [`FileSpan::Lines`], where the range's first line that exists starts, or the
+    /// file's size when none does.
+    pub start: u64,
+    /// The span's bytes, its first `max` when it is longer.
+    pub bytes: Vec<u8>,
+    /// For [`FileSpan::Lines`]: the first and the last line of the range that exist, which the
+    /// span holds; `None` when none exists, and for [`FileSpan::Bytes`].
+    pub lines: Option<(u64, u64)>,
+}
+
+/// One entry of a listing below a directory ([`RepoRead::list_tree_depth`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedEntry {
+    /// Its path below the listed directory: its name, for one of the directory's own entries.
+    pub path: RepoPath,
+    /// What it is: a leaf, with its kind and blob, or a directory, with its tree.
+    pub target: EntryTarget,
+    /// For a leaf, its size in bytes: its blob's length, as the blob's object header records it;
+    /// `None` for a directory.
+    pub size: Option<u64>,
+}
+
+/// A page of a listing below a directory ([`RepoRead::list_tree_depth`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreePage {
+    /// The page's entries, in pre-order.
+    pub entries: Vec<ListedEntry>,
+    /// Whether entries follow the page's last.
+    pub truncated: bool,
+}
+
 impl<O: ObjectStore> Repo<O> {
-    /// Changeset `id`, if the store holds it.
+    /// A snapshot of the metadata as committed now ([`swarmops_store::MetaStore::read`]), to make
+    /// the reads of one request in: see [`RepoRead`] for its two rules.
+    pub fn snapshot(&self) -> Result<RepoRead<'_, O>, RepoError> {
+        Ok(RepoRead {
+            repo: self,
+            meta: self.meta.read()?,
+        })
+    }
+
+    /// Changeset `id`, if the store holds it, in a snapshot of its own
+    /// ([`RepoRead::changeset`]).
     pub fn changeset(&self, id: ChangesetId) -> Result<Option<StoredChangeset>, RepoError> {
-        match self.meta.read()?.changeset(id)? {
-            Some(meta) => self.stored(&meta).map(Some),
-            None => Ok(None),
-        }
+        self.snapshot()?.changeset(id)
     }
 
-    /// The changeset revision `rev` names, in one snapshot of the metadata: see
-    /// [the module documentation](self) for the grammar. [`RepoError::NotFound`] when it names
-    /// none (a ref that does not exist or names a changeset the store does not hold, an id or a
-    /// prefix of none, a `~N` past a root), [`RepoError::Ambiguous`] for a prefix of more than
-    /// one, [`RepoError::BadRev`] for anything that is not a revision. The errors carry `rev`
-    /// as given (a dangling ref's error adds the changeset it names).
+    /// The changeset revision `rev` names, in a snapshot of its own ([`RepoRead::resolve`]).
     pub fn resolve(&self, rev: &str) -> Result<ChangesetId, RepoError> {
-        let bad = || RepoError::BadRev(rev.to_owned());
-        let mut parts = rev.split('~');
-        let base = parts.next().expect("split yields a first part");
-        let mut steps: u64 = 0;
-        for part in parts {
-            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
-                return Err(bad());
-            }
-            let n: u64 = part.parse().map_err(|_| bad())?;
-            steps = steps.checked_add(n).ok_or_else(bad)?;
-        }
-        let read = self.meta.read()?;
-        let mut id = resolve_base(&read, base, rev)?;
-        for _ in 0..steps {
-            id = first_parent(&read, id)?.ok_or_else(|| RepoError::NotFound(rev.to_owned()))?;
-        }
-        Ok(id)
+        self.snapshot()?.resolve(rev)
     }
 
-    /// The kind, the blob id and the bytes of the file at `path` in changeset `cs`'s tree;
-    /// `None` if no file is there (nothing, or a directory). [`RepoError::NotFound`] if the
-    /// store does not hold `cs`.
+    /// The kind, the blob id and the bytes of the file at `path` in changeset `cs`'s tree, in a
+    /// snapshot of its own ([`RepoRead::read_blob_at`]).
     pub fn read_blob_at(
         &self,
         cs: ChangesetId,
         path: &RepoPath,
     ) -> Result<Option<(LeafKind, BlobId, Vec<u8>)>, RepoError> {
-        let root = self.root_of(cs)?;
-        let components: Vec<&str> = path.components().collect();
-        let (&name, dirs) = components.split_last().expect("a path has a component");
-        let Some(dir) = self.descend(root, dirs)? else {
-            return Ok(None);
-        };
-        let tree = repo::tree(&self.objects, dir)?;
-        match find(&tree, name).map(|entry| entry.target) {
-            Some(EntryTarget::Leaf(kind, blob)) => {
-                let content = repo::object(&self.objects, blob.0, ObjectKind::Blob)?;
-                Ok(Some((kind, blob, content)))
-            }
-            Some(EntryTarget::Dir(_)) | None => Ok(None),
-        }
+        self.snapshot()?.read_blob_at(cs, path)
     }
 
-    /// The entries of directory `dir` (the root for `None`) in changeset `cs`'s tree, in
-    /// canonical order; `None` if no directory is there (nothing, or a file).
-    /// [`RepoError::NotFound`] if the store does not hold `cs`.
+    /// The entries of directory `dir` in changeset `cs`'s tree, in a snapshot of its own
+    /// ([`RepoRead::list_tree`]).
     pub fn list_tree(
         &self,
         cs: ChangesetId,
         dir: Option<&RepoPath>,
     ) -> Result<Option<Vec<TreeEntry>>, RepoError> {
-        let root = self.root_of(cs)?;
-        let components: Vec<&str> = dir
-            .map(|dir| dir.components().collect())
-            .unwrap_or_default();
-        match self.descend(root, &components)? {
-            Some(tree) => Ok(Some(repo::tree(&self.objects, tree)?.entries().to_vec())),
-            None => Ok(None),
-        }
+        self.snapshot()?.list_tree(cs, dir)
     }
 
     /// The changeset `meta` records, with its object.
@@ -115,14 +171,6 @@ impl<O: ObjectStore> Repo<O> {
             generation: meta.generation,
             changeset: self.changeset_object(meta.id)?,
         })
-    }
-
-    /// The root tree of changeset `cs`; [`RepoError::NotFound`] if the store does not hold it.
-    fn root_of(&self, cs: ChangesetId) -> Result<TreeId, RepoError> {
-        if self.meta.read()?.changeset(cs)?.is_none() {
-            return Err(RepoError::NotFound(cs.to_string()));
-        }
-        Ok(self.changeset_object(cs)?.root)
     }
 
     /// The tree of the directory that `dirs` lead to from tree `root`; `None` if one of them
@@ -140,6 +188,330 @@ impl<O: ObjectStore> Repo<O> {
     }
 }
 
+impl<O: ObjectStore> RepoRead<'_, O> {
+    /// Changeset `id`, if the snapshot holds it.
+    pub fn changeset(&self, id: ChangesetId) -> Result<Option<StoredChangeset>, RepoError> {
+        match self.meta.changeset(id)? {
+            Some(meta) => self.repo.stored(&meta).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The changeset revision `rev` names in the snapshot: see [the module documentation](self)
+    /// for the grammar. [`RepoError::NotFound`] when it names none (a ref that does not exist or
+    /// names a changeset the store does not hold, an id or a prefix of none, a `~N` past a root),
+    /// [`RepoError::Ambiguous`] for a prefix of more than one, [`RepoError::BadRev`] for anything
+    /// that is not a revision. The errors carry `rev` as given (a dangling ref's error adds the
+    /// changeset it names).
+    pub fn resolve(&self, rev: &str) -> Result<ChangesetId, RepoError> {
+        let bad = || RepoError::BadRev(rev.to_owned());
+        let mut parts = rev.split('~');
+        let base = parts.next().expect("split yields a first part");
+        let mut steps: u64 = 0;
+        for part in parts {
+            if part.is_empty() || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(bad());
+            }
+            let n: u64 = part.parse().map_err(|_| bad())?;
+            steps = steps.checked_add(n).ok_or_else(bad)?;
+        }
+        let mut id = self.resolve_base(base, rev)?;
+        for _ in 0..steps {
+            id = self
+                .first_parent(id)?
+                .ok_or_else(|| RepoError::NotFound(rev.to_owned()))?;
+        }
+        Ok(id)
+    }
+
+    /// The kind, the blob id and the bytes of the file at `path` in changeset `cs`'s tree;
+    /// `None` if no file is there (nothing, or a directory). [`RepoError::NotFound`] if the
+    /// snapshot does not hold `cs`.
+    pub fn read_blob_at(
+        &self,
+        cs: ChangesetId,
+        path: &RepoPath,
+    ) -> Result<Option<(LeafKind, BlobId, Vec<u8>)>, RepoError> {
+        match self.entry_at(cs, path)? {
+            Some(EntryTarget::Leaf(kind, blob)) => Ok(Some((kind, blob, self.blob(blob)?))),
+            Some(EntryTarget::Dir(_)) | None => Ok(None),
+        }
+    }
+
+    /// What `path` holds in changeset `cs`'s tree: a leaf (its kind and blob), a directory (its
+    /// tree), or nothing (`None`, also below a file or a missing directory). Reads the tree of
+    /// each directory on the way, the root's first. [`RepoError::NotFound`] if the snapshot does
+    /// not hold `cs`.
+    pub fn entry_at(
+        &self,
+        cs: ChangesetId,
+        path: &RepoPath,
+    ) -> Result<Option<EntryTarget>, RepoError> {
+        let root = self.root_of(cs)?;
+        let components: Vec<&str> = path.components().collect();
+        let (&name, dirs) = components.split_last().expect("a path has a component");
+        let Some(dir) = self.repo.descend(root, dirs)? else {
+            return Ok(None);
+        };
+        Ok(find(&self.tree(dir)?, name).map(|entry| entry.target))
+    }
+
+    /// Tree `id`, decoded, its object verified against its id as every object read is.
+    /// [`RepoError::MissingObject`] if the store lacks it, or holds an object of another kind
+    /// under that id.
+    pub fn tree(&self, id: TreeId) -> Result<Tree, RepoError> {
+        repo::tree(&self.repo.objects, id)
+    }
+
+    /// The bytes of blob `id`, its object verified against its id as every object read is.
+    /// [`RepoError::MissingObject`] if the store lacks it, or holds an object of another kind
+    /// under that id.
+    pub fn blob(&self, id: BlobId) -> Result<Vec<u8>, RepoError> {
+        repo::object(&self.repo.objects, id.0, ObjectKind::Blob)
+    }
+
+    /// The entries of directory `dir` (the root for `None`) in changeset `cs`'s tree, in
+    /// canonical order; `None` if no directory is there (nothing, or a file).
+    /// [`RepoError::NotFound`] if the snapshot does not hold `cs`.
+    pub fn list_tree(
+        &self,
+        cs: ChangesetId,
+        dir: Option<&RepoPath>,
+    ) -> Result<Option<Vec<TreeEntry>>, RepoError> {
+        let root = self.root_of(cs)?;
+        let components: Vec<&str> = dir
+            .map(|dir| dir.components().collect())
+            .unwrap_or_default();
+        match self.repo.descend(root, &components)? {
+            Some(tree) => Ok(Some(self.tree(tree)?.entries().to_vec())),
+            None => Ok(None),
+        }
+    }
+
+    /// The part `span` names of the file at `path` in changeset `cs`'s tree, its first `max` bytes
+    /// at most, with the file's kind, blob and size; `None` if no file is there (nothing, or a
+    /// directory). [`RepoError::NotFound`] if the snapshot does not hold `cs`.
+    ///
+    /// The blob's object file is read whole, as [`RepoRead::blob`] reads it, but its payload goes
+    /// by in pieces ([`ObjectStore::read_chunks`]) of which only the span's first `max` bytes are
+    /// kept: the memory is the file and those bytes, not a copy of the payload besides. The whole
+    /// payload is verified all the same, so a blob whose bytes fail their id is
+    /// [`StoreError::Corrupt`] wherever the damage lies, in the span or not; a blob the store
+    /// lacks, or an object of another kind under its id, is [`RepoError::MissingObject`].
+    pub fn read_file_span(
+        &self,
+        cs: ChangesetId,
+        path: &RepoPath,
+        span: FileSpan,
+        max: u64,
+    ) -> Result<Option<FileSpanRead>, RepoError> {
+        let Some(EntryTarget::Leaf(kind, blob)) = self.entry_at(cs, path)? else {
+            return Ok(None);
+        };
+        let mut kept = Kept::new(span, max);
+        let stat = (self.repo.objects).read_chunks(blob.0, &mut |piece: &[u8]| kept.take(piece))?;
+        match stat {
+            Some(ObjectStat {
+                kind: ObjectKind::Blob,
+                size,
+            }) => Ok(Some(kept.read(kind, blob, size))),
+            _ => Err(RepoError::MissingObject {
+                id: blob.0,
+                kind: ObjectKind::Blob,
+            }),
+        }
+    }
+
+    /// A page of the entries below directory `dir` (the root for `None`) in changeset `cs`'s
+    /// tree, down to `depth` levels below it (1: its own entries; 0 lists as 1 does), in
+    /// pre-order: a directory, then the entries below it, each directory's entries by name bytes.
+    /// The page holds the first `limit` entries after `after` in that order (from the first for
+    /// `None`; `after` need not name an entry that exists), and says whether more follow. A leaf's
+    /// size is its blob's length as the blob's object header records it ([`ObjectStore::stat`]):
+    /// no payload is read. `None` if no directory is at `dir` (nothing, or a file);
+    /// [`RepoError::NotFound`] if the snapshot does not hold `cs`; [`RepoError::MissingObject`]
+    /// for a tree the walk enters, or a blob of the page, that the store lacks or holds as an
+    /// object of another kind.
+    ///
+    /// Reads the trees on the way to `dir`, those of the directories on `after`'s path that the
+    /// listing enters, and one tree for each directory the page enters, but none to learn that
+    /// more entries follow: a directory's tree is never empty (only the root's may be).
+    pub fn list_tree_depth(
+        &self,
+        cs: ChangesetId,
+        dir: Option<&RepoPath>,
+        depth: u32,
+        after: Option<&RepoPath>,
+        limit: usize,
+    ) -> Result<Option<TreePage>, RepoError> {
+        let root = self.root_of(cs)?;
+        let components: Vec<&str> = dir
+            .map(|dir| dir.components().collect())
+            .unwrap_or_default();
+        let Some(listed) = self.repo.descend(root, &components)? else {
+            return Ok(None);
+        };
+        let mut levels = vec![self.level(None, 1, listed)?];
+        if let Some(after) = after {
+            self.skip_through(&mut levels, depth, after)?;
+        }
+        let mut entries = Vec::new();
+        // The directory the page listed last, if the walk enters it: its path, how far below the
+        // listed directory its entries are, and its tree.
+        let mut enter: Option<(RepoPath, u32, TreeId)> = None;
+        let truncated = loop {
+            if let Some((path, below_by, tree)) = enter.take() {
+                if entries.len() == limit {
+                    break true;
+                }
+                levels.push(self.level(Some(path), below_by, tree)?);
+            }
+            let Some(level) = levels.last_mut() else {
+                break false;
+            };
+            let Some(entry) = level.tree.entries().get(level.next).cloned() else {
+                levels.pop();
+                continue;
+            };
+            if entries.len() == limit {
+                break true;
+            }
+            level.next += 1;
+            let path = below(level.path.as_ref(), &entry.name);
+            if let EntryTarget::Dir(tree) = entry.target
+                && level.depth < depth
+            {
+                enter = Some((path.clone(), level.depth + 1, tree));
+            }
+            entries.push(ListedEntry {
+                path,
+                target: entry.target,
+                size: None,
+            });
+        };
+        for entry in &mut entries {
+            if let EntryTarget::Leaf(_, blob) = entry.target {
+                entry.size = Some(self.blob_size(blob)?);
+            }
+        }
+        Ok(Some(TreePage { entries, truncated }))
+    }
+
+    /// Directory `tree`, at `path` below a listing's directory (`None` for that directory itself),
+    /// with its entries `depth` levels below it, none of them listed yet.
+    fn level(&self, path: Option<RepoPath>, depth: u32, tree: TreeId) -> Result<Level, RepoError> {
+        Ok(Level {
+            path,
+            depth,
+            tree: self.tree(tree)?,
+            next: 0,
+        })
+    }
+
+    /// Moves a listing's walk, `levels` (the listed directory's level alone), past `after` in
+    /// pre-order: every entry up to `after` is passed over, and the walk resumes with the entry
+    /// that follows it, the first below `after` when `after` is a directory the listing enters
+    /// (`depth`). Reads the trees of the directories on `after`'s path that the listing enters.
+    fn skip_through(
+        &self,
+        levels: &mut Vec<Level>,
+        depth: u32,
+        after: &RepoPath,
+    ) -> Result<(), RepoError> {
+        for name in after.components() {
+            let level = levels
+                .last_mut()
+                .expect("a listing's walk starts in the listed directory");
+            let entries = level.tree.entries();
+            let at = entries.partition_point(|entry| entry.name.as_bytes() < name.as_bytes());
+            // An entry above `after`, or `after` itself: passed over either way.
+            let Some(target) = entries
+                .get(at)
+                .filter(|entry| entry.name == name)
+                .map(|entry| entry.target)
+            else {
+                // No entry has the name: the walk resumes at the first entry past it.
+                level.next = at;
+                return Ok(());
+            };
+            level.next = at + 1;
+            match target {
+                EntryTarget::Dir(tree) if level.depth < depth => {
+                    let path = below(level.path.as_ref(), name);
+                    let next = self.level(Some(path), level.depth + 1, tree)?;
+                    levels.push(next);
+                }
+                // A leaf, or a directory the listing does not enter: nothing below it is listed.
+                EntryTarget::Dir(_) | EntryTarget::Leaf(..) => return Ok(()),
+            }
+        }
+        Ok(())
+    }
+
+    /// The size of blob `id` in bytes, as its object's 16-byte header records it
+    /// ([`ObjectStore::stat`]): its payload is neither read nor verified.
+    /// [`RepoError::MissingObject`] if the store lacks it, or holds an object of another kind
+    /// under that id.
+    fn blob_size(&self, id: BlobId) -> Result<u64, RepoError> {
+        match self.repo.objects.stat(id.0)? {
+            Some(ObjectStat {
+                kind: ObjectKind::Blob,
+                size,
+            }) => Ok(size),
+            _ => Err(RepoError::MissingObject {
+                id: id.0,
+                kind: ObjectKind::Blob,
+            }),
+        }
+    }
+
+    /// The root tree of changeset `cs`; [`RepoError::NotFound`] if the snapshot does not hold
+    /// it.
+    fn root_of(&self, cs: ChangesetId) -> Result<TreeId, RepoError> {
+        if self.meta.changeset(cs)?.is_none() {
+            return Err(RepoError::NotFound(cs.to_string()));
+        }
+        Ok(self.repo.changeset_object(cs)?.root)
+    }
+
+    /// The changeset that `base`, a revision without its `~N` suffixes, names in the snapshot.
+    /// The errors carry `rev`, the whole revision.
+    fn resolve_base(&self, base: &str, rev: &str) -> Result<ChangesetId, RepoError> {
+        let read = &self.meta;
+        let not_found = || RepoError::NotFound(rev.to_owned());
+        let hex = !base.is_empty() && base.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex {
+            // No ref name is all hex digits: main, or release/<x>.
+            return match read.get_ref(base) {
+                Ok(Some(state)) if read.changeset(state.target)?.is_some() => Ok(state.target),
+                // A dangling ref (damage verify reports): the revision names nothing.
+                Ok(Some(state)) => Err(RepoError::NotFound(format!(
+                    "{rev} (ref {base} names {}, which the store does not hold)",
+                    state.target
+                ))),
+                Ok(None) => Err(not_found()),
+                Err(StoreError::RefName(_)) => Err(RepoError::BadRev(rev.to_owned())),
+                Err(e) => Err(e.into()),
+            };
+        }
+        match base.len() {
+            64 => {
+                let id = ChangesetId(ObjectId::from_hex(base).expect("64 hex digits"));
+                match read.changeset(id)? {
+                    Some(_) => Ok(id),
+                    None => Err(not_found()),
+                }
+            }
+            12..=63 => match read.resolve_prefix(base)?[..] {
+                [] => Err(not_found()),
+                [id] => Ok(id),
+                _ => Err(RepoError::Ambiguous(rev.to_owned())),
+            },
+            _ => Err(RepoError::BadRev(rev.to_owned())),
+        }
+    }
+}
+
 /// The entry named `name` of `tree`: a binary search, the entries being sorted by name bytes.
 fn find<'t>(tree: &'t Tree, name: &str) -> Option<&'t TreeEntry> {
     let entries = tree.entries();
@@ -149,38 +521,118 @@ fn find<'t>(tree: &'t Tree, name: &str) -> Option<&'t TreeEntry> {
         .map(|at| &entries[at])
 }
 
-/// The changeset that `base`, a revision without its `~N` suffixes, names in snapshot `read`.
-/// The errors carry `rev`, the whole revision.
-fn resolve_base(read: &MetaRead<'_>, base: &str, rev: &str) -> Result<ChangesetId, RepoError> {
-    let not_found = || RepoError::NotFound(rev.to_owned());
-    let hex = !base.is_empty() && base.bytes().all(|b| b.is_ascii_hexdigit());
-    if !hex {
-        // No ref name is all hex digits: main, or release/<x>.
-        return match read.get_ref(base) {
-            Ok(Some(state)) if read.changeset(state.target)?.is_some() => Ok(state.target),
-            // A dangling ref (damage verify reports): the revision names nothing.
-            Ok(Some(state)) => Err(RepoError::NotFound(format!(
-                "{rev} (ref {base} names {}, which the store does not hold)",
-                state.target
-            ))),
-            Ok(None) => Err(not_found()),
-            Err(StoreError::RefName(_)) => Err(RepoError::BadRev(rev.to_owned())),
-            Err(e) => Err(e.into()),
-        };
+/// A directory a listing walks ([`RepoRead::list_tree_depth`]), and how far through its entries
+/// the walk is.
+struct Level {
+    /// Its path below the listed directory; `None` for the listed directory itself.
+    path: Option<RepoPath>,
+    /// How far below the listed directory its entries are: 1 for the listed directory's own.
+    depth: u32,
+    /// Its tree.
+    tree: Tree,
+    /// The index of its next entry to list.
+    next: usize,
+}
+
+/// The path of entry `name` of the directory at `parent` below a listing's directory: `name`
+/// itself for one of the listed directory's own entries (`parent` `None`).
+fn below(parent: Option<&RepoPath>, name: &str) -> RepoPath {
+    let path = match parent {
+        Some(parent) => format!("{parent}/{name}"),
+        None => name.to_owned(),
+    };
+    RepoPath::new(path).expect("a tree entry's name is one path component")
+}
+
+/// What [`RepoRead::read_file_span`] keeps of a payload as its pieces go by: the span's first
+/// `max` bytes, and, for lines, where the span starts and which lines it holds.
+struct Kept {
+    /// The span.
+    span: FileSpan,
+    /// The most bytes to keep.
+    max: usize,
+    /// The bytes kept.
+    bytes: Vec<u8>,
+    /// How many bytes of the payload have gone by.
+    seen: u64,
+    /// For [`FileSpan::Lines`]: the line the next byte is on, from 1.
+    line: u64,
+    /// For [`FileSpan::Lines`]: where the range's first line that exists starts.
+    start: Option<u64>,
+    /// For [`FileSpan::Lines`]: the range's first and last line seen so far.
+    lines: Option<(u64, u64)>,
+}
+
+impl Kept {
+    /// Nothing kept yet of `span`, of which `max` bytes at most are to be.
+    fn new(span: FileSpan, max: u64) -> Self {
+        Self {
+            span,
+            max: usize::try_from(max).unwrap_or(usize::MAX),
+            bytes: Vec::new(),
+            seen: 0,
+            line: 1,
+            start: None,
+            lines: None,
+        }
     }
-    match base.len() {
-        64 => {
-            let id = ChangesetId(ObjectId::from_hex(base).expect("64 hex digits"));
-            match read.changeset(id)? {
-                Some(_) => Ok(id),
-                None => Err(not_found()),
+
+    /// Takes the payload's next piece, keeping what of it is in the span while there is room.
+    fn take(&mut self, piece: &[u8]) {
+        let at = self.seen;
+        self.seen += to_u64(piece.len());
+        match self.span {
+            FileSpan::Bytes { start } => {
+                // Where the span starts in this piece: at its start once the span has begun.
+                if let Ok(from) = usize::try_from(start.saturating_sub(at))
+                    && from < piece.len()
+                {
+                    self.keep(&piece[from..]);
+                }
+            }
+            // Past the range: nothing more to keep, or to count.
+            FileSpan::Lines { last, .. } if self.line > last => {}
+            FileSpan::Lines { first, last } => {
+                let mut offset = at;
+                for part in piece.split_inclusive(|&byte| byte == b'\n') {
+                    if self.line > last {
+                        break;
+                    }
+                    if self.line >= first {
+                        self.start.get_or_insert(offset);
+                        let from = self.lines.map_or(self.line, |(from, _)| from);
+                        self.lines = Some((from, self.line));
+                        self.keep(part);
+                    }
+                    offset += to_u64(part.len());
+                    if part.ends_with(b"\n") {
+                        self.line += 1;
+                    }
+                }
             }
         }
-        12..=63 => match read.resolve_prefix(base)?[..] {
-            [] => Err(not_found()),
-            [id] => Ok(id),
-            _ => Err(RepoError::Ambiguous(rev.to_owned())),
-        },
-        _ => Err(RepoError::BadRev(rev.to_owned())),
+    }
+
+    /// Keeps what there is room for of `bytes`.
+    fn keep(&mut self, bytes: &[u8]) {
+        let room = self.max - self.bytes.len();
+        self.bytes
+            .extend_from_slice(&bytes[..bytes.len().min(room)]);
+    }
+
+    /// What was read of the file of `kind` and `blob`, `size` bytes long, its payload gone by.
+    fn read(self, kind: LeafKind, blob: BlobId, size: u64) -> FileSpanRead {
+        let start = match self.span {
+            FileSpan::Bytes { start } => start,
+            FileSpan::Lines { .. } => self.start.unwrap_or(size),
+        };
+        FileSpanRead {
+            kind,
+            blob,
+            size,
+            start,
+            bytes: self.bytes,
+            lines: self.lines,
+        }
     }
 }

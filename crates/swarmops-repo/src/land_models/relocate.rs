@@ -4,8 +4,8 @@
 use std::collections::BTreeSet;
 
 use swarmops_core::{
-    BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectKind,
-    RepoPath, Tree, TreeId, hash_object,
+    BlobId, Changeset, ChangesetId, DeltaEntry, DeltaOp, EntryTarget, Hashed, LeafKind, ObjectKind,
+    RepoPath, Tree, TreeId,
 };
 use swarmops_store::{MetaWrite, ObjectStore, StoreError};
 
@@ -83,9 +83,10 @@ pub(super) fn relocate<O: ObjectStore>(
         let Some(merged) = merged else {
             return Ok(Relocation::Overlap);
         };
+        let merged = Hashed::new(ObjectKind::Blob, merged);
         entry.op = DeltaOp::Put {
             kind: LeafKind::File,
-            id: BlobId(hash_object(ObjectKind::Blob, &merged)),
+            id: BlobId(merged.id()),
         };
         blobs.push(merged);
     }
@@ -107,19 +108,12 @@ pub(super) fn relocate<O: ObjectStore>(
         delta,
         ..l.clone()
     };
-    let bytes = changeset.encode()?;
-    let id = ChangesetId(hash_object(ObjectKind::Changeset, &bytes));
-    let mut batch: Vec<(ObjectKind, Vec<u8>)> = blobs
-        .into_iter()
-        .map(|blob| (ObjectKind::Blob, blob))
-        .collect();
-    batch.extend(
-        changed
-            .into_iter()
-            .map(|(_, tree)| (ObjectKind::Tree, tree)),
-    );
-    batch.push((ObjectKind::Changeset, bytes));
-    repo.objects.put_batch(batch)?;
+    let object = Hashed::new(ObjectKind::Changeset, changeset.encode()?);
+    let id = ChangesetId(object.id());
+    let mut batch = blobs;
+    batch.extend(changed);
+    batch.push(object);
+    repo.objects.put_hashed_batch(batch)?;
     repo.objects.flush()?;
     Ok(Relocation::Relocated {
         id,

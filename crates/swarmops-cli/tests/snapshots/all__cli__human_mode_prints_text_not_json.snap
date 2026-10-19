@@ -26,6 +26,7 @@ $ swarmops --human --repo [tmp]/store ls main
 [exit 0]
 entries[0].name: README.md
 entries[0].kind: file
+entries[0].size: 16
 entries[0].id: [id1]
 truncated: false
 

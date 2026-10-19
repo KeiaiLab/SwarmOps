@@ -4,9 +4,12 @@
 //! here.
 
 mod commit;
+mod derive;
+mod diff;
 #[cfg(feature = "test-hooks")]
 mod landing_models;
 mod oplog;
+mod path_history;
 mod read;
 mod verify;
 

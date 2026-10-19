@@ -247,7 +247,8 @@ expression: s.transcript()
         "kind": "file",
         "encoding": "utf8",
         "content": "fn m",
-        "truncated": true
+        "truncated": true,
+        "next_offset": 4
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -255,6 +256,106 @@ expression: s.transcript()
         "resolved": {
           "main": "[c2]"
         },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main:src/main.rs --offset 4",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_file",
+      "api": 1,
+      "result": {
+        "blob": "[id5]",
+        "size": 13,
+        "kind": "file",
+        "encoding": "utf8",
+        "content": "ain() {}\n",
+        "truncated": false,
+        "offset": 4
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main:README.md --lines 3-3",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_file",
+      "api": 1,
+      "result": {
+        "blob": "[id1]",
+        "size": 18,
+        "kind": "file",
+        "encoding": "utf8",
+        "content": "version 2\n",
+        "truncated": false,
+        "offset": 8,
+        "lines": {
+          "first": 3,
+          "last": 3
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main:README.md --offset 1 --lines 1-2",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "read_file",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "the argument '--offset <N>' cannot be used with '--lines <A-B>'",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops cat --offset <N> <REV:PATH>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store cat main:README.md --lines 3",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "read_file",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "invalid value '3' for '--lines <A-B>': expected two line numbers, A-B, such as 10-20",
+        "retryable": false,
+        "exit": 2,
+        "details": {},
+        "hint": "Usage: swarmops cat [OPTIONS] <REV:PATH>\nFor more information, try '--help'."
+      },
+      "meta": {
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
         "auth": "trust"
       }
     }
@@ -299,6 +400,7 @@ expression: s.transcript()
           {
             "name": "README.md",
             "kind": "file",
+            "size": 18,
             "id": "[id1]"
           },
           {
@@ -309,11 +411,13 @@ expression: s.transcript()
           {
             "name": "latest",
             "kind": "symlink",
+            "size": 9,
             "id": "[id4]"
           },
           {
             "name": "logo.bin",
             "kind": "file",
+            "size": 4,
             "id": "[id2]"
           },
           {
@@ -346,6 +450,7 @@ expression: s.transcript()
           {
             "name": "README.md",
             "kind": "file",
+            "size": 18,
             "id": "[id1]"
           },
           {
@@ -356,11 +461,13 @@ expression: s.transcript()
           {
             "name": "latest",
             "kind": "symlink",
+            "size": 9,
             "id": "[id4]"
           },
           {
             "name": "logo.bin",
             "kind": "file",
+            "size": 4,
             "id": "[id2]"
           },
           {
@@ -393,6 +500,7 @@ expression: s.transcript()
           {
             "name": "run",
             "kind": "exec",
+            "size": 18,
             "id": "[id8]"
           }
         ],
@@ -420,6 +528,7 @@ expression: s.transcript()
           {
             "name": "run",
             "kind": "exec",
+            "size": 18,
             "id": "[id8]"
           }
         ],
@@ -447,6 +556,7 @@ expression: s.transcript()
           {
             "name": "README.md",
             "kind": "file",
+            "size": 18,
             "id": "[id1]"
           },
           {
@@ -480,16 +590,124 @@ expression: s.transcript()
           {
             "name": "latest",
             "kind": "symlink",
+            "size": 9,
             "id": "[id4]"
           },
           {
             "name": "logo.bin",
             "kind": "file",
+            "size": 4,
             "id": "[id2]"
           }
         ],
         "truncated": true,
         "cursor": "logo.bin"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main --depth 2",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "README.md",
+            "path": "README.md",
+            "kind": "file",
+            "size": 18,
+            "id": "[id1]"
+          },
+          {
+            "name": "bin",
+            "path": "bin",
+            "kind": "dir",
+            "id": "[id6]"
+          },
+          {
+            "name": "run",
+            "path": "bin/run",
+            "kind": "exec",
+            "size": 18,
+            "id": "[id8]"
+          },
+          {
+            "name": "latest",
+            "path": "latest",
+            "kind": "symlink",
+            "size": 9,
+            "id": "[id4]"
+          },
+          {
+            "name": "logo.bin",
+            "path": "logo.bin",
+            "kind": "file",
+            "size": 4,
+            "id": "[id2]"
+          },
+          {
+            "name": "src",
+            "path": "src",
+            "kind": "dir",
+            "id": "[id7]"
+          },
+          {
+            "name": "main.rs",
+            "path": "src/main.rs",
+            "kind": "file",
+            "size": 13,
+            "id": "[id5]"
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store ls main --depth 2 --limit 2 --cursor bin",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "read_tree",
+      "api": 1,
+      "result": {
+        "entries": [
+          {
+            "name": "run",
+            "path": "bin/run",
+            "kind": "exec",
+            "size": 18,
+            "id": "[id8]"
+          },
+          {
+            "name": "latest",
+            "path": "latest",
+            "kind": "symlink",
+            "size": 9,
+            "id": "[id4]"
+          }
+        ],
+        "truncated": true,
+        "cursor": "latest"
       },
       "meta": {
         "repo": "[tmp]/store",
