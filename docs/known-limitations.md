@@ -343,6 +343,14 @@ These do not change what SwarmOps does, only how well the tests can see it.
   up to its damage" message is not pinned; the CLI tests assume a temporary directory without
   spaces; and one end-to-end test skips when run as root. *Unscheduled. Found: M1 Tasks 1, 2a,
   3, 5 and 8, and the final fix pass; narrowed by M1.5 Task 2.*
+- **The `git merge-file` oracle pairs lines with Myers.** git 2.43, the declared oracle
+  version, has no `--diff-algorithm` for `merge-file` (git 2.44 added it), so the corpus in
+  `crates/swarmops-merge/tests/fixtures/merge_file/` records git's merges over its Myers diff,
+  while the three-way merge pairs lines with the histogram diff. The cases are built from
+  distinct lines, which the two diffs pair alike, and diffy, the other oracle, uses Myers too: a
+  merge that only the histogram diff pairs differently is checked by no oracle. *Unscheduled:
+  when the declared git moves to 2.44 or later, `generate.sh` adds
+  `--diff-algorithm=histogram`. Found: M2 Task 8; M4 Task 3b.*
 - **The specs are in Korean.** They are the authority; [architecture.md](architecture.md) is an
   English overview, not a translation. *Unscheduled.*
 

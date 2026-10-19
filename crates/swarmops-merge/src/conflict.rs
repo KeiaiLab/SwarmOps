@@ -40,8 +40,8 @@ pub enum ContentMerge {
     Clean(Vec<u8>),
     /// The places where the two sides' edits conflict, in file order: at least one.
     Conflicted(Vec<ConflictHunk>),
-    /// Both sides changed the content, differently, and a side is not text
-    /// ([`is_text`](crate::line_diff::is_text)): it is not merged by lines.
+    /// Both sides changed the content, differently, and the base's, ours' or theirs' content is
+    /// not text ([`is_text`](crate::line_diff::is_text)): it is not merged by lines.
     Binary,
 }
 

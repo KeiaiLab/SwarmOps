@@ -21,6 +21,8 @@ criterion = "0.8.2"
 tempfile = "3.27.0"
 zstd = "0.14.2"
 imara-diff = "0.2.0"
+# The three-way text merge's in-process oracle (swarmops-merge's tests only; storage §9).
+diffy = "0.5.2"
 rayon = "1.12.0"
 camino = "1.2.6"
 crc32fast = "1.5.2"

@@ -6,6 +6,7 @@
 //! importer diffs the trees it has just built in memory.
 
 pub mod conflict;
+pub mod diff3;
 pub mod line_diff;
 
 #[cfg(test)]
