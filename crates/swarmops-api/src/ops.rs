@@ -10,9 +10,11 @@
 //! after the page. The default page of `read_tree`, `show` and `log` stays within the operations
 //! spec's 64 KiB target for a default response (§9); `read_file`'s 1 MiB is the spec's own.
 //!
-//! No store-facing type carries a filesystem path. The two exceptions are client-side:
-//! [`ContentInput::File`], which the client reads and sends as bytes, and [`InitReq::path`],
-//! because `init` runs on the client and is not a [`StoreOps`] method.
+//! No store-facing type carries a filesystem path. The three exceptions are client-side:
+//! [`ContentInput::File`], which the client reads and sends as bytes, [`InitReq::path`],
+//! because `init` runs on the client and is not a [`StoreOps`] method, and
+//! [`GitImportReq::git_path`], because `git import` reads its source repository on the
+//! caller's host and is not a [`StoreOps`] method either (nor an MCP tool).
 //!
 //! Not in M1 yet:
 //! - M2: `ContentInput::Blob`, `ReadFileReq.range`, `ReadTreeReq.depth`, the `size` of each
@@ -648,6 +650,140 @@ pub struct VerifyFinding {
     /// index columns) or `object` (derive the record from its object again).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
+}
+
+fn default_git_ref() -> String {
+    "HEAD".to_owned()
+}
+
+fn default_target_ref() -> String {
+    "main".to_owned()
+}
+
+/// `git import`: bring a git repository's history into the store. Every commit that `git_ref`
+/// reaches and the store does not hold yet becomes a changeset, parents first, and
+/// `target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as
+/// `init` does: no server receives this request, and it is no MCP tool.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct GitImportReq {
+    /// The git repository to read, on the caller's host: its directory, absolute or relative to
+    /// the caller's working directory (a bare repository, or a work tree with its `.git`). The
+    /// caller reads it; no store or server is ever asked to read a path.
+    pub git_path: String,
+    /// The commit to import, with every commit it reaches: `HEAD` (the default), a ref name,
+    /// short or full (`stable`, `refs/heads/stable`), looked up in git's order, or a commit id
+    /// of 40 hex digits; a tag is peeled to its commit. There is no revision syntax such as
+    /// `main~3`.
+    #[serde(default = "default_git_ref")]
+    pub git_ref: String,
+    /// The ref to move to that commit's changeset: `main` (the default) or `release/<name>`,
+    /// created if it does not exist. If it does, its head must be the import of that commit or
+    /// of an ancestor of it, and only the commits after that head are imported; any other head
+    /// (the source was rewritten, or a native changeset was committed on the ref) is
+    /// `E_GIT_IMPORT_DIVERGED`, and nothing is written.
+    #[serde(default = "default_target_ref")]
+    pub target_ref: String,
+    /// The classes of content the import may drop or normalize; a changeset that loses any
+    /// names them in its `git.lossy` metadata. Empty by default: a commit holding any class is
+    /// refused with `E_GIT_IMPORT_LOSSY`, which names the commit, the path and the class.
+    #[serde(default)]
+    pub lossy: Vec<LossyClass>,
+}
+
+/// A class of git content that a changeset cannot hold as git has it (storage spec §7). A
+/// commit holding one is refused unless the import's `lossy` allows its class; an allowed class
+/// is dropped or normalized, a directory a drop leaves empty is dropped with it, and the
+/// changeset's `git.lossy` metadata names the classes, since it no longer renders back to the
+/// commit's own git id.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LossyClass {
+    /// A submodule's entry (git mode 160000): dropped.
+    Gitlinks,
+    /// A name that is not UTF-8, or is `.` or `..`: dropped.
+    Paths,
+    /// A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as
+    /// `100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by
+    /// its owner's execute bit, and `040000` a directory.
+    Modes,
+    /// A tree whose entries are not in git's order, or that names one entry twice: put in order,
+    /// the first of a name kept.
+    TreeOrder,
+    /// An entry naming an empty tree: dropped.
+    EmptyTrees,
+    /// A commit whose bytes the changeset cannot keep: a signature line, time or header line that
+    /// renders back differently, no blank line before the message, or a parent listed twice
+    /// (kept once).
+    Nonstandard,
+}
+
+impl LossyClass {
+    /// Every class, in declaration order.
+    pub const ALL: [LossyClass; 6] = [
+        LossyClass::Gitlinks,
+        LossyClass::Paths,
+        LossyClass::Modes,
+        LossyClass::TreeOrder,
+        LossyClass::EmptyTrees,
+        LossyClass::Nonstandard,
+    ];
+
+    /// The class's name, as the wire, the CLI's `--lossy` and `git.lossy` metadata spell it,
+    /// e.g. `"tree_order"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LossyClass::Gitlinks => "gitlinks",
+            LossyClass::Paths => "paths",
+            LossyClass::Modes => "modes",
+            LossyClass::TreeOrder => "tree_order",
+            LossyClass::EmptyTrees => "empty_trees",
+            LossyClass::Nonstandard => "nonstandard",
+        }
+    }
+}
+
+/// `git import`: what the import brought in, and where the target ref stands.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct GitImportResp {
+    /// How many commits became changesets in this import.
+    pub imported: u64,
+    /// How many commits the import found in the store already, where its walk stopped: the
+    /// commit of the target's head, or commits an earlier import made. Importing the commit the
+    /// target names already imports 0 and skips 1.
+    pub skipped: u64,
+    /// The changeset of `git_ref`'s commit, which `target_ref` names now.
+    pub head_changeset: String,
+    /// `git_ref`'s commit: its git id, 40 lowercase hex digits.
+    pub git_head_sha: String,
+    /// The ref the import moved, or found at `head_changeset` already.
+    pub target_ref: String,
+    /// Whether this import moved `target_ref`, or created it; `false` when the ref named
+    /// `head_changeset` already, after an earlier import of the same commit or a concurrent one.
+    pub ref_moved: bool,
+    /// What `target_ref` named when the import started; omitted when it did not exist, and the
+    /// import created it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_head: Option<String>,
+    /// The commits this import took lossily, as the request's `lossy` allowed: the first 100,
+    /// in the order imported. `lossy_total` counts them all.
+    pub lossy: Vec<LossyCommitOut>,
+    /// How many commits this import took lossily, the ones past the first 100 included.
+    pub lossy_total: u64,
+    /// Problems the import met that did not stop it, such as failed housekeeping after the
+    /// target's move became durable; the import itself succeeded. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// `git import`: a commit taken lossily, and what it lost.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct LossyCommitOut {
+    /// The git commit: its id, 40 lowercase hex digits.
+    pub commit: String,
+    /// The changeset made of it, whose `git.lossy` metadata names the same classes.
+    pub changeset: String,
+    /// The classes dropped or normalized in it, ordered by name, as `git.lossy` lists them.
+    pub classes: Vec<LossyClass>,
 }
 
 /// One store's operations, implemented over a local store now and by a remote client later

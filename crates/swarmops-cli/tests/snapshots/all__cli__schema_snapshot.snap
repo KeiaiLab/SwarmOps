@@ -1282,6 +1282,36 @@ expression: s.redact(&all)
           "const": "E_MAINTENANCE_BUSY",
           "description": "Maintenance (gc or verify) holds the store's maintenance lease.",
           "type": "string"
+        },
+        {
+          "const": "E_GIT_NOT_A_REPO",
+          "description": "`git import` found no git repository it can open at `git_path` (`details.git_path`).",
+          "type": "string"
+        },
+        {
+          "const": "E_GIT_REF_NOT_FOUND",
+          "description": "`git import`: the source repository has no `git_ref`, or it names no commit\n(`details.git_ref`; `details.kind` the object it names instead, such as a tree).",
+          "type": "string"
+        },
+        {
+          "const": "E_GIT_IMPORT_DIVERGED",
+          "description": "`git import`: the target ref's head is not the import of `git_ref`'s commit or of an\nancestor of it, because the source was rewritten or a native changeset was committed on\nthe target, so nothing was written; there is no silent merge. `details` names\n`target_ref`, `target_head`, `git_head` and, when the head was imported, its git commit\n`base`.",
+          "type": "string"
+        },
+        {
+          "const": "E_GIT_IMPORT_LOSSY",
+          "description": "`git import`: a commit holds content a changeset cannot keep as git has it; `details`\nnames the `commit`, the `path` (also as `path_base64` when it is not UTF-8) and the\nlossy `class`, which the request's `lossy` can allow. The import stops before that\ncommit, and the target ref does not move.",
+          "type": "string"
+        },
+        {
+          "const": "E_GIT_UNSUPPORTED",
+          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a commit of more than 255 parents, or an entry whose mode is no kind of entry;\n`details.reason` says which (`object_format`, `ref_storage`, `shallow`, `parents`,\n`mode`), and `details.commit` names the commit of the last two.",
+          "type": "string"
+        },
+        {
+          "const": "E_GIT_READ",
+          "description": "`git import` could not read the source: an object is missing (as in a partial clone),\ndoes not hash to its id or does not parse, or the filesystem refused a read\n(`details.reason`; `details.object` names the object when there is one).",
+          "type": "string"
         }
       ],
       "title": "ErrorCode"
@@ -1386,6 +1416,212 @@ expression: s.redact(&all)
         }
       ],
       "title": "FileKind"
+    },
+    "GitImportReq": {
+      "$defs": {
+        "LossyClass": {
+          "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+          "oneOf": [
+            {
+              "const": "gitlinks",
+              "description": "A submodule's entry (git mode 160000): dropped.",
+              "type": "string"
+            },
+            {
+              "const": "paths",
+              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "modes",
+              "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+              "type": "string"
+            },
+            {
+              "const": "tree_order",
+              "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+              "type": "string"
+            },
+            {
+              "const": "empty_trees",
+              "description": "An entry naming an empty tree: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "nonstandard",
+              "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`git import`: bring a git repository's history into the store. Every commit that `git_ref`\nreaches and the store does not hold yet becomes a changeset, parents first, and\n`target_ref` moves to the changeset of `git_ref`'s commit. It runs on the caller's host, as\n`init` does: no server receives this request, and it is no MCP tool.",
+      "properties": {
+        "git_path": {
+          "description": "The git repository to read, on the caller's host: its directory, absolute or relative to\nthe caller's working directory (a bare repository, or a work tree with its `.git`). The\ncaller reads it; no store or server is ever asked to read a path.",
+          "type": "string"
+        },
+        "git_ref": {
+          "default": "HEAD",
+          "description": "The commit to import, with every commit it reaches: `HEAD` (the default), a ref name,\nshort or full (`stable`, `refs/heads/stable`), looked up in git's order, or a commit id\nof 40 hex digits; a tag is peeled to its commit. There is no revision syntax such as\n`main~3`.",
+          "type": "string"
+        },
+        "lossy": {
+          "default": [],
+          "description": "The classes of content the import may drop or normalize; a changeset that loses any\nnames them in its `git.lossy` metadata. Empty by default: a commit holding any class is\nrefused with `E_GIT_IMPORT_LOSSY`, which names the commit, the path and the class.",
+          "items": {
+            "$ref": "#/$defs/LossyClass"
+          },
+          "type": "array"
+        },
+        "target_ref": {
+          "default": "main",
+          "description": "The ref to move to that commit's changeset: `main` (the default) or `release/<name>`,\ncreated if it does not exist. If it does, its head must be the import of that commit or\nof an ancestor of it, and only the commits after that head are imported; any other head\n(the source was rewritten, or a native changeset was committed on the ref) is\n`E_GIT_IMPORT_DIVERGED`, and nothing is written.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "git_path"
+      ],
+      "title": "GitImportReq",
+      "type": "object"
+    },
+    "GitImportResp": {
+      "$defs": {
+        "LossyClass": {
+          "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+          "oneOf": [
+            {
+              "const": "gitlinks",
+              "description": "A submodule's entry (git mode 160000): dropped.",
+              "type": "string"
+            },
+            {
+              "const": "paths",
+              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "modes",
+              "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+              "type": "string"
+            },
+            {
+              "const": "tree_order",
+              "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+              "type": "string"
+            },
+            {
+              "const": "empty_trees",
+              "description": "An entry naming an empty tree: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "nonstandard",
+              "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+              "type": "string"
+            }
+          ]
+        },
+        "LossyCommitOut": {
+          "description": "`git import`: a commit taken lossily, and what it lost.",
+          "properties": {
+            "changeset": {
+              "description": "The changeset made of it, whose `git.lossy` metadata names the same classes.",
+              "type": "string"
+            },
+            "classes": {
+              "description": "The classes dropped or normalized in it, ordered by name, as `git.lossy` lists them.",
+              "items": {
+                "$ref": "#/$defs/LossyClass"
+              },
+              "type": "array"
+            },
+            "commit": {
+              "description": "The git commit: its id, 40 lowercase hex digits.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "commit",
+            "changeset",
+            "classes"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`git import`: what the import brought in, and where the target ref stands.",
+      "properties": {
+        "git_head_sha": {
+          "description": "`git_ref`'s commit: its git id, 40 lowercase hex digits.",
+          "type": "string"
+        },
+        "head_changeset": {
+          "description": "The changeset of `git_ref`'s commit, which `target_ref` names now.",
+          "type": "string"
+        },
+        "imported": {
+          "description": "How many commits became changesets in this import.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lossy": {
+          "description": "The commits this import took lossily, as the request's `lossy` allowed: the first 100,\nin the order imported. `lossy_total` counts them all.",
+          "items": {
+            "$ref": "#/$defs/LossyCommitOut"
+          },
+          "type": "array"
+        },
+        "lossy_total": {
+          "description": "How many commits this import took lossily, the ones past the first 100 included.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_head": {
+          "description": "What `target_ref` named when the import started; omitted when it did not exist, and the\nimport created it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "ref_moved": {
+          "description": "Whether this import moved `target_ref`, or created it; `false` when the ref named\n`head_changeset` already, after an earlier import of the same commit or a concurrent one.",
+          "type": "boolean"
+        },
+        "skipped": {
+          "description": "How many commits the import found in the store already, where its walk stopped: the\ncommit of the target's head, or commits an earlier import made. Importing the commit the\ntarget names already imports 0 and skips 1.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "target_ref": {
+          "description": "The ref the import moved, or found at `head_changeset` already.",
+          "type": "string"
+        },
+        "warnings": {
+          "description": "Problems the import met that did not stop it, such as failed housekeeping after the\ntarget's move became durable; the import itself succeeded. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "imported",
+        "skipped",
+        "head_changeset",
+        "git_head_sha",
+        "target_ref",
+        "ref_moved",
+        "lossy",
+        "lossy_total"
+      ],
+      "title": "GitImportResp",
+      "type": "object"
     },
     "Identity": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1597,6 +1833,108 @@ expression: s.redact(&all)
         }
       },
       "title": "LogReq",
+      "type": "object"
+    },
+    "LossyClass": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+      "oneOf": [
+        {
+          "const": "gitlinks",
+          "description": "A submodule's entry (git mode 160000): dropped.",
+          "type": "string"
+        },
+        {
+          "const": "paths",
+          "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+          "type": "string"
+        },
+        {
+          "const": "modes",
+          "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+          "type": "string"
+        },
+        {
+          "const": "tree_order",
+          "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+          "type": "string"
+        },
+        {
+          "const": "empty_trees",
+          "description": "An entry naming an empty tree: dropped.",
+          "type": "string"
+        },
+        {
+          "const": "nonstandard",
+          "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+          "type": "string"
+        }
+      ],
+      "title": "LossyClass"
+    },
+    "LossyCommitOut": {
+      "$defs": {
+        "LossyClass": {
+          "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+          "oneOf": [
+            {
+              "const": "gitlinks",
+              "description": "A submodule's entry (git mode 160000): dropped.",
+              "type": "string"
+            },
+            {
+              "const": "paths",
+              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "modes",
+              "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+              "type": "string"
+            },
+            {
+              "const": "tree_order",
+              "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+              "type": "string"
+            },
+            {
+              "const": "empty_trees",
+              "description": "An entry naming an empty tree: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "nonstandard",
+              "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`git import`: a commit taken lossily, and what it lost.",
+      "properties": {
+        "changeset": {
+          "description": "The changeset made of it, whose `git.lossy` metadata names the same classes.",
+          "type": "string"
+        },
+        "classes": {
+          "description": "The classes dropped or normalized in it, ordered by name, as `git.lossy` lists them.",
+          "items": {
+            "$ref": "#/$defs/LossyClass"
+          },
+          "type": "array"
+        },
+        "commit": {
+          "description": "The git commit: its id, 40 lowercase hex digits.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "commit",
+        "changeset",
+        "classes"
+      ],
+      "title": "LossyCommitOut",
       "type": "object"
     },
     "Meta": {
