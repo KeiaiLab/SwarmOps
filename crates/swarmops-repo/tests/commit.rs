@@ -1006,6 +1006,47 @@ mod advance {
         assert!(warning.starts_with(alone), "{warning}");
     }
 
+    /// Whether the store at `root` holds changeset `want`, a commit on main's head `base` that
+    /// advances main: `Err` unless it holds both the changeset and main's move to it, or neither
+    /// (main still at `base`), and verifies clean. The crash sweep's check of every crash.
+    fn both_or_neither(
+        root: &Utf8Path,
+        base: ChangesetId,
+        want: ChangesetId,
+    ) -> Result<bool, String> {
+        let repo = LocalRepo::open(root).unwrap();
+        let committed = repo.changeset(want).unwrap().is_some();
+        let main = repo.get_ref("main").unwrap().map(|state| state.target);
+        let expected = if committed { want } else { base };
+        if main != Some(expected) {
+            return Err(format!("committed {committed}, main at {main:?}"));
+        }
+        let problems = repo.verify(true).unwrap().problems;
+        if problems.is_empty() {
+            Ok(committed)
+        } else {
+            Err(format!("committed {committed}, verify found {problems:?}"))
+        }
+    }
+
+    /// The crash sweep's own check ([`both_or_neither`]): a store holding the changeset without
+    /// main's move to it, as a crash between the two frames of a commit then a `cas_ref` leaves
+    /// one, is refused; with main moved to it too, it holds both.
+    #[test]
+    fn the_crash_sweep_s_check_refuses_a_changeset_without_its_move() {
+        let (_dir, root, repo, base) = with_main();
+        let want = repo
+            .commit(request(&[base], vec![put("b", b"b")]))
+            .unwrap()
+            .id;
+        assert!(
+            both_or_neither(&root, base, want).is_err(),
+            "the changeset alone"
+        );
+        repo.cas_ref("main", Some(base), Some(want), ACTOR).unwrap();
+        assert_eq!(both_or_neither(&root, base, want), Ok(true));
+    }
+
     /// The commit the crash sweep's child makes: [`crash_request`]'s files, on main's head `base`,
     /// advancing main.
     #[cfg(feature = "test-hooks")]
@@ -1043,18 +1084,15 @@ mod advance {
         );
 
         // Both or neither: the changeset is there exactly when main names it.
-        let repo = LocalRepo::open(&root).unwrap();
-        let committed = repo.changeset(want).unwrap().is_some();
-        let main = repo.get_ref("main").unwrap().map(|state| state.target);
-        let expected = if committed { want } else { base };
-        assert_eq!(main, Some(expected), "k={k}: committed {committed}");
+        let committed =
+            both_or_neither(&root, base, want).unwrap_or_else(|why| panic!("k={k}: {why}"));
         assert!(
             committed || !finished,
             "k={k}: the commit returned but is not stored"
         );
-        assert_eq!(repo.verify(true).unwrap().problems, [], "k={k}");
 
         // The same request made again ends with both.
+        let repo = LocalRepo::open(&root).unwrap();
         let again = repo.commit(advancing_crash_request(base)).unwrap();
         assert_eq!(again.id, want, "k={k}");
         assert_eq!(
