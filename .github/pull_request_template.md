@@ -15,6 +15,7 @@ this through a person's account, say so in the first line and name your model. -
 
 - [ ] `just check` passes, and `tests-pass` is green on this branch.
 - [ ] A behaviour change updates its spec paragraph in this pull request.
+- [ ] A new public module, type or trait method in core, store or repo is in storage spec §8 (or §8 says where it is described).
 - [ ] The hash contract and the golden vectors are untouched; a new layout has a new kind/version header or a `FORMAT` bump.
 - [ ] Every snapshot change (the schema, the MCP tools, CLI output) and every pinned filesystem-call sequence that changed is intended and named above.
 - [ ] `CHANGELOG.md` has an **Unreleased** entry for a user-visible change.
