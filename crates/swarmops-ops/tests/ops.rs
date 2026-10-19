@@ -123,6 +123,7 @@ fn log_req(rev: Option<&str>) -> LogReq {
         rev: rev.map(Rev::from),
         limit: DEFAULT_LOG_LIMIT,
         cursor: None,
+        paths: Vec::new(),
     }
 }
 
@@ -1836,5 +1837,368 @@ mod snapshot {
             c2,
             "main as the last read resolved it"
         );
+    }
+}
+
+/// `log` with `paths` and `path_history` (operations spec §1; M2 Task 15): the changesets whose
+/// delta touches a path, by the chase of its last modifier, a page at a time.
+mod path_history {
+    use std::sync::Arc;
+
+    use swarmops_api::{
+        DEFAULT_PATH_HISTORY_LIMIT, Envelope, Meta, PathHistoryEntry, PathHistoryPage,
+        PathHistoryReq,
+    };
+    use swarmops_testkit::fs::NoSyncFs;
+
+    use super::*;
+
+    /// A `path_history` request for `path` from `rev` (main without one), a page of the default
+    /// size.
+    fn history(rev: Option<&str>, path: &str) -> PathHistoryReq {
+        PathHistoryReq {
+            rev: rev.map(Rev::from),
+            path: path.to_owned(),
+            limit: DEFAULT_PATH_HISTORY_LIMIT,
+            cursor: None,
+        }
+    }
+
+    /// The changesets of `page`.
+    fn changesets(page: &PathHistoryPage) -> Vec<&str> {
+        page.entries
+            .iter()
+            .map(|entry| entry.changeset.as_str())
+            .collect()
+    }
+
+    /// A first-parent chain of `ops`'s commits, one per step (`allow_empty`, so a step may change
+    /// nothing), and `main` created on its head: the ids, the root first.
+    fn chain(ops: &LocalOps, steps: Vec<Vec<ChangeInput>>) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for changes in steps {
+            let req = CommitReq {
+                allow_empty: true,
+                ..commit_req(ids.last().map(String::as_str), changes)
+            };
+            ids.push(ops.commit(&agent(), req).unwrap().changeset);
+        }
+        let head = ids.last().unwrap();
+        ops.ref_set(&agent(), set("main", head, None, true))
+            .unwrap();
+        ids
+    }
+
+    /// `log` with `paths` lists only the changesets whose delta has an entry at one of the paths
+    /// or below it, newest first, each once: a file's, a directory's (with or without a trailing
+    /// `/`), several at once, and none (an empty page, not an error). A page is `truncated`
+    /// exactly when another such changeset follows, and its cursor resumes after it. A path that
+    /// is not one is `E_INVALID_ARG`.
+    #[test]
+    fn log_with_paths_lists_only_the_changesets_that_touch_them() {
+        let (_dir, _root, ops) = new_store();
+        let c = chain(
+            &ops,
+            vec![
+                vec![text("a", "1"), text("b", "1")],
+                vec![text("b", "2")],
+                vec![text("c/x", "1")],
+                vec![text("a", "2")],
+                vec![],
+                vec![text("c/y", "1")],
+                vec![delete("c/x"), delete("c/y")],
+            ],
+        );
+        let log = |paths: &[&str], limit: usize, cursor: Option<&str>| {
+            let req = LogReq {
+                limit,
+                cursor: cursor.map(str::to_owned),
+                paths: paths.iter().map(|&p| p.to_owned()).collect(),
+                ..log_req(None)
+            };
+            ops.log(req).unwrap()
+        };
+        let at =
+            |indices: &[usize]| -> Vec<&str> { indices.iter().map(|&i| c[i].as_str()).collect() };
+        assert_eq!(ids(&log(&["a"], 50, None)), at(&[3, 0]));
+        assert_eq!(ids(&log(&["c"], 50, None)), at(&[6, 5, 2]));
+        assert_eq!(ids(&log(&["c/"], 50, None)), at(&[6, 5, 2]));
+        assert_eq!(ids(&log(&["a", "c/x"], 50, None)), at(&[6, 3, 2, 0]));
+        assert_eq!(
+            ids(&log(&["a", "a/"], 50, None)),
+            at(&[3, 0]),
+            "each changeset once"
+        );
+        let none = log(&["zz"], 50, None);
+        assert_eq!(
+            (none.entries.len(), none.truncated, none.cursor),
+            (0, false, None)
+        );
+
+        let first = log(&["c"], 2, None);
+        assert_eq!((ids(&first), first.truncated), (at(&[6, 5]), true));
+        assert_eq!(first.cursor.as_deref(), Some(c[5].as_str()));
+        let rest = log(&["c"], 2, first.cursor.as_deref());
+        assert_eq!(
+            (ids(&rest), rest.truncated, rest.cursor.as_deref()),
+            (at(&[2]), false, None)
+        );
+        let exact = log(&["a"], 2, None);
+        assert_eq!(
+            (ids(&exact), exact.truncated),
+            (at(&[3, 0]), false),
+            "nothing older"
+        );
+        let after_root = log(&["a"], 2, Some(&c[0]));
+        assert_eq!((after_root.entries.len(), after_root.truncated), (0, false));
+
+        // From a revision, recorded as resolved.
+        let resolved = Resolved::default();
+        let from_c3 = LogReq {
+            paths: vec!["b".to_owned()],
+            ..log_req(Some(&c[3]))
+        };
+        let page = ops.recording(&resolved).log(from_c3).unwrap();
+        assert_eq!(ids(&page), at(&[1, 0]));
+        assert_eq!(
+            resolved.take(),
+            BTreeMap::from([(c[3].clone(), c[3].clone())])
+        );
+
+        for bad in ["a//b", "/", "", "./a"] {
+            let req = LogReq {
+                paths: vec!["a".to_owned(), bad.to_owned()],
+                ..log_req(None)
+            };
+            let err = expect_err(ops.log(req), ErrorCode::InvalidArg);
+            assert_eq!(err.details["path"], bad);
+        }
+    }
+
+    /// A path's history, a page at a time: each entry what the path holds after its changeset
+    /// (`put` with its kind and id, `delete` with neither) and who wrote it when; the cursor, the
+    /// last entry's id, resumes from that changeset's first parent, and the last page is not
+    /// `truncated`. A cursor at the root gives an empty page; one that is not a full id the store
+    /// holds is `E_INVALID_ARG`. A directory's entries name its tree.
+    #[test]
+    fn history_pages_resume_after_the_cursor() {
+        let (_dir, _root, ops) = new_store();
+        let c = chain(
+            &ops,
+            vec![
+                vec![text("p", "0"), text("q", "0")],
+                vec![text("q", "1")],
+                vec![text("p", "2")],
+                vec![text("q", "3")],
+                vec![delete("p")],
+                vec![text("q", "5")],
+                vec![put(
+                    "p",
+                    ContentInput::Inline("6".to_owned()),
+                    Some(ModeInput::Exec),
+                )],
+                vec![text("dir/x", "7")],
+            ],
+        );
+        let resolved = Resolved::default();
+        let page = |cursor: Option<&str>| {
+            let req = PathHistoryReq {
+                limit: 2,
+                cursor: cursor.map(str::to_owned),
+                ..history(None, "p")
+            };
+            ops.recording(&resolved).path_history(req).unwrap()
+        };
+        let first = page(None);
+        assert_eq!(first.path, "p");
+        assert_eq!(changesets(&first), [c[6].as_str(), c[4].as_str()]);
+        assert_eq!(
+            (first.truncated, first.cursor.as_deref()),
+            (true, Some(c[4].as_str()))
+        );
+        assert_eq!(
+            first.entries[0],
+            PathHistoryEntry {
+                changeset: c[6].clone(),
+                op: ChangeOp::Put,
+                kind: Some(EntryKindOut::Exec),
+                id: Some(blob(b"6")),
+                author_agent: "agent/worker-17".to_owned(),
+                created_at: first.entries[0].created_at,
+                title: "a test commit".to_owned(),
+            }
+        );
+        assert!(first.entries[0].created_at >= 1_760_000_000_000);
+        let deleted = &first.entries[1];
+        assert_eq!(
+            (deleted.op, &deleted.kind, &deleted.id),
+            (ChangeOp::Delete, &None, &None)
+        );
+        assert_eq!(
+            resolved.take(),
+            BTreeMap::from([("main".to_owned(), c[7].clone())])
+        );
+
+        let second = page(first.cursor.as_deref());
+        assert_eq!(changesets(&second), [c[2].as_str(), c[0].as_str()]);
+        assert_eq!((second.truncated, second.cursor), (false, None));
+        assert_eq!(second.entries[1].kind, Some(EntryKindOut::File));
+        assert_eq!(second.entries[1].id, Some(blob(b"0")));
+        assert!(resolved.take().is_empty(), "a cursor resolves no revision");
+        let after_root = page(Some(&c[0]));
+        assert_eq!((after_root.entries.len(), after_root.truncated), (0, false));
+
+        let dir = ops.path_history(history(None, "dir/")).unwrap();
+        assert_eq!(dir.path, "dir");
+        assert_eq!(changesets(&dir), [c[7].as_str()]);
+        let tree = ops.read_tree(ls("main", None)).unwrap();
+        let listed = tree
+            .entries
+            .iter()
+            .find(|entry| entry.name == "dir")
+            .unwrap();
+        assert_eq!(
+            (dir.entries[0].kind, dir.entries[0].id.as_deref()),
+            (Some(EntryKindOut::Dir), Some(listed.id.as_str()))
+        );
+
+        let unknown = "0".repeat(64);
+        for cursor in ["main", &c[0][..12], "zz", unknown.as_str()] {
+            let req = PathHistoryReq {
+                cursor: Some(cursor.to_owned()),
+                ..history(None, "p")
+            };
+            let err = expect_err(ops.path_history(req), ErrorCode::InvalidArg);
+            assert_eq!(err.details["cursor"], cursor);
+        }
+    }
+
+    /// A path that no changeset on the first-parent chain ever touched is `E_PATH_NOT_FOUND`
+    /// `{rev, path}`, its hint the listing of the directory it would be in, whether it never
+    /// existed or exists only after the revision asked about; a path deleted since still has its
+    /// history. A limit of 0 and a path that is not one are `E_INVALID_ARG`, an unknown revision
+    /// `E_REV_NOT_FOUND`.
+    #[test]
+    fn a_path_that_never_existed_is_path_not_found() {
+        let (_dir, _root, ops) = new_store();
+        let c = chain(
+            &ops,
+            vec![
+                vec![text("src/lib.rs", "1"), text("gone", "1")],
+                vec![delete("gone")],
+                vec![text("later", "1")],
+            ],
+        );
+        let nope = expect_err(
+            ops.path_history(history(None, "nope")),
+            ErrorCode::PathNotFound,
+        );
+        assert_eq!(nope.details["rev"], "main");
+        assert_eq!(nope.details["path"], "nope");
+        assert_eq!(nope.hint.as_deref(), Some("swarmops ls main"));
+        let below = expect_err(
+            ops.path_history(history(None, "src/nope")),
+            ErrorCode::PathNotFound,
+        );
+        assert_eq!(below.hint.as_deref(), Some("swarmops ls main:src"));
+        let not_yet = expect_err(
+            ops.path_history(history(Some(&c[1]), "later")),
+            ErrorCode::PathNotFound,
+        );
+        assert_eq!(not_yet.details["rev"], c[1].as_str());
+
+        let gone = ops.path_history(history(None, "gone")).unwrap();
+        assert_eq!(changesets(&gone), [c[1].as_str(), c[0].as_str()]);
+        assert_eq!(gone.entries[0].op, ChangeOp::Delete);
+
+        let zero = PathHistoryReq {
+            limit: 0,
+            ..history(None, "gone")
+        };
+        expect_err(ops.path_history(zero), ErrorCode::InvalidArg);
+        for bad in ["", "/", "a//b"] {
+            let err = expect_err(ops.path_history(history(None, bad)), ErrorCode::InvalidArg);
+            assert_eq!(err.details["path"], bad);
+        }
+        expect_err(
+            ops.path_history(history(Some("release/none"), "gone")),
+            ErrorCode::RevNotFound,
+        );
+    }
+
+    /// Every page an agent gets by default stays under the operations spec's 64 KiB target (§9):
+    /// over a path that 500 changesets changed, with 60-byte titles, the default `path_history`
+    /// page and the default `log` page with that path, each in its envelope.
+    #[test]
+    fn a_default_history_page_stays_under_64_kib() {
+        let (_dir, root, ops) = new_store();
+        // Committed below the API, without syncs: what the pages hold is the subject here.
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+        let signature = Signature {
+            name: b"agent/worker-17".to_vec(),
+            email: b"worker-17@claude-code.swarmops.local".to_vec(),
+            secs: 1_760_000_000,
+            offset_secs: 0,
+            negative_zero: false,
+        };
+        let mut head: Option<ChangesetId> = None;
+        for i in 0..500_u32 {
+            let content = i.to_string();
+            let title = format!("{:x<55}{i:05}", "change the path, a title of 60 bytes ");
+            assert_eq!(title.len(), 60);
+            let outcome = repo
+                .commit(CommitRequest {
+                    parents: head.into_iter().collect(),
+                    changes: vec![Change {
+                        path: RepoPath::new("src/p").unwrap(),
+                        op: swarmops_repo::ChangeOp::Put {
+                            kind: LeafKind::File,
+                            content: content.into_bytes(),
+                        },
+                    }],
+                    author: signature.clone(),
+                    committer: signature.clone(),
+                    message: format!("{title}\n\nthe body is not in the page").into_bytes(),
+                    metadata: vec![
+                        ("agent".to_owned(), b"agent/worker-17".to_vec()),
+                        ("run_id".to_owned(), b"run-17".to_vec()),
+                    ],
+                    allow_empty: false,
+                    advance: None,
+                })
+                .unwrap();
+            head = Some(outcome.id);
+        }
+        drop(repo);
+        let head = head.unwrap().to_string();
+        ops.ref_set(&agent(), set("main", &head, None, true))
+            .unwrap();
+        let meta = || Meta {
+            repo: Some(root.to_string()),
+            elapsed_ms: 1_000,
+            resolved: BTreeMap::from([("main".to_owned(), head.clone())]),
+            auth: "trust".to_owned(),
+            recovered: None,
+        };
+
+        let page = ops.path_history(history(None, "src/p")).unwrap();
+        assert_eq!(
+            (page.entries.len(), page.truncated),
+            (DEFAULT_PATH_HISTORY_LIMIT, true)
+        );
+        let bytes = serde_json::to_vec(&Envelope::ok("path_history", page, meta())).unwrap();
+        assert!(bytes.len() <= 65_536, "path_history: {} bytes", bytes.len());
+
+        let log = LogReq {
+            paths: vec!["src".to_owned()],
+            ..log_req(None)
+        };
+        let page = ops.log(log).unwrap();
+        assert_eq!(
+            (page.entries.len(), page.truncated),
+            (DEFAULT_LOG_LIMIT, true)
+        );
+        let bytes = serde_json::to_vec(&Envelope::ok("log", page, meta())).unwrap();
+        assert!(bytes.len() <= 65_536, "log --path: {} bytes", bytes.len());
     }
 }

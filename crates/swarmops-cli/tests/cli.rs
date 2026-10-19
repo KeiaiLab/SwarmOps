@@ -253,6 +253,79 @@ fn ls_show_log(s: &mut Session, store: &str, [c1, c2]: [&str; 2]) {
     assert_eq!(older["result"]["entries"][0]["id"], c1);
 }
 
+/// `history` and `log --path`: a file's history and a directory's, a page at a time with its
+/// cursor (a directory may end in `/`); the log of the changesets that change some paths; and the
+/// errors: a path nothing ever touched (`E_PATH_NOT_FOUND`), a target without a path and a limit
+/// of 0 (`E_INVALID_ARG`).
+#[test]
+fn history_and_log_path_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store, "--name", "acme"]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+    let c1 = s.commit(&store, None, "src/lib.rs", "pub fn f() {}\n", "c1");
+    let c2 = s.commit(&store, Some(&c1), "README.md", "# acme\n", "c2");
+    let c3 = s.commit(
+        &store,
+        Some(&c2),
+        "src/lib.rs",
+        "pub fn f() -> u8 { 1 }\n",
+        "c3",
+    );
+    let c4 = s.commit(&store, Some(&c3), "src/main.rs", "fn main() {}\n", "c4");
+    let main = [
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c4, "--create",
+    ];
+    assert_eq!(s.run(&main).exit, 0);
+    let ids = |reply: &Reply, key: &str| -> Vec<String> {
+        let entries = reply["result"]["entries"].as_array().unwrap();
+        entries
+            .iter()
+            .map(|entry| entry[key].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let file = s.run(&["--repo", &store, "history", "main:src/lib.rs"]);
+    assert_eq!(ids(&file, "changeset"), [c3.as_str(), c1.as_str()]);
+    assert_eq!(file["result"]["entries"][0]["kind"], "file");
+    assert_eq!(file["meta"]["resolved"], json!({"main": c4}));
+    let first = s.run(&["--repo", &store, "history", "main:src", "-n", "1"]);
+    assert_eq!(ids(&first, "changeset"), [c4.as_str()]);
+    assert_eq!(first["result"]["entries"][0]["kind"], "dir");
+    assert_eq!(first["result"]["cursor"], c4.as_str());
+    let second = s.run(&[
+        "--repo",
+        &store,
+        "history",
+        "main:src/",
+        "-n",
+        "1",
+        "--cursor",
+        &c4,
+    ]);
+    assert_eq!(ids(&second, "changeset"), [c3.as_str()]);
+    assert_eq!(second["result"]["path"], "src");
+    let last = s.run(&["--repo", &store, "history", "main:src", "--cursor", &c3]);
+    assert_eq!(ids(&last, "changeset"), [c1.as_str()]);
+    assert_eq!(last["result"]["truncated"], false);
+
+    let logged = s.run(&["--repo", &store, "log", "--path", "src"]);
+    assert_eq!(ids(&logged, "id"), [c4.as_str(), c3.as_str(), c1.as_str()]);
+    let two = ["--path", "README.md", "--path", "src/main.rs"];
+    let paged = s.run(&[&["--repo", &store, "log", "-n", "1"][..], &two[..]].concat());
+    assert_eq!(ids(&paged, "id"), [c4.as_str()]);
+    assert_eq!(paged["result"]["cursor"], c4.as_str());
+
+    let nope = s.run(&["--repo", &store, "history", "main:nope"]);
+    let code = ErrorCode::PathNotFound;
+    assert_eq!((nope.exit, nope.code()), (code.exit(), code.as_str()));
+    let no_path = s.run(&["--repo", &store, "history", "main"]);
+    assert_eq!((no_path.exit, no_path.code()), (2, "E_INVALID_ARG"));
+    let zero = s.run(&["--repo", &store, "history", "main:src", "-n", "0"]);
+    assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
+    insta::assert_json_snapshot!(s.transcript());
+}
+
 #[test]
 fn ref_set_expect_mismatch_exits_4() {
     let mut s = Session::new();

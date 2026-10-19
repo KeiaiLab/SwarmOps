@@ -151,6 +151,12 @@ left).
   a commit's outcome is unknown (its process died before it answered) and it is run again, a
   first attempt that did commit stays as an unreferenced changeset beside the second. An
   idempotency key (`commit --key`) closes this. *Target: M4. Found: M1 final fix pass.*
+- **History follows first parents only.** `log`, `log --path` and `history` walk first parents,
+  and a changeset's changes are those against its first parent: what a merge brought in from its
+  other parents shows as the merge's own change, and the changesets on those parents are never
+  listed. Native histories have no merge (`main` is linear, workspaces land squashed); git
+  import's do. *Target: M3, if imported merge histories need it (`LogReq.first_parent`). Found:
+  M2 Task 15 (M2 Decision 8).*
 - **No second root commit.** Once `main` exists, an omitted parent means `main`'s head (the
   advanced ref's, for a `commit --advance`), so the API makes a root commit only with `advance`
   naming a ref that does not exist yet. *Target: M3 (`commit_raw`, which git import needs).

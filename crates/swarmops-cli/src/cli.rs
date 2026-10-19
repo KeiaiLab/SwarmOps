@@ -7,7 +7,8 @@ use std::path::Path;
 use clap::error::ErrorKind;
 use clap::{ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 use swarmops_api::{
-    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT,
+    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT,
+    DEFAULT_READ_TREE_LIMIT,
 };
 
 use crate::output::printable;
@@ -191,6 +192,22 @@ pub enum Command {
         /// Resume a log: the previous page's cursor, exactly as it was returned.
         #[arg(long)]
         cursor: Option<String>,
+        /// Only the changesets that change PATH, or anything below it; give it again for more.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
+    },
+    /// List the changesets that changed a path, newest first, along first parents.
+    History {
+        // Split at the first ':' as `cat`'s target is (see there).
+        /// The revision and the path (a file, or a directory), split at the first ':'.
+        #[arg(value_name = "REV:PATH")]
+        target: String,
+        /// The most changesets to list.
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_PATH_HISTORY_LIMIT)]
+        limit: usize,
+        /// Resume a history: the previous page's cursor, exactly as it was returned.
+        #[arg(long)]
+        cursor: Option<String>,
     },
     /// List refs, or move one by compare-and-swap.
     #[command(subcommand)]
@@ -203,8 +220,9 @@ pub enum Command {
     },
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
-    /// One tool per operation (repo_info, read_file, read_tree, show, log, ref_list, ref_set,
-    /// ref_delete, commit, verify), each taking the operation's request as its arguments and
+    /// One tool per operation (repo_info, read_file, read_tree, show, log, path_history,
+    /// ref_list, ref_set, ref_delete, commit, verify), each taking the operation's request as its
+    /// arguments and
     /// returning the envelope the other commands print. The store and the identity are the
     /// server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28,
     /// and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope:
@@ -364,6 +382,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ls"] => "read_tree",
         ["show"] => "show",
         ["log"] => "log",
+        ["history"] => "path_history",
         ["ref", "list"] => "ref_list",
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
@@ -476,10 +495,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 14);
+        assert_eq!(ops.len(), 15);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 14, "two subcommands name one op");
+        assert_eq!(ops.len(), 15, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
     }
 

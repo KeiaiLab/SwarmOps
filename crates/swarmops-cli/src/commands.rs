@@ -37,8 +37,8 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, InfoReq, LogReq, Meta, OpError,
-    ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev,
-    ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq,
+    RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Resolved, shell_word};
@@ -177,17 +177,17 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             },
             |ops, req| ops.show(req),
         ),
-        Command::Log { rev, limit, cursor } => ctx.on_store(
-            op,
-            || {
-                Ok(LogReq {
-                    rev: rev.map(Rev::from),
-                    limit,
-                    cursor,
-                })
-            },
-            |ops, req| ops.log(req),
-        ),
+        Command::Log {
+            rev,
+            limit,
+            cursor,
+            paths,
+        } => log(ctx, op, rev, limit, cursor, paths),
+        Command::History {
+            target,
+            limit,
+            cursor,
+        } => history(ctx, op, &target, limit, cursor),
         Command::Ref(command) => run_ref(ctx, op, command),
         Command::Verify { deep } => ctx.on_store(
             op,
@@ -196,6 +196,49 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         ),
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
     }
+}
+
+/// Runs `log`, which names operation `op`: `limit` changesets from `rev` (`main` by default) or
+/// after `cursor`, only those that change `paths` if it names any.
+fn log(
+    ctx: &Ctx<'_>,
+    op: &'static str,
+    rev: Option<String>,
+    limit: usize,
+    cursor: Option<String>,
+    paths: Vec<String>,
+) -> Printed {
+    let req = LogReq {
+        rev: rev.map(Rev::from),
+        limit,
+        cursor,
+        paths,
+    };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.log(req))
+}
+
+/// Runs `history`, which names operation `op`: `limit` changesets of the history of `target`'s
+/// path (`<rev>:<path>`), from its revision or after `cursor`.
+fn history(
+    ctx: &Ctx<'_>,
+    op: &'static str,
+    target: &str,
+    limit: usize,
+    cursor: Option<String>,
+) -> Printed {
+    ctx.on_store(
+        op,
+        || {
+            let (rev, path) = history_target(target)?;
+            Ok(PathHistoryReq {
+                rev: Some(rev.into()),
+                path: path.to_owned(),
+                limit,
+                cursor,
+            })
+        },
+        |ops, req| ops.path_history(req),
+    )
 }
 
 /// Runs a `ref` subcommand, which names operation `op`.
@@ -552,6 +595,20 @@ fn file_target(target: &str) -> Result<(&str, &str), OpError> {
     })
 }
 
+/// `history`'s `<rev>:<path>`, as [`split_target`] splits it; a target without a path is
+/// `E_INVALID_ARG`.
+fn history_target(target: &str) -> Result<(&str, &str), OpError> {
+    let (rev, path) = split_target(target);
+    path.map(|path| (rev, path)).ok_or_else(|| {
+        OpError::new(
+            ErrorCode::InvalidArg,
+            format!("{target:?} names no path: history takes <rev>:<path>"),
+        )
+        .with_details(details([("target", target.into())]))
+        .with_hint(format!("swarmops ls {}", quoted(target)))
+    })
+}
+
 /// `verify`'s report as the command's outcome: a success for a clean store, else
 /// `E_STORE_CORRUPT` (exit 1) with the whole report in `details`. The hint is a deep
 /// verify after a structural one, which finds damaged bytes too, and after a deep one the
@@ -607,6 +664,16 @@ mod tests {
             file_target("my rev").unwrap_err().hint.as_deref(),
             Some("swarmops ls 'my rev'")
         );
+    }
+
+    #[test]
+    fn history_splits_its_target_at_the_first_colon() {
+        assert_eq!(history_target("main:src/").unwrap(), ("main", "src/"));
+        assert_eq!(history_target("main~1:a:b").unwrap(), ("main~1", "a:b"));
+        let refused = history_target("src/lib.rs").unwrap_err();
+        assert_eq!((refused.code.as_str(), refused.exit), ("E_INVALID_ARG", 2));
+        assert_eq!(refused.details["target"], "src/lib.rs");
+        assert_eq!(refused.hint.as_deref(), Some("swarmops ls src/lib.rs"));
     }
 
     #[test]
