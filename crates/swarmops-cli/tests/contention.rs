@@ -10,6 +10,9 @@
 //! --locked --release -p swarmops-cli --run-ignored ignored-only --test all -E
 //! 'test(/^contention::/)' --no-capture`.
 //! [`COMMITS_VAR`] sets how many commits each child makes, for a quick check of the harness.
+//! [`PUBLISH_VAR`] makes each child publish every commit on a ref of its own, in one transaction
+//! (`commit --advance`) or in two (`commit`, then `ref set`), and the summary then gives the
+//! journal frames, so the lock passes, each publish took (docs/perf.md, "M1.6 — publishes").
 //!
 //! The parent `init`s a store in a fresh temporary directory under `SWARMOPS_BENCH_DIR`
 //! (default `~/.local/state/swarmops-bench`, on the native filesystem, as every measurement in
@@ -62,7 +65,7 @@ use std::time::{Duration, Instant};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use swarmops_store::{Layout, MetaLock};
+use swarmops_store::{Journal, Layout, MetaLock, RealFs};
 use swarmops_testkit::test_name;
 
 use crate::support;
@@ -76,6 +79,14 @@ const COMMITS: usize = 1_000;
 
 /// Set to give each child another number of commits than [`COMMITS`].
 const COMMITS_VAR: &str = "SWARMOPS_TEST_CLI_CONTENTION_COMMITS";
+
+/// Set to make each child publish its commits on a ref of its own, `release/agent-<n>`
+/// ([`own_ref`]), which the parent creates at the base changeset before the go: `1` publishes
+/// each in one transaction (`commit --parent <its previous> --advance release/agent-<n>`), `0` in
+/// two (that commit without `--advance`, then `ref set release/agent-<n> <it> --expect <its
+/// previous>`). Unset, a child only commits. The refs are the measurement's artefact, not a ref
+/// model: agents publish to `main`, and a publish there that loses a race runs again.
+const PUBLISH_VAR: &str = "SWARMOPS_TEST_CLI_CONTENTION_ADVANCE";
 
 /// The measurement's name, which its children are run with.
 const TEST: &str = "thirty_two_processes_thousand_commits_each";
@@ -146,10 +157,16 @@ fn thirty_two_processes_thousand_commits_each() {
     let work = tempfile::tempdir_in(base_dir()).expect("create the work dir");
     let store = store_path(work.path());
     let base = create_store(work.path());
+    let publish = Publish::from_env();
+    if publish != Publish::No {
+        create_own_refs(&store, &base);
+    }
     let control = busy_control(work.path(), &base);
 
-    let run = run_children(work.path(), &base);
-    let busy = print_contention(&run, commits, control);
+    let frames_before = journal_frames(&store);
+    let run = run_children(work.path(), &base, publish);
+    let frames = journal_frames(&store) - frames_before;
+    let busy = print_contention(&run, commits, control, (publish, frames));
     let changesets = support::run_within(&["--repo", &store, "info"], &[], RUN_TIMEOUT);
     print_solo(work.path(), &base, &run);
     let verify = support::run_within(&["--repo", &store, "verify", "--deep"], &[], RUN_TIMEOUT);
@@ -203,6 +220,18 @@ fn thirty_two_processes_thousand_commits_each() {
     assert_eq!(verify.exit(), 0, "verify --deep: {verify}");
     assert_eq!(verify.ok()["problems"], json!([]), "{verify}");
     check_log(&log, &run, commits);
+    // Each publish wrote as many frames as it has transactions; a compaction adds one frame every
+    // 1,025 changesets.
+    let publishes = u64::try_from(CHILDREN * commits).expect("fits");
+    let passes = publishes * publish.passes();
+    assert!(
+        (passes..=passes + publishes / 1_000 + 1).contains(&frames),
+        "{frames} journal frames for {publishes} publishes of {} transactions each",
+        publish.passes()
+    );
+    if publish != Publish::No {
+        check_own_refs(&store, &run);
+    }
 }
 
 /// The harness's own deadline: of two children, the one told to hang after the go is killed
@@ -300,9 +329,58 @@ fn child_env() -> Option<ChildEnv> {
     })
 }
 
-/// A child's run: [`COMMITS`] commits (or as [`COMMITS_VAR`] says), each on the one before,
-/// then its report. Anything but a commit or an `E_BUSY` fails it, and so do
-/// [`MAX_BUSY_IN_A_ROW`] `E_BUSY`s in a row and a commit not started by [`CHILD_DEADLINE`].
+/// How each child publishes its commits ([`PUBLISH_VAR`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Publish {
+    /// It only commits.
+    No,
+    /// `commit --advance` on its own ref: one transaction a publish.
+    OneStep,
+    /// `commit`, then `ref set --expect` on its own ref: two transactions a publish.
+    TwoStep,
+}
+
+impl Publish {
+    /// What [`PUBLISH_VAR`] says in this process's environment.
+    fn from_env() -> Publish {
+        match std::env::var(PUBLISH_VAR).as_deref() {
+            Err(_) => Publish::No,
+            Ok("1") => Publish::OneStep,
+            Ok("0") => Publish::TwoStep,
+            Ok(other) => panic!(
+                "{PUBLISH_VAR} is 1 (commit --advance) or 0 (commit, then ref set), not {other:?}"
+            ),
+        }
+    }
+
+    /// The value of [`PUBLISH_VAR`] that says it, for the children; `None` for [`Publish::No`].
+    fn var(self) -> Option<&'static str> {
+        match self {
+            Publish::No => None,
+            Publish::OneStep => Some("1"),
+            Publish::TwoStep => Some("0"),
+        }
+    }
+
+    /// How many write transactions, so passes of the lock that write a frame, a publish takes.
+    fn passes(self) -> u64 {
+        match self {
+            Publish::No | Publish::OneStep => 1,
+            Publish::TwoStep => 2,
+        }
+    }
+}
+
+/// The ref child `number` publishes on ([`PUBLISH_VAR`]).
+fn own_ref(number: usize) -> String {
+    format!("release/agent-{number:02}")
+}
+
+/// A child's run: [`COMMITS`] commits (or as [`COMMITS_VAR`] says), each on the one before, each
+/// published on its own ref as [`PUBLISH_VAR`] says, then its report. Anything but a commit (and
+/// its publish) or an `E_BUSY` fails it, and so do [`MAX_BUSY_IN_A_ROW`] `E_BUSY`s in a row and a
+/// commit not started by [`CHILD_DEADLINE`]. A publish's time is its commit's, and in two steps
+/// its move's too.
 fn child(env: &ChildEnv) {
     let number = env.number;
     let store = store_path(&env.work);
@@ -310,6 +388,8 @@ fn child(env: &ChildEnv) {
     let agent = format!("contention/agent-{number:02}");
     let path = format!("agents/{number:02}.txt");
     let commits = commits_per_child();
+    let publish = Publish::from_env();
+    let own = own_ref(number);
     let mut report = Report {
         child: number,
         elapsed_ms: Vec::with_capacity(commits),
@@ -335,10 +415,33 @@ fn child(env: &ChildEnv) {
             "child {number}: commit {j} not started {CHILD_DEADLINE:?} after the go"
         );
         let what = format!("agent {number} commit {j}");
+        let label = format!("child {number}, commit {j}");
         let parent = report.head.clone();
-        let (run, wall) = commit(&store, &changes, &agent, Some(&parent), &path, &what);
-        match outcome(&run, Some(&parent), &format!("child {number}, commit {j}")) {
+        let advance = (publish == Publish::OneStep).then_some(own.as_str());
+        let (run, wall) = commit(
+            &store,
+            &changes,
+            &agent,
+            Some(&parent),
+            &path,
+            &what,
+            advance,
+        );
+        match outcome(&run, Some(&parent), &label) {
             Outcome::Committed { id, elapsed_ms } => {
+                let (elapsed_ms, wall) = match publish {
+                    Publish::No => (elapsed_ms, wall),
+                    Publish::OneStep => {
+                        let advanced = &run.envelope()["result"]["advanced"];
+                        assert_eq!(advanced["new"], id.as_str(), "{label}: no move: {run}");
+                        (elapsed_ms, wall)
+                    }
+                    Publish::TwoStep => {
+                        let mv = (own.as_str(), parent.as_str(), id.as_str());
+                        let (ms, took) = move_ref(&store, &agent, mv, &mut report.busy_ms, &label);
+                        (elapsed_ms + ms, wall + took)
+                    }
+                };
                 report.elapsed_ms.push(elapsed_ms);
                 report.wall_us.push(micros(wall));
                 report.head = id;
@@ -394,7 +497,7 @@ fn timed(args: &[&str]) -> (support::Run, Duration) {
 
 /// Commits one small file, `path`, as `agent` on `parent` (with none, on main if it exists)
 /// to `store`, through the change list file `changes`, which it rewrites: the file's content
-/// and the message are both `what`.
+/// and the message are both `what`. With `advance`, the commit also moves that ref to it.
 fn commit(
     store: &str,
     changes: &Path,
@@ -402,6 +505,7 @@ fn commit(
     parent: Option<&str>,
     path: &str,
     what: &str,
+    advance: Option<&str>,
 ) -> (support::Run, Duration) {
     let list = json!([{"path": path, "op": "put", "content": {"inline": format!("{what}\n")}}]);
     fs::write(changes, list.to_string()).expect("write a change list");
@@ -420,7 +524,41 @@ fn commit(
     if let Some(parent) = parent {
         args.extend(["--parent", parent]);
     }
+    if let Some(name) = advance {
+        args.extend(["--advance", name]);
+    }
     timed(&args)
+}
+
+/// Moves ref `name` from `old` to `new` (`(name, old, new)`) as `agent` on `store`: the second
+/// transaction of a publish in two steps. Each `E_BUSY` goes into `busy`, and the move is run
+/// again; anything else but the move fails the test, named after `what`. The move's
+/// `meta.elapsed_ms` and wall time, its `E_BUSY` runs' not counted.
+fn move_ref(
+    store: &str,
+    agent: &str,
+    (name, old, new): (&str, &str, &str),
+    busy: &mut Vec<u64>,
+    what: &str,
+) -> (u64, Duration) {
+    let args = [
+        "--repo", store, "--as", agent, "ref", "set", name, new, "--expect", old,
+    ];
+    for _ in 0..MAX_BUSY_IN_A_ROW {
+        let (run, wall) = timed(&args);
+        let envelope = run.envelope();
+        let elapsed_ms = elapsed_ms(&envelope, what);
+        match run.exit() {
+            0 => {
+                let applied = &envelope["result"]["already_applied"];
+                assert_eq!(applied, false, "{what}: the move: {run}");
+                return (elapsed_ms, wall);
+            }
+            4 if envelope["error"]["code"] == "E_BUSY" => busy.push(elapsed_ms),
+            _ => panic!("{what}: the move: {run}"),
+        }
+    }
+    panic!("{what}: the move met E_BUSY {MAX_BUSY_IN_A_ROW} times in a row");
 }
 
 /// What a commit came to.
@@ -484,6 +622,7 @@ fn create_store(work: &Path) -> String {
         None,
         "README.md",
         what,
+        None,
     );
     let Outcome::Committed { id, .. } = outcome(&base, None, "the base commit") else {
         panic!("the base commit: {base}");
@@ -503,6 +642,46 @@ fn create_store(work: &Path) -> String {
     id
 }
 
+/// Creates each child's ref ([`own_ref`]) at `base` in `store`, for the publishes
+/// ([`PUBLISH_VAR`]).
+fn create_own_refs(store: &str, base: &str) {
+    for number in 0..CHILDREN {
+        let name = own_ref(number);
+        let create = [
+            "--repo",
+            store,
+            "--as",
+            "contention/harness",
+            "ref",
+            "set",
+            &name,
+            base,
+            "--create",
+        ];
+        support::run_within(&create, &[], RUN_TIMEOUT).ok();
+    }
+}
+
+/// Checks that each child's ref names its last changeset: its every publish moved it.
+fn check_own_refs(store: &str, run: &Contention) {
+    let listed = support::run_within(&["--repo", store, "ref", "list"], &[], RUN_TIMEOUT).ok();
+    let refs = listed["refs"].as_array().expect("refs");
+    for report in run.reports.iter().flatten() {
+        let name = own_ref(report.child);
+        let target = (refs.iter())
+            .find(|r| r["name"] == name.as_str())
+            .and_then(|r| r["target"].as_str());
+        assert_eq!(target, Some(report.head.as_str()), "{name}");
+    }
+}
+
+/// How many frames the journal of `store` holds.
+fn journal_frames(store: &str) -> u64 {
+    let layout = Layout::new(Utf8PathBuf::from(store));
+    let journal = Journal::open(&layout, Arc::new(RealFs)).expect("open the journal");
+    journal.frame_count().expect("count the journal's frames")
+}
+
 /// Checks that the harness sees a `Busy`: a commit while this process holds `meta/lock` must
 /// get `E_BUSY` (exit 4) after the store's lock timeout. Returns its `meta.elapsed_ms`.
 fn busy_control(work: &Path, base: &str) -> u64 {
@@ -517,6 +696,7 @@ fn busy_control(work: &Path, base: &str) -> u64 {
         Some(base),
         "control.txt",
         "the lock is held",
+        None,
     );
     drop(held);
     let Outcome::Busy { elapsed_ms } = outcome(&run, Some(base), "the control commit") else {
@@ -608,6 +788,7 @@ fn spawn_children(
             .env(WORK_DIR, work)
             .env(CHILD_NUMBER, number.to_string())
             .env(BASE, base)
+            .env_remove(PUBLISH_VAR)
             .envs(env.iter().copied())
             .stdout(file("stdout"))
             .stderr(file("stderr"))
@@ -705,11 +886,17 @@ struct Contention {
     load: [f64; 4],
 }
 
-/// Runs [`CHILDREN`] children on the store in `work`, from `base`, lets them go together
-/// once all are ready, and collects their reports; a child that fails, or one still running at
-/// [`PARENT_DEADLINE`], fails the test (every child killed and reaped first).
-fn run_children(work: &Path, base: &str) -> Contention {
-    let mut children = spawn_children(work, base, TEST, CHILDREN, &[]);
+/// Runs [`CHILDREN`] children on the store in `work`, from `base`, publishing as `publish` says,
+/// lets them go together once all are ready, and collects their reports; a child that fails, or
+/// one still running at [`PARENT_DEADLINE`], fails the test (every child killed and reaped
+/// first).
+fn run_children(work: &Path, base: &str, publish: Publish) -> Contention {
+    let env: Vec<(&str, &str)> = publish
+        .var()
+        .map(|v| (PUBLISH_VAR, v))
+        .into_iter()
+        .collect();
+    let mut children = spawn_children(work, base, TEST, CHILDREN, &env);
     wait_until_ready(work, &mut children);
     let before = load_average();
     let sampler = LoadSampler::start();
@@ -731,8 +918,14 @@ fn run_children(work: &Path, base: &str) -> Contention {
     }
 }
 
-/// Prints what the children measured, and returns how many `E_BUSY`s they met.
-fn print_contention(run: &Contention, commits: usize, control_ms: u64) -> usize {
+/// Prints what the children measured, with how they published and the journal frames their
+/// run wrote (`(publish, frames)`), and returns how many `E_BUSY`s they met.
+fn print_contention(
+    run: &Contention,
+    commits: usize,
+    control_ms: u64,
+    (publish, frames): (Publish, u64),
+) -> usize {
     let reports: Vec<&Report> = run.reports.iter().flatten().collect();
     let mut elapsed: Vec<u64> = reports
         .iter()
@@ -746,9 +939,20 @@ fn print_contention(run: &Contention, commits: usize, control_ms: u64) -> usize 
     wall.sort_unstable();
     let busy: usize = reports.iter().map(|report| report.busy_ms.len()).sum();
     let [before, low, high, after] = run.load;
+    let how = match publish {
+        Publish::No => "",
+        Publish::OneStep => {
+            ", each published on the child's release/agent-<n> in the same transaction \
+             (commit --advance)"
+        }
+        Publish::TwoStep => {
+            ", each published on the child's release/agent-<n> by a ref set after it (two \
+             transactions)"
+        }
+    };
     println!(
         "{SUMMARY}{CHILDREN} children x {commits} commits of one small file each, each child on \
-         its own chain (--parent its previous changeset)"
+         its own chain (--parent its previous changeset){how}"
     );
     println!(
         "{SUMMARY}load (1-minute average): {before:.2} before, {low:.2}-{high:.2} during, \
@@ -760,6 +964,23 @@ fn print_contention(run: &Contention, commits: usize, control_ms: u64) -> usize 
         run.wall.as_secs_f64(),
         per_second(elapsed.len(), run.wall)
     );
+    if publish != Publish::No {
+        let publishes = u64::try_from(elapsed.len()).unwrap_or(u64::MAX).max(1);
+        println!(
+            "{SUMMARY}{} publishes: {:.1} publishes/s; {:.3} journal frames, so lock passes, per \
+             publish ({} by construction, and a compaction's frame every 1,025 changesets); \
+             a publish's meta.elapsed_ms below is its commit's{}",
+            elapsed.len(),
+            per_second(elapsed.len(), run.wall),
+            ratio(frames, publishes),
+            publish.passes(),
+            if publish == Publish::TwoStep {
+                " and its ref set's"
+            } else {
+                ""
+            }
+        );
+    }
     if !elapsed.is_empty() {
         println!(
             "{SUMMARY}commit meta.elapsed_ms: mean {} p50 {} p90 {} p99 {} p99.9 {} max {}",
@@ -849,6 +1070,7 @@ fn print_solo(work: &Path, base: &str, contention: &Contention) {
             Some(&parent),
             "solo.txt",
             &what,
+            None,
         );
         match outcome(&run, Some(&parent), &what) {
             Outcome::Committed { id, elapsed_ms } => {

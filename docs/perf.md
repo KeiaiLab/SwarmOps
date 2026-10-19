@@ -817,3 +817,31 @@ At the loads and raw `fdatasync` latencies in the tables above: outside W2, load
 - **Group commit.** No durable engine here puts several writers' commits under one sync, so each one's W2 rate is bounded by its own per-commit sync cost (sled, a reference line, runs W2 above W1: 2,110 against 1,791 transactions/s). With 32 writers that is where the next factor lies, for the native store as for the others.
 - **The disk.** Every durable engine here waits on `fdatasync`; the ratios follow the number of syncs per commit for as long as a sync costs more than the rest of a commit (94 % of it here), and the other engines' one sync costs about half of a raw append + `fdatasync` (W1: 1.82–2.34 ms against 3.8–4.7) where each native sync costs about one (3.70–3.87 ms). Most likely every native sync pays for a new length or a new inode that ext4 logs before the sync returns, while redb rewrites pages in place, SQLite rewrites its WAL from the start after each checkpoint and fjall writes into a journal it pre-sized to 64 MiB; journal files preallocated in place would test that. W2 ran on a disk about twice as slow as W1's (a 6.7–9.7 ms probe against 3.8–5.1); the native store's rate fell to 0.54 of its W1 rate and redb's to 0.51, about as much as the disk, fjall's to 0.40 and SQLite's to 0.22, so the ratios between the engines moved (against the native store: SQLite 7.0× in W1, 2.8–2.9× in W2; fjall 6.6×, 4.9×; redb 7.6×, 7.1×); the records do not say why.
 - **A long-lived reader.** A server process (M10) could keep the index's files open and cache the sorted views' upper levels, closing most of W3's and W6's gap; mapping the files is ruled out while `unsafe` is forbidden. A CLI command, which takes one or two snapshots, pays 0.1–0.2 ms.
+
+## M1.6 — publishes under 32 writers: one transaction against two (not measured yet)
+
+`commit --advance` makes a publish one write transaction: the changeset and the move of its ref
+in one journal frame, where `commit` and then `ref set --expect` take two. The CLI contention
+test measures what that saves under 32 writers (`crates/swarmops-cli/tests/contention.rs`): with
+`SWARMOPS_TEST_CLI_CONTENTION_ADVANCE=1` each child publishes its 1,000 commits in one
+transaction each, `commit --parent <its previous> --advance release/agent-<n>`, and with `=0` the
+same children publish in two, `commit --parent <its previous>`, then `ref set release/agent-<n>
+<it> --expect <its previous>`; the parent creates the 32 refs at the base changeset before the
+children start. The summary gives publishes/s and the journal frames each publish wrote, so its
+**lock passes per publish**: 1 against 2 by construction (a compaction's frame every 1,025
+changesets aside), which the test asserts.
+
+The per-child refs are the measurement's artefact, not a ref model: agents publish to `main`
+(umbrella decision 7), where every publish in a round but one loses its compare-and-swap,
+records nothing and runs again on the winner. So these numbers are never landing throughput;
+the shared-`main` compare-and-swap loop is M4's to measure.
+
+Not measured yet: M1.6 runs its measurements once, after its last task, in a quiet window under
+the host's heavy-run lock, and those two runs fill this section. Each is
+
+```sh
+SWARMOPS_TEST_CLI_CONTENTION_ADVANCE=1 cargo nextest run --locked --release -p swarmops-cli \
+  --run-ignored ignored-only --test all -E 'test(/^contention::thirty_two/)' --no-capture
+```
+
+with `=1`, and again with `=0`.

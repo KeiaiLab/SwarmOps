@@ -239,6 +239,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   take two and six. `swarmops mcp` refuses `advance` without a full 64-hex `parent`
   (`E_INVALID_ARG`), `swarmops schema` lists `Advanced`, and `swarmops_store::check_ref_name`
   checks a ref name as every ref operation does.
+- The CLI-level 32-process contention measurement (`crates/swarmops-cli/tests/contention.rs`)
+  can publish: with `SWARMOPS_TEST_CLI_CONTENTION_ADVANCE=1` each child publishes every commit
+  on a ref of its own in one transaction (`commit --advance`), with `=0` in two (`commit`, then
+  `ref set`), and the summary gives publishes/s and the journal frames, so the lock passes, each
+  publish took. [docs/perf.md](docs/perf.md) has the section the quiet-window runs fill.
 
 ### Changed
 
