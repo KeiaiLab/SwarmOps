@@ -13,7 +13,7 @@ use swarmops_api::{
     FileKind, Identity, IdentityInfo, InfoReq, InitReq, LogPage, LogReq, Meta, ModeInput, OpError,
     ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefSetReq, RefSetResp,
     RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
-    VerifyReport, VerifyReq, schema_for_all,
+    VerifyFinding, VerifyReport, VerifyReq, schema_for_all,
 };
 
 /// Requests and the input types inside them.
@@ -54,6 +54,7 @@ const RESPONSES: &[&str] = &[
     "Signatures",
     "TreeEntryOut",
     "TreeListing",
+    "VerifyFinding",
     "VerifyReport",
 ];
 
@@ -337,6 +338,101 @@ fn envelope_for_failure_carries_the_error_and_no_result() {
     );
 }
 
+/// Whether `value` meets `branch`, a schema of the keywords the `oneOf` branches in this file
+/// use: `required`, `properties` whose schemas are a `const` or a `type`, and `not`. Any other
+/// keyword fails the test, so that a branch cannot gain a rule this reading would skip.
+fn meets(branch: &Value, value: &Value) -> bool {
+    let fields = value.as_object().expect("an object to check");
+    let keyword = |(name, rule): (&String, &Value)| match name.as_str() {
+        "required" => rule
+            .as_array()
+            .expect("required is an array")
+            .iter()
+            .all(|key| fields.contains_key(key.as_str().expect("a key"))),
+        "properties" => rule
+            .as_object()
+            .expect("properties is an object")
+            .iter()
+            .all(|(key, schema)| fields.get(key).is_none_or(|field| is(schema, field))),
+        "not" => !meets(rule, value),
+        other => panic!("a keyword this test does not read: {other}"),
+    };
+    branch
+        .as_object()
+        .expect("a branch is a schema object")
+        .iter()
+        .all(keyword)
+}
+
+/// Whether `field` is what `schema`, a `const` or a `type`, allows.
+fn is(schema: &Value, field: &Value) -> bool {
+    let keyword = |(name, rule): (&String, &Value)| match name.as_str() {
+        "const" => field == rule,
+        "type" => match rule.as_str().expect("a type name") {
+            "string" => field.is_string(),
+            "null" => field.is_null(),
+            other => panic!("a type this test does not read: {other}"),
+        },
+        other => panic!("a keyword this test does not read: {other}"),
+    };
+    schema
+        .as_object()
+        .expect("a property schema is an object")
+        .iter()
+        .all(keyword)
+}
+
+/// The branches of `schema`'s `oneOf` that `value` meets, by their index.
+fn branches_met(schema: &Value, value: &Value) -> Vec<usize> {
+    let branches = schema["oneOf"].as_array().expect("a oneOf");
+    (0..branches.len())
+        .filter(|&i| meets(&branches[i], value))
+        .collect()
+}
+
+/// `Envelope`'s schema says what its two constructors keep: exactly one of `result` (when
+/// `ok`) and `error` (when not), the other omitted, and `error` never null. The wire does not
+/// change: each constructor's envelope meets its own branch alone, and the shapes they never
+/// write meet none.
+#[test]
+fn envelope_schema_says_exactly_one_outcome() {
+    let schema = &schema_for_all()["Envelope"];
+    assert_eq!(
+        schema["oneOf"],
+        json!([
+            {"properties": {"ok": {"const": true}}, "required": ["result"],
+             "not": {"required": ["error"]}},
+            {"properties": {"ok": {"const": false}}, "required": ["error"],
+             "not": {"required": ["result"]}},
+        ])
+    );
+    assert_eq!(
+        schema["properties"]["error"],
+        json!({
+            "$ref": "#/$defs/OpError",
+            "description": "The failure; present exactly when not `ok`.",
+        })
+    );
+    assert_eq!(schema["required"], json!(["ok", "op", "api", "meta"]));
+
+    let bare = || OpError::new(ErrorCode::RevNotFound, "no rev x");
+    let error = serde_json::to_value(bare()).unwrap();
+    let ok = serde_json::to_value(Envelope::ok("info", json!({}), meta())).unwrap();
+    let failed = serde_json::to_value(Envelope::<Value>::err("info", bare(), meta())).unwrap();
+    assert_eq!(branches_met(schema, &ok), [0]);
+    assert_eq!(branches_met(schema, &failed), [1]);
+    for never in [
+        json!({"ok": true, "result": {}, "error": error}),
+        json!({"ok": false, "result": {}, "error": error}),
+        json!({"ok": true}),
+        json!({"ok": false}),
+        json!({"ok": true, "error": error}),
+        json!({"ok": false, "result": {}}),
+    ] {
+        assert_eq!(branches_met(schema, &never), [0_usize; 0], "{never}");
+    }
+}
+
 #[test]
 fn error_object_always_carries_details_and_hint() {
     // `details` reads as `{}` when it is missing or null.
@@ -457,6 +553,10 @@ fn requests_and_responses_ignore_unknown_fields() {
     assert_ignores_unknown_fields::<VerifyReport>(
         "VerifyReport",
         json!({"objects_checked": 0, "changesets_checked": 0, "problems": []}),
+    );
+    assert_ignores_unknown_fields::<VerifyFinding>(
+        "VerifyFinding",
+        json!({"kind": "missing_object", "object": "b1", "changeset": "c9f1"}),
     );
     assert_ignores_unknown_fields::<Meta>(
         "Meta",
@@ -748,6 +848,138 @@ fn ref_moves_carry_warnings_only_when_there_are_some() {
         r#"{"name":"main","old":"b0b0","new":"c9f1","already_applied":false,"warnings":["the ref move is committed"]}"#
     );
     assert_eq!(serde_json::from_str::<RefSetResp>(&text).unwrap(), moved);
+}
+
+/// `RefSetReq`'s schema says what `ref set` checks: exactly one of `expected_old` and
+/// `create`. Of the five shapes a request can take, the two that the operation accepts (its
+/// side is `ref_set_takes_exactly_one_of_expected_old_and_create` in the ops tests) meet one
+/// branch each, and the three it refuses meet none: both, neither, and a null `expected_old`.
+/// The wire does not change: each shape still reads as a `RefSetReq`.
+#[test]
+fn ref_set_schema_says_exactly_one_of_expected_old_and_create() {
+    let schema = &schema_for_all()["RefSetReq"];
+    assert_eq!(
+        schema["oneOf"],
+        json!([
+            {"required": ["expected_old"],
+             "properties": {"expected_old": {"type": "string"}, "create": {"const": false}}},
+            {"required": ["create"],
+             "properties": {"create": {"const": true}, "expected_old": {"type": "null"}}},
+        ])
+    );
+    // The shape, what it adds to a name and a new target, the branches it meets, and whether
+    // the operation takes it.
+    for (shape, fields, met, accepted) in [
+        (
+            "{expected_old}",
+            json!({"expected_old": "b0b0"}),
+            vec![0],
+            true,
+        ),
+        ("{create}", json!({"create": true}), vec![1], true),
+        (
+            "{expected_old, create}",
+            json!({"expected_old": "b0b0", "create": true}),
+            vec![],
+            false,
+        ),
+        ("{}", json!({}), vec![], false),
+        (
+            "{expected_old: null}",
+            json!({"expected_old": null}),
+            vec![],
+            false,
+        ),
+    ] {
+        let mut req = json!({"name": "main", "new": "c9f1"});
+        for (key, value) in fields.as_object().unwrap() {
+            req[key] = value.clone();
+        }
+        assert_eq!(branches_met(schema, &req), met, "{shape}");
+        assert_eq!(met.len() == 1, accepted, "{shape}");
+        serde_json::from_value::<RefSetReq>(req).unwrap_or_else(|e| panic!("{shape}: {e}"));
+    }
+}
+
+/// `verify`'s report carries `findings` beside `problems`, for a program to act on: a finding
+/// requires only its `kind`, a string with no list of values, so that a client reads kinds
+/// newer than its own; it has no message, since `problems` holds the line at the same index; a
+/// report written before findings existed reads as having none; and a finding omits the keys
+/// its kind does not use and calls its ref `ref`.
+#[test]
+fn verify_report_carries_findings_beside_problems() {
+    let all = schema_for_all();
+    let report = &all["VerifyReport"];
+    assert_eq!(
+        report["properties"]["findings"]["items"],
+        json!({"$ref": "#/$defs/VerifyFinding"})
+    );
+    assert_eq!(report["properties"]["findings"]["type"], "array");
+    assert_eq!(report["properties"]["findings"]["default"], json!([]));
+    assert_eq!(
+        report["required"],
+        json!(["objects_checked", "changesets_checked", "problems"])
+    );
+    let finding = &all["VerifyFinding"];
+    assert_eq!(finding["required"], json!(["kind"]));
+    assert_eq!(finding["properties"]["kind"]["type"], "string");
+    assert!(finding["properties"]["kind"].get("enum").is_none());
+    let keys: BTreeSet<&str> = finding["properties"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        BTreeSet::from([
+            "kind",
+            "object",
+            "changeset",
+            "parent",
+            "seq",
+            "offset",
+            "ref",
+            "cause"
+        ])
+    );
+
+    let before: VerifyReport = serde_json::from_value(
+        json!({"objects_checked": 3, "changesets_checked": 1, "problems": []}),
+    )
+    .unwrap();
+    assert_eq!(before.findings, []);
+    let dangling = VerifyFinding {
+        kind: "dangling_ref".to_owned(),
+        object: None,
+        changeset: None,
+        parent: None,
+        seq: None,
+        offset: None,
+        ref_name: Some("main".to_owned()),
+        cause: None,
+    };
+    let report = VerifyReport {
+        objects_checked: 3,
+        changesets_checked: 1,
+        problems: vec!["ref main names no changeset in the store".to_owned()],
+        findings: vec![dangling],
+    };
+    let text = serde_json::to_string(&report).unwrap();
+    assert_eq!(
+        text,
+        r#"{"objects_checked":3,"changesets_checked":1,"problems":["ref main names no changeset in the store"],"findings":[{"kind":"dangling_ref","ref":"main"}]}"#
+    );
+    assert_eq!(serde_json::from_str::<VerifyReport>(&text).unwrap(), report);
+    let clean = VerifyReport {
+        problems: Vec::new(),
+        findings: Vec::new(),
+        ..report
+    };
+    assert_eq!(
+        serde_json::to_string(&clean).unwrap(),
+        r#"{"objects_checked":3,"changesets_checked":1,"problems":[],"findings":[]}"#
+    );
 }
 
 #[test]

@@ -726,13 +726,14 @@ fn envelopes_keep_the_spec_field_order() {
 }
 
 /// `verify` exits 1 with `E_STORE_CORRUPT` when it finds problems, the whole report in
-/// `details`; a clean store is a success envelope with the report as `result`.
+/// `details`, each problem a line in `problems` and a finding at the same index in `findings`;
+/// a clean store is a success envelope with the report as `result`.
 #[test]
 fn verify_problems_exit_1_with_the_report() {
     let mut s = Session::new();
     let store = s.store();
     s.run(&["init", &store]);
-    s.commit(&store, None, "f.txt", "content", "c1");
+    let c1 = s.commit(&store, None, "f.txt", "content", "c1");
     for deep in [false, true] {
         let mut args = vec!["--repo", store.as_str(), "verify"];
         if deep {
@@ -741,6 +742,7 @@ fn verify_problems_exit_1_with_the_report() {
         let clean = s.run(&args);
         assert_eq!(clean.exit, 0);
         assert_eq!(clean["result"]["problems"], json!([]));
+        assert_eq!(clean["result"]["findings"], json!([]));
         assert_eq!(clean["result"]["changesets_checked"], 1);
     }
 
@@ -761,10 +763,15 @@ fn verify_problems_exit_1_with_the_report() {
         assert!(details["objects_checked"].as_u64().unwrap() >= 2);
         let problems = details["problems"].as_array().unwrap();
         assert_eq!(problems.len(), 1, "{problems:?}");
-        assert!(
-            problems[0].as_str().unwrap().contains(&blob.to_hex()),
-            "{problems:?}"
+        let findings = details["findings"].as_array().unwrap();
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0]["kind"], "missing_object", "{findings:?}");
+        assert_eq!(
+            findings[0]["object"],
+            blob.to_hex().as_str(),
+            "{findings:?}"
         );
+        assert_eq!(findings[0]["changeset"], c1.as_str(), "{findings:?}");
         let hint = damaged["error"]["hint"].as_str().unwrap();
         assert!(hint.contains(next), "{hint}");
     }

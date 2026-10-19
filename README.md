@@ -184,7 +184,10 @@ agent harness that speaks the Model Context Protocol, such as Claude Code, calls
 as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
 `ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
 `inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
-definitions it refers to written in place. Its result is the envelope the CLI prints for that
+definitions it refers to written in place, and kept a plain object: a rule across fields that
+the type's schema states with a top-level `oneOf`, which the Claude API refuses in a tool, is
+left to the description and to the server's own check, and the `expected_old` of `ref_set` and
+`ref_delete` asks for a full changeset id. Its result is the envelope the CLI prints for that
 request, as `structuredContent` and as text, and a failed operation sets `isError`, with the
 envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
 to clients that open with `initialize`.
@@ -232,10 +235,11 @@ The store and the identity are the server's, as they are a command's: `--repo`, 
 another identity: every commit and ref move is recorded for the server's agent, and without one
 they fail with `E_IDENTITY_REQUIRED`. The client starts the server as its own user, so the
 server reads `{"file": "<path>"}` content as the CLI does, on its own machine; it refuses a
-relative path (`E_INVALID_ARG`), since an agent cannot see the server's working directory, and
-a path that is the server's own stdin or stdout, the protocol's pipes: give absolute paths,
-the store's too. It opens the store for each call, and so sees what other agents commit
-meanwhile. The store runs in the server's process, so the server ends
+relative path (`E_INVALID_ARG`), since an agent cannot see the server's working directory; a
+path that is the server's own stdin or stdout, the protocol's pipes; and anything that is not
+a regular file (a FIFO, a socket, a device or a directory), which a read could block on: give
+absolute paths, the store's too. It opens the store for each call, and so sees what other
+agents commit meanwhile. The store runs in the server's process, so the server ends
 with it on any of the store's three documented aborts (storage spec §2): a failed journal write
 or sync whose cut-back fails too, in a write or in the repair before one, which any commit or
 ref move can meet; or an `init` that cannot take its `FORMAT` back, which no tool runs. The
@@ -258,7 +262,10 @@ Two rules matter more to an agent than to a person at the CLI:
   agent should ask for little: `max_bytes` of 32 KiB or less for `read_file`, a `limit` of 100
   or less for `read_tree` and `log`, paging on with the `cursor` a result returns, and
   `max_changes` of 100 or less for `show`. The tools' descriptions say so; the operations' own
-  defaults stay as they are.
+  defaults stay as they are. `read_file` alone raises Claude Code's limit for itself: its entry
+  in `tools/list` carries `_meta: {"anthropic/maxResultSizeChars": 200000}`, so Claude Code
+  keeps a `read_file` result of up to 200,000 characters in the conversation instead of saving
+  it to a file.
 
 ### When the server does not start
 

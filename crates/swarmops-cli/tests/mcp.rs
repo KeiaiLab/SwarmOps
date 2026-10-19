@@ -17,6 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Barrier, Mutex};
@@ -754,6 +755,60 @@ fn a_client_file_must_be_absolute_and_not_the_servers_stdio() {
     server.finish_clean();
     store.assert_clean("after the refused commits");
 }
+
+/// A `commit`'s client file that is not a regular file (a FIFO, whose open would block until
+/// something opens it for writing, a symlink to one, a device, a directory) is refused before
+/// anything is resolved, opened or read, with the change and the file named; the server serves
+/// on, and the store is untouched.
+#[test]
+fn a_client_file_that_is_not_a_regular_file_is_refused_without_blocking() {
+    let store = Store::init();
+    let fifo = store.tmp().join("pipe");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let to_fifo = store.tmp().join("to-pipe");
+    std::os::unix::fs::symlink(&fifo, &to_fifo).unwrap();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    for file in [
+        fifo.as_path(),
+        to_fifo.as_path(),
+        Path::new("/dev/null"),
+        store.tmp(),
+    ] {
+        let file = file.to_str().unwrap();
+        let refused = server.err(
+            "commit",
+            json!({
+                "message": "x",
+                "changes": [
+                    {"path": "README.md", "op": "put", "content": {"inline": "# acme\n"}},
+                    {"path": "lib.rs", "op": "put", "content": {"file": file}},
+                ],
+            }),
+            "E_INVALID_ARG",
+        );
+        assert_eq!(
+            refused["error"]["details"],
+            json!({"index": 1, "path": "lib.rs", "file": file}),
+            "{refused}"
+        );
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains("not a regular file"), "{file}: {message}");
+        assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
+        assert_eq!(server.result("ping", json!({})), json!({}));
+        let info = server.ok("repo_info", json!({}));
+        assert_eq!(info["result"]["changesets"], 0, "{file}: {info}");
+    }
+    server.finish_clean();
+    store.assert_clean("after the refused commits");
+}
+
 /// A changeset committed through `server` on `parent`, putting a file named `name`; its id.
 fn commit_on(server: &mut Server, name: &str, parent: &str) -> String {
     let arguments = json!({
@@ -1414,7 +1469,8 @@ fn check_envelope(tool: &str, envelope: &Value) {
 
 /// Checks the tool `name` lists: its request type's schema (`request`, as `schema_for_all`
 /// gives it in `all`) standing alone, with no references; a title, a one-line description, and
-/// the annotations of what it does to the store.
+/// the annotations of what it does to the store; and for `read_file` alone, the `_meta` that
+/// raises the size of a result Claude Code keeps in the conversation to 200,000 characters.
 fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     let keys: BTreeSet<&str> = tool
         .as_object()
@@ -1422,11 +1478,17 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        keys,
-        BTreeSet::from(["name", "title", "description", "inputSchema", "annotations"]),
-        "{tool}"
-    );
+    let mut expected =
+        BTreeSet::from(["name", "title", "description", "inputSchema", "annotations"]);
+    if name == "read_file" {
+        expected.insert("_meta");
+        assert_eq!(
+            tool["_meta"],
+            json!({"anthropic/maxResultSizeChars": 200_000}),
+            "{tool}"
+        );
+    }
+    assert_eq!(keys, expected, "{tool}");
     for field in ["title", "description"] {
         let text = tool[field].as_str().unwrap();
         assert!(!text.is_empty() && !text.contains('\n'), "{name}: {text:?}");

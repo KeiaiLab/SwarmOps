@@ -47,8 +47,8 @@ use crate::mcp;
 use crate::output::{self, Format, Printed};
 
 /// The hint of a failed deep `verify`, which leaves nothing to re-check.
-const RESTORE_HINT: &str =
-    "details.problems names each damaged object or record: restore them from a backup of the store";
+const RESTORE_HINT: &str = "details.findings names each damaged object, record or ref by kind and \
+                            id: restore them from a backup of the store";
 
 /// What every command runs with besides its own arguments.
 pub struct Ctx<'a> {
@@ -634,6 +634,7 @@ mod tests {
             objects_checked: 5,
             changesets_checked: 2,
             problems: problems.iter().map(|p| (*p).to_owned()).collect(),
+            findings: Vec::new(),
         };
         assert_eq!(clean(report(&[]), false).unwrap(), report(&[]));
         let one = clean(report(&["object x is missing"]), false).unwrap_err();

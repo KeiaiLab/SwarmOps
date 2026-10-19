@@ -323,6 +323,7 @@ expression: s.transcript()
             "Signatures",
             "TreeEntryOut",
             "TreeListing",
+            "VerifyFinding",
             "VerifyReport",
             "VerifyReq"
           ]
