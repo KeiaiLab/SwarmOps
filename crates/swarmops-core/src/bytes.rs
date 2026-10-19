@@ -88,6 +88,8 @@ impl<'a, E> Reader<'a, E> {
 /// `n`, a length, count or offset held in a `usize`, as the `u64` the byte layouts, the
 /// store and the API use. Lossless: no target Rust supports has a `usize` wider than 64 bits,
 /// as the assertion below checks when the crate compiles, so this never panics.
+// Inlined into the other crates, as the private helpers this replaced were in their own.
+#[inline]
 pub fn to_u64(n: usize) -> u64 {
     u64::try_from(n).expect("a usize fits in a u64")
 }
