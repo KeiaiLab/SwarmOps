@@ -4,6 +4,7 @@
 //! line here.
 
 mod conflict;
+mod diff3;
 mod line_diff;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file

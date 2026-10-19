@@ -18,7 +18,10 @@ swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 imara-diff.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
+diffy.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
 
 # One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
 # its tests named `<file>::<test>`. Cargo builds no other test target from `tests/`
