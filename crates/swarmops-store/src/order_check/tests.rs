@@ -395,6 +395,13 @@ fn w7_format_is_linked_last() {
     };
     assert_breaks("W7", || link(&fs));
     fs.fsync_dir(&root.join("objects")).unwrap();
+    // The rest of the store durable, FORMAT's own data must be synced too, though the staging
+    // directory it is written in is exempt from the rest.
+    let unsynced = root.join("objects/tmp/format");
+    fs.append(&unsynced, b"1\n").unwrap();
+    assert_breaks("W7", || {
+        fs.link_noclobber(&unsynced, &format).unwrap();
+    });
     link(&fs);
 }
 
