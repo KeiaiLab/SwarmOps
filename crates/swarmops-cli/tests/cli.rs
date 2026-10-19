@@ -483,6 +483,107 @@ fn commit_advance_publishes_the_changeset_and_moves_the_ref() {
     }
 }
 
+/// `commit --key UUID` through the binary: the same command run again replays the first run's
+/// changeset (`replayed: true`, nothing written, `info` counting one changeset), also with
+/// `SWARMOPS_TEST_NOW` moving the clock in between, since the key's time signs the commit
+/// (`show`'s `created_at` is the key's, to the second, and its `commit_key` the key); with
+/// `--advance`, the run again finds the ref's head carrying the key (`already_applied`); and a
+/// key that is not a uuid v7 is `E_INVALID_ARG`, exit 2, naming it, and records nothing.
+#[test]
+fn commit_with_a_key_twice_through_the_binary() {
+    use swarmops_ops::NOW_ENV;
+
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let list = |content: &str| {
+        json!([{"path": "f.txt", "op": "put", "content": {"inline": content}}]).to_string()
+    };
+    let (first_changes, second_changes) =
+        (s.file("1.json", &list("1")), s.file("2.json", &list("2")));
+    // uuid v7s whose time is 2001-09-09T01:46:40.999Z.
+    let (key, advance_key) = (
+        "00e8d4a5-13e7-7a1c-9b2d-3e4f5a6b7c8d",
+        "00e8d4a5-13e7-7a1c-9b2d-3e4f5a6b7c8e",
+    );
+    let keyed = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "keyed",
+        "--changes",
+        &first_changes,
+        "--key",
+        key,
+    ];
+
+    let first = s.run(&keyed);
+    assert_eq!(first.exit, 0, "{}", first.json);
+    assert_eq!(first["result"]["replayed"], false);
+    let c1 = s.name_at(&first, "/result/changeset", "c1");
+    let again = s.run_env(&[(NOW_ENV, "2000000000")], &keyed);
+    assert_eq!(again.exit, 0, "{}", again.json);
+    assert_eq!(again["result"]["changeset"], c1.as_str());
+    assert_eq!(again["result"]["replayed"], true);
+    assert_eq!(again["result"]["blobs_written"], 0);
+    let info = s.run(&["--repo", &store, "info"]);
+    assert_eq!(info["result"]["changesets"], 1);
+    let shown = s.run(&["--repo", &store, "show", &c1]);
+    assert_eq!(shown["result"]["created_at"], 1_000_000_000_000_u64);
+    assert_eq!(shown["result"]["metadata"]["commit_key"], key);
+
+    s.run(&[
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c1, "--create",
+    ]);
+    let advancing = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "advancing",
+        "--changes",
+        &second_changes,
+        "--key",
+        advance_key,
+        "--advance",
+        "main",
+    ];
+    let published = s.run(&advancing);
+    let c2 = s.name_at(&published, "/result/changeset", "c2");
+    assert_eq!(published["result"]["advanced"]["already_applied"], false);
+    let replayed = s.run(&advancing);
+    assert_eq!(replayed.exit, 0, "{}", replayed.json);
+    assert_eq!(
+        replayed["result"]["advanced"],
+        json!({"name": "main", "old": c1, "new": c2, "already_applied": true})
+    );
+    assert_eq!(replayed["result"]["replayed"], true);
+    assert_eq!(replayed["meta"]["resolved"], json!({"main": c2}));
+
+    let refused = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "x",
+        "--changes",
+        &first_changes,
+        "--key",
+        "retry-1",
+    ]);
+    assert_eq!((refused.exit, refused.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(refused["error"]["details"]["idempotency_key"], "retry-1");
+    let info = s.run(&["--repo", &store, "info"]);
+    assert_eq!(info["result"]["changesets"], 2);
+}
+
 #[test]
 fn missing_identity_exits_5() {
     let mut s = Session::new();

@@ -326,8 +326,10 @@ static TOOLS: [Spec; 10] = [
                       same transaction, only if the ref still names parent, which must then be \
                       the full 64-hex id you read; otherwise it records nothing (E_CAS_MISMATCH, \
                       details.committed false). Check result.advanced: a server that does not \
-                      know advance moves no ref. A {\"file\": path} content is read by this \
-                      server: give an absolute path.",
+                      know advance moves no ref. An idempotency_key, a uuid v7 new for each \
+                      commit, makes a retry safe: the same call again replays it \
+                      (result.replayed) instead of recording it twice. A {\"file\": path} \
+                      content is read by this server: give an absolute path.",
         effect: Effect::Adds,
         result_chars: None,
     },
@@ -1289,7 +1291,9 @@ enum Effect {
     /// It only reads.
     Reads,
     /// It adds to the store and changes nothing there (`commit`); run again, it adds again,
-    /// another changeset signed at its own time.
+    /// another changeset signed at its own time, unless the call carries an `idempotency_key`,
+    /// which makes the same call again a replay. A call without one is not idempotent, so the
+    /// tool does not say it is.
     Adds,
     /// It moves or deletes a ref by compare-and-swap, changing what the ref names; run again
     /// with the same arguments, it finds the ref as it asked (`already_applied`) or not as it

@@ -65,6 +65,25 @@ edits to the content at the error's `actual` and commit with --parent <actual> -
 Do not re-send your old whole-file puts: M1 has no merge, so they would revert the winner's \
 edits to shared files.";
 
+/// `commit --key`'s short help.
+const KEY_HELP: &str =
+    "A uuid v7 that makes a retry safe: the same commit run again replays (replayed: true)";
+
+/// `commit --key`'s long help.
+const KEY_LONG_HELP: &str = "A uuid v7 (RFC 9562) that makes a retry of this commit safe: make a \
+new one for each commit, and give it again only to retry that commit.
+
+The commit signs at the key's time, to the second, and records the key as its commit_key \
+metadata, so the same command run again on the same parent makes the same changeset, which the \
+store holds already: the result says replayed: true, with the first run's changeset, and \
+nothing is written. A commit whose parent is the changeset its key made (without --parent, \
+main's head, or REF's with --advance) replays that changeset instead of committing it again on \
+top of itself.
+
+Give --parent as the full changeset id you read: without it the commit builds on main's head \
+(REF's, with --advance) as it is when the command runs, so a retry after that head moved to \
+another changeset commits again, on the new head.";
+
 /// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
 /// on stdout.
 #[derive(Parser, Debug)]
@@ -148,6 +167,8 @@ pub enum Command {
         allow_empty: bool,
         #[arg(long, value_name = "REF", help = ADVANCE_HELP, long_help = ADVANCE_LONG_HELP)]
         advance: Option<String>,
+        #[arg(long, value_name = "UUID", help = KEY_HELP, long_help = KEY_LONG_HELP)]
+        key: Option<String>,
     },
     /// Print one file at a revision.
     Cat {

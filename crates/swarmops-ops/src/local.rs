@@ -77,6 +77,17 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 ///   recorded. Without `parent`, such a commit builds on that ref's head, recorded in the
 ///   request's [`Resolved`] under the ref's name, and on nothing if the ref does not exist (a
 ///   root changeset that creates it): the move then only detects a race from that moment on.
+///   With `idempotency_key`, a uuid v7 checked before anything is resolved (anything else is
+///   `E_INVALID_ARG`, naming it in `details.idempotency_key`), the commit signs at the key's
+///   time, to the second, whatever the clock and [`NOW_ENV`] say, and its metadata holds the
+///   key, in lowercase, as `commit_key`: the same request on the same parent is then the same
+///   changeset. A commit whose changeset the store held already, and which moved no ref, wrote
+///   nothing, and says `replayed`. A keyed commit whose parent (given, or the head it builds on
+///   by default, which another request may have moved there) is the changeset its key made
+///   replays that changeset rather than build on it, once a write transaction has confirmed
+///   under the store's lock that the changeset is there (with `advance`, that the ref names it;
+///   a ref that names another is `E_CAS_MISMATCH`). A keyed commit without `parent` builds on
+///   the head as it is when it runs, so a retry after that head moved elsewhere commits again.
 /// - `read_file` returns at most `max_bytes` bytes from the file's start: UTF-8 text when they
 ///   are text, a cut inside a character moved back to the character's start (so up to 3 bytes
 ///   fewer); otherwise exactly `max_bytes` bytes, in base64. A directory there is `E_IS_DIR`,
@@ -398,6 +409,70 @@ impl Recording<'_> {
         }
         Ok(head)
     }
+
+    /// The replay of a commit keyed `key` whose parent, the changeset it would build on, is
+    /// `parent`, when that is the changeset an earlier request with the key made (its
+    /// `commit_key`; one object read): the commit is made, and making it again would apply its
+    /// change a second time. `None` otherwise.
+    ///
+    /// The replay is decided under the store's lock, after the write's tail check, as a ref
+    /// move's replay is, never from this request's snapshot, which shows a whole frame that its
+    /// writer may not have synced yet: by a move of the ref the commit advances (`main` for one
+    /// that advances none) to the target it names, which [`Repo::cas_ref`] compares there and
+    /// never records. That move finds `parent` gone where the tail check took it back; then there
+    /// is no replay, and the commit goes on, as one on a parent that is gone does. With
+    /// `advance`, the ref must name `parent`, as `already_applied`; a ref that names another is
+    /// `E_CAS_MISMATCH`, which the commit itself would be. Either way the write's repairs are
+    /// recorded, as a commit's are.
+    ///
+    /// [`Repo::cas_ref`]: swarmops_repo::Repo::cas_ref
+    fn replay_of_key(
+        &self,
+        who: &Identity,
+        key: &CommitKey,
+        parent: ChangesetId,
+        advance: Option<&str>,
+    ) -> Result<Option<CommitResp>, OpError> {
+        let StoredChangeset { changeset, .. } = self.ops.stored(parent)?;
+        if !key.made(&changeset.metadata) {
+            return Ok(None);
+        }
+        let name = advance.unwrap_or("main");
+        let confirmed = match (self.ops.repo).cas_ref(name, Some(parent), Some(parent), who.agent())
+        {
+            Ok(confirmed) => confirmed,
+            Err(RepoError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(op(e)),
+        };
+        self.resolved.record_recovered(confirmed.recovered);
+        let old = changeset.parents.first().copied();
+        let advanced = match (advance, confirmed.result) {
+            (None, _) => None,
+            (Some(name), CasResult::Applied { .. }) => Some(swarmops_api::Advanced {
+                name: name.to_owned(),
+                old: old.map(|id| id.to_string()),
+                new: parent.to_string(),
+                already_applied: true,
+            }),
+            (Some(name), CasResult::Mismatch { actual }) => {
+                return Err(op(RepoError::RefMoved {
+                    name: name.to_owned(),
+                    actual,
+                    recovered: Box::new(confirmed.recovered),
+                }));
+            }
+        };
+        Ok(Some(CommitResp {
+            changeset: parent.to_string(),
+            parent: old.map(|id| id.to_string()),
+            root: changeset.root.to_string(),
+            files_changed: to_u64(changeset.delta.len()),
+            blobs_written: 0,
+            advanced,
+            warnings: confirmed.warnings,
+            replayed: true,
+        }))
+    }
 }
 
 impl StoreOps for Recording<'_> {
@@ -419,20 +494,34 @@ impl StoreOps for Recording<'_> {
             changes,
             message,
             advance,
-            // `commit --key` (M4 Task 8) gives the key its effect: until then it changes nothing,
-            // as for a store that does not know the field.
-            idempotency_key: _,
+            idempotency_key,
             allow_empty,
         } = req;
+        // A key that is not a uuid v7 is refused before anything is resolved or read.
+        let key = idempotency_key
+            .as_deref()
+            .map(CommitKey::parse)
+            .transpose()?;
         let parent = match (&parent, &advance) {
             (Some(rev), _) => Some(self.resolve(rev)?),
             // A commit that advances a ref builds on that ref's head by default.
             (None, Some(name)) => self.head(name)?,
             (None, None) => self.main_head()?,
         };
+        // A keyed commit whose parent is the changeset its key made has been made: it replays
+        // that changeset rather than make its change again on top of it.
+        if let (Some(key), Some(on)) = (&key, parent)
+            && let Some(replay) = self.replay_of_key(who, key, on, advance.as_deref())?
+        {
+            return Ok(replay);
+        }
         let changes = content::changes(changes)?;
-        let signature = native_signature(who);
+        let signature = native_signature(who, key.as_ref().map(|key| key.secs));
+        // In ascending key order, as a changeset's metadata must be.
         let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
+        if let Some(key) = &key {
+            metadata.push((COMMIT_KEY.to_owned(), key.text.clone().into_bytes()));
+        }
         if let Some(run_id) = who.run_id() {
             metadata.push(("run_id".to_owned(), run_id.as_bytes().to_vec()));
         }
@@ -462,6 +551,10 @@ impl StoreOps for Recording<'_> {
                 op(e)
             })?;
         self.resolved.record_recovered(outcome.recovered);
+        // The store held the changeset already, and the ref it advances, if any, named it: an
+        // identical request made both, and this one wrote nothing.
+        let replayed = matches!(outcome.insert, swarmops_repo::InsertOutcome::AlreadyPresent)
+            && (outcome.advanced.as_ref()).is_none_or(|moved| moved.already_applied);
         Ok(CommitResp {
             changeset: outcome.id.to_string(),
             parent: parent.map(|id| id.to_string()),
@@ -475,8 +568,7 @@ impl StoreOps for Recording<'_> {
                 already_applied: moved.already_applied,
             }),
             warnings: outcome.warnings,
-            // Reported with `commit --key` (M4 Task 8).
-            replayed: false,
+            replayed,
         })
     }
 
@@ -845,20 +937,21 @@ fn at_least_one(field: &str, value: usize) -> Result<(), OpError> {
 
 /// Test hook, in a build with the `test-hooks` feature: with `SWARMOPS_TEST_NOW=<unix seconds>`
 /// set to an integer, [`LocalOps`] signs the changesets it commits at that time instead of the
-/// clock's. The same commit made twice is then the same changeset, whenever it runs: a crash
-/// test's runs write the same objects, and so make the same filesystem calls, which the store's
-/// own test hooks count and crash at (`swarmops_store::CRASH_AT_ENV`,
-/// `swarmops_store::FS_CALLS_ENV`). Unset, not an integer, or in a build without the feature (a
-/// release build among them): the clock's time.
+/// clock's, but for a keyed commit's, which take their key's time either way. The same commit
+/// made twice is then the same changeset, whenever it runs: a crash test's runs write the same
+/// objects, and so make the same filesystem calls, which the store's own test hooks count and
+/// crash at (`swarmops_store::CRASH_AT_ENV`, `swarmops_store::FS_CALLS_ENV`). Unset, not an
+/// integer, or in a build without the feature (a release build among them): the clock's time.
 pub const NOW_ENV: &str = "SWARMOPS_TEST_NOW";
 
-/// The signature of a changeset that `who` records now: the agent name, the email
-/// `<instance>@<family>.swarmops.local`, the current time in UTC ([`signing_time`]).
-fn native_signature(who: &Identity) -> Signature {
+/// The signature of a changeset that `who` records: the agent name, the email
+/// `<instance>@<family>.swarmops.local`, and `secs`, a keyed commit's key's time, or else the
+/// current time ([`signing_time`]), in UTC.
+fn native_signature(who: &Identity, secs: Option<i64>) -> Signature {
     Signature {
         name: who.agent().as_bytes().to_vec(),
         email: format!("{}@{}.swarmops.local", who.instance(), who.family()).into_bytes(),
-        secs: signing_time(),
+        secs: secs.unwrap_or_else(signing_time),
         offset_secs: 0,
         negative_zero: false,
     }
@@ -889,6 +982,71 @@ fn test_now() -> Option<i64> {
 #[cfg(not(feature = "test-hooks"))]
 fn test_now() -> Option<i64> {
     None
+}
+
+/// The metadata key under which a keyed commit records its key.
+const COMMIT_KEY: &str = "commit_key";
+
+/// A commit's idempotency key (`CommitReq::idempotency_key`, `commit --key`): a uuid v7 (RFC
+/// 9562), whose first 48 bits are its time in Unix milliseconds.
+struct CommitKey {
+    /// The key as a changeset's `commit_key` metadata records it: 36 characters, lowercase.
+    text: String,
+    /// Its time in whole Unix seconds, which a keyed commit signs at, so that the same request
+    /// made again is the same changeset.
+    secs: i64,
+}
+
+impl CommitKey {
+    /// `key`, if it is a uuid v7: 32 hex digits of either case in groups of 8, 4, 4, 4 and 12,
+    /// a hyphen between each two, the version digit (the 15th character) 7, and the variant
+    /// digit (the 20th) 8, 9, a or b, for the variant `10`. Otherwise `E_INVALID_ARG`, naming
+    /// it in `details.idempotency_key`.
+    fn parse(key: &str) -> Result<CommitKey, OpError> {
+        let refused = |why: &str| {
+            error(
+                ErrorCode::InvalidArg,
+                format!("idempotency_key {key:?} is not a uuid v7: {why}"),
+            )
+            .with_details(details([("idempotency_key", key.into())]))
+            .with_hint("make a new uuid v7 for each commit, and give it again only to retry it")
+        };
+        let bytes = key.as_bytes();
+        let shaped = bytes.len() == 36
+            && bytes.iter().enumerate().all(|(at, byte)| match at {
+                8 | 13 | 18 | 23 => *byte == b'-',
+                _ => byte.is_ascii_hexdigit(),
+            });
+        if !shaped {
+            return Err(refused(
+                "a uuid is 32 hex digits in groups of 8, 4, 4, 4 and 12, a hyphen between each two",
+            ));
+        }
+        let (version, variant) = (char::from(bytes[14]), char::from(bytes[19]));
+        if version != '7' {
+            return Err(refused(&format!("its version digit is {version}, not 7")));
+        }
+        if !matches!(variant, '8' | '9' | 'a' | 'b' | 'A' | 'B') {
+            return Err(refused(&format!(
+                "its variant digit is {variant}, not 8, 9, a or b"
+            )));
+        }
+        let text = key.to_ascii_lowercase();
+        // The first 12 hex digits: the time.
+        let millis = (text.chars())
+            .filter(|c| *c != '-')
+            .take(12)
+            .filter_map(|c| c.to_digit(16))
+            .fold(0_u64, |millis, digit| (millis << 4) | u64::from(digit));
+        let secs = i64::try_from(millis / 1000).unwrap_or(i64::MAX);
+        Ok(CommitKey { text, secs })
+    }
+
+    /// Whether a changeset whose metadata is `metadata` records this key: the changeset a
+    /// request with it made.
+    fn made(&self, metadata: &[(String, Vec<u8>)]) -> bool {
+        (metadata.iter()).any(|(key, value)| key == COMMIT_KEY && value == self.text.as_bytes())
+    }
 }
 
 /// Whom a changeset's `metadata` attributes it to.
@@ -1396,6 +1554,103 @@ mod tests {
         };
         assert_eq!(resolved.take_recovered(), Some(listed_and_written));
         assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 2);
+    }
+
+    /// A keyed commit replays the changeset that carries its key, its ref's head here, only
+    /// once that is decided under the lock, after its write's tail check, as a ref move's
+    /// replay is (operations spec §4): never from a snapshot, which shows a whole frame
+    /// `journal.off` does not list as if it were committed, though its writer may not have
+    /// synced it. The first attempt's frame, its changeset and the move of `main` to it, is
+    /// whole and durable in journal.log, and its listing in journal.off fails: committed with a
+    /// warning, and readers see `main` at it. (a) The retry lists the frame before it answers its
+    /// replay, reports that as what its write repaired, and writes no frame of its own. (b)
+    /// Where the tail check can neither sync the frame nor write it afresh, it cuts it, and the
+    /// retry is a retryable `E_IO_TRANSIENT` that committed nothing, not a replay of a changeset
+    /// no reader sees afterwards.
+    #[test]
+    fn a_keyed_replay_is_decided_after_the_tail_check() {
+        // A uuid v7.
+        const KEY: &str = "00e8d4a5-13e7-7a1c-9b2d-3e4f5a6b7c8d";
+        for tail_check_fails in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let who = Identity::parse("agent/worker-17").unwrap();
+            // On main's head, advancing main.
+            let publish = |content: &str, key: Option<&str>| CommitReq {
+                parent: None,
+                changes: vec![ChangeInput {
+                    path: "f".to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline(content.to_owned())),
+                    mode: None,
+                }],
+                message: "m".to_owned(),
+                advance: Some("main".to_owned()),
+                idempotency_key: key.map(str::to_owned),
+                allow_empty: false,
+            };
+            let c1 = ops.commit(&who, publish("1", None)).unwrap().changeset;
+            let first = ops_on(&root, failing("append_durable", "journal.off"))
+                .commit(&who, publish("2", Some(KEY)))
+                .unwrap();
+            one_injected(&first.warnings);
+            let c2 = first.changeset;
+            let main = |ops: &LocalOps| ops.repo_info(InfoReq {}).unwrap().main;
+            assert_eq!(main(&ops).as_deref(), Some(c2.as_str()), "readers see c2");
+            let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
+            let lens = || (file_len(&log), file_len(&off));
+            let (log_len, off_len) = lens();
+            if tail_check_fails {
+                // The tail check's sync of journal.log fails, and so does its rewrite.
+                let model = Arc::new(FsyncModelFs::new().failing(|call| {
+                    call.path.ends_with("journal.log")
+                        && (call.method == "sync_data" || call.method == "append_durable")
+                }));
+                let error = ops_on(&root, Arc::clone(&model))
+                    .commit(&who, publish("2", Some(KEY)))
+                    .unwrap_err();
+                assert_eq!(
+                    (error.code.as_str(), error.exit, error.retryable),
+                    ("E_IO_TRANSIENT", 4, true),
+                    "{error:?}"
+                );
+                assert_eq!(error.details["committed"], false, "{error:?}");
+                assert_eq!(
+                    model.failed(),
+                    [format!("sync_data {log}"), format!("append_durable {log}")]
+                );
+                let fresh = LocalOps::open(&root).unwrap();
+                assert_eq!(
+                    main(&fresh).as_deref(),
+                    Some(c1.as_str()),
+                    "the cut took the commit back"
+                );
+                assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 1);
+            } else {
+                let resolved = Resolved::default();
+                let replay = ops
+                    .recording(&resolved)
+                    .commit(&who, publish("2", Some(KEY)))
+                    .unwrap();
+                assert!(replay.replayed && replay.warnings.is_empty(), "{replay:?}");
+                assert_eq!(replay.changeset, c2);
+                assert!(replay.advanced.is_some_and(|moved| moved.already_applied));
+                assert_eq!(
+                    lens(),
+                    (log_len, off_len + 8),
+                    "its write listed the frame before it answered, and wrote no frame of its own"
+                );
+                // It listed the frame, and wrote the index's record and the ref's file.
+                let listed_and_written = RecoveredOut {
+                    frames_listed: 1,
+                    records_replayed: 1,
+                    refs_replayed: 1,
+                    ..RecoveredOut::default()
+                };
+                assert_eq!(resolved.take_recovered(), Some(listed_and_written));
+            }
+        }
     }
 
     /// A `ref_set` to the target it expects is decided under the lock, after its write's tail
