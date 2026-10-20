@@ -17,10 +17,13 @@ default: check
 # first run leaves out. A doc of the default build cannot link to that code, or the first run
 # fails. Every step that resolves dependencies runs `--locked`: a Cargo.lock (either
 # workspace's) that the manifests no longer match fails the gate instead of being rewritten.
+# The last step fails when THIRD-PARTY-LICENSES, the notices of the third-party crates that the
+# release archives carry, no longer matches Cargo.lock, the licenses deny.toml allows and the
+# crates' packages: `python3 -I scripts/third-party-licenses.py` writes it again.
 # CI (.github/workflows/ci.yml) runs this recipe with `NEXTEST_PROFILE=ci`; the release run
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
-# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny.
+# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
@@ -32,6 +35,7 @@ check:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
     cargo deny --locked check
+    python3 -I scripts/third-party-licenses.py --check
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,

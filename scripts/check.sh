@@ -31,3 +31,5 @@ fi
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
 cargo deny --locked check
+# THIRD-PARTY-LICENSES, the notices the release archives carry, still matches Cargo.lock.
+python3 -I scripts/third-party-licenses.py --check
