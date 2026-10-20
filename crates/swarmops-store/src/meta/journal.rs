@@ -35,7 +35,8 @@
 //! measured after it, and damage to it is [`StoreError::JournalCorrupt`] for readers too;
 //! they skip only an unlisted torn tail (or an append still in progress) silently, and drop,
 //! as recovery does, the zeroed entries at the end of `journal.off` that a power loss leaves of
-//! an entry never synced (no frame but the first starts at 0). They read
+//! an entry never synced (no frame but the first starts at 0): a 4 KiB block of them at most,
+//! found with one read, and a longer run of zeros is damage. They read
 //! with `read_at` on read-only handles, except that `journal.ckpt`, which
 //! [`Journal::set_ckpt`] replaces by rename, is read by path.
 
@@ -63,6 +64,14 @@ const ENTRY_LEN: u64 = 8;
 /// failed, or zeroed or partial ones a crash left at its end), so the next read nearly always
 /// finds it still; a shrink every time is reported as damage.
 const OFF_REREADS: u32 = 3;
+
+/// The most zeroed entries at the end of `journal.off`, past frame 0, that readers and recovery
+/// drop: a 4 KiB block of them. A power loss leaves zeroed only the entry being written, always
+/// within one 512 B sector (storage spec §2 rule 3), so a longer run of zeros is damage,
+/// [`StoreError::JournalCorrupt`] at 0 (the offset such an entry holds); and finding where the
+/// entries that list frames end takes one read of at most the last 4 KiB of the file (and the
+/// entry before them), however long it is.
+const MAX_ZEROED: u64 = 512;
 
 /// A handle on one store's metadata journal.
 pub struct Journal {
@@ -292,7 +301,7 @@ impl Journal {
     /// starts over, measuring `journal.off` again, up to three times; a shrink every time is
     /// [`StoreError::JournalCorrupt`] at the first wanted frame's start, or 0 if its entry is gone
     /// too. Zeroed entries at the end of `journal.off` list nothing and are dropped first, as
-    /// recovery drops them (see [`Journal::tail_frames_from`]).
+    /// recovery drops them, 512 at most (see [`Journal::tail_frames_from`]).
     pub fn frames_from(&self, first: u64, limit: usize) -> Result<Vec<Frame>, StoreError> {
         reread(|| self.frames_from_once(first, limit))
     }
@@ -301,7 +310,7 @@ impl Journal {
     /// entries when they are read than it did when measured.
     fn frames_from_once(&self, first: u64, limit: usize) -> Result<Attempt, StoreError> {
         // journal.off cut since it was measured: entries of the snapshot are gone.
-        let Some(listed) = unless_cut(self.listed())? else {
+        let Some(listed) = self.listed()? else {
             return Ok(Attempt::Shrunk { offset: 0 });
         };
         let wanted = u64::try_from(limit)
@@ -368,6 +377,9 @@ impl Journal {
     /// `journal.off`, past frame 0, are not listings: a power loss between an entry's append
     /// and its sync may keep the file's length and lose the bytes. They are dropped first, as
     /// recovery drops them, and the frames they would list read as whole frames not listed yet.
+    /// A power loss leaves zeroed only the entry being written, so more than 512 of them (a
+    /// 4 KiB block) are damage, [`StoreError::JournalCorrupt`] at 0: finding where they start
+    /// reads at most the last 4 KiB of `journal.off`, however long it is.
     ///
     /// `journal.off` is measured, and the entries read, before `journal.log`: every frame
     /// listed then was whole and durable before its entry was written, so it is whole in
@@ -410,7 +422,7 @@ impl Journal {
     fn tail_frames_once(&self, offset: u64) -> Result<Attempt, StoreError> {
         // journal.off cut since it was measured: entries of the snapshot are gone.
         let shrunk = || Ok(Attempt::Shrunk { offset });
-        let Some(listed) = unless_cut(self.listed())? else {
+        let Some(listed) = self.listed()? else {
             return shrunk();
         };
         let Some(first) = unless_cut(self.first_at_or_after(offset, listed))? else {
@@ -513,11 +525,13 @@ impl Journal {
     ///   garbage in `journal.off` could make the cut or the new entries destroy or misnumber
     ///   committed frames;
     /// - a partial entry at the end of `journal.off` is dropped, and so are zeroed entries
-    ///   past frame 0 before it (a zero-filled block: no frame but the first starts at 0);
-    ///   the frame then left last is checked as any last listed frame is;
-    /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: a last listed
-    ///   frame, or the frame listed before it, that does not start where the frame listed
-    ///   before it ends; a last listed frame that is cut short, missing (`journal.log` ends
+    ///   past frame 0 before it, up to 512 of them (what a power loss leaves of an entry never
+    ///   synced: no frame but the first starts at 0); the frame then left last is checked as
+    ///   any last listed frame is;
+    /// - anything else is [`StoreError::JournalCorrupt`] and changes nothing: more than 512
+    ///   zeroed entries at the end of `journal.off` (at 0: more than a power loss leaves); a
+    ///   last listed frame, or the frame listed before it, that does not start where the frame
+    ///   listed before it ends; a last listed frame that is cut short, missing (`journal.log` ends
     ///   where it starts), fails its CRC or does not decode (a listed frame's bytes were
     ///   durable before it was listed, so its loss is a filesystem's, never a torn write); a
     ///   listed frame that fails the check before a cut or a listing; an unlisted frame that
@@ -567,24 +581,18 @@ impl Journal {
     /// frame takes. Its whole entries, measured on this handle (one `fstat`, no [`FsOps`]
     /// call), less the zeroed ones at its end past frame 0, which a power loss leaves of
     /// entries never synced, and which [`Journal::frames_from`], [`Journal::tail_frames_from`]
-    /// and recovery drop: one `read_at` of the last entry, and one more per zeroed one. An
-    /// entry cut since the measurement lists nothing either: a writer cuts only such zeroed or
-    /// partial entries, and one whose own append failed.
+    /// and recovery drop: one `read_at` of at most the last 513 entries. More than 512 zeroed
+    /// entries there are more than a power loss leaves: [`StoreError::JournalCorrupt`] at 0, as
+    /// for those readers and recovery. An entry cut since the measurement lists nothing either:
+    /// a writer cuts only such zeroed or partial entries, and one whose own append failed.
     pub fn frame_count(&self) -> Result<u64, StoreError> {
         let off_len = self
             .off
             .metadata()
             .map_err(|e| self.off_failed(FileOp::Stat, e))?;
-        let mut listed = off_len.len() / ENTRY_LEN;
-        while listed > 1 {
-            match self.entry(listed - 1) {
-                Ok(0) => listed -= 1,
-                Ok(_) => break,
-                Err(StoreError::Io(e)) if e.kind() == io::ErrorKind::UnexpectedEof => listed -= 1,
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(listed)
+        let whole = off_len.len() / ENTRY_LEN;
+        let (from, entries) = self.last_entries(whole)?;
+        listing(whole, from, &entries)
     }
 
     /// The offset up to which the journal is materialized: what [`Journal::set_ckpt`] last
@@ -754,20 +762,24 @@ impl Journal {
     fn check_tail(&self) -> Result<(Tail, TailRepair), StoreError> {
         let log_len = self.fs.file_len(self.log_path.as_std_path())?;
         let off_len = self.fs.file_len(self.off_path.as_std_path())?;
-        let mut listed = off_len / ENTRY_LEN;
+        // Zeroed entries past frame 0 at the end are what a power loss leaves of an entry never
+        // synced (no frame but the first starts at 0): dropped like a partial entry, up to
+        // MAX_ZEROED of them (more is damage, and nothing changes), and the frame left last is
+        // checked as the last listed one. Under the lock nothing cuts journal.off: an entry gone
+        // since it was measured fails the check.
+        let whole = off_len / ENTRY_LEN;
+        let (from, entries) = self.last_entries(whole)?;
+        if to_u64(entries.len()) < whole - from {
+            let gone = io::Error::from(io::ErrorKind::UnexpectedEof);
+            return Err(self.off_failed(FileOp::ReadAt, gone).into());
+        }
+        let listed = listing(whole, from, &entries)?;
         // Read from the last listed frame's start: that frame is checked again, and the
         // frames `journal.off` does not list yet follow it.
-        let mut start = match listed.checked_sub(1) {
+        let start = match listed.checked_sub(1) {
             Some(last) => self.entry(last)?,
             None => 0,
         };
-        // Zeroed entries past frame 0 at the end are what a zero-filled block leaves (no
-        // frame but the first starts at 0): dropped like a partial entry, and the frame left
-        // last is checked as the last listed one.
-        while start == 0 && listed > 1 {
-            listed -= 1;
-            start = self.entry(listed - 1)?;
-        }
         if start > log_len {
             return Err(StoreError::JournalCorrupt { offset: start });
         }
@@ -891,14 +903,26 @@ impl Journal {
     /// measured with [`FsOps::file_len`], less the zeroed ones at its end past frame 0, which
     /// recovery drops too. No frame but the first starts at 0: a zeroed entry there is what a
     /// power loss leaves of an entry appended and never synced (the file's length kept, its
-    /// bytes lost), and the frame it would list reads as one whole frame not listed yet. One
-    /// `read_at` of the last entry, and one more per zeroed entry.
-    fn listed(&self) -> Result<u64, StoreError> {
-        let mut listed = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
-        while listed > 1 && self.entry(listed - 1)? == 0 {
-            listed -= 1;
+    /// bytes lost), and the frame it would list reads as one whole frame not listed yet. More
+    /// than [`MAX_ZEROED`] of them is more than a power loss leaves: [`StoreError::JournalCorrupt`]
+    /// at 0. One `read_at` of at most the last 513 entries; `None` where it finds fewer than
+    /// were measured: a writer cut the file since.
+    fn listed(&self) -> Result<Option<u64>, StoreError> {
+        let whole = self.fs.file_len(self.off_path.as_std_path())? / ENTRY_LEN;
+        let (from, entries) = self.last_entries(whole)?;
+        if to_u64(entries.len()) < whole - from {
+            return Ok(None);
         }
-        Ok(listed)
+        listing(whole, from, &entries).map(Some)
+    }
+
+    /// The entries of the first `whole` of `journal.off` that may be zeroed ones to drop (past
+    /// frame 0, the last [`MAX_ZEROED`] + 1 at most), and where they start: [`listing`] reads
+    /// how many of the `whole` list frames from them. One `read_at`, of 4 KiB and 8 bytes at
+    /// most; fewer entries where the file ends before them.
+    fn last_entries(&self, whole: u64) -> Result<(u64, Vec<u64>), StoreError> {
+        let from = whole - whole.saturating_sub(1).min(MAX_ZEROED + 1);
+        Ok((from, self.entries(from, whole - from)?))
     }
 
     /// Where the frame listed before frame `seq` starts; `None` for frame 0.
@@ -995,6 +1019,19 @@ impl Journal {
     /// The failure `e` of `op` on this handle's `journal.off`, located.
     fn off_failed(&self, op: FileOp, e: io::Error) -> IoFailure {
         self.fs.locate(op, &self.off_path, e)
+    }
+}
+
+/// How many of the first `whole` entries of `journal.off` list frames, given `entries`, what it
+/// holds from entry `from` on ([`Journal::last_entries`]; an entry gone since `whole` was
+/// measured is missing there, and lists nothing): `whole`, less the zeroed entries at its end
+/// past frame 0, which are dropped (entry 0 lists frame 0, whatever it holds). More than
+/// [`MAX_ZEROED`] of them is [`StoreError::JournalCorrupt`] at 0.
+fn listing(whole: u64, from: u64, entries: &[u64]) -> Result<u64, StoreError> {
+    match entries.iter().rposition(|&entry| entry != 0) {
+        Some(last) => Ok(from + to_u64(last) + 1),
+        None if whole - from <= MAX_ZEROED => Ok(from),
+        None => Err(StoreError::JournalCorrupt { offset: 0 }),
     }
 }
 

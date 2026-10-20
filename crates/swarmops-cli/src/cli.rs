@@ -405,7 +405,7 @@ pub enum Command {
     Op(OpCommand),
     /// Check the store's consistency.
     Verify {
-        /// Re-hash every object too.
+        /// Re-hash every object, and check the derived values against the objects, too.
         #[arg(long)]
         deep: bool,
     },

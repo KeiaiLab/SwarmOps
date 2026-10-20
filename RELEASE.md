@@ -95,15 +95,16 @@ installs the same tool versions as `ci.yml`'s: move them together.
    install section, SECURITY.md's supported versions, CHANGELOG.md's introduction, the
    versioning policy's first paragraph and this file's first line.
 5. **Bump the version** in `[workspace.package]` of `Cargo.toml` and in the
-   `version = "X.Y.Z"` of every internal dependency in `crates/*/Cargo.toml`; let `cargo check`
-   update `Cargo.lock`. The two other workspaces' lockfiles record the path crates' version
-   too and fail `--locked` until they are updated:
-   `cargo update --manifest-path fuzz/Cargo.toml -p swarmops-core -p swarmops-store`, and the
-   same with `--manifest-path bench/compare/Cargo.toml` (`-p` leaves every other pinned entry
-   as it is; `just check` gates only the fuzz lockfile, `just bench-compare` the other). Run
-   `just check` again. The first release, 0.1.0, is the version the workspace already has, so
-   it skips this step. Commit the changelog and the bump (for 0.1.0, the changelog and the first
-   release's updates): `chore: release X.Y.Z`.
+   `version = "X.Y.Z"` of every internal dependency in `crates/*/Cargo.toml`,
+   `fuzz/Cargo.toml` and `bench/compare/Cargo.toml`; let `cargo check` update `Cargo.lock`.
+   The two other workspaces' lockfiles record the path crates' version too and fail `--locked`
+   until they are updated:
+   `cargo update --manifest-path fuzz/Cargo.toml -p swarmops-core -p swarmops-store -p swarmops-testkit`,
+   and `cargo update --manifest-path bench/compare/Cargo.toml -p swarmops-core -p swarmops-store`
+   (`-p` leaves every other pinned entry as it is; `just check` gates only the fuzz lockfile,
+   `just bench-compare` the other). Run `just check` again. The first release, 0.1.0, is the
+   version the workspace already has, so it skips this step. Commit the changelog and the bump
+   (for 0.1.0, the changelog and the first release's updates): `chore: release X.Y.Z`.
 6. **Land that commit on `stable`** and wait for `tests-pass` to be green for it. Push `stable`
    before the tag: the workflow refuses a tagged commit that `stable` does not hold.
 7. **Tag** the commit with an annotated, signed tag, and push the tag:

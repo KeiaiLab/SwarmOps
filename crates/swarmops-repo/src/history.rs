@@ -11,18 +11,32 @@
 //! another is at most `g` first-parent steps below it, if it is on its chain at all, and one of
 //! generation `g` is at most `g - 1` first-parent steps above a root. A walk across at most
 //! [`SKIP_AFTER`] generations (for [`RepoRead::ancestor`], steps) steps from one first parent to
-//! the next by narrow index lookups ([`MetaRead::first_parent`]), and reads no derived value. A
-//! longer one lifts along the first-parent skip list ([`FirstParentSkipList`]): from a changeset's
-//! list it jumps the `2^i` steps of the highest level that does not pass what it walks to, then
-//! goes on one level lower from where it landed, so that it reads one list per jump and at most
-//! one per bit of the distance. A list the store lacks is derived on the way, with every list
-//! below it on its chain that the store lacks too; the store keeps them.
+//! the next, and reads no derived value. A longer one lifts along the first-parent skip list
+//! ([`FirstParentSkipList`]): from a changeset's list it jumps the `2^i` steps of the highest
+//! level that does not pass what it walks to, then goes on one level lower from where it landed, a
+//! jump per bit of the distance at most. A list the store lacks is derived on the way, with every
+//! list below it on its chain that the store lacks too; the store keeps them.
 //!
-//! The walks read the index records of the changesets they start from and lift to, for their
-//! generations; [`RepoRead::merge_base`] reads the record of each changeset it steps to as well,
-//! since it steps the side of the higher generation.
+//! A list read back is a cache file anyone who can write the store's files can have placed, so a
+//! walk checks what it uses against the index and against the derivation's own rule, one level
+//! down: entry 0 of each list it reads is the changeset's first parent (a root's list is empty),
+//! and the list has no more entries than the changeset's generation leaves room for; each jump of
+//! `2^i` steps lands on a changeset the snapshot holds, at least `2^i` generations lower, which
+//! is entry `i - 1` of the list of entry `i - 1` (the one more list a jump reads); a lift ends
+//! where no first-parent step further keeps to its target, and a list that ends before a jump the
+//! walk needs has a last entry whose own list is shorter. A list that fails is
+//! [`RepoError::DerivedCorrupt`], never a walk to a changeset off the chain. Lists that someone
+//! made to agree with each other can pass these checks; `verify --deep` checks every list against
+//! the objects.
 //!
-//! [`MetaRead::first_parent`]: swarmops_store::MetaRead::first_parent
+//! Every step takes the first parent from the changeset's object, hash-checked against its id,
+//! never from its index record: the parents the index records are what a damaged or crafted index
+//! says, and a walk that followed them could pass over committed changesets, or go round a cycle
+//! the index makes up, while the objects can do neither, each naming its parents by their hashes.
+//! The skip lists are derived from the objects too. The walks read the index records of the
+//! changesets they start from and lift to, for their generations; [`RepoRead::merge_base`] reads
+//! the record of each changeset it steps to as well, since it steps the side of the higher
+//! generation.
 
 use std::cmp::Ordering;
 use std::fmt;
@@ -31,7 +45,7 @@ use std::iter::FusedIterator;
 use swarmops_core::ChangesetId;
 use swarmops_store::{ChangesetMeta, ObjectStore, StoreError};
 
-use crate::derive::{FirstParentSkipList, SkipList};
+use crate::derive::{Derivation, FirstParentSkipList, SkipList};
 use crate::error::RepoError;
 use crate::read::RepoRead;
 
@@ -43,16 +57,16 @@ use crate::read::RepoRead;
 pub const SKIP_AFTER: u64 = 1024;
 
 /// A walk from a changeset back through its first parents to a root, the changeset first, in one
-/// snapshot ([`RepoRead::first_parents`]). Each item is one lookup, which also finds the next
-/// item: the start's reads its index record, which says whether the snapshot holds it, and every
-/// first parent's is a narrow lookup. An error ends the walk.
+/// snapshot ([`RepoRead::first_parents`]). Each item reads its changeset's object, which names the
+/// next item; the start's also looks its index record up, which says whether the snapshot holds
+/// it. An error ends the walk.
 pub struct FirstParents<'a, O: ObjectStore> {
     read: &'a RepoRead<'a, O>,
     /// The changeset to give next; `None` once the walk has ended.
     next: Option<ChangesetId>,
     /// Whether `next` is the changeset the walk started from, which the snapshot may lack
-    /// ([`RepoError::NotFound`]), rather than a first parent, which it holds unless its index is
-    /// damaged.
+    /// ([`RepoError::NotFound`]), rather than a first parent, which it holds: a changeset is
+    /// committed after its parents.
     start: bool,
 }
 
@@ -67,7 +81,7 @@ impl<O: ObjectStore> fmt::Debug for FirstParents<'_, O> {
 
 /// The changesets of the walk, each once, `Ok` until an error, which is the last item:
 /// [`RepoError::NotFound`] if the snapshot does not hold the changeset the walk started from,
-/// [`StoreError::MissingParent`] for a first parent it lacks (a damaged index).
+/// [`RepoError::MissingObject`] for a changeset whose object the store lacks.
 impl<O: ObjectStore> Iterator for FirstParents<'_, O> {
     type Item = Result<ChangesetId, RepoError>;
 
@@ -89,7 +103,7 @@ impl<O: ObjectStore> FusedIterator for FirstParents<'_, O> {}
 
 impl<O: ObjectStore> RepoRead<'_, O> {
     /// A walk from changeset `from` back through its first parents to a root, `from` first: an
-    /// iterator of [`FirstParents`], each a narrow lookup. Its first item is
+    /// iterator of [`FirstParents`], each an object read. Its first item is
     /// [`RepoError::NotFound`] if the snapshot does not hold `from`.
     pub fn first_parents(&self, from: ChangesetId) -> FirstParents<'_, O> {
         FirstParents {
@@ -104,7 +118,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// further, it lifts along the first-parent skip list, a jump per bit of `n`. A `cs` of
     /// generation `g` has at most `g - 1` first-parent steps above a root, so an `n` of `g` or
     /// more is `None` from `cs`'s record alone. [`RepoError::NotFound`] if the snapshot does not
-    /// hold `cs`.
+    /// hold `cs`; [`RepoError::DerivedCorrupt`] for a skip list that fails a walk's checks ([the
+    /// module documentation](self)).
     pub fn ancestor(&self, cs: ChangesetId, n: u64) -> Result<Option<ChangesetId>, RepoError> {
         self.ancestor_within(cs, n, SKIP_AFTER)
     }
@@ -114,7 +129,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// [`SKIP_AFTER`] generations it walks from `of` by narrow lookups, at most one step per
     /// generation; across more, it lifts along the first-parent skip list to the furthest of
     /// `of`'s first-parent ancestors at `ancestor`'s generation or above, which is `ancestor` if
-    /// anything is. [`RepoError::NotFound`] if the snapshot does not hold either.
+    /// anything is. [`RepoError::NotFound`] if the snapshot does not hold either;
+    /// [`RepoError::DerivedCorrupt`] for a skip list that fails a lift's checks.
     pub fn is_ancestor(&self, ancestor: ChangesetId, of: ChangesetId) -> Result<bool, RepoError> {
         self.is_ancestor_within(ancestor, of, SKIP_AFTER)
     }
@@ -126,7 +142,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// along the first-parent skip list to the other's generation when they are further; no step
     /// passes the merge base, which is at or below the lower generation. Each step reads the index
     /// record of the changeset it reaches, for its generation. [`RepoError::NotFound`] if the
-    /// snapshot does not hold either.
+    /// snapshot does not hold either; [`RepoError::DerivedCorrupt`] for a skip list that fails a
+    /// lift's checks.
     pub fn merge_base(
         &self,
         a: ChangesetId,
@@ -151,39 +168,38 @@ impl<O: ObjectStore> RepoRead<'_, O> {
         }
         if n <= skip_after {
             let mut at = cs;
-            let mut parent = start.parents.first().copied();
-            for step in 1..=n {
-                let Some(next) = parent else {
+            for _ in 0..n {
+                let Some(parent) = self.walk_step(at)? else {
                     return Ok(None);
                 };
-                at = next;
-                if step < n {
-                    parent = self.walk_step(at)?;
-                }
+                at = parent;
             }
             return Ok(Some(at));
         }
         // A jump of `2^level` steps for each bit of `n`, from the highest: entry `level` of the
         // list of where the walk is, which a chain shorter than the jump does not have.
-        let mut at = cs;
+        let mut at = start;
         let mut left = n;
-        let mut list = self.skip_list_at(at)?;
+        let mut list = self.checked_list(&at)?;
         for level in (0..64_usize).rev() {
             let jump = 1_u64 << level;
             if left & jump == 0 {
                 continue;
             }
-            let Some(&next) = list.get(level) else {
+            let Some(&entry) = list.get(level) else {
+                self.check_end(&at, &list)?;
                 return Ok(None);
             };
+            let next = self.listed_record(&at, level, entry)?;
+            self.check_jump(&at, &list, level, &next)?;
             at = next;
             left -= jump;
             if left == 0 {
                 break;
             }
-            list = self.skip_list_at(at)?;
+            list = self.checked_list(&at)?;
         }
-        Ok(Some(at))
+        Ok(Some(at.id))
     }
 
     /// [`RepoRead::is_ancestor`], lifting along the skip list across more than `skip_after`
@@ -207,12 +223,12 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             return Ok(self.lift_toward(from, target)?.id == ancestor);
         }
         // `ancestor`, if on `of`'s chain, is at most `gap` first-parent steps down it.
-        let mut parent = from.parents.first().copied();
-        for step in 1..=gap {
-            match parent {
-                Some(at) if at == ancestor => return Ok(true),
-                Some(at) if step < gap => parent = self.walk_step(at)?,
-                _ => break,
+        let mut at = of;
+        for _ in 0..gap {
+            match self.walk_step(at)? {
+                Some(parent) if parent == ancestor => return Ok(true),
+                Some(parent) => at = parent,
+                None => break,
             }
         }
         Ok(false)
@@ -281,23 +297,38 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// fall strictly along the chain, so a jump that would pass the furthest such ancestor lands
     /// below `target`, and is not made; the jumps made add up to the distance, a jump per bit.
     fn lift_toward(&self, from: ChangesetMeta, target: u64) -> Result<ChangesetMeta, RepoError> {
+        let start = from.id;
         let mut at = from;
-        let mut list = self.skip_list_at(at.id)?;
+        let mut list = self.checked_list(&at)?;
         let mut level = list.len();
         while level > 0 {
             level -= 1;
-            let Some(&next) = list.get(level) else {
+            let Some(&entry) = list.get(level) else {
                 continue;
             };
-            let next = self.walk_record(next)?;
+            let next = self.listed_record(&at, level, entry)?;
             if next.generation < target {
                 continue;
             }
+            self.check_jump(&at, &list, level, &next)?;
             at = next;
             if at.generation == target || level == 0 {
                 break;
             }
-            list = self.skip_list_at(at.id)?;
+            list = self.checked_list(&at)?;
+        }
+        // The furthest such ancestor: a first-parent step further falls below `target`.
+        if let Some(parent) = self.walk_parent(&at)?
+            && parent.generation >= target
+        {
+            return Err(wrong_list(
+                start,
+                format!(
+                    "a lift from it toward generation {target} stopped at {}, of generation {}, \
+                     whose first parent is of generation {}: a list on the way lacks an entry",
+                    at.id, at.generation, parent.generation
+                ),
+            ));
         }
         Ok(at)
     }
@@ -306,6 +337,115 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// with the lists below it that the store lacks ([`crate::Repo::derived`]).
     fn skip_list_at(&self, cs: ChangesetId) -> Result<SkipList, RepoError> {
         self.repo.derived::<FirstParentSkipList>(cs, &())
+    }
+
+    /// The skip list of the changeset whose index record is `at`, checked against the record: its
+    /// entry 0 is the changeset's first parent, none for a root, and it has no more entries than
+    /// the generation leaves room for (an entry `2^i` steps back needs a generation over `2^i`).
+    fn checked_list(&self, at: &ChangesetMeta) -> Result<SkipList, RepoError> {
+        let list = self.skip_list_at(at.id)?;
+        if list.first() != at.parents.first() {
+            return Err(wrong_list(at.id, "its entry 0 is not its first parent"));
+        }
+        let room = list.len() <= 64
+            && list
+                .len()
+                .checked_sub(1)
+                .is_none_or(|top| 1_u64 << top < at.generation);
+        if !room {
+            return Err(wrong_list(
+                at.id,
+                format!(
+                    "{} entries, more than generation {} leaves room for",
+                    list.len(),
+                    at.generation
+                ),
+            ));
+        }
+        Ok(list)
+    }
+
+    /// The index record of `entry`, entry `level` of the skip list of the changeset whose record
+    /// is `at`: one the snapshot does not hold is a wrong list, not a damaged index.
+    fn listed_record(
+        &self,
+        at: &ChangesetMeta,
+        level: usize,
+        entry: ChangesetId,
+    ) -> Result<ChangesetMeta, RepoError> {
+        self.meta.changeset(entry)?.ok_or_else(|| {
+            wrong_list(
+                at.id,
+                format!("its entry {level} names {entry}, which the store does not hold"),
+            )
+        })
+    }
+
+    /// Checks a jump along entry `level` of `list`, the skip list of the changeset whose record is
+    /// `at`, to the changeset whose record is `next`: every first-parent step lowers the
+    /// generation by one at least, so `next` is `2^level` generations lower at least; and entry
+    /// `level` is entry `level - 1` of the list of entry `level - 1`, as the derivation makes it
+    /// (one more list read).
+    fn check_jump(
+        &self,
+        at: &ChangesetMeta,
+        list: &SkipList,
+        level: usize,
+        next: &ChangesetMeta,
+    ) -> Result<(), RepoError> {
+        let lower = (next.generation)
+            .checked_add(1 << level)
+            .is_some_and(|reach| reach <= at.generation);
+        if !lower {
+            return Err(wrong_list(
+                at.id,
+                format!(
+                    "its entry {level} names {}, of generation {}, not {} or more below its own {}",
+                    next.id,
+                    next.generation,
+                    1_u64 << level,
+                    at.generation
+                ),
+            ));
+        }
+        if let Some(&half) = level.checked_sub(1).and_then(|below| list.get(below)) {
+            let vouched = self.skip_list_at(half)?.get(level - 1).copied();
+            if vouched != Some(next.id) {
+                return Err(wrong_list(
+                    at.id,
+                    format!(
+                        "its entry {level} names {}, where entry {} of the list of its entry {} \
+                         names {}",
+                        next.id,
+                        level - 1,
+                        level - 1,
+                        vouched.map_or_else(|| "nothing".to_owned(), |id| id.to_string())
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Checks `list`, the skip list of the changeset whose record is `at`, which ends before a
+    /// jump the walk needs: the chain below ends there only if the list is whole, and then its
+    /// last entry, at least half as far down as the chain goes, has a shorter list of its own (a
+    /// root's list is empty, which [`RepoRead::checked_list`] checked).
+    fn check_end(&self, at: &ChangesetMeta, list: &SkipList) -> Result<(), RepoError> {
+        let Some(&furthest) = list.last() else {
+            return Ok(());
+        };
+        let below = self.skip_list_at(furthest)?.len();
+        if below >= list.len() {
+            return Err(wrong_list(
+                at.id,
+                format!(
+                    "it ends at {} entries, where the list of its last entry has {below}",
+                    list.len()
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// The index record of changeset `id`, where a walk starts: [`RepoError::NotFound`] if the
@@ -325,23 +465,33 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             .ok_or(StoreError::MissingParent(id))?)
     }
 
-    /// The index record of the first parent of the changeset `record` is of, `None` for a root.
+    /// The index record of the first parent of the changeset `record` is of, `None` for a root:
+    /// the parent its object names ([`RepoRead::walk_step`]), not the one the record does.
     fn walk_parent(&self, record: &ChangesetMeta) -> Result<Option<ChangesetMeta>, RepoError> {
-        record
-            .parents
-            .first()
-            .map(|&parent| self.walk_record(parent))
+        self.walk_step(record.id)?
+            .map(|parent| self.walk_record(parent))
             .transpose()
     }
 
-    /// The first parent of changeset `id` (`None` for a root), a first-parent ancestor of a
-    /// changeset the snapshot holds: a narrow lookup ([`swarmops_store::MetaRead::first_parent`]),
-    /// and one the snapshot lacks is a damaged index.
-    fn walk_step(&self, id: ChangesetId) -> Result<Option<ChangesetId>, RepoError> {
-        Ok(self
-            .meta
-            .first_parent(id)?
-            .ok_or(StoreError::MissingParent(id))?)
+    /// The first parent of changeset `id`, `None` for a root, as its object names it: the object
+    /// read and hash-checked against `id` ([`RepoError::MissingObject`] if the store lacks it). A
+    /// step of every first-parent walk, which therefore never reads the parents an index record
+    /// names: what a damaged or crafted index says there could make a walk pass over a committed
+    /// changeset, or go round a cycle. An object names its parents by their hashes, so that no
+    /// chain of objects has a cycle. The snapshot holds every first parent of a changeset it holds,
+    /// committed before it.
+    pub(crate) fn walk_step(&self, id: ChangesetId) -> Result<Option<ChangesetId>, RepoError> {
+        Ok(self.repo.changeset_object(id)?.parents.first().copied())
+    }
+}
+
+/// The error of a skip list read back for changeset `cs` that a walk finds wrong, as `why` says
+/// ([`RepoError::DerivedCorrupt`]).
+fn wrong_list(cs: ChangesetId, why: impl Into<String>) -> RepoError {
+    RepoError::DerivedCorrupt {
+        name: FirstParentSkipList::NAME.to_owned(),
+        changeset: cs,
+        why: why.into(),
     }
 }
 

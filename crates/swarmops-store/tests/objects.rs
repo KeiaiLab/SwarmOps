@@ -589,6 +589,81 @@ fn a_header_claiming_more_than_the_object_limit_is_bad_header() {
     }
 }
 
+/// An object file longer than any this store writes (its 16-byte header and a raw payload of
+/// `MAX_OBJECT_LEN` bytes: a zstd body is always shorter than its payload) is `BadHeader` by its
+/// length alone, measured before the store makes any `FsOps` call, so that neither `get` nor
+/// `read_chunks` reads it into memory (storage spec §2 rule 1). Each file here is sparse past the
+/// raw object it replaces, costing no disk: 2 GiB behind the header it had, 2 GiB behind a header
+/// that records the length of its body, and a byte past the bound behind one that records the most
+/// an object holds. A file of the bound's own length passes the measure and is read. The recorder
+/// fails each read of the object's file, should one come, so that no run of this test reads a
+/// gigabyte.
+#[test]
+fn an_object_file_longer_than_any_the_store_writes_is_bad_header_before_it_is_read() {
+    use std::os::unix::fs::FileExt;
+
+    use swarmops_store::{FileOp, MAX_OBJECT_LEN};
+    use swarmops_testkit::fs::RecordingFs;
+
+    let (_root, layout) = new_root();
+    let (recording, calls) = RecordingFs::new();
+    let failing = recording.failing();
+    let store = FsObjectStore::open(layout.clone(), Box::new(recording));
+    let id = store.put(ObjectKind::Blob, &[7; 100]).unwrap();
+    let path = layout.object_path(id);
+    assert_eq!(fs::read(&path).unwrap()[5], ENC_RAW);
+    let read = format!("read {}", path.file_name().unwrap());
+    failing.set(Box::leak(read.clone().into_boxed_str()));
+    calls();
+
+    // The object's file, made `len` bytes long, its header recording a payload of `ulen` bytes.
+    let plant = |len: u64, ulen: u64| {
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(len).unwrap();
+        file.write_all_at(&ulen.to_le_bytes(), 8).unwrap();
+    };
+    let bound = 16 + MAX_OBJECT_LEN;
+    let too_long = [
+        ("2 GiB behind the header it had", 2 << 30, 100),
+        (
+            "2 GiB behind a header of its body's length",
+            2 << 30,
+            (2 << 30) - 16,
+        ),
+        ("a byte past the bound", bound + 1, MAX_OBJECT_LEN),
+    ];
+    for (what, len, ulen) in too_long {
+        plant(len, ulen);
+        let got = store.get(id);
+        assert!(
+            matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+            "get, {what}: {got:?}"
+        );
+        let mut pieces = 0;
+        let got = store.read_chunks(id, &mut |_| pieces += 1);
+        assert!(
+            matches!(got, Err(StoreError::BadHeader { id: bad }) if bad == id),
+            "read_chunks, {what}: {got:?}"
+        );
+        assert_eq!(pieces, 0, "read_chunks, {what}: no piece is visited");
+        assert_eq!(calls(), Vec::<String>::new(), "{what}: never read");
+    }
+
+    // The bound is a length an object file can have: both read the file, which the recorder fails.
+    plant(bound, MAX_OBJECT_LEN);
+    let rel = path.strip_prefix(layout.root()).unwrap();
+    let failed_read = |got: Option<StoreError>| match got {
+        Some(StoreError::Io(failure)) => {
+            assert_eq!(failure.op, FileOp::Fs(FsMethod::Read));
+            assert_eq!(failure.file.as_deref(), Some(rel));
+        }
+        other => panic!("expected the read's injected failure, got {other:?}"),
+    };
+    failed_read(store.get(id).err());
+    failed_read(store.read_chunks(id, &mut |_| ()).err());
+    assert_eq!(calls(), [read.clone(), read]);
+}
+
 /// One byte past the largest payload decoded in one pass, 64 MiB, `get` decodes a zstd object as
 /// a stream, into a buffer that grows only as the output arrives: past the payload's length once
 /// its last byte arrives. A payload of 64 MiB it decodes in one pass, into a buffer of the size
@@ -1634,5 +1709,90 @@ mod read_chunks {
             );
             assert_eq!(pieces.len(), 0, "{what}: no piece is visited");
         }
+    }
+}
+
+/// zstd's legacy formats (v0.1 to v0.7, from before zstd 1.0) are no object's encoding: this
+/// store writes frames of the current format only, and builds zstd without the legacy decoders
+/// (`default-features = false`; storage spec §2 rule 1), some 25,000 lines of C that a crafted
+/// object file would otherwise reach before its payload is hashed. A zstd built with them
+/// (its default `legacy` feature) reads both object files below back as valid: they hold the very
+/// payload their id names.
+mod legacy_zstd {
+    use swarmops_core::bytes::to_u64;
+    use swarmops_store::ObjectStat;
+    use swarmops_testkit::store::{zstd_object, zstd_v07_frame};
+
+    use super::*;
+
+    /// What every object file here holds, whatever its frames: the payload of the object's id.
+    const PAYLOAD: &[u8] = b"an object whose zstd body holds a frame of the legacy v0.7 format\n";
+
+    /// The bytes of [`PAYLOAD`] that the two-frame body holds in a frame of the current format.
+    const HEAD: usize = 24;
+
+    /// The object file of [`PAYLOAD`] with one frame of the v0.7 format for its zstd body.
+    fn one_legacy_frame(file: &mut Vec<u8>) {
+        zstd_object(file, to_u64(PAYLOAD.len()), &zstd_v07_frame(PAYLOAD));
+    }
+
+    /// The object file of [`PAYLOAD`] with a frame of the current format, as zstd writes one, then
+    /// a frame of the v0.7 format for its zstd body: zstd decodes a body frame by frame, so a
+    /// check of the first frame's magic alone would not refuse it.
+    fn a_legacy_frame_second(file: &mut Vec<u8>) {
+        let (head, tail) = PAYLOAD.split_at(HEAD);
+        let mut body = zstd::bulk::compress(head, 3).unwrap();
+        body.extend(zstd_v07_frame(tail));
+        zstd_object(file, to_u64(PAYLOAD.len()), &body);
+    }
+
+    /// Applies `damage` to the file of `id`, reads `id` in pieces, and restores the file.
+    fn read_chunks_damaged(
+        store: &FsObjectStore,
+        layout: &Layout,
+        id: ObjectId,
+        damage: fn(&mut Vec<u8>),
+    ) -> Result<Option<ObjectStat>, StoreError> {
+        let path = layout.object_path(id);
+        let pristine = fs::read(&path).unwrap();
+        let mut damaged = pristine.clone();
+        damage(&mut damaged);
+        fs::write(&path, &damaged).unwrap();
+        let got = store.read_chunks(id, &mut |_| {});
+        fs::write(&path, &pristine).unwrap();
+        got
+    }
+
+    /// A legacy frame anywhere in an object's body makes the object `Corrupt`, for `get` and for
+    /// `read_chunks` alike, although the frame holds the payload the object's id names: zstd no
+    /// longer finds the frame's size, so the read stops before decoding anything.
+    #[test]
+    fn an_object_in_a_legacy_zstd_frame_is_corrupt() {
+        let (_root, layout) = new_root();
+        let store = real_store(&layout);
+        let id = store.put(ObjectKind::Blob, PAYLOAD).unwrap();
+        let cases: [Damage; 2] = [
+            ("one v0.7 frame", id, one_legacy_frame),
+            (
+                "a frame of the current format, then a v0.7 frame",
+                id,
+                a_legacy_frame_second,
+            ),
+        ];
+        for (what, id, damage) in cases {
+            let got = get_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+                "get, {what}: {got:?}"
+            );
+            let got = read_chunks_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+                "read_chunks, {what}: {got:?}"
+            );
+        }
+        // Each read put the object's own file back.
+        let stored = store.get(id).unwrap();
+        assert_eq!(stored, Some((ObjectKind::Blob, PAYLOAD.to_vec())));
     }
 }

@@ -2391,7 +2391,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_GIT_UNSUPPORTED",
-          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a commit of more than 255 parents, or an entry whose mode is no kind of entry;\n`details.reason` says which (`object_format`, `ref_storage`, `shallow`, `parents`,\n`mode`), and `details.commit` names the commit of the last two.",
+          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a FIFO, a socket or a device where it reads a file of the git directory, a file it\nreads whole there that is longer than 16 MiB, a commit of more than 255 parents, or an\nentry whose mode is no kind of entry; `details.reason` says which (`object_format`,\n`ref_storage`, `shallow`, `special_file`, `file_too_long`, `parents`, `mode`),\n`details.file` names the file of `special_file` and `file_too_long` by its path in the git\ndirectory (`details.size` and `details.max` give the long one's length and the limit), and\n`details.commit` names the commit of `parents` and `mode`.",
           "type": "string"
         },
         {
@@ -6295,21 +6295,28 @@ expression: s.redact(&all)
           ]
         },
         "changeset": {
-          "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), or the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key (`external_id_mismatch`).",
+          "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key (`external_id_mismatch`), or the one a\nderived value is about (`derived_mismatch`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "derivation": {
+          "description": "The derivation whose stored value is not the one the objects give: `first_parent_skip_list`\nor `last_modified` (`derived_mismatch`, which a deep verify finds). Removing the value's\nfile under `meta/derived/<derivation>/`, or all of `meta/derived/`, has it derived again.",
           "type": [
             "string",
             "null"
           ]
         },
         "key": {
-          "description": "The external id whose entry it is, in lowercase hex: a git commit's oid for system `git`\n(`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).",
+          "description": "The key, in lowercase hex: the external id whose entry it is, a git commit's oid for\nsystem `git` (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`); or a\nderived value's key, its postcard bytes, omitted for a derivation whose key is `()`\n(`derived_mismatch`: a path's for `last_modified`).",
           "type": [
             "string",
             "null"
           ]
         },
         "kind": {
-          "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,\n`external_id_corrupt`, `external_id_dangling` or `external_id_mismatch`. A string, as\n`OpError.code` is, so that a client can read kinds newer than its own list.",
+          "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,\n`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch` or\n`derived_mismatch`. A string, as `OpError.code` is, so that a client can read kinds newer\nthan its own list.",
           "type": "string"
         },
         "object": {
@@ -6378,21 +6385,28 @@ expression: s.redact(&all)
               ]
             },
             "changeset": {
-              "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), or the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key (`external_id_mismatch`).",
+              "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key (`external_id_mismatch`), or the one a\nderived value is about (`derived_mismatch`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "derivation": {
+              "description": "The derivation whose stored value is not the one the objects give: `first_parent_skip_list`\nor `last_modified` (`derived_mismatch`, which a deep verify finds). Removing the value's\nfile under `meta/derived/<derivation>/`, or all of `meta/derived/`, has it derived again.",
               "type": [
                 "string",
                 "null"
               ]
             },
             "key": {
-              "description": "The external id whose entry it is, in lowercase hex: a git commit's oid for system `git`\n(`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).",
+              "description": "The key, in lowercase hex: the external id whose entry it is, a git commit's oid for\nsystem `git` (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`); or a\nderived value's key, its postcard bytes, omitted for a derivation whose key is `()`\n(`derived_mismatch`: a path's for `last_modified`).",
               "type": [
                 "string",
                 "null"
               ]
             },
             "kind": {
-              "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,\n`external_id_corrupt`, `external_id_dangling` or `external_id_mismatch`. A string, as\n`OpError.code` is, so that a client can read kinds newer than its own list.",
+              "description": "What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,\n`dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,\n`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch` or\n`derived_mismatch`. A string, as `OpError.code` is, so that a client can read kinds newer\nthan its own list.",
               "type": "string"
             },
             "object": {
@@ -6493,7 +6507,7 @@ expression: s.redact(&all)
       "properties": {
         "deep": {
           "default": false,
-          "description": "Re-hash every object. When `false`, verify checks structure only: parents, that\nreferenced objects exist, the index against the journal, and refs.",
+          "description": "Re-hash every object, and check every derived value of the built-in derivations (the\nfirst-parent skip lists, the last touches of paths) against the objects. When `false`,\nverify checks structure only: parents, that referenced objects exist, the index against\nthe journal, and refs.",
           "type": "boolean"
         }
       },

@@ -1017,6 +1017,128 @@ fn resolve_prefix_unique_and_ambiguous() {
     assert_eq!(read.by_delta_hash(&[0x10; 32]).unwrap(), [one.id, near.id]);
 }
 
+/// A crafted or damaged changeset index below the checkpoint, where a handle counts its records
+/// as they are (SECURITY.md, "Crafted or damaged store files"): a lookup by key never answers
+/// with a record that holds another key, nor with parents that lie elsewhere than the index's own
+/// layout puts them, but fails with `IndexCorrupt`, which `swarmops verify` explains.
+mod damaged_index {
+    use std::fmt::Debug;
+    use std::fs;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use camino::Utf8Path;
+    use swarmops_store::{Index, Layout, MetaLock, MetaStore, RealFs, StoreError};
+
+    use super::{ACTOR, cs, delta, id, index, insert, new_store, stored};
+
+    /// Commits c1 ← c2 ← c3 ← c4 to `store` at `root`, a frame each, then checkpoints them and
+    /// compacts the index under the writer lock: the sorted views cover every record and no frame
+    /// lies past the checkpoint, so that the index answers every lookup on its own.
+    fn checkpointed_chain(store: &MetaStore, root: &Utf8Path) {
+        for n in 1..=4 {
+            let parents: Vec<u64> = (n > 1).then_some(n - 1).into_iter().collect();
+            insert(store, &[cs(n, &parents)]);
+        }
+        store.flush().unwrap();
+        let layout = Layout::new(root);
+        let _lock = MetaLock::acquire(&layout, Duration::from_secs(10)).unwrap();
+        let mut index = Index::open(&layout, Arc::new(RealFs)).unwrap();
+        assert_eq!(index.compact().unwrap(), 4);
+    }
+
+    /// Points the entry of sorted view `view` (`ids` or `dh`) whose key is `key` at record `rec`,
+    /// in its `.rec` file.
+    fn repoint(root: &Utf8Path, view: &str, key: [u8; 32], rec: u64) {
+        let layout = Layout::new(root);
+        let keys = fs::read(layout.meta_path(&format!("sorted/{view}.key"))).unwrap();
+        let at = (keys.as_chunks::<32>().0.iter())
+            .position(|entry| *entry == key)
+            .expect("the key is in the view");
+        let file = layout.meta_path(&format!("sorted/{view}.rec"));
+        let mut recs = fs::read(&file).unwrap();
+        recs[at * 8..(at + 1) * 8].copy_from_slice(&rec.to_le_bytes());
+        fs::write(&file, recs).unwrap();
+    }
+
+    #[track_caller]
+    fn assert_index_corrupt<T: Debug>(got: Result<T, StoreError>, what: &str) {
+        match got {
+            Err(StoreError::IndexCorrupt { .. }) => {}
+            other => panic!("{what}: expected IndexCorrupt, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_view_entry_naming_another_record_fails_every_lookup_of_its_key() {
+        let (_dir, root, store) = new_store();
+        checkpointed_chain(&store, &root);
+        // The id view's entry for c1, and the delta-hash view's for c1's delta hash, name c3's
+        // record (2): a bit flipped in each `.rec` file, or a crafted one.
+        repoint(&root, "ids", id(1).0.0, 2);
+        repoint(&root, "dh", delta(1), 2);
+        let read = store.read().unwrap();
+        let hex = id(1).0.to_hex();
+        assert_index_corrupt(index(&root).find(id(1)), "find");
+        assert_index_corrupt(read.changeset(id(1)), "changeset");
+        assert_index_corrupt(read.first_parent(id(1)), "first_parent");
+        assert_index_corrupt(read.resolve_prefix(&hex[..12]), "a prefix");
+        assert_index_corrupt(read.resolve_prefix(&hex), "all 64 digits");
+        assert_index_corrupt(read.by_delta_hash(&delta(1)), "delta hash");
+        // Every other key reads as it did, c3's among them.
+        for n in 2..=4 {
+            let want = stored(n, &[n - 1], n - 1, n);
+            assert_eq!(read.changeset(id(n)).unwrap(), Some(want), "c{n}");
+            let prefix = &id(n).0.to_hex()[..12];
+            assert_eq!(read.resolve_prefix(prefix).unwrap(), [id(n)], "c{n}");
+            assert_eq!(read.by_delta_hash(&delta(n)).unwrap(), [id(n)], "c{n}");
+        }
+    }
+
+    #[test]
+    fn a_write_refuses_a_view_entry_naming_another_record() {
+        let (_dir, root, store) = new_store();
+        checkpointed_chain(&store, &root);
+        repoint(&root, "ids", id(1).0.0, 2);
+        let mut write = store.write().unwrap();
+        // c3's record is not taken for c1's: not to call c1 present again, nor to give a
+        // changeset on c1 its generation, nor to move a ref to c1.
+        assert_index_corrupt(write.changeset(id(1)), "the write's lookup");
+        assert_index_corrupt(write.insert_changeset(cs(1, &[])), "c1 again");
+        assert_index_corrupt(write.insert_changeset(cs(5, &[1])), "a changeset on c1");
+        assert_index_corrupt(
+            write.cas_ref("main", None, Some(id(1)), ACTOR),
+            "main to c1",
+        );
+        assert!(write.queued().is_empty(), "{:?}", write.queued());
+    }
+
+    #[test]
+    fn a_par_col_entry_out_of_place_fails_the_lookups_of_its_record_and_the_next() {
+        let (_dir, root, store) = new_store();
+        checkpointed_chain(&store, &root);
+        // c3's par.col entry (record 2) points at c2's parents, c1, instead of at its own, c2:
+        // one bit, 0x2001 to 0x0001.
+        let par = Layout::new(&root).meta_path("idx/par.col");
+        let mut entries = fs::read(&par).unwrap();
+        assert_eq!(entries[16..24], ((32_u64 << 8) | 1).to_le_bytes());
+        entries[16..24].copy_from_slice(&1_u64.to_le_bytes());
+        fs::write(&par, entries).unwrap();
+        let read = store.read().unwrap();
+        assert_index_corrupt(read.changeset(id(3)), "c3");
+        assert_index_corrupt(read.first_parent(id(3)), "c3's first parent");
+        // c4's entry is whole, but its parents no longer start where c3's end: which of the two
+        // is wrong only the journal tells (verify), so neither is read.
+        assert_index_corrupt(read.changeset(id(4)), "c4");
+        assert_index_corrupt(read.first_parent(id(4)), "c4's first parent");
+        assert_eq!(read.changeset(id(2)).unwrap(), Some(stored(2, &[1], 1, 2)));
+        assert_eq!(read.first_parent(id(2)).unwrap(), Some(Some(id(1))));
+        // `Index::get` reads a record as the files hold it: what verify compares with the
+        // journal, to name the record that disagrees.
+        assert_eq!(index(&root).get(2).unwrap().parents, [id(1)]);
+    }
+}
+
 #[test]
 fn journal_after_returns_global_order() {
     let (_dir, root, first) = new_store();
@@ -1876,6 +1998,49 @@ fn a_fifo_where_a_store_file_should_be_is_refused_not_opened() {
         Ok(other) => panic!("a FIFO at journal.log: expected InvalidData, got {other:?}"),
         Err(timeout) => panic!("opening the store blocked on the FIFO at journal.log: {timeout}"),
     }
+}
+
+#[test]
+fn a_fifo_at_meta_lock_fails_a_write_at_once_instead_of_blocking() {
+    // A FIFO where the lock file should be, which a restored store can hold, would block every
+    // writer's open of it until something opened it for reading: a write transaction, and a
+    // committed snapshot (both take the lock), fail at once instead, as damage (`InvalidData`)
+    // that names meta/lock. Reads take no lock, and go on. Each runs on a thread with a deadline,
+    // so that a regression fails instead of hanging the test.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    drop(store);
+    let lock = Layout::new(&root).meta_lock();
+    fs::remove_file(&lock).unwrap();
+    let made = Command::new("mkfifo").arg(&lock).status();
+    assert!(made.unwrap().success(), "mkfifo");
+    for (what, committed) in [("write", false), ("read_committed", true)] {
+        let (tx, rx) = mpsc::channel();
+        let opened_root = root.clone();
+        thread::spawn(move || {
+            let store = MetaStore::open(&opened_root).unwrap();
+            let _ = tx.send(if committed {
+                store.read_committed().map(drop)
+            } else {
+                store.write().map(drop)
+            });
+        });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Err(StoreError::Io(e))) => {
+                let file = e.file.as_ref().map(|file| file.as_str());
+                assert_eq!(
+                    (e.kind(), file),
+                    (io::ErrorKind::InvalidData, Some("meta/lock")),
+                    "{what}: {e}"
+                );
+                assert_eq!(e.to_string(), "open meta/lock: lock is not a regular file");
+            }
+            Ok(other) => panic!("{what}: a FIFO at meta/lock: expected InvalidData, got {other:?}"),
+            Err(timeout) => panic!("{what} blocked on the FIFO at meta/lock: {timeout}"),
+        }
+    }
+    let store = MetaStore::open(&root).unwrap();
+    assert_eq!(store.read().unwrap().count_changesets().unwrap(), 1);
 }
 
 #[test]
@@ -3408,10 +3573,10 @@ fn a_directory_for(meta: &Utf8Path, file: &str) {
 /// A failure of the metadata store's own reads, off the `FsOps` seam, names its file relative to
 /// the store's root as well, and never the root: a `journal.off` that is gone fails the open of
 /// it (`NotFound`); a `journal.ckpt` that is a directory, or three bytes long, and a ref file
-/// that is a directory fail their reads as damage (`InvalidData`: a store file that is not a
-/// regular file is refused before it is opened); a `meta/lock` that is a directory fails its
-/// open (`EISDIR`); and each of the nine index files, gone, is [`StoreError::IndexCorrupt`]
-/// naming it. Root-safe: no file mode is involved.
+/// that is a directory fail their reads as damage, and a `meta/lock` that is a directory its
+/// open (`InvalidData`: a store file that is not a regular file is refused before it is opened);
+/// and each of the nine index files, gone, is [`StoreError::IndexCorrupt`] naming it. Root-safe:
+/// no file mode is involved.
 #[test]
 fn a_direct_read_that_fails_names_its_file() {
     use swarmops_store::{FileOp, FsMethod};
@@ -3468,7 +3633,7 @@ fn a_direct_read_that_fails_names_its_file() {
             run: |root| MetaStore::open(root).and_then(|store| store.write().map(drop)),
             op: FileOp::Open,
             file: "meta/lock",
-            kind: io::ErrorKind::IsADirectory,
+            kind: io::ErrorKind::InvalidData,
         },
     ];
     for case in cases {

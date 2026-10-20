@@ -1,6 +1,18 @@
 //! `meta/lock`: the exclusive advisory lock (the standard library's file lock, `flock` on
 //! Linux) that serializes metadata writers across threads and processes (storage spec §3).
 //!
+//! # The lock file
+//!
+//! `meta/lock` is a regular file, which [`MetaLock::acquire`] makes if it is missing and never
+//! writes. One that is anything else, as a crafted or restored store can hold, is refused before
+//! it is opened, as every store file is: a FIFO, whose open for writing would wait for a reader
+//! (and every writer with it, before its timeout even starts), a symlink, whatever it points at
+//! (the open would follow it, and make the file it names, outside the store), a socket, a device
+//! or a directory. The open itself follows no symlink (`O_NOFOLLOW`), does not wait for a FIFO's
+//! reader (`O_NONBLOCK`, which leaves the lock as it is: only `LOCK_NB` keeps `flock` from
+//! waiting), and checks what it opened (`fstat`), so that one put there between the check and the
+//! open is refused at once too. [`MetaLock::refuses`] is the check alone, which `verify` reports.
+//!
 //! # Waiting: the kernel flock queue (not strictly FIFO), timeout via a helper thread
 //!
 //! [`MetaLock::acquire`] opens `meta/lock` afresh and first tries the lock without blocking,
@@ -23,14 +35,16 @@
 //! instant. An abandoned helper parks until the holder lets go; a holder that never does (a
 //! hung process) leaves one parked thread per abandoned wait in each waiting process.
 
-use std::fs::{File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io;
+use std::os::unix::fs::OpenOptionsExt;
+use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError, SendError};
 use std::thread;
 use std::time::Duration;
 
 use crate::error::{FileOp, IoFailure, StoreError};
-use crate::fs_ops::store_relative;
+use crate::fs_ops::{not_a_regular_file, store_relative};
 use crate::layout::Layout;
 
 /// The exclusive lock on `meta/lock`, held until dropped.
@@ -48,18 +62,13 @@ impl MetaLock {
     /// must exist). If another handle holds it, waits in the kernel's queue (see the module
     /// documentation) until `timeout` has passed, then gives up with [`StoreError::Busy`]; a
     /// zero `timeout` gives up at once. A failure names `meta/lock`, relative to the store's
-    /// root, and what failed: its open, or the lock.
+    /// root, and what failed: its open, or the lock. A `meta/lock` that is not a regular file
+    /// fails its open at once, as damage (kind `InvalidData`; see the module documentation).
     pub fn acquire(layout: &Layout, timeout: Duration) -> Result<MetaLock, StoreError> {
-        let failed = |op, e| {
-            let lock = layout.meta_lock();
-            IoFailure::new(op, store_relative(layout.root(), lock.as_std_path()), e)
-        };
-        let file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(layout.meta_lock())
-            .map_err(|e| failed(FileOp::Open, e))?;
+        let lock = layout.meta_lock();
+        let failed =
+            |op, e| IoFailure::new(op, store_relative(layout.root(), lock.as_std_path()), e);
+        let file = open_lock_file(lock.as_std_path()).map_err(|e| failed(FileOp::Open, e))?;
         match file.try_lock() {
             Ok(()) => return Ok(Self { file }),
             Err(TryLockError::WouldBlock) => {}
@@ -90,6 +99,52 @@ impl MetaLock {
             .into()),
         }
     }
+
+    /// Whether [`MetaLock::acquire`] refuses `layout`'s `meta/lock` before it opens it: the file
+    /// is there, and is not a regular file (see the module documentation). It only looks
+    /// (`lstat`): it opens nothing, follows no symlink and writes nothing, so that a check that
+    /// takes no lock, `verify`, can ask. A lock file that is missing is not refused (an acquire
+    /// makes it), and one that cannot be looked at is not counted here (an acquire's open fails
+    /// on it as it would).
+    pub fn refuses(layout: &Layout) -> bool {
+        refuses(layout.meta_lock().as_std_path())
+    }
+}
+
+/// Whether the lock file at `path` is there and is not a regular file, looked at without opening
+/// it or following a symlink (`lstat`): the check before [`open_lock_file`]'s open, and
+/// [`MetaLock::refuses`]'s. A missing one is not refused (the open makes it), and one that cannot
+/// be looked at is left to the open, which fails on it as it would.
+fn refuses(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|found| !found.is_file())
+}
+
+/// Opens the lock file at `path` for writing, making it if it is missing: one that is not a
+/// regular file is refused before it is opened, then [`open_unfollowed`] opens it.
+fn open_lock_file(path: &Path) -> io::Result<File> {
+    if refuses(path) {
+        return Err(not_a_regular_file(path));
+    }
+    open_unfollowed(path)
+}
+
+/// [`open_lock_file`]'s open, without the check before it: it meets what can be put at `path`
+/// after that check. It follows no symlink (`ELOOP`), does not wait for a FIFO's reader (`ENXIO`
+/// when there is none), and refuses what it opened if that is not a regular file (a FIFO with a
+/// reader, a device). `O_NONBLOCK` stays on the file and changes nothing for a regular file's
+/// lock: `flock` waits unless `LOCK_NB` is given.
+fn open_unfollowed(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if file.metadata()?.is_file() {
+        Ok(file)
+    } else {
+        Err(not_a_regular_file(path))
+    }
 }
 
 impl Drop for MetaLock {
@@ -109,5 +164,75 @@ fn lock_blocking(file: &File) -> io::Result<()> {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
             locked => return locked,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs::{self, File, OpenOptions};
+    use std::io;
+    use std::os::unix::fs::{OpenOptionsExt, symlink};
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    use super::open_unfollowed;
+
+    /// What [`open_unfollowed`] returned for `path` within 5 s, run on a thread of its own so
+    /// that an open that blocks fails the test instead of hanging it: `None` if it blocked.
+    fn opened_within(path: &Path) -> Option<io::Result<File>> {
+        let (tx, rx) = mpsc::channel();
+        let path = PathBuf::from(path);
+        thread::spawn(move || {
+            let _ = tx.send(open_unfollowed(&path));
+        });
+        rx.recv_timeout(Duration::from_secs(5)).ok()
+    }
+
+    /// The open alone, without the check before it, meets what can be put at the lock file's
+    /// path after that check: a FIFO with no reader fails at once (`ENXIO`; without
+    /// `O_NONBLOCK` the open would wait for a reader), one with a reader is opened and then
+    /// refused as no regular file, and a symlink is not followed (`ELOOP`), whatever it points
+    /// at, so nothing is made where it points. A missing file is made, and an existing regular
+    /// one is opened as it is, its bytes kept.
+    #[test]
+    fn the_open_follows_no_symlink_waits_for_no_reader_and_keeps_only_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let at = |name: &str| dir.path().join(name);
+
+        let fifo = at("fifo");
+        let made = Command::new("mkfifo").arg(&fifo).status();
+        assert!(made.expect("run mkfifo").success(), "mkfifo");
+        let alone = opened_within(&fifo).expect("the open waited for a reader");
+        assert_eq!(alone.unwrap_err().raw_os_error(), Some(libc::ENXIO));
+        let reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .expect("open the FIFO's reading end");
+        let e = opened_within(&fifo).expect("the open blocked").unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::InvalidData, "{e}");
+        assert_eq!(e.to_string(), "fifo is not a regular file");
+        drop(reader);
+
+        let regular = at("regular");
+        fs::write(&regular, b"kept").unwrap();
+        let nowhere = at("nowhere");
+        for (link, target) in [("to-nowhere", &nowhere), ("to-regular", &regular)] {
+            symlink(target, at(link)).unwrap();
+            let e = opened_within(&at(link))
+                .expect("the open blocked")
+                .unwrap_err();
+            assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "{link}: {e}");
+        }
+        assert!(!fs::exists(&nowhere).unwrap(), "a symlink was followed");
+
+        let missing = at("missing");
+        opened_within(&missing).expect("the open blocked").unwrap();
+        assert!(fs::symlink_metadata(&missing).unwrap().is_file());
+        opened_within(&regular).expect("the open blocked").unwrap();
+        assert_eq!(fs::read(&regular).unwrap(), b"kept");
     }
 }

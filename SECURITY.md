@@ -39,8 +39,9 @@ filesystem permissions are the access boundary. Within that model, these are vul
   without bound or return wrong data as valid. That covers object files
   (`objects/<2hex>/<62hex>`: the header, the zstd frame and the payload, which is checked against
   its id on every read), the journal (`meta/journal.log`, `journal.off`, `journal.ckpt`), the
-  changeset index (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/*`) and ref files
-  (`meta/refs/*`). These cases are known and tracked
+  changeset index (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/*`), ref files
+  (`meta/refs/*`) and derived values (`meta/derived/*`, a cache whose files carry a checksum
+  over their slot and value, not a signature). These cases are known and tracked
   ([docs/known-limitations.md](docs/known-limitations.md), "Hostile input"): an object whose
   zstd frame really decompresses to a large size (a compression bomb) is decompressed in full
   before its hash is checked, so reading it takes up to 512 MiB, the most an object holds (a
@@ -48,10 +49,21 @@ filesystem permissions are the access boundary. Within that model, these are vul
   as corrupt); crafted `journal.off` entries that agree with each other, deeper than
   the two links recovery and readers check, pass as valid, so a read that starts past them
   numbers its frames by them until `verify` walks the file and reports them (recovery checks
-  every listed frame before it cuts or lists anything, so no committed frame is lost); and a
+  every listed frame before it cuts or lists anything, so no committed frame is lost); the
+  generations a crafted index records (`meta/idx/gen.col`) are taken as they are, so the history
+  queries that prune by them (a land's merge base, a revision's `~N`) can answer wrongly, though
+  every changeset they reach is on the first-parent chain the changeset objects name, and
+  `verify` reports the damage; and a
   `journal.log`, `journal.off`, index column or sorted view whose length is huge (sparse or
   crafted) is read into one buffer of that length, so a read allocates without bound and aborts
-  when the allocation fails instead of returning an error. `FORMAT`, `REPO` (an id and a name of
+  when the allocation fails instead of returning an error; and a derived value file crafted with
+  a value its derivation does not give, whole and with its trailer right, is refused by a reader
+  only where the reader's checks against the index and the objects tell (a skip list's first
+  entry, length and each jump against the list one level down; a last touch's changeset against
+  the path), and is otherwise read as valid until `verify --deep`, which checks every value of the
+  built-in derivations against the objects, reports it (removing `meta/derived/` has every value
+  derived again). A derived value's zstd frame is decoded whole within the object bound, 512
+  MiB. `FORMAT`, `REPO` (an id and a name of
   at most 255 bytes), `journal.ckpt` and the ref files are capped at their sizes, and a store
   file that is not a regular file is refused before it is opened.
 - **Requests.** Change lists, revisions and paths that get past their checks: a repository
@@ -78,11 +90,13 @@ filesystem permissions are the access boundary. Within that model, these are vul
   crafted repository will be a vulnerability. Workspaces (M5), which write files to disk, are in
   scope the same way.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
-  or run. `cargo deny check` (advisories, licenses, bans, sources) runs in every `just check`,
-  `Cargo.lock` is committed and builds use `--locked`, and the GitHub Actions workflows pin every
-  action by commit, start from `permissions: {}`, keep no credentials after checkout and are
-  checked with zizmor. A known advisory in a dependency that is already public can go to a
-  normal issue.
+  or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the
+  project builds: the workspace's and the fuzz crate's in every `just check`, and
+  `bench/compare`'s, which `just check` does not build, wherever it is built
+  (`just bench-compare` and the weekly scheduled run). The lockfiles are committed and builds use
+  `--locked`, and the GitHub Actions workflows pin every action by commit, start from
+  `permissions: {}`, keep no credentials after checkout and are checked with zizmor. A known
+  advisory in a dependency that is already public can go to a normal issue.
 
 ## What is not a vulnerability under M1's model
 
@@ -91,8 +105,8 @@ filesystem permissions are the access boundary. Within that model, these are vul
   (`E_AUTH` is reserved for them).
 - **Anything a local user with write access to the store can do directly**: delete, rewrite or
   corrupt its files, hold its lock, fill its disk. Filesystem permissions are the boundary.
-  SwarmOps detecting such damage is in scope (`swarmops verify --deep` re-hashes every object);
-  preventing it is not.
+  SwarmOps detecting such damage is in scope (`swarmops verify --deep` re-hashes every object
+  and checks the derived values against them); preventing it is not.
 - **Reading files the caller can read.** A change list's `{"file": "<path>"}` content is read
   on the client, with the caller's own permissions, as any program the caller runs could read
   it; the stdio MCP server runs as its caller and reads it the same way. A server that takes
