@@ -1507,9 +1507,10 @@ fn error_codes_reach_the_cli() {
         ),
         ("E_BUSY", "needs the store's lock held for its 10 s wait"),
         ("E_INTERNAL", "a caught panic: the binary's unit tests"),
-        ("E_CONFLICT", "`land` arrives later in M4"),
-        ("E_CAS_RETRY_EXHAUSTED", "`land` arrives later in M4"),
-        ("E_NOTHING_TO_LAND", "`land` arrives later in M4"),
+        (
+            "E_CAS_RETRY_EXHAUSTED",
+            "needs the target moved before every attempt: the ops unit tests raise it",
+        ),
         ("E_AUTH", "tokens arrive after M1"),
         ("E_POLICY_DENIED", "policies arrive after M1"),
         (
@@ -1548,6 +1549,11 @@ fn error_codes_reach_the_cli() {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let failed = s.run(&args);
         assert_eq!(failed.code(), code, "{args:?}");
+        raised.push(code);
+    }
+    for (code, args) in land_cases(&mut s, &store, &c1) {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(s.run(&args).code(), code, "{args:?}");
         raised.push(code);
     }
     // Last, as it damages the store: verify finds the blob gone.
@@ -1770,6 +1776,47 @@ fn fixture_repo(fixtures: &[(&str, swarmops_testkit::git::GitFixture)], name: &s
     repo.to_str().expect("UTF-8 temp paths").to_owned()
 }
 
+/// The failing lands of [`error_codes_reach_the_cli`], each with the code it must raise, against
+/// `store`, where main holds `c1`: a land of main's own head, which is on main already; and a land
+/// of a change to `src/lib.rs` onto `release/conflict`, made here on `c1` with another change to
+/// the same line.
+fn land_cases(s: &mut Session, store: &str, c1: &str) -> Vec<(&'static str, Vec<String>)> {
+    let ours = s.commit(store, Some(c1), "src/lib.rs", "pub fn ours() {}\n", "ours");
+    let theirs = s.commit(
+        store,
+        Some(c1),
+        "src/lib.rs",
+        "pub fn theirs() {}\n",
+        "theirs",
+    );
+    let create = [
+        "--repo",
+        store,
+        "--as",
+        AGENT,
+        "ref",
+        "set",
+        "release/conflict",
+        theirs.as_str(),
+        "--create",
+    ];
+    assert_eq!(s.run(&create).exit, 0);
+    let on = |args: &[&str]| -> Vec<String> {
+        ["--repo", store, "--as", AGENT]
+            .iter()
+            .chain(args)
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    };
+    vec![
+        ("E_NOTHING_TO_LAND", on(&["land", "main"])),
+        (
+            "E_CONFLICT",
+            on(&["land", &ours, "--target", "release/conflict"]),
+        ),
+    ]
+}
+
 /// `op log` lists the store's operations newest first, each with its kind, the changesets it
 /// recorded and the refs it moved: here a commit, a ref's creation, a publish (`commit
 /// --advance`) and an undo. A page holds at most `-n` operations below `--before`, and says when
@@ -1975,6 +2022,352 @@ fn op_undo_end_to_end() {
         s.run(&["--repo", store.as_str(), "verify", "--deep"]).exit,
         0
     );
+}
+
+/// The agent whose publish main gains while a change waits to land, in the land tests.
+const OTHER: &str = "agent/worker-18";
+
+/// Publishes `content` at `path` on `parent` as [`OTHER`], moving main to it (`commit
+/// --advance`); the changeset's id, named `[name]`.
+fn publish_as_other(
+    s: &mut Session,
+    store: &str,
+    parent: &str,
+    (path, content): (&str, &str),
+    name: &str,
+) -> String {
+    let changes = s.file(
+        &format!("{name}.json"),
+        &json!([{"path": path, "op": "put", "content": {"inline": content}}]).to_string(),
+    );
+    let args = [
+        "--repo",
+        store,
+        "--as",
+        OTHER,
+        "commit",
+        "-m",
+        name,
+        "--changes",
+        changes.as_str(),
+        "--parent",
+        parent,
+        "--advance",
+        "main",
+    ];
+    let published = s.run(&args);
+    assert_eq!(published.exit, 0, "{}", published.json);
+    s.name_at(&published, "/result/changeset", name)
+}
+
+/// What main names, read through `ref list`.
+fn main_target(s: &mut Session, store: &str) -> Value {
+    let refs = s.run(&["--repo", store, "ref", "list"]);
+    let main = (refs["result"]["refs"].as_array().unwrap().iter()).find(|r| r["name"] == "main");
+    main.map_or(Value::Null, |r| r["target"].clone())
+}
+
+/// `land` publishes a change committed on an older head: it merges the change three-way onto
+/// main's head as one new changeset whose parent is that head, and moves main to it in one
+/// transaction, which `op log` calls a land; both sides' edits of one file merge
+/// (`auto_merged`). `meta.resolved` names what the head and main named; `show` names the lander
+/// and the chain; and `--human` prints one line.
+#[test]
+fn land_merges_a_commit_onto_main_end_to_end() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let t0 = s.commit(&store, None, "a.txt", "1\n2\n3\n4\n5\n", "t0");
+    s.run(&[
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &t0, "--create",
+    ]);
+    let head = s.commit(&store, Some(&t0), "a.txt", "one\n2\n3\n4\n5\n", "head");
+    let theirs = publish_as_other(
+        &mut s,
+        &store,
+        &t0,
+        ("a.txt", "1\n2\n3\n4\nfive\n"),
+        "theirs",
+    );
+
+    let landed = s.run(&["--repo", &store, "--as", AGENT, "land", &head]);
+    assert_eq!(
+        (landed.exit, &landed["op"]),
+        (0, &json!("land")),
+        "{}",
+        landed.json
+    );
+    let id = landed["result"]["landed"].as_str().unwrap().to_owned();
+    assert_eq!(
+        landed["result"],
+        json!({
+            "status": "landed",
+            "landed": id,
+            "rebased_onto": theirs,
+            "target": "main",
+            "base": t0,
+            "attempts": 1,
+            "relocated": false,
+            "files_changed": 1,
+            "squashed_from": [head],
+            "auto_merged": ["a.txt"],
+        })
+    );
+    let resolved = landed["meta"]["resolved"].as_object().unwrap();
+    assert_eq!(resolved.len(), 2, "{}", landed.json);
+    assert_eq!(
+        (&resolved[&head], &resolved["main"]),
+        (&json!(head), &json!(theirs))
+    );
+    assert_eq!(main_target(&mut s, &store), id.as_str());
+    let cat = s.run(&["--repo", &store, "cat", "main:a.txt"]);
+    assert_eq!(cat["result"]["content"], "one\n2\n3\n4\nfive\n");
+    let shown = s.run(&["--repo", &store, "show", &id]);
+    assert_eq!(shown["result"]["parents"], json!([theirs]));
+    assert_eq!(shown["result"]["lander"], json!({"agent": AGENT}));
+    assert_eq!(shown["result"]["squashed_from"], json!([head]));
+    assert!(shown["result"].get("land_key").is_none(), "{}", shown.json);
+    let newest = s.run(&["--repo", &store, "op", "log", "-n", "1"]);
+    assert_eq!(
+        newest["result"]["ops"][0]["kind"], "land",
+        "{}",
+        newest.json
+    );
+
+    let next = s.commit(&store, Some(&id), "b.txt", "b\n", "next");
+    let args: [&str; 7] = ["--human", "--repo", &store, "--as", AGENT, "land", &next];
+    let human = Session::run_raw(&[], &args, None);
+    assert_eq!(human.exit, 0, "{}", human.stdout);
+    let again = main_target(&mut s, &store);
+    let again = again.as_str().unwrap();
+    assert_eq!(
+        human.stdout,
+        format!("landed {again} on main (onto {id}, attempt 1)\n")
+    );
+    assert_eq!(s.run(&["--repo", &store, "verify", "--deep"]).exit, 0);
+}
+
+/// A land whose change conflicts with what main gained exits 3 with `E_CONFLICT`, not
+/// retryable, and the conflict report in `details.report`; it records nothing.
+/// `--max-conflict-bytes` bounds the report's hunk texts, and `--human` prints each conflicting
+/// path with its kind, one a line.
+#[test]
+fn a_conflicting_land_exits_3_with_the_report() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let t0 = s.commit(&store, None, "f.txt", "1\n2\n3\n", "t0");
+    s.run(&[
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &t0, "--create",
+    ]);
+    let head = s.commit(&store, Some(&t0), "f.txt", "1\nours\n3\n", "head");
+    let theirs = publish_as_other(&mut s, &store, &t0, ("f.txt", "1\ntheirs\n3\n"), "theirs");
+
+    let land: [&str; 6] = ["--repo", &store, "--as", AGENT, "land", &head];
+    let conflict = s.run(&land);
+    assert_eq!(
+        (conflict.exit, conflict.code()),
+        (3, "E_CONFLICT"),
+        "{}",
+        conflict.json
+    );
+    assert_eq!(conflict["error"]["retryable"], false);
+    let blob = |text: &str| hash_object(ObjectKind::Blob, text.as_bytes()).to_hex();
+    let side = |line: u64, text: &str| json!({"first": line, "last": line, "text": text});
+    let report = json!({
+        "base": t0,
+        "ours": head,
+        "theirs": theirs,
+        "files": [{
+            "path": "f.txt",
+            "kind": "content",
+            "base_blob": blob("1\n2\n3\n"),
+            "ours_blob": blob("1\nours\n3\n"),
+            "theirs_blob": blob("1\ntheirs\n3\n"),
+            "hunks": [{"id": 0, "base": side(2, "2\n"), "ours": side(2, "ours\n"),
+                       "theirs": side(2, "theirs\n")}],
+            "theirs_changeset": theirs,
+            "theirs_agent": OTHER,
+        }],
+        "kinds": ["content"],
+        "truncated": false,
+    });
+    assert_eq!(conflict["error"]["details"], json!({ "report": report }));
+    let hint = format!(
+        "swarmops cat {theirs}:f.txt, then swarmops land {head} --resolve <file> with each path's \
+         resolution and against = {theirs}"
+    );
+    assert_eq!(conflict["error"]["hint"], hint.as_str());
+    assert_eq!(
+        main_target(&mut s, &store),
+        theirs.as_str(),
+        "nothing recorded"
+    );
+
+    let cut = s.run(&[&land[..], &["--max-conflict-bytes", "0"][..]].concat());
+    let cut = &cut["error"]["details"]["report"];
+    assert_eq!(cut["truncated"], true);
+    assert_eq!(
+        cut["files"][0]["hunks"][0]["ours"],
+        json!({"first": 2, "last": 2})
+    );
+
+    let human = Session::run_raw(&[], &[&["--human"][..], &land[..]].concat(), None);
+    assert_eq!(human.exit, 3, "{}", human.stdout);
+    let message = conflict["error"]["message"].as_str().unwrap();
+    assert_eq!(
+        human.stdout,
+        format!("error: E_CONFLICT: {message}\nconflict: content f.txt\nhint: {hint}\n")
+    );
+}
+
+/// A land run again with its `--key` finds its changeset on main and replays it: the same
+/// result but `status` `replayed`, and nothing written (`op log` as it was); `--human` prints
+/// `replayed <id>`. Run again without the key, it finds the change on main already:
+/// `E_NOTHING_TO_LAND` (exit 1), `reason` `no_changes`.
+#[test]
+fn a_replayed_land_reports_replayed() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let t0 = s.commit(&store, None, "a.txt", "a\n", "t0");
+    s.run(&[
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &t0, "--create",
+    ]);
+    let head = s.commit(&store, Some(&t0), "b.txt", "b\n", "head");
+    let land: [&str; 8] = [
+        "--repo", &store, "--as", AGENT, "land", &head, "--key", "land-7",
+    ];
+    let first = s.run(&land);
+    assert_eq!(first.exit, 0, "{}", first.json);
+    let newest = |s: &mut Session| {
+        let listed = s.run(&["--repo", &store, "op", "log", "-n", "1"]);
+        listed["result"]["ops"][0]["op"].clone()
+    };
+    let before = newest(&mut s);
+
+    let again = s.run(&land);
+    let mut replayed = first["result"].clone();
+    replayed["status"] = json!("replayed");
+    assert_eq!(again["result"], replayed, "{}", again.json);
+    assert_eq!(newest(&mut s), before, "a replay writes nothing");
+    let human = Session::run_raw(&[], &[&["--human"][..], &land[..]].concat(), None);
+    let id = first["result"]["landed"].as_str().unwrap();
+    assert_eq!((human.exit, human.stdout), (0, format!("replayed {id}\n")));
+
+    let unkeyed = s.run(&land[..6]);
+    assert_eq!((unkeyed.exit, unkeyed.code()), (1, "E_NOTHING_TO_LAND"));
+    assert_eq!(unkeyed["error"]["details"], json!({"reason": "no_changes"}));
+    assert_eq!(newest(&mut s), before);
+}
+
+/// A land that conflicts is resolved without a checkout: from the report of its `E_CONFLICT`
+/// (exit 3), resolutions against the report's `theirs`, read by the client from a file
+/// (`--resolve FILE`) or from stdin (`--resolve -`). Resolving one of two conflicting files exits
+/// 3 again with the other; a `res.json` that resolves both lands, with the resolved contents. A
+/// resolution file that cannot be read, or holds no resolutions, is `E_INVALID_ARG` (exit 2)
+/// naming it.
+#[test]
+fn a_conflicting_land_resolved_with_a_file_lands() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let files = json!([
+        {"path": "f.txt", "op": "put", "content": {"inline": "1\n2\n3\n"}},
+        {"path": "g.txt", "op": "put", "content": {"inline": "1\n2\n3\n"}},
+    ]);
+    let t0 = s.file("t0.json", &files.to_string());
+    let base = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "t0",
+        "--changes",
+        &t0,
+        "--advance",
+        "main",
+    ]);
+    let t0 = s.name_at(&base, "/result/changeset", "t0");
+    let ours = json!([
+        {"path": "f.txt", "op": "put", "content": {"inline": "1\nours\n3\n"}},
+        {"path": "g.txt", "op": "put", "content": {"inline": "1\nours\n3\n"}},
+    ]);
+    let ours = s.file("ours.json", &ours.to_string());
+    let made = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "head",
+        "--changes",
+        &ours,
+        "--parent",
+        &t0,
+    ]);
+    let head = s.name_at(&made, "/result/changeset", "head");
+    let theirs = publish_as_other(&mut s, &store, &t0, ("f.txt", "1\ntheirs\n3\n"), "x");
+    let theirs = publish_as_other(
+        &mut s,
+        &store,
+        &theirs,
+        ("g.txt", "1\ntheirs\n3\n"),
+        "theirs",
+    );
+
+    let land: [&str; 6] = ["--repo", &store, "--as", AGENT, "land", &head];
+    let conflict = s.run(&land);
+    assert_eq!((conflict.exit, conflict.code()), (3, "E_CONFLICT"));
+    let report = &conflict["error"]["details"]["report"];
+    assert_eq!(report["theirs"], theirs.as_str());
+    let resolve = |files: Value| json!({"against": report["theirs"], "files": files}).to_string();
+
+    let one = resolve(json!({"f.txt": {"take": "ours"}}));
+    let partly = s.run_stdin(&one, &[&land[..], &["--resolve", "-"][..]].concat());
+    assert_eq!(
+        (partly.exit, partly.code()),
+        (3, "E_CONFLICT"),
+        "{}",
+        partly.json
+    );
+    let left = &partly["error"]["details"]["report"];
+    assert_eq!(left["files"].as_array().unwrap().len(), 1, "{left}");
+    assert_eq!(left["files"][0]["path"], "g.txt");
+    assert!(left.get("stale").is_none(), "{left}");
+
+    let both = resolve(json!({
+        "f.txt": {"take": "ours"},
+        "g.txt": {"content": {"inline": "1\nours and theirs\n3\n"}},
+    }));
+    let res = s.file("res.json", &both);
+    let landed = s.run(&[&land[..], &["--resolve", &res][..]].concat());
+    assert_eq!(landed.exit, 0, "{}", landed.json);
+    assert_eq!(landed["result"]["rebased_onto"], theirs.as_str());
+    assert_eq!(landed["result"]["files_changed"], 2);
+    for (path, content) in [
+        ("f.txt", "1\nours\n3\n"),
+        ("g.txt", "1\nours and theirs\n3\n"),
+    ] {
+        let cat = s.run(&["--repo", &store, "cat", &format!("main:{path}")]);
+        assert_eq!(cat["result"]["content"], content, "{path}");
+    }
+
+    let missing = format!("{}/missing.json", s.tmp());
+    let unread = s.run(&[&land[..], &["--resolve", &missing][..]].concat());
+    assert_eq!((unread.exit, unread.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(unread["error"]["details"], json!({"resolve": missing}));
+    let not_resolutions = s.run_stdin("[]", &[&land[..], &["--resolve", "-"][..]].concat());
+    assert_eq!(
+        (not_resolutions.exit, not_resolutions.code()),
+        (2, "E_INVALID_ARG")
+    );
+    assert_eq!(not_resolutions["error"]["details"], json!({"resolve": "-"}));
+    let hint = not_resolutions["error"]["hint"].as_str().unwrap();
+    assert!(hint.contains("swarmops schema ResolutionsInput"), "{hint}");
 }
 
 // ---------------------------------------------------------------------------------------------

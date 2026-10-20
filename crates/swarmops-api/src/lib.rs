@@ -34,24 +34,27 @@ pub use ops::{
     VerifyReport, VerifyReq,
 };
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
 pub use rev::Rev;
+
+/// The object [`schema_for_all`] returns: each listed type's JSON Schema under the type's name.
+macro_rules! schemas {
+    ($($ty:ident $(<$arg:ty>)?),+ $(,)?) => {
+        serde_json::Value::Object(serde_json::Map::from_iter([
+            $((
+                stringify!($ty).to_owned(),
+                schemars::schema_for!($ty $(<$arg>)?).to_value(),
+            ),)+
+        ]))
+    };
+}
 
 /// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
 ///
 /// [`Envelope`] is listed as `Envelope<serde_json::Value>`: its `result` is an operation's
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
-    macro_rules! schemas {
-        ($($ty:ident $(<$arg:ty>)?),+ $(,)?) => {
-            serde_json::Value::Object(serde_json::Map::from_iter([
-                $((
-                    stringify!($ty).to_owned(),
-                    schemars::schema_for!($ty $(<$arg>)?).to_value(),
-                ),)+
-            ]))
-        };
-    }
     schemas![
         // Shared by every operation.
         Envelope<serde_json::Value>,
@@ -140,6 +143,9 @@ pub fn schema_for_all() -> serde_json::Value {
         GitExportResp,
         // land, op log, undo (M4).
         LandReq,
+        ResolutionsInput,
+        ResolutionInput,
+        Side,
         LandResp,
         LandStatus,
         ConflictReport,

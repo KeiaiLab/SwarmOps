@@ -536,6 +536,28 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   is a replay (`already_applied`); changesets are never removed. They raise `E_OP_NOT_FOUND` and
   `E_NOTHING_TO_UNDO`. The MCP server's instructions name the two tools, and leave the sizes of
   small reads to each tool's description.
+- `swarmops land HEAD` and the MCP tool `land` (`StoreOps::land`): a land merges an agent's change,
+  HEAD with its first-parent chain after `--base` (by default the merge base of HEAD and the
+  target's head), three-way onto `--target` (`main` by default), and publishes it there as one new
+  changeset whose parent is the target's head, with the target's move to it, in one transaction. A
+  target that moves meanwhile makes the land merge again and retry, up to `--max-attempts` (8 by
+  default, 1 to 32), then `E_CAS_RETRY_EXHAUSTED` (exit 4, retryable). A change that conflicts is
+  `E_CONFLICT` (exit 3) with the conflict report in `details.report`, its hunk texts within
+  `--max-conflict-bytes` (32 KiB), and nothing is recorded; a land with nothing to add is
+  `E_NOTHING_TO_LAND`, saying why (`on_target`, `no_changes`). With `--key`, the same land run again
+  replays (`status: replayed`), and the key given for another change is `E_INVALID_ARG`. `--human`
+  prints `landed <id> on <target> (onto <head>, attempt <n>)`, `replayed <id>`, or each conflicting
+  path with its kind. `show` names a land's lander, key and squashed chain (`lander`, `land_key`,
+  `squashed_from`). The MCP server's instructions now say to publish a changeset by landing it,
+  where they told an agent how to retry after `E_CAS_MISMATCH`.
+- `swarmops land HEAD --resolve FILE` (`-` for stdin) and the `land` tool's `resolutions`
+  (`LandReq.resolutions`, with `ResolutionsInput`, `ResolutionInput` and `Side` in
+  `swarmops schema`) resolve a land's conflicts without a checkout: decided against the conflict
+  report's `theirs`, each path takes `ours` or `theirs`, new `content` (as a commit's change gives
+  it, with an optional `mode`) or `delete`, for the path and every path below it, whether it
+  conflicts or not, while the target still holds that path as `against` did. A path the target
+  changed since comes back in the `E_CONFLICT` report's new `stale` list, and a conflict left
+  unresolved fails the land as before; `swarmops mcp` takes `against` only as a full 64-hex id.
 
 #### M8: git export (2026-10-19)
 

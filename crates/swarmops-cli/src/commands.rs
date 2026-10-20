@@ -38,6 +38,8 @@ use std::time::{Duration, Instant};
 use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use swarmops_api::LandReq;
+use swarmops_api::ResolutionsInput;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
@@ -157,6 +159,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             },
             |ops, (who, req)| ops.commit(&who, req),
         ),
+        land @ Command::Land { .. } => run_land(ctx, op, land),
         Command::Blob(command) => run_blob(ctx, op, command),
         Command::Resolve { rev } => resolve_rev(ctx, op, rev),
         Command::Cat {
@@ -264,6 +267,41 @@ fn history(
             })
         },
         |ops, req| ops.path_history(req),
+    )
+}
+
+/// Runs `land`, which names operation `op`, as the caller: `command` is the land's arguments.
+fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::Land {
+        head,
+        base,
+        target,
+        message,
+        key,
+        max_attempts,
+        max_conflict_bytes,
+        resolve,
+    } = command
+    else {
+        unreachable!("run passes land its own command alone");
+    };
+    ctx.on_store(
+        op,
+        || {
+            let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
+            let req = LandReq {
+                head: head.into(),
+                base: base.map(Rev::from),
+                target,
+                message,
+                idempotency_key: key,
+                max_attempts,
+                max_conflict_bytes,
+                resolutions: resolve.as_deref().map(read_resolutions).transpose()?,
+            };
+            Ok((who, req))
+        },
+        |ops, (who, req)| ops.land(&who, req),
     )
 }
 
@@ -780,48 +818,24 @@ fn schema(name: Option<&str>) -> Result<Value, OpError> {
 }
 
 /// A commit's change list: the JSON array of changes in file `source`, or on stdin for `-`, of
-/// at most [`MAX_REQUEST_BYTES`]. A file's length is checked before it is read, and either is
-/// read no further than one byte past the limit, so that a list past it is refused
-/// (`E_TOO_LARGE`, scope `request`) before it is parsed.
+/// at most [`MAX_REQUEST_BYTES`] ([`read_request`]).
 fn read_changes(source: &str) -> Result<Vec<ChangeInput>, OpError> {
     read_changes_within(source, MAX_REQUEST_BYTES)
 }
 
 /// [`read_changes`], with at most `limit` bytes of text.
 fn read_changes_within(source: &str, limit: u64) -> Result<Vec<ChangeInput>, OpError> {
-    let shown = if source == "-" {
-        "stdin".to_owned()
-    } else {
-        format!("{source:?}")
-    };
-    let refuse = |what: String| {
-        OpError::new(ErrorCode::InvalidArg, what)
-            .with_details(details([("changes", source.into())]))
-    };
-    let text = if source == "-" {
-        read_text(io::stdin().lock(), None, limit)
-    } else {
-        fs::File::open(source).and_then(|file| {
-            let len = file.metadata()?.len();
-            read_text(file, Some(len), limit)
-        })
-    }
-    .map_err(|e| refuse(format!("cannot read the changes from {shown}: {e}")))?;
-    let bytes = text.map_err(|size| {
-        OpError::new(
-            ErrorCode::TooLarge,
-            format!("the changes in {shown} are more than the {limit} bytes a request may hold"),
-        )
-        .with_details(details([
-            ("size", size.into()),
-            ("limit", limit.into()),
-            ("scope", "request".into()),
-            ("changes", source.into()),
-        ]))
-        .with_hint(REQUEST_HINT)
-    })?;
+    let bytes = read_request(source, limit, "changes", "the changes")?;
     let changes: Vec<ChangeInput> = serde_json::from_slice(&bytes).map_err(|e| {
-        refuse(format!("the changes in {shown} are not a JSON array of changes: {e}")).with_hint(
+        OpError::new(
+            ErrorCode::InvalidArg,
+            format!(
+                "the changes in {} are not a JSON array of changes: {e}",
+                shown(source)
+            ),
+        )
+        .with_details(details([("changes", source.into())]))
+        .with_hint(
             r#"the changes are an array such as [{"path": "a.txt", "op": "put", "content": {"inline": "hi"}}]; swarmops schema ChangeInput gives the rest"#,
         )
     })?;
@@ -855,6 +869,97 @@ fn read_changes_within(source: &str, limit: u64) -> Result<Vec<ChangeInput>, OpE
         }
     }
     Ok(changes)
+}
+
+/// A land's resolutions (`--resolve`): the JSON object of resolutions in file `source`, or on
+/// stdin for `-`, of at most [`MAX_REQUEST_BYTES`] ([`read_request`]). Read from stdin, they may
+/// not name this process's own stdin or stdout as a client file, as a change list may not.
+fn read_resolutions(source: &str) -> Result<ResolutionsInput, OpError> {
+    let bytes = read_request(source, MAX_REQUEST_BYTES, "resolve", "the resolutions")?;
+    let resolutions: ResolutionsInput = serde_json::from_slice(&bytes).map_err(|e| {
+        OpError::new(
+            ErrorCode::InvalidArg,
+            format!(
+                "the resolutions in {} are not a JSON object of resolutions: {e}",
+                shown(source)
+            ),
+        )
+        .with_details(details([("resolve", source.into())]))
+        .with_hint(
+            r#"the resolutions are an object such as {"against": "<the report's theirs>", "files": {"a.txt": {"take": "ours"}}}; swarmops schema ResolutionsInput gives the rest"#,
+        )
+    })?;
+    if source == "-" {
+        // As for a change list read from stdin (`read_changes_within`).
+        let own =
+            (resolutions.files.iter()).find_map(|(path, resolution)| match &resolution.content {
+                Some(ContentInput::File(file)) if is_own_stdio(file) => Some((path, file)),
+                _ => None,
+            });
+        if let Some((path, file)) = own {
+            return Err(OpError::new(
+                ErrorCode::InvalidArg,
+                output::printable(&format!(
+                    "the resolution of {path:?}: the client file {file:?} is this process's own \
+                     stdin, which the resolutions came from, or its stdout: name a regular file, \
+                     or send the bytes as inline or base64 content"
+                )),
+            )
+            .with_details(details([
+                ("resolve", source.into()),
+                ("path", path.as_str().into()),
+                ("file", file.as_str().into()),
+            ])));
+        }
+    }
+    Ok(resolutions)
+}
+
+/// The text of a request that the client reads, its `flag`'s (`changes`, `resolve`), which its
+/// errors name in their `details` and call `what` ("the changes", "the resolutions"): file
+/// `source`'s, or stdin's for `-`, of at most `limit` bytes. A file's length is checked before it
+/// is read, and either is read no further than one byte past the limit, so that a text past it is
+/// refused (`E_TOO_LARGE`, scope `request`) before it is parsed. One that cannot be read is
+/// `E_INVALID_ARG`.
+fn read_request(source: &str, limit: u64, flag: &str, what: &str) -> Result<Vec<u8>, OpError> {
+    let shown = shown(source);
+    let text = if source == "-" {
+        read_text(io::stdin().lock(), None, limit)
+    } else {
+        fs::File::open(source).and_then(|file| {
+            let len = file.metadata()?.len();
+            read_text(file, Some(len), limit)
+        })
+    }
+    .map_err(|e| {
+        OpError::new(
+            ErrorCode::InvalidArg,
+            format!("cannot read {what} from {shown}: {e}"),
+        )
+        .with_details(details([(flag, source.into())]))
+    })?;
+    text.map_err(|size| {
+        OpError::new(
+            ErrorCode::TooLarge,
+            format!("{what} in {shown} are more than the {limit} bytes a request may hold"),
+        )
+        .with_details(details([
+            ("size", size.into()),
+            ("limit", limit.into()),
+            ("scope", "request".into()),
+            (flag, source.into()),
+        ]))
+        .with_hint(REQUEST_HINT)
+    })
+}
+
+/// How a request's errors call file `source`: quoted, or `stdin` for `-`.
+fn shown(source: &str) -> String {
+    if source == "-" {
+        "stdin".to_owned()
+    } else {
+        format!("{source:?}")
+    }
 }
 
 /// The text `reader` holds, whose length is `len` if it has one, unless it is more than `limit`

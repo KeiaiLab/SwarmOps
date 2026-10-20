@@ -579,17 +579,23 @@ What an agent sees (operations §4):
   what it named before, which is skipped); a ref moved since by another operation refuses it
   with `E_CAS_MISMATCH`, and nothing is written. It reads the operation's frame under its own
   write's lock, so it never undoes a frame that a failed sync took back.
-- M1 has no merge: an agent that loses a ref race and commits its change again on top of the
-  winner's can overwrite the winner's edits to the same files. Merging and landing arrive in
-  M4.
+- `land` publishes a change made on an older head: it merges the change three-way onto the
+  target's head (`main` or a `release/*` ref), and inserts the result, one squashed changeset whose
+  parent is that head, with the target's compare-and-swap to it in one transaction, the frame a
+  `commit --advance` writes. A land that loses its race merges again onto what the target gained,
+  over its own paths, and tries again, waiting from its fourth attempt; a conflict is
+  `E_CONFLICT`, with a report of each conflicting file, and records nothing. A keyed land run
+  again finds its changeset on the target and replays it, decided under the store's lock. So an
+  agent that loses a ref race lands its change rather than re-sending whole files, which would
+  overwrite the winner's edits.
 
 ## The contract
 
-Every operation is a function from a request type to a response type or an `OpError`, and
-every type is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore
-fields they do not know, so versions can differ (operations §0). `StoreOps` has eighteen operations:
-`repo_info`, `commit`, `resolve_rev`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`,
-`log`, `path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `op_log`, `undo`, `verify` and
+Every operation is a function from a request type to a response type or an `OpError`, and every type
+is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore fields they do
+not know, so versions can differ (operations §0). `StoreOps` has nineteen operations: `repo_info`,
+`commit`, `land`, `resolve_rev`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`, `log`,
+`path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `op_log`, `undo`, `verify` and
 `derive`; `init`, `whoami` and `schema` live in the CLI. `op_log` shows the journal as the store's
 operations, a frame each (storage §3), and `undo` moves an operation's refs back by
 compare-and-swap.
@@ -604,7 +610,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 37 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
 found) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 88 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 91 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

@@ -929,6 +929,475 @@ fn merge_and_merge_trees_merge_text_three_way() {
     assert_eq!(names, [("f", "content")]);
 }
 
+/// Resolutions (operations spec §3, resolution path (b); the M4 plan's Decision 9): a land told
+/// what to make of some paths, against the target's head a conflict report named, applies them to
+/// each attempt's merge before its conflict check, while the target holds those paths as that
+/// head did; a path it holds otherwise is stale, and fails the land with a fresh report.
+mod resolutions {
+    use swarmops_core::{BlobId, LeafKind};
+    use swarmops_repo::land::{Resolution, Resolutions, Side};
+    use swarmops_testkit::repo::put_as;
+
+    use super::*;
+
+    /// [`landing`] of `head`, with `files` resolved against `against`.
+    fn resolving(
+        head: ChangesetId,
+        against: ChangesetId,
+        files: Vec<(&str, Resolution)>,
+    ) -> LandRequest {
+        let files = (files.into_iter())
+            .map(|(p, resolution)| (path(p), resolution))
+            .collect();
+        LandRequest {
+            resolutions: Some(Resolutions { against, files }),
+            ..landing(head)
+        }
+    }
+
+    /// A resolution that puts `bytes`, of the kind the land picks.
+    fn new_content(bytes: &[u8]) -> Resolution {
+        Resolution::Put {
+            kind: None,
+            content: bytes.to_vec(),
+        }
+    }
+
+    /// The kind of the leaf at `p` in changeset `id`'s tree; `None` if there is none.
+    fn kind_at(repo: &LocalRepo, id: ChangesetId, p: &str) -> Option<LeafKind> {
+        (repo.read_blob_at(id, &path(p)).unwrap()).map(|(kind, _, _)| kind)
+    }
+
+    /// Each kind of resolution lands: of four files that conflict, one takes ours, one takes
+    /// theirs, one takes new content and one is deleted. `L`, on the head the report named, holds
+    /// what each says (theirs' file needs no change in its delta), no path it resolved is
+    /// reported auto-merged, and the store verifies.
+    #[test]
+    fn each_kind_of_resolution_lands() {
+        let (_dir, _root, repo) = new_store();
+        let files = ["a", "b", "c", "d"];
+        let each = |content: &[u8]| files.iter().map(|f| put(f, content)).collect::<Vec<_>>();
+        let t0 = advance(&repo, ACTOR, &[], each(b"1\n2\n3\n"));
+        let head = commit_by(&repo, ACTOR, &[t0], each(b"1\nours\n3\n"));
+        let x = advance(&repo, OTHER, &[t0], each(b"1\ntheirs\n3\n"));
+        let conflicts = conflicts_of(repo.land(landing(head)));
+        assert_eq!(
+            kinds(&conflicts),
+            [
+                ("a", "content"),
+                ("b", "content"),
+                ("c", "content"),
+                ("d", "content")
+            ]
+        );
+        assert_eq!((conflicts.theirs, conflicts.stale.clone()), (x, Vec::new()));
+
+        let land = resolving(
+            head,
+            conflicts.theirs,
+            vec![
+                ("a", Resolution::Take(Side::Ours)),
+                ("b", Resolution::Take(Side::Theirs)),
+                ("c", new_content(b"1\nboth\n3\n")),
+                ("d", Resolution::Delete),
+            ],
+        );
+        let out = repo.land(land).unwrap();
+        assert_eq!(
+            (out.status, out.rebased_onto, out.attempts),
+            (LandStatus::Landed, x, 1)
+        );
+        assert_eq!(main_head(&repo), out.landed);
+        assert_eq!(
+            content(&repo, out.landed, "a"),
+            Some(b"1\nours\n3\n".to_vec())
+        );
+        assert_eq!(
+            content(&repo, out.landed, "b"),
+            Some(b"1\ntheirs\n3\n".to_vec())
+        );
+        assert_eq!(
+            content(&repo, out.landed, "c"),
+            Some(b"1\nboth\n3\n".to_vec())
+        );
+        assert_eq!(content(&repo, out.landed, "d"), None);
+        let delta = repo.changeset(out.landed).unwrap().unwrap().changeset.delta;
+        let paths: Vec<&str> = delta.iter().map(|entry| entry.path.as_str()).collect();
+        assert_eq!(paths, ["a", "c", "d"], "b keeps theirs");
+        assert_eq!(out.files_changed, 3);
+        assert_eq!(out.auto_merged, Vec::<RepoPath>::new());
+        assert_eq!(repo.verify(true).unwrap().problems, []);
+    }
+
+    /// A content resolution's leaf is of the kind it gives; else of the kind of the leaf ours holds
+    /// at its path, else theirs', else a file.
+    #[test]
+    fn a_content_resolution_s_kind_is_its_own_else_ours_else_theirs_else_a_file() {
+        let (_dir, _root, repo) = new_store();
+        let base = b"1\n2\n3\n";
+        let t0 = advance(
+            &repo,
+            ACTOR,
+            &[],
+            vec![put("e", base), put("f", base), put("g", base)],
+        );
+        // Ours makes e executable and edits it, deletes f, edits g.
+        let ours = vec![
+            put_as("e", LeafKind::Exec, b"1\nours\n3\n"),
+            delete("f"),
+            put("g", b"1\nours\n3\n"),
+        ];
+        let head = commit_by(&repo, ACTOR, &[t0], ours);
+        // Theirs edits e, makes f executable and edits it, edits g.
+        let theirs = vec![
+            put("e", b"1\ntheirs\n3\n"),
+            put_as("f", LeafKind::Exec, b"1\ntheirs\n3\n"),
+            put("g", b"1\ntheirs\n3\n"),
+        ];
+        let x = advance(&repo, OTHER, &[t0], theirs);
+        let conflicts = conflicts_of(repo.land(landing(head)));
+        assert_eq!(
+            kinds(&conflicts),
+            [("e", "content"), ("f", "delete_modify"), ("g", "content")]
+        );
+
+        let symlink = Resolution::Put {
+            kind: Some(LeafKind::Symlink),
+            content: b"e".to_vec(),
+        };
+        let land = resolving(
+            head,
+            x,
+            vec![
+                ("e", new_content(b"e\n")),
+                ("f", new_content(b"f\n")),
+                ("g", symlink),
+                ("n", new_content(b"n\n")),
+            ],
+        );
+        let out = repo.land(land).unwrap();
+        let landed = |p| kind_at(&repo, out.landed, p);
+        assert_eq!(
+            [landed("e"), landed("f"), landed("g"), landed("n")],
+            [
+                Some(LeafKind::Exec),
+                Some(LeafKind::Exec),
+                Some(LeafKind::Symlink),
+                Some(LeafKind::File)
+            ],
+            "e is ours' kind, f theirs' (ours has none), g its own, n a file (neither has one)"
+        );
+        assert_eq!(content(&repo, out.landed, "n"), Some(b"n\n".to_vec()));
+    }
+
+    /// A resolution made against a head of the target that held its path otherwise than the
+    /// target's head does now is stale: the land fails with a fresh report, the merge onto the
+    /// head now, whose `stale` names the path (which still conflicts, so is a conflict of the
+    /// report too), and records nothing. Made against the head now, the same resolution lands.
+    #[test]
+    fn a_resolution_against_a_stale_theirs_is_refused_with_a_fresh_report() {
+        let (_dir, root, repo) = new_store();
+        let t0 = advance(
+            &repo,
+            ACTOR,
+            &[],
+            vec![put("f", b"1\n2\n3\n"), put("g", b"g\n")],
+        );
+        let head = commit_by(&repo, ACTOR, &[t0], vec![put("f", b"1\nours\n3\n")]);
+        let x = advance(&repo, OTHER, &[t0], vec![put("f", b"1\ntheirs\n3\n")]);
+        assert_eq!(conflicts_of(repo.land(landing(head))).theirs, x);
+        // The target changes f again after the report.
+        let y = advance(
+            &repo,
+            "test/third",
+            &[x],
+            vec![put("f", b"1\ntheirs\nthree\n")],
+        );
+        let (frames, before) = (frame_count(&root), main_head(&repo));
+
+        let resolved =
+            |against| resolving(head, against, vec![("f", new_content(b"1\nboth\n3\n"))]);
+        let conflicts = conflicts_of(repo.land(resolved(x)));
+        assert_eq!(
+            (conflicts.base, conflicts.ours, conflicts.theirs),
+            (t0, head, y)
+        );
+        assert_eq!(conflicts.stale, [path("f")]);
+        assert_eq!(kinds(&conflicts), [("f", "content")], "f conflicts with y");
+        assert_eq!(
+            conflicts.last_touched.get(&path("f")),
+            Some(&(y, "test/third".to_owned()))
+        );
+        assert_eq!((frame_count(&root), main_head(&repo)), (frames, before));
+
+        let out = repo.land(resolved(y)).unwrap();
+        assert_eq!((out.rebased_onto, out.attempts), (y, 1));
+        assert_eq!(
+            content(&repo, out.landed, "f"),
+            Some(b"1\nboth\n3\n".to_vec())
+        );
+    }
+
+    /// A stale resolution fails the land also where the merge onto the target's head now is
+    /// clean: the target took its change of the path back after the report, so that the change
+    /// merges there, but the lander decided the path against what the target held before, and
+    /// the report says so, with no conflict; nothing is recorded.
+    #[test]
+    fn a_stale_resolution_fails_the_land_where_the_merge_is_clean() {
+        let (_dir, root, repo) = new_store();
+        let t0 = advance(&repo, ACTOR, &[], vec![put("f", b"1\n2\n3\n")]);
+        let head = commit_by(&repo, ACTOR, &[t0], vec![put("f", b"1\nours\n3\n")]);
+        let x = advance(&repo, OTHER, &[t0], vec![put("f", b"1\ntheirs\n3\n")]);
+        let y = advance(&repo, OTHER, &[x], vec![put("f", b"1\n2\n3\n")]);
+        let (frames, before) = (frame_count(&root), main_head(&repo));
+
+        let land = resolving(head, x, vec![("f", new_content(b"1\nboth\n3\n"))]);
+        let conflicts = conflicts_of(repo.land(land));
+        assert_eq!(conflicts.theirs, y);
+        assert_eq!(conflicts.stale, [path("f")]);
+        assert_eq!(kinds(&conflicts), [], "the merge onto y is clean");
+        assert_eq!((frame_count(&root), main_head(&repo)), (frames, before));
+    }
+
+    /// A resolution applies while the target holds its path as `against` did, whatever else the
+    /// target gained since: made against the head a report named, it lands on the head the target
+    /// moved to after, which changed a file beside the resolved one, in its directory.
+    #[test]
+    fn a_resolution_applies_while_the_target_holds_its_path_as_against_did() {
+        let (_dir, _root, repo) = new_store();
+        let t0 = advance(
+            &repo,
+            ACTOR,
+            &[],
+            vec![put("d/f", b"1\n2\n3\n"), put("d/g", b"g\n")],
+        );
+        let head = commit_by(&repo, ACTOR, &[t0], vec![put("d/f", b"1\nours\n3\n")]);
+        let x = advance(&repo, OTHER, &[t0], vec![put("d/f", b"1\ntheirs\n3\n")]);
+        assert_eq!(conflicts_of(repo.land(landing(head))).theirs, x);
+        let y = advance(&repo, "test/third", &[x], vec![put("d/g", b"g 2\n")]);
+
+        let land = resolving(head, x, vec![("d/f", Resolution::Take(Side::Ours))]);
+        let out = repo.land(land).unwrap();
+        assert_eq!(out.rebased_onto, y);
+        assert_eq!(
+            content(&repo, out.landed, "d/f"),
+            Some(b"1\nours\n3\n".to_vec())
+        );
+        assert_eq!(content(&repo, out.landed, "d/g"), Some(b"g 2\n".to_vec()));
+    }
+
+    /// A land that resolves some of its conflicts fails with the others: the report lists the
+    /// conflicts left, not the one resolved, and no path stale; nothing is recorded.
+    #[test]
+    fn a_missing_resolution_reports_the_remaining_conflicts() {
+        let (_dir, root, repo) = new_store();
+        let both = |content: &[u8]| vec![put("f", content), put("g", content)];
+        let t0 = advance(&repo, ACTOR, &[], both(b"1\n2\n3\n"));
+        let head = commit_by(&repo, ACTOR, &[t0], both(b"1\nours\n3\n"));
+        let x = advance(&repo, OTHER, &[t0], both(b"1\ntheirs\n3\n"));
+        let (frames, before) = (frame_count(&root), main_head(&repo));
+
+        let land = resolving(head, x, vec![("f", Resolution::Take(Side::Theirs))]);
+        let conflicts = conflicts_of(repo.land(land));
+        assert_eq!(kinds(&conflicts), [("g", "content")]);
+        assert_eq!(conflicts.stale, Vec::<RepoPath>::new());
+        assert_eq!(conflicts.theirs, x);
+        assert_eq!(
+            conflicts.last_touched.keys().collect::<Vec<_>>(),
+            [&path("g")]
+        );
+        assert_eq!((frame_count(&root), main_head(&repo)), (frames, before));
+    }
+
+    /// A resolution applies whether its path conflicts or not: one for a file both sides edited
+    /// apart, which merges cleanly, and one for a file neither side changed put their contents in
+    /// `L`, and one that takes theirs for a file the merge merged leaves theirs' content, not the
+    /// merge's; none of them is reported auto-merged.
+    #[test]
+    fn a_resolution_for_a_path_that_merges_cleanly_still_applies() {
+        let (_dir, _root, repo) = new_store();
+        let five = b"1\n2\n3\n4\n5\n";
+        let base = vec![
+            put("f", b"1\n2\n3\n"),
+            put("h", five),
+            put("k", five),
+            put("u", b"u\n"),
+        ];
+        let t0 = advance(&repo, ACTOR, &[], base);
+        let ours = vec![
+            put("f", b"1\nours\n3\n"),
+            put("h", b"one\n2\n3\n4\n5\n"),
+            put("k", b"one\n2\n3\n4\n5\n"),
+        ];
+        let head = commit_by(&repo, ACTOR, &[t0], ours);
+        let theirs = vec![
+            put("f", b"1\ntheirs\n3\n"),
+            put("h", b"1\n2\n3\n4\nfive\n"),
+            put("k", b"1\n2\n3\n4\nfive\n"),
+        ];
+        let x = advance(&repo, OTHER, &[t0], theirs);
+        let conflicts = conflicts_of(repo.land(landing(head)));
+        assert_eq!(kinds(&conflicts), [("f", "content")]);
+        assert_eq!(conflicts.auto_merged, [path("h"), path("k")]);
+
+        let land = resolving(
+            head,
+            x,
+            vec![
+                ("f", Resolution::Take(Side::Ours)),
+                ("h", new_content(b"h, resolved\n")),
+                ("k", Resolution::Take(Side::Theirs)),
+                ("u", new_content(b"u, resolved\n")),
+            ],
+        );
+        let out = repo.land(land).unwrap();
+        let landed = |p| content(&repo, out.landed, p);
+        assert_eq!(landed("f"), Some(b"1\nours\n3\n".to_vec()));
+        assert_eq!(landed("h"), Some(b"h, resolved\n".to_vec()));
+        assert_eq!(
+            landed("k"),
+            Some(b"1\n2\n3\n4\nfive\n".to_vec()),
+            "theirs' k, not the merged one"
+        );
+        assert_eq!(landed("u"), Some(b"u, resolved\n".to_vec()));
+        assert_eq!(out.auto_merged, Vec::<RepoPath>::new());
+    }
+
+    /// A resolution decides its path and every path below it: where the change put a file and
+    /// the target made a directory (a type change), taking ours leaves the file and none of the
+    /// directory's files, taking theirs the directory and not the file, new content a file of
+    /// it, and a delete neither.
+    #[test]
+    fn a_resolution_decides_its_path_and_every_path_below_it() {
+        let file = Some(b"a file\n".to_vec());
+        let below = Some(b"x\n".to_vec());
+        for (resolution, d, d_x) in [
+            (Resolution::Take(Side::Ours), file.clone(), None),
+            (Resolution::Take(Side::Theirs), None, below),
+            (new_content(b"new\n"), Some(b"new\n".to_vec()), None),
+            (Resolution::Delete, None, None),
+        ] {
+            let (_dir, _root, repo) = new_store();
+            let t0 = advance(&repo, ACTOR, &[], vec![put("a", b"a\n")]);
+            let ours = vec![put("a", b"a 2\n"), put("d", b"a file\n")];
+            let head = commit_by(&repo, ACTOR, &[t0], ours);
+            let theirs = vec![put("d/x", b"x\n"), put("d/y", b"y\n")];
+            let x = advance(&repo, OTHER, &[t0], theirs);
+            let conflicts = conflicts_of(repo.land(landing(head)));
+            assert_eq!(kinds(&conflicts), [("d", "type_change")]);
+
+            let what = format!("{resolution:?}");
+            let out = repo
+                .land(resolving(head, x, vec![("d", resolution)]))
+                .unwrap();
+            assert_eq!(content(&repo, out.landed, "d"), d, "{what}");
+            assert_eq!(content(&repo, out.landed, "d/x"), d_x.clone(), "{what}");
+            assert_eq!(
+                content(&repo, out.landed, "d/y"),
+                d_x.map(|_| b"y\n".to_vec())
+            );
+            assert_eq!(content(&repo, out.landed, "a"), Some(b"a 2\n".to_vec()));
+            assert_eq!(repo.verify(true).unwrap().problems, [], "{what}");
+        }
+    }
+
+    /// A resolution of a directory resolves the conflicts below it: taking ours for `src`, where
+    /// two files conflict, lands ours' files there, and leaves what the merge made beside it, in
+    /// `src2`, whose name starts as the directory's does.
+    #[test]
+    fn a_resolution_of_a_directory_resolves_the_conflicts_below_it() {
+        let (_dir, _root, repo) = new_store();
+        let each = |content: &[u8]| vec![put("src/a", content), put("src/b", content)];
+        let mut base = each(b"1\n2\n3\n");
+        base.push(put("src2", b"s\n"));
+        let t0 = advance(&repo, ACTOR, &[], base);
+        let mut ours = each(b"1\nours\n3\n");
+        ours.push(put("src2", b"s 2\n"));
+        let head = commit_by(&repo, ACTOR, &[t0], ours);
+        let x = advance(&repo, OTHER, &[t0], each(b"1\ntheirs\n3\n"));
+        let conflicts = conflicts_of(repo.land(landing(head)));
+        assert_eq!(
+            kinds(&conflicts),
+            [("src/a", "content"), ("src/b", "content")]
+        );
+
+        let land = resolving(head, x, vec![("src", Resolution::Take(Side::Ours))]);
+        let out = repo.land(land).unwrap();
+        for p in ["src/a", "src/b"] {
+            let landed = content(&repo, out.landed, p);
+            assert_eq!(landed, Some(b"1\nours\n3\n".to_vec()), "{p}");
+        }
+        assert_eq!(content(&repo, out.landed, "src2"), Some(b"s 2\n".to_vec()));
+    }
+
+    /// A resolution's content can be a blob the store holds, named by its id, which the land
+    /// neither reads nor writes again. An id the store holds no blob under fails the land before
+    /// its first attempt, naming the path and the id, and records nothing.
+    #[test]
+    fn a_resolution_names_a_stored_blob_by_its_id() {
+        let (_dir, root, repo) = new_store();
+        let t0 = advance(&repo, ACTOR, &[], vec![put("f", b"1\n2\n3\n")]);
+        let head = commit_by(&repo, ACTOR, &[t0], vec![put("f", b"1\nours\n3\n")]);
+        let x = advance(&repo, OTHER, &[t0], vec![put("f", b"1\ntheirs\n3\n")]);
+        let (frames, before) = (frame_count(&root), main_head(&repo));
+        let named = |id| {
+            let resolution = Resolution::PutBlob { kind: None, id };
+            resolving(head, x, vec![("f", resolution)])
+        };
+
+        let never = blob(b"never stored\n");
+        let tree = repo.changeset(x).unwrap().unwrap().changeset.root;
+        for id in [never, BlobId(tree.0)] {
+            match repo.land(named(id)) {
+                Err(RepoError::MissingBlob {
+                    path: at,
+                    id: named,
+                }) => {
+                    assert_eq!((at, named), (path("f"), id));
+                }
+                other => panic!("expected MissingBlob, got {other:?}"),
+            }
+        }
+        assert_eq!((frame_count(&root), main_head(&repo)), (frames, before));
+
+        let stored = repo.put_blob(b"1\nstored\n3\n".to_vec()).unwrap();
+        let out = repo.land(named(stored.id)).unwrap();
+        assert_eq!(
+            content(&repo, out.landed, "f"),
+            Some(b"1\nstored\n3\n".to_vec())
+        );
+        assert_eq!(kind_at(&repo, out.landed, "f"), Some(LeafKind::File));
+    }
+
+    /// Resolutions apply in every attempt: a land whose first publish loses its race to a change
+    /// elsewhere applies them again to its re-merge onto the target's new head, and lands there.
+    #[test]
+    fn resolutions_apply_again_after_a_lost_race() {
+        let (_dir, root, repo) = new_store();
+        let t0 = advance(&repo, ACTOR, &[], vec![put("f", b"1\n2\n3\n")]);
+        let head = commit_by(&repo, ACTOR, &[t0], vec![put("f", b"1\nours\n3\n")]);
+        let x = advance(&repo, OTHER, &[t0], vec![put("f", b"1\ntheirs\n3\n")]);
+        drop(repo);
+        let racer = Racer::new(&root, 1, |n| vec![put(&format!("race/{n}"), b"theirs\n")]);
+        let repo = racer.open();
+
+        let land = resolving(head, x, vec![("f", new_content(b"1\nboth\n3\n"))]);
+        let out = repo.land(land).unwrap();
+        let gained = racer.landed();
+        assert_eq!(gained.len(), 1, "one race");
+        assert_eq!((out.attempts, out.rebased_onto), (2, gained[0]));
+        assert_eq!(
+            content(&repo, out.landed, "f"),
+            Some(b"1\nboth\n3\n".to_vec())
+        );
+        assert_eq!(
+            content(&repo, out.landed, "race/0"),
+            Some(b"theirs\n".to_vec())
+        );
+        assert_eq!(repo.verify(true).unwrap().problems, []);
+    }
+}
+
 /// A replay is decided under the store's lock, after the write's tail check, as a keyed commit's
 /// is: a land whose frame is whole but not listed in `journal.off` (its listing failed after the
 /// commit point, which the land reports as a warning) is found by its key, and the replay lists

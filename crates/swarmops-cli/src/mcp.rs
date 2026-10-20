@@ -57,10 +57,10 @@
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
 //! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`,
-//! `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `blob_put`, `blob_has` and `verify`, in
-//! `tools/list`'s order. A tool's `inputSchema` is its request type's JSON Schema, as `swarmops
-//! schema <type>` prints it, with each `$ref` replaced by the definition it names so that the
-//! schema stands alone: a keyword beside the reference wins over the definition's, but for
+//! `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has` and
+//! `verify`, in `tools/list`'s order. A tool's `inputSchema` is its request type's JSON Schema, as
+//! `swarmops schema <type>` prints it, with each `$ref` replaced by the definition it names so that
+//! the schema stands alone: a keyword beside the reference wins over the definition's, but for
 //! `description`, where the reference's comes first and the definition's after it. It is kept a
 //! plain object ([`tool_input_schema`]): nothing at its top but `$schema`, `title`,
 //! `description`, `type`, `properties` and `required`, since the Claude API refuses a request
@@ -80,11 +80,12 @@
 //! `ref_delete` must name what it expects the ref to hold by its full changeset id, since a ref
 //! name or a relative revision resolves when the call runs and so defeats the compare-and-swap,
 //! and an id prefix stops resolving once another changeset shares it (the CLI takes any
-//! revision for `--expect`, and its help warns why not to); and a `commit` or a `blob_put` whose
-//! `{"file": <path>}` content names a relative path, this process's own stdin or stdout, or
-//! anything but a regular file, is refused, since the server would read the file from a working
-//! directory the agent cannot see, block on the pipe that carries the protocol, or block on a
-//! FIFO or a device. A mutation then
+//! revision for `--expect`, and its help warns why not to); a `land` must name what its
+//! `resolutions` were decided `against` by its full changeset id, for the same reasons; and a
+//! `commit`, a `blob_put` or a `land` whose `{"file": <path>}` content names a relative path,
+//! this process's own stdin or stdout, or anything but a regular file, is refused, since the
+//! server would read the file from a working directory the agent cannot see, block on the pipe
+//! that carries the protocol, or block on a FIFO or a device. A mutation then
 //! needs the server's identity, and last the store is opened and the operation runs; a
 //! `verify` that finds problems is `E_STORE_CORRUPT`, as `swarmops verify` is, and a panic in
 //! the operation is `E_INTERNAL`. The tool result holds the envelope the CLI prints for the
@@ -132,6 +133,7 @@ use std::time::Instant;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
+use swarmops_api::LandReq;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
@@ -212,8 +214,8 @@ show, log or a commit's result). A \
 ref name or a relative revision is read when the call runs instead of pinning the id you read: \
 the ref's own name always matches, so the compare-and-swap protects nothing, and main~1 on ref \
 main never matches; an id prefix stops resolving once another changeset shares it; the server \
-refuses all three. After E_CAS_MISMATCH, commit your change again on top of details.actual, \
-re-applying your edits to the content there, then retry with expected_old set to it. A read \
+refuses all three. To publish a changeset, land it: land merges it three-way onto main and \
+moves main in one step, and on E_CONFLICT details.report says what to resolve. A read \
 may show a commit that a failed sync then takes back; a mutation that names it fails under the \
 lock instead of building on it. op_log lists the store's transactions, newest first; undo \
 restores the refs one moved while they still hold what it set. Clients limit long tool results: \
@@ -232,7 +234,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 17] = [
+static TOOLS: [Spec; 18] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -404,6 +406,20 @@ static TOOLS: [Spec; 17] = [
                       (result.replayed) instead of recording it twice. A {\"file\": path} \
                       content is read by this server: give an absolute path.",
         effect: Effect::Adds,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Land,
+        name: "land",
+        request: "LandReq",
+        title: "Land a change",
+        description: "Merges head (with its first-parent chain since base) three-way onto target, \
+                      main by default, and publishes the result as one changeset in one \
+                      transaction; on E_CONFLICT, details.report lists each conflict: resolve them \
+                      with resolutions, against the report's theirs, its full 64-hex id (a path \
+                      the target changed since comes back in the report's stale). Give \
+                      idempotency_key to make a retry safe.",
+        effect: Effect::Lands,
         result_chars: None,
     },
     Spec {
@@ -910,6 +926,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::RefDelete => how.mutate(|ops, who, req| ops.ref_delete(who, req)),
         Tool::Undo => how.mutate(|ops, who, req| ops.undo(who, req)),
         Tool::Commit => how.mutate(|ops, who, req| ops.commit(who, req)),
+        Tool::Land => how.mutate(|ops, who, req| ops.land(who, req)),
         Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
         Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
         Tool::Verify => how.read(|ops, req: VerifyReq| {
@@ -1125,6 +1142,64 @@ fn unreadable(file: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// A land's resolutions apply while the target holds each path as `against` did, so `against`
+/// is a full changeset id ([`concrete_against`]); a resolution's client file is read by this
+/// server as a commit's is, so the same rules hold ([`unreadable`]); the refusal names the
+/// resolution's `path` and the `file`.
+impl Refuse for LandReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        let Some(resolutions) = &self.resolutions else {
+            return Ok(());
+        };
+        concrete_against(&resolutions.against)?;
+        for (path, resolution) in &resolutions.files {
+            let Some(ContentInput::File(file)) = &resolution.content else {
+                continue;
+            };
+            let Some(why) = unreadable(file) else {
+                continue;
+            };
+            return Err(OpError::new(
+                ErrorCode::InvalidArg,
+                output::printable(&format!(
+                    "the resolution of {path:?}: the client file {file:?} {why}: name a regular \
+                     file by its absolute path, or send the bytes as inline or base64 content"
+                )),
+            )
+            .with_details(Map::from_iter([
+                ("path".to_owned(), Value::from(path.as_str())),
+                ("file".to_owned(), Value::from(file.as_str())),
+            ])));
+        }
+        Ok(())
+    }
+}
+
+/// `E_INVALID_ARG` unless `against`, what a land's resolutions were decided against, is a full
+/// changeset id ([`is_full_id`]): a resolution applies while the target holds its path as
+/// `against` did, so `against` must pin the head the caller read the conflict report at. A ref
+/// name or a relative revision is read when the call runs instead, so it holds every path as the
+/// target does and protects nothing, and an id prefix stops resolving once another changeset
+/// shares it. The CLI takes any revision there, as it does for `--expect`; an agent through this
+/// server gets the rule enforced.
+fn concrete_against(against: &Rev) -> Result<(), OpError> {
+    let rev = against.as_str();
+    if is_full_id(rev) {
+        return Ok(());
+    }
+    Err(OpError::new(
+        ErrorCode::InvalidArg,
+        output::printable(&format!(
+            "resolutions.against {rev:?} is not a full changeset id: a resolution applies while \
+             the target holds its path as against did, and a ref name or a relative revision is \
+             read when the call runs instead of pinning the head you read, so it would protect \
+             nothing, while an id prefix stops resolving once another changeset shares it; pass \
+             the conflict report's theirs, its 64-hex id"
+        )),
+    )
+    .with_details(Map::from_iter([("against".to_owned(), Value::from(rev))])))
 }
 
 /// A move names the target it expects by its full id ([`concrete_expectation`]), unless it
@@ -1465,6 +1540,7 @@ enum Tool {
     RefDelete,
     Undo,
     Commit,
+    Land,
     BlobPut,
     BlobHas,
     Verify,
@@ -1485,6 +1561,10 @@ enum Effect {
     /// `ref_delete`, `undo`); run again with the same arguments, it finds them as it asked
     /// (`already_applied`) or not as it expected (`E_CAS_MISMATCH`), and changes nothing more.
     Moves,
+    /// It adds a changeset onto a ref's head and moves the ref to it, keeping all the ref held
+    /// (`land`); run again with the same arguments, it finds its change on the ref and adds
+    /// nothing: `replayed` with an `idempotency_key`, `E_NOTHING_TO_LAND` without.
+    Lands,
 }
 
 impl Effect {
@@ -1500,6 +1580,10 @@ impl Effect {
             // ref again. An undo compares against what its operation's frame recorded, the same at
             // every call: run again, it finds the refs restored and writes nothing.
             Effect::Moves => (false, true, true),
+            // A land merges onto the ref's head and moves the ref to a changeset whose parent is
+            // that head, so it only adds; run again, it finds its change there (a replay with its
+            // key, E_NOTHING_TO_LAND without one) and writes nothing.
+            Effect::Lands => (false, false, true),
         };
         json!({
             "readOnlyHint": read_only,
@@ -1663,10 +1747,6 @@ mod tests {
         // operations, so they have no tool; `derive` is maintenance, which `swarmops derive` runs
         // beside the store, and no agent's work.
         let client_side = ["InitReq", "GitImportReq", "GitExportReq"];
-        // M4's contract has the request of `land` (M4 Task 7) before its operation: it stays
-        // off the tools until that task adds the operation and the tool, and takes it off this
-        // list.
-        let without_tools_yet = ["LandReq"];
         let all = schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
@@ -1674,20 +1754,11 @@ mod tests {
             .keys()
             .map(String::as_str)
             .filter(|name| {
-                name.ends_with("Req")
-                    && !client_side.contains(name)
-                    && *name != "DeriveReq"
-                    && !without_tools_yet.contains(name)
+                name.ends_with("Req") && !client_side.contains(name) && *name != "DeriveReq"
             })
             .collect();
         let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
         advertised.sort_unstable();
-        for name in without_tools_yet {
-            assert!(
-                all.get(name).is_some() && !advertised.contains(&name),
-                "{name} has a tool now: take it off the requests without one"
-            );
-        }
         assert_eq!(
             advertised, requests,
             "one tool per operation's request type"
@@ -1717,6 +1788,7 @@ mod tests {
     fn sample() -> Value {
         json!({
             "rev": "main",
+            "head": "main",
             "from": "main",
             "to": "main",
             "path": "a",
@@ -1774,6 +1846,10 @@ mod tests {
 
         fn commit(&self, _: &Identity, _: CommitReq) -> Result<CommitResp, OpError> {
             self.called("commit", "CommitReq")
+        }
+
+        fn land(&self, _: &Identity, _: LandReq) -> Result<swarmops_api::LandResp, OpError> {
+            self.called("land", "LandReq")
         }
 
         fn read_file(&self, _: ReadFileReq) -> Result<FileContent, OpError> {
