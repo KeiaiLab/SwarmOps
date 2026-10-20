@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="t d">
+  <title id="t">SwarmOps</title>
+  <desc id="d">The SwarmOps logo beside its name and tagline: source control for swarms of coding agents.</desc>
+  <!-- The social preview (GitHub's 1280x640, and the website's og:image). Rendered to
+       docs/assets/social-card.png and site/og-image.png by scripts/site/render-images.cjs. -->
+  <defs>
+    <radialGradient id="glow" cx="22%" cy="50%" r="60%">
+      <stop offset="0" stop-color="#7c5cff" stop-opacity=".30"/>
+      <stop offset="1" stop-color="#7c5cff" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="hex" width="56" height="97" patternUnits="userSpaceOnUse" patternTransform="translate(8 4)">
+      <path d="M28 0 56 16.2v32.3L28 64.6 0 48.5V16.2zM28 64.6v32.4" fill="none" stroke="#7c5cff" stroke-opacity=".10" stroke-width="2"/>
+    </pattern>
+    <linearGradient id="fade" x1="0" x2="1" y1="0" y2="0">
+      <stop offset=".45" stop-color="#fff" stop-opacity="0"/>
+      <stop offset="1" stop-color="#fff" stop-opacity="1"/>
+    </linearGradient>
+    <mask id="right"><rect width="1280" height="640" fill="url(#fade)"/></mask>
+  </defs>
+  <rect width="1280" height="640" fill="#0d1117"/>
+  <rect width="1280" height="640" fill="url(#glow)"/>
+  <rect width="1280" height="640" fill="url(#hex)" mask="url(#right)"/>
+  <!-- docs/assets/logo.svg at 2.3x -->
+  <g transform="translate(96 170) scale(2.3)">
+    <path d="M64 6 114.2 35v58L64 122 13.8 93V35z" fill="#7c5cff" fill-opacity=".16" stroke="#7c5cff" stroke-width="6" stroke-linejoin="round"/>
+    <g fill="none" stroke="#9b85ff" stroke-width="4.5" stroke-linecap="round">
+      <path d="M36 38c0 16 12 26 28 26M92 38c0 16-12 26-28 26M36 70c0 16 12 26 28 26M92 70c0 16-12 26-28 26"/>
+    </g>
+    <g fill="#9b85ff"><circle cx="36" cy="36" r="6"/><circle cx="92" cy="36" r="6"/><circle cx="36" cy="68" r="6"/><circle cx="92" cy="68" r="6"/></g>
+    <path d="M64 30v66" stroke="#f59e0b" stroke-width="7" stroke-linecap="round"/>
+    <g fill="#f59e0b"><circle cx="64" cy="30" r="8.5"/><circle cx="64" cy="64" r="8.5"/><circle cx="64" cy="96" r="8.5"/></g>
+  </g>
+  <g font-family="DejaVu Sans" fill="#f0f6fc">
+    <text x="470" y="262" font-size="104" font-weight="bold" letter-spacing="-2">SwarmOps</text>
+    <text x="474" y="336" font-size="42" fill="#c9d1d9">Source control for swarms</text>
+    <text x="474" y="388" font-size="42" fill="#c9d1d9">of coding agents</text>
+    <text x="476" y="452" font-size="25" fill="#8b949e">Many writers · one store · one JSON envelope per command</text>
+  </g>
+  <rect x="0" y="560" width="1280" height="80" fill="#010409" fill-opacity=".55"/>
+  <g font-family="DejaVu Sans" font-size="26">
+    <text x="96" y="609" fill="#f59e0b" font-weight="bold">swarmops.cc</text>
+    <text x="1184" y="609" fill="#8b949e" text-anchor="end">Rust · MIT · pre-release</text>
+  </g>
+</svg>
