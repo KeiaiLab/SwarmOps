@@ -34,3 +34,5 @@ cargo deny --locked check
 # The fuzz crate's lockfile too, which the fuzz clippy step builds; its one license exception is
 # in fuzz/deny.exceptions.toml.
 cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
+# THIRD-PARTY-LICENSES, the notices the release archives carry, still matches Cargo.lock.
+python3 -I scripts/third-party-licenses.py --check

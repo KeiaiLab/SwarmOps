@@ -69,9 +69,10 @@ replaces both binaries (`Replaced package`).
 From v0.1.0 on, each release on the
 [releases page](https://github.com/KeiaiLab/SwarmOps/releases) carries one archive per Linux
 target, `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` and
-`swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz` (`swarmops`, `so`, the license, the README
-and the changelog), and a `SHA256SUMS` file to check them against. The binaries need glibc 2.34
-or newer. [RELEASE.md](../RELEASE.md) has the release steps.
+`swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz` (`swarmops`, `so`, the license, the
+third-party licenses, the README and the changelog), and a `SHA256SUMS` file to check them
+against. The binaries need glibc 2.34 or newer. [RELEASE.md](../RELEASE.md) has the release
+steps.
 
 ```sh
 gh release download v0.1.0 --repo KeiaiLab/SwarmOps \

@@ -158,8 +158,8 @@ jobs:
 
   # `swarmops` and `so` for one target, `cargo build --release --locked` on the pinned toolchain
   # without the `test-hooks` feature, smoke-run, then packed into
-  # `swarmops-<version>-<target>.tar.gz` (both binaries, LICENSE, README.md, CHANGELOG.md) with
-  # its SHA-256.
+  # `swarmops-<version>-<target>.tar.gz` (both binaries, LICENSE, THIRD-PARTY-LICENSES, README.md,
+  # CHANGELOG.md) with its SHA-256.
   build:
     name: build ${{ matrix.target }}
     needs: version
@@ -266,7 +266,10 @@ jobs:
             "$bin/swarmops" --repo "$store" show main
           expect '.result.content == "hello\n"' "$bin/swarmops" --repo "$store" cat main:hello.txt
           expect '.result.problems == []' "$bin/so" --repo "$store" verify --deep
-      # Reproducible: the entries sorted, owned by root and dated at the tagged commit.
+      # Reproducible: the entries sorted, owned by root and dated at the tagged commit. The archive
+      # holds exactly these files, or the step fails: THIRD-PARTY-LICENSES, the licenses of the
+      # crates compiled into the binaries, is among them (`just check` keeps it in step with
+      # Cargo.lock).
       - name: Pack the archive
         id: pack
         run: |
@@ -275,12 +278,19 @@ jobs:
           mkdir -p "$stage/$name" dist
           install -m 0755 "target/$TARGET_TRIPLE/release/swarmops" \
             "target/$TARGET_TRIPLE/release/so" "$stage/$name/"
-          install -m 0644 LICENSE README.md CHANGELOG.md "$stage/$name/"
+          install -m 0644 LICENSE THIRD-PARTY-LICENSES README.md CHANGELOG.md "$stage/$name/"
           mtime=$(git log -1 --format=%ct)
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$mtime" \
             -C "$stage" -cf - "$name" | gzip -9 --no-name >"dist/$name.tar.gz"
-          (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
           tar -tvzf "dist/$name.tar.gz"
+          expected=$(printf '%s\n' "$name/" "$name/CHANGELOG.md" "$name/LICENSE" "$name/README.md" \
+            "$name/THIRD-PARTY-LICENSES" "$name/so" "$name/swarmops" | LC_ALL=C sort)
+          if [ "$(tar -tzf "dist/$name.tar.gz" | LC_ALL=C sort)" != "$expected" ]; then
+            echo "::error::$name.tar.gz does not hold exactly its directory, both binaries," \
+              "LICENSE, THIRD-PARTY-LICENSES, README.md and CHANGELOG.md (its listing is above)"
+            exit 1
+          fi
+          (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
           cat "dist/$name.tar.gz.sha256"
           echo "name=$name" >>"$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

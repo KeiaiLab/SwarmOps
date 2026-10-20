@@ -38,7 +38,8 @@ cargo install --locked cargo-fuzz      # only for fuzzing, which also needs a ni
 ```
 
 `just check` lints the fuzz crate too, and on a cold cache that compiles libFuzzer's C++
-sources, so it needs a C++ compiler (`c++`).
+sources, so it needs a C++ compiler (`c++`). Its last step runs a Python script, with Python 3.11
+or newer as `python3`.
 
 ## Branches and landing
 
@@ -71,7 +72,12 @@ A change is done when `just check` passes on it. It runs, in order:
    link-checks the code behind `test-hooks` (the order checker and the fault doubles);
 6. `cargo deny check`, advisories, licenses, bans and sources, with `deny.toml`, over both
    lockfiles the steps above build: the workspace's and the fuzz crate's, whose one license
-   exception is in `fuzz/deny.exceptions.toml`.
+   exception is in `fuzz/deny.exceptions.toml`;
+7. `scripts/third-party-licenses.py --check`: `THIRD-PARTY-LICENSES`, the notices that the
+   release archives carry for the third-party crates compiled into `swarmops` and `so`, still
+   matches `Cargo.lock`, the licenses `deny.toml` allows and the crates' own license files. After
+   a dependency change, run `python3 -I scripts/third-party-licenses.py` and commit the file it
+   writes with `Cargo.lock`.
 
 The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
 where it is built, by `just bench-compare` and the weekly scheduled run, with a policy of its

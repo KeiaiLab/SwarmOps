@@ -666,6 +666,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   runbook of the first real use, on this repository (its history imported, one agent session
   through MCP, the export and its round trip, the repository's CI on it, what to measure, the
   success criteria and the rollback).
+- [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES), in every release archive: each third-party crate
+  that the release build of `swarmops` and `so` compiles, with the license expression it declares,
+  the license it is used under (one that `deny.toml` allows) and the license texts from its
+  package, zstd's C library and the libdivsufsort-lite it includes among them.
+  `scripts/third-party-licenses.py` writes it from `Cargo.lock`; `just check` fails when the file
+  no longer matches (so it now needs `python3`, 3.11 or newer), and the release's packing fails
+  without it.
 
 #### The v0.1.0 release batch (2026-10-20)
 
