@@ -155,8 +155,12 @@ impl GixSink {
     }
 
     /// The loose file of `oid`, read and checked against its id; `None` when there is no such
-    /// file.
+    /// file, or no regular one: the open of a FIFO would block, and gix's own lookups pass such a
+    /// file over too.
     fn read_loose(&self, oid: GitOid) -> Result<Option<(RawKind, Vec<u8>)>, SinkError> {
+        if !self.is_loose(oid)? {
+            return Ok(None);
+        }
         let mut buffer = Vec::new();
         match self.loose.try_find(&to_gix(oid), &mut buffer) {
             Ok(Some(data)) => checked(oid, raw_kind(data.kind), data.data.to_vec()).map(Some),

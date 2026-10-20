@@ -29,7 +29,7 @@
 
 SwarmOps is source control built for a swarm of coding agents: 10 to 50 Claude Code or LangGraph
 processes on one host, committing to one repository at once. It is written in Rust and fully
-embedded: one program, no external database, no daemon. It is pre-release, at milestone M1.6:
+embedded: one program, no external database, no daemon. It is pre-release, at milestone M2:
 usable by one agent, with a store that already takes commits from many processes at once;
 merging and landing, which a swarm needs, come in M4 ([roadmap](#roadmap)).
 
@@ -354,7 +354,7 @@ and starts no server either.
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `op log [--before OP] [-n N] [--max-changesets N]` | The store's operations, newest first, a page at a time: each write transaction with its kind, its changesets and its ref moves. |
 | `op undo OP` | Move every ref operation `OP` moved back to what it named before, by compare-and-swap in one transaction: all of them or none. |
-| `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
+| `verify [--deep]` | Check the store; `--deep` re-hashes every object and checks the derived values against the objects. |
 | `derive [--after N] [--follow] [--interval-ms N] [--from-start]` | Derive ahead of any reader the eager derived values (the first-parent skip list) of the changesets the journal records. Once: up to 1,000 journal frames, from the first or after `--after N`, its `next` saying where to go on. With `--follow`: as they are committed, from the journal's end (its start with `--from-start`), until killed, one envelope a line for each run that derived something. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
 | `git import PATH [--ref GIT_REF] [--into REF] [--lossy CLASS]... [--gitlinks refuse\|drop]` | Bring the history of the git repository at `PATH` in: every commit `--ref` (`HEAD`) reaches that the store does not hold, then move `--into` (`main`) to it ([Bring a git repository in](#bring-a-git-repository-in)). |
@@ -504,7 +504,7 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | ✅ | M1 | The single-agent core: `init`, `commit`, `cat`, `ls`, `log` and ref compare-and-swap, over the native metadata store and object files; crash sweeps. |
 | ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, `--locked` everywhere; I/O-error injection, write-ordering checks and the fsync-failure policy; power-loss images; the project policies; the tests' shared support in one crate; benchmarks of the metadata store against embedded databases; the MCP server and `so`. |
 | ✅ | M1.6 | The code-review follow-ups, before M2: the error contract an agent sees (typed refusals, I/O failures that name the store file and no host path but in two rare `E_IO`s, a report of what a write's recovery repaired); a bound on the lock-free reader's retries; structured `verify` findings, and MCP tool schemas kept plain objects; object reads without a second copy or an allocation of the size a file claims; the test doubles M1.5 left, in one place; spec hygiene (the write-ordering rules W1–W7, §8 in step with the code); the harness for the measurements M2's sync decision needs, whose quiet-window runs are still to come; and `commit --advance`, the commit primitive M4's landing reuses. |
-| 📋 | M2 | Diff, history and the derived-data engine. |
+| ✅ | M2 | Diff, history and the derived-data engine. |
 | 📋 | M3 | git import. |
 | 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |
 | 📋 | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |

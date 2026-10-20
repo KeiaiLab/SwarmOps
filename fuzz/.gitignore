@@ -1,4 +1,6 @@
-# cargo-fuzz output, relative to fuzz/ (the corpus in fuzz/corpus/ is tracked).
+# cargo-fuzz output, relative to fuzz/. The corpus in fuzz/corpus/ is tracked; the new inputs
+# that `just fuzz` finds go to corpus-new/<target>/ (CONTRIBUTING.md says how they join it).
 /target/
 /artifacts/
 /coverage/
+/corpus-new/

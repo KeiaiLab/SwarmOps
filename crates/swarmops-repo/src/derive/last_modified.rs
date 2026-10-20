@@ -121,7 +121,7 @@ impl Derivation for LastModified {
 /// a search for the path, then one for the first entry at or after `path/`, which is below the
 /// path if it starts with that (the entries below a path are contiguous, but not next to the
 /// path's own: `a-b` sorts between `a` and `a/c`).
-fn touches(delta: &[DeltaEntry], path: &RepoPath) -> bool {
+pub(crate) fn touches(delta: &[DeltaEntry], path: &RepoPath) -> bool {
     fn at(entry: &DeltaEntry) -> &[u8] {
         entry.path.as_str().as_bytes()
     }

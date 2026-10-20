@@ -11,9 +11,9 @@ just bench-compare --w1-txns 2000 --w2-txns 100   # smaller W1 and W2, everythin
 
 The full run's time goes almost all to waiting for the disk: W1 makes 10,000 commits per engine and run, W2 32,000, and the native store's W1 commit makes four syncs (see below). `--w1-txns`, `--w2-txns` and `--sizes` scale a run down; the report's headings give the sizes it ran.
 
-The recipe runs `cargo run --release --locked --manifest-path bench/compare/Cargo.toml -- …`. The first build compiles SQLite's C sources (a C compiler is needed) and takes a minute or two. The report (Markdown) goes to stdout, progress to stderr, and every raw value to a JSON file (`bench/compare/target/results/`, or `--out`). The run needs no network.
+The recipe first checks this workspace's lockfile with `cargo deny --locked --manifest-path bench/compare/Cargo.toml --config bench/compare/deny.toml check` (below), which fetches the RustSec advisory database, then runs `cargo run --release --locked --manifest-path bench/compare/Cargo.toml -- …`. The first build compiles SQLite's C sources (a C compiler is needed) and takes a minute or two. The report (Markdown) goes to stdout, progress to stderr, and every raw value to a JSON file (`bench/compare/target/results/`, or `--out`). The run itself needs no network.
 
-The harness has tests of its own, which `just check` does not run: after a change here, run `cargo test --manifest-path bench/compare/Cargo.toml --locked`, `cargo clippy --manifest-path bench/compare/Cargo.toml --locked --all-targets -- -D warnings` and `cargo fmt --manifest-path bench/compare/Cargo.toml --check`.
+The harness has tests of its own, which `just check` does not run: after a change here, run `cargo test --manifest-path bench/compare/Cargo.toml --locked`, `cargo clippy --manifest-path bench/compare/Cargo.toml --locked --all-targets -- -D warnings` and `cargo fmt --manifest-path bench/compare/Cargo.toml --check`, and after a change to `Cargo.toml` or `Cargo.lock` here, the `cargo deny` command above. The weekly scheduled workflow runs all four.
 
 ## Engines
 
@@ -30,9 +30,11 @@ The harness has tests of its own, which `just check` does not run: after a chang
 Versions are pinned exactly, each released at least 7 days before the harness was written, as are the transitive dependencies in `Cargo.lock`, except `zstd` 0.14.2 (5.7 days), `zstd-safe` 8.1.0 and `zstd-sys` 2.1.1 (6.6 days), which `swarmops-store`'s own `zstd` brings in. Every engine runs with its defaults apart from durability; no engine gets a tuning the others do not.
 
 Nothing in the repository bumps these versions: `.github/dependabot.yml` has no entry for this
-workspace, and `cargo deny` audits only the root one (run against this lockfile it fails on
-`fxhash` and `instant`, unmaintained crates that `sled` pulls in and that no upgrade fixes). The
-pins change only by hand, and the table above and `docs/perf.md` record the versions measured.
+workspace. `cargo deny` checks this lockfile with `bench/compare/deny.toml`: every line of the
+workspace's policy, two licenses allowed for one crate each (`varint-rs`, 0BSD; `xxhash-rust`,
+BSL-1.0), and two advisories ignored with their reasons, for `fxhash` and `instant`, unmaintained
+crates that `sled` pulls in and that no upgrade fixes. The pins change only by hand, and the
+table above and `docs/perf.md` record the versions measured.
 
 **fjall's settled state.** fjall writes a memtable to a table file only once it holds 64 MiB, and deletes a journal only when every keyspace has flushed past it. The small keyspaces (`meta`, `refs`, `reflog`) never fill a memtable, so after a bulk load every journal stays until 512 MiB of them force a flush: left that way, W5 would count the journals beside the tables. So `fjall` settles as the others do, by moving its log into its main structure, as SQLite's checkpoint does: it syncs the journal, then flushes every keyspace's memtable (`rotate_memtable_and_wait`, public but doc-hidden; fjall's own tests use it), and fjall deletes the journals no keyspace needs. One cost stays, and it is fjall's own: the active journal is rotated only when it passes 64 MB at a flush, and an open replays it whole, flushed or not. So the flush shrinks a large store (W5); at open it saves only the first open after the load, which on an unflushed store replays every journal, flushes what the load left in memtables and deletes the sealed journals (2.9 s against 0.55 s at 1M, provisional), while every later open replays the same active journal. A small store keeps its whole journal beside the new tables. `fjall-unflushed` shows the store as the load left it in W5, in its first open after the load (timed at seeding) and in W4's opens, each of a fresh copy of the store taken at seeding; W3 and W4's recovery see it after that first open has settled it.
 

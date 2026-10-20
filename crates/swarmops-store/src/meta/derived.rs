@@ -11,7 +11,9 @@
 //! their own, of which one is linked. A read checks what the file says against the slot it was
 //! asked for, and a trailer, BLAKE3 over the slot and the value, against both; a file that fails
 //! (torn, cut short, zero-filled, flipped, or another slot's file) is removed, best effort, and
-//! reads as missing, so that the value is derived and stored again.
+//! reads as missing, so that the value is derived and stored again. No value holds more than an
+//! object does ([`MAX_OBJECT_LEN`], 512 MiB): a put refuses a longer one, and a file whose header
+//! records a longer one fails its checks before anything is decoded or allocated for it.
 //!
 //! A file is `"SWDV" | u8 1 | u8 enc | u16le 0 | u32le key_len | u64le value_len | key | payload
 //! | trailer`: the payload is the value itself (`enc` 0) or, for a value over 4 KiB, its zstd
@@ -20,6 +22,9 @@
 //! u32le key_len ++ key ++ u64le value_len ++ value)`, over the value before compression. The
 //! layout has a header of its own, outside the journal's `FORMAT`: a new layout gets a new
 //! version byte.
+//!
+//! A check of the store lists a derivation's value files by their names ([`DerivedStore::list`])
+//! and reads each with its key ([`DerivedStore::read_listed`]), removing nothing.
 
 use std::borrow::Cow;
 use std::hash::{BuildHasher, RandomState};
@@ -28,12 +33,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use camino::Utf8Path;
 use swarmops_core::ObjectId;
 use swarmops_core::bytes::{Reader, to_u64};
 
 use crate::error::{FileOp, StoreError};
+use crate::external_ids::from_hex;
+use crate::fs_objects::MAX_OBJECT_LEN;
 use crate::fs_ops::{FsOps, LinkOutcome, StoreFs};
-use crate::layout::Layout;
+use crate::layout::{Layout, derived_key_hash};
 
 const MAGIC: [u8; 4] = *b"SWDV";
 /// The version of the file layout: its fifth byte.
@@ -82,18 +90,7 @@ impl DerivedSlot<'_> {
     /// The key's length, as the file records it, if the slot is one a store takes (see
     /// [`DerivedSlot`]'s fields); [`StoreError::BadCall`] otherwise.
     fn key_len(&self) -> Result<u32, StoreError> {
-        if !is_derived_name(self.name) {
-            return Err(StoreError::BadCall(format!(
-                "derived value name {:?}: not 1 to 64 bytes of [a-z0-9_], or tmp",
-                self.name
-            )));
-        }
-        if self.version == 0 {
-            return Err(StoreError::BadCall(format!(
-                "derived value version 0 of {}: versions start at 1",
-                self.name
-            )));
-        }
+        check_derivation(self.name, self.version)?;
         u32::try_from(self.key.len()).map_err(|_| {
             StoreError::BadCall(format!(
                 "derived value key of {} bytes: at most {}",
@@ -120,6 +117,44 @@ impl DerivedSlot<'_> {
         hasher.update(value);
         *hasher.finalize().as_bytes()
     }
+}
+
+/// [`StoreError::BadCall`] unless `name` and `version` are a derivation's that a store takes
+/// ([`DerivedSlot::name`], [`DerivedSlot::version`]).
+fn check_derivation(name: &str, version: u32) -> Result<(), StoreError> {
+    if !is_derived_name(name) {
+        return Err(StoreError::BadCall(format!(
+            "derived value name {name:?}: not 1 to 64 bytes of [a-z0-9_], or tmp"
+        )));
+    }
+    if version == 0 {
+        return Err(StoreError::BadCall(format!(
+            "derived value version 0 of {name}: versions start at 1"
+        )));
+    }
+    Ok(())
+}
+
+/// A value file of a derivation's directory, as [`DerivedStore::list`] finds it by its name: the
+/// subject the name gives, and the hash of the key it ends in, if any. [`DerivedStore::read_listed`]
+/// reads the key and the value the file holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ListedValue {
+    /// The object the value is about: its first byte the file's fan-out directory, the rest the
+    /// name's first 62 hex digits.
+    pub subject: ObjectId,
+    /// The first 8 bytes of BLAKE3 of the value's key, which the file's name ends in
+    /// (`.<16 hex>`); `None` for a name without them, a value whose key is empty.
+    pub key_hash: Option<[u8; 8]>,
+}
+
+/// What a whole value file holds, as [`DerivedStore::read_listed`] reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredValue {
+    /// The key of the slot it is the file of, as the file records it.
+    pub key: Vec<u8>,
+    /// The value.
+    pub value: Vec<u8>,
 }
 
 /// Whether `name` is one a derivation takes: 1 to 64 bytes of `[a-z0-9_]`, and not `tmp`, which
@@ -154,8 +189,9 @@ impl DerivedStore {
     /// The value in `slot`, or `None`: none was stored, a power loss took it back, or its file is
     /// damaged. A file whose header, lengths, key or trailer does not check out against `slot` is
     /// removed, best effort, so that a put can store the value again; one the store cannot remove
-    /// reads as missing all the same, every time (storage spec §3). Reads the file whole, once
-    /// ([`FsOps::read`]).
+    /// reads as missing all the same, every time (storage spec §3). A header that records a value
+    /// longer than [`MAX_OBJECT_LEN`] is such a file, found out before its payload is decoded.
+    /// Reads the file whole, once ([`FsOps::read`]).
     ///
     /// [`StoreError::BadCall`] for a slot no store takes ([`DerivedSlot`]), before any read; a
     /// failed read is [`StoreError::Io`], naming the file.
@@ -186,10 +222,17 @@ impl DerivedStore {
     /// leaves no file in the slot, and removes its temp file, best effort; what a crash leaves in
     /// `meta/derived/tmp/` stays there.
     ///
-    /// [`StoreError::BadCall`] for a slot no store takes ([`DerivedSlot`]), before anything is
-    /// written; a failed filesystem call is [`StoreError::Io`], naming the file.
+    /// [`StoreError::BadCall`] for a slot no store takes ([`DerivedSlot`]), and for a value longer
+    /// than an object holds ([`MAX_OBJECT_LEN`]), which no read would take back, before anything
+    /// is written; a failed filesystem call is [`StoreError::Io`], naming the file.
     pub fn put(&self, slot: &DerivedSlot<'_>, value: &[u8]) -> Result<bool, StoreError> {
         let key_len = slot.key_len()?;
+        if to_u64(value.len()) > MAX_OBJECT_LEN {
+            return Err(StoreError::BadCall(format!(
+                "a derived value of {} bytes: at most {MAX_OBJECT_LEN}",
+                value.len()
+            )));
+        }
         let path = self.layout.derived_path(slot);
         if self.fs.exists(&path)? {
             return Ok(false);
@@ -217,6 +260,140 @@ impl DerivedStore {
             }
         }
     }
+}
+
+impl DerivedStore {
+    /// Every value file of derivation `name` at `version`, sorted: each name under
+    /// `meta/derived/<name>/<version>/` that [`Layout::derived_path`] gives a slot, a fan-out
+    /// directory of two lowercase hex digits and in it a file of the other 62, ending in `.` and 16
+    /// more where the slot's key is not empty. Anything else is passed over, as the object store's
+    /// listing passes over strays. Lists the directories with `std::fs` (an [`FsOps`] has no
+    /// listing), following a link to a directory as a read of a file below it does, and reads no
+    /// file ([`DerivedStore::read_listed`] reads one); a listing that fails fails the call, naming
+    /// the directory.
+    ///
+    /// [`StoreError::BadCall`] for a name or a version no store takes ([`DerivedSlot`]), before
+    /// anything is listed.
+    pub fn list(&self, name: &str, version: u32) -> Result<Vec<ListedValue>, StoreError> {
+        check_derivation(name, version)?;
+        let dir = self
+            .layout
+            .derived_dir()
+            .join(name)
+            .join(version.to_string());
+        let mut listed = Vec::new();
+        for fanout in self.names_in(&dir)? {
+            let Some(first) = from_hex(&fanout).filter(|first| first.len() == 1) else {
+                continue;
+            };
+            for file in self.names_in(&dir.join(&fanout))? {
+                if let Some(value) = listed_value(&first, &file) {
+                    listed.push(value);
+                }
+            }
+        }
+        listed.sort_unstable();
+        Ok(listed)
+    }
+
+    /// What the file `listed` names in derivation `name`'s `version` directory holds
+    /// ([`DerivedStore::list`]), if it is whole: the key the file records, whose hash must be
+    /// the one its name ends in, and the value, checked as [`DerivedStore::get`] checks the file of
+    /// the slot of that key. `None` if the file is gone, is not a regular file (nor a link to one),
+    /// or does not check out. Unlike [`DerivedStore::get`] it removes nothing, so that a check of
+    /// a store changes nothing in it. One [`FsOps::read`].
+    ///
+    /// [`StoreError::BadCall`] for a name or a version no store takes ([`DerivedSlot`]), before
+    /// any read; a read that fails otherwise is [`StoreError::Io`], naming the file.
+    pub fn read_listed(
+        &self,
+        name: &str,
+        version: u32,
+        listed: &ListedValue,
+    ) -> Result<Option<StoredValue>, StoreError> {
+        check_derivation(name, version)?;
+        let path = self
+            .layout
+            .derived_file(name, version, listed.subject, listed.key_hash);
+        let file = match self.fs.read(&path) {
+            Ok(Some(file)) => file,
+            Ok(None) => return Ok(None),
+            // No value file: a read of its slot fails on it as on any store file that is not a
+            // regular file.
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let Some(key) = recorded_key(&file).map(<[u8]>::to_vec) else {
+            return Ok(None);
+        };
+        if derived_key_hash(&key) != listed.key_hash {
+            return Ok(None);
+        }
+        let slot = DerivedSlot {
+            name,
+            version,
+            subject: listed.subject,
+            key: &key,
+        };
+        let key_len = slot.key_len()?;
+        Ok(decode(&slot, key_len, file).map(|value| StoredValue { key, value }))
+    }
+
+    /// The names in `dir`, read with `std::fs`; none if `dir` does not exist or is not a
+    /// directory. A name that is not UTF-8 is no name the store gives, and is passed over.
+    fn names_in(&self, dir: &Utf8Path) -> Result<Vec<String>, StoreError> {
+        let listing_failed = |e| self.fs.locate(FileOp::ReadDir, dir, e);
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(Vec::new());
+            }
+            Err(e) => return Err(listing_failed(e).into()),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            if let Ok(name) = entry.map_err(listing_failed)?.file_name().into_string() {
+                names.push(name);
+            }
+        }
+        Ok(names)
+    }
+}
+
+/// The value file `file` names in the fan-out directory of subject byte `first`, if `file` is
+/// one's name: 62 lowercase hex digits, the subject's other 31 bytes, then `.` and 16 more where
+/// the slot's key is not empty, the first 8 bytes of BLAKE3 of the key.
+fn listed_value(first: &[u8], file: &str) -> Option<ListedValue> {
+    let (rest, key_hash) = match file.split_once('.') {
+        Some((rest, hash)) => {
+            let hash: [u8; 8] = from_hex(hash)?.try_into().ok()?;
+            (rest, Some(hash))
+        }
+        None => (file, None),
+    };
+    let rest = from_hex(rest).filter(|rest| rest.len() == 31)?;
+    let subject: [u8; 32] = [first, &rest].concat().try_into().ok()?;
+    Some(ListedValue {
+        subject: ObjectId(subject),
+        key_hash,
+    })
+}
+
+/// The key a value file records, if its header and its lengths leave room for one: the
+/// `key_len` bytes after the header, before the trailer.
+fn recorded_key(file: &[u8]) -> Option<&[u8]> {
+    let key_len: [u8; 4] = file.get(8..12)?.try_into().ok()?;
+    let key_len = usize::try_from(u32::from_le_bytes(key_len)).ok()?;
+    let end = HEADER_LEN.checked_add(key_len)?;
+    if end.checked_add(TRAILER_LEN)? > file.len() {
+        return None;
+    }
+    file.get(HEADER_LEN..end)
 }
 
 /// A name for a new temp file that no other put takes, in this process or another:
@@ -263,9 +440,11 @@ fn compress(value: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// The value `file` holds, if it is `slot`'s file and whole: its header is this layout's, its key
-/// is the slot's, its lengths add up to the file's, its payload decodes to the value's length,
-/// and its trailer is the slot's and the value's. `None` if anything fails. A raw value comes
-/// back in `file` itself, the rest cut off around it.
+/// is the slot's, its value's length is at most [`MAX_OBJECT_LEN`] (checked before the payload is
+/// decoded, so that a header cannot size what a read allocates), its lengths add up to the
+/// file's, its payload decodes to the value's length, and its trailer is the slot's and the
+/// value's. `None` if anything fails. A raw value comes back in `file` itself, the rest cut off
+/// around it.
 fn decode(slot: &DerivedSlot<'_>, key_len: u32, mut file: Vec<u8>) -> Option<Vec<u8>> {
     let mut reader = Reader::new(&file, |_| ());
     let header: [u8; 8] = reader.array().ok()?;
@@ -276,7 +455,12 @@ fn decode(slot: &DerivedSlot<'_>, key_len: u32, mut file: Vec<u8>) -> Option<Vec
     if reader.array().map(u32::from_le_bytes).ok()? != key_len {
         return None;
     }
-    let value_len = usize::try_from(reader.u64_le().ok()?).ok()?;
+    let value_len = reader.u64_le().ok()?;
+    // No value holds more than an object does: refused before a buffer is sized by it.
+    if value_len > MAX_OBJECT_LEN {
+        return None;
+    }
+    let value_len = usize::try_from(value_len).ok()?;
     if reader.bytes(slot.key.len()).ok()? != slot.key {
         return None;
     }

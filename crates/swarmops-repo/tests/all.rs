@@ -4,6 +4,7 @@
 //! here.
 
 mod commit;
+mod damaged_index;
 mod derive;
 mod diff;
 mod history;

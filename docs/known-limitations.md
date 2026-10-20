@@ -145,6 +145,13 @@ left).
   a validated lazy read, a per-handle map of refs or a packed refs file (a FORMAT change), and
   the `read_snapshot` bench measures 0, 16 and 256 refs to tell. *Unscheduled: when refs grow
   past dozens. Found: M1 Tasks 2c, 3 and 4b.*
+- **A file of control characters reads back at many times its size.** `read_file` returns UTF-8
+  content as JSON text, which spells most control characters in six bytes each (`\u0001`): a page of
+  a file made of them prints at six times its length through the CLI, and at thirteen times through
+  MCP, whose result holds its envelope twice, the second time as JSON text again (a 1 MiB page of
+  such a file is a 13 MiB answer). `max_bytes` (1 MiB unless asked otherwise) has no upper limit but
+  the file's size, and the MCP server builds its answer in memory before it sends it. *Unscheduled.
+  Found: the 2026-10-20 security review.*
 
 ## Commits, refs and history
 
@@ -216,7 +223,9 @@ left).
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
   and checks each sorted-view entry with its own reads (about 9 million reads at a million
   changesets, about 9 per changeset: each index record, and each entry of both sorted views, is
-  read on its own). *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
+  read on its own). A deep check of a store with derived values also holds the first-parent
+  forest (a few words per changeset) and every `last_modified` value the store holds.
+  *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
 - **`verify`'s report has no cap.** `problems` and `findings` list every problem found, a line
   and a finding each, and a failed verify's `E_STORE_CORRUPT` carries the whole report in
   `details`, so a store damaged in many places gives a response as long as its damage, twice
@@ -227,6 +236,14 @@ left).
   `E_STORE_CORRUPT`. *Unscheduled. Found: M1 final review.*
 - **`verify --deep` skips object files that are symlinks**, because the object listing ignores
   them; SwarmOps never writes one. *Unscheduled. Found: M1 final review.*
+- **A damaged object file stays until it is removed by hand.** A put never replaces a file, so where
+  an object's file is there already, whatever it holds (other bytes, or a symlink to nothing), a
+  commit of that object's content takes the file for the object: it succeeds, names the object and
+  does not count it in `blobs_written`. Reads of the object then fail with `E_STORE_CORRUPT`, and
+  `verify --deep` reports it (`corrupt_object`, or `missing_object` for a symlink to nothing, which
+  a shallow `verify` reports too). Once the file is removed, the same content committed again writes
+  it afresh, and every changeset that names it reads again. *Target: M6 (fsck). Found: the
+  2026-10-20 security review.*
 
 ## Hostile input
 
@@ -240,8 +257,12 @@ left).
   too (`E_STORE_CORRUPT`, which `verify --deep` lists), before more than 64 MiB is reserved for
   its output, beside the decoder's window, which the frame's header sets up to zstd's default
   limit of 128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store
-  can hold one. Streamed reads would bound `cat` below 512 MiB. *Target: M2 (streamed reads); M3
-  Task 4 set the bound. Found: M1 Task 1; the 2026-10-16 code review.*
+  can hold one. A derived value's file (`meta/derived/`) over 4 KiB is a zstd frame too, decoded
+  whole before its trailer is checked, within the same bound: a header that records a value
+  longer than 512 MiB fails the file's checks before anything is decoded or allocated for it, and
+  the file reads as missing. Streamed reads would bound `cat` below 512 MiB. *Target: M2
+  (streamed reads); M3 Task 4 set the bound. Found: M1 Task 1; the 2026-10-16 code review; for
+  derived values, the 2026-10-20 security review.*
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range
@@ -250,10 +271,13 @@ left).
   delta-hash lookup returns) are each read into one buffer sized from the file's length, with an
   infallible allocation: a sparse or crafted file of gigabytes makes any command take that much
   memory and abort when the allocation fails, instead of failing with an error, and the abort is
-  no panic, so `swarmops mcp` dies with it. SwarmOps never writes such a file. *Target: M6
-  (bounded reads, when M6 moves the metadata read path onto `FsOps` for fault injection: the
-  journal a frame at a time with a streaming CRC, `journal.off`, the index columns and the views
-  in windows, and a cap on what a lookup returns). Found: M1.5 final review (security-1).*
+  no panic, so `swarmops mcp` dies with it. A `journal.off` that ends in more than 512 zeroed
+  entries, as a sparse one does, is refused before that read ("A `journal.off` that ends in more
+  than 512 zeroed entries is refused, not repaired" below); one that does not still takes that read.
+  SwarmOps never writes such a file. *Target: M6 (bounded reads, when M6 moves the metadata read
+  path onto `FsOps` for fault injection: the journal a frame at a time with a streaming CRC,
+  `journal.off`, the index columns and the views in windows, and a cap on what a lookup returns).
+  Found: M1.5 final review (security-1); narrowed by the 2026-10-20 security review.*
 - **Crafted `journal.off` entries can mis-number a read.** Entries crafted to agree with each
   other (one pointing into a payload whose bytes read as a frame header ending where the next
   entry starts), three or more links before the end, pass the two links recovery and readers
@@ -268,11 +292,44 @@ left).
 - **A zeroed `journal.off` entry deep in the chain** (three or more links before the end) is
   outside the crash model: recovery checks the last two links, and `verify` finds the rest.
   *Target: M6 (the next `FORMAT`'s checksums). Found: M1 fuzzing review.*
+- **A `journal.off` that ends in more than 512 zeroed entries is refused, not repaired.** A
+  power loss leaves zeroed only the entry being written, so readers and recovery drop at most a
+  4 KiB block of zeroed entries at the end of `journal.off`, found with one read, and refuse a
+  longer run as damage (`E_STORE_CORRUPT`, at offset 0; `verify` reports it): every read and
+  write fails until the file is cut back to its last entry that is not zero. *Target: M6
+  (fsck). Found: 2026-10-20 review.*
+- **A crafted index's generations steer history queries.** A read checks what the changeset
+  index says where it can do so cheaply: a sorted view's entry must name a record that holds its
+  key, and a record's parents must start where the record before it leaves off, or the read
+  fails with `E_STORE_CORRUPT`; and every first-parent walk takes its parents from the changeset
+  objects, which their hashes bind to their ids, so that no walk drops a committed changeset or
+  loops. A record's generation below the checkpoint or under the sorted views is taken as it is,
+  as is its delta hash: a damaged or crafted `meta/idx/gen.col` can make a revision's `~N` name
+  nothing where a changeset is, a land take an older common ancestor than the newest for its
+  merge base, and `log --path` list its changesets out of order. Every changeset such a walk
+  reaches is on the objects' first-parent chain, and `verify` reports the damage. Checking a
+  generation takes the journal, or every generation down to a root. *Target: M6 (fsck). Found:
+  2026-10-20, when the read path came to check the index.*
 - **A changeset written outside the repository library can hold both `x` and `x:b64`.** The
   library refuses a metadata key that ends in `:b64` for every writer
   (`swarmops_repo::check_metadata`, which `Repo::commit` runs), so only a store written by other
   means, such as a crafted one, can hold such a pair; `show` then gives one of the two entries,
   and `verify` does not report it. *Unscheduled. Found: M1 Task 4b.*
+- **Crafted derived values that agree with each other are read as valid.** A file under
+  `meta/derived/` carries a checksum over its slot and value, not a signature, so anyone who can
+  write the store's files can place a whole file with any value. The readers check what they use
+  where they can without the walk the value saves: a skip list's first entry against the index,
+  its length against the generation, each jump against the generations and against the list one
+  level down, and where a lift or a list ends; a last touch's changeset against the snapshot, its
+  generation and its delta. One that fails is `E_STORE_CORRUPT`. Lists crafted to agree with each
+  other, and a last touch that names an older changeset that touched the path, pass those checks
+  and are read as valid, and the engine derives new values from them; `verify --deep` checks
+  every value of the built-in derivations against the objects and reports each one
+  (`derived_mismatch`), and removing `meta/derived/` has every value derived again. The values the
+  git export memoizes (`git_oid`, `git_tree_oid`, `git_blob_oid`) are checked by nothing yet. A
+  keyed trailer whose key lives outside the store would make a placed file fail its checks, at
+  the cost of a new layout version. *Target: M6 (`fsck --git` for the export's values; an
+  authenticated cache is unscheduled). Found: the 2026-10-20 security review.*
 
 ## Serving requests
 
@@ -299,6 +356,14 @@ left).
   command was given (operations spec §0). A server that takes requests from another host must
   not pass either on as it is. *Target: M11 (`serve`), M10. Found: the M1.6 consolidated review
   (error contract).*
+- **A request takes the memory its type holds.** The MCP server reads of a message line, at
+  most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
+  so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A
+  request type's own fields are built in full, though: a long list of short strings (`blob_has`
+  ids) or a map of small entries (`land` resolutions) takes up to about 15 times its text, near
+  1 GiB for a line at the cap, before the operation refuses what is not an id or a resolution;
+  the CLI reads `--changes` and `--resolve` the same way. *Unscheduled. Found: the 2026-10-20
+  security audit.*
 
 ## Git import and export
 
@@ -339,6 +404,22 @@ left).
   (`rewritten`, and a warning), which a branch built on the originals does not take
   (`lossy_history`), and the signature headers they keep verbatim (`gpgsig`) no longer verify.
   *Documented (storage spec §7; M8 Decision 13). Found: M8 Task 5.*
+- **A git directory's file longer than 16 MiB is refused.** The git import and export let gix
+  read a repository's refs (`HEAD`, every loose ref and every pseudo-ref, which a symbolic `HEAD`
+  can name), `config`, `config.worktree` and `objects/info/alternates` whole, so they refuse one
+  longer than 16 MiB before anything reads it (`E_GIT_UNSUPPORTED`, `details.reason`
+  `file_too_long`), as they refuse a FIFO, a socket or a device where they read a file
+  (`special_file`). No such file that git writes comes near the bound, but a `FETCH_HEAD` left by
+  a fetch of some hundreds of thousands of refs, or a `SQUASH_MSG` of a squash of very many
+  commits, can pass it: remove that file, which git keeps only for its next command, and run the
+  import or export again. *Documented (storage spec §7). Found: 2026-10-20.*
+- **An import holds each commit's new files in memory together.** The import stores the trees and
+  blobs it converts each time 64 MiB of them have gathered (`ImportRequest::object_batch_bytes`),
+  but only between commits: the new files of one commit are all held until that commit is converted,
+  each up to 512 MiB, however many the commit adds, so a commit that adds large files takes their
+  size together in memory, and more (about 400 MiB at its peak for one commit of 384 MiB of new
+  files). *Unscheduled: storing a commit's objects as they gather, within the commit, would bound
+  it. Found: the 2026-10-20 security review.*
 
 ## Platforms
 

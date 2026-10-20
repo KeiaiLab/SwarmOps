@@ -485,8 +485,9 @@ pub fn lower_hex(bytes: &[u8]) -> String {
     hex
 }
 
-/// The bytes `hex` spells, if it is an even count of lowercase hex digits.
-fn from_hex(hex: &str) -> Option<Vec<u8>> {
+/// The bytes `hex` spells, if it is an even count of lowercase hex digits: how the external id
+/// index and the derived store read the names their files are given.
+pub(crate) fn from_hex(hex: &str) -> Option<Vec<u8>> {
     let digit = |b: u8| match b {
         b'0'..=b'9' => Some(b - b'0'),
         b'a'..=b'f' => Some(b - b'a' + 10),

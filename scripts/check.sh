@@ -31,3 +31,6 @@ fi
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
 RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
 cargo deny --locked check
+# The fuzz crate's lockfile too, which the fuzz clippy step builds; its one license exception is
+# in fuzz/deny.exceptions.toml.
+cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check

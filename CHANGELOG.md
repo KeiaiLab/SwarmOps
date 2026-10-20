@@ -848,6 +848,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   must have `ExportOid` registered there (`swarmops_git::register`), as every `LocalOps` does
   (storage spec §7, operations spec §6).
 
+#### Release preparation (2026-10-20)
+
+- `just fuzz` writes the new inputs a run finds into `fuzz/corpus-new/<target>/`, which git
+  ignores, and reads the tracked corpus (`fuzz/corpus/<target>/`) as a seed that it never writes
+  to, where it wrote them into the tracked corpus and left each run's checkout with hundreds of
+  untracked inputs to commit or drop. New inputs join the tracked corpus minimised by
+  `cargo fuzz cmin`, as [CONTRIBUTING.md](CONTRIBUTING.md) describes.
+
 ### Fixed
 
 #### M1.6: the code-review follow-ups (2026-10-19)
@@ -933,6 +941,109 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 
 #### The security review's fixes (2026-10-20)
 
+- A damaged or crafted changeset index could make reads and writes act on a changeset they were not
+  asked about, all with exit 0: a sorted view's entry (`meta/sorted/*`) that named another
+  changeset's record made `show` of an id, and `show`, `cat`, `ls` and `log` of a prefix, answer
+  with that changeset, and `ref set` of a prefix move the ref to it; a parents entry out of place
+  (`meta/idx/par.col`, `meta/parents.log`) made `log` and `~N` skip committed changesets or read
+  another changeset's files, and a cycle in them made a walk go on for ever. A lookup now checks
+  that the record a view names holds the key it was asked for, and that a record's parents start
+  where the record before it leaves off, and is `E_STORE_CORRUPT` where either does not, a write's
+  lookup included (nothing is recorded); and every first-parent walk (`log`, `~N`, `log --path`,
+  `history`, a land's merge base and squash, the git export's walk) takes each parent from the
+  changeset's object, which its hash binds to its id, at the cost of one object read per step.
+  `verify` reports the damage, as before. Generations below the checkpoint are still taken as the
+  index gives them ([docs/known-limitations.md](docs/known-limitations.md), "A crafted index's
+  generations steer history queries").
+- A derived value file (`meta/derived/*`) that someone placed, whole and with its checksum right but
+  holding a value its derivation does not give, was read as valid, and `verify --deep` did not look
+  at derived values: a skip list could make `~N` past 1,024 steps, and the ancestry checks a land's
+  merge base rests on, follow a changeset off the first-parent chain (so `cat` at such a revision
+  served files that `main`'s history never held), and a last touch could make `history` and
+  `log --path` name a changeset that never touched the path. Now `verify --deep` checks every value
+  of the built-in derivations (`first_parent_skip_list`, `last_modified`) against the objects and
+  reports each one that disagrees (`derived_mismatch`, with the new `derivation` field), and the
+  readers check each value they use where they can without the walk it saves (a skip list's first
+  entry, its length and each jump; a last touch's changeset, its generation and its delta), refusing
+  one that fails with `E_STORE_CORRUPT` (`details.derivation`, `details.changeset`; hint
+  `swarmops verify --deep`). Removing `meta/derived/` has every value derived again. Values crafted
+  to agree with each other still pass the readers
+  ([docs/known-limitations.md](docs/known-limitations.md), "Crafted derived values that agree with
+  each other are read as valid").
+- A small derived value file whose zstd frame records a value of any length made a read decompress
+  and allocate that much, without bound, before the file's checksum was checked. A recorded value
+  longer than 512 MiB (`MAX_OBJECT_LEN`, the most an object holds) now fails the file's checks
+  before anything is decoded or allocated for it: the file reads as missing and is removed, and the
+  value is derived again; `DerivedStore::put` refuses such a value. Within that bound a value's
+  frame is still decoded whole before its checksum is checked
+  ([docs/known-limitations.md](docs/known-limitations.md), "A zstd bomb object is decoded whole").
+- An object file is measured before it is read: one longer than any object's file (its 16-byte
+  header and 512 MiB) is refused by its length, unread, as `E_STORE_CORRUPT` (`details.object`),
+  which `verify --deep` lists as a `corrupt_object` and goes on. Such a file, sparse or crafted,
+  used to be read whole before its header was checked, so `cat`, `verify --deep`, and any commit,
+  walk or read that reached it took its whole length in memory, enough for the system to kill the
+  process, `swarmops mcp` with it. A file within the bound is still read whole
+  ([docs/known-limitations.md](docs/known-limitations.md), "`cat` reads the whole object file").
+- zstd is built without its default features, so `swarmops` and `so` no longer hold its decoders for
+  the legacy formats (v0.1 to v0.7, about 25,000 lines of C that no store needs), which every object
+  read could reach: an object file holding a legacy frame was decoded by them, and one whose legacy
+  frame held the object's own payload passed as valid, `verify --deep` included. An object in a
+  legacy frame, alone or after a current one, is now `E_STORE_CORRUPT`, which `verify --deep` lists;
+  what the store writes is unchanged.
+- A `journal.off` that ends in a long run of zeroed entries no longer holds up every read and write:
+  each scanned such a run one 8-byte read at a time, so a long enough one kept every command, and
+  the MCP server, busy for hours with almost no memory. Readers and recovery drop at most 512 zeroed
+  entries at its end, a 4 KiB block (a power loss leaves zeroed only the entry being written), found
+  with one read, and refuse a longer run as damage: `E_STORE_CORRUPT`, the journal corrupt at offset
+  0, with nothing changed on disk, which `verify` reports. The first write used to cut such a file
+  back once its scan ended; now it is cut back by hand, to its last entry that is not zero
+  ([docs/known-limitations.md](docs/known-limitations.md), "A `journal.off` that ends in more than
+  512 zeroed entries is refused, not repaired").
+- A `meta/lock` that is not a regular file is refused before it is opened (`E_STORE_CORRUPT`,
+  `details.store_file` `meta/lock`; a directory there was `E_IO`), its open follows no symlink and
+  waits for no reader (`O_NOFOLLOW`, `O_NONBLOCK`, then a check of what it opened), and `verify`
+  reports it (`meta_corrupt`); removing it repairs the store, since the next write makes a new one.
+  Before, a FIFO there made every write (a `commit`, a `ref set`, the MCP server's first write) wait
+  in its open for ever, before the 10 s lock timeout starts, and a symlink there was followed, while
+  `verify` saw nothing wrong. The two flags come from `libc`, which the build already held and which
+  is now a direct dependency of `swarmops-store`, for its constants only.
+- `swarmops mcp` no longer parses a message line into a generic JSON value before it checks
+  anything, which could take about a hundred times the line's length, up to the 64 MiB a line may
+  hold: one line could exhaust the memory of the server that a session and its subagents share, and
+  a batch or a message before `initialize` was refused only after that parse. The server checks that
+  a line is JSON without building anything, reads only the members it serves, and reads a tool's
+  arguments straight into their request type, so what else a line holds costs nothing beyond its own
+  bytes; a tool argument that names a field of its request type twice is now `E_INVALID_ARG`, where
+  the later one was taken. A request type's own fields still take up to about 15 times their text
+  ([docs/known-limitations.md](docs/known-limitations.md), "A request takes the memory its type
+  holds").
+- Before M2, a commit's contents together had no limit, only each put's 512 MiB, so a small commit
+  request could make the process, `swarmops mcp` included, allocate gigabytes and abort. M2's limit
+  on them, 1 GiB together, checked by the sizes they declare before a byte of them is read
+  (`E_TOO_LARGE`, `details.scope` `commit`; **Changed**, M2), is the fix, and a test now holds that
+  the MCP server refuses such a commit before it reads any of the files it names, and serves on.
+- `git import` and `git export` no longer open a file of the git directory without looking at what
+  it is: a FIFO where they read one (`config`, `HEAD`, a ref or `objects/info/alternates`, among
+  others) held the command until it was killed, and a file there that never ends, or of huge length,
+  was read whole until memory ran out. Before gix opens the repository, every file of the git
+  directory that the open and the command's lookups read is looked at, a symlink followed: a FIFO, a
+  socket or a device is `E_GIT_UNSUPPORTED` (`details.reason` `special_file`, `details.file` its
+  path in the git directory), and a ref file, `config`, `config.worktree` or
+  `objects/info/alternates` longer than 16 MiB, which gix reads whole, is refused unread
+  (`file_too_long`, with `size` and `max`; [docs/known-limitations.md](docs/known-limitations.md),
+  "A git directory's file longer than 16 MiB is refused").
+- `cargo deny` (advisories, licenses, bans, sources) checks every lockfile the project builds, where
+  it builds it. It checked only the workspace's, while every `just check` also builds the fuzz
+  crate's and the weekly scheduled run builds and tests `bench/compare`'s, and under the workspace's
+  policy both failed. `just check` and `scripts/check.sh` check the fuzz lockfile with the
+  workspace's policy and one license exception, NCSA for `libfuzzer-sys`
+  (`fuzz/deny.exceptions.toml`); `just bench-compare` and the weekly run check `bench/compare`'s
+  with its own policy (`bench/compare/deny.toml`: every line of the workspace's, two crate-scoped
+  license exceptions, and two advisories ignored with their reasons, RUSTSEC-2025-0057 for `fxhash`
+  and RUSTSEC-2024-0384 for `instant`, unmaintained crates without a fixed release that only `sled`,
+  a comparison engine, brings in, and that no shipped binary holds). A test of `swarmops-core` fails
+  the gate when a recipe, a script or a workflow job builds a lockfile that no `cargo deny` checks
+  there.
 - An external id entry's file (`meta/external_ids/`, 44 bytes) is read no further than a byte
   past an entry, so a longer one is a damaged entry, however long: `verify` lists it as an
   `external_id_corrupt` finding (`E_STORE_CORRUPT`) and goes on, the git import and export pass
