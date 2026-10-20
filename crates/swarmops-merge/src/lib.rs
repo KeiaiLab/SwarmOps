@@ -5,8 +5,11 @@
 //! hold: the repository engine re-exports this crate as `swarmops_repo::merge`, and M3's
 //! importer diffs the trees it has just built in memory.
 
+pub mod conflict;
+pub mod diff3;
 pub mod line_diff;
 pub mod tree_diff;
+pub mod tree_merge;
 
 #[cfg(test)]
 mod tests {

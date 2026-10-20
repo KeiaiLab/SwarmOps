@@ -3,6 +3,8 @@
 //! test target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod`
 //! line here.
 
+mod conflict;
+mod diff3;
 mod line_diff;
 mod tree_diff;
 

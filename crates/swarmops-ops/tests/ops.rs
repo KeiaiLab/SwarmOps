@@ -83,6 +83,7 @@ fn commit_req(parent: Option<&str>, changes: Vec<ChangeInput>) -> CommitReq {
         message: "a test commit".to_owned(),
         allow_empty: false,
         advance: None,
+        idempotency_key: None,
     }
 }
 
@@ -318,6 +319,7 @@ fn commit_from_inline_and_base64_contents_then_cat_ls_show_log() {
                 message: "add the readme\n\nand a tool".to_owned(),
                 allow_empty: false,
                 advance: None,
+                idempotency_key: None,
             },
         )
         .unwrap();
@@ -470,6 +472,7 @@ fn commit_on_main_by_default(ops: &LocalOps, who: &Identity, c1: &str) {
                 message: "update the readme".to_owned(),
                 allow_empty: false,
                 advance: None,
+                idempotency_key: None,
             },
         )
         .unwrap();
@@ -1304,6 +1307,1073 @@ mod advance {
                 (None, Some(c1), "agent/worker-3"),
             ]
         );
+    }
+}
+
+/// `commit` with an `idempotency_key`, `commit --key` (operations spec §4): a uuid v7 whose time
+/// signs the commit and which the changeset records as its `commit_key` metadata, so that a
+/// retry replays the first attempt instead of recording a second changeset.
+mod commit_key {
+    use swarmops_api::{Advanced, CommitResp, Signatures};
+
+    use super::*;
+
+    /// A key's time, in Unix milliseconds: 2001-09-09T01:46:40.999Z, far from the clock a test
+    /// runs at, with milliseconds that a signature's whole seconds drop.
+    const KEY_MS: u64 = 1_000_000_000_999;
+
+    /// A uuid v7 (RFC 9562) of time `ms`, in Unix milliseconds, whose random bits come from
+    /// `seed`: 48 bits of time, the version 7, 12 bits, the variant `10`, 62 bits.
+    fn key_at(ms: u64, seed: u64) -> String {
+        let rand_b = (seed & 0x3fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000;
+        let hex = format!("{ms:012x}7{:03x}{rand_b:016x}", seed & 0xfff);
+        format!(
+            "{}-{}-{}-{}-{}",
+            &hex[..8],
+            &hex[8..12],
+            &hex[12..16],
+            &hex[16..20],
+            &hex[20..]
+        )
+    }
+
+    /// [`commit_req`] with `key` as its `idempotency_key`.
+    fn keyed(parent: Option<&str>, changes: Vec<ChangeInput>, key: &str) -> CommitReq {
+        CommitReq {
+            idempotency_key: Some(key.to_owned()),
+            ..commit_req(parent, changes)
+        }
+    }
+
+    /// [`keyed`], also advancing `main`.
+    fn keyed_advancing(parent: Option<&str>, changes: Vec<ChangeInput>, key: &str) -> CommitReq {
+        CommitReq {
+            advance: Some("main".to_owned()),
+            ..keyed(parent, changes, key)
+        }
+    }
+
+    /// How many records the journal of the store at `root` holds: a request that writes no
+    /// frame adds none.
+    fn journal_records(root: &Utf8Path) -> usize {
+        let meta = MetaStore::open(root).unwrap();
+        meta.read()
+            .unwrap()
+            .journal_after(None, 1_000)
+            .unwrap()
+            .len()
+    }
+
+    /// The same keyed request twice, on the same parent, is one changeset: the second answers
+    /// `replayed` with the first's response but for its `blobs_written`, 0, and writes no frame;
+    /// `repo_info.changesets` grew by one. Given its parent by its full id, the request is the
+    /// same changeset again.
+    #[test]
+    fn commit_with_a_key_twice_is_one_changeset() {
+        let (_dir, root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let before = ops.repo_info(InfoReq {}).unwrap().changesets;
+        let key = key_at(KEY_MS, 1);
+        let changes = || vec![text("f", "2"), text("g", "3")];
+
+        // On main's head by default, which a commit without advance leaves where it is.
+        let first = ops.commit(&who, keyed(None, changes(), &key)).unwrap();
+        assert!(!first.replayed, "{first:?}");
+        assert_eq!(first.blobs_written, 2);
+        let records = journal_records(&root);
+        let again = ops.commit(&who, keyed(None, changes(), &key)).unwrap();
+        let replay = CommitResp {
+            blobs_written: 0,
+            replayed: true,
+            ..first.clone()
+        };
+        assert_eq!(again, replay);
+        assert_eq!(journal_records(&root), records, "no frame");
+        let after = ops.repo_info(InfoReq {}).unwrap().changesets;
+        assert_eq!(after, before + 1);
+
+        let pinned = ops.commit(&who, keyed(Some(&c1), changes(), &key)).unwrap();
+        assert_eq!(pinned, replay);
+    }
+
+    /// A keyed commit signs at its key's time, to the second: `show`'s `created_at` is the key's
+    /// milliseconds rounded down to a whole second, and both signatures hold those seconds, not
+    /// the clock's, which an unkeyed commit signs at. (Through the binary, `SWARMOPS_TEST_NOW`
+    /// does not move it either: `commit_with_a_key_twice_through_the_binary`.)
+    #[test]
+    fn a_commit_key_pins_the_signature_time() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let key = key_at(KEY_MS, 2);
+        let cs = ops
+            .commit(&who, keyed(None, vec![text("f", "1")], &key))
+            .unwrap()
+            .changeset;
+        let detail = ops.show(show(&cs)).unwrap();
+        assert_eq!(detail.created_at, 1_000_000_000_000);
+        let Signatures { author, committer } = detail.signatures;
+        assert_eq!(
+            (author.secs, committer.secs),
+            (1_000_000_000, 1_000_000_000)
+        );
+
+        let now = unix_secs();
+        let unkeyed = commit(&ops, Some(&cs), vec![text("f", "2")]);
+        let committer = ops.show(show(&unkeyed)).unwrap().signatures.committer;
+        assert!(committer.secs >= now, "the clock's time: {committer:?}");
+    }
+
+    /// A key that is not a uuid v7 is `E_INVALID_ARG` naming it in `details.idempotency_key`,
+    /// before anything is resolved or written: a v4 uuid and a v8 one, variants other than RFC
+    /// 9562's, a uuid without its hyphens or with one more digit, a digit that is not hex, a word
+    /// and nothing.
+    #[test]
+    fn a_commit_key_must_be_a_uuid_v7() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let v7 = key_at(KEY_MS, 3);
+        let at = |index: usize, digit: &str| {
+            let mut key = v7.clone();
+            key.replace_range(index..=index, digit);
+            key
+        };
+        let refused = [
+            at(14, "4"),
+            at(14, "8"),
+            at(19, "c"),
+            at(19, "7"),
+            v7.replace('-', ""),
+            format!("{v7}0"),
+            at(35, "g"),
+            "retry-1".to_owned(),
+            String::new(),
+        ];
+        for key in refused {
+            let resolved = Resolved::default();
+            let request = keyed(Some("main"), vec![text("f", "2")], &key);
+            let result = ops.recording(&resolved).commit(&who, request);
+            let err = expect_err(result, ErrorCode::InvalidArg);
+            assert_eq!(err.details["idempotency_key"], key.as_str(), "{err:?}");
+            assert!(resolved.take().is_empty(), "{key:?}: nothing resolved");
+        }
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 1);
+    }
+
+    /// A keyed commit records its key as `commit_key` metadata, beside `agent` and `run_id`, in
+    /// lowercase also when it was given in uppercase, which is the same key: a retry with it in
+    /// lowercase is a replay.
+    #[test]
+    fn a_keyed_commit_records_its_key() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent().with_run_id("run-3");
+        // Its variant digit is b, so that the uppercase key has a B there.
+        let key = key_at(KEY_MS, 0x3000_0000_0000_0004);
+        let shouted = key.to_uppercase();
+        assert_ne!(shouted, key);
+        let first = ops
+            .commit(&who, keyed(None, vec![text("f", "1")], &shouted))
+            .unwrap();
+        let metadata = ops.show(show(&first.changeset)).unwrap().metadata;
+        let expected = BTreeMap::from([
+            ("agent".to_owned(), "agent/worker-17".to_owned()),
+            ("commit_key".to_owned(), key.clone()),
+            ("run_id".to_owned(), "run-3".to_owned()),
+        ]);
+        assert_eq!(metadata, expected);
+        let again = ops
+            .commit(&who, keyed(None, vec![text("f", "1")], &key))
+            .unwrap();
+        assert!(again.replayed, "{again:?}");
+        assert_eq!(again.changeset, first.changeset);
+    }
+
+    /// An advancing commit retried with its key and no parent finds the ref's head carrying the
+    /// key, and replays it: the first attempt's changeset, parent and move, `replayed`,
+    /// `advanced.already_applied`, no second changeset and no frame, with `meta.resolved`
+    /// naming the ref's head as the request resolved it. Retried with the first attempt's parent
+    /// given, it is the same replay.
+    #[test]
+    fn an_advancing_commit_retried_with_its_key_is_a_replay() {
+        let (_dir, root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 5);
+        let request = |parent: Option<&str>| keyed_advancing(parent, vec![text("f", "2")], &key);
+        let first = ops.commit(&who, request(None)).unwrap();
+        let c2 = first.changeset.clone();
+        let moved = Advanced {
+            name: "main".to_owned(),
+            old: Some(c1.clone()),
+            new: c2.clone(),
+            already_applied: false,
+        };
+        assert_eq!(first.advanced, Some(moved.clone()));
+        let (info, records) = (ops.repo_info(InfoReq {}).unwrap(), journal_records(&root));
+
+        let resolved = Resolved::default();
+        let again = ops
+            .recording(&resolved)
+            .commit(&who, request(None))
+            .unwrap();
+        let replay = CommitResp {
+            blobs_written: 0,
+            advanced: Some(Advanced {
+                already_applied: true,
+                ..moved
+            }),
+            replayed: true,
+            ..first
+        };
+        assert_eq!(again, replay);
+        let main_at_c2 = BTreeMap::from([("main".to_owned(), c2.clone())]);
+        assert_eq!(resolved.take(), main_at_c2);
+        assert_eq!(
+            resolved.take_recovered(),
+            None,
+            "its write repaired nothing"
+        );
+        let pinned = ops.commit(&who, request(Some(&c1))).unwrap();
+        assert_eq!(pinned, replay);
+        assert_eq!(
+            ops.repo_info(InfoReq {}).unwrap(),
+            info,
+            "no second changeset"
+        );
+        assert_eq!(journal_records(&root), records, "no frame");
+    }
+
+    /// The changeset a keyed commit would build on is its replay when it carries the key, so it
+    /// is not made again on top of itself: given as `parent`, or as `main`'s head when the
+    /// request names none, after the first attempt was published by a `ref set` of its own.
+    #[test]
+    fn a_keyed_commit_on_its_own_changeset_is_a_replay() {
+        let (_dir, root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 6);
+        let first = ops
+            .commit(&who, keyed(None, vec![text("f", "2")], &key))
+            .unwrap();
+        let c2 = first.changeset.clone();
+        ops.ref_set(&who, set("main", &c2, Some(&c1), false))
+            .unwrap();
+        let records = journal_records(&root);
+        let replay = CommitResp {
+            blobs_written: 0,
+            replayed: true,
+            ..first
+        };
+        for parent in [Some(c2.as_str()), None] {
+            let again = ops
+                .commit(&who, keyed(parent, vec![text("f", "2")], &key))
+                .unwrap();
+            assert_eq!(again, replay, "parent {parent:?}");
+        }
+        assert_eq!(journal_records(&root), records, "no frame");
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 2);
+    }
+
+    /// With `advance`, a keyed commit whose parent is its own changeset replays only while the
+    /// ref names it: once the ref has moved on, it is `E_CAS_MISMATCH` naming what the ref holds,
+    /// `committed: false`, as the commit itself would be, and nothing is recorded.
+    #[test]
+    fn a_keyed_advance_on_its_changeset_after_the_ref_moved_is_a_cas_mismatch() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 7);
+        let c2 = ops
+            .commit(&who, keyed_advancing(None, vec![text("f", "2")], &key))
+            .unwrap()
+            .changeset;
+        let c3 = ops
+            .commit(
+                &who,
+                CommitReq {
+                    advance: Some("main".to_owned()),
+                    ..commit_req(Some(&c2), vec![text("g", "3")])
+                },
+            )
+            .unwrap()
+            .changeset;
+        let before = ops.repo_info(InfoReq {}).unwrap();
+
+        let request = keyed_advancing(Some(&c2), vec![text("f", "2")], &key);
+        let err = expect_err(ops.commit(&who, request), ErrorCode::CasMismatch);
+        assert_eq!(
+            Value::Object(err.details.clone()),
+            json!({"name": "main", "actual": c3, "committed": false})
+        );
+        assert_eq!(
+            ops.repo_info(InfoReq {}).unwrap(),
+            before,
+            "nothing recorded"
+        );
+    }
+
+    /// `replayed` says the request wrote nothing: a keyed retry whose changeset the store holds
+    /// already, but whose ref was moved back off it in between (as an undo does), moves the ref
+    /// to it again, in a frame of its own, and so answers as the first attempt did, with
+    /// `replayed` and `already_applied` false; it wrote no blob, and no second changeset.
+    #[test]
+    fn a_keyed_retry_that_moves_its_ref_again_is_no_replay() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 9);
+        let request = || keyed_advancing(Some(&c1), vec![text("f", "2")], &key);
+        let first = ops.commit(&who, request()).unwrap();
+        let c2 = first.changeset.clone();
+        ops.ref_set(&who, set("main", &c1, Some(&c2), false))
+            .unwrap();
+
+        let again = ops.commit(&who, request()).unwrap();
+        let moved_again = CommitResp {
+            blobs_written: 0,
+            ..first
+        };
+        assert_eq!(again, moved_again);
+        let info = ops.repo_info(InfoReq {}).unwrap();
+        assert_eq!((info.changesets, info.main), (2, Some(c2)));
+    }
+
+    /// What `commit --key` leaves open (known limitations): a keyed commit that names no parent
+    /// builds on `main`'s head as it is when it runs, so a retry after `main` moved to another
+    /// changeset commits again, on the new head. Given its parent by its full id, the retry is
+    /// the first attempt's changeset.
+    #[test]
+    fn a_keyed_retry_after_main_moved_commits_again_unless_its_parent_is_pinned() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let key = key_at(KEY_MS, 8);
+        let first = ops
+            .commit(&who, keyed(None, vec![text("f", "2")], &key))
+            .unwrap();
+        // Another agent's changeset becomes main's head in between.
+        let other = commit(&ops, Some(&c1), vec![text("g", "x")]);
+        ops.ref_set(&who, set("main", &other, Some(&c1), false))
+            .unwrap();
+
+        let again = ops
+            .commit(&who, keyed(None, vec![text("f", "2")], &key))
+            .unwrap();
+        assert!(!again.replayed, "{again:?}");
+        assert_ne!(again.changeset, first.changeset);
+        assert_eq!(again.parent.as_deref(), Some(other.as_str()));
+        let pinned = ops
+            .commit(&who, keyed(Some(&c1), vec![text("f", "2")], &key))
+            .unwrap();
+        assert!(pinned.replayed, "{pinned:?}");
+        assert_eq!(pinned.changeset, first.changeset);
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 4);
+    }
+}
+
+/// `land` (operations spec §3, the store-only block): a change committed on an older head,
+/// merged three-way onto main and published there as one new changeset in one call; its
+/// conflicts as `E_CONFLICT`, with the report in `details.report`; a keyed land run again a
+/// replay; and `show` naming a land's lander, key and chain.
+mod land {
+    use swarmops_api::{
+        ConflictKindOut, ConflictReport, DEFAULT_MAX_CONFLICT_BYTES, FileConflictOut, HunkOut,
+        LandReq, LandResp, LandStatus, LineRange, LinesOut, OpLogReq, OperationKind,
+    };
+
+    use super::*;
+
+    /// The agent whose commits main gains while a change waits to land.
+    const OTHER: &str = "agent/worker-9";
+
+    fn other() -> Identity {
+        Identity::parse(OTHER).expect("a valid agent name")
+    }
+
+    /// A land of `head` onto main with the request's defaults, read as a client's arguments are.
+    fn landing(head: &str) -> LandReq {
+        serde_json::from_value(json!({"head": head})).expect("a land request")
+    }
+
+    /// Commits `changes` on `parent` as `who`, moving main to the changeset in the same
+    /// transaction (creating main for a root commit); the changeset's id.
+    #[track_caller]
+    fn publish(
+        ops: &LocalOps,
+        who: &Identity,
+        parent: Option<&str>,
+        changes: Vec<ChangeInput>,
+    ) -> String {
+        let req = CommitReq {
+            advance: Some("main".to_owned()),
+            ..commit_req(parent, changes)
+        };
+        ops.commit(who, req).expect("publish").changeset
+    }
+
+    /// What main names.
+    fn main_of(ops: &LocalOps) -> String {
+        let refs = ops.ref_list(RefListReq {}).unwrap().refs;
+        refs.into_iter().find(|r| r.name == "main").unwrap().target
+    }
+
+    /// The newest operation's number: a request that writes nothing leaves it as it was.
+    fn last_op(ops: &LocalOps) -> u64 {
+        let req = OpLogReq {
+            before: None,
+            limit: 1,
+            max_changesets: 1,
+        };
+        ops.op_log(req).unwrap().ops[0].op
+    }
+
+    /// The report of the `E_CONFLICT` that `result` must be.
+    #[track_caller]
+    fn report_of(result: Result<LandResp, OpError>) -> (ConflictReport, OpError) {
+        let error = expect_err(result, ErrorCode::Conflict);
+        let report = serde_json::from_value(error.details["report"].clone())
+            .unwrap_or_else(|e| panic!("details.report is a ConflictReport ({e}): {error:?}"));
+        (report, error)
+    }
+
+    /// Lines `first` to `last` with their text.
+    fn lines(first: u64, last: u64, text: &str) -> LinesOut {
+        LinesOut {
+            first,
+            last,
+            text: Some(text.to_owned()),
+        }
+    }
+
+    /// A land of a commit made on main's head is one call: one new changeset on main, whose
+    /// parent is main's head and whose change is the commit's, in one transaction, which the
+    /// operation log calls a land. The response says where it landed and what it squashed, and
+    /// the request's record holds what `head` and the target named.
+    #[test]
+    fn land_publishes_a_commit_in_one_call() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let t0 = publish(&ops, &who, None, vec![text("a", "a\n")]);
+        let head = commit(&ops, Some(&t0), vec![text("b", "b\n")]);
+        let before = last_op(&ops);
+
+        let resolved = Resolved::default();
+        let resp = ops.recording(&resolved).land(&who, landing(&head)).unwrap();
+        let landed = resp.landed.clone();
+        assert_eq!(
+            resp,
+            LandResp {
+                status: LandStatus::Landed,
+                landed: landed.clone(),
+                rebased_onto: t0.clone(),
+                target: "main".to_owned(),
+                base: t0.clone(),
+                attempts: 1,
+                relocated: false,
+                files_changed: 1,
+                squashed_from: vec![head.clone()],
+                auto_merged: Vec::new(),
+                warnings: Vec::new(),
+            }
+        );
+        assert_eq!(landed.len(), 64, "a full id: {landed}");
+        assert_eq!(
+            resolved.take(),
+            BTreeMap::from([
+                (head.clone(), head.clone()),
+                ("main".to_owned(), t0.clone())
+            ])
+        );
+        assert_eq!(main_of(&ops), landed);
+        assert_eq!(last_op(&ops), before + 1, "one transaction");
+        let req = OpLogReq {
+            before: None,
+            limit: 1,
+            max_changesets: 1,
+        };
+        assert_eq!(ops.op_log(req).unwrap().ops[0].kind, OperationKind::Land);
+        assert_eq!(ops.show(show(&landed)).unwrap().parents, [t0]);
+        for (path, content) in [("a", "a\n"), ("b", "b\n")] {
+            assert_eq!(ops.read_file(cat("main", path)).unwrap().content, content);
+        }
+    }
+
+    /// A land whose change conflicts with what main gained since its base fails `E_CONFLICT`
+    /// (exit 3, not retryable) and records nothing. `details.report` names the base, the change
+    /// (`ours`) and main's head (`theirs`) by full id; each conflicting file, in path order, with
+    /// its kind, the blob each side holds there (none for a side without the file), the hunks of
+    /// a text both sides edited (each side's lines from 1, both ends included, and their texts),
+    /// and the newest changeset on main since the base that changed it, with its agent; the
+    /// kinds; and the paths both sides changed that merged cleanly. The hint reads the target's
+    /// side, then names the land with its resolutions.
+    #[test]
+    fn a_conflicting_land_is_e_conflict_with_the_report() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let h0 = "h1\nh2\nh3\nh4\nh5\n";
+        let files = vec![text("f", "1\n2\n3\n"), text("g", "g\n"), text("h", h0)];
+        let t0 = publish(&ops, &who, None, files);
+        let ours = vec![
+            text("f", "1\nours\n3\n"),
+            delete("g"),
+            text("h", "H1\nh2\nh3\nh4\nh5\n"),
+        ];
+        let head = commit(&ops, Some(&t0), ours);
+        let changed = vec![
+            text("f", "1\ntheirs\n3\n"),
+            text("g", "g2\n"),
+            text("h", "h1\nh2\nh3\nh4\nH5\n"),
+        ];
+        let theirs = publish(&ops, &other(), Some(&t0), changed);
+        let before = last_op(&ops);
+
+        let (report, error) = report_of(ops.land(&who, landing(&head)));
+        let blob_of = |content: &str| Some(blob(content.as_bytes()));
+        let by_them = |path: &str, kind: ConflictKindOut, hunks: Vec<HunkOut>| FileConflictOut {
+            path: path.to_owned(),
+            kind,
+            base_blob: None,
+            ours_blob: None,
+            theirs_blob: None,
+            hunks,
+            theirs_changeset: Some(theirs.clone()),
+            theirs_agent: Some(OTHER.to_owned()),
+        };
+        let hunk = HunkOut {
+            id: 0,
+            base: lines(2, 2, "2\n"),
+            ours: lines(2, 2, "ours\n"),
+            theirs: lines(2, 2, "theirs\n"),
+        };
+        let expected = ConflictReport {
+            base: t0.clone(),
+            ours: head.clone(),
+            theirs: theirs.clone(),
+            files: vec![
+                FileConflictOut {
+                    base_blob: blob_of("1\n2\n3\n"),
+                    ours_blob: blob_of("1\nours\n3\n"),
+                    theirs_blob: blob_of("1\ntheirs\n3\n"),
+                    ..by_them("f", ConflictKindOut::Content, vec![hunk])
+                },
+                FileConflictOut {
+                    base_blob: blob_of("g\n"),
+                    theirs_blob: blob_of("g2\n"),
+                    ..by_them("g", ConflictKindOut::DeleteModify, Vec::new())
+                },
+            ],
+            kinds: vec![ConflictKindOut::Content, ConflictKindOut::DeleteModify],
+            auto_merged: vec!["h".to_owned()],
+            stale: Vec::new(),
+            truncated: false,
+        };
+        assert_eq!(report, expected);
+        assert_eq!(error.details.len(), 1, "the report alone: {error:?}");
+        assert_eq!(
+            error.hint.as_deref(),
+            Some(
+                format!(
+                    "swarmops cat {theirs}:f, then swarmops land {head} --resolve <file> with \
+                     each path's resolution and against = {theirs}"
+                )
+                .as_str()
+            )
+        );
+        assert!(error.message.contains(&theirs), "{error:?}");
+        assert_eq!(main_of(&ops), theirs, "nothing recorded");
+        assert_eq!(last_op(&ops), before);
+    }
+
+    /// The report holds hunk texts while their sum stays within `max_conflict_bytes`, a hunk's
+    /// three sides together and in the report's order; past it, it leaves the texts out and
+    /// says `truncated`, keeping every line position and blob id.
+    #[test]
+    fn a_report_past_its_budget_drops_texts_and_says_truncated() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let base = "one\ntwo\nthree\nfour\nfive\nsix\nseven\n";
+        let t0 = publish(&ops, &who, None, vec![text("f", base)]);
+        let ours = "one\nTWO OURS\nthree\nfour\nfive\nSIX OURS\nseven\n";
+        let head = commit(&ops, Some(&t0), vec![text("f", ours)]);
+        let theirs = "one\nTWO THEIRS\nthree\nfour\nfive\nSIX THEIRS\nseven\n";
+        publish(&ops, &other(), Some(&t0), vec![text("f", theirs)]);
+        let report = |max_conflict_bytes| {
+            let req = LandReq {
+                max_conflict_bytes,
+                ..landing(&head)
+            };
+            report_of(ops.land(&who, req)).0
+        };
+        // Each hunk's texts: 4 + 9 + 11 bytes.
+        let hunk_bytes = 24;
+        let full = report(DEFAULT_MAX_CONFLICT_BYTES);
+        let texts = |report: &ConflictReport| -> Vec<bool> {
+            let hunks = &report.files[0].hunks;
+            let sides =
+                |hunk: &HunkOut| [&hunk.base, &hunk.ours, &hunk.theirs].map(|s| s.text.is_some());
+            hunks.iter().flat_map(sides).collect()
+        };
+        assert_eq!((texts(&full), full.truncated), (vec![true; 6], false));
+        let without_texts = |mut report: ConflictReport| {
+            for hunk in &mut report.files[0].hunks {
+                for side in [&mut hunk.base, &mut hunk.ours, &mut hunk.theirs] {
+                    side.text = None;
+                }
+            }
+            report.truncated = false;
+            report
+        };
+        for (max, kept) in [
+            (16, [false; 6]),
+            (0, [false; 6]),
+            (hunk_bytes, [true, true, true, false, false, false]),
+            (2 * hunk_bytes - 1, [true, true, true, false, false, false]),
+            (2 * hunk_bytes, [true; 6]),
+        ] {
+            let cut = report(max);
+            assert_eq!(texts(&cut), kept, "max_conflict_bytes {max}");
+            assert_eq!(
+                cut.truncated,
+                kept.contains(&false),
+                "max_conflict_bytes {max}"
+            );
+            assert_eq!(without_texts(cut), without_texts(full.clone()), "{max}");
+        }
+    }
+
+    /// Each side of a hunk is the lines `read_file` takes as `lines` at that side's changeset
+    /// (the report's `base`, `ours` or `theirs`): read there, they are the side's text. A side
+    /// without lines there has `last` one less than `first`, and an empty text.
+    #[test]
+    fn hunk_sides_are_the_lines_read_file_takes() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let t0 = publish(&ops, &who, None, vec![text("f", "1\n2\n3\n4\n5\n6\n7\n")]);
+        let ours = "1\n3\n4\n5\nours six\nours six again\n7\n";
+        let head = commit(&ops, Some(&t0), vec![text("f", ours)]);
+        let theirs = "1\ntheirs two\n3\n4\n5\ntheirs six\n7\n";
+        publish(&ops, &other(), Some(&t0), vec![text("f", theirs)]);
+
+        let (report, _) = report_of(ops.land(&who, landing(&head)));
+        let [file] = &report.files[..] else {
+            panic!("one file: {report:?}");
+        };
+        assert_eq!(file.hunks.len(), 2, "{report:?}");
+        let mut empty = 0;
+        for hunk in &file.hunks {
+            for (side, at) in [
+                (&hunk.base, &report.base),
+                (&hunk.ours, &report.ours),
+                (&hunk.theirs, &report.theirs),
+            ] {
+                let text = side.text.as_deref().expect("within the budget");
+                if side.last + 1 == side.first {
+                    assert_eq!(text, "", "{hunk:?}");
+                    empty += 1;
+                    continue;
+                }
+                let lines = LineRange {
+                    first: side.first,
+                    last: side.last,
+                };
+                let read = ReadFileReq {
+                    lines: Some(lines),
+                    ..cat(at, &file.path)
+                };
+                assert_eq!(ops.read_file(read).unwrap().content, text, "{hunk:?}");
+            }
+        }
+        assert_eq!(empty, 1, "ours deleted line 2: {report:?}");
+    }
+
+    /// A land with nothing to add to the target fails `E_NOTHING_TO_LAND`, naming why: its head
+    /// is on the target (`on_target`), or the target holds its change already (`no_changes`), as
+    /// a land of the same change without a key, run again, finds. A target that does not exist
+    /// is `E_REV_NOT_FOUND`, naming it.
+    #[test]
+    fn nothing_to_land_names_its_reason() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let t0 = publish(&ops, &who, None, vec![text("a", "a\n")]);
+        let on_target = expect_err(ops.land(&who, landing(&t0)), ErrorCode::NothingToLand);
+        assert_eq!(
+            Value::Object(on_target.details),
+            json!({"reason": "on_target"})
+        );
+        let head = commit(&ops, Some(&t0), vec![text("b", "b\n")]);
+        let landed = ops.land(&who, landing(&head)).unwrap().landed;
+        let before = last_op(&ops);
+        let again = expect_err(ops.land(&who, landing(&head)), ErrorCode::NothingToLand);
+        assert_eq!(
+            Value::Object(again.details),
+            json!({"reason": "no_changes"})
+        );
+        assert_eq!((main_of(&ops), last_op(&ops)), (landed, before));
+
+        let elsewhere = LandReq {
+            target: "release/none".to_owned(),
+            ..landing(&head)
+        };
+        let missing = expect_err(ops.land(&who, elsewhere), ErrorCode::RevNotFound);
+        assert_eq!(missing.details["rev"], "release/none");
+        assert_eq!(missing.hint.as_deref(), Some("swarmops ref list"));
+    }
+
+    /// A keyed land run again finds the changeset it landed on the target and replays it: the
+    /// same response but `status`, nothing written. The key given for another head is
+    /// `E_INVALID_ARG`, naming the key and the changeset it landed.
+    #[test]
+    fn a_keyed_land_run_again_is_a_replay() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let t0 = publish(&ops, &who, None, vec![text("a", "a\n")]);
+        let head = commit(&ops, Some(&t0), vec![text("b", "b\n")]);
+        let keyed = LandReq {
+            idempotency_key: Some("land-1".to_owned()),
+            ..landing(&head)
+        };
+        let first = ops.land(&who, keyed.clone()).unwrap();
+        let before = last_op(&ops);
+        let again = ops.land(&who, keyed).unwrap();
+        assert_eq!(
+            again,
+            LandResp {
+                status: LandStatus::Replayed,
+                ..first.clone()
+            }
+        );
+        assert_eq!(last_op(&ops), before, "a replay writes nothing");
+
+        let another = commit(&ops, Some(&t0), vec![text("c", "c\n")]);
+        let reused = LandReq {
+            idempotency_key: Some("land-1".to_owned()),
+            ..landing(&another)
+        };
+        let error = expect_err(ops.land(&who, reused), ErrorCode::InvalidArg);
+        assert_eq!(
+            Value::Object(error.details),
+            json!({"key": "land-1", "landed": first.landed})
+        );
+    }
+
+    /// `show` names who landed a changeset a land made (its `lander` and `lander_run_id`
+    /// metadata), the land's key and the chain it squashed, oldest first; the author is the
+    /// change's. A changeset no land made has none of the three, and its JSON leaves them out.
+    #[test]
+    fn show_names_a_lands_lander_key_and_chain() {
+        let (_dir, _root, ops) = new_store();
+        let writer = agent().with_run_id("run-w");
+        let landing_agent = Identity::parse("agent/lander-1")
+            .unwrap()
+            .with_run_id("run-7");
+        let t0 = publish(&ops, &writer, None, vec![text("a", "a\n")]);
+        let c1 = ops
+            .commit(&writer, commit_req(Some(&t0), vec![text("b", "b\n")]))
+            .unwrap()
+            .changeset;
+        let c2 = ops
+            .commit(&writer, commit_req(Some(&c1), vec![text("c", "c\n")]))
+            .unwrap()
+            .changeset;
+        let req = LandReq {
+            idempotency_key: Some("k-7".to_owned()),
+            message: Some("land b and c".to_owned()),
+            ..landing(&c2)
+        };
+        let landed = ops.land(&landing_agent, req).unwrap().landed;
+
+        let shown = ops.show(show(&landed)).unwrap();
+        let attribution = |agent: &str, run_id: &str| Attribution {
+            agent: agent.to_owned(),
+            run_id: Some(run_id.to_owned()),
+            on_behalf_of: None,
+        };
+        assert_eq!(shown.author, attribution(writer.agent(), "run-w"));
+        assert_eq!(
+            shown.lander,
+            Some(attribution("agent/lander-1", "run-7"))
+        );
+        assert_eq!(shown.land_key.as_deref(), Some("k-7"));
+        assert_eq!(shown.squashed_from, [c1.clone(), c2.clone()]);
+        assert_eq!(shown.message, "land b and c");
+        assert_eq!(shown.signatures.committer.name, "agent/lander-1");
+        assert_eq!(shown.metadata["lander_run_id"], "run-7");
+
+        let plain = ops.show(show(&c2)).unwrap();
+        assert_eq!(
+            (&plain.lander, &plain.land_key, &plain.squashed_from),
+            (&None, &None, &Vec::new())
+        );
+        let json = serde_json::to_value(&plain).unwrap();
+        for key in ["lander", "land_key", "squashed_from"] {
+            assert!(json.get(key).is_none(), "{key}: {json}");
+        }
+        // A lander without a run id, and a land without a key.
+        let c3 = commit(&ops, Some(&landed), vec![text("d", "d\n")]);
+        let bare = ops.land(&agent(), landing(&c3)).unwrap().landed;
+        let shown = ops.show(show(&bare)).unwrap();
+        let by_agent = Attribution {
+            agent: agent().agent().to_owned(),
+            run_id: None,
+            on_behalf_of: None,
+        };
+        assert_eq!((shown.lander, shown.land_key), (Some(by_agent), None));
+    }
+
+    /// The key and the attempts are checked before anything is resolved: a key that is not 1 to
+    /// 64 letters, digits and `-` is `E_INVALID_ARG` naming it, and so are `max_attempts` outside
+    /// 1 to 32; within them, the land goes on (here to the head it cannot find).
+    #[test]
+    fn a_land_checks_its_key_and_attempts_first() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let long = "k".repeat(65);
+        for key in ["", "has space", "a_b", "a.b", "ünï", long.as_str()] {
+            let req = LandReq {
+                idempotency_key: Some(key.to_owned()),
+                ..landing("release/none")
+            };
+            let error = expect_err(ops.land(&who, req), ErrorCode::InvalidArg);
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"idempotency_key": key})
+            );
+        }
+        for attempts in [0, 33] {
+            let req = LandReq {
+                max_attempts: attempts,
+                ..landing("release/none")
+            };
+            let error = expect_err(ops.land(&who, req), ErrorCode::InvalidArg);
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"max_attempts": attempts})
+            );
+        }
+        let uuid = "0192e4f6-3c2a-7b1d-9e8f-0123456789ab";
+        let id = "ab".repeat(32);
+        let longest = "K-9".repeat(21) + "x";
+        for key in ["k", "Key-1", uuid, id.as_str(), longest.as_str()] {
+            for attempts in [1, 32] {
+                let req = LandReq {
+                    idempotency_key: Some(key.to_owned()),
+                    max_attempts: attempts,
+                    ..landing("release/none")
+                };
+                expect_err(ops.land(&who, req), ErrorCode::RevNotFound);
+            }
+        }
+    }
+    /// Resolutions through the operations (operations spec §3, resolution path (b)): a land's
+    /// `resolutions` checked, their contents turned into bytes by a commit's rules, and a stale
+    /// one named in the conflict report's `stale`.
+    mod resolutions {
+        use swarmops_api::{ResolutionInput, ResolutionsInput, Side};
+
+        use super::*;
+
+        /// A resolution with these fields.
+        fn resolution(
+            take: Option<Side>,
+            content: Option<ContentInput>,
+            mode: Option<ModeInput>,
+            delete: bool,
+        ) -> ResolutionInput {
+            ResolutionInput {
+                take,
+                content,
+                mode,
+                delete,
+            }
+        }
+
+        /// A resolution that takes `side`.
+        fn take(side: Side) -> ResolutionInput {
+            resolution(Some(side), None, None, false)
+        }
+
+        /// A resolution that puts `text`, inline.
+        fn inline(text: &str) -> ResolutionInput {
+            let content = ContentInput::Inline(text.to_owned());
+            resolution(None, Some(content), None, false)
+        }
+
+        /// A land of `head` with `files` resolved against `against`.
+        fn resolving(head: &str, against: &str, files: Vec<(&str, ResolutionInput)>) -> LandReq {
+            let files = (files.into_iter())
+                .map(|(path, resolution)| (path.to_owned(), resolution))
+                .collect();
+            LandReq {
+                resolutions: Some(ResolutionsInput {
+                    against: against.into(),
+                    files,
+                }),
+                ..landing(head)
+            }
+        }
+
+        /// A resolution takes exactly one of `take`, `content` and `delete`, a `mode` only with
+        /// `content`, a repository path, and an id for a blob it names: each refusal is
+        /// `E_INVALID_ARG` naming the path (and the blob), before anything is resolved (the head
+        /// here is a ref that does not exist). A resolution of each form goes on, to the head.
+        #[test]
+        fn a_resolution_takes_exactly_one_of_take_content_delete() {
+            let (_dir, _root, ops) = new_store();
+            let who = agent();
+            let against = "ab".repeat(32);
+            let text = || Some(ContentInput::Inline("x\n".to_owned()));
+            let refused = |files: Vec<(&str, ResolutionInput)>| {
+                let req = resolving("release/none", &against, files);
+                expect_err(ops.land(&who, req), ErrorCode::InvalidArg)
+            };
+            for (shape, why) in [
+                (resolution(None, None, None, false), "none of the three"),
+                (
+                    resolution(Some(Side::Ours), None, None, true),
+                    "take and delete",
+                ),
+                (
+                    resolution(Some(Side::Theirs), text(), None, false),
+                    "take and content",
+                ),
+                (resolution(None, text(), None, true), "content and delete"),
+                (
+                    resolution(Some(Side::Ours), text(), None, true),
+                    "all three",
+                ),
+                (
+                    resolution(Some(Side::Ours), None, Some(ModeInput::Exec), false),
+                    "a mode with take",
+                ),
+                (
+                    resolution(None, None, Some(ModeInput::File), true),
+                    "a mode with delete",
+                ),
+            ] {
+                let error = refused(vec![("src/f.rs", shape)]);
+                assert_eq!(
+                    Value::Object(error.details.clone()),
+                    json!({"path": "src/f.rs"}),
+                    "{why}: {error:?}"
+                );
+                assert!(error.message.contains("src/f.rs"), "{why}: {error:?}");
+            }
+            for bad in ["", "/abs", "a//b", "../x", "a/./b", "a/"] {
+                let error = refused(vec![(bad, take(Side::Ours))]);
+                assert_eq!(error.details["path"], bad, "{error:?}");
+            }
+            let blob = Some(ContentInput::Blob("not-an-id".to_owned()));
+            let error = refused(vec![("f", resolution(None, blob, None, false))]);
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"path": "f", "blob": "not-an-id"})
+            );
+
+            let id = "cd".repeat(32);
+            let blob = Some(ContentInput::Blob(id));
+            let files = vec![
+                ("a", take(Side::Ours)),
+                ("b", take(Side::Theirs)),
+                ("c", resolution(None, text(), Some(ModeInput::Exec), false)),
+                ("d", resolution(None, blob, None, false)),
+                ("e", resolution(None, None, None, true)),
+            ];
+            let req = resolving("release/none", &against, files);
+            let missing = expect_err(ops.land(&who, req), ErrorCode::RevNotFound);
+            assert_eq!(missing.details["rev"], "release/none");
+        }
+
+        /// A land resolved against its conflict report's `theirs` lands: a resolution of each
+        /// form, its content by a commit's rules (inline, base64 with a mode). Made against a
+        /// head of main that held a resolved path otherwise, it is `E_CONFLICT` again, whose
+        /// report names the path in `stale`; `against` must be a changeset the store holds, and
+        /// a client file a resolution names one it can read, which the error names.
+        #[test]
+        fn resolutions_land_and_a_stale_one_is_reported() {
+            let (_dir, root, ops) = new_store();
+            let who = agent();
+            let base = vec![text("f", "1\n2\n3\n"), text("g", "1\n2\n3\n")];
+            let t0 = publish(&ops, &who, None, base);
+            let ours = vec![text("f", "1\nours\n3\n"), text("g", "1\nours\n3\n")];
+            let head = commit(&ops, Some(&t0), ours);
+            let theirs = vec![text("f", "1\ntheirs\n3\n"), text("g", "1\ntheirs\n3\n")];
+            let x = publish(&ops, &other(), Some(&t0), theirs);
+            let (report, _) = report_of(ops.land(&who, landing(&head)));
+            assert_eq!(
+                (report.theirs.as_str(), report.files.len()),
+                (x.as_str(), 2)
+            );
+            assert_eq!(report.stale, Vec::<String>::new());
+
+            // main moves on and changes g again: a resolution of g against x is stale.
+            let y = publish(
+                &ops,
+                &other(),
+                Some(&x),
+                vec![text("g", "1\ntheirs\nthree\n")],
+            );
+            let before = last_op(&ops);
+            let both = || {
+                let encoded = STANDARD.encode("#!/bin/sh\n");
+                let script = ContentInput::Base64(encoded);
+                vec![
+                    ("f", take(Side::Ours)),
+                    ("g", inline("1\nboth\n3\n")),
+                    (
+                        "run.sh",
+                        resolution(None, Some(script), Some(ModeInput::Exec), false),
+                    ),
+                ]
+            };
+            let (stale, error) = report_of(ops.land(&who, resolving(&head, &x, both())));
+            assert_eq!(
+                (stale.theirs.as_str(), stale.stale.clone()),
+                (y.as_str(), vec!["g".to_owned()])
+            );
+            let files: Vec<&str> = stale.files.iter().map(|f| f.path.as_str()).collect();
+            assert_eq!(files, ["g"], "f was resolved, g still conflicts: {stale:?}");
+            assert!(error.message.contains("stale"), "{error:?}");
+            assert_eq!(last_op(&ops), before, "nothing recorded");
+
+            let unknown = "ef".repeat(32);
+            let missing = expect_err(
+                ops.land(&who, resolving(&head, &unknown, both())),
+                ErrorCode::RevNotFound,
+            );
+            assert_eq!(missing.details["rev"], unknown.as_str());
+            let absent = root.join("absent.txt").to_string();
+            let file = resolution(None, Some(ContentInput::File(absent.clone())), None, false);
+            let error = expect_err(
+                ops.land(&who, resolving(&head, &y, vec![("g", file)])),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"path": "g", "file": absent})
+            );
+
+            let landed = ops.land(&who, resolving(&head, &y, both())).unwrap();
+            assert_eq!(
+                (landed.rebased_onto.as_str(), landed.files_changed),
+                (y.as_str(), 3)
+            );
+            let read = |path: &str| ops.read_file(cat("main", path)).unwrap();
+            assert_eq!(read("f").content, "1\nours\n3\n");
+            assert_eq!(read("g").content, "1\nboth\n3\n");
+            let script = read("run.sh");
+            assert_eq!(
+                (script.content.as_str(), script.kind),
+                ("#!/bin/sh\n", FileKind::Exec)
+            );
+        }
     }
 }
 

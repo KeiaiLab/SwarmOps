@@ -616,6 +616,24 @@ expression: s.redact(&all)
           "description": "The changeset's id.",
           "type": "string"
         },
+        "land_key": {
+          "description": "The idempotency key of the land that made it (its `land_key` metadata), when it had one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lander": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Attribution"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Who landed it, for a changeset a `land` made: its `lander` and `lander_run_id` metadata.\nOmitted for any other changeset."
+        },
         "message": {
           "description": "The message.",
           "type": "string"
@@ -647,6 +665,13 @@ expression: s.redact(&all)
         "signatures": {
           "$ref": "#/$defs/Signatures",
           "description": "The git author and committer signatures, kept for git fidelity."
+        },
+        "squashed_from": {
+          "description": "The changesets a land squashed into it, oldest first: the landed head's first-parent chain\nafter the land's base, ending at that head (its `squashed_from` metadata). Omitted for a\nchangeset no land made.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         }
       },
       "required": [
@@ -867,6 +892,13 @@ expression: s.redact(&all)
           },
           "type": "array"
         },
+        "idempotency_key": {
+          "description": "Makes a retry of this commit safe: a uuid v7 (anything else is `E_INVALID_ARG`). The\ncommit takes the key's time, to the second, as its signature time and records the key as\n`commit_key` metadata, so the same request on the same parent makes the same changeset,\nwhich the store holds already: the response says `replayed`, and nothing is written.\nWith `advance`, a ref whose head carries the key is a replay too. Give `parent` by its full\nid: without it, a retry after the head moved commits again, on the new head.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "message": {
           "description": "The commit message.",
           "type": "string"
@@ -960,6 +992,11 @@ expression: s.redact(&all)
             "null"
           ]
         },
+        "replayed": {
+          "default": false,
+          "description": "The store held the changeset already, from an identical request before (a retry with the\nsame `idempotency_key`), so nothing was written. Always written; a response from a store\nthat does not know the field reads as `false`.",
+          "type": "boolean"
+        },
         "root": {
           "description": "The new root tree's id.",
           "type": "string"
@@ -979,6 +1016,269 @@ expression: s.redact(&all)
         "blobs_written"
       ],
       "title": "CommitResp",
+      "type": "object"
+    },
+    "ConflictKindOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What kind of conflict a file has. `ours` is the change, `theirs` the target.",
+      "oneOf": [
+        {
+          "const": "content",
+          "description": "Both sides edited the same lines of a text file, or lines next to each other.",
+          "type": "string"
+        },
+        {
+          "const": "binary",
+          "description": "Both sides changed the content of a file that is not text, or of a symlink, differently.",
+          "type": "string"
+        },
+        {
+          "const": "delete_modify",
+          "description": "The change deleted the file, and the target changed it.",
+          "type": "string"
+        },
+        {
+          "const": "modify_delete",
+          "description": "The change changed the file, and the target deleted it.",
+          "type": "string"
+        },
+        {
+          "const": "add_add",
+          "description": "Both sides added the file, with contents that do not merge.",
+          "type": "string"
+        },
+        {
+          "const": "mode",
+          "description": "Both sides changed the file's kind (file, executable or symlink), differently.",
+          "type": "string"
+        },
+        {
+          "const": "type_change",
+          "description": "One side has a file where the other has a directory.",
+          "type": "string"
+        }
+      ],
+      "title": "ConflictKindOut"
+    },
+    "ConflictReport": {
+      "$defs": {
+        "ConflictKindOut": {
+          "description": "What kind of conflict a file has. `ours` is the change, `theirs` the target.",
+          "oneOf": [
+            {
+              "const": "content",
+              "description": "Both sides edited the same lines of a text file, or lines next to each other.",
+              "type": "string"
+            },
+            {
+              "const": "binary",
+              "description": "Both sides changed the content of a file that is not text, or of a symlink, differently.",
+              "type": "string"
+            },
+            {
+              "const": "delete_modify",
+              "description": "The change deleted the file, and the target changed it.",
+              "type": "string"
+            },
+            {
+              "const": "modify_delete",
+              "description": "The change changed the file, and the target deleted it.",
+              "type": "string"
+            },
+            {
+              "const": "add_add",
+              "description": "Both sides added the file, with contents that do not merge.",
+              "type": "string"
+            },
+            {
+              "const": "mode",
+              "description": "Both sides changed the file's kind (file, executable or symlink), differently.",
+              "type": "string"
+            },
+            {
+              "const": "type_change",
+              "description": "One side has a file where the other has a directory.",
+              "type": "string"
+            }
+          ]
+        },
+        "FileConflictOut": {
+          "description": "One conflicting file. Its blobs are the file's content on each side, which `read_file` reads\nat that side's changeset; a side without a file at the path (deleted, never added, or a\ndirectory there) has none.",
+          "properties": {
+            "base_blob": {
+              "description": "Its blob at the merge base.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "hunks": {
+              "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content`, and `add_add` of two texts). Omitted when there are none.",
+              "items": {
+                "$ref": "#/$defs/HunkOut"
+              },
+              "type": "array"
+            },
+            "kind": {
+              "$ref": "#/$defs/ConflictKindOut",
+              "description": "What kind of conflict it is."
+            },
+            "ours_blob": {
+              "description": "Its blob in the change.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "path": {
+              "description": "The file's repository path.",
+              "type": "string"
+            },
+            "theirs_agent": {
+              "description": "The agent that wrote `theirs_changeset`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs_blob": {
+              "description": "Its blob on the target.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "theirs_changeset": {
+              "description": "The newest changeset on the target since the merge base that changed this path: what to\nread for the other side's edit.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "HunkOut": {
+          "description": "One place where the two sides' edits of a text file meet: each side's lines there. The lines\nare numbered from 1, and each side's range includes both ends, as `read_file` takes a range\nof lines.",
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The lines at the merge base."
+            },
+            "id": {
+              "description": "Its number in the file, from 0.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ours": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The change's lines."
+            },
+            "theirs": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The target's lines."
+            }
+          },
+          "required": [
+            "id",
+            "base",
+            "ours",
+            "theirs"
+          ],
+          "type": "object"
+        },
+        "LinesOut": {
+          "description": "One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without\nlines there has `last` one less than `first`: its place is before line `first`.",
+          "properties": {
+            "first": {
+              "description": "The first line.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The last line; `first` minus one when the side has none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "description": "The lines' text; omitted when the report would pass its `max_conflict_bytes`\n(`truncated`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Why a land could not merge its change onto the target, file by file, or could not apply its\nresolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.\n`ours` is the change, `theirs` the target. Ids are full.",
+      "properties": {
+        "auto_merged": {
+          "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "base": {
+          "description": "The merge base: the changeset the change starts from.",
+          "type": "string"
+        },
+        "files": {
+          "description": "The files that conflict, by path.",
+          "items": {
+            "$ref": "#/$defs/FileConflictOut"
+          },
+          "type": "array"
+        },
+        "kinds": {
+          "description": "The kinds of conflict in `files`, each once.",
+          "items": {
+            "$ref": "#/$defs/ConflictKindOut"
+          },
+          "type": "array"
+        },
+        "ours": {
+          "description": "The change's head.",
+          "type": "string"
+        },
+        "stale": {
+          "description": "The paths whose resolutions did not apply, since the target holds there what their\n`against` did not: the target changed them after the report the resolutions answered.\nRead them at `theirs` and resolve them again, against it. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "theirs": {
+          "description": "The target's head the change was merged with.",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "Whether hunk texts were left out to keep the report within the request's\n`max_conflict_bytes`; the line positions and blob ids are always there.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "base",
+        "ours",
+        "theirs",
+        "files",
+        "kinds",
+        "truncated"
+      ],
+      "title": "ConflictReport",
       "type": "object"
     },
     "ContentEncoding": {
@@ -2030,6 +2330,31 @@ expression: s.redact(&all)
           "type": "string"
         },
         {
+          "const": "E_CONFLICT",
+          "description": "The change conflicts with the target: `details.report` lists each conflicting file with\nits kind, its hunks and who changed it on the target. Nothing was recorded; resolve the\nconflicts, then land again (the `hint` says how).",
+          "type": "string"
+        },
+        {
+          "const": "E_CAS_RETRY_EXHAUSTED",
+          "description": "The target moved before every one of the land's attempts could publish; nothing was\nrecorded, and running the land again can succeed.",
+          "type": "string"
+        },
+        {
+          "const": "E_NOTHING_TO_LAND",
+          "description": "The land has nothing to add to the target: its head is on the target already, or its\nchange is (`details.reason` says which).",
+          "type": "string"
+        },
+        {
+          "const": "E_NOTHING_TO_UNDO",
+          "description": "The operation moved no ref, so there is nothing to restore.",
+          "type": "string"
+        },
+        {
+          "const": "E_OP_NOT_FOUND",
+          "description": "The store has no operation by that number.",
+          "type": "string"
+        },
+        {
           "const": "E_AUTH",
           "description": "The caller's token failed verification.",
           "type": "string"
@@ -2076,6 +2401,169 @@ expression: s.redact(&all)
         }
       ],
       "title": "ErrorCode"
+    },
+    "FileConflictOut": {
+      "$defs": {
+        "ConflictKindOut": {
+          "description": "What kind of conflict a file has. `ours` is the change, `theirs` the target.",
+          "oneOf": [
+            {
+              "const": "content",
+              "description": "Both sides edited the same lines of a text file, or lines next to each other.",
+              "type": "string"
+            },
+            {
+              "const": "binary",
+              "description": "Both sides changed the content of a file that is not text, or of a symlink, differently.",
+              "type": "string"
+            },
+            {
+              "const": "delete_modify",
+              "description": "The change deleted the file, and the target changed it.",
+              "type": "string"
+            },
+            {
+              "const": "modify_delete",
+              "description": "The change changed the file, and the target deleted it.",
+              "type": "string"
+            },
+            {
+              "const": "add_add",
+              "description": "Both sides added the file, with contents that do not merge.",
+              "type": "string"
+            },
+            {
+              "const": "mode",
+              "description": "Both sides changed the file's kind (file, executable or symlink), differently.",
+              "type": "string"
+            },
+            {
+              "const": "type_change",
+              "description": "One side has a file where the other has a directory.",
+              "type": "string"
+            }
+          ]
+        },
+        "HunkOut": {
+          "description": "One place where the two sides' edits of a text file meet: each side's lines there. The lines\nare numbered from 1, and each side's range includes both ends, as `read_file` takes a range\nof lines.",
+          "properties": {
+            "base": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The lines at the merge base."
+            },
+            "id": {
+              "description": "Its number in the file, from 0.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ours": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The change's lines."
+            },
+            "theirs": {
+              "$ref": "#/$defs/LinesOut",
+              "description": "The target's lines."
+            }
+          },
+          "required": [
+            "id",
+            "base",
+            "ours",
+            "theirs"
+          ],
+          "type": "object"
+        },
+        "LinesOut": {
+          "description": "One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without\nlines there has `last` one less than `first`: its place is before line `first`.",
+          "properties": {
+            "first": {
+              "description": "The first line.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The last line; `first` minus one when the side has none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "description": "The lines' text; omitted when the report would pass its `max_conflict_bytes`\n(`truncated`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One conflicting file. Its blobs are the file's content on each side, which `read_file` reads\nat that side's changeset; a side without a file at the path (deleted, never added, or a\ndirectory there) has none.",
+      "properties": {
+        "base_blob": {
+          "description": "Its blob at the merge base.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "hunks": {
+          "description": "The places where the two sides' edits of its lines meet, in file order: for a text file\nboth sides edited (`content`, and `add_add` of two texts). Omitted when there are none.",
+          "items": {
+            "$ref": "#/$defs/HunkOut"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "$ref": "#/$defs/ConflictKindOut",
+          "description": "What kind of conflict it is."
+        },
+        "ours_blob": {
+          "description": "Its blob in the change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The file's repository path.",
+          "type": "string"
+        },
+        "theirs_agent": {
+          "description": "The agent that wrote `theirs_changeset`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "theirs_blob": {
+          "description": "Its blob on the target.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "theirs_changeset": {
+          "description": "The newest changeset on the target since the merge base that changed this path: what to\nread for the other side's edit.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "kind"
+      ],
+      "title": "FileConflictOut",
+      "type": "object"
     },
     "FileContent": {
       "$defs": {
@@ -2662,6 +3150,69 @@ expression: s.redact(&all)
       "title": "GitImportResp",
       "type": "object"
     },
+    "HunkOut": {
+      "$defs": {
+        "LinesOut": {
+          "description": "One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without\nlines there has `last` one less than `first`: its place is before line `first`.",
+          "properties": {
+            "first": {
+              "description": "The first line.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The last line; `first` minus one when the side has none.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "text": {
+              "description": "The lines' text; omitted when the report would pass its `max_conflict_bytes`\n(`truncated`).",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One place where the two sides' edits of a text file meet: each side's lines there. The lines\nare numbered from 1, and each side's range includes both ends, as `read_file` takes a range\nof lines.",
+      "properties": {
+        "base": {
+          "$ref": "#/$defs/LinesOut",
+          "description": "The lines at the merge base."
+        },
+        "id": {
+          "description": "Its number in the file, from 0.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ours": {
+          "$ref": "#/$defs/LinesOut",
+          "description": "The change's lines."
+        },
+        "theirs": {
+          "$ref": "#/$defs/LinesOut",
+          "description": "The target's lines."
+        }
+      },
+      "required": [
+        "id",
+        "base",
+        "ours",
+        "theirs"
+      ],
+      "title": "HunkOut",
+      "type": "object"
+    },
     "Identity": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "The caller of a mutation: an agent name `<family>/<instance>` (`agent/worker-17`,\n`human/purple`) and an optional run id. M1 trusts the name as claimed.\n\nThe agent name always follows the grammar below, also in an identity read from JSON.",
@@ -2741,6 +3292,349 @@ expression: s.redact(&all)
       "title": "InitReq",
       "type": "object"
     },
+    "LandReq": {
+      "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "ResolutionInput": {
+          "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+            },
+            "delete": {
+              "description": "Nothing there: no file at the path, nor below it.",
+              "type": "boolean"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModeInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+            },
+            "take": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Side"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+            }
+          },
+          "type": "object"
+        },
+        "ResolutionsInput": {
+          "description": "A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change\nonto the target, decided against one of the target's heads.",
+          "properties": {
+            "against": {
+              "$ref": "#/$defs/Rev",
+              "description": "The target's head the resolutions were decided against: the conflict report's `theirs`,\nby its full 64-hex id. A resolution applies while the target holds its path as this\nchangeset does (the same file, the same directory, or nothing)."
+            },
+            "files": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ResolutionInput"
+              },
+              "description": "What to make of each path, by its repository path.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "against",
+            "files"
+          ],
+          "type": "object"
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        },
+        "Side": {
+          "description": "One side of a land's merge.",
+          "oneOf": [
+            {
+              "const": "ours",
+              "description": "The change: its head.",
+              "type": "string"
+            },
+            {
+              "const": "theirs",
+              "description": "The target: its head when the land merges.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`land`: merge a change three-way onto a target ref and publish it there as one new\nchangeset, in one transaction (operations spec §3). The change is `head` with its\nfirst-parent chain after `base`, squashed: the landed changeset's parent is the target's\nhead, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in\n`details.report`; nothing is recorded then.",
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the change starts: a first-parent ancestor of `head`, whose own changes are not part\nof it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the\nmerge base of `head` and the target's head, along first parents."
+        },
+        "head": {
+          "$ref": "#/$defs/Rev",
+          "description": "The changeset to land: the change's head."
+        },
+        "idempotency_key": {
+          "description": "Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land\nwith a key first looks down the target's first parents, to `base`, for a changeset that\nlanded with the same key: one squashed from this `head` is the replay, which writes\nnothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used\nfor another change.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_attempts": {
+          "default": 8,
+          "description": "How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32.",
+          "format": "uint32",
+          "maximum": 32,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_conflict_bytes": {
+          "default": 32768,
+          "description": "The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left\nout (`truncated`), and the line positions and blob ids stay.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "The landed changeset's message; `head`'s when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resolutions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolutionsInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to make of the paths an `E_CONFLICT` report named, decided without a checkout\n(operations spec §3, resolution path (b)). Each resolution applies to its path while the\ntarget holds there what `against` held, whether the path conflicts or not; a path the\ntarget changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report\nthat names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses\nan `against` that is not a full 64-hex id (`E_INVALID_ARG`)."
+        },
+        "target": {
+          "default": "main",
+          "description": "The ref to land on: `main` or `release/<name>`, which must exist.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "head"
+      ],
+      "title": "LandReq",
+      "type": "object"
+    },
+    "LandResp": {
+      "$defs": {
+        "LandStatus": {
+          "description": "How a land ended.",
+          "oneOf": [
+            {
+              "const": "landed",
+              "description": "This request landed the change.",
+              "type": "string"
+            },
+            {
+              "const": "replayed",
+              "description": "A land with the same `idempotency_key` had landed it already; nothing was written.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`land`: where the change landed. Ids are full.",
+      "properties": {
+        "attempts": {
+          "description": "How many times the land tried to publish.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "auto_merged": {
+          "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "base": {
+          "description": "The changeset the change was taken from: what `head`'s first-parent chain added after it\nis what landed.",
+          "type": "string"
+        },
+        "files_changed": {
+          "description": "How many paths the landed changeset changes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "landed": {
+          "description": "The landed changeset: the change squashed into one changeset on the target.",
+          "type": "string"
+        },
+        "rebased_onto": {
+          "description": "The target's head the change landed on: `landed`'s parent.",
+          "type": "string"
+        },
+        "relocated": {
+          "description": "The target moved after the land read it, and the publish put the change on the new head\nitself, without another attempt.",
+          "type": "boolean"
+        },
+        "squashed_from": {
+          "description": "The changesets the land squashed, oldest first: `head`'s first-parent chain after `base`,\nending at `head`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/LandStatus",
+          "description": "`landed`, or `replayed` when a land with the same `idempotency_key` had landed the change\nalready."
+        },
+        "target": {
+          "description": "The ref it landed on.",
+          "type": "string"
+        },
+        "warnings": {
+          "description": "Problems found after the land became durable, such as failed housekeeping; the land\nitself succeeded. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "status",
+        "landed",
+        "rebased_onto",
+        "target",
+        "base",
+        "attempts",
+        "relocated",
+        "files_changed",
+        "squashed_from"
+      ],
+      "title": "LandResp",
+      "type": "object"
+    },
+    "LandStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How a land ended.",
+      "oneOf": [
+        {
+          "const": "landed",
+          "description": "This request landed the change.",
+          "type": "string"
+        },
+        {
+          "const": "replayed",
+          "description": "A land with the same `idempotency_key` had landed it already; nothing was written.",
+          "type": "string"
+        }
+      ],
+      "title": "LandStatus"
+    },
     "LineOp": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Which side of a diff a hunk's line is on.",
@@ -2785,6 +3679,37 @@ expression: s.redact(&all)
         "last"
       ],
       "title": "LineRange",
+      "type": "object"
+    },
+    "LinesOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without\nlines there has `last` one less than `first`: its place is before line `first`.",
+      "properties": {
+        "first": {
+          "description": "The first line.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "last": {
+          "description": "The last line; `first` minus one when the side has none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "text": {
+          "description": "The lines' text; omitted when the report would pass its `max_conflict_bytes`\n(`truncated`).",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "first",
+        "last"
+      ],
+      "title": "LinesOut",
       "type": "object"
     },
     "LogCutOut": {
@@ -3189,6 +4114,45 @@ expression: s.redact(&all)
       ],
       "title": "ModeInput"
     },
+    "OpChangesetOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A changeset an operation recorded.",
+      "properties": {
+        "agent": {
+          "description": "The agent that wrote it, as `show` gives `author.agent`.",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "description": "Its id.",
+          "type": "string"
+        },
+        "land_key": {
+          "description": "The idempotency key of the land that made it, when it had one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "description": "The message's first line.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "agent",
+        "created_at",
+        "title"
+      ],
+      "title": "OpChangesetOut",
+      "type": "object"
+    },
     "OpError": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "A failed operation: the envelope's `error` object.\n\n`code`, `exit` and `retryable` come from one `ErrorCode`. `code` stays a string so a client\ncan read codes newer than its own table.",
@@ -3233,6 +4197,409 @@ expression: s.redact(&all)
         "hint"
       ],
       "title": "OpError",
+      "type": "object"
+    },
+    "OpLogPage": {
+      "$defs": {
+        "OpChangesetOut": {
+          "description": "A changeset an operation recorded.",
+          "properties": {
+            "agent": {
+              "description": "The agent that wrote it, as `show` gives `author.agent`.",
+              "type": "string"
+            },
+            "created_at": {
+              "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "description": "Its id.",
+              "type": "string"
+            },
+            "land_key": {
+              "description": "The idempotency key of the land that made it, when it had one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "description": "The message's first line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "agent",
+            "created_at",
+            "title"
+          ],
+          "type": "object"
+        },
+        "OperationKind": {
+          "description": "What an operation did, read from what it recorded.",
+          "oneOf": [
+            {
+              "const": "commit",
+              "description": "It recorded changesets and moved no ref (`commit`).",
+              "type": "string"
+            },
+            {
+              "const": "publish",
+              "description": "It recorded one changeset and moved a ref to it (`commit` with `advance`).",
+              "type": "string"
+            },
+            {
+              "const": "land",
+              "description": "It recorded one changeset that names a lander and moved a ref to it (`land`).",
+              "type": "string"
+            },
+            {
+              "const": "ref_move",
+              "description": "It moved refs and recorded no changeset (`ref set`, `ref delete`, `undo`).",
+              "type": "string"
+            },
+            {
+              "const": "compaction",
+              "description": "It recorded a compaction of the changeset index, and nothing else.",
+              "type": "string"
+            },
+            {
+              "const": "mixed",
+              "description": "Any other mix of changesets, ref moves and compactions.",
+              "type": "string"
+            }
+          ]
+        },
+        "OperationOut": {
+          "description": "One operation: a write transaction, as the journal recorded it.",
+          "properties": {
+            "changesets": {
+              "description": "The changesets it recorded, in its order: at most the request's `max_changesets`.",
+              "items": {
+                "$ref": "#/$defs/OpChangesetOut"
+              },
+              "type": "array"
+            },
+            "changesets_total": {
+              "description": "How many changesets it recorded in all, also past `max_changesets`.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "kind": {
+              "$ref": "#/$defs/OperationKind",
+              "description": "What it did, read from what it recorded."
+            },
+            "op": {
+              "description": "Its number: its journal frame's, from 0 in commit order. `undo` takes it.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "ref_moves": {
+              "description": "The ref moves it made, in its order.",
+              "items": {
+                "$ref": "#/$defs/RefMoveOut"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "op",
+            "kind",
+            "changesets",
+            "changesets_total",
+            "ref_moves"
+          ],
+          "type": "object"
+        },
+        "RefMoveOut": {
+          "description": "A move of a ref, as the journal recorded it.",
+          "properties": {
+            "actor": {
+              "description": "Who moved it.",
+              "type": "string"
+            },
+            "at": {
+              "description": "When it moved, in Unix seconds, as its writer recorded it.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "name": {
+              "description": "The ref.",
+              "type": "string"
+            },
+            "new": {
+              "description": "What it names after; omitted for the move that deleted it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old": {
+              "description": "What it named before; omitted for the move that created it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "actor",
+            "at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`op_log` (CLI `op log`): a page of operations, newest first.",
+      "properties": {
+        "ops": {
+          "description": "The operations.",
+          "items": {
+            "$ref": "#/$defs/OperationOut"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Whether older operations follow this page: give the last one's `op` as `before` to read\nthem.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "ops",
+        "truncated"
+      ],
+      "title": "OpLogPage",
+      "type": "object"
+    },
+    "OpLogReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`op_log` (CLI `op log`): the store's operations, newest first, a page at a time. An operation\nis one write transaction: a frame of the journal, numbered from 0 in commit order.",
+      "properties": {
+        "before": {
+          "description": "Start below this operation: the page holds the ones numbered less than it, so the last\n`op` of a page reads on from there. When omitted, from the newest.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 50,
+          "description": "The most operations to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_changesets": {
+          "default": 20,
+          "description": "The most changesets to list for each operation; `changesets_total` counts them all.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "title": "OpLogReq",
+      "type": "object"
+    },
+    "OperationKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What an operation did, read from what it recorded.",
+      "oneOf": [
+        {
+          "const": "commit",
+          "description": "It recorded changesets and moved no ref (`commit`).",
+          "type": "string"
+        },
+        {
+          "const": "publish",
+          "description": "It recorded one changeset and moved a ref to it (`commit` with `advance`).",
+          "type": "string"
+        },
+        {
+          "const": "land",
+          "description": "It recorded one changeset that names a lander and moved a ref to it (`land`).",
+          "type": "string"
+        },
+        {
+          "const": "ref_move",
+          "description": "It moved refs and recorded no changeset (`ref set`, `ref delete`, `undo`).",
+          "type": "string"
+        },
+        {
+          "const": "compaction",
+          "description": "It recorded a compaction of the changeset index, and nothing else.",
+          "type": "string"
+        },
+        {
+          "const": "mixed",
+          "description": "Any other mix of changesets, ref moves and compactions.",
+          "type": "string"
+        }
+      ],
+      "title": "OperationKind"
+    },
+    "OperationOut": {
+      "$defs": {
+        "OpChangesetOut": {
+          "description": "A changeset an operation recorded.",
+          "properties": {
+            "agent": {
+              "description": "The agent that wrote it, as `show` gives `author.agent`.",
+              "type": "string"
+            },
+            "created_at": {
+              "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "description": "Its id.",
+              "type": "string"
+            },
+            "land_key": {
+              "description": "The idempotency key of the land that made it, when it had one.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "title": {
+              "description": "The message's first line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "agent",
+            "created_at",
+            "title"
+          ],
+          "type": "object"
+        },
+        "OperationKind": {
+          "description": "What an operation did, read from what it recorded.",
+          "oneOf": [
+            {
+              "const": "commit",
+              "description": "It recorded changesets and moved no ref (`commit`).",
+              "type": "string"
+            },
+            {
+              "const": "publish",
+              "description": "It recorded one changeset and moved a ref to it (`commit` with `advance`).",
+              "type": "string"
+            },
+            {
+              "const": "land",
+              "description": "It recorded one changeset that names a lander and moved a ref to it (`land`).",
+              "type": "string"
+            },
+            {
+              "const": "ref_move",
+              "description": "It moved refs and recorded no changeset (`ref set`, `ref delete`, `undo`).",
+              "type": "string"
+            },
+            {
+              "const": "compaction",
+              "description": "It recorded a compaction of the changeset index, and nothing else.",
+              "type": "string"
+            },
+            {
+              "const": "mixed",
+              "description": "Any other mix of changesets, ref moves and compactions.",
+              "type": "string"
+            }
+          ]
+        },
+        "RefMoveOut": {
+          "description": "A move of a ref, as the journal recorded it.",
+          "properties": {
+            "actor": {
+              "description": "Who moved it.",
+              "type": "string"
+            },
+            "at": {
+              "description": "When it moved, in Unix seconds, as its writer recorded it.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "name": {
+              "description": "The ref.",
+              "type": "string"
+            },
+            "new": {
+              "description": "What it names after; omitted for the move that deleted it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old": {
+              "description": "What it named before; omitted for the move that created it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "actor",
+            "at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One operation: a write transaction, as the journal recorded it.",
+      "properties": {
+        "changesets": {
+          "description": "The changesets it recorded, in its order: at most the request's `max_changesets`.",
+          "items": {
+            "$ref": "#/$defs/OpChangesetOut"
+          },
+          "type": "array"
+        },
+        "changesets_total": {
+          "description": "How many changesets it recorded in all, also past `max_changesets`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "$ref": "#/$defs/OperationKind",
+          "description": "What it did, read from what it recorded."
+        },
+        "op": {
+          "description": "Its number: its journal frame's, from 0 in commit order. `undo` takes it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ref_moves": {
+          "description": "The ref moves it made, in its order.",
+          "items": {
+            "$ref": "#/$defs/RefMoveOut"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "op",
+        "kind",
+        "changesets",
+        "changesets_total",
+        "ref_moves"
+      ],
+      "title": "OperationOut",
       "type": "object"
     },
     "PathHistoryEntry": {
@@ -3800,6 +5167,46 @@ expression: s.redact(&all)
       "title": "RefListResp",
       "type": "object"
     },
+    "RefMoveOut": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A move of a ref, as the journal recorded it.",
+      "properties": {
+        "actor": {
+          "description": "Who moved it.",
+          "type": "string"
+        },
+        "at": {
+          "description": "When it moved, in Unix seconds, as its writer recorded it.",
+          "format": "int64",
+          "type": "integer"
+        },
+        "name": {
+          "description": "The ref.",
+          "type": "string"
+        },
+        "new": {
+          "description": "What it names after; omitted for the move that deleted it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old": {
+          "description": "What it named before; omitted for the move that created it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "actor",
+        "at"
+      ],
+      "title": "RefMoveOut",
+      "type": "object"
+    },
     "RefOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "One ref.",
@@ -3986,6 +5393,309 @@ expression: s.redact(&all)
       "title": "RepoInfo",
       "type": "object"
     },
+    "ResolutionInput": {
+      "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "Side": {
+          "description": "One side of a land's merge.",
+          "oneOf": [
+            {
+              "const": "ours",
+              "description": "The change: its head.",
+              "type": "string"
+            },
+            {
+              "const": "theirs",
+              "description": "The target: its head when the land merges.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+      "properties": {
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+        },
+        "delete": {
+          "description": "Nothing there: no file at the path, nor below it.",
+          "type": "boolean"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModeInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+        },
+        "take": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Side"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+        }
+      },
+      "title": "ResolutionInput",
+      "type": "object"
+    },
+    "ResolutionsInput": {
+      "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "ResolutionInput": {
+          "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+            },
+            "delete": {
+              "description": "Nothing there: no file at the path, nor below it.",
+              "type": "boolean"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModeInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+            },
+            "take": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Side"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+            }
+          },
+          "type": "object"
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        },
+        "Side": {
+          "description": "One side of a land's merge.",
+          "oneOf": [
+            {
+              "const": "ours",
+              "description": "The change: its head.",
+              "type": "string"
+            },
+            {
+              "const": "theirs",
+              "description": "The target: its head when the land merges.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change\nonto the target, decided against one of the target's heads.",
+      "properties": {
+        "against": {
+          "$ref": "#/$defs/Rev",
+          "description": "The target's head the resolutions were decided against: the conflict report's `theirs`,\nby its full 64-hex id. A resolution applies while the target holds its path as this\nchangeset does (the same file, the same directory, or nothing)."
+        },
+        "files": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ResolutionInput"
+          },
+          "description": "What to make of each path, by its repository path.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "against",
+        "files"
+      ],
+      "title": "ResolutionsInput",
+      "type": "object"
+    },
     "ResolveRevReq": {
       "$defs": {
         "Rev": {
@@ -4094,6 +5804,23 @@ expression: s.redact(&all)
       ],
       "title": "ShowReq",
       "type": "object"
+    },
+    "Side": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One side of a land's merge.",
+      "oneOf": [
+        {
+          "const": "ours",
+          "description": "The change: its head.",
+          "type": "string"
+        },
+        {
+          "const": "theirs",
+          "description": "The target: its head when the land merges.",
+          "type": "string"
+        }
+      ],
+      "title": "Side"
     },
     "SignatureOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -4341,6 +6068,109 @@ expression: s.redact(&all)
         "truncated"
       ],
       "title": "TreeListing",
+      "type": "object"
+    },
+    "UndoReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by\ncompare-and-swap, in one transaction: all of them or none. Changesets are never removed.",
+      "properties": {
+        "op": {
+          "description": "The operation to undo: its `op` in the operation log.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "op"
+      ],
+      "title": "UndoReq",
+      "type": "object"
+    },
+    "UndoResp": {
+      "$defs": {
+        "RefMoveOut": {
+          "description": "A move of a ref, as the journal recorded it.",
+          "properties": {
+            "actor": {
+              "description": "Who moved it.",
+              "type": "string"
+            },
+            "at": {
+              "description": "When it moved, in Unix seconds, as its writer recorded it.",
+              "format": "int64",
+              "type": "integer"
+            },
+            "name": {
+              "description": "The ref.",
+              "type": "string"
+            },
+            "new": {
+              "description": "What it names after; omitted for the move that deleted it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old": {
+              "description": "What it named before; omitted for the move that created it.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "actor",
+            "at"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`undo` (CLI `op undo`): the moves that restored the refs.",
+      "properties": {
+        "already_applied": {
+          "description": "Every ref the operation moved already names what it named before, so nothing was written:\nan undo run again is a replay, and safe.",
+          "type": "boolean"
+        },
+        "op": {
+          "description": "The operation this undo recorded, which another undo can take; omitted when it wrote\nnothing (`already_applied`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ref_moves": {
+          "description": "The moves it made: each ref from what the operation set back to what it named before.",
+          "items": {
+            "$ref": "#/$defs/RefMoveOut"
+          },
+          "type": "array"
+        },
+        "undone": {
+          "description": "The operation undone.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warnings": {
+          "description": "Problems found after the undo became durable, such as failed housekeeping; the undo\nitself succeeded. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "undone",
+        "ref_moves",
+        "already_applied"
+      ],
+      "title": "UndoResp",
       "type": "object"
     },
     "VerifyFinding": {

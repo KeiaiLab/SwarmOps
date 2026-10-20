@@ -693,12 +693,13 @@ fn a_crashed_import_resumes_past_its_committed_frames() {
     let second = first_parents(manifest, &tip(manifest, "newer"))[4];
     assert!(
         matches!(
-            error,
+            &error,
             ImportError::Store {
-                source: RepoError::Store(StoreError::NotCommitted { .. }),
+                source,
                 imported: 2,
                 last: Some(last),
-            } if last == second
+            } if matches!(**source, RepoError::Store(StoreError::NotCommitted { .. }))
+                && *last == second
         ),
         "{error:?}"
     );

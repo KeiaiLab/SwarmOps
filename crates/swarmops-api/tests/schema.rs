@@ -28,16 +28,21 @@ const REQUESTS: &[&str] = &[
     "Identity",
     "InfoReq",
     "InitReq",
+    "LandReq",
     "LineRange",
     "LogReq",
+    "OpLogReq",
     "PathHistoryReq",
     "ReadFileReq",
     "ReadTreeReq",
     "RefDeleteReq",
     "RefListReq",
     "RefSetReq",
+    "ResolutionInput",
+    "ResolutionsInput",
     "ResolveRevReq",
     "ShowReq",
+    "UndoReq",
     "VerifyReq",
 ];
 
@@ -51,24 +56,33 @@ const RESPONSES: &[&str] = &[
     "ChangesetDetail",
     "ChangesetSummary",
     "CommitResp",
+    "ConflictReport",
     "DeriveResp",
     "Diff",
     "DiffHunk",
     "DiffLineOut",
     "Envelope",
+    "FileConflictOut",
     "FileContent",
     "FileDiff",
     "GitImportResp",
+    "HunkOut",
     "IdentityInfo",
+    "LandResp",
+    "LinesOut",
     "LogCutOut",
     "LogPage",
     "LossyCommitOut",
     "Meta",
+    "OpChangesetOut",
     "OpError",
+    "OpLogPage",
+    "OperationOut",
     "PathHistoryEntry",
     "PathHistoryPage",
     "RecoveredOut",
     "RefListResp",
+    "RefMoveOut",
     "RefOut",
     "RefSetResp",
     "RepoInfo",
@@ -77,6 +91,7 @@ const RESPONSES: &[&str] = &[
     "Signatures",
     "TreeEntryOut",
     "TreeListing",
+    "UndoResp",
     "VerifyFinding",
     "VerifyReport",
 ];
@@ -84,6 +99,7 @@ const RESPONSES: &[&str] = &[
 /// Enums and newtypes, which have no object fields of their own.
 const SCALARS: &[&str] = &[
     "ChangeOp",
+    "ConflictKindOut",
     "ContentEncoding",
     "ContentInput",
     "DiffFormat",
@@ -91,11 +107,14 @@ const SCALARS: &[&str] = &[
     "EntryKindOut",
     "ErrorCode",
     "FileKind",
+    "LandStatus",
     "LineOp",
     "LossyClass",
     "ModeInput",
+    "OperationKind",
     "Rev",
     "RevKind",
+    "Side",
 ];
 
 #[test]
@@ -205,8 +224,9 @@ fn every_operation_takes_a_request_and_returns_a_response() {
 /// Each code's string, exit code and retry advice, written out independently of the crate's
 /// table: from the operations spec (§0 exit codes, §1 and §4 names and retryability) where it
 /// names the code, from the M1 plan and rulings for `E_UNSUPPORTED_FS`, `E_BUSY` and
-/// `E_INTERNAL`, and by the `E_<NAME>` convention for `E_TYPE_CONFLICT`, `E_UNKNOWN_PARENT` and
-/// `E_IO`. A new variant does not compile here until its row is added.
+/// `E_INTERNAL`, from the M4 plan for `E_NOTHING_TO_UNDO` and `E_OP_NOT_FOUND`, and by the
+/// `E_<NAME>` convention for `E_TYPE_CONFLICT`, `E_UNKNOWN_PARENT` and `E_IO`. A new variant does
+/// not compile here until its row is added.
 fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
     match code {
         ErrorCode::ExistsAlready => ("E_EXISTS", 1, false),
@@ -230,6 +250,11 @@ fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
         ErrorCode::IoTransient => ("E_IO_TRANSIENT", 4, true),
         ErrorCode::Busy => ("E_BUSY", 4, true),
         ErrorCode::Internal => ("E_INTERNAL", 1, false),
+        ErrorCode::Conflict => ("E_CONFLICT", 3, false),
+        ErrorCode::CasRetryExhausted => ("E_CAS_RETRY_EXHAUSTED", 4, true),
+        ErrorCode::NothingToLand => ("E_NOTHING_TO_LAND", 1, false),
+        ErrorCode::NothingToUndo => ("E_NOTHING_TO_UNDO", 1, false),
+        ErrorCode::OpNotFound => ("E_OP_NOT_FOUND", 6, false),
         ErrorCode::Auth => ("E_AUTH", 5, false),
         ErrorCode::PolicyDenied => ("E_POLICY_DENIED", 5, false),
         ErrorCode::MaintenanceBusy => ("E_MAINTENANCE_BUSY", 4, true),
@@ -324,6 +349,7 @@ fn envelope_serializes_without_nulls_for_success() {
         blobs_written: 1,
         advanced: None,
         warnings: Vec::new(),
+        replayed: false,
     };
     let envelope = Envelope::ok("commit", result, meta());
     assert_eq!(envelope.api, API_VERSION);
@@ -335,7 +361,10 @@ fn envelope_serializes_without_nulls_for_success() {
             "ok": true,
             "op": "commit",
             "api": 1,
-            "result": {"changeset": "c9f1", "root": "7a0b", "files_changed": 2, "blobs_written": 1},
+            "result": {
+                "changeset": "c9f1", "root": "7a0b", "files_changed": 2, "blobs_written": 1,
+                "replayed": false,
+            },
             "meta": {"elapsed_ms": 12, "resolved": {"main": "c9f1"}, "auth": "trust"},
         })
     );
@@ -738,6 +767,7 @@ fn omitted_request_fields_take_their_defaults() {
             changes: Vec::new(),
             allow_empty: false,
             advance: None,
+            idempotency_key: None,
         }
     );
 }
@@ -786,6 +816,7 @@ fn change_lists_and_enums_use_their_wire_forms() {
             ],
             allow_empty: false,
             advance: None,
+            idempotency_key: None,
         }
     );
     // Serializing writes no nulls for the options left out, and keeps the spec's field order
@@ -796,6 +827,7 @@ fn change_lists_and_enums_use_their_wire_forms() {
         message: "m".to_owned(),
         allow_empty: true,
         advance: None,
+        idempotency_key: None,
     };
     assert_eq!(
         serde_json::to_string(&rooted).unwrap(),
@@ -853,6 +885,7 @@ fn a_commit_that_advances_a_ref_says_so() {
         changes: Vec::new(),
         message: "m".to_owned(),
         advance: Some("main".to_owned()),
+        idempotency_key: None,
         allow_empty: true,
     };
     assert_eq!(
@@ -873,6 +906,7 @@ fn a_commit_that_advances_a_ref_says_so() {
         blobs_written: 1,
         advanced,
         warnings: Vec::new(),
+        replayed: false,
     };
     let cases = [
         (
@@ -927,8 +961,11 @@ fn responses_follow_the_spec_shape_and_field_order() {
             run_id: Some("run-3".to_owned()),
             on_behalf_of: None,
         },
+        lander: None,
         created_at: 1_760_000_000_000,
         message: "add files".to_owned(),
+        land_key: None,
+        squashed_from: Vec::new(),
         changes: vec![
             ChangeOut {
                 path: "a.txt".to_owned(),

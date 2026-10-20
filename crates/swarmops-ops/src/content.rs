@@ -25,6 +25,9 @@
 //!   a file that grows while it is read (or a device without a length) is read no further than
 //!   one byte past what either limit leaves it.
 //!
+//! A land's resolutions that put content follow the same rules for their contents, each said of
+//! the path it resolves rather than of an index.
+//!
 //! A breach of a limit is `E_TOO_LARGE`, with the `size` and the `limit` in `details`, and the
 //! `scope` that says which: `put` for one content, whose `size` is its own, or `commit` for the
 //! contents together, whose `size` is theirs up to and with the change's (a client reading its
@@ -348,6 +351,42 @@ fn changes_within(
         .collect()
 }
 
+/// The bytes of a land's content resolutions (operations spec §3, resolution path (b)), each
+/// with the path it resolves, by the rules of a commit's contents ([the module
+/// documentation](self)), `blob` content aside, which names bytes the store holds and is not
+/// passed here: the sizes they declare are checked against a put's limit and, together, against
+/// a commit's, before any is converted, so that resolutions past them cost no file reads; then
+/// each is converted, in order. An error names the resolution, by its path, in its message and
+/// its `details` ([`in_resolution`]).
+pub(crate) fn resolution_bytes(
+    contents: Vec<(RepoPath, ContentInput)>,
+) -> Result<Vec<(RepoPath, Vec<u8>)>, OpError> {
+    let mut declared_total: u64 = 0;
+    for (path, content) in &contents {
+        declared_total = declared_total.saturating_add(declared(content));
+        if declared_total > MAX_COMMIT_CONTENT_BYTES {
+            let mut error = too_large_for(declared_total, MAX_COMMIT_CONTENT_BYTES, Scope::Commit);
+            if let ContentInput::File(file) = content {
+                (error.details).insert("file".to_owned(), Value::from(file.as_str()));
+            }
+            return Err(in_resolution(error, path.as_str()));
+        }
+    }
+    let mut used: u64 = 0;
+    (contents.into_iter())
+        .map(|(path, content)| {
+            let room = Room {
+                put: MAX_CONTENT_BYTES,
+                total: MAX_COMMIT_CONTENT_BYTES,
+                used,
+            };
+            let bytes = convert(content, room).map_err(|e| in_resolution(e, path.as_str()))?;
+            used = used.saturating_add(to_u64(bytes.len()));
+            Ok((path, bytes))
+        })
+        .collect()
+}
+
 /// A put's content once its change's shape is checked: bytes to decode or read, or a blob the
 /// store holds, by its id.
 enum Content {
@@ -441,7 +480,7 @@ pub(crate) fn metadata_entry(key: &str, value: &[u8]) -> (String, String) {
 
 /// The kind of leaf a put of `mode` writes: a regular file when it names none. Every mode is a
 /// leaf's, so no put is a directory's.
-fn leaf_kind(mode: Option<ModeInput>) -> LeafKind {
+pub(crate) fn leaf_kind(mode: Option<ModeInput>) -> LeafKind {
     match mode {
         None | Some(ModeInput::File) => LeafKind::File,
         Some(ModeInput::Exec) => LeafKind::Exec,
@@ -454,6 +493,14 @@ fn leaf_kind(mode: Option<ModeInput>) -> LeafKind {
 pub(crate) fn in_change(mut error: OpError, index: usize, path: &str) -> OpError {
     error.message = format!("change {index} ({path:?}): {}", error.message);
     error.details.insert("index".to_owned(), Value::from(index));
+    error.details.insert("path".to_owned(), Value::from(path));
+    error
+}
+
+/// `error`, said of a land's resolution of `path`: its message prefixed with it, and the `path`
+/// in its `details`.
+pub(crate) fn in_resolution(mut error: OpError, path: &str) -> OpError {
+    error.message = format!("the resolution of {path:?}: {}", error.message);
     error.details.insert("path".to_owned(), Value::from(path));
     error
 }

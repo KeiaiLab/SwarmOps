@@ -542,6 +542,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6184e33543162437515c2e2b48714794e37845ec9851711914eec9d308f6ebe8"
 
 [[package]]
+name = "diffy"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e3dc2f773b6aaa63b1a7684b8589f670a8a0146a510b74d23a401c882364b49"
+dependencies = [
+ "hashbrown 0.17.1",
+]
+
+[[package]]
 name = "dunce"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1378,6 +1387,9 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heapless"
@@ -2148,8 +2160,11 @@ dependencies = [
 name = "swarmops-merge"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "diffy",
  "imara-diff",
  "proptest",
+ "serde_json",
  "swarmops-core",
 ]
 
@@ -2173,8 +2188,11 @@ dependencies = [
 name = "swarmops-repo"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "camino",
+ "criterion",
  "postcard",
+ "proptest",
  "serde",
  "swarmops-core",
  "swarmops-merge",
