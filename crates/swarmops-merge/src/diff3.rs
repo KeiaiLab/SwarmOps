@@ -6,9 +6,11 @@
 //! each block to the lines where the two sides differ, which can split it, and joins blocks that
 //! only three lines or fewer, or lines without a letter or digit, keep apart). Equal sides, or one
 //! side equal to the base, decide at once: that side, whatever its bytes. Otherwise contents that
-//! are not all text ([`is_text`]) are not merged by lines, and the merge is
-//! [`ContentMerge::Binary`]. Text is merged by lines: a line is the bytes up to and including a
-//! `\n`, a last line may have none, and `\r` is a byte of its line
+//! are not all text ([`is_text`]), or not all within the line diff's bound
+//! ([`MAX_DIFF_LINES`](crate::line_diff::MAX_DIFF_LINES) lines and
+//! [`MAX_DIFF_BYTES`](crate::line_diff::MAX_DIFF_BYTES) bytes each), are not merged by lines, and
+//! the merge is [`ContentMerge::Binary`]. Text is merged by lines: a line is the bytes up to and
+//! including a `\n`, a last line may have none, and `\r` is a byte of its line
 //! ([`split_lines`](crate::line_diff::split_lines)). The two sides' hunks against the base
 //! ([`line_hunks`]: the histogram diff, placed as git places its hunks) are walked in lockstep over
 //! the base's lines, in chunks: a chunk starts at the next hunk of either side and grows while a
@@ -21,15 +23,11 @@
 use std::ops::Range;
 
 use crate::conflict::{ConflictHunk, ContentMerge};
-use crate::line_diff::{Hunk, is_text, line_hunks};
+use crate::line_diff::{Hunk, diffable, is_text, line_hunks};
 
 /// Merges what ours and theirs made of `base` (module doc): the merged bytes, the hunks where the
 /// two sides' edits conflict (in file order, their ranges 0-based and half-open over each side's
 /// lines), or `Binary`. Its signature is a [`ContentMerger`](crate::conflict::ContentMerger)'s.
-///
-/// # Panics
-///
-/// If a content has `i32::MAX` lines or more, [`line_hunks`]' bound (2 GiB at least).
 pub fn merge_content(base: &[u8], ours: &[u8], theirs: &[u8]) -> ContentMerge {
     if ours == theirs || theirs == base {
         return ContentMerge::Clean(ours.to_vec());
@@ -40,14 +38,23 @@ pub fn merge_content(base: &[u8], ours: &[u8], theirs: &[u8]) -> ContentMerge {
     if !(is_text(base) && is_text(ours) && is_text(theirs)) {
         return ContentMerge::Binary;
     }
+    // The line diff's bound, checked for all three before either diff runs.
+    if !(diffable(base) && diffable(ours) && diffable(theirs)) {
+        return ContentMerge::Binary;
+    }
     merge_lines(base, ours, theirs)
 }
 
-/// The lockstep walk of the module doc over two sides that both changed `base`, all three text.
+/// The lockstep walk of the module doc over two sides that both changed `base`, all three text;
+/// `Binary` if one is past the line diff's bound.
 fn merge_lines(base: &[u8], ours: &[u8], theirs: &[u8]) -> ContentMerge {
+    let (Ok(ours_hunks), Ok(theirs_hunks)) = (line_hunks(base, ours), line_hunks(base, theirs))
+    else {
+        return ContentMerge::Binary;
+    };
     let base_lines = Lines::new(base);
-    let mut ours_side = Side::new(ours, line_hunks(base, ours));
-    let mut theirs_side = Side::new(theirs, line_hunks(base, theirs));
+    let mut ours_side = Side::new(ours, ours_hunks);
+    let mut theirs_side = Side::new(theirs, theirs_hunks);
     let mut merged = Vec::with_capacity(ours.len().max(theirs.len()));
     let mut conflicts = Vec::new();
     // The base's lines before `copied` are in `merged`, or in a conflict hunk.
@@ -125,7 +132,7 @@ impl<'a> Lines<'a> {
     }
 
     fn count(&self) -> u32 {
-        u32::try_from(self.starts.len() - 1).expect("fewer lines than i32::MAX (line_hunks)")
+        u32::try_from(self.starts.len() - 1).expect("at most MAX_DIFF_LINES lines (line_hunks)")
     }
 
     /// The bytes of the lines `lines`.

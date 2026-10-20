@@ -41,7 +41,9 @@ pub enum ContentMerge {
     /// The places where the two sides' edits conflict, in file order: at least one.
     Conflicted(Vec<ConflictHunk>),
     /// Both sides changed the content, differently, and the base's, ours' or theirs' content is
-    /// not text ([`is_text`](crate::line_diff::is_text)): it is not merged by lines.
+    /// not text ([`is_text`](crate::line_diff::is_text)) or is past the line diff's bound
+    /// ([`MAX_DIFF_LINES`](crate::line_diff::MAX_DIFF_LINES) lines,
+    /// [`MAX_DIFF_BYTES`](crate::line_diff::MAX_DIFF_BYTES) bytes): it is not merged by lines.
     Binary,
 }
 
@@ -54,7 +56,8 @@ pub enum ConflictKind {
         /// Where, in file order.
         hunks: Vec<ConflictHunk>,
     },
-    /// Both sides changed the content of a file that is not text, or of a symlink, differently.
+    /// Both sides changed the content of a file that is not text, or that is past the line
+    /// diff's bound, or of a symlink, differently.
     Binary,
     /// Ours deleted the file, and theirs changed it.
     DeleteModify,

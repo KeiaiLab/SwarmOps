@@ -48,7 +48,7 @@
 <div class="hero">
   <div class="wrap">
     <div>
-      <span class="pill"><b>Pre-release</b> · milestone M1.6 · MIT licence</span>
+      <span class="pill"><b>Pre-release</b> · milestone M8 · MIT licence</span>
       <h1>Source control for <em>swarms of coding agents</em></h1>
       <p class="lead">Many writers, one store, one JSON envelope per command. SwarmOps is
         <strong>fully embedded</strong>, written in Rust: one program, no daemon, no external
@@ -157,7 +157,7 @@
   <div class="wrap">
     <p class="eyebrow">SwarmOps and git</p>
     <h2>Judged strictly, ahead and behind</h2>
-    <p class="sub">SwarmOps is not a general-purpose git replacement: it will import from git (M3) and export to it (M8), so today's pipelines keep running. Where the two compare, this is where it stands.</p>
+    <p class="sub">SwarmOps is not a general-purpose git replacement: it imports from git (M3) and exports to it (M8), so today's pipelines keep running. Where the two compare, this is where it stands.</p>
     <table class="cmp">
       <thead><tr><th scope="col">Dimension</th><th scope="col">SwarmOps today</th><th scope="col">Against git</th></tr></thead>
       <tbody>
@@ -172,14 +172,14 @@
         <tr><td>Offline, on one host</td><td>No network code: every operation runs against the host's own store.</td><td><span class="v parity">Parity</span></td></tr>
         <tr><td>Throughput of many writers</td><td>Writers take turns, each commit holding the store-wide lock across two journal <code>fdatasync</code>s.</td><td><span class="v behind">Behind by design</span> Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files.</td></tr>
         <tr><td>Refs beyond one compare-and-swap</td><td><code>main</code> and <code>release/&lt;name&gt;</code> only, moved one per call.</td><td><span class="v behind">Behind</span> No multi-ref transactions, tags, free-form branch names or symbolic refs.</td></tr>
-        <tr><td>Breadth of reads</td><td>One file or one directory per call; ranged reads, depths and sizes come in M2, sparse workspaces in M5.</td><td><span class="v behind">Behind</span> Git has batch reads, recursive listings, <code>git grep &lt;tree&gt;</code> and sparse checkouts.</td></tr>
+        <tr><td>Breadth of reads</td><td>One file or one directory per call; since M2, a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size; sparse workspaces come in M5.</td><td><span class="v behind">Behind</span> Git has batch reads, <code>git grep &lt;tree&gt;</code> and sparse checkouts.</td></tr>
         <tr><td>Storage on disk</td><td>One file per object, zstd-compressed when that makes it smaller; no packs, no delta compression.</td><td><span class="v behind">Behind by design</span> in bytes and in files, against git's packs.</td></tr>
-        <tr><td>Conflicts</td><td>Today one signal, <code>E_CAS_MISMATCH</code>, with the ref's actual target. Three-way merge, conflicts per hunk as JSON, comes in M4.</td><td><span class="v behind">Behind today</span> Git merges without a checkout (<code>git merge-tree</code>), with typed conflict records. M4 is <span class="v later">not yet comparable</span></td></tr>
+        <tr><td>Conflicts</td><td>Since M3, <code>E_GIT_IMPORT_DIVERGED</code> signals a conflict when a git import's target and the git history have diverged. <code>land</code> merges three-way without a checkout and reports a conflict as <code>E_CONFLICT</code> with a JSON report: each conflicting file's kind, its hunks and the target's changeset and agent that last changed it. <code>land --resolve</code> resolves them without a checkout, path by path, against the report's <code>theirs</code>.</td><td><span class="v parity">Parity</span> with <code>git merge-tree --write-tree</code>, which merges without a checkout and reports typed conflicts. Resolving without a checkout is one request here, where git takes plumbing (<code>git hash-object</code>, a temporary index, <code>git commit-tree</code>).</td></tr>
         <tr><td>Review</td><td>Nothing today; change requests, approvals and a landing gate come in M7.</td><td><span class="v behind">Behind today</span> Git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is <span class="v later">not yet comparable</span></td></tr>
-        <tr><td>Sync between hosts</td><td>Nothing today; offline-first <code>fetch</code> and <code>push</code> against one upstream come in M11.</td><td><span class="v behind">Behind</span> Git clones, fetches and pushes over any transport, and bundles without one.</td></tr>
-        <tr><td>Ecosystem</td><td>The CLI, <code>swarmops schema</code> and an MCP server; git import in M3, export in M8. No hooks, signing, submodules or LFS.</td><td><span class="v behind">Behind</span> after v1 too: git parity is not a v1 goal, and git has MCP servers as well.</td></tr>
+        <tr><td>Sync between hosts</td><td>Since M8, through a git remote, one writing host at a time: the writer exports, then pushes with git, and the others fetch with git, then import; two hosts that both write stop rather than merge. Offline-first <code>fetch</code> and <code>push</code> against one upstream come in M11.</td><td><span class="v behind">Behind</span> Git clones, fetches and pushes over any transport, and bundles without one.</td></tr>
+        <tr><td>Ecosystem</td><td>The CLI, <code>swarmops schema</code>, an MCP server, git import since M3 and git export since M8. No hooks, signing, submodules or LFS.</td><td><span class="v behind">Behind</span> after v1 too: git parity is not a v1 goal, and git has MCP servers as well.</td></tr>
         <tr><td>Maturity</td><td>Pre-release: no tag yet, and the first spec dates from 2026-10-15.</td><td><span class="v behind">Behind</span> Git has hosted itself since 2005.</td></tr>
-        <tr><td>Landing</td><td>An agent that loses a ref race re-applies its edits on the winner's head by hand, commits again and retries. <code>land</code> comes in M4.</td><td><span class="v later">Not yet comparable</span> The loop by hand is behind.</td></tr>
+        <tr><td>Landing</td><td><code>land</code> merges an agent's change onto <code>main</code> and publishes it as one changeset in one transaction, merging again and retrying by itself when <code>main</code> moves; a retry with the same key replays it. The landing model chosen by measurement comes after the pilot.</td><td><span class="v ahead">Ahead by design</span> of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load.</td></tr>
       </tbody>
     </table>
     <p class="note">Every dimension of <a href="https://github.com/KeiaiLab/SwarmOps#swarmops-and-git">the README's comparison</a>, which gives each verdict's evidence. Ahead: built, with evidence. Ahead or behind by design: judged from the design and the code, never measured against git. Not yet comparable: not built yet. No git baseline has been measured; the verdicts come from the design, the code and git's own documentation and source.</p>
@@ -240,7 +240,7 @@ so verify --deep</pre>
       </div>
     </div>
     <ul class="tools" aria-label="The MCP tools">
-      <li>repo_info</li><li>read_file</li><li>read_tree</li><li>show</li><li>log</li><li>ref_list</li><li>ref_set</li><li>ref_delete</li><li>commit</li><li>verify</li>
+      <li>repo_info</li><li>resolve_rev</li><li>read_file</li><li>read_tree</li><li>show</li><li>log</li><li>path_history</li><li>diff</li><li>op_log</li><li>ref_list</li><li>ref_set</li><li>ref_delete</li><li>undo</li><li>commit</li><li>land</li><li>blob_put</li><li>blob_has</li><li>verify</li>
     </ul>
   </div>
 </section>
@@ -258,11 +258,6 @@ so verify --deep</pre>
           <li><b>M1</b><span>the single-agent core: commit, read, log and ref compare-and-swap; crash sweeps</span></li>
           <li><b>M1.5</b><span>hardening: CI, fault injection, power-loss images, the MCP server</span></li>
           <li><b>M1.6</b><span>the code-review follow-ups: the error contract an agent sees, structured <code>verify</code> findings, and <code>commit --advance</code>, the commit primitive M4's landing reuses</span></li>
-        </ol>
-      </div>
-      <div class="now">
-        <h3><span class="dot" aria-hidden="true"></span>In development</h3>
-        <ol>
           <li><b>M2</b><span>diff, history and the derived-data engine</span></li>
           <li><b>M3</b><span>git import</span></li>
           <li><b>M4</b><span>merge and landing, and the operation log with undo</span></li>
@@ -281,7 +276,7 @@ so verify --deep</pre>
         </ol>
       </div>
     </div>
-    <p class="usable">Usable by one agent from M1; by a swarm, with landing, from M4; as the complete v1, with review, at M9; across hosts from M11.</p>
+    <p class="usable">Usable by one agent from M1; by a swarm, with landing, from M4; as the complete v1, with review, at M9; across hosts, offline-first, from M11.</p>
   </div>
 </section>
 </main>
