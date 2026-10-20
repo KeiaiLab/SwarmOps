@@ -98,7 +98,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
    first), and point `[Unreleased]` at `compare/vX.Y.Z...stable`. The new section is the
    release's notes: the workflow refuses a tag without one. The first release also brings up to
    date what says nothing is released yet: README's status badge, status line, maturity row and
-   install section, SECURITY.md's supported versions, CHANGELOG.md's introduction, the
+   install section, the README's documentation table, `docs/operations.md`'s install section,
+   SECURITY.md's supported versions, CHANGELOG.md's introduction, the
    versioning policy's first paragraph, this file's first line, `site/index.html`'s status texts
    (the page's description, the pill, the comparison's Maturity row, the roadmap's sub line and its
    In development item) and the issue template's contact text (`.github/ISSUE_TEMPLATE/config.yml`).
