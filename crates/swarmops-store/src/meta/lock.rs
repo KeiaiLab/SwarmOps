@@ -11,7 +11,7 @@
 //! or a directory. The open itself follows no symlink (`O_NOFOLLOW`), does not wait for a FIFO's
 //! reader (`O_NONBLOCK`, which leaves the lock as it is: only `LOCK_NB` keeps `flock` from
 //! waiting), and checks what it opened (`fstat`), so that one put there between the check and the
-//! open is refused at once too.
+//! open is refused at once too. [`MetaLock::refuses`] is the check alone, which `verify` reports.
 //!
 //! # Waiting: the kernel flock queue (not strictly FIFO), timeout via a helper thread
 //!
@@ -99,12 +99,22 @@ impl MetaLock {
             .into()),
         }
     }
+
+    /// Whether [`MetaLock::acquire`] refuses `layout`'s `meta/lock` before it opens it: the file
+    /// is there, and is not a regular file (see the module documentation). It only looks
+    /// (`lstat`): it opens nothing, follows no symlink and writes nothing, so that a check that
+    /// takes no lock, `verify`, can ask. A lock file that is missing is not refused (an acquire
+    /// makes it), and one that cannot be looked at is not counted here (an acquire's open fails
+    /// on it as it would).
+    pub fn refuses(layout: &Layout) -> bool {
+        refuses(layout.meta_lock().as_std_path())
+    }
 }
 
 /// Whether the lock file at `path` is there and is not a regular file, looked at without opening
-/// it or following a symlink (`lstat`): the check before [`open_lock_file`]'s open. A missing one
-/// is not refused (the open makes it), and one that cannot be looked at is left to the open, which
-/// fails on it as it would.
+/// it or following a symlink (`lstat`): the check before [`open_lock_file`]'s open, and
+/// [`MetaLock::refuses`]'s. A missing one is not refused (the open makes it), and one that cannot
+/// be looked at is left to the open, which fails on it as it would.
 fn refuses(path: &Path) -> bool {
     fs::symlink_metadata(path).is_ok_and(|found| !found.is_file())
 }
