@@ -23,7 +23,8 @@ pub enum PathPlan {
     /// it, or made the same change as theirs.
     Theirs,
     /// The path holds this leaf, which theirs does not: ours', where only ours changed the
-    /// path, or one side's kind with the other side's content, where each changed one of them.
+    /// path, or one side's kind with the other side's content, where each changed one of them
+    /// (an executable bit and a text: a symlink against a file conflicts instead).
     Put(Leaf),
     /// The path holds nothing: ours deleted the leaf, which theirs left as the base had it.
     Delete,
@@ -48,10 +49,13 @@ pub enum PathPlan {
 ///    deleted it, and ours changed it: [`ConflictKind::ModifyDelete`];
 /// 5. both hold a leaf, each changed: the kind and the content are decided apart, each the
 ///    side's that changed it, or the change both made alike. Two different kinds are
-///    [`ConflictKind::Mode`]; two different contents are [`PathPlan::MergeContent`], unless a
-///    side is a symlink, which is not merged by lines ([`ConflictKind::Binary`]). With no base
-///    (both added the path) a kind or a content both sides have differently counts as changed by
-///    both.
+///    [`ConflictKind::Mode`]. A symlink on one side against a file on the other is
+///    [`ConflictKind::Binary`]: one side changed the kind and the other the target or the
+///    content, whose bytes would mean another thing under the other kind (git's "distinct
+///    types"). Two different contents are [`PathPlan::MergeContent`], unless the base's, ours'
+///    or theirs' leaf is a symlink, which is not merged by lines ([`ConflictKind::Binary`]).
+///    With no base (both added the path) a kind or a content both sides have differently counts
+///    as changed by both.
 ///
 /// A leaf it decides on that is theirs is [`PathPlan::Theirs`]. It looks at nothing but the
 /// three leaves: whether a file stands against a directory (a [`ConflictKind::TypeChange`]) takes
@@ -78,6 +82,11 @@ pub fn plan_path(triple: &PathTriple) -> PathPlan {
             theirs: theirs.kind,
         });
     };
+    // One side changed the kind, to or from a symlink, and the other the bytes: decided apart,
+    // they would make a file of a link's target, or a link to a file's text.
+    if ours.kind != theirs.kind && [ours.kind, theirs.kind].contains(&LeafKind::Symlink) {
+        return PathPlan::Conflict(ConflictKind::Binary);
+    }
     let Some(blob) = changed_by_one(base.map(|b| b.blob), ours.blob, theirs.blob) else {
         let symlink = [base.map(|b| b.kind), Some(ours.kind), Some(theirs.kind)]
             .contains(&Some(LeafKind::Symlink));
