@@ -268,6 +268,97 @@ fn a_damaged_value_file_reads_as_missing_and_is_removed() {
     }
 }
 
+/// A zstd value file whose header records one byte more than an object holds
+/// (`MAX_OBJECT_LEN + 1`, 512 MiB + 1), its frame honest about that length (zstd's own encoder,
+/// fed zeros, records it: about 16 KiB on disk) and its trailer right for those zeros, is refused
+/// before its frame is decoded: the slot reads as missing and its file is removed, as any value
+/// file that does not check out is. Nothing the size of the value is allocated: the process's
+/// peak resident memory (`VmHWM`, Linux; nextest runs each test in a process of its own) grows by
+/// less than half the claimed length, where decoding it would write all of it.
+#[test]
+fn a_zstd_value_past_the_object_limit_is_refused_before_it_is_decoded() {
+    use std::io::Write as _;
+
+    use swarmops_store::MAX_OBJECT_LEN;
+
+    let (_dir, layout, store) = new_store();
+    let slot = slot("depth", 1, 1, b"");
+    let len = MAX_OBJECT_LEN + 1;
+    let zeros = vec![0_u8; 1 << 20];
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    encoder.set_pledged_src_size(Some(len)).unwrap();
+    encoder.include_contentsize(true).unwrap();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"swarmops:derived:v1\0");
+    hasher.update(&[u8::try_from(slot.name.len()).unwrap()]);
+    hasher.update(slot.name.as_bytes());
+    hasher.update(&slot.version.to_le_bytes());
+    hasher.update(&slot.subject.0);
+    hasher.update(&0_u32.to_le_bytes());
+    hasher.update(&len.to_le_bytes());
+    let mut left = len;
+    while left > 0 {
+        let n = usize::try_from(left.min(1 << 20)).unwrap();
+        encoder.write_all(&zeros[..n]).unwrap();
+        hasher.update(&zeros[..n]);
+        left -= u64::try_from(n).unwrap();
+    }
+    let frame = encoder.finish().unwrap();
+    assert!(frame.len() < 64 << 10, "{} bytes of zstd", frame.len());
+
+    let mut file = b"SWDV".to_vec();
+    file.extend([1, 1, 0, 0]);
+    file.extend(0_u32.to_le_bytes());
+    file.extend(len.to_le_bytes());
+    file.extend(&frame);
+    file.extend(hasher.finalize().as_bytes());
+    let path = layout.derived_path(&slot);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, &file).unwrap();
+
+    let before = peak_resident_kib();
+    let got = store.get(&slot).unwrap().map(|value| value.len());
+    let grew = peak_resident_kib().saturating_sub(before);
+    assert_eq!(
+        got, None,
+        "a value past the object limit reads as missing (the read grew the peak resident memory \
+         by {grew} KiB)"
+    );
+    assert!(!path.exists(), "and its file is removed");
+    assert!(
+        grew < len / 2 / 1024,
+        "the read grew the peak resident memory by {grew} KiB"
+    );
+}
+
+/// A put of a value longer than an object holds (`MAX_OBJECT_LEN + 1` zeros, whose pages stay
+/// untouched until something reads them) is a call the store does not take: `BadCall`, before
+/// any filesystem call, since no read would take such a value back.
+#[test]
+fn a_put_of_a_value_past_the_object_limit_is_refused() {
+    use swarmops_store::MAX_OBJECT_LEN;
+
+    let (_dir, layout) = new_root();
+    let (fs, calls) = RecordingFs::new();
+    let store = DerivedStore::open(layout.clone(), Arc::new(fs));
+    let past = vec![0_u8; usize::try_from(MAX_OBJECT_LEN + 1).unwrap()];
+    let got = store.put(&slot("depth", 1, 1, b""), &past);
+    assert!(matches!(got, Err(StoreError::BadCall(_))), "{got:?}");
+    assert_eq!(calls(), Vec::<String>::new(), "no filesystem call");
+    assert!(!layout.derived_dir().exists(), "nothing written");
+}
+
+/// The process's peak resident memory, in KiB: `VmHWM` of `/proc/self/status` on Linux; 0
+/// elsewhere, where the check that uses it checks nothing.
+fn peak_resident_kib() -> u64 {
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|kib| kib.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// Holds each `link_noclobber` until all the racers have come to theirs, so that each has written
 /// its temp file before any links one into place.
 struct LinkTogether(Barrier);

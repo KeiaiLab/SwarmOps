@@ -11,7 +11,9 @@
 //! their own, of which one is linked. A read checks what the file says against the slot it was
 //! asked for, and a trailer, BLAKE3 over the slot and the value, against both; a file that fails
 //! (torn, cut short, zero-filled, flipped, or another slot's file) is removed, best effort, and
-//! reads as missing, so that the value is derived and stored again.
+//! reads as missing, so that the value is derived and stored again. No value holds more than an
+//! object does ([`MAX_OBJECT_LEN`], 512 MiB): a put refuses a longer one, and a file whose header
+//! records a longer one fails its checks before anything is decoded or allocated for it.
 //!
 //! A file is `"SWDV" | u8 1 | u8 enc | u16le 0 | u32le key_len | u64le value_len | key | payload
 //! | trailer`: the payload is the value itself (`enc` 0) or, for a value over 4 KiB, its zstd
@@ -32,6 +34,7 @@ use swarmops_core::ObjectId;
 use swarmops_core::bytes::{Reader, to_u64};
 
 use crate::error::{FileOp, StoreError};
+use crate::fs_objects::MAX_OBJECT_LEN;
 use crate::fs_ops::{FsOps, LinkOutcome, StoreFs};
 use crate::layout::Layout;
 
@@ -154,8 +157,9 @@ impl DerivedStore {
     /// The value in `slot`, or `None`: none was stored, a power loss took it back, or its file is
     /// damaged. A file whose header, lengths, key or trailer does not check out against `slot` is
     /// removed, best effort, so that a put can store the value again; one the store cannot remove
-    /// reads as missing all the same, every time (storage spec §3). Reads the file whole, once
-    /// ([`FsOps::read`]).
+    /// reads as missing all the same, every time (storage spec §3). A header that records a value
+    /// longer than [`MAX_OBJECT_LEN`] is such a file, found out before its payload is decoded.
+    /// Reads the file whole, once ([`FsOps::read`]).
     ///
     /// [`StoreError::BadCall`] for a slot no store takes ([`DerivedSlot`]), before any read; a
     /// failed read is [`StoreError::Io`], naming the file.
@@ -186,10 +190,17 @@ impl DerivedStore {
     /// leaves no file in the slot, and removes its temp file, best effort; what a crash leaves in
     /// `meta/derived/tmp/` stays there.
     ///
-    /// [`StoreError::BadCall`] for a slot no store takes ([`DerivedSlot`]), before anything is
-    /// written; a failed filesystem call is [`StoreError::Io`], naming the file.
+    /// [`StoreError::BadCall`] for a slot no store takes ([`DerivedSlot`]), and for a value longer
+    /// than an object holds ([`MAX_OBJECT_LEN`]), which no read would take back, before anything
+    /// is written; a failed filesystem call is [`StoreError::Io`], naming the file.
     pub fn put(&self, slot: &DerivedSlot<'_>, value: &[u8]) -> Result<bool, StoreError> {
         let key_len = slot.key_len()?;
+        if to_u64(value.len()) > MAX_OBJECT_LEN {
+            return Err(StoreError::BadCall(format!(
+                "a derived value of {} bytes: at most {MAX_OBJECT_LEN}",
+                value.len()
+            )));
+        }
         let path = self.layout.derived_path(slot);
         if self.fs.exists(&path)? {
             return Ok(false);
@@ -263,9 +274,11 @@ fn compress(value: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// The value `file` holds, if it is `slot`'s file and whole: its header is this layout's, its key
-/// is the slot's, its lengths add up to the file's, its payload decodes to the value's length,
-/// and its trailer is the slot's and the value's. `None` if anything fails. A raw value comes
-/// back in `file` itself, the rest cut off around it.
+/// is the slot's, its value's length is at most [`MAX_OBJECT_LEN`] (checked before the payload is
+/// decoded, so that a header cannot size what a read allocates), its lengths add up to the
+/// file's, its payload decodes to the value's length, and its trailer is the slot's and the
+/// value's. `None` if anything fails. A raw value comes back in `file` itself, the rest cut off
+/// around it.
 fn decode(slot: &DerivedSlot<'_>, key_len: u32, mut file: Vec<u8>) -> Option<Vec<u8>> {
     let mut reader = Reader::new(&file, |_| ());
     let header: [u8; 8] = reader.array().ok()?;
@@ -276,7 +289,12 @@ fn decode(slot: &DerivedSlot<'_>, key_len: u32, mut file: Vec<u8>) -> Option<Vec
     if reader.array().map(u32::from_le_bytes).ok()? != key_len {
         return None;
     }
-    let value_len = usize::try_from(reader.u64_le().ok()?).ok()?;
+    let value_len = reader.u64_le().ok()?;
+    // No value holds more than an object does: refused before a buffer is sized by it.
+    if value_len > MAX_OBJECT_LEN {
+        return None;
+    }
+    let value_len = usize::try_from(value_len).ok()?;
     if reader.bytes(slot.key.len()).ok()? != slot.key {
         return None;
     }

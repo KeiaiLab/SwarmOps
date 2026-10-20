@@ -240,8 +240,12 @@ left).
   too (`E_STORE_CORRUPT`, which `verify --deep` lists), before more than 64 MiB is reserved for
   its output, beside the decoder's window, which the frame's header sets up to zstd's default
   limit of 128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store
-  can hold one. Streamed reads would bound `cat` below 512 MiB. *Target: M2 (streamed reads); M3
-  Task 4 set the bound. Found: M1 Task 1; the 2026-10-16 code review.*
+  can hold one. A derived value's file (`meta/derived/`) over 4 KiB is a zstd frame too, decoded
+  whole before its trailer is checked, within the same bound: a header that records a value
+  longer than 512 MiB fails the file's checks before anything is decoded or allocated for it, and
+  the file reads as missing. Streamed reads would bound `cat` below 512 MiB. *Target: M2
+  (streamed reads); M3 Task 4 set the bound. Found: M1 Task 1; the 2026-10-16 code review; for
+  derived values, the 2026-10-20 security review.*
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range
