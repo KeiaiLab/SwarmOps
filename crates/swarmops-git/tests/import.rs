@@ -412,7 +412,9 @@ fn a_known_tip_moves_the_target_only_from_its_ancestor() {
     let fixture = git::fixture("refs");
     let manifest = manifest(&fixture);
     let source = open(&fixture);
-    let (_dir, _root, repo) = unsynced_repo();
+    let (_dir, _root, mut repo) = unsynced_repo();
+    // Before it says the target diverged, the import tries the commit its head exports to.
+    swarmops_git::register(&mut repo).unwrap();
     let into = |git_ref: &str, target: &str| {
         import(&repo, &source, &ImportRequest::new(git_ref, target, ACTOR))
     };
@@ -498,15 +500,17 @@ fn a_damaged_or_dangling_external_id_is_a_miss_and_a_warning() {
 }
 
 /// A source rewritten under the target, its tip no longer reaching the target's head, is
-/// diverged, and the import writes nothing.
+/// diverged, and the import writes nothing: only the derived store, a cache, gains the export
+/// oids it derived to learn that the head exports to its own commit (M8 decision 7).
 #[test]
 fn a_rewritten_source_is_diverged_and_writes_nothing() {
     let fixture = git::fixture("refs");
     let manifest = manifest(&fixture);
     let source = open(&fixture);
-    let (_dir, root, repo) = new_repo();
+    let (_dir, root, mut repo) = new_repo();
+    swarmops_git::register(&mut repo).unwrap();
     let older = import(&repo, &source, &request("older")).unwrap();
-    let (log_len, before) = (journal_len(&root), files(&root));
+    let (log_len, before) = (journal_len(&root), files_but_derived(&root));
 
     let error = import(&repo, &source, &request("rewritten")).unwrap_err();
     let ImportError::Diverged {
@@ -523,33 +527,342 @@ fn a_rewritten_source_is_diverged_and_writes_nothing() {
     assert_eq!(base, Some(oid(&tip(manifest, "older"))));
     assert_eq!(git_head, oid(&tip(manifest, "rewritten")));
     assert_eq!(journal_len(&root), log_len);
-    assert_eq!(files(&root), before, "nothing written");
+    assert_eq!(files_but_derived(&root), before, "nothing written");
 }
 
-/// A native changeset on the target holds no git commit: the import is diverged, with no base,
-/// and writes nothing.
+/// [`files`] but the derived store's (`meta/derived/`): a cache, which an import fills when it
+/// derives the export oid of its target's head (M8 decision 7).
+fn files_but_derived(root: &Utf8Path) -> BTreeMap<PathBuf, Vec<u8>> {
+    let mut files = files(root);
+    files.retain(|path, _| !path.starts_with("meta/derived"));
+    files
+}
+
+/// A native changeset committed on `main`'s head (`native.txt`), and `main` moved to it.
+fn native_on_main(repo: &LocalRepo) -> ChangesetId {
+    let head = main_head(repo);
+    let native = commit(repo, &[head], vec![put("native.txt", b"native\n")]);
+    let moved = repo
+        .cas_ref("main", Some(head), Some(native), "test/native")
+        .unwrap();
+    assert!(matches!(moved.result, CasResult::Applied { .. }));
+    native
+}
+
+/// Writes into the repository at `dir` a commit made in git: tree `tree`, the one parent
+/// `parent`, a fixed author and committer, and `message`; then moves its branch `main` from
+/// `parent` to it, as git would. The commit.
+fn git_commit(dir: &std::path::Path, tree: GitOid, parent: GitOid, message: &str) -> GitOid {
+    use swarmops_core::Signature;
+    use swarmops_git::{BranchUpdate, GitSink, GixSink, commit_bytes};
+
+    let mut sink = GixSink::open(dir).unwrap_or_else(|error| panic!("open: {error}"));
+    let author = Signature {
+        name: b"A Git User".to_vec(),
+        email: b"git@example.com".to_vec(),
+        secs: 1_760_000_100,
+        offset_secs: 3_600,
+        negative_zero: false,
+    };
+    let bytes = commit_bytes(tree, &[parent], &author, &author, &[], message.as_bytes());
+    let commit = sink.write_object(RawKind::Commit, &bytes).unwrap();
+    sink.sync(&[commit]).unwrap();
+    let moved = sink.cas_branch("main", Some(parent), commit);
+    assert_eq!(moved, Ok(BranchUpdate::Applied));
+    commit
+}
+
+/// Writes into the repository at `dir` a commit made in git on top of `parent` whose tree is
+/// `parent`'s with one more file, `file` (holding its own name), and moves `main` to it
+/// ([`git_commit`]). The commit.
+fn commit_in_git(dir: &std::path::Path, parent: GitOid, file: &str) -> GitOid {
+    use swarmops_git::{GitSink, GixSink, RawCommit, RawTreeEntry};
+
+    let mut sink = GixSink::open(dir).unwrap_or_else(|error| panic!("open: {error}"));
+    let (_, bytes) = sink.read(parent).unwrap();
+    let (_, bytes) = sink.read(RawCommit::parse(&bytes).unwrap().tree).unwrap();
+    let mut tree = RawTree::parse(&bytes).unwrap();
+    let blob = sink.write_object(RawKind::Blob, file.as_bytes()).unwrap();
+    tree.entries.push(RawTreeEntry {
+        mode: b"100644".to_vec(),
+        name: file.as_bytes().to_vec(),
+        oid: blob,
+    });
+    // git's order: the names' bytes, a directory's as if it ended in `/`.
+    tree.entries.sort_by_key(|entry| {
+        let mut key = entry.name.clone();
+        if entry.mode == b"40000" {
+            key.push(b'/');
+        }
+        key
+    });
+    let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
+    sink.sync(&[blob, tree]).unwrap();
+    git_commit(dir, tree, parent, &format!("Add {file}\n"))
+}
+
+/// The parents of changeset `id`.
+fn parents(repo: &LocalRepo, id: ChangesetId) -> Vec<ChangesetId> {
+    let stored = repo.changeset(id).unwrap();
+    stored.expect("the changeset is stored").changeset.parents
+}
+
+/// A native changeset on the target that was never exported: the import goes on from the commit
+/// it exports to (M8 decision 7), which the tip does not reach, so the import is diverged with
+/// that commit as its base, and writes nothing but the derived values it made to find it.
 #[test]
-fn a_native_commit_on_the_target_is_diverged() {
+fn an_import_onto_an_unexported_native_head_is_diverged() {
+    use swarmops_git::{ExportOid, register};
+
+    let fixture = git::fixture("linear");
+    let source = open(&fixture);
+    let (_dir, root, mut repo) = new_repo();
+    register(&mut repo).unwrap();
+    import(&repo, &source, &request("HEAD")).unwrap();
+    let native = native_on_main(&repo);
+    let (log_len, before) = (journal_len(&root), files_but_derived(&root));
+
+    let error = import(&repo, &source, &request("HEAD")).unwrap_err();
+    let exported = repo.derived::<ExportOid>(native, &()).unwrap().git_oid();
+    assert!(
+        matches!(
+            error,
+            ImportError::Diverged { base: Some(base), target_head, .. }
+                if base == exported && target_head == native
+        ),
+        "{error:?}"
+    );
+    assert_eq!(journal_len(&root), log_len);
+    assert_eq!(files_but_derived(&root), before, "nothing written");
+}
+
+/// The base of a native head is the commit it exports to, which a repository derives only with
+/// `ExportOid` registered, as every `LocalOps` registers it: without it an import onto a native
+/// head fails before it writes anything.
+#[test]
+fn an_import_onto_a_native_head_needs_export_oids_registered() {
     let fixture = git::fixture("linear");
     let source = open(&fixture);
     let (_dir, root, repo) = new_repo();
-    let first = import(&repo, &source, &request("HEAD")).unwrap();
-    let native = commit(&repo, &[first.head], vec![put("native.txt", b"native\n")]);
-    let moved = repo
-        .cas_ref("main", Some(first.head), Some(native), "test/native")
-        .unwrap();
-    assert!(matches!(moved.result, CasResult::Applied { .. }));
+    import(&repo, &source, &request("HEAD")).unwrap();
+    native_on_main(&repo);
     let before = files(&root);
 
     let error = import(&repo, &source, &request("HEAD")).unwrap_err();
     assert!(
         matches!(
-            error,
-            ImportError::Diverged { base: None, target_head, .. } if target_head == native
+            &error,
+            ImportError::Store {
+                source: RepoError::Derived { name, .. },
+                imported: 0,
+                last: None,
+            } if name == "git_oid"
         ),
         "{error:?}"
     );
     assert_eq!(files(&root), before, "nothing written");
+}
+
+/// Commits made in git on top of an export come back (M8 decision 7): `linear` imported, a
+/// native changeset committed on `main` and exported into the fixture's own repository, and a
+/// commit made there on top of the export. The import of `main` takes that commit alone, onto
+/// the native changeset, whose export is the base and seeds the conversion, so that the one blob
+/// read is the new file's; an export afterwards writes nothing, the commit being its changeset's
+/// export.
+#[test]
+fn an_import_after_an_export_takes_only_the_git_side_commits() {
+    use swarmops_git::{ExportRequest, GixSink, export, git_hash, register};
+
+    let fixture = git::fixture("linear");
+    let dir = fixture
+        .repo
+        .clone()
+        .expect("the fixture holds a repository");
+    let (_dir, _root, mut repo) = unsynced_repo();
+    register(&mut repo).unwrap();
+    import(&repo, &open(&fixture), &request("HEAD")).unwrap();
+    let native = native_on_main(&repo);
+    let to_main = ExportRequest::new("main", "main");
+    let exported = export(&repo, &mut GixSink::open(&dir).unwrap(), &to_main).unwrap();
+    assert_eq!((exported.head, exported.commits_written), (native, 1));
+    let made = commit_in_git(&dir, exported.head_oid, "git.txt");
+
+    let counting = Counting {
+        inner: open(&fixture),
+        reads: RefCell::new(Vec::new()),
+    };
+    let report = import(&repo, &counting, &request("main")).unwrap();
+    assert_eq!(
+        (report.imported, report.skipped, report.ref_moved),
+        (1, 1, true)
+    );
+    assert_eq!((report.old_head, report.git_head), (Some(native), made));
+    let blobs: Vec<GitOid> = (counting.reads.borrow().iter())
+        .filter(|(_, kind)| *kind == RawKind::Blob)
+        .map(|(oid, _)| *oid)
+        .collect();
+    assert_eq!(blobs, [git_hash(RawKind::Blob, b"git.txt")]);
+    assert_eq!(main_head(&repo), report.head);
+    assert_eq!(parents(&repo, report.head), [native]);
+    assert_eq!(git_oid(&repo, report.head), made);
+    assert_eq!(repo.verify(true).unwrap().problems, []);
+
+    let again = export(&repo, &mut GixSink::open(&dir).unwrap(), &to_main).unwrap();
+    assert_eq!((again.head_oid, again.old), (made, Some(made)));
+    assert_eq!(
+        (
+            again.branch_moved,
+            again.commits_written,
+            again.objects_written
+        ),
+        (false, 0, 0)
+    );
+}
+
+/// A head imported with a loss exports to another commit than its own, and a tip descending from
+/// either continues it, from the one it descends from (M8 decision 7). `gitlinks`' second commit
+/// is imported with its gitlinks dropped, then its third, which descends from the original
+/// second: onto it. That history exported into an empty repository becomes new commits there
+/// from the second on, and a commit made there on top of the export is imported onto the third
+/// changeset, the export its base and seeding the conversion, so that the one blob read is the
+/// new file's; an export afterwards writes nothing. A history that descends from neither is
+/// diverged, naming the head's own commit.
+#[test]
+fn a_lossy_head_takes_the_oid_the_tip_descends_from() {
+    use swarmops_git::{ExportOid, ExportRequest, GixSink, export, git_hash, register};
+
+    let fixture = git::fixture("gitlinks");
+    let manifest = manifest(&fixture);
+    let source = open(&fixture);
+    let (_dir, _root, mut repo) = unsynced_repo();
+    register(&mut repo).unwrap();
+    let lossy = |git_ref: &str| {
+        let mut req = request(git_ref);
+        req.lossy = [LossyClass::Gitlinks].into_iter().collect();
+        req
+    };
+    let second = import(&repo, &source, &lossy(&manifest.commits[1].oid)).unwrap();
+    let third = import(&repo, &source, &lossy("HEAD")).unwrap();
+    assert_eq!(
+        (third.imported, third.skipped, third.old_head),
+        (1, 1, Some(second.head))
+    );
+    let head = third.head;
+    let own = git_oid(&repo, head);
+    let exported = repo.derived::<ExportOid>(head, &()).unwrap();
+    assert!(!exported.kept);
+    assert_ne!(exported.git_oid(), own);
+
+    let destination = git::empty_repository();
+    let to_main = ExportRequest::new("main", "main");
+    let mut sink = GixSink::open(&destination.dir).unwrap();
+    let report = export(&repo, &mut sink, &to_main).unwrap();
+    assert_eq!(report.head_oid, exported.git_oid());
+
+    let linear = git::fixture("linear");
+    let error = import(&repo, &open(&linear), &request("HEAD")).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            ImportError::Diverged { base: Some(base), target_head, .. }
+                if base == own && target_head == head
+        ),
+        "{error:?}"
+    );
+
+    let made = commit_in_git(&destination.dir, report.head_oid, "git.txt");
+    let from_export = Counting {
+        inner: GixSource::open(&destination.dir).unwrap(),
+        reads: RefCell::new(Vec::new()),
+    };
+    let continued = import(&repo, &from_export, &request("main")).unwrap();
+    assert_eq!(
+        (continued.imported, continued.skipped, continued.ref_moved),
+        (1, 1, true)
+    );
+    assert_eq!((continued.old_head, continued.git_head), (Some(head), made));
+    assert_eq!(parents(&repo, continued.head), [head]);
+    assert_eq!(git_oid(&repo, continued.head), made);
+    let blobs: Vec<GitOid> = (from_export.reads.borrow().iter())
+        .filter(|(_, kind)| *kind == RawKind::Blob)
+        .map(|(oid, _)| *oid)
+        .collect();
+    assert_eq!(blobs, [git_hash(RawKind::Blob, b"git.txt")]);
+
+    let again = export(
+        &repo,
+        &mut GixSink::open(&destination.dir).unwrap(),
+        &to_main,
+    )
+    .unwrap();
+    assert_eq!(
+        (again.head_oid, again.branch_moved, again.objects_written),
+        (made, false, 0)
+    );
+}
+
+/// A head that is faithful itself but sits on a commit imported with a loss exports to another
+/// commit than its own too, and a tip descending from that export continues it. With the target
+/// moved back to that head afterwards, a tip that reaches it only through a commit the store
+/// holds already continues it as well, from a repository that lacks the head's own commit: the
+/// base, not met by the walk, then seeds nothing.
+#[test]
+fn a_head_above_a_lossy_commit_is_continued_from_its_export() {
+    use swarmops_git::{ExportOid, ExportRequest, GixSink, export, register};
+
+    let fixture = git::fixture("gitlinks");
+    let manifest = manifest(&fixture);
+    let dir = fixture
+        .repo
+        .clone()
+        .expect("the fixture holds a repository");
+    let (_dir, _root, mut repo) = unsynced_repo();
+    register(&mut repo).unwrap();
+    let mut req = request("HEAD");
+    req.lossy = [LossyClass::Gitlinks].into_iter().collect();
+    let lossy = import(&repo, &open(&fixture), &req).unwrap();
+    // A commit made in git on the original that drops both gitlinks: the first commit's tree.
+    let first_tree = oid(&manifest.commits[0].tree);
+    let dropped = git_commit(&dir, first_tree, lossy.git_head, "Drop the gitlinks\n");
+    let faithful = import(&repo, &open(&fixture), &request("main")).unwrap();
+    assert_eq!(
+        (faithful.imported, faithful.lossy_total, faithful.git_head),
+        (1, 0, dropped)
+    );
+    let head = faithful.head;
+    let exported = repo.derived::<ExportOid>(head, &()).unwrap();
+    assert!(!exported.kept);
+
+    let destination = git::empty_repository();
+    let to_main = ExportRequest::new("main", "main");
+    let report = export(
+        &repo,
+        &mut GixSink::open(&destination.dir).unwrap(),
+        &to_main,
+    )
+    .unwrap();
+    assert_eq!(report.head_oid, exported.git_oid());
+    let made = commit_in_git(&destination.dir, report.head_oid, "git.txt");
+    let from_export = || GixSource::open(&destination.dir).unwrap();
+    let continued = import(&repo, &from_export(), &request("main")).unwrap();
+    assert_eq!(
+        (continued.imported, continued.skipped, continued.old_head),
+        (1, 1, Some(head))
+    );
+    assert_eq!(parents(&repo, continued.head), [head]);
+
+    let back = repo
+        .cas_ref("main", Some(continued.head), Some(head), ACTOR)
+        .unwrap();
+    assert!(matches!(back.result, CasResult::Applied { .. }));
+    let more = commit_in_git(&destination.dir, made, "more.txt");
+    let again = import(&repo, &from_export(), &request("main")).unwrap();
+    assert_eq!(
+        (again.imported, again.skipped, again.old_head),
+        (1, 1, Some(head))
+    );
+    assert_eq!(parents(&repo, again.head), [continued.head]);
+    assert_eq!(git_oid(&repo, again.head), more);
 }
 
 /// A [`GitSource`] whose first read of the tip moves `main` to a native changeset, as another

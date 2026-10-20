@@ -6,21 +6,31 @@
 //!
 //! 1. The source ref is resolved to a commit, the tip ([`GitSource::resolve`]), and the target
 //!    ref read. A target that exists has a base: the git commit its head changeset holds in its
-//!    `git.oid` metadata. A head without one, a native changeset, is [`ImportError::Diverged`]
-//!    with no base, and nothing is written.
+//!    `git.oid` metadata, or for a native head, which holds none, the commit it exports to
+//!    ([`ExportOid`], M8 decision 7), so that commits made in git on top of an export come back
+//!    on the changeset they were made on.
 //! 2. The walk: from the tip over parents, first parents first, on a stack of its own, never by
-//!    recursion. A commit is known when it is the base, or when the external id index names a
-//!    changeset the store holds for it; the walk stops there. An entry that is damaged, or names
-//!    a changeset the store lacks, is a miss and a warning: its commit is converted again. The
-//!    commits it does not know come out parents first; how many known ones it stopped at is
-//!    [`ImportReport::skipped`].
+//!    recursion. A commit is known when it is the base, which stands for the target's head, or
+//!    when the external id index names a changeset the store holds for it; the walk stops there.
+//!    An entry that is damaged, or names a changeset the store lacks, is a miss and a warning:
+//!    its commit is converted again. The commits it does not know come out parents first; how
+//!    many known ones it stopped at is [`ImportReport::skipped`].
 //! 3. The base must be the tip, and then nothing is written, or an ancestor of it: met by the
 //!    walk, or reached from a known commit it stopped at by a walk down the store's parents,
 //!    pruned to the generations above the base's (a base reached only through a merge's second
-//!    parent is no divergence). Otherwise [`ImportError::Diverged`], and nothing is written.
-//! 4. A faithful base (no `git.lossy`) seeds the conversion: its root and the base commit's git
-//!    tree are walked together, entries matched by name and kind, so that the trees and blobs
-//!    the new commits share with the base are neither read nor converted again.
+//!    parent is no divergence). A head that holds a `git.oid` but exports to another commit
+//!    (one imported with a loss, or above such a one: [`ExportedOid::kept`] is false) stands for
+//!    that commit too, which a tip made on its export descends from: when the tip does not lead
+//!    from the `git.oid` and the walk met that commit, the walk is made again with it as a second
+//!    base, and the one the tip descends from is the base. Otherwise [`ImportError::Diverged`],
+//!    naming the head's `git.oid`, else the commit a native head exports to, and nothing is
+//!    written.
+//! 4. A base whose tree the head's root holds without loss (a `git.oid` without `git.lossy`, or
+//!    the head's export, which is its root rendered) seeds the conversion: the head's root and
+//!    the base commit's git tree are walked together, entries matched by name and kind, so that
+//!    the trees and blobs the new commits share with the base are neither read nor converted
+//!    again. A base the walk did not meet, only reached, may be a commit the source lacks (one
+//!    the tip descends from through the head's export instead): then nothing is seeded.
 //! 5. The frames: each run of [`ImportRequest::frame_changesets`] commits is converted, its new
 //!    trees and blobs stored ([`Repo::put_objects`]) whenever
 //!    [`ImportRequest::object_batch_bytes`] of them accumulate and at its end, then recorded as
@@ -43,6 +53,12 @@
 //! import run again continues after the frames that committed. A commit the conversion refuses
 //! ([`ImportError::Convert`]) ends the import before the frame that would hold it.
 //!
+//! The export oids of steps 1 and 3 are derived values ([`swarmops_repo::Repo::derived`]): the
+//! import asks for one only where the target's head is native, or holds a git commit the tip does
+//! not lead from, so a plain incremental import derives nothing. Deriving one the derived store
+//! lacks derives those of the head's ancestors too, once, and stores them, as the export does.
+//!
+//! [`ExportedOid::kept`]: crate::ExportedOid::kept
 //! [`Repo::put_objects`]: swarmops_repo::Repo::put_objects
 //! [`Repo::raw_batch`]: swarmops_repo::Repo::raw_batch
 //! [`Repo::record_external_ids`]: swarmops_repo::Repo::record_external_ids
@@ -58,7 +74,7 @@ use swarmops_store::{ExternalEntry, Recovered, SYSTEM_GIT, check_ref_name};
 
 use crate::ancestry;
 use crate::{
-    ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID, GitOid, GitSource, LossySet,
+    ConvertError, Converted, Converter, ExportOid, GIT_LOSSY, GIT_OID, GitOid, GitSource, LossySet,
     ObjectFormat, RawCommit, RawError, RawKind, RawTree, SourceError, Unsupported,
 };
 
@@ -174,9 +190,11 @@ pub enum ImportError {
     /// written.
     #[error("invalid target ref name {0:?}: a ref is main or release/<name>")]
     RefName(String),
-    /// The target does not lead to the tip: its head holds no git commit (a native changeset is
-    /// on it), or holds one that is not an ancestor of the tip (the source was rewritten, or is
-    /// behind). Nothing was written.
+    /// The target does not lead to the tip: the git commit its head stands for, the one it holds
+    /// or for a native head the one it exports to, is not an ancestor of the tip (the source was
+    /// rewritten, or is behind, or a native changeset nobody exported is on the target), nor is
+    /// the head's export, where it exports to another commit than the one it holds. Nothing was
+    /// written.
     #[error(
         "{target_ref} has diverged from the git history: its head {target_head} {}, which the \
          tip {git_head} does not reach",
@@ -187,7 +205,10 @@ pub enum ImportError {
         target_ref: String,
         /// The changeset it names.
         target_head: ChangesetId,
-        /// The git commit that changeset holds; `None` for a native changeset.
+        /// The git commit the import tried first: the one that changeset holds (`git.oid`), or
+        /// for a native changeset the one it exports to ([`ExportOid`]). [`import()`] always
+        /// names one since a native head goes on from its export (M8 decision 7); `None` would
+        /// say the head stands for no git commit.
         base: Option<GitOid>,
         /// The tip.
         git_head: GitOid,
@@ -238,11 +259,12 @@ pub enum ImportError {
     },
 }
 
-/// What [`ImportError::Diverged`] says the target's head holds.
+/// What [`ImportError::Diverged`] says the target's head stands for: the git commit it holds, or
+/// the one a native head exports to.
 fn holding(base: Option<GitOid>) -> String {
     base.map_or_else(
         || "holds no git commit".to_owned(),
-        |base| format!("is git commit {base}"),
+        |base| format!("stands for git commit {base}"),
     )
 }
 
@@ -256,6 +278,11 @@ const DIR_MODE: &[u8] = b"40000";
 /// Imports into `repo` every commit `source`'s `req.git_ref` reaches that `repo` does not hold,
 /// and moves `req.target_ref` to the tip's changeset: see [the module documentation](self) for
 /// the steps and their errors.
+///
+/// Where the target's head is native, or holds a git commit the tip does not lead from, the
+/// import derives the commit the head exports to, and `repo` must have [`ExportOid`] registered
+/// ([`crate::register`], as every `LocalOps` registers it): without it the import fails there with
+/// [`RepoError::Derived`] ([`ImportError::Store`]) before it writes anything.
 pub fn import(
     repo: &LocalRepo,
     source: &dyn GitSource,
@@ -270,35 +297,48 @@ pub fn import(
         return Err(SourceError::Unsupported(format).into());
     }
     let tip = source.resolve(&req.git_ref)?;
-    let base = Base::of(repo, req, tip)?;
-    let walk = Walk::from_tip(repo, source, tip, base.as_ref())?;
+    let mut base = Base::of(repo, req)?;
+    let mut walk = Walk::from_tip(repo, source, tip, base.as_ref())?;
     let old_head = base.as_ref().map(|base| base.head);
-    if let Some(base) = &base {
-        if base.commit == tip {
-            return Ok(ImportReport {
-                imported: 0,
-                skipped: to_u64(walk.known.len()),
-                head: base.head,
-                git_head: tip,
-                target_ref: req.target_ref.clone(),
-                old_head,
-                ref_moved: false,
-                lossy: Vec::new(),
-                lossy_total: 0,
-                warnings: walk.warnings,
-                recovered: Recovered::default(),
-            });
+    // The commit that seeds the conversion, and whether the walk met it.
+    let mut seeds = None;
+    if let Some(base) = &mut base {
+        let mut leads = base.leads(repo, tip, &walk)?;
+        if leads.is_none() && base.add_export(repo, &walk)? {
+            // The tip may descend from the head's export, which the walk met: the walk again,
+            // knowing it.
+            walk = Walk::from_tip(repo, source, tip, Some(base))?;
+            leads = base.leads(repo, tip, &walk)?;
         }
-        let met = walk.known.contains_key(&base.commit);
-        let stops = walk.known.values().copied();
-        let reached = || ancestry::reaches(repo, stops, base.head, base.generation);
-        if !met && !reached().map_err(|source| stopped(source, 0, None))? {
-            return Err(ImportError::Diverged {
-                target_ref: req.target_ref.clone(),
-                target_head: base.head,
-                base: Some(base.commit),
-                git_head: tip,
-            });
+        match leads {
+            None => {
+                return Err(ImportError::Diverged {
+                    target_ref: req.target_ref.clone(),
+                    target_head: base.head,
+                    base: Some(base.commits[0].oid),
+                    git_head: tip,
+                });
+            }
+            Some(Leads::Tip) => {
+                return Ok(ImportReport {
+                    imported: 0,
+                    skipped: to_u64(walk.known.len()),
+                    head: base.head,
+                    git_head: tip,
+                    target_ref: req.target_ref.clone(),
+                    old_head,
+                    ref_moved: false,
+                    lossy: Vec::new(),
+                    lossy_total: 0,
+                    warnings: walk.warnings,
+                    recovered: Recovered::default(),
+                });
+            }
+            Some(Leads::Met(commit)) => seeds = commit.seeds.then_some((commit.oid, true)),
+            Some(Leads::Reached) => {
+                let first = base.commits[0];
+                seeds = first.seeds.then_some((first.oid, false));
+            }
         }
     }
     let mut run = Run::new(repo, source, req, walk.known);
@@ -306,9 +346,9 @@ pub fn import(
     run.warnings = walk.warnings;
     run.flagged = walk.flagged;
     if let Some(base) = &base
-        && let Some(root) = base.faithful_root
+        && let Some((commit, met)) = seeds
     {
-        seed(repo, source, &mut run.converter, base, root)?;
+        seed(repo, source, &mut run.converter, base, commit, met)?;
     }
     for commits in walk
         .unknown
@@ -319,24 +359,50 @@ pub fn import(
     run.finish(tip, old_head)
 }
 
-/// The target's head when the import starts, and the git commit it holds: what the import
+/// The target's head when the import starts, and the git commits it stands for: what the import
 /// goes on from.
 struct Base {
     /// The changeset the target names.
     head: ChangesetId,
     /// Its generation: no changeset of a generation as low or lower has it as an ancestor.
     generation: u64,
-    /// The git commit it holds: its `git.oid`.
-    commit: GitOid,
-    /// Its root, when it holds the commit without loss (no `git.lossy`): what seeds the
-    /// conversion.
-    faithful_root: Option<TreeId>,
+    /// Its root.
+    root: TreeId,
+    /// Whether it holds a git commit (`git.oid`): an imported changeset, which may export to
+    /// another commit than its own.
+    imported: bool,
+    /// The git commits it stands for, the first tried first: the one it holds, or for a native
+    /// head the one it exports to; then, where the walk met it, the other commit an imported head
+    /// exports to ([`Base::add_export`]).
+    commits: Vec<BaseCommit>,
+}
+
+/// A git commit the target's head stands for.
+#[derive(Clone, Copy)]
+struct BaseCommit {
+    /// The commit.
+    oid: GitOid,
+    /// Whether the head's root holds its tree without loss, so that it seeds the conversion: the
+    /// commit an imported head holds unless the head has `git.lossy`, and the head's export,
+    /// which is its root rendered.
+    seeds: bool,
+}
+
+/// How the tip leads from the target's head (step 3 of [the module documentation](self)).
+enum Leads {
+    /// The tip is one of the commits the head stands for: there is nothing to import.
+    Tip,
+    /// The walk met this commit the head stands for: a parent of a commit it did not know.
+    Met(BaseCommit),
+    /// The walk met none of them, but stopped at a known commit whose changeset descends from the
+    /// head in the store.
+    Reached,
 }
 
 impl Base {
-    /// The base of `req.target_ref` in `repo`; `None` when the target does not exist.
-    /// [`ImportError::Diverged`] without a base when its head holds no git commit.
-    fn of(repo: &LocalRepo, req: &ImportRequest, tip: GitOid) -> Result<Option<Base>, ImportError> {
+    /// The base of `req.target_ref` in `repo`; `None` when the target does not exist. For a
+    /// native head, the commit it exports to, derived ([`ExportOid`]).
+    fn of(repo: &LocalRepo, req: &ImportRequest) -> Result<Option<Base>, ImportError> {
         let at_start = |source| stopped(source, 0, None);
         let Some(state) = repo.get_ref(&req.target_ref).map_err(at_start)? else {
             return Ok(None);
@@ -346,22 +412,76 @@ impl Base {
             return Err(at_start(RepoError::NotFound(head.to_string())));
         };
         let metadata = &stored.changeset.metadata;
-        let Some(commit) = value(metadata, GIT_OID).and_then(GitOid::from_hex) else {
-            return Err(ImportError::Diverged {
-                target_ref: req.target_ref.clone(),
-                target_head: head,
-                base: None,
-                git_head: tip,
-            });
+        let own = value(metadata, GIT_OID).and_then(GitOid::from_hex);
+        let first = match own {
+            Some(oid) => BaseCommit {
+                oid,
+                seeds: value(metadata, GIT_LOSSY).is_none(),
+            },
+            None => BaseCommit {
+                oid: export_oid(repo, head)?,
+                seeds: true,
+            },
         };
-        let faithful = value(metadata, GIT_LOSSY).is_none();
         Ok(Some(Base {
             head,
             generation: stored.generation,
-            commit,
-            faithful_root: faithful.then_some(stored.changeset.root),
+            root: stored.changeset.root,
+            imported: own.is_some(),
+            commits: vec![first],
         }))
     }
+
+    /// Whether `oid` is one of the git commits the head stands for.
+    fn stands_for(&self, oid: GitOid) -> bool {
+        self.commits.iter().any(|commit| commit.oid == oid)
+    }
+
+    /// How the tip leads from the head, as `walk` from `tip` found it; `None` when it does not.
+    fn leads(
+        &self,
+        repo: &LocalRepo,
+        tip: GitOid,
+        walk: &Walk,
+    ) -> Result<Option<Leads>, ImportError> {
+        if self.stands_for(tip) {
+            return Ok(Some(Leads::Tip));
+        }
+        let mut commits = self.commits.iter();
+        if let Some(&met) = commits.find(|commit| walk.known.contains_key(&commit.oid)) {
+            return Ok(Some(Leads::Met(met)));
+        }
+        let stops = walk.known.values().copied();
+        let reached = ancestry::reaches(repo, stops, self.head, self.generation);
+        let reached = reached.map_err(|source| stopped(source, 0, None))?;
+        Ok(reached.then_some(Leads::Reached))
+    }
+
+    /// Adds the commit an imported head exports to, when that is another commit than the one it
+    /// holds (it was imported with a loss, or above such a one) and `walk` met it: `true` then.
+    /// A native head's export is its first commit already. Derives the head's export oid.
+    fn add_export(&mut self, repo: &LocalRepo, walk: &Walk) -> Result<bool, ImportError> {
+        if !self.imported {
+            return Ok(false);
+        }
+        let exported = export_oid(repo, self.head)?;
+        if self.stands_for(exported) || !walk.met(exported) {
+            return Ok(false);
+        }
+        self.commits.push(BaseCommit {
+            oid: exported,
+            seeds: true,
+        });
+        Ok(true)
+    }
+}
+
+/// The commit changeset `head` exports to ([`ExportOid`]): [`ImportError::Store`] when it cannot
+/// be derived, as when `repo` has no [`ExportOid`] registered.
+fn export_oid(repo: &LocalRepo, head: ChangesetId) -> Result<GitOid, ImportError> {
+    let exported = repo.derived::<ExportOid>(head, &());
+    let exported = exported.map_err(|source| stopped(source, 0, None))?;
+    Ok(exported.git_oid())
 }
 
 /// The value of metadata key `key`.
@@ -439,9 +559,9 @@ impl Walk {
         Ok(())
     }
 
-    /// The changeset commit `oid` is known as: the base's, or the one its external id entry
-    /// names if the store holds it. An entry that is damaged, or names a changeset the store
-    /// lacks, is a miss and a warning.
+    /// The changeset commit `oid` is known as: the base's head, for a commit it stands for, or the
+    /// one its external id entry names if the store holds it. An entry that is damaged, or names a
+    /// changeset the store lacks, is a miss and a warning.
     fn known_as(
         &mut self,
         repo: &LocalRepo,
@@ -449,7 +569,7 @@ impl Walk {
         oid: GitOid,
     ) -> Result<Option<ChangesetId>, ImportError> {
         if let Some(base) = base
-            && base.commit == oid
+            && base.stands_for(oid)
         {
             return Ok(Some(base.head));
         }
@@ -474,6 +594,11 @@ impl Walk {
         );
         self.flag(oid, &why);
         Ok(None)
+    }
+
+    /// Whether the walk met commit `oid`: a commit it did not know, or a known one it stopped at.
+    fn met(&self, oid: GitOid) -> bool {
+        self.known.contains_key(&oid) || self.unknown.contains(&oid)
     }
 
     /// Warns that the external id entry of commit `oid` is no use, for the reason `why`.
@@ -503,18 +628,24 @@ fn malformed(oid: GitOid, error: &RawError) -> ImportError {
     }
 }
 
-/// Step 4 of [the module documentation](self): the trees and blobs of the faithful `base`,
-/// whose root is `root`, taken by `converter` as converted already, by walking the base commit's
-/// git tree and the root together, entries matched by name and kind.
+/// Step 4 of [the module documentation](self): the trees and blobs of `base`'s head, taken by
+/// `converter` as converted already, by walking the git tree of `commit`, a commit the head
+/// stands for whose tree its root holds without loss, and the root together, entries matched by
+/// name and kind. A commit the walk did not meet (`met` false) that `source` lacks seeds nothing.
 fn seed(
     repo: &LocalRepo,
     source: &dyn GitSource,
     converter: &mut Converter<'_>,
     base: &Base,
-    root: TreeId,
+    commit: GitOid,
+    met: bool,
 ) -> Result<(), ImportError> {
-    let git_root = read_commit(source, base.commit)?.tree;
-    converter.remember_tree(git_root, root);
+    let git_root = match read_commit(source, commit) {
+        Ok(commit) => commit.tree,
+        Err(ImportError::Source(SourceError::Missing { .. })) if !met => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    converter.remember_tree(git_root, base.root);
     // Each directory to walk: its path in the base's tree (`None` for the root) and its git tree.
     let mut dirs: Vec<(Option<RepoPath>, GitOid)> = vec![(None, git_root)];
     // The git trees walked or about to be: a tree held at several paths is walked once.

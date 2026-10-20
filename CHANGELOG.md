@@ -743,6 +743,20 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `BadHeader`, where a zstd frame that claimed as much was `Corrupt`), so a compression bomb in a
   crafted store costs a read at most 512 MiB (storage spec §2 rule 1, §10 item 6).
 
+#### M8: git export (2026-10-19)
+
+- `git import` continues a branch SwarmOps exported: a target whose head is a native changeset goes
+  on from the commit that changeset exports to (`ExportOid`), so commits made in git on top of an
+  export, a merge on GitHub or a Dependabot update, come in on it, linearly, where they failed with
+  `E_GIT_IMPORT_DIVERGED`; a head imported with a loss, or above such a commit, goes on from its own
+  commit or from its export, whichever the source's commit descends from. A native head that was
+  never exported, or that the source does not build on, is still `E_GIT_IMPORT_DIVERGED`, whose
+  `details.base` now names the commit the head exports to, and whose message says the head stands
+  for that commit. The import derives that export oid only where the head is native or the source
+  does not lead from the commit it holds, so in the library (`swarmops_git::import`) the repository
+  must have `ExportOid` registered there (`swarmops_git::register`), as every `LocalOps` does
+  (storage spec §7, operations spec §6).
+
 ### Fixed
 
 #### M1.6: the code-review follow-ups (2026-10-19)
