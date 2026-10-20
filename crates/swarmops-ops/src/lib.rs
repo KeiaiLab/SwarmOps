@@ -14,6 +14,7 @@
 //! The CLI calls these and prints each result in one envelope. A remote client will implement
 //! `StoreOps` over the same types later, resolving identities and file contents the same way.
 
+mod conflict;
 pub mod content;
 mod error;
 pub mod identity;

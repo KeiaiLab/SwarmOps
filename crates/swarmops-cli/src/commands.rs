@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use swarmops_api::LandReq;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
@@ -154,6 +155,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             },
             |ops, (who, req)| ops.commit(&who, req),
         ),
+        land @ Command::Land { .. } => run_land(ctx, op, land),
         Command::Blob(command) => run_blob(ctx, op, command),
         Command::Resolve { rev } => resolve_rev(ctx, op, rev),
         Command::Cat {
@@ -260,6 +262,39 @@ fn history(
             })
         },
         |ops, req| ops.path_history(req),
+    )
+}
+
+/// Runs `land`, which names operation `op`, as the caller: `command` is the land's arguments.
+fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::Land {
+        head,
+        base,
+        target,
+        message,
+        key,
+        max_attempts,
+        max_conflict_bytes,
+    } = command
+    else {
+        unreachable!("run passes land its own command alone");
+    };
+    ctx.on_store(
+        op,
+        || {
+            let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
+            let req = LandReq {
+                head: head.into(),
+                base: base.map(Rev::from),
+                target,
+                message,
+                idempotency_key: key,
+                max_attempts,
+                max_conflict_bytes,
+            };
+            Ok((who, req))
+        },
+        |ops, (who, req)| ops.land(&who, req),
     )
 }
 

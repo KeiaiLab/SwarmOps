@@ -54,7 +54,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 
 /// The tools, one per `StoreOps` operation, in the order `tools/list` gives them, each with
 /// the request type its arguments are.
-const TOOLS: [(&str, &str); 17] = [
+const TOOLS: [(&str, &str); 18] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -69,6 +69,7 @@ const TOOLS: [(&str, &str); 17] = [
     ("ref_delete", "RefDeleteReq"),
     ("undo", "UndoReq"),
     ("commit", "CommitReq"),
+    ("land", "LandReq"),
     ("blob_put", "BlobPutReq"),
     ("blob_has", "BlobHasReq"),
     ("verify", "VerifyReq"),
@@ -88,7 +89,7 @@ const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 // The tests.
 // ---------------------------------------------------------------------------------------------
 
-/// Every revision lists the same seventeen tools: `initialize` negotiates 2025-11-25 or 2025-06-18
+/// Every revision lists the same eighteen tools: `initialize` negotiates 2025-11-25 or 2025-06-18
 /// (2025-11-25 for a client that asks for a version it does not serve), `server/discover`
 /// advertises all three, and each tool's schema is its request type's, standing alone.
 #[test]
@@ -931,6 +932,156 @@ fn mcp_undo_is_compare_and_swap_guarded() {
         "the refused undo wrote nothing: {after}"
     );
     server.err("undo", json!({"op": op + 99}), "E_OP_NOT_FOUND");
+    server.finish_clean();
+}
+
+/// The `land` tool publishes a change committed on an older head: it merges it onto main's head
+/// as one new changeset and moves main to it, as `swarmops land` does, for the server's agent;
+/// `meta.resolved` names what the head and main named. Its annotations say it adds and moves
+/// without destroying, and is idempotent: the same call again, with its `idempotency_key`,
+/// replays the land (nothing written), and `show` and `op_log` name the land's key.
+#[test]
+fn mcp_land_publishes_and_reports() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let listed = server.result("tools/list", json!({}));
+    let tools = listed["tools"].as_array().unwrap();
+    let land = (tools.iter()).find(|tool| tool["name"] == "land").unwrap();
+    assert_eq!(
+        land["annotations"],
+        json!({"readOnlyHint": false, "destructiveHint": false, "idempotentHint": true,
+               "openWorldHint": false})
+    );
+
+    let first = json!({"message": "t0", "changes": [{"path": "t0", "op": "put",
+                                                    "content": {"inline": "t0"}}]});
+    let t0 = server.ok("commit", first)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": t0, "create": true}),
+    );
+    let head = commit_on(&mut server, "head", &t0);
+    let arguments = json!({"head": head, "idempotency_key": "mcp-land-1"});
+    let landed = server.ok("land", arguments.clone());
+    let id = landed["result"]["landed"].as_str().unwrap().to_owned();
+    assert_eq!(
+        landed["result"],
+        json!({"status": "landed", "landed": id, "rebased_onto": t0, "target": "main",
+               "base": t0, "attempts": 1, "relocated": false, "files_changed": 1,
+               "squashed_from": [head]})
+    );
+    let mut resolved = BTreeMap::new();
+    resolved.insert(head.clone(), json!(head));
+    resolved.insert("main".to_owned(), json!(t0));
+    assert_eq!(landed["meta"]["resolved"], json!(resolved));
+    assert_eq!(
+        refs_of(&mut server),
+        json!([{"name": "main", "target": id, "version": 2}])
+    );
+
+    let again = server.ok("land", arguments);
+    assert_eq!(again["result"]["status"], "replayed", "{again}");
+    assert_eq!(again["result"]["landed"], id.as_str());
+    let shown = server.ok("show", json!({"rev": id}));
+    assert_eq!(shown["result"]["land_key"], "mcp-land-1");
+    assert_eq!(shown["result"]["lander"], json!({"agent": AGENT}));
+    let newest = server.ok("op_log", json!({"limit": 1}));
+    let op = &newest["result"]["ops"][0];
+    assert_eq!(op["kind"], "land", "{newest}");
+    assert_eq!(op["changesets"][0]["land_key"], "mcp-land-1", "{newest}");
+    assert_eq!(
+        refs_of(&mut server),
+        json!([{"name": "main", "target": id, "version": 2}]),
+        "the replay wrote nothing"
+    );
+    server.finish_clean();
+    store.assert_clean("after the lands");
+}
+
+/// A land whose change conflicts is a failed call (`isError`) whose envelope's error is
+/// `E_CONFLICT` (exit 3, not retryable), with the conflict report in `details.report` and a hint
+/// that reads the target's side first; nothing is recorded. `max_conflict_bytes` bounds the
+/// report's texts.
+#[test]
+fn mcp_land_conflict_is_an_error_with_the_report() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let put = |content: &str| json!([{"path": "f", "op": "put", "content": {"inline": content}}]);
+    let base = json!({"message": "t0", "changes": put("1\n2\n3\n")});
+    let t0 = server.ok("commit", base)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": t0, "create": true}),
+    );
+    let on_t0 = |content: &str| json!({"message": content, "parent": t0, "changes": put(content)});
+    let head = server.ok("commit", on_t0("1\nours\n3\n"))["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut published = on_t0("1\ntheirs\n3\n");
+    published["advance"] = json!("main");
+    let theirs = server.ok("commit", published)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let call = server.call("land", json!({"head": head}));
+    assert_eq!(call.result["isError"], true, "{}", call.envelope);
+    let error = &call.envelope["error"];
+    assert_eq!(
+        (&error["code"], &error["exit"], &error["retryable"]),
+        (&json!("E_CONFLICT"), &json!(3), &json!(false)),
+        "{error}"
+    );
+    let report = &error["details"]["report"];
+    assert_eq!(
+        (&report["base"], &report["ours"], &report["theirs"]),
+        (&json!(t0), &json!(head), &json!(theirs))
+    );
+    assert_eq!(report["kinds"], json!(["content"]));
+    let file = &report["files"][0];
+    assert_eq!(
+        (&file["path"], &file["kind"]),
+        (&json!("f"), &json!("content"))
+    );
+    assert_eq!(
+        file["hunks"][0]["theirs"],
+        json!({"first": 2, "last": 2, "text": "theirs\n"})
+    );
+    assert_eq!(
+        (&file["theirs_changeset"], &file["theirs_agent"]),
+        (&json!(theirs), &json!(AGENT))
+    );
+    let hint = error["hint"].as_str().unwrap();
+    assert!(
+        hint.starts_with(&format!("swarmops cat {theirs}:f, then ")),
+        "{hint}"
+    );
+    assert_eq!(
+        refs_of(&mut server),
+        json!([{"name": "main", "target": theirs, "version": 2}]),
+        "nothing recorded"
+    );
+
+    let cut = server.err(
+        "land",
+        json!({"head": head, "max_conflict_bytes": 0}),
+        "E_CONFLICT",
+    );
+    let cut = &cut["error"]["details"]["report"];
+    assert_eq!(cut["truncated"], true, "{cut}");
+    assert!(
+        cut["files"][0]["hunks"][0]["theirs"].get("text").is_none(),
+        "{cut}"
+    );
     server.finish_clean();
 }
 
@@ -1917,6 +2068,7 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     assert_no_references(name, schema);
     let (read_only, destructive, idempotent) = match name {
         "commit" | "blob_put" => (false, false, false),
+        "land" => (false, false, true),
         "ref_set" | "ref_delete" | "undo" => (false, true, true),
         _ => (true, false, true),
     };

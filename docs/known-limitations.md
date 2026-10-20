@@ -151,11 +151,6 @@ left).
 
 ## Commits, refs and history
 
-- **No merge.** An agent that loses a ref race and commits its change again on top of the
-  winner's can overwrite the winner's edits to the same files: M1 has no three-way merge. So
-  can a `commit --advance` without `--parent`: it builds on the ref's head when it runs, and its
-  move catches only a race from then on, not edits that landed since the agent read the files
-  it puts whole. *Target: M4 (merge and landing). Found: M1 Task 4b.*
 - **A retried commit that omits its parent can record a second changeset.** `commit --key` (a
   uuid v7) makes a retry of the same request replay the first attempt: the commit signs at the
   key's time and records the key as `commit_key`, so on the same parent it is the same

@@ -73,12 +73,12 @@ planned, each with its milestone.
 | Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
 | Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, `git grep <tree>` and sparse checkouts. |
 | Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
-| Conflicts | Today the one signal is `E_CAS_MISMATCH`, with the ref's actual target. 📋 M4: three-way merge, conflicts reported per hunk as JSON and resolved without a checkout. | **Behind** today: git merges without a checkout (`git merge-tree`), with typed conflict records. M4 is **not yet comparable**. |
+| Conflicts | ✅ M4: `land` merges three-way without a checkout and reports a conflict as `E_CONFLICT` with a JSON report: each conflicting file's kind, its hunks (each side's lines, numbered as `cat --lines` takes them, and their text) and the target's changeset and agent that last changed it. 📋 M4: resolving them without a checkout (`land --resolve`). | **Parity** with `git merge-tree --write-tree`, which merges without a checkout and reports typed conflicts; resolving is **not yet comparable**. |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | Nothing today. 📋 M11: offline-first sync, a full store on every host, `fetch` and `push` against one upstream. | **Behind**: git clones, fetches and pushes over any transport, and bundles without one. |
 | Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. 📋 M3: git import. 📋 M8: git export. No user hooks, signing, submodules or LFS. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
 | Maturity | Pre-release: no tag yet, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
-| Landing | Today an agent that loses a ref race re-applies its edits on the winner's head by hand, commits again and retries the compare-and-swap. 📋 M4: `land`. | **Not yet comparable**; the loop by hand is behind. |
+| Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load. |
 
 No git baseline has been measured yet: these verdicts come from the design, the code, and git's
 own documentation and source, not from a benchmark. The first measured comparison is planned for
@@ -181,7 +181,14 @@ so verify --deep
 `--advance main` publishes the commit: the same transaction moves `main` to the new changeset,
 only if `main` still names `--parent` (for a root commit, as here, only if `main` does not exist
 yet), and otherwise the commit records nothing and fails with `E_CAS_MISMATCH`. A later publish
-is `so commit -m … --changes … --parent <the id main held when you read it> --advance main`. To
+is a commit, then a land: `so commit -m … --changes … --parent <the id main held when you read
+it>` records your change without moving any ref, and `so land <that changeset> --key <a new uuid
+v7>` merges it three-way onto `main`'s head, whatever `main` gained since, and moves `main` to
+the result in one transaction, as one new changeset whose parent is that head. A land that loses
+a race to another publish merges again and retries by itself; a change that conflicts with what
+`main` gained fails with `E_CONFLICT` (exit 3) and the conflict report in `details.report`,
+recording nothing; and the same land run again with its key replays it (`status: replayed`).
+`commit --parent <that id> --advance main` publishes in one step while `main` has not moved. To
 move a ref past several changesets at once, commit them with `--parent`, then move it once with
 `so ref set main <last> --expect <old>` (or `--create`).
 
@@ -196,10 +203,10 @@ Every command, its revisions and change lists, and its output are in [Commands](
 
 ## MCP
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
-agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
-as tools: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`,
-`diff`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `blob_put`, `blob_has` and
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an agent
+harness that speaks the Model Context Protocol, such as Claude Code, calls the operations as tools:
+`repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`,
+`op_log`, `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has` and
 `verify`. A tool's arguments are the operation's request: its `inputSchema` is the request type's
 schema, as `swarmops schema <Type>` prints it, with the definitions it refers to written in place,
 and kept a plain object: a rule across fields that the type's schema states with a top-level
@@ -301,6 +308,7 @@ and starts no server either.
 | `info` | Describe the store: its id, name, `main`, and how many changesets and refs it holds. |
 | `whoami` | The identity this caller's changes carry. |
 | `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--key UUID] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. With `--key`, a uuid v7, the same commit run again replays the first run (`replayed: true`) instead of recording a second changeset. |
+| `land HEAD [--base REV] [--target REF] [-m MSG] [--key KEY] [--max-attempts N] [--max-conflict-bytes N]` | Merge HEAD's change (its first-parent chain after `--base`, by default the merge base of HEAD and REF's head) three-way onto REF (`main` by default) and publish it there as one new changeset in one transaction, merging again and retrying, up to N attempts, when REF moves meanwhile. A conflict is `E_CONFLICT` (exit 3) with the report in `details.report`, and nothing is recorded; with `--key`, the same land run again replays (`status: replayed`). |
 | `blob put FILE\|-`, `blob has ID…` | Store a file's content (stdin's for `-`) as a blob, outside any commit, and print its id; or list which of the ids the store holds blobs under. A change names a stored blob by id. |
 | `resolve REV` | The full id of the changeset REV names, and its kind: `ref` when REV is exactly a ref's name, `changeset` otherwise. |
 | `cat REV:PATH [--offset N \| --lines A-B] [--max-bytes N]` | One file at a revision, or part of it, from byte N or lines A to B: UTF-8 text, or base64. A read cut short gives `next_offset`, where `--offset` reads on. |
@@ -329,11 +337,12 @@ follow from the paths. A commit's contents hold at most 1 GiB together (a blob n
 nothing) and a change list's text at most 64 MiB (`E_TOO_LARGE` past either), so a large file
 goes as `file` content, or through `blob put`. A ref moves only by compare-and-swap: when another agent moved it first,
 `ref set` and `commit --advance` fail with `E_CAS_MISMATCH` (exit 4) and the ref's target in
-`details.actual` (a `commit --advance` that fails so records nothing). Then read the files you
-changed at `<actual>`, re-apply your edits to them (M1 has no merge, so re-sending your old
-whole-file puts would revert the winner's edits to shared files), and publish with
-`commit --parent <actual> --advance <ref>`, or commit with `--parent <actual>` and retry
-`ref set` with `--expect <actual>`.
+`details.actual` (a `commit --advance` that fails so records nothing). Then land your change:
+commit it on the head you read, and `land` merges it three-way onto the ref's head however far
+the ref moved. Re-sending your old whole-file puts on top of `<actual>` would revert the
+winner's edits to shared files; to publish without a land, read the files you changed at
+`<actual>`, re-apply your edits to them, and publish with `commit --parent <actual> --advance
+<ref>`, or commit with `--parent <actual>` and retry `ref set` with `--expect <actual>`.
 
 ### The store and the identity
 
@@ -369,8 +378,8 @@ store, never a host path), and a `hint`, often the next command to run. The exit
 | 0 | Success. | |
 | 1 | The operation failed. | `E_EMPTY_COMMIT`, `E_STORE_CORRUPT`, `E_IO` |
 | 2 | A malformed request or command line. | `E_INVALID_ARG` |
-| 3 | Reserved for conflicts (M4); no M1 code exits with it. | |
-| 4 | Retryable: the operation can succeed if run again (after a CAS mismatch, on top of `details.actual`, with your edits re-applied there). | `E_CAS_MISMATCH`, `E_BUSY`, `E_IO_TRANSIENT` |
+| 3 | A conflict: `land` could not merge the change onto the target, and recorded nothing; `details.report` says where. | `E_CONFLICT` |
+| 4 | Retryable: the operation can succeed if run again (after a CAS mismatch, by a land, or on top of `details.actual` with your edits re-applied there). | `E_CAS_MISMATCH`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY`, `E_IO_TRANSIENT` |
 | 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED` |
 | 6 | Something it names does not exist. | `E_NOT_A_REPO`, `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND` |
 

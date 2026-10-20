@@ -21,12 +21,14 @@ use swarmops_api::{
     TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
     ChangesetId, DeltaEntry, DeltaOp, EntryKind, EntryTarget, LeafKind, ObjectId, RepoPath,
     Signature,
 };
+use swarmops_repo::LandRequest;
 use swarmops_repo::merge::line_diff::{
     DiffLine, UnifiedHunk, is_text, line_hunks, line_stats, unified,
 };
@@ -41,7 +43,7 @@ use crate::content;
 use crate::error::{During, details, error, hint, one_line, op, repo_error, shell_word};
 
 /// The agent a changeset is attributed to when its metadata names none.
-const UNKNOWN_AGENT: &str = "unknown/unknown";
+pub(crate) const UNKNOWN_AGENT: &str = "unknown/unknown";
 
 /// A snapshot of the store's metadata, in which a request makes all its reads.
 type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
@@ -52,6 +54,16 @@ const LANDER_KEY: &str = "lander";
 
 /// The metadata key of a land's idempotency key, when it had one.
 const LAND_KEY_KEY: &str = "land_key";
+
+/// The metadata key of the run of who landed a changeset, when the lander has a run id.
+const LANDER_RUN_ID_KEY: &str = "lander_run_id";
+
+/// The metadata key of the chain a land squashed: the changesets' ids, oldest first, in hex, a
+/// space between each two.
+const SQUASHED_FROM_KEY: &str = "squashed_from";
+
+/// The longest land key: 64 characters, a changeset id's hex digits (M11's form).
+const MAX_LAND_KEY: usize = 64;
 
 /// The operations over a store on the local filesystem: [`StoreOps`], run in this process with
 /// the repository library.
@@ -117,6 +129,21 @@ const LAND_KEY_KEY: &str = "land_key";
 ///   under the store's lock that the changeset is there (with `advance`, that the ref names it;
 ///   a ref that names another is `E_CAS_MISMATCH`). A keyed commit without `parent` builds on
 ///   the head as it is when it runs, so a retry after that head moved elsewhere commits again.
+/// - `land` merges `head`'s change, its first-parent chain after `base` (when omitted, the merge
+///   base of `head` and the target's head, along first parents), three-way onto `target` (`main` or
+///   `release/<name>`, which must exist), and publishes the result there as one new changeset,
+///   whose parent is the target's head, with the target's move to it, in one transaction
+///   (operations spec §3, the store-only block). The changeset's author is `head`'s and its
+///   committer the caller, signed as a commit is; its metadata holds `head`'s `agent` and `run_id`,
+///   the caller's agent as `lander` and run id as `lander_run_id`, the key as `land_key` and the
+///   chain as `squashed_from`. A target that moved since the land read it makes it merge again onto
+///   the new head and retry, `max_attempts` times at most. A keyed land run again finds the
+///   changeset it landed on the target and replays it (`replayed`), decided under the store's lock,
+///   as a keyed commit's replay is. A key that is not 1 to 64 letters, digits and `-` is
+///   `E_INVALID_ARG`, naming it in `details.idempotency_key`, and so is a `max_attempts` outside 1
+///   to 32 (`details.max_attempts`), both checked before anything is resolved. What `head`, `base`
+///   and the target name in the request's snapshot is recorded in its [`Resolved`]; each attempt
+///   reads the target again, and `rebased_onto` says which head the change landed on.
 /// - `blob_put` stores its content as a blob, by the change list's rules for content (`blob`
 ///   content aside, which names a blob already stored), durable when it returns, and says
 ///   whether it placed it (`written`). It needs an identity, which it records nowhere.
@@ -145,7 +172,9 @@ const LAND_KEY_KEY: &str = "land_key";
 ///   when it records no agent); `created_at` is the committer's time in milliseconds (0 before
 ///   1970); a metadata value that is not UTF-8 is given in base64 under its key with `:b64`
 ///   appended, a suffix commits refuse in a key, so `k:b64` is always the base64 of `k`'s
-///   value; `changes` holds at most `max_changes` entries.
+///   value; `changes` holds at most `max_changes` entries. A changeset a land made also names
+///   its lander (its `lander` and `lander_run_id` metadata), its `land_key` and the chain it
+///   squashed (`squashed_from`, oldest first).
 /// - `log` follows first parents from `rev` (`main` when omitted) or, given a `cursor`, from the
 ///   first parent of the changeset it names, which must be a full id the store holds; a page
 ///   is `truncated` when older history follows its last entry. With `paths` (each a repository
@@ -245,6 +274,20 @@ const LAND_KEY_KEY: &str = "land_key";
 ///   (`last` null when the store has none); the hint is `swarmops op log`.
 /// - `E_NOTHING_TO_UNDO` `{op}`: `NothingToUndo`, an `undo` of an operation that left every ref
 ///   where it found it; the hint is `swarmops op log`.
+/// - `E_CONFLICT` `{report}` (exit 3): `Conflict`, a land whose change conflicts with the target's
+///   head, which recorded nothing. `report` is the conflict report (operations spec §3): each
+///   conflicting file with its kind, its blobs, its hunks (each side's lines numbered from 1, both
+///   ends included, and their texts while they fit within the request's `max_conflict_bytes`, else
+///   `truncated`) and the target's changeset and agent that last changed it. The hint reads the
+///   target's side of the first conflicting path, then names the land again with its resolutions.
+/// - `E_NOTHING_TO_LAND` `{reason}`: `NothingToLand`, a land whose head is on the target
+///   (`on_target`) or whose change the target holds already (`no_changes`).
+/// - `E_CAS_RETRY_EXHAUSTED` (retryable) `{attempts, actual}`: `RetryExhausted`, a land whose
+///   target moved before each of its attempts could publish, which recorded nothing; the hint says
+///   to run it again.
+/// - `E_INVALID_ARG`, of a land: `KeyReused` `{key, landed}` (a key that landed another change; the
+///   hint is `swarmops show <landed>`), `MergeChangeset` `{changeset}`, `BaseNotAncestor`
+///   `{base, head}` and `NoMergeBase` `{head, theirs}` (the hint is `swarmops log <head>`).
 /// - `E_BUSY` (retryable): the store's `Busy` (a writer's lock wait ran out) or
 ///   `SnapshotContended` (a read's snapshot rounds ran out); either way nothing was committed (a
 ///   commit's flushed objects may remain, for GC). The hint says which, and to retry.
@@ -996,6 +1039,81 @@ impl StoreOps for Recording<'_> {
         })
     }
 
+    fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError> {
+        let LandReq {
+            head,
+            base,
+            target,
+            message,
+            idempotency_key,
+            max_attempts,
+            max_conflict_bytes,
+        } = req;
+        // The request's own rules are checked before anything is resolved or read.
+        if let Some(key) = &idempotency_key {
+            land_key(key)?;
+        }
+        if !(1..=MAX_LAND_ATTEMPTS).contains(&max_attempts) {
+            return Err(error(
+                ErrorCode::InvalidArg,
+                format!("max_attempts is {max_attempts}, not 1 to {MAX_LAND_ATTEMPTS}"),
+            )
+            .with_details(details([("max_attempts", max_attempts.into())])));
+        }
+        // The revisions resolve in one snapshot, and the target's head is recorded as it names
+        // it; the land reads the target again in each attempt's own snapshot.
+        let read = self.snapshot()?;
+        let head = self.resolve(&read, &head)?;
+        let base = match &base {
+            Some(rev) => Some(self.resolve(&read, rev)?),
+            None => None,
+        };
+        self.head(&read, &target)?;
+        drop(read);
+        let mut lander_metadata = Vec::new();
+        if let Some(run_id) = who.run_id() {
+            let run_id = run_id.as_bytes().to_vec();
+            lander_metadata.push((LANDER_RUN_ID_KEY.to_owned(), run_id));
+        }
+        let land = LandRequest {
+            base,
+            key: idempotency_key,
+            message: message.map(String::into_bytes),
+            lander_metadata,
+            max_attempts,
+            ..LandRequest::new(head, &target, native_signature(who, None))
+        };
+        let outcome = self.ops.repo.land(land).map_err(|e| {
+            let message = e.to_string();
+            match e {
+                RepoError::Conflict(conflicts) => {
+                    crate::error::conflict(&conflicts, message, max_conflict_bytes)
+                }
+                e => op(e),
+            }
+        })?;
+        Ok(LandResp {
+            status: match outcome.status {
+                swarmops_repo::LandStatus::Landed => LandStatus::Landed,
+                swarmops_repo::LandStatus::Replayed => LandStatus::Replayed,
+            },
+            landed: outcome.landed.to_string(),
+            rebased_onto: outcome.rebased_onto.to_string(),
+            target,
+            base: outcome.base.to_string(),
+            attempts: outcome.attempts,
+            relocated: outcome.relocated,
+            files_changed: to_u64(outcome.files_changed),
+            squashed_from: (outcome.squashed_from.iter())
+                .map(ToString::to_string)
+                .collect(),
+            auto_merged: (outcome.auto_merged.iter())
+                .map(ToString::to_string)
+                .collect(),
+            warnings: outcome.warnings,
+        })
+    }
+
     fn blob_put(&self, _who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
         let BlobPutReq { content } = req;
         let stored = (self.ops.repo)
@@ -1137,12 +1255,13 @@ impl StoreOps for Recording<'_> {
             parents: changeset.parents.iter().map(ToString::to_string).collect(),
             root: changeset.root.to_string(),
             author: attribution(&changeset.metadata),
-            // A land's fields, which `land` (M4 Task 7) fills from the metadata it records.
-            lander: None,
+            lander: lander(&changeset.metadata),
             created_at: created_at(&changeset.committer),
             message: lossy(&changeset.message),
-            land_key: None,
-            squashed_from: Vec::new(),
+            land_key: metadata_text(&changeset.metadata, LAND_KEY_KEY),
+            squashed_from: (metadata_text(&changeset.metadata, SQUASHED_FROM_KEY))
+                .map(|chain| chain.split_whitespace().map(str::to_owned).collect())
+                .unwrap_or_default(),
             changes: changeset
                 .delta
                 .iter()
@@ -1488,6 +1607,10 @@ impl StoreOps for LocalOps {
         self.recording(&Resolved::default()).commit(who, req)
     }
 
+    fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError> {
+        self.recording(&Resolved::default()).land(who, req)
+    }
+
     fn blob_put(&self, who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
         self.recording(&Resolved::default()).blob_put(who, req)
     }
@@ -1637,8 +1760,8 @@ fn history_entry(read: &Snapshot<'_>, event: &PathEvent) -> Result<PathHistoryEn
 
 /// The message of a `ref_set` that lost to another move, which left the ref at `actual`
 /// (`what` says how): commit the change again on top of `actual`, its edits re-applied to the
-/// content there (M1 has no merge, so whole files sent again would revert the other's edits),
-/// then expect `actual`.
+/// content there (whole files sent again would revert the other's edits; a land merges them
+/// instead), then expect `actual`.
 fn retry_on(what: &str, actual: ChangesetId) -> String {
     format!(
         "{what}: commit your change on top of it (--parent {actual}), then retry with --expect \
@@ -1789,17 +1912,45 @@ impl CommitKey {
 
 /// Whom a changeset's `metadata` attributes it to.
 fn attribution(metadata: &[(String, Vec<u8>)]) -> Attribution {
-    let text = |key: &str| {
-        metadata
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, value)| lossy(value))
-    };
     Attribution {
-        agent: text("agent").unwrap_or_else(|| UNKNOWN_AGENT.to_owned()),
-        run_id: text("run_id"),
+        agent: metadata_text(metadata, "agent").unwrap_or_else(|| UNKNOWN_AGENT.to_owned()),
+        run_id: metadata_text(metadata, "run_id"),
         on_behalf_of: None,
     }
+}
+
+/// Who landed a changeset whose metadata is `metadata`, if a land made it: its `lander` and, when
+/// present, its `lander_run_id`.
+fn lander(metadata: &[(String, Vec<u8>)]) -> Option<Attribution> {
+    Some(Attribution {
+        agent: metadata_text(metadata, LANDER_KEY)?,
+        run_id: metadata_text(metadata, LANDER_RUN_ID_KEY),
+        on_behalf_of: None,
+    })
+}
+
+/// The value of `key` in a changeset's `metadata`, as text (invalid UTF-8 replaced), if it has
+/// the key.
+fn metadata_text(metadata: &[(String, Vec<u8>)], key: &str) -> Option<String> {
+    (metadata.iter())
+        .find(|(k, _)| k == key)
+        .map(|(_, value)| lossy(value))
+}
+
+/// `E_INVALID_ARG`, naming it in `details.idempotency_key`, unless `key`, a land's idempotency
+/// key, is 1 to 64 ASCII letters, digits and `-` (operations spec §3 (a)): a uuid v7, or a
+/// changeset id's 64 hex digits.
+fn land_key(key: &str) -> Result<(), OpError> {
+    let allowed = |b: u8| b.is_ascii_alphanumeric() || b == b'-';
+    if (1..=MAX_LAND_KEY).contains(&key.len()) && key.bytes().all(allowed) {
+        return Ok(());
+    }
+    Err(error(
+        ErrorCode::InvalidArg,
+        format!("idempotency_key {key:?} is not 1 to {MAX_LAND_KEY} letters, digits and '-'"),
+    )
+    .with_details(details([("idempotency_key", key.into())]))
+    .with_hint("make a new uuid v7 for each land, and give it again only to retry that land"))
 }
 
 /// When a changeset with `committer` was recorded, in Unix milliseconds: 0 before 1970.
@@ -3149,5 +3300,119 @@ mod tests {
             );
             assert_eq!((page.from, page.to, page.files.len()), (c1, c2, 1));
         }
+    }
+
+    /// A land that loses its race at every attempt fails `E_CAS_RETRY_EXHAUSTED` (exit 4,
+    /// retryable), naming how many attempts it made and what the target names after the last,
+    /// with a hint to run it again; it recorded nothing, and run again it lands. Here the land
+    /// makes one attempt, and another lander moves main while it flushes its changeset's objects.
+    #[test]
+    fn retry_exhausted_is_retryable_with_attempts_and_actual() {
+        use std::sync::Mutex;
+
+        use swarmops_store::RealFs;
+        use swarmops_testkit::fs::{Call, Watch, Watched};
+
+        /// Moves main once, as another lander would: at the land's first flush of objects (its
+        /// first `fsync_dir` under `objects/`, outside the lock), it publishes a change on main's
+        /// head through a handle of its own on the real filesystem.
+        struct Race {
+            root: Utf8PathBuf,
+            /// The changeset it moved main to, once it has.
+            raced: Mutex<Option<String>>,
+        }
+
+        impl Watch for Race {
+            fn before(&self, call: &Call<'_>) -> io::Result<()> {
+                let at = call.path().strip_prefix(&self.root).unwrap_or(call.path());
+                let mut raced = self.raced.lock().unwrap();
+                if call.method == "fsync_dir" && at.starts_with("objects") && raced.is_none() {
+                    let other = Identity::parse("agent/worker-9").unwrap();
+                    let req = CommitReq {
+                        parent: None,
+                        changes: vec![ChangeInput {
+                            path: "race".to_owned(),
+                            op: ChangeOp::Put,
+                            content: Some(ContentInput::Inline("theirs\n".to_owned())),
+                            mode: None,
+                        }],
+                        message: "a race".to_owned(),
+                        advance: Some("main".to_owned()),
+                        idempotency_key: None,
+                        allow_empty: false,
+                    };
+                    let won = LocalOps::open(&self.root).unwrap().commit(&other, req);
+                    *raced = Some(won.unwrap().changeset);
+                }
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let commit = |parent: Option<&str>, path: &str, advance: Option<&str>| {
+            let req = CommitReq {
+                parent: parent.map(Rev::from),
+                changes: vec![ChangeInput {
+                    path: path.to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline("ours\n".to_owned())),
+                    mode: None,
+                }],
+                message: path.to_owned(),
+                advance: advance.map(str::to_owned),
+                idempotency_key: None,
+                allow_empty: false,
+            };
+            ops.commit(&who, req).unwrap().changeset
+        };
+        let t0 = commit(None, "base", Some("main"));
+        let head = commit(Some(&t0), "change", None);
+        let race = Arc::new(Race {
+            root: root.clone(),
+            raced: Mutex::new(None),
+        });
+        let racing = ops_on(&root, Watched(Arc::clone(&race), RealFs));
+        let land: LandReq =
+            serde_json::from_value(json!({"head": head, "max_attempts": 1})).unwrap();
+        let frames = || {
+            ops.op_log(OpLogReq {
+                before: None,
+                limit: 1,
+                max_changesets: 1,
+            })
+            .unwrap()
+            .ops[0]
+                .op
+        };
+        let before = frames();
+
+        let error = racing.land(&who, land.clone()).unwrap_err();
+        let actual = race.raced.lock().unwrap().clone().expect("the race ran");
+        assert_eq!(
+            (error.code.as_str(), error.exit, error.retryable),
+            ("E_CAS_RETRY_EXHAUSTED", 4, true),
+            "{error:?}"
+        );
+        assert_eq!(
+            Value::Object(error.details.clone()),
+            json!({"attempts": 1, "actual": actual})
+        );
+        assert_eq!(
+            error.hint.as_deref(),
+            Some("run the land again: nothing of this one was recorded")
+        );
+        let main = || ops.repo_info(InfoReq {}).unwrap().main;
+        assert_eq!(main().as_deref(), Some(actual.as_str()));
+        assert_eq!(frames(), before + 1, "the race's frame alone");
+
+        let again = ops.land(&who, land).unwrap();
+        assert_eq!(
+            (again.status, again.rebased_onto.as_str(), again.attempts),
+            (LandStatus::Landed, actual.as_str(), 1)
+        );
+        assert_eq!(main(), Some(again.landed));
     }
 }

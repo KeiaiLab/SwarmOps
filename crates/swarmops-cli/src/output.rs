@@ -10,12 +10,19 @@
 //! lines indented by two spaces; control characters other than line breaks escaped. A failure
 //! prints `error: <code>: <message>`, then its details, `retryable: true` when it is, and the
 //! hint. The exit code is the same in both formats.
+//!
+//! A land prints one line in place of its result's lines,
+//! `landed <id> on <target> (onto <head>, attempt <n>)` (with `, relocated` before the closing
+//! parenthesis when the publish moved it onto a newer head) or `replayed <id>`, then its warnings
+//! as `warnings[i]` lines. An `E_CONFLICT` prints one `conflict: <kind> <path>` line for each
+//! conflicting file in place of its details, the report.
 
 use std::fmt;
 use std::fmt::Write as _;
 
 use serde::Serialize;
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
+use serde_json::{Map, Value};
 use swarmops_api::Envelope;
 
 /// How a command prints its envelope.
@@ -78,7 +85,16 @@ fn json<T: Serialize>(envelope: &Envelope<T>, pretty: bool) -> String {
 fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
     let mut out = String::new();
     if let Some(result) = &envelope.result {
-        lines(&mut out, "", &Tree::of(result));
+        let result = Tree::of(result);
+        match landed(&envelope.op, &result) {
+            Some(summary) => {
+                line(&mut out, "", &summary);
+                if let Some(warnings) = result.get("warnings") {
+                    lines(&mut out, "warnings", warnings);
+                }
+            }
+            None => lines(&mut out, "", &result),
+        }
     }
     if let Some(error) = &envelope.error {
         line(
@@ -86,8 +102,17 @@ fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
             "error",
             &format!("{}: {}", printable(&error.code), printable(&error.message)),
         );
-        for (key, value) in &error.details {
-            lines(&mut out, &format!("details.{key}"), &Tree::of(value));
+        match conflicts(&error.code, &error.details) {
+            Some(files) => {
+                for file in files {
+                    line(&mut out, "conflict", &file);
+                }
+            }
+            None => {
+                for (key, value) in &error.details {
+                    lines(&mut out, &format!("details.{key}"), &Tree::of(value));
+                }
+            }
         }
         if error.retryable {
             line(&mut out, "retryable", "true");
@@ -97,6 +122,53 @@ fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
         }
     }
     out
+}
+
+/// The one line a land's `result` prints as ([the module documentation](self)), for operation
+/// `op`; `None` for another operation's, or a result without what the line says, which prints
+/// as `key: value` lines.
+fn landed(op: &str, result: &Tree) -> Option<String> {
+    if op != "land" {
+        return None;
+    }
+    let text = |key: &str| match result.get(key)? {
+        Tree::String(text) => Some(printable(text)),
+        _ => None,
+    };
+    let landed = text("landed")?;
+    match text("status")?.as_str() {
+        "replayed" => Some(format!("replayed {landed}")),
+        "landed" => {
+            let Tree::Number(attempts) = result.get("attempts")? else {
+                return None;
+            };
+            let relocated = match result.get("relocated") {
+                Some(Tree::Bool(true)) => ", relocated",
+                _ => "",
+            };
+            let (target, onto) = (text("target")?, text("rebased_onto")?);
+            Some(format!(
+                "landed {landed} on {target} (onto {onto}, attempt {attempts}{relocated})"
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// The lines of an `E_CONFLICT` (`code`) whose `details` hold its report: `<kind> <path>` for each
+/// conflicting file; `None` for another error, or details without such a report, which print as
+/// they are.
+fn conflicts(code: &str, details: &Map<String, Value>) -> Option<Vec<String>> {
+    if code != "E_CONFLICT" {
+        return None;
+    }
+    let files = details.get("report")?.get("files")?.as_array()?;
+    (files.iter())
+        .map(|file| {
+            let field = |key: &str| file.get(key)?.as_str().map(printable);
+            Some(format!("{} {}", field("kind")?, field("path")?))
+        })
+        .collect()
 }
 
 /// `tree`, under `key` (`""` at the top), as `key: value` lines.
@@ -173,6 +245,16 @@ impl Tree {
     fn of<T: Serialize + ?Sized>(value: &T) -> Tree {
         let text = serde_json::to_string(value).expect("an API value serializes");
         serde_json::from_str(&text).expect("serde_json reads back what it wrote")
+    }
+
+    /// The member `key` of an object; `None` for another value, or an object without it.
+    fn get(&self, key: &str) -> Option<&Tree> {
+        match self {
+            Tree::Object(members) => (members.iter())
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value),
+            _ => None,
+        }
     }
 }
 
@@ -366,6 +448,65 @@ mod tests {
         assert_eq!(
             render(&usage, Format::Human).stdout,
             "error: E_INVALID_ARG: bad\nhint: |\n  Usage: x\n  more\n"
+        );
+    }
+
+    /// `land` prints one line in human text: where it landed, or that it replayed, then any
+    /// warnings; and a conflict prints each conflicting path with its kind, one a line, in place
+    /// of the report.
+    #[test]
+    fn human_text_of_a_land() {
+        let landed = json!({"status": "landed", "landed": "l1", "rebased_onto": "h0",
+                            "target": "main", "base": "b0", "attempts": 2, "relocated": false,
+                            "files_changed": 1, "squashed_from": ["c1"]});
+        let human = |result: &Value| render(&Envelope::ok("land", result, meta()), Format::Human);
+        assert_eq!(
+            human(&landed),
+            Printed {
+                stdout: "landed l1 on main (onto h0, attempt 2)\n".to_owned(),
+                exit: 0,
+            }
+        );
+        let mut relocated = landed.clone();
+        relocated["relocated"] = json!(true);
+        relocated["target"] = json!("release/1.0");
+        relocated["warnings"] = json!(["the index sync failed"]);
+        assert_eq!(
+            human(&relocated).stdout,
+            "landed l1 on release/1.0 (onto h0, attempt 2, relocated)\n\
+             warnings[0]: the index sync failed\n"
+        );
+        let mut replayed = landed.clone();
+        replayed["status"] = json!("replayed");
+        assert_eq!(human(&replayed).stdout, "replayed l1\n");
+        // Another operation's result keeps its key: value lines.
+        let other = render(&Envelope::ok("show", &landed, meta()), Format::Human);
+        assert!(
+            other.stdout.contains("\nstatus: landed\n") && !other.stdout.contains("landed l1"),
+            "{}",
+            other.stdout
+        );
+
+        let file = |path: &str, kind: &str| json!({"path": path, "kind": kind});
+        let report = json!({"base": "b0", "ours": "c1", "theirs": "h0",
+                            "files": [file("src/a.rs", "content"), file("b\nc", "delete_modify")],
+                            "kinds": ["content", "delete_modify"], "truncated": false});
+        let mut details = Map::new();
+        details.insert("report".to_owned(), report);
+        let error = OpError::new(ErrorCode::Conflict, "2 path(s) conflict")
+            .with_details(details)
+            .with_hint("swarmops cat h0:src/a.rs");
+        let failed: Envelope<()> = Envelope::err("land", error, meta());
+        assert_eq!(
+            render(&failed, Format::Human),
+            Printed {
+                stdout: "error: E_CONFLICT: 2 path(s) conflict\n\
+                         conflict: content src/a.rs\n\
+                         conflict: delete_modify b\\nc\n\
+                         hint: swarmops cat h0:src/a.rs\n"
+                    .to_owned(),
+                exit: 3,
+            }
         );
     }
 }

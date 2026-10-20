@@ -7,9 +7,9 @@ use std::io;
 
 use camino::Utf8Path;
 use serde_json::{Map, Value};
-use swarmops_api::{ErrorCode, OpError};
+use swarmops_api::{DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, OpError};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
-use swarmops_repo::{RepoError, StoreError};
+use swarmops_repo::{MergeConflicts, RepoError, StoreError};
 use swarmops_store::{IoFailure, Layout};
 
 use crate::local::cas_mismatch;
@@ -107,8 +107,7 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             actual,
             ..
         } => undo_blocked(number, &name, expected, actual),
-        // A land's (M4): `land` serves them from M4 Task 7 on, which adds the conflict report to
-        // E_CONFLICT's details.
+        // A land's (M4).
         e @ (RepoError::Conflict(_)
         | RepoError::NothingToLand(_)
         | RepoError::RetryExhausted { .. }
@@ -126,11 +125,12 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
 }
 
 /// The operations-spec error for a land's error `e`, whose message is `message`: [`repo_error`]'s
-/// table, a land's rows (M4). E_CONFLICT has no details until `land` builds its report (M4 Task
-/// 7). Any other error is [`repo_error`]'s.
+/// table, a land's rows (M4). E_CONFLICT's report holds hunk texts within the default
+/// `max_conflict_bytes` here; `land` gives it its request's ([`conflict`]). Any other error is
+/// [`repo_error`]'s.
 fn land_error(e: RepoError, message: String) -> OpError {
     match e {
-        RepoError::Conflict(_) => error(ErrorCode::Conflict, message),
+        RepoError::Conflict(conflicts) => conflict(&conflicts, message, DEFAULT_MAX_CONFLICT_BYTES),
         RepoError::NothingToLand(reason) => error(ErrorCode::NothingToLand, message)
             .with_details(details([("reason", reason.as_str().into())])),
         RepoError::RetryExhausted { attempts, actual } => {
@@ -163,6 +163,28 @@ fn land_error(e: RepoError, message: String) -> OpError {
             .with_hint(hint(format!("swarmops log {head}"))),
         other => repo_error(other, During::Op),
     }
+}
+
+/// `E_CONFLICT` for a land whose change conflicts with its target as `conflicts` say, whose
+/// message is `message`: `details.report` is the conflict report, its hunk texts within
+/// `max_bytes` ([`crate::conflict::report`]), and the hint reads the target's side of the first
+/// conflicting path, then names the land again with its resolutions, against the target's head
+/// the report names (`land --resolve`).
+pub(crate) fn conflict(conflicts: &MergeConflicts, message: String, max_bytes: u64) -> OpError {
+    let report = crate::conflict::report(conflicts, max_bytes);
+    let side = match report.files.first() {
+        Some(file) => shell_word(&format!("{}:{}", report.theirs, file.path)),
+        None => format!("{}:<path>", report.theirs),
+    };
+    let next = hint(format!(
+        "swarmops cat {side}, then swarmops land {} --resolve <file> with each path's resolution \
+         and against = {}",
+        report.ours, report.theirs
+    ));
+    let report = serde_json::to_value(&report).expect("a conflict report serializes");
+    error(ErrorCode::Conflict, message)
+        .with_details(details([("report", report)]))
+        .with_hint(next)
 }
 
 /// The operations-spec error for store error `e`, whose message is `message`, raised while
@@ -578,15 +600,18 @@ mod tests {
         ]
     }
 
-    /// A land's errors carry what they are about: the reason there is nothing to land, the
-    /// attempts made and what the target names after the last (retryable, exit 4, with a hint to
-    /// land again), the key and the changeset it landed, the merge changeset, the base and the
-    /// head. E_CONFLICT carries no details before `land` builds its report.
+    /// A land's errors carry what they are about: the conflict report (exit 3, not retryable,
+    /// with a hint that reads the target's side and names the land with its resolutions), the
+    /// reason there is nothing to land, the attempts made and what the target names after the last
+    /// (retryable, exit 4, with a hint to land again), the key and the changeset it landed, the
+    /// merge changeset, the base and the head.
     #[test]
     fn land_errors_carry_their_details() {
         let full = id().to_string();
+        let report = serde_json::json!({"base": full, "ours": full, "theirs": full, "files": [],
+                                        "kinds": [], "truncated": false});
         let want = [
-            ("E_CONFLICT", serde_json::json!({})),
+            ("E_CONFLICT", serde_json::json!({ "report": report })),
             (
                 "E_NOTHING_TO_LAND",
                 serde_json::json!({"reason": "on_target"}),
@@ -618,6 +643,16 @@ mod tests {
             assert_eq!(error.code.as_str(), code, "{error:?}");
             assert_eq!(Value::Object(error.details), details, "{code}");
         }
+        let [conflict, ..] = land_errors();
+        let conflict = repo_error(conflict, During::Op);
+        assert_eq!((conflict.exit, conflict.retryable), (3, false));
+        assert_eq!(
+            conflict.hint,
+            Some(format!(
+                "swarmops cat {full}:<path>, then swarmops land {full} --resolve <file> with each \
+                 path's resolution and against = {full}"
+            ))
+        );
         let exhausted = repo_error(
             RepoError::RetryExhausted {
                 attempts: 3,

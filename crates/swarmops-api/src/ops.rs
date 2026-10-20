@@ -1476,6 +1476,12 @@ pub trait StoreOps {
     /// leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
 
+    /// Merges a change three-way onto a ref, `main` by default, and publishes the result there as
+    /// one new changeset, with the ref's move, in one transaction (CLI `land`). A change that
+    /// conflicts is `E_CONFLICT`, with the conflict report in `details.report`, and records
+    /// nothing.
+    fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError>;
+
     /// The changeset a revision names, and whether the revision is exactly a ref's name (CLI
     /// `resolve`).
     fn resolve_rev(&self, req: ResolveRevReq) -> Result<ResolvedRev, OpError>;
