@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keep git: import, land and export · SwarmOps</title>
+  <meta name="description" content="Bring a git repository into a SwarmOps store, let agents land their work, and export it back to git so CI and deployment keep running.">
+  <link rel="canonical" href="https://swarmops.cc/guides/git-round-trip">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0e14">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/guides/git-round-trip.css">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="SwarmOps">
+  <meta property="og:title" content="Keep git: import, land and export">
+  <meta property="og:description" content="Bring a git repository into a SwarmOps store, let agents land their work, and export it back to git so CI and deployment keep running.">
+  <meta property="og:url" content="https://swarmops.cc/guides/git-round-trip">
+  <meta property="og:image" content="https://swarmops.cc/og-image.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="The SwarmOps logo beside its name and tagline: source control for swarms of coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@graph":[{"@type":"WebPage","@id":"https://swarmops.cc/guides/git-round-trip#webpage","url":"https://swarmops.cc/guides/git-round-trip","name":"Keep git: import, land and export","description":"Bring a git repository into a SwarmOps store, let agents land their work, and export it back to git so CI and deployment keep running.","inLanguage":"en","isPartOf":{"@id":"https://swarmops.cc/#website"},"breadcrumb":{"@id":"https://swarmops.cc/guides/git-round-trip#breadcrumb"}},{"@type":"BreadcrumbList","@id":"https://swarmops.cc/guides/git-round-trip#breadcrumb","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":{"@id":"https://swarmops.cc/"}},{"@type":"ListItem","position":2,"name":"Keep git: import, land and export","item":{"@id":"https://swarmops.cc/guides/git-round-trip"}}]}]}
+  </script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/logo.svg" alt="" width="30" height="30">SwarmOps</a>
+    <nav class="nav" aria-label="Site">
+      <a href="/#start">Quick start</a>
+      <a class="gh" href="https://github.com/KeiaiLab/SwarmOps">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<div class="hero guide-hero">
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/">Home</a></li>
+        <li><span aria-current="page">Keep git: import, land and export</span></li>
+      </ol>
+    </nav>
+    <div>
+      <span class="pill"><b>Pre-1.0</b> · Linux today; macOS and Windows next · MIT licence</span>
+      <h1>Keep git: <em>import, land and export</em></h1>
+      <p class="lead">SwarmOps: a git replacement for coding-agent swarms. Git stays at both ends: <code>git import</code> brings a repository's history into a store, agents commit and land their work there, and <code>git export</code> writes the result back to a git branch that <code>git push</code> sends on, so that the pipeline that watches the branch keeps running. This guide runs the round trip command by command, and lists what stops it.</p>
+    </div>
+  </div>
+</div>
+
+<div class="wrap guide-wrap">
+  <nav class="toc" aria-label="On this page">
+    <p class="eyebrow">On this page</p>
+    <ol>
+      <li><a href="#loop">The round trip</a></li>
+      <li><a href="#before">Before you start</a></li>
+      <li><a href="#import">Import a git repository</a></li>
+      <li><a href="#land">Let agents commit and land</a></li>
+      <li><a href="#export">Export back to git</a></li>
+      <li><a href="#push">Push, and CI runs</a></li>
+      <li><a href="#again">Run it again</a></li>
+      <li><a href="#stops">When an export stops</a></li>
+      <li><a href="#refuses">What import refuses</a></li>
+      <li><a href="#limits">Limits to know first</a></li>
+      <li><a href="#next">Go further</a></li>
+    </ol>
+  </nav>
+
+  <article class="prose">
+    <section id="loop">
+      <h2>The round trip</h2>
+      <p>Git and the store meet in one git repository on the host. Make it a bare clone of your remote: <code>git import</code> reads it, <code>git export</code> writes it, and git itself fetches into it and pushes from it, because SwarmOps has no network code.</p>
+      <figure class="loop">
+<pre class="disk" role="img" tabindex="0" aria-label="Three boxes in a row: your remote, a bare clone of it on the host, and the SwarmOps store. Git fetch and git push connect the remote and the clone; git import and git export connect the clone and the store; agents commit and land in the store."> remote               ~/src/acme.git        the store
+ <span class="m">CI, deployment       a bare clone          where agents work</span>
+
+ ┌────────┐ <span class="d">git fetch</span> ┌────────┐ <span class="d">git import</span> ┌────────┐
+ │ stable │ ────────▶ │ stable │ ─────────▶ │  main  │ ◀── <span class="d">commit, land</span>
+ │        │ ◀──────── │        │ ◀───────── │        │
+ └────────┘ <span class="d">git push</span>  └────────┘ <span class="d">git export</span> └────────┘</pre>
+        <figcaption>Where each command runs. The remote keeps its CI and deployment, and SwarmOps never talks to it.</figcaption>
+      </figure>
+      <ol class="loop-steps">
+        <li><div><code>git import</code> reads the repository and records its commits in the store as changesets, then moves <code>main</code> to the last one.</div></li>
+        <li><div>Agents commit in the store and <code>land</code> their changes: each one is merged three-way onto <code>main</code>.</div></li>
+        <li><div><code>git export</code> writes the history behind <code>main</code> into a branch of the repository.</div></li>
+        <li><div><code>git push</code> sends the branch to the remote, and the pipeline that watches it runs.</div></li>
+      </ol>
+      <div class="callout">
+        <h3>In short</h3>
+        <ul>
+          <li><strong>What comes back is git.</strong> A changeset imported from git exports as the commit it came from, byte for byte. A changeset made in the store exports as a commit with its own author and committer and a <code>SwarmOps-Changeset:</code> trailer. The same store gives the same commits every time.</li>
+          <li><strong>Nothing is merged between the two.</strong> When git and the store both moved, the command stops with exit code 3 and says why.</li>
+          <li><strong>Not yet measured on real repositories.</strong> The tests read fixtures that real git made. A round trip on real repositories, and the export's measurements, come after the pilot.</li>
+        </ul>
+      </div>
+      <p>If people also push to the branch, fetch and import before agents land more on top of it, so that the next export continues the branch. <a href="#stops">When an export stops</a> shows what happens otherwise.</p>
+    </section>
+
+    <section id="before">
+      <h2>Before you start</h2>
+      <ul>
+        <li><strong>SwarmOps, installed</strong> (Linux today; macOS and Windows next). The <a href="/#start">Quick start</a> builds <code>swarmops</code> and <code>so</code>, the same program under a shorter name. The examples use <code>so</code>.</li>
+        <li><strong>A store</strong> on a native Linux filesystem. A path under <code>/mnt/</code> is refused with <code>E_UNSUPPORTED_FS</code>.</li>
+        <li><strong>An identity for the import.</strong> A git import, like a commit, needs one: <code>--as &lt;family&gt;/&lt;instance&gt;</code>, else <code>SWARMOPS_AGENT</code>. A git export needs none.</li>
+        <li><strong>The repository on the same host.</strong> Both commands read or write a path on this host (a relative path is taken from the working directory), and never go through a server.</li>
+        <li><strong>A bare clone to meet in.</strong> An export refuses the branch that a work tree has checked out, as <code>git push</code> does, and a bare repository has no work tree.</li>
+      </ul>
+      <div class="code">
+        <div class="label">Once, before the first import</div>
+<pre tabindex="0"><span class="c"># where SwarmOps and git meet</span>
+git clone --bare &lt;remote-url&gt; ~/src/acme.git
+
+<span class="c"># the store and the agent's identity, or --repo and --as on each command</span>
+export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme
+export SWARMOPS_AGENT=agent/worker-1
+
+so init "$SWARMOPS_REPO" --name acme</pre>
+      </div>
+    </section>
+
+    <section id="import">
+      <h2>Import a git repository</h2>
+      <p><code>git import</code> reads the repository at its path, a work tree or a bare repository. Every commit that <code>--ref</code> reaches and the store does not hold becomes a changeset, parents first, a merge with all of its parents in their order. Then <code>--into</code> moves to the changeset of <code>--ref</code>'s commit, and is created if it does not exist.</p>
+      <div class="code out">
+        <div class="label">Import the stable branch into main</div>
+<pre><span class="p">$</span> so git import ~/src/acme.git --ref stable
+{
+  "ok": true,
+  "op": "git_import",
+  "api": 1,
+  "result": {
+    "imported": 5,
+    "skipped": 0,
+    "head_changeset": "8804…",
+    "git_head_sha": "f686…",
+    "target_ref": "main",
+    "ref_moved": true,
+    "lossy": [],
+    "lossy_total": 0
+  },
+  "meta": {…}
+}</pre>
+      </div>
+      <p>The repository in these examples has five commits, a merge among them. The transcripts cut each id to four digits and leave <code>meta</code> out. <code>skipped</code> counts the commits the walk found in the store already, where it stopped; a first import skips none.</p>
+      <dl class="defs">
+        <dt><code>--ref</code></dt>
+        <dd>The commit to import, with every commit it reaches: <code>HEAD</code> by default, a ref name, short or full (<code>stable</code>, <code>refs/heads/stable</code>), or a commit id of 40 hex digits. A tag is peeled to its commit. There is no revision syntax such as <code>main~3</code>.</dd>
+        <dt><code>--into</code></dt>
+        <dd>The store ref to move: <code>main</code> by default, or <code>release/&lt;name&gt;</code>. A store has no other refs.</dd>
+        <dt><code>--lossy</code>, <code>--gitlinks</code></dt>
+        <dd>Allow content that a changeset cannot hold as git has it. See <a href="#refuses">What import refuses</a>.</dd>
+      </dl>
+      <p>An imported changeset is its git commit. Its author, committer and times are the commit's, and its <code>git.oid</code> metadata holds the commit's id, which the changeset renders back to when nothing was lost. It records no agent, so <code>log</code> shows it as <code>unknown/unknown</code>. The same git commit is the same changeset in every store.</p>
+      <p>The full request and response types are in <code>so schema GitImportReq</code> and <code>so schema GitImportResp</code>.</p>
+    </section>
+
+    <section id="land">
+      <h2>Let agents commit and land</h2>
+      <p>From here the agents work in the store, as in the <a href="/#start">Quick start</a>. To publish a change, an agent commits it on the head it read, then lands it.</p>
+      <div class="code">
+        <div class="label">An agent's change</div>
+<pre tabindex="0"><span class="p">$</span> so resolve main                       <span class="c"># the full id main holds now</span>
+<span class="p">$</span> cat &gt; changes.json &lt;&lt;'EOF'
+[{"path": "src/lib.rs", "op": "put",
+  "content": {"inline": "pub fn f() -&gt; u32 { 2 }\n"}}]
+EOF
+<span class="p">$</span> so commit -m "return two" --changes changes.json --parent &lt;that id&gt;
+<span class="p">$</span> so land &lt;that changeset&gt; --key &lt;a new uuid v7&gt;</pre>
+      </div>
+      <div class="code out">
+        <div class="label">What they print</div>
+<pre><span class="p">$</span> so commit -m "return two" --changes changes.json --parent 8804…
+{
+  "ok": true,
+  "op": "commit",
+  "api": 1,
+  "result": {
+    "changeset": "ff6d…",
+    "parent": "8804…",
+    "root": "4eb3…",
+    "files_changed": 1,
+    "blobs_written": 1,
+    "replayed": false
+  },
+  "meta": {…}
+}
+
+<span class="p">$</span> so land ff6d… --key 01a1…
+{
+  "ok": true,
+  "op": "land",
+  "api": 1,
+  "result": {
+    "status": "landed",
+    "landed": "d2d4…",
+    "rebased_onto": "8804…",
+    "target": "main",
+    "base": "8804…",
+    "attempts": 1,
+    "relocated": false,
+    "files_changed": 1,
+    "squashed_from": [
+      "ff6d…"
+    ]
+  },
+  "meta": {…}
+}</pre>
+      </div>
+      <p><code>land</code> merges the change three-way onto the head of <code>main</code>, whatever <code>main</code> gained since, and moves <code>main</code> to the result in one transaction, as one new changeset whose parent is that head. A land that loses a race to another publish merges again and retries by itself. A change that conflicts with what <code>main</code> gained fails with <code>E_CONFLICT</code> (exit 3) and the conflict report in <code>details.report</code>, recording nothing. The same land run again with its key replays it (<code>status: replayed</code>).</p>
+      <p><code>commit</code> and <code>land</code> are also MCP tools, so an agent can publish through <code>swarmops mcp</code>: <a href="/guides/claude-code">Use SwarmOps from Claude Code</a> shows how. <code>git import</code> and <code>git export</code> are not tools; an agent runs them as commands.</p>
+      <p>The git repository changes only when an export writes it, so a landed change stays in the store until the next export.</p>
+    </section>
+
+    <section id="export">
+      <h2>Export back to git</h2>
+      <p><code>git export</code> writes the history behind a store ref (<code>--ref</code>, <code>main</code> by default) into a branch (<code>--branch</code>, <code>main</code> by default) of the git repository at its path, and creates the branch if it does not exist. Every commit the branch does not reach is written, parents first. The objects are made durable before the branch moves, by compare-and-swap, and the same store gives the same commits every time.</p>
+      <div class="code out">
+        <div class="label">Export main into the stable branch</div>
+<pre><span class="p">$</span> so git export ~/src/acme.git --branch stable
+{
+  "ok": true,
+  "op": "git_export",
+  "api": 1,
+  "result": {
+    "exported": 1,
+    "objects_written": 4,
+    "head_changeset": "d2d4…",
+    "head_sha": "a054…",
+    "branch": "stable",
+    "old_sha": "f686…",
+    "branch_moved": true,
+    "incremental": true,
+    "rewritten": 0
+  },
+  "meta": {…}
+}</pre>
+      </div>
+      <p>The repository must exist already; <code>git init --bare</code> makes an empty one. It may be a bare repository or a work tree, but a work tree's checked-out branch is refused, as <code>git push</code> refuses it, with <code>E_INVALID_ARG</code> and <code>details.reason</code> <code>checked_out</code>. An export needs no identity.</p>
+      <h3>What git gets</h3>
+      <ul>
+        <li>A changeset imported from git exports as the commit it came from, byte for byte.</li>
+        <li>A changeset made in the store exports as a commit with its own author and committer and, after its message, a trailer block: <code>SwarmOps-Changeset:</code> with the changeset's id, then <code>SwarmOps-Land-Key:</code> and <code>SwarmOps-Squashed-From:</code> once a land records them.</li>
+        <li>For a landed change, the author is the agent that made it and the committer is the lander. Both are named <code>&lt;family&gt;/&lt;instance&gt;</code>, with the address <code class="w">&lt;instance&gt;@&lt;family&gt;.swarmops.local</code>. Here one agent did both.</li>
+        <li>A message that already ends in a trailer block, such as <code>Co-Authored-By:</code>, shares it with SwarmOps' trailers.</li>
+      </ul>
+      <div class="code out">
+        <div class="label">The exported commit, in git</div>
+<pre><span class="p">$</span> git -C ~/src/acme.git log -1 --format=fuller
+commit a054…
+Author:     agent/worker-1 &lt;worker-1@agent.swarmops.local&gt;
+AuthorDate: …
+Commit:     agent/worker-1 &lt;worker-1@agent.swarmops.local&gt;
+CommitDate: …
+
+    return two
+
+    SwarmOps-Changeset: d2d4…
+    SwarmOps-Land-Key: 01a1…
+    SwarmOps-Squashed-From: ff6d…</pre>
+      </div>
+      <p>A test imports fixture repositories that real git made, lands two changes on each and exports them into an empty repository: <code>git fsck --strict --no-dangling</code> accepts the result, and a checkout of it gives the store's files, executable bits and symlink targets. A weekly job runs the test with git 2.39.5, 2.43.0 and 2.56.0.</p>
+      <p>Each object an export writes is a loose file, fsynced on its own, so the first export of a long history writes one file and one fsync per object until <code>git gc</code> packs them. In a clone that already holds the history only the commits after the branch are written: the export above wrote four objects. An export leaves no reflog entry, so <code>git reflog</code> does not show its moves.</p>
+      <p>The request and response types are in <code>so schema GitExportReq</code> and <code>so schema GitExportResp</code>.</p>
+    </section>
+
+    <section id="push">
+      <h2>Push, and CI runs</h2>
+      <p>Git sends the branch on. SwarmOps has no network code, and an export writes only the repository on this host.</p>
+      <div class="code out">
+        <div class="label">Push the exported branch</div>
+<pre><span class="p">$</span> git -C ~/src/acme.git push origin stable
+To &lt;remote-url&gt;
+   f68652e..a054ffc  stable -&gt; stable</pre>
+      </div>
+      <p>Commits imported from git come back as they were, so the branch continues what the remote has: the push above moved the remote's <code>stable</code> forward by one commit. The roadmap moved git export ahead of other milestones (M8) for this: work landed in SwarmOps goes back to git, and today's deployment pipelines keep running.</p>
+      <p>Before the first push, check the remote's branch rules: a commit made in the store is not signed (SwarmOps has no signing), and its author is an agent's name with a <code>swarmops.local</code> address.</p>
+      <p>SwarmOps has no review of its own yet: change requests, approvals and a landing gate are planned (M7). Whatever agents land is what the next export writes. To put a person in between, export to another branch, such as <code>review</code> (<code>--branch review</code>), and move the trunk with git after the review.</p>
+    </section>
+
+    <section id="again">
+      <h2>Run it again</h2>
+      <p>Both commands are incremental. Run again, <code>git import</code> takes only the commits after the one the target's head holds, and writes nothing when that is <code>--ref</code>'s commit: it imports 0 and skips 1. Run again, <code>git export</code> writes only what the branch's last export does not reach.</p>
+      <div class="code out">
+        <div class="label">The same export again</div>
+<pre><span class="p">$</span> so git export ~/src/acme.git --branch stable
+{
+  "ok": true,
+  "op": "git_export",
+  "api": 1,
+  "result": {
+    "exported": 0,
+    "objects_written": 0,
+    "head_changeset": "d2d4…",
+    "head_sha": "a054…",
+    "branch": "stable",
+    "old_sha": "a054…",
+    "branch_moved": false,
+    "incremental": true,
+    "rewritten": 0
+  },
+  "meta": {…}
+}</pre>
+      </div>
+      <p>An import cut short says how many commits it recorded (<code>details.imported</code>), and the same command run again continues after them.</p>
+      <p>A script can branch on the exit code: 0 for success, 3 when git and the store diverged, 4 when running again can succeed, and 5 when an import has no identity.</p>
+    </section>
+
+    <section id="stops">
+      <h2>When an export stops</h2>
+      <p>An export stops with <code>E_GIT_EXPORT_DIVERGED</code> when git moved, and with <code>E_GIT_WRITE</code> when the repository cannot be written.</p>
+      <h3>When git moves too</h3>
+      <p>People and CI may push to the branch as well. SwarmOps does not merge their history with the store's. An export continues a branch only when it holds the export of <code>--ref</code>'s head or of an ancestor of it; any other branch stops the export with <code>E_GIT_EXPORT_DIVERGED</code> (exit 3). <code>details.reason</code> says why, and the hint says what to do.</p>
+      <table class="matrix">
+        <caption>The six reasons an export stops. The first five are found before anything is written.</caption>
+        <thead><tr><th scope="col">Reason</th><th scope="col">What happened</th><th scope="col">What to do</th></tr></thead>
+        <tbody>
+          <tr><th scope="row"><code>branch_ahead</code></th><td data-label="What happened">Commits were made in git on top of the export of the head itself.</td><td data-label="What to do">Bring them in with <code>git import</code>, then export again. <code>--force</code> replaces them instead.</td></tr>
+          <tr><th scope="row"><code>both_moved</code></th><td data-label="What happened">Commits were made in git on top of an older export, and the source ref moved too.</td><td data-label="What to do">Nothing is merged. <code>git log</code> shows the git side. <code>--force</code> replaces it.</td></tr>
+          <tr><th scope="row"><code>branch_moved</code></th><td data-label="What happened">The branch names a commit that is no export of this history.</td><td data-label="What to do"><code>git log</code> shows what the branch holds. <code>--force</code> replaces it with the export.</td></tr>
+          <tr><th scope="row"><code>source_moved_back</code></th><td data-label="What happened">The source ref's head is behind the export the branch holds, after an <code>op undo</code> or a <code>ref set</code> backwards.</td><td data-label="What to do"><code>so op log</code> names what moved the ref. <code>--force</code> moves the branch back to the export of its head.</td></tr>
+          <tr><th scope="row"><code>lossy_history</code></th><td data-label="What happened">The branch holds the original commits of a history imported lossily, which the export would replace.</td><td data-label="What to do">Export to another branch (<code>--branch &lt;name&gt;</code>), or <code>--force</code> replaces the original commits.</td></tr>
+          <tr><th scope="row"><code>moved_during_export</code></th><td data-label="What happened">Another writer moved the branch while this export wrote.</td><td data-label="What to do">Run the same export again. What it wrote stays.</td></tr>
+        </tbody>
+      </table>
+      <p><code>--force</code> moves the branch all the same, still by compare-and-swap, replacing what git holds there. It does not override a checked-out branch.</p>
+      <p>Take <code>branch_ahead</code>: someone merged a change in git, on top of the commit the last export pushed. The hint names the import that brings it in, and the export after it finds the branch up to date.</p>
+      <div class="code out">
+        <div class="label">A change merged in git, brought into the store</div>
+<pre><span class="p">$</span> git -C ~/src/acme.git fetch origin stable:stable
+From &lt;remote-url&gt;
+   a054ffc..b925315  stable     -&gt; stable
+
+<span class="p">$</span> so git export ~/src/acme.git --branch stable
+{
+  "ok": false,
+  "op": "git_export",
+  "api": 1,
+  "error": {
+    "code": "E_GIT_EXPORT_DIVERGED",
+    "message": "the branch stable has diverged from d2d4… (branch_ahead): it names b925…",
+    "retryable": false,
+    "exit": 3,
+    "details": {
+      "branch": "stable",
+      "exported_changeset": "d2d4…",
+      "git_head": "b925…",
+      "head_changeset": "d2d4…",
+      "reason": "branch_ahead"
+    },
+    "hint": "swarmops git import /home/me/src/acme.git --ref refs/heads/stable --into main brings the commits made in git into the store, then run the export again; --force replaces them instead"
+  },
+  "meta": {…}
+}
+<span class="c"># exit 3</span>
+
+<span class="p">$</span> so git import ~/src/acme.git --ref refs/heads/stable --into main
+{
+  "ok": true,
+  "op": "git_import",
+  "api": 1,
+  "result": {
+    "imported": 1,
+    "skipped": 1,
+    "head_changeset": "10c8…",
+    "git_head_sha": "b925…",
+    "target_ref": "main",
+    "ref_moved": true,
+    "old_head": "d2d4…",
+    "lossy": [],
+    "lossy_total": 0
+  },
+  "meta": {…}
+}</pre>
+      </div>
+      <p>If the store moved too, the export stops on <code>both_moved</code>, and an import stops with <code>E_GIT_IMPORT_DIVERGED</code> (exit 3): nothing is merged, and nothing is written. An import stops the same way when the git history was rewritten, because the target's head is then not the import of an ancestor of the branch's commit.</p>
+      <h3>When the repository cannot be written</h3>
+      <p>A failed write is <code>E_GIT_WRITE</code> (exit 1), and <code>details.reason</code> says what failed. Running the export again after the cause is gone writes what is still missing.</p>
+      <dl class="defs">
+        <dt><code>ref_locked</code></dt>
+        <dd>The branch's lock file, <code>refs/heads/&lt;branch&gt;.lock</code>, exists: another git process holds it, or an export that died left it. Remove it once no git process runs, then export again.</dd>
+        <dt><code>ref_name_conflict</code></dt>
+        <dd>An existing ref stands where the branch's name needs a directory, or the other way round. Export to another branch.</dd>
+        <dt><code>io</code></dt>
+        <dd>The filesystem refused a write. <code>details.path</code> names the file.</dd>
+      </dl>
+    </section>
+
+    <section id="refuses">
+      <h2>What import refuses</h2>
+      <p>Content that a changeset cannot hold as git has it is refused with <code>E_GIT_IMPORT_LOSSY</code> (exit 1), naming the commit, the path and the class. The import stops before that commit, and the target ref does not move.</p>
+      <div class="code out">
+        <div class="label">A submodule in the history</div>
+<pre><span class="p">$</span> so git import ~/src/app.git --ref stable
+{
+  "ok": false,
+  "op": "git_import",
+  "api": 1,
+  "error": {
+    "code": "E_GIT_IMPORT_LOSSY",
+    "message": "commit 6293… holds gitlinks content at vendor/lib: a gitlink, to commit 1111…; allowing the class drops or normalizes it",
+    "retryable": false,
+    "exit": 1,
+    "details": {
+      "class": "gitlinks",
+      "commit": "6293…",
+      "path": "vendor/lib"
+    },
+    "hint": "run it again with --lossy gitlinks to drop or normalize it and mark the changeset (git.lossy)"
+  },
+  "meta": {…}
+}
+<span class="c"># exit 1</span></pre>
+      </div>
+      <p><code>--lossy &lt;class&gt;</code> (repeatable, or <code>all</code>) drops or normalizes that class instead, and the changeset names it in its <code>git.lossy</code> metadata. <code>--gitlinks drop</code> is <code>--lossy gitlinks</code>, and <code>--gitlinks</code>, when given, decides that class whatever <code>--lossy</code> says. The result lists the first 100 commits taken lossily, and <code>lossy_total</code> counts them all.</p>
+      <table class="matrix">
+        <caption>The six classes, and what an import does to each when it is allowed.</caption>
+        <thead><tr><th scope="col">Class</th><th scope="col">Git content</th><th scope="col">With the class allowed</th></tr></thead>
+        <tbody>
+          <tr><th scope="row"><code>gitlinks</code></th><td data-label="Git content">A submodule's entry.</td><td data-label="With the class allowed">Dropped.</td></tr>
+          <tr><th scope="row"><code>paths</code></th><td data-label="Git content">A name that is not UTF-8, or is <code>.</code> or <code>..</code>.</td><td data-label="With the class allowed">Dropped.</td></tr>
+          <tr><th scope="row"><code>modes</code></th><td data-label="Git content">A mode git does not write, such as <code>100664</code> or a zero-padded <code>040000</code>.</td><td data-label="With the class allowed">Normalized: a regular file becomes a file or an executable by its owner's execute bit, and <code>040000</code> a directory.</td></tr>
+          <tr><th scope="row"><code>tree_order</code></th><td data-label="Git content">A tree whose entries are not in git's order, or that names one entry twice.</td><td data-label="With the class allowed">Put in order, the first of a name kept.</td></tr>
+          <tr><th scope="row"><code>empty_trees</code></th><td data-label="Git content">An entry naming an empty tree (an empty directory).</td><td data-label="With the class allowed">Dropped.</td></tr>
+          <tr><th scope="row"><code>nonstandard</code></th><td data-label="Git content">A commit whose bytes its fields cannot give back: a signature line, time or header line that renders back differently, no blank line before the message, or a parent listed twice.</td><td data-label="With the class allowed">Kept as its fields hold it; a parent listed twice is kept once.</td></tr>
+        </tbody>
+      </table>
+      <p>Some repositories are not read at all. A SHA-256 repository, reftable refs and a shallow clone are refused with <code>E_GIT_UNSUPPORTED</code>, and so are a commit of more than 255 parents and an entry whose mode is no kind of entry. An object the repository lacks, as a partial clone lacks blobs, is <code>E_GIT_READ</code>.</p>
+      <div class="callout">
+        <h3>A lossy import changes what comes back</h3>
+        <ul>
+          <li>A commit the import took with a loss renders to other bytes than the commit it came from, and so does every commit above it, whose parent's id changes with it.</li>
+          <li>They export as new commits (<code>rewritten</code> counts them, with a warning), which a branch built on the originals does not take (<code>lossy_history</code>), and the signature headers they keep verbatim no longer verify.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="limits">
+      <h2>Limits to know first</h2>
+      <ul>
+        <li><strong>One writing host at a time.</strong> Between hosts SwarmOps syncs through a git remote: the writer exports, then pushes with git, and the others fetch with git, then import. Two hosts that both write stop on <code>E_GIT_EXPORT_DIVERGED</code> or <code>E_GIT_IMPORT_DIVERGED</code> rather than merge. Offline-first sync is planned (M11).</li>
+        <li><strong>One host, Linux today; macOS and Windows next.</strong> There is no network code, and SwarmOps is built and tested on x86_64 Linux.</li>
+        <li><strong>Branches, not tags.</strong> A store has the refs <code>main</code> and <code>release/&lt;name&gt;</code>, no tags, and an export moves one branch. SwarmOps has no user hooks, signing, submodules or LFS.</li>
+        <li><strong>The export is a contract.</strong> The rendering of commits made in the store is version 1 of the <code>git_oid</code> derivation. A change to it is a new version, never in place, and every branch exported before it meets it as divergence, to be exported again once with <code>--force</code>: a deployment pipeline sees a rewritten history.</li>
+        <li><strong>Pre-1.0.</strong> A minor version may break a public surface other than the hash contract, and stores are not migrated between pre-release formats: a store made before a format change may be refused afterwards and need creating again.</li>
+        <li><strong>No review yet.</strong> Change requests, approvals and a landing gate are planned (M7).</li>
+        <li><strong>Not yet measured.</strong> The tests read fixtures that real git made; a round trip on real repositories and the export's measurements come after the pilot. No git baseline has been measured, and landing is not measured under a swarm's load.</li>
+        <li><strong>An export queues behind the swarm.</strong> It reads a committed snapshot under the store's writer lock, so it waits behind committing agents as a writer does, and past the store's lock timeout it fails with the retryable <code>E_BUSY</code> (exit 4).</li>
+        <li><strong>A crash can leave a lock.</strong> An export that dies between taking <code>refs/heads/&lt;branch&gt;.lock</code> and renaming it leaves the file, as git does. Every later export of that branch, and git itself, refuses the branch until the file is removed by hand, once no git process runs.</li>
+      </ul>
+    </section>
+
+    <section id="next">
+      <h2>Go further</h2>
+      <ul>
+        <li>The README's <a href="https://github.com/KeiaiLab/SwarmOps#bring-a-git-repository-in">Bring a git repository in</a> and <a href="https://github.com/KeiaiLab/SwarmOps#send-the-work-back-to-git">Send the work back to git</a> have the full text of both commands.</li>
+        <li><a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md#git-import">Git import</a> and <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md#git-export">Git export</a> in the architecture overview walk through each step the commands take.</li>
+        <li><a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md#git-import-and-export">Known limitations</a> lists what is still open for import and export, and <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/policies/versioning-and-stability.md">versioning and stability</a> says what stays compatible.</li>
+        <li><a href="/guides/claude-code">Use SwarmOps from Claude Code</a> registers <code>swarmops mcp</code>, and <a href="/guides/parallel-agents">Parallel coding agents on one repository</a> sets SwarmOps beside git worktrees.</li>
+        <li>The <a href="/">home page</a> has the comparison with git and the roadmap.</li>
+      </ul>
+    </section>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/logo.svg" alt="" width="26" height="26">SwarmOps</a>
+    <nav aria-label="Project">
+      <a href="https://github.com/KeiaiLab/SwarmOps">GitHub</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md">Architecture</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md">Known limitations</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/CONTRIBUTING.md">Contributing</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md">Security</a>
+      <a href="/THIRD-PARTY-NOTICES.txt">Third-party notices</a>
+    </nav>
+    <span>MIT licence · © 2026 KeiaiLab</span>
+  </div>
+</footer>
+</body>
+</html>

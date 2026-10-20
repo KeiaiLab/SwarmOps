@@ -1,0 +1,68 @@
+/* /guides/claude-code: the layout of one guide. Every colour comes from /styles.css. */
+
+/* Head of the guide: the landing page's hero, in one column. */
+.guide-hero .wrap { grid-template-columns: 1fr; gap: 0; padding: 36px 0 44px; align-items: start; }
+.guide-hero h1 { font-size: clamp(32px, 4.4vw, 48px); margin: 14px 0; text-wrap: balance; }
+.guide-hero .lead { max-width: 44em; margin: 0; }
+.crumbs ol { display: flex; flex-wrap: wrap; gap: 4px 8px; margin: 0 0 26px; padding: 0; list-style: none; font-size: 14px; color: var(--muted); }
+.crumbs li + li::before { content: "/"; margin-right: 8px; }
+.crumbs a { color: var(--muted); }
+.crumbs a:hover { color: var(--text); }
+/* The pill reads longer here than on the landing page: keep "Pre-1.0" whole and let the rest wrap. */
+.guide-hero .pill b { white-space: nowrap; }
+
+/* A prose column with the page's contents beside it. */
+.guide-wrap { display: grid; grid-template-columns: minmax(0, 1fr) 15rem; gap: 56px; padding: 48px 0 72px; align-items: start; }
+.toc { grid-column: 2; grid-row: 1; position: sticky; top: 88px; }
+.prose { grid-column: 1; grid-row: 1; max-width: 46rem; }
+.toc .eyebrow { margin-bottom: 10px; }
+.toc ol { list-style: none; margin: 0; padding: 0; border-left: 1px solid var(--border); }
+.toc a { display: block; padding: 5px 0 5px 14px; color: var(--muted); text-decoration: none; font-size: 14.5px; }
+.toc a:hover { color: var(--text); }
+@media (max-width: 960px) {
+  .guide-wrap { grid-template-columns: minmax(0, 1fr); gap: 28px; padding-top: 32px; }
+  .toc, .prose { grid-column: 1; }
+  .toc { position: static; }
+  .prose { grid-row: 2; }
+  .toc ol { display: flex; flex-wrap: wrap; gap: 8px; border: 0; }
+  .toc a { padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); }
+}
+
+/* Sections of the guide: the shared `section` rule is for the landing page's bands. */
+.prose section { padding: 0; border-bottom: 0; margin-top: 56px; }
+.prose section:first-child { margin-top: 0; }
+.prose section > * { margin: 16px 0 0; }
+.prose section > h2 { margin-top: 0; font-size: clamp(24px, 2.8vw, 30px); }
+.prose section > h3 { margin-top: 32px; }
+.prose ul { padding-left: 1.2em; }
+.prose li + li { margin-top: 8px; }
+.prose .code pre { font-size: 13px; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* The path from an agent to the store, in three steps. */
+.flow { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; padding: 0; list-style: none; counter-reset: flow; }
+.prose .flow li { counter-increment: flow; margin: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+.flow li::before { content: counter(flow); display: grid; place-items: center; width: 24px; height: 24px; margin-bottom: 8px; border-radius: 50%; background: var(--violet-soft); color: var(--violet); font: 600 13px var(--mono); }
+.flow strong { display: block; margin-bottom: 4px; }
+.flow span { color: var(--muted); font-size: 14.5px; }
+@media (max-width: 760px) { .flow { grid-template-columns: 1fr; } }
+
+/* Terms and what they mean: the tools, and what to do when a call fails. */
+.defs { display: grid; grid-template-columns: minmax(9rem, max-content) 1fr; gap: 0 22px; padding: 0; }
+.defs dt, .defs dd { margin: 0; padding: 12px 0; border-top: 1px solid var(--border); }
+.defs dt { font-weight: 600; }
+.defs dt code { overflow-wrap: anywhere; }
+.defs dd { color: var(--muted); }
+.defs.fixes { grid-template-columns: minmax(0, 1fr); }
+.defs.fixes dt { padding: 14px 0 2px; }
+.defs.fixes dd { color: var(--text); border-top: 0; padding: 0 0 14px; }
+@media (max-width: 640px) {
+  .defs { grid-template-columns: minmax(0, 1fr); }
+  .defs dt { padding-bottom: 2px; }
+  .defs dd { border-top: 0; padding-top: 0; }
+}
+
+/* How much to ask for. */
+.limits { width: 100%; border-collapse: collapse; font-size: 15px; }
+.limits th, .limits td { text-align: left; vertical-align: top; padding: 10px 14px 10px 0; border-top: 1px solid var(--border); }
+.limits th { border-top: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.limits code { overflow-wrap: anywhere; }

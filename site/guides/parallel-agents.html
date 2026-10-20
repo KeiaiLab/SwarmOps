@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Parallel coding agents on one repository · SwarmOps</title>
+  <meta name="description" content="How many coding agents commit to one repository with SwarmOps: one store, refs moved by compare-and-swap, three-way landing, and where git worktrees still lead.">
+  <link rel="canonical" href="https://swarmops.cc/guides/parallel-agents">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0e14">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/guides/parallel-agents.css">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="SwarmOps">
+  <meta property="og:title" content="Parallel coding agents on one repository">
+  <meta property="og:description" content="How many coding agents commit to one repository with SwarmOps: one store, refs moved by compare-and-swap, three-way landing, and where git worktrees still lead.">
+  <meta property="og:url" content="https://swarmops.cc/guides/parallel-agents">
+  <meta property="og:image" content="https://swarmops.cc/og-image.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="The SwarmOps logo beside its name and tagline: source control for swarms of coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@graph":[{"@type":"WebPage","@id":"https://swarmops.cc/guides/parallel-agents#webpage","url":"https://swarmops.cc/guides/parallel-agents","name":"Parallel coding agents on one repository","description":"How many coding agents commit to one repository with SwarmOps: one store, refs moved by compare-and-swap, three-way landing, and where git worktrees still lead.","inLanguage":"en","isPartOf":{"@id":"https://swarmops.cc/#website"},"breadcrumb":{"@id":"https://swarmops.cc/guides/parallel-agents#breadcrumb"}},{"@type":"BreadcrumbList","@id":"https://swarmops.cc/guides/parallel-agents#breadcrumb","itemListElement":[{"@type":"ListItem","position":1,"name":"Home","item":{"@id":"https://swarmops.cc/"}},{"@type":"ListItem","position":2,"name":"Parallel coding agents on one repository","item":{"@id":"https://swarmops.cc/guides/parallel-agents"}}]}]}
+  </script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/logo.svg" alt="" width="30" height="30">SwarmOps</a>
+    <nav class="nav" aria-label="Site">
+      <a href="/#start">Quick start</a>
+      <a class="gh" href="https://github.com/KeiaiLab/SwarmOps">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<div class="read">
+  <div class="guide-head">
+    <p class="eyebrow">Guide</p>
+    <h1>Parallel coding agents on one repository</h1>
+    <p class="lead">Run several coding agents, such as Claude Code sessions, on one codebase and they collide in the working tree, in git's locks and at merge time. This guide shows each failure with git 2.43, what git worktrees fix and what they leave open, how SwarmOps, a git replacement for coding-agent swarms, handles the same three changes, and where worktrees are still the better tool.</p>
+    <p><span class="pill"><b>Pre-1.0</b> · Linux today; macOS and Windows next · MIT licence</span></p>
+  </div>
+
+  <div class="short">
+    <h2>In short</h2>
+    <ol>
+      <li><strong>A shared checkout breaks first.</strong> Agents in one working tree share one HEAD, one index and one set of files. One agent's <code>git add -A</code> commits another's unfinished edit, a second git command fails while the first holds <code>index.lock</code>, and a git process killed with <code>SIGKILL</code> leaves that lock behind.</li>
+      <li><strong>A worktree per agent fixes the files, not the integration.</strong> Each agent gets its own files, HEAD and index. The branches still have to be merged into one trunk, one at a time, and a conflict shows up only then.</li>
+      <li><strong>SwarmOps integrates inside the store.</strong> Agents commit into one store without a checkout, refs move only by compare-and-swap, and <code>land</code> merges an agent's change three-way onto <code>main</code>, retries by itself when <code>main</code> moved, and returns a conflict as a JSON report.</li>
+      <li><strong>Worktrees still lead</strong> on write throughput, a directory to build and test in, branches and tags, review tooling, platforms and maturity.</li>
+      <li><strong>Measured:</strong> 32 processes committing 1,000 times each through the binary, with no <code>E_BUSY</code>, at 72.7 commits a second on one busy host. <strong>Not measured:</strong> any comparison with git, and landing under a swarm's load.</li>
+    </ol>
+  </div>
+
+  <nav class="toc" aria-label="On this page">
+    <p>On this page</p>
+    <ul>
+      <li><a href="#checkout">One shared checkout</a></li>
+      <li><a href="#worktrees">Git worktrees</a></li>
+      <li><a href="#swarmops">What SwarmOps does</a></li>
+      <li><a href="#worktrees-lead">Where worktrees lead</a></li>
+      <li><a href="#choose">Which to use</a></li>
+      <li><a href="#measured">What is measured</a></li>
+      <li><a href="#sources">Sources</a></li>
+    </ul>
+  </nav>
+
+  <article class="prose">
+    <h2 id="checkout">What breaks when agents share one checkout</h2>
+    <p>A working tree is one set of files with one HEAD and one index. The git manual says a linked worktree shares everything with its repository <q>except per-worktree files such as HEAD, index, etc.</q>, so agents that work in the same tree share those too. Four things go wrong. The runs below use git 2.43.0.</p>
+
+    <h3>One agent commits another's unfinished work</h3>
+    <p>The index is shared, so <code>git add -A</code> stages whatever is in the tree, whoever wrote it, and the next commit takes it. Here agent A has left <code>src/lib.rs</code> half-written while agent B edits the README and commits.</p>
+    <div class="code">
+      <div class="label">git 2.43: one checkout, two agents</div>
+<pre tabindex="0"><span class="c"># Agent A leaves a half-written edit in the shared tree.</span>
+<span class="p">$</span> printf 'pub fn f() -&gt; u32 {\n    todo!()\n}\n' &gt; src/lib.rs
+<span class="c"># Agent B finishes its README change and commits everything.</span>
+<span class="p">$</span> printf '# acme\n\nA small crate.\n' &gt; README.md
+<span class="p">$</span> git add -A &amp;&amp; git commit -q -m "describe the crate"
+<span class="p">$</span> git show --stat --format=%s HEAD
+<span class="o">describe the crate</span>
+
+<span class="o"> README.md  | 2 ++</span>
+<span class="o"> src/lib.rs | 2 +-</span>
+<span class="o"> 2 files changed, 3 insertions(+), 1 deletion(-)</span></pre>
+    </div>
+    <p>B's commit holds A's <code>todo!()</code>.</p>
+
+    <h3>Git commands collide on <code>index.lock</code></h3>
+    <p>git holds <code>.git/index.lock</code> while it rewrites the index. A second command that needs the index does not wait; it fails. The slow pre-commit hook below only widens the window.</p>
+    <div class="code">
+      <div class="label">git 2.43: two commands, one index</div>
+<pre tabindex="0"><span class="c"># Agent A commits a.txt; its pre-commit hook takes 4 s, so .git/index.lock stays held.</span>
+<span class="p">$</span> git commit -m "A" a.txt &amp;
+<span class="c"># A second later, agent B stages its own file.</span>
+<span class="p">$</span> git add b.txt
+<span class="o">fatal: Unable to create '…/.git/index.lock': File exists.</span>
+
+<span class="o">Another git process seems to be running in this repository, e.g.</span>
+<span class="o">an editor opened by 'git commit'. Please make sure all processes</span>
+<span class="o">are terminated then try again. If it still fails, a git process</span>
+<span class="o">may have crashed in this repository earlier:</span>
+<span class="o">remove the file manually to continue.</span></pre>
+    </div>
+
+    <h3>A killed agent leaves the lock behind</h3>
+    <p>Kill the first command in that run with <code>SIGKILL</code> and the lock file stays. Every later command that needs the index fails with the same error until someone removes the file by hand. git removes its lock files on the signals it can catch; <code>SIGKILL</code> is not one of them.</p>
+
+    <h3>Files and HEAD are shared too</h3>
+    <p>Two agents that write the same file leave the last writer's version, and nothing is merged. A <code>git switch</code> by one agent changes the files under all the others, and their next commit goes to the new branch.</p>
+
+    <p>Claude Code's documentation names the usual workaround: <q>Agent teams don't isolate teammates in worktrees, so partition the work so each teammate owns a different set of files.</q> Partitioning stops two agents writing the same file. The shared index, lock and HEAD remain, and a partition only holds while the agents keep to it. Worktrees give each agent its own.</p>
+
+    <h2 id="worktrees">What git worktrees fix, and what they leave open</h2>
+    <p><code>git worktree add</code> gives each agent a linked worktree: its own directory, HEAD and index, over the repository's shared objects and refs. Claude Code builds on it. <code>claude --worktree &lt;name&gt;</code> creates a worktree under <code>.claude/worktrees/&lt;name&gt;/</code> by default, on a new branch named <code>worktree-&lt;name&gt;</code>, and a subagent runs in a worktree of its own when its definition says <code>isolation: worktree</code>. Claude Code's documentation says worktrees <q>isolate file edits</q>. They do, and the four failures above stop. Four things remain.</p>
+    <p>Take three agents that start from the same <code>main</code>. Agent 1 changes <code>f</code> in <code>src/lib.rs</code> to return 2, agent 2 adds a line to the README, and agent 3 changes the same line of <code>f</code> to return 3. The SwarmOps section below runs the same three changes.</p>
+
+    <h3>One branch each, and a branch lives in one worktree</h3>
+    <p>By default git refuses to check a branch out in two worktrees, so each agent works on a branch of its own. The work still has to get from three branches onto one trunk.</p>
+    <div class="code">
+      <div class="label">git 2.43: a worktree for each agent</div>
+<pre tabindex="0"><span class="c"># Each agent gets a worktree and a branch of its own (output omitted).</span>
+<span class="p">$</span> git worktree add ../agent-1 -b agent-1/f-returns-2
+<span class="p">$</span> git worktree add ../agent-2 -b agent-2/describe
+<span class="p">$</span> git worktree add ../agent-3 -b agent-3/f-returns-3
+<span class="c"># A fourth worktree on main, which the main checkout already has:</span>
+<span class="p">$</span> git worktree add ../agent-4 main
+<span class="o">Preparing worktree (checking out 'main')</span>
+<span class="o">fatal: 'main' is already used by worktree at '…/acme'</span></pre>
+    </div>
+
+    <h3>Merging is a serial step, and conflicts show up late</h3>
+    <p>Merged into <code>main</code> one at a time, agent 1's branch fast-forwards and agent 2's merges cleanly. Agent 3's stops with a conflict, after all three agents have finished, and leaves the checkout where <code>main</code> lives half-merged, with conflict markers in the file. Whoever owns that checkout resolves it.</p>
+    <div class="code">
+      <div class="label">git 2.43: merging the three branches into main</div>
+<pre tabindex="0"><span class="c"># Each agent commits in its own directory. In the main checkout, one branch at a time:</span>
+<span class="p">$</span> git merge --no-edit agent-1/f-returns-2<span class="c">     # fast-forwards</span>
+<span class="p">$</span> git merge --no-edit agent-2/describe<span class="c">        # merges cleanly</span>
+<span class="p">$</span> git merge --no-edit agent-3/f-returns-3
+<span class="o">Auto-merging src/lib.rs</span>
+<span class="o">CONFLICT (content): Merge conflict in src/lib.rs</span>
+<span class="o">Automatic merge failed; fix conflicts and then commit the result.</span>
+<span class="p">$</span> git status --short
+<span class="o">UU src/lib.rs</span>
+<span class="p">$</span> head -6 src/lib.rs
+<span class="o">pub fn f() -&gt; u32 {</span>
+<span class="o">&lt;&lt;&lt;&lt;&lt;&lt;&lt; HEAD</span>
+<span class="o">    2</span>
+<span class="o">=======</span>
+<span class="o">    3</span>
+<span class="o">&gt;&gt;&gt;&gt;&gt;&gt;&gt; agent-3/f-returns-3</span></pre>
+    </div>
+    <p><code>git merge-tree --write-tree</code> runs the same merge without reading or writing a working tree or index, and exits 1 on a conflict, so a script can look for conflicts between branches before anyone merges. Resolving one without a checkout then takes plumbing: <code>git hash-object</code>, a temporary index, <code>git commit-tree</code>.</p>
+
+    <h3>A moved trunk sends the pusher back</h3>
+    <p>Agents that push to a shared trunk meet the next problem when the trunk moves: the second push is refused with <code>[rejected] main -&gt; main (fetch first)</code>. The fetch, the merge and the retry are left to the pusher.</p>
+
+    <h3>Every worktree is a fresh checkout</h3>
+    <p>Claude Code's documentation: <q>A worktree is a fresh checkout, so initialize your development environment there</q>. Each agent's worktree needs its own setup.</p>
+
+    <h2 id="swarmops">What SwarmOps does: one store, no checkout</h2>
+    <p>SwarmOps is a git replacement for coding-agent swarms. It is designed for 10 to 50 Claude Code or LangGraph processes on one host, committing to one repository at once, and it is written in Rust and fully embedded: one program, no external database, no daemon. Agents do not check files out of it. They read a path at a revision, <code>so cat main:src/lib.rs</code>, and write a commit from a JSON list of whole-file changes. (<code>so</code> is the short name of <code>swarmops</code>: the same program.)</p>
+
+    <h3>Many writers, one history</h3>
+    <p>Object writes take no lock. Metadata writes queue in the kernel for one lock, an <code>flock</code> that the kernel releases when its holder dies, so a killed agent leaves no stale lock. Refs move only by compare-and-swap. A commit returns only once its journal frame is on disk, and the next writer repairs whatever a crash cut short. <a href="/explainers/store">The store as a machine</a> draws it.</p>
+
+    <h3>Landing: a three-way merge without a checkout</h3>
+    <p>An agent commits its change on the head it read: <code class="w">so commit … --parent &lt;the id main held&gt;</code> records the change and moves no ref. <code>so land &lt;changeset&gt; --key &lt;key&gt;</code> then merges it three-way onto the head of <code>main</code>, whatever <code>main</code> gained since, and moves <code>main</code> to the result in one transaction, as one new changeset whose parent is that head. A land that loses a race to another publish merges again and retries by itself, up to 8 attempts unless told otherwise (<code>--max-attempts</code>, at most 32), and then fails with the retryable <code>E_CAS_RETRY_EXHAUSTED</code>. A land run again with its key replays instead of landing twice.</p>
+    <p>Here are the three changes from the worktree section. A change list is a JSON array of whole-file puts and deletes, and <code>--as</code> names the agent that makes the change. In the transcripts, ids are cut to four characters (commands take the full id, or a prefix of 12 or more hex digits), keys keep the order the binary printed them, and <code>…</code> marks what was cut.</p>
+    <div class="code">
+      <div class="label">SwarmOps: three agents commit, two land</div>
+<pre tabindex="0"><span class="c"># Three agents read main (1348…) and each commits a change on that parent. No ref moves.</span>
+<span class="p">$</span> cat a.json
+<span class="o">[{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() -&gt; u32 {\n    2\n}\n"}}]</span>
+<span class="p">$</span> so commit -m "f returns 2" --changes a.json --parent 1348… --as agent/worker-1
+<span class="o">{"ok":true,"op":"commit",…,"result":{"changeset":"f1f3…","parent":"1348…",…},…}</span>
+<span class="p">$</span> so commit -m "describe the crate" --changes b.json --parent 1348… --as agent/worker-2
+<span class="p">$</span> so commit -m "f returns 3" --changes c.json --parent 1348… --as agent/worker-3
+
+<span class="c"># Each agent then lands its changeset on main.</span>
+<span class="p">$</span> so land f1f3… --key f-returns-2 --as agent/worker-1
+<span class="o">{"ok":true,"op":"land",…,</span>
+<span class="o">  "result":{"status":"landed","landed":"894b…","rebased_onto":"1348…",…,"attempts":1,…},…}</span>
+<span class="p">$</span> so land e7ee… --key describe-the-crate --as agent/worker-2
+<span class="o">{"ok":true,"op":"land",…,</span>
+<span class="o">  "result":{"status":"landed","landed":"5f6a…","rebased_onto":"894b…",…,"attempts":1,…},…}</span></pre>
+    </div>
+    <p>Agent 2 changed a different file, so its change merged onto the head that agent 1 had just published: <code>rebased_onto</code> is agent 1's landed changeset. <code>main</code> stays linear, each land one changeset whose parent is the previous head.</p>
+
+    <h3>Merge conflicts come back as data</h3>
+    <p>Agent 3 changed the same line agent 1 changed. Its land fails with <code>E_CONFLICT</code> (exit 3) and records nothing. The report in <code>details.report</code> gives each conflicting file's kind, its hunks with each side's lines, numbered as <code>cat --lines</code> takes them, and the changeset and agent that last changed the path on <code>main</code>. In it, <code>ours</code> is the agent's change and <code>theirs</code> is what <code>main</code> holds.</p>
+    <div class="code">
+      <div class="label">SwarmOps: a conflict, then its resolution</div>
+<pre tabindex="0"><span class="p">$</span> so land cd32… --key f-returns-3 --as agent/worker-3
+<span class="o">{"ok":false,"op":"land",…,</span>
+<span class="o">  "error":{"code":"E_CONFLICT",…,"retryable":false,"exit":3,</span>
+<span class="o">    "details":{"report":{"base":"1348…",</span>
+<span class="o">      "files":[{…,</span>
+<span class="o">        "hunks":[{"base":{…,"text":"    1\n"},"id":0,"ours":{…,"text":"    3\n"},</span>
+<span class="o">          "theirs":{…,"text":"    2\n"}}],</span>
+<span class="o">        "kind":"content",…,"path":"src/lib.rs","theirs_agent":"agent/worker-1",…}],</span>
+<span class="o">      …,"ours":"cd32…","theirs":"5f6a…",…}},</span>
+<span class="o">    "hint":"swarmops cat 5f6a…:src/lib.rs, then swarmops land cd32… --resolve &lt;file&gt; …"},</span>
+<span class="o">  …}</span>
+
+<span class="c"># Nothing was recorded. The agent reads the other side, decides, and lands again.</span>
+<span class="p">$</span> cat resolve.json
+<span class="o">{"against": "5f6a…", "files": {"src/lib.rs": {"take": "ours"}}}</span>
+<span class="p">$</span> so land cd32… --key f-returns-3 --resolve resolve.json --as agent/worker-3
+<span class="o">{"ok":true,"op":"land",…,</span>
+<span class="o">  "result":{"status":"landed","landed":"dfd9…","rebased_onto":"5f6a…",…,"attempts":1,…},…}</span></pre>
+    </div>
+    <p><code>land --resolve</code> settles paths without a checkout: take a side, give new content, or delete, against the report's <code>theirs</code>. A path that <code>main</code> changed since the report comes back as stale. As above, git can find the same conflict without a checkout; the README rates conflicts as parity with <code>git merge-tree --write-tree</code> and notes that resolving without a checkout is one request here, where git takes plumbing.</p>
+
+    <h3>Compare-and-swap, not overwrite</h3>
+    <p>Publishing without <code>land</code> is refused when the ref has moved. The error carries the ref's actual target, says that nothing was recorded, and is marked retryable.</p>
+    <div class="code">
+      <div class="label">SwarmOps: a publish from a stale parent</div>
+<pre tabindex="0"><span class="p">$</span> so commit -m "notes" --changes d.json --parent 1348… --advance main --as agent/worker-4
+<span class="o">{"ok":false,"op":"commit",…,</span>
+<span class="o">  "error":{"code":"E_CAS_MISMATCH",…,"retryable":true,"exit":4,</span>
+<span class="o">    "details":{"actual":"dfd9…","committed":false,"name":"main"},</span>
+<span class="o">    "hint":"swarmops show dfd9…"},</span>
+<span class="o">  …}</span></pre>
+    </div>
+    <p>Re-sending old whole-file puts on top of the new head would revert the winner's edits to shared files. The usual way forward is <code>land</code>: commit on the head you read and let the merge do the rest.</p>
+
+    <h3>Who did what, and undo</h3>
+    <p>Every write names its agent, <code>&lt;family&gt;/&lt;instance&gt;</code> such as <code>agent/worker-1</code>. The changeset records it, and the journal records who moved each ref. <code>so op log</code> lists the store's operations, newest first. <code>so op undo &lt;op&gt;</code> moves every ref that operation moved back to what it named before, all of them or none, by compare-and-swap, and refuses if another operation has moved one since.</p>
+
+    <h3>Claude Code and MCP</h3>
+    <p><code>swarmops mcp</code> serves 18 operations to an agent as MCP tools, among them <code>read_file</code>, <code>commit</code> and <code>land</code>. Register it with Claude Code: <code class="w">claude mcp add swarmops -- so mcp --repo &lt;store&gt; --as &lt;agent&gt;</code>. By default Claude Code starts one server per session and the session's subagents share it, so their commits are recorded for the session's agent. An agent that needs an identity of its own runs as its own Claude Code process, with its own <code>SWARMOPS_AGENT</code>. <a href="/guides/claude-code">Use SwarmOps from Claude Code over MCP</a> covers the registration, one identity for each agent process and the two rules agents follow; the home page has <a href="/#mcp">the MCP section</a>.</p>
+
+    <h3>Git at both ends</h3>
+    <p><code>so git import</code> brings a git repository's history into a store, and <code>so git export</code> writes the store's history back to a git branch, so work landed in SwarmOps goes back to git and today's deployment pipelines keep running. Where git still leads is listed next.</p>
+
+    <h2 id="worktrees-lead">Where git worktrees still lead</h2>
+    <p>These are the dimensions where SwarmOps stands behind git today. Most come from the README's own comparison with git; the second follows from SwarmOps having no workspaces yet, and the platforms row from its platform policy.</p>
+    <table class="compare" aria-labelledby="worktrees-lead">
+      <thead>
+        <tr><th scope="col">Dimension</th><th scope="col">Git worktrees</th><th scope="col">SwarmOps today</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <th scope="row">Write throughput</th>
+          <td data-label="Git worktrees">Agents serialize nothing, and git's defaults sync none of a commit's files.</td>
+          <td data-label="SwarmOps today">Writers take turns: each commit holds one store-wide lock across two journal syncs, and full fsync is the only mode. A commit with no contention takes about 21 ms; 32 processes managed 72.7 commits a second on one busy host. No git number exists to set beside them.</td>
+        </tr>
+        <tr>
+          <th scope="row">A directory to build and test in</th>
+          <td data-label="Git worktrees">Every worktree is a checkout of its own. GitButler's documentation recommends worktrees <q>when agents need incompatible checkout states, separate runtime state, or competing attempts at the same task</q>.</td>
+          <td data-label="SwarmOps today">No workspaces yet; they are planned for M5. An agent that must build or test its change does so in a git worktree checked out from an export of <code>main</code>, at the head it read, and commits the files it made there.</td>
+        </tr>
+        <tr>
+          <th scope="row">Refs</th>
+          <td data-label="Git worktrees">Multi-ref transactions, tags, free-form branch names and symbolic refs.</td>
+          <td data-label="SwarmOps today"><code>main</code> and <code>release/&lt;name&gt;</code> only, moved one per call.</td>
+        </tr>
+        <tr>
+          <th scope="row">Reading</th>
+          <td data-label="Git worktrees">Batch reads, <code>git grep &lt;tree&gt;</code> and sparse checkouts.</td>
+          <td data-label="SwarmOps today">One file or one directory per call, with a byte offset or a range of lines for a file and a depth for a directory. Sparse workspaces are planned.</td>
+        </tr>
+        <tr>
+          <th scope="row">Storage on disk</th>
+          <td data-label="Git worktrees">Packs.</td>
+          <td data-label="SwarmOps today">One file per object, zstd-compressed when that makes it smaller; no packs, no delta compression.</td>
+        </tr>
+        <tr>
+          <th scope="row">Review and the ecosystem</th>
+          <td data-label="Git worktrees">Patch-review tools, with Gerrit and GitHub adding review on top; hooks, signing, submodules and LFS.</td>
+          <td data-label="SwarmOps today">No user hooks, signing, submodules or LFS. Review, with change requests, approvals and a landing gate, is planned for M7.</td>
+        </tr>
+        <tr>
+          <th scope="row">Between hosts</th>
+          <td data-label="Git worktrees">Clone, fetch and push over any transport, and bundles without one.</td>
+          <td data-label="SwarmOps today">One host. Between hosts, a git remote carries the history, one writing host at a time. Offline-first sync is planned for M11.</td>
+        </tr>
+        <tr>
+          <th scope="row">Platforms</th>
+          <td data-label="Git worktrees">Linux, macOS and Windows.</td>
+          <td data-label="SwarmOps today">Linux today; macOS and Windows next. A store must live on a native Linux filesystem.</td>
+        </tr>
+        <tr>
+          <th scope="row">Maturity</th>
+          <td data-label="Git worktrees">Git has hosted itself since 2005.</td>
+          <td data-label="SwarmOps today">Pre-1.0; the first commit is dated <time datetime="2026-10-15">2026-10-15</time>.</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>Where SwarmOps is level or ahead, by design</h3>
+    <p>The README labels each verdict. <q>Ahead by design</q> means judged from the design and the code, never measured against git, and no git baseline has been measured.</p>
+    <ul>
+      <li><strong>Lost commits and lock failures: level.</strong> Concurrent commits all succeed, short of a lock wait past 10 s or a snapshot that meets a new commit in each of its 32 rounds (the retryable <code>E_BUSY</code>). The README rates this parity with agents in separate worktrees.</li>
+      <li><strong>Stale locks: ahead by design.</strong> The writer lock is an <code>flock</code>, which the kernel releases when its holder dies.</li>
+      <li><strong>Conflicts: level.</strong> <code>land</code> merges without a checkout and reports typed conflicts, as <code>git merge-tree --write-tree</code> does.</li>
+      <li><strong>Landing: ahead by design</strong> of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher. Not yet measured under a swarm's load.</li>
+      <li><strong>Errors: ahead by design.</strong> A code, an exit code, a retryable flag, details and a hint, where git reports free text on stderr. git's plumbing and <code>--porcelain</code> formats narrow the gap for output.</li>
+    </ul>
+
+    <h2 id="choose">Which to use</h2>
+    <p>Use git worktrees, or <code>claude --worktree</code>, when</p>
+    <ul>
+      <li>a few agents work on long tasks that a person reviews and merges;</li>
+      <li>an agent must build, test or run a server in a checkout of its own, since SwarmOps has no workspaces yet;</li>
+      <li>you need tags, many branches, review tools or hooks, or you work on macOS or Windows today.</li>
+    </ul>
+    <p>With worktrees, a few habits keep the integration step small:</p>
+    <ul>
+      <li>start each agent on a branch and worktree of its own: <code>git worktree add ../agent-1 -b agent-1/&lt;task&gt;</code>, or <code>claude --worktree &lt;name&gt;</code>;</li>
+      <li>set each worktree up, since it is a fresh checkout: install dependencies there, and list gitignored files such as <code>.env</code> in a <code>.worktreeinclude</code> file, which Claude Code copies into each worktree it creates;</li>
+      <li>look for conflicts before anyone merges: <code>git merge-tree --write-tree</code> on two branches exits 1 when they conflict;</li>
+      <li>merge one branch at a time, check the next against the new <code>main</code>, and remove a finished worktree with <code>git worktree remove</code>.</li>
+    </ul>
+    <p>Consider SwarmOps when</p>
+    <ul>
+      <li>many agent processes, 10 to 50 by design, commit to one trunk on one host (Linux today; macOS and Windows next), and the time goes into git locks, overwritten work and merge-and-retry loops;</li>
+      <li>you want conflicts and errors as data an agent can act on: an error code that does not change, a retryable flag, a hint and a conflict report;</li>
+      <li>you accept what the table says: pre-1.0, no workspaces, and a landing that is built but not yet measured under a swarm's load.</li>
+    </ul>
+    <p>The two are not exclusive. <code>git import</code> and <code>git export</code> move history between a store and a git repository, and <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/operations.md#building-and-testing-a-change">the operations guide</a> has an agent build and test in a git worktree checked out from an export, then commit the files it made there.</p>
+
+    <h2 id="measured">What has been measured, and what has not</h2>
+    <p>The measurement: 32 processes committing 1,000 times each through the <code>swarmops</code> binary made 32,000 commits in 440 s, which is 72.7 commits a second, with no <code>E_BUSY</code>, the retryable error for a lock wait past 10 s. The median commit took 427 ms, an estimated 406 ms of it waiting for the lock, and the slowest took 918 ms. It ran on one busy development host (WSL2, ext4 on a virtual disk, 32 hardware threads, load average 14.6 to 16.4). The project calls such numbers <q>goals and measurements, not guarantees</q>.</p>
+    <p>Not measured:</p>
+    <ul>
+      <li><strong>A comparison with git.</strong> No git baseline has been measured, and a side-by-side benchmark against git worktrees is not on the roadmap. The verdicts on this page come from the design, the code and git's own documentation and source.</li>
+      <li><strong>Landing under a swarm's load.</strong> <code>land</code> is built. Landing by 32 and 50 processes through the binary, and the landing model those numbers choose, come after a pilot on a real repository. A first probe through the binary, on a host under load and so only indicative, had 8, 16 and 32 processes land a few changes each on one <code>main</code>: every change landed exactly once, 22 to 44 % of the lands retried, and with 32 processes four of the 96 lands took all 8 attempts. An agent that meets <code>E_CAS_RETRY_EXHAUSTED</code> lands again with the same key, or asks for more attempts.</li>
+      <li><strong>Power loss on a real device.</strong> Crash sweeps abort <code>init</code> and <code>commit</code> at every one of their filesystem calls, as <code>kill -9</code> would. Power loss is modelled, not tested on a device.</li>
+    </ul>
+
+    <h2 id="try">Try it</h2>
+    <p>Install SwarmOps, make a store and commit: <a href="/#start">the quick start</a> has the commands. Then register the MCP server with Claude Code, one identity for each agent process, as <a href="/#mcp">the MCP section</a> shows. The code, the architecture overview and the list of known limitations are on <a href="https://github.com/KeiaiLab/SwarmOps">GitHub</a>.</p>
+
+    <h2 id="sources">Sources</h2>
+    <p>Facts about SwarmOps come from its repository at milestone M8, October 2026. The runs above used git 2.43.0 and a binary built from that code. Quotes are from the pages listed here.</p>
+    <ul class="sources">
+      <li>git: <a href="https://git-scm.com/docs/git-worktree">git-worktree</a>, <a href="https://git-scm.com/docs/git-merge-tree">git-merge-tree</a> and <a href="https://git-scm.com/install/">installing git</a>.</li>
+      <li>Claude Code: <a href="https://code.claude.com/docs/en/worktrees">Run parallel sessions with worktrees</a>, <a href="https://code.claude.com/docs/en/agents">Run agents in parallel</a> and <a href="https://code.claude.com/docs/en/sub-agents">Create custom subagents</a>.</li>
+      <li>GitButler: <a href="https://docs.gitbutler.com/ai-agents/parallel-agents">Parallel agents</a>.</li>
+      <li>SwarmOps README: <a href="https://github.com/KeiaiLab/SwarmOps#swarmops-and-git">SwarmOps and git</a>, <a href="https://github.com/KeiaiLab/SwarmOps#quick-start">Quick start</a>, <a href="https://github.com/KeiaiLab/SwarmOps#mcp">MCP</a> and <a href="https://github.com/KeiaiLab/SwarmOps#commands">Commands</a>.</li>
+      <li>SwarmOps documents: <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/perf.md">performance ledger</a>, <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md#concurrency">concurrency</a>, <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md">known limitations</a>, <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/policies/versioning-and-stability.md">versioning</a>, <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/policies/msrv-and-platforms.md">platforms</a> and <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/operations.md#building-and-testing-a-change">the operations guide</a>.</li>
+    </ul>
+  </article>
+</div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/logo.svg" alt="" width="26" height="26">SwarmOps</a>
+    <nav aria-label="Project">
+      <a href="https://github.com/KeiaiLab/SwarmOps">GitHub</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md">Architecture</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md">Known limitations</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/CONTRIBUTING.md">Contributing</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md">Security</a>
+      <a href="/THIRD-PARTY-NOTICES.txt">Third-party notices</a>
+    </nav>
+    <span>MIT licence · © 2026 KeiaiLab</span>
+  </div>
+</footer>
+</body>
+</html>

@@ -1,0 +1,7 @@
+# Report a vulnerability privately, never in a public issue, pull request, discussion or commit.
+Contact: https://github.com/KeiaiLab/SwarmOps/security/advisories/new
+Policy: https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md
+Preferred-Languages: en
+
+Canonical: https://swarmops.cc/.well-known/security.txt
+Expires: 2027-10-01T00:00:00Z

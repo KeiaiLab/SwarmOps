@@ -20,3 +20,15 @@
   Cache-Control: public, max-age=86400
 /styles.css
   Cache-Control: public, max-age=3600
+
+# Search engines skip the pages.dev addresses; custom domains do not match these hosts.
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex
+https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex
+
+# One canonical for the dark and the light figure page, which differ only in theme.
+/explainers/store
+  Link: <https://swarmops.cc/explainers/store>; rel="canonical"
+/explainers/store-light
+  Link: <https://swarmops.cc/explainers/store>; rel="canonical"
