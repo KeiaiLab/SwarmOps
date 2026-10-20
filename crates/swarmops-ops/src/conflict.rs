@@ -439,6 +439,54 @@ mod tests {
         );
     }
 
+    /// A file after the first goes in whole, with every hunk it holds, or not at all: one of fifty
+    /// hunks after a first file goes in with all fifty; one whose hunks pass what is left of the
+    /// budget is left out, and so is every file after it, one that would fit too; and the report
+    /// says `truncated`, though it carries every text it holds.
+    #[test]
+    fn a_later_file_goes_in_whole_or_not_at_all() {
+        let hunk = |i: u32| ConflictHunk {
+            base: i..i + 1,
+            ours: i..i + 1,
+            theirs: i..i + 1,
+            base_text: Vec::new(),
+            ours_text: b"o\n".to_vec(),
+            theirs_text: b"t\n".to_vec(),
+        };
+        let content = |hunks: u32| ConflictKind::Content {
+            hunks: (0..hunks).map(hunk).collect(),
+        };
+        let of = |files: Vec<FileConflict>| MergeConflicts {
+            base: id(1),
+            ours: id(2),
+            theirs: id(3),
+            conflicts: files,
+            auto_merged: Vec::new(),
+            last_touched: BTreeMap::new(),
+            stale: Vec::new(),
+        };
+        let listed = |report: &ConflictReport| -> Vec<(String, usize)> {
+            (report.files.iter())
+                .map(|file| (file.path.clone(), file.hunks.len()))
+                .collect()
+        };
+
+        let every_text = u64::MAX;
+        let two = vec![conflict("a", content(1)), conflict("b", content(50))];
+        let fits = report(&of(two), every_text);
+        assert_eq!(listed(&fits), [("a".to_owned(), 1), ("b".to_owned(), 50)]);
+        assert!(!fits.truncated, "nothing left out");
+
+        let files = vec![
+            conflict("a", content(1)),
+            conflict("b", content(1_000)),
+            conflict("c", content(1)),
+        ];
+        let cut = report(&of(files), every_text);
+        assert_eq!(listed(&cut), [("a".to_owned(), 1)]);
+        assert!(cut.truncated);
+    }
+
     /// A report of conflicts holding a hundred thousand hunks in a file and ten thousand files
     /// after it stays within the operations spec's 64 KiB target for a response (§9) with no
     /// texts, made in well under a second: the first file and its first hunk, with their
