@@ -37,6 +37,9 @@
 //!    frame a failed sync took back after step 1 saw it) is [`RepoError::UnknownParent`],
 //!    nothing is recorded, and the objects step 4 flushed stay, unreferenced, for GC.
 //!
+//! Steps 2 to 4 write a changeset without recording it (`Repo::write_changeset`), as a land
+//! writes the changeset it then publishes ([`crate::land`]).
+//!
 //! An identical request computes the same objects and the same changeset: the store has them
 //! all, so nothing is written, and the insert finds the changeset
 //! ([`InsertOutcome::AlreadyPresent`]) without appending a transaction.
@@ -198,6 +201,62 @@ pub struct CommitOutcome {
     pub recovered: Recovered,
 }
 
+/// A changeset for [`Repo::write_changeset`] to write: changes to the tree it applies them to,
+/// and the changeset's other fields.
+pub(crate) struct Draft {
+    /// The tree the changes apply to: the first parent's root; `None` for the empty tree, a root
+    /// changeset's.
+    pub(crate) onto: Option<TreeId>,
+    /// The changes, sorted by path, each path once: those that change nothing stay out of the
+    /// delta.
+    pub(crate) changes: Vec<DeltaEntry>,
+    /// The contents the puts name that the store may lack, as blob objects by id, each hashed
+    /// once: those of the puts left in the delta are written, the rest dropped.
+    pub(crate) contents: BTreeMap<ObjectId, Hashed>,
+    /// The parents, the mainline parent (whose root is `onto`) first.
+    pub(crate) parents: Vec<ChangesetId>,
+    /// Who wrote the change.
+    pub(crate) author: Signature,
+    /// Who recorded it.
+    pub(crate) committer: Signature,
+    /// The message, verbatim.
+    pub(crate) message: Vec<u8>,
+    /// SwarmOps-owned key/value pairs; keys strictly ascending.
+    pub(crate) metadata: Vec<(String, Vec<u8>)>,
+    /// Whether a changeset that changes nothing may be written; otherwise that is
+    /// [`RepoError::EmptyChanges`].
+    pub(crate) allow_empty: bool,
+}
+
+/// What [`Repo::write_changeset`] wrote and flushed: a changeset no metadata names yet.
+pub(crate) struct WrittenChangeset {
+    /// The changeset's id.
+    pub(crate) id: ChangesetId,
+    /// The changeset, whose delta leaves out the changes that changed nothing.
+    pub(crate) changeset: Changeset,
+    /// Its delta hash, from its one encoding.
+    pub(crate) delta_hash: [u8; 32],
+    /// How many blobs this call's own writes placed; those there already, or placed first by a
+    /// concurrent writer, count 0.
+    pub(crate) blobs_written: usize,
+    /// How many trees this call's own writes placed, counted as blobs are.
+    pub(crate) trees_written: usize,
+}
+
+impl WrittenChangeset {
+    /// The index record the changeset's insert queues: its seq and generation are the store's to
+    /// number.
+    pub(crate) fn meta(&self) -> ChangesetMeta {
+        ChangesetMeta {
+            id: self.id,
+            seq: 0,
+            generation: 0,
+            delta_hash: self.delta_hash,
+            parents: self.changeset.parents.clone(),
+        }
+    }
+}
+
 impl<O: ObjectStore> Repo<O> {
     /// Applies `req`'s changes to its first parent's tree and records the result as a
     /// changeset: see [the module documentation](self) for the steps and their errors. The
@@ -240,13 +299,65 @@ impl<O: ObjectStore> Repo<O> {
         let changes = sorted_changes(changes, allow_empty)?;
         self.check_parents(&parents, seen)?;
         self.retain_named(&changes)?;
-        let (candidates, mut contents) = candidate_delta(changes);
-        let mut edit = match parents.first() {
-            Some(&first) => TreeEdit::new(&self.objects, self.changeset_object(first)?.root)?,
+        let (candidates, contents) = candidate_delta(changes);
+        let onto = match parents.first() {
+            Some(&first) => Some(self.changeset_object(first)?.root),
+            None => None,
+        };
+        let written = self.write_changeset(Draft {
+            onto,
+            changes: candidates,
+            contents,
+            parents,
+            author,
+            committer,
+            message,
+            metadata,
+            allow_empty,
+        })?;
+        let (insert, advanced, warnings, recovered) = self.record(written.meta(), advance)?;
+        Ok(CommitOutcome {
+            id: written.id,
+            root: written.changeset.root,
+            files_changed: written.changeset.delta.len(),
+            blobs_written: written.blobs_written,
+            trees_written: written.trees_written,
+            insert,
+            advanced,
+            warnings,
+            recovered,
+        })
+    }
+
+    /// Writes the changeset `draft` describes, and records nothing (the module documentation's
+    /// steps 2 to 4): applies its changes to the tree `onto`, the deletes first, leaving out of the
+    /// delta each put of what its path holds already ([`RepoError::EmptyChanges`] if none is
+    /// left, unless `allow_empty`), encodes the changed directories bottom-up and then the
+    /// changeset, each hashed once, and writes the blobs the delta puts, the changed trees and
+    /// the changeset object in one `put_hashed_batch`, then flushes: every object is durable when
+    /// it returns, before any metadata names it (I1). A put below a file, or where a directory
+    /// is, or a delete of a directory, is [`RepoError::TypeConflict`]; a delete of a path that is
+    /// no file, [`RepoError::PathNotFound`]; a changeset it cannot encode, [`RepoError::Codec`];
+    /// and nothing is written then. A commit records what it wrote ([`Repo::commit`]); a land
+    /// publishes it ([`crate::land`]).
+    pub(crate) fn write_changeset(&self, draft: Draft) -> Result<WrittenChangeset, RepoError> {
+        let Draft {
+            onto,
+            changes,
+            mut contents,
+            parents,
+            author,
+            committer,
+            message,
+            metadata,
+            allow_empty,
+        } = draft;
+        let mut edit = match onto {
+            Some(root) => TreeEdit::new(&self.objects, root)?,
             None => TreeEdit::empty(&self.objects),
         };
-        let effective = edit.apply(&candidates)?;
-        let delta: Vec<DeltaEntry> = candidates
+        let effective = edit.apply(&changes)?;
+        let delta: Vec<DeltaEntry> = changes
             .into_iter()
             .zip(effective)
             .filter_map(|(entry, effective)| effective.then_some(entry))
@@ -254,7 +365,6 @@ impl<O: ObjectStore> Repo<O> {
         if delta.is_empty() && !allow_empty {
             return Err(RepoError::EmptyChanges);
         }
-        let files_changed = delta.len();
         let Encoded {
             root,
             changed: trees,
@@ -279,13 +389,6 @@ impl<O: ObjectStore> Repo<O> {
         };
         let (object, delta_hash) = changeset.encode_hashed()?;
         let id = ChangesetId(object.id());
-        let meta = ChangesetMeta {
-            id,
-            seq: 0,
-            generation: 0,
-            delta_hash,
-            parents: changeset.parents,
-        };
 
         let (blob_count, tree_count) = (contents.len(), trees.len());
         let mut batch = Vec::with_capacity(blob_count + tree_count + 1);
@@ -297,18 +400,12 @@ impl<O: ObjectStore> Repo<O> {
         let (blobs, trees) = outcomes.split_at(blob_count);
         let (blobs_written, trees_written) = (placed(blobs), placed(&trees[..tree_count]));
         self.objects.flush()?;
-
-        let (insert, advanced, warnings, recovered) = self.record(meta, advance)?;
-        Ok(CommitOutcome {
+        Ok(WrittenChangeset {
             id,
-            root,
-            files_changed,
+            changeset,
+            delta_hash,
             blobs_written,
             trees_written,
-            insert,
-            advanced,
-            warnings,
-            recovered,
         })
     }
 

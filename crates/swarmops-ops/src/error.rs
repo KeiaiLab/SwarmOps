@@ -107,12 +107,61 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
             actual,
             ..
         } => undo_blocked(number, &name, expected, actual),
+        // A land's (M4): `land` serves them from M4 Task 7 on, which adds the conflict report to
+        // E_CONFLICT's details.
+        e @ (RepoError::Conflict(_)
+        | RepoError::NothingToLand(_)
+        | RepoError::RetryExhausted { .. }
+        | RepoError::KeyReused { .. }
+        | RepoError::MergeChangeset(_)
+        | RepoError::BaseNotAncestor { .. }
+        | RepoError::NoMergeBase { .. }) => land_error(e, message),
         RepoError::MissingObject { id, .. } => {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
         // A derivation that fails on immutable inputs fails again on every call: a bug.
         RepoError::Derived { .. } => error(ErrorCode::Internal, message),
+    }
+}
+
+/// The operations-spec error for a land's error `e`, whose message is `message`: [`repo_error`]'s
+/// table, a land's rows (M4). E_CONFLICT has no details until `land` builds its report (M4 Task
+/// 7). Any other error is [`repo_error`]'s.
+fn land_error(e: RepoError, message: String) -> OpError {
+    match e {
+        RepoError::Conflict(_) => error(ErrorCode::Conflict, message),
+        RepoError::NothingToLand(reason) => error(ErrorCode::NothingToLand, message)
+            .with_details(details([("reason", reason.as_str().into())])),
+        RepoError::RetryExhausted { attempts, actual } => {
+            error(ErrorCode::CasRetryExhausted, message)
+                .with_details(details([
+                    ("attempts", attempts.into()),
+                    ("actual", actual.to_string().into()),
+                ]))
+                .with_hint("run the land again: nothing of this one was recorded")
+        }
+        RepoError::KeyReused { key, landed } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("key", key.into()),
+                ("landed", landed.to_string().into()),
+            ]))
+            .with_hint(hint(format!("swarmops show {landed}"))),
+        RepoError::MergeChangeset(id) => error(ErrorCode::InvalidArg, message)
+            .with_details(details([("changeset", id.to_string().into())])),
+        RepoError::BaseNotAncestor { base, head } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("base", base.to_string().into()),
+                ("head", head.to_string().into()),
+            ]))
+            .with_hint(hint(format!("swarmops log {head}"))),
+        RepoError::NoMergeBase { head, theirs } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("head", head.to_string().into()),
+                ("theirs", theirs.to_string().into()),
+            ]))
+            .with_hint(hint(format!("swarmops log {head}"))),
+        other => repo_error(other, During::Op),
     }
 }
 
@@ -462,6 +511,110 @@ mod tests {
             why: "a cycle".into(),
         };
         maps(derived, op, ErrorCode::Internal);
+        for e in land_errors() {
+            let code = match e {
+                RepoError::Conflict(_) => ErrorCode::Conflict,
+                RepoError::NothingToLand(_) => ErrorCode::NothingToLand,
+                RepoError::RetryExhausted { .. } => ErrorCode::CasRetryExhausted,
+                _ => ErrorCode::InvalidArg,
+            };
+            maps(e, op, code);
+        }
+    }
+
+    /// One of each error a land raises.
+    fn land_errors() -> [RepoError; 8] {
+        use swarmops_repo::{MergeConflicts, NothingToLandReason};
+        let conflicts = MergeConflicts {
+            base: id(),
+            ours: id(),
+            theirs: id(),
+            conflicts: Vec::new(),
+            auto_merged: Vec::new(),
+            last_touched: std::collections::BTreeMap::new(),
+        };
+        [
+            RepoError::Conflict(Box::new(conflicts)),
+            RepoError::NothingToLand(NothingToLandReason::OnTarget),
+            RepoError::NothingToLand(NothingToLandReason::NoChanges),
+            RepoError::RetryExhausted {
+                attempts: 8,
+                actual: id(),
+            },
+            RepoError::KeyReused {
+                key: "k-1".into(),
+                landed: id(),
+            },
+            RepoError::MergeChangeset(id()),
+            RepoError::BaseNotAncestor {
+                base: id(),
+                head: id(),
+            },
+            RepoError::NoMergeBase {
+                head: id(),
+                theirs: id(),
+            },
+        ]
+    }
+
+    /// A land's errors carry what they are about: the reason there is nothing to land, the
+    /// attempts made and what the target names after the last (retryable, exit 4, with a hint to
+    /// land again), the key and the changeset it landed, the merge changeset, the base and the
+    /// head. E_CONFLICT carries no details before `land` builds its report.
+    #[test]
+    fn land_errors_carry_their_details() {
+        let full = id().to_string();
+        let want = [
+            ("E_CONFLICT", serde_json::json!({})),
+            (
+                "E_NOTHING_TO_LAND",
+                serde_json::json!({"reason": "on_target"}),
+            ),
+            (
+                "E_NOTHING_TO_LAND",
+                serde_json::json!({"reason": "no_changes"}),
+            ),
+            (
+                "E_CAS_RETRY_EXHAUSTED",
+                serde_json::json!({"attempts": 8, "actual": full}),
+            ),
+            (
+                "E_INVALID_ARG",
+                serde_json::json!({"key": "k-1", "landed": full}),
+            ),
+            ("E_INVALID_ARG", serde_json::json!({"changeset": full})),
+            (
+                "E_INVALID_ARG",
+                serde_json::json!({"base": full, "head": full}),
+            ),
+            (
+                "E_INVALID_ARG",
+                serde_json::json!({"head": full, "theirs": full}),
+            ),
+        ];
+        for (e, (code, details)) in land_errors().into_iter().zip(want) {
+            let error = repo_error(e, During::Op);
+            assert_eq!(error.code.as_str(), code, "{error:?}");
+            assert_eq!(Value::Object(error.details), details, "{code}");
+        }
+        let exhausted = repo_error(
+            RepoError::RetryExhausted {
+                attempts: 3,
+                actual: id(),
+            },
+            During::Op,
+        );
+        assert_eq!((exhausted.exit, exhausted.retryable), (4, true));
+        let hint = exhausted.hint.unwrap_or_default();
+        assert!(hint.contains("land again"), "{hint}");
+        let reused = repo_error(
+            RepoError::KeyReused {
+                key: "k-1".into(),
+                landed: id(),
+            },
+            During::Op,
+        );
+        assert_eq!(reused.hint, Some(format!("swarmops show {full}")));
     }
 
     /// A commit with `advance` whose ref moved first recorded nothing: `E_CAS_MISMATCH` (exit 4,

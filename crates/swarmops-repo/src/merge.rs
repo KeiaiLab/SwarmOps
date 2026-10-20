@@ -4,7 +4,8 @@
 //! what one changeset, ours, changed since a base onto another, theirs, reading only the paths
 //! ours changed, and returns the result as data, a [`MergeOutcome`], for its caller to commit or
 //! to report; [`Repo::merge_trees_with`] does the same for three trees, over the paths it is
-//! given. Neither writes anything.
+//! given. Neither writes anything. [`Repo::merge`] and [`Repo::merge_trees`] are the two with the
+//! three-way text merge, diff3 ([`merge_content`]), which a land makes ([`crate::land`]).
 //!
 //! Each path ours changed is decided from the leaf the base, ours and theirs hold there
 //! ([`plan_path`]); a path only theirs changed below one of them keeps theirs' leaf. A file
@@ -32,6 +33,7 @@ use swarmops_core::{
     TreeId, hash_object,
 };
 use swarmops_merge::conflict::{ConflictKind, ContentMerge, ContentMerger};
+use swarmops_merge::diff3::merge_content;
 use swarmops_merge::tree_diff::{Leaf, PathFilter, PathTriple, TreeRead, diff_trees, three_way};
 use swarmops_merge::tree_merge::{FileConflict, PathPlan, entry_in, plan_path};
 use swarmops_store::ObjectStore;
@@ -80,10 +82,7 @@ impl<O: ObjectStore> Repo<O> {
             }
         };
         let roots = [root(base)?, root(ours)?, root(theirs)?];
-        let reads = Reads::new(&self.objects);
-        let changed = diff_trees(&reads, Some(roots[0]), Some(roots[1]), &PathFilter::all())?;
-        let paths = changed.into_iter().map(|change| change.path).collect();
-        merge_trees(&reads, roots, paths, content)
+        self.merge_roots(roots, content)
     }
 
     /// [`Repo::merge_with`] of three trees, the merge of what `ours` changed since `base` onto
@@ -101,6 +100,44 @@ impl<O: ObjectStore> Repo<O> {
     ) -> Result<MergeOutcome, RepoError> {
         let reads = Reads::new(&self.objects);
         merge_trees(&reads, [base, ours, theirs], paths.to_vec(), content)
+    }
+
+    /// [`Repo::merge_with`] with the three-way text merge, [`merge_content`] (diff3): the merge a
+    /// land makes of its change onto the target's head ([`crate::land`]).
+    pub fn merge(
+        &self,
+        base: ChangesetId,
+        ours: ChangesetId,
+        theirs: ChangesetId,
+    ) -> Result<MergeOutcome, RepoError> {
+        self.merge_with(base, ours, theirs, &merge_content)
+    }
+
+    /// [`Repo::merge_trees_with`] with the three-way text merge, [`merge_content`] (diff3): a
+    /// land's incremental re-merge, after the target moved, of what it merged onto what the target
+    /// gained ([`crate::land`]).
+    pub fn merge_trees(
+        &self,
+        base: TreeId,
+        ours: TreeId,
+        theirs: TreeId,
+        paths: &[RepoPath],
+    ) -> Result<MergeOutcome, RepoError> {
+        self.merge_trees_with(base, ours, theirs, paths, &merge_content)
+    }
+
+    /// [`Repo::merge_with`] of the three roots `[base, ours, theirs]`, read by the caller already:
+    /// over the paths of the diff from `base` to `ours`, each tree read once, the diff's and the
+    /// merge's alike. Nothing is written.
+    pub(crate) fn merge_roots(
+        &self,
+        roots: [TreeId; 3],
+        content: ContentMerger<'_>,
+    ) -> Result<MergeOutcome, RepoError> {
+        let reads = Reads::new(&self.objects);
+        let changed = diff_trees(&reads, Some(roots[0]), Some(roots[1]), &PathFilter::all())?;
+        let paths = changed.into_iter().map(|change| change.path).collect();
+        merge_trees(&reads, roots, paths, content)
     }
 }
 
