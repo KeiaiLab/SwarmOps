@@ -40,6 +40,13 @@ The store relies on what a native Linux filesystem gives:
   directory is synced.
 - **Atomic `rename`, and hard links within the filesystem**: objects are linked into place
   without replacing anything, and ref files and checkpoints are replaced by rename.
+- **A failed directory `fsync` that stops the filesystem** (storage spec §2 rule 5): on ext4
+  with its journal, XFS and btrfs, a directory fsync that fails once makes every later change
+  and sync of that filesystem fail until it is mounted again, so a later fsync of a directory
+  that succeeds makes every entry made in it before durable. A failed writeback of file data is
+  not fail-stop (Linux reports it once, to one sync), so the store cuts back or writes again
+  what a failed sync covered. ext4 without its journal, ext2, FUSE and network filesystems do
+  not stop so, and are not supported.
 
 So a store must live on a native Linux filesystem:
 

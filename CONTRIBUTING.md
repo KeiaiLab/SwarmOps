@@ -23,7 +23,7 @@ alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here
   [`docs/superpowers/plans/`](docs/superpowers/plans/) with its tasks and acceptance tests, and
   cites the spec sections it implements. Small fixes need no plan.
 - **Check what is already known.** [docs/known-limitations.md](docs/known-limitations.md) lists
-  what M1 and M1.5 leave open and the milestone that is meant to close each item.
+  what M1, M1.5 and M1.6 leave open and the milestone that is meant to close each item.
 
 ## Setup
 
@@ -75,7 +75,9 @@ Every cargo build, test, clippy and doc step uses `--locked`, so `Cargo.lock` (c
 `fuzz/Cargo.lock`) is exactly what is built. `scripts/check.sh` runs the same steps on a machine
 without `just`. Lints are strict: `unsafe` is forbidden, every exported item must be documented
 (`missing_docs`), clippy's `all` group is denied and `pedantic` warns (so fails under
-`-D warnings`), apart from five noisy lints the workspace `Cargo.toml` allows.
+`-D warnings`), apart from five noisy lints the workspace `Cargo.toml` allows. `missing_docs`
+reaches test builds too: a `pub` item under `#[cfg(test)]` that the crate root reaches needs its
+`///` comment, and a new test, bench or binary crate root its `//!` one.
 
 ## Tests
 
@@ -149,7 +151,7 @@ without `just`. Lints are strict: `unsafe` is forbidden, every exported item mus
 
 | Command | What it does |
 | --- | --- |
-| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash and I/O-error sweeps, the power-loss images at every cut, the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
+| `just check-slow` | `PROPTEST_CASES=2000` and every ignored test except `regenerate_golden` (which rewrites the golden vectors): the crash and I/O-error sweeps, the power-loss images at every cut (sampled in the two long stretches of its bulk transaction that repeat what the run checks at every step), the two 32-process contention measurements, long journal and index runs. It took 723 s at the end of M1, most of it the two contention runs, which run one after the other. |
 | `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden` and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |

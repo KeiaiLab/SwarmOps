@@ -963,8 +963,9 @@ pub struct RefSetReq {
 }
 
 /// States in `RefSetReq`'s schema what `ref set` checks: exactly one of `expected_old` (a
-/// string) and `create` (`true`). Both, neither, and an `expected_old` of null meet no branch,
-/// as the operation refuses them. The wire does not change.
+/// string) and `create` (`true`). Both, and neither, meet no branch, as the operation refuses
+/// them; an `expected_old` of null is no expectation, so with `create: true` it meets the second
+/// branch, as the operation takes it, and without it no branch. The wire does not change.
 fn one_of_expected_old_and_create(schema: &mut schemars::Schema) {
     schema.insert(
         "oneOf".to_owned(),
@@ -1050,8 +1051,8 @@ pub struct VerifyFinding {
     /// string, as `OpError.code` is, so that a client can read kinds newer than its own list.
     pub kind: String,
     /// The object: one whose content does not hash to its id or does not decode
-    /// (`corrupt_object`), or one a changeset references that the store lacks
-    /// (`missing_object`).
+    /// (`corrupt_object`), or one a changeset references that the store lacks, or holds as
+    /// another kind (`missing_object`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub object: Option<String>,
     /// The changeset: the first, in seq order, that references the missing object

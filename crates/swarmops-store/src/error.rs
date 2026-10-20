@@ -93,14 +93,22 @@ pub enum StoreError {
     /// in the caller; carries what the call asked for.
     #[error("a call the store does not take: {0}")]
     BadCall(String),
-    /// The changeset index files hold what no crash leaves behind, as `what` says: a sorted
-    /// view file that ends in a partial entry; sorted views out of order, out of step in a
-    /// way the order compaction renames them in cannot explain, or covering records the
-    /// columns do not hold; an id the index holds twice; a record whose parents lie off
-    /// `parents.log`'s 32-byte boundaries or past its end; an index file that changed
-    /// during an append (a writer without `meta/lock`); or an index file that is missing
-    /// (a store has them all from its creation, and nothing removes one). The journal can
-    /// rebuild the index.
+    /// The changeset index files hold what no crash leaves behind, as `what` says:
+    ///
+    /// - a sorted view file that ends in a partial entry;
+    /// - sorted views out of order, out of step in a way the order compaction renames them in
+    ///   cannot explain, or covering records the columns do not hold;
+    /// - a sorted-view entry that points at a record its view does not cover;
+    /// - an id the index holds twice;
+    /// - a record whose parents lie off `parents.log`'s 32-byte boundaries or past its end, or,
+    ///   where the index counts its records by their lengths, do not start where the record
+    ///   before it leaves off;
+    /// - records a handle counted that are no longer whole in every index file;
+    /// - an index file that changed during an append (a writer without `meta/lock`);
+    /// - an index file that is missing (a store has them all from its creation, and nothing
+    ///   removes one).
+    ///
+    /// The journal can rebuild the index.
     #[error("the changeset index is corrupt: {what}")]
     IndexCorrupt {
         /// What is wrong.
@@ -134,7 +142,10 @@ pub enum StoreError {
     /// frames are cut back off with it). Or the tail check's listing of such a frame in
     /// `journal.off` failed, and what reached `journal.off` of the entry was cut back off it:
     /// the transaction never began, and the next tail check lists the frame. Retrying the
-    /// transaction is safe: nothing of it is in the store. Retryable.
+    /// transaction is safe: nothing of it is in the store. Retryable, unless the filesystem
+    /// refused the append for want of permission or as a read-only filesystem (`source.kind()`
+    /// `PermissionDenied`, `ReadOnlyFilesystem`): running it again meets that refusal again
+    /// until its cause is fixed, and the API layer reports it as `E_IO`, not `E_IO_TRANSIENT`.
     #[error(
         "the transaction did not commit: a journal append failed, and what it wrote was cut \
          back off the journal: {source}"
@@ -385,6 +396,21 @@ const _: fn() = || {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The refusals of an id prefix and of a call the store does not take say what they
+    /// refused: the prefix as given, and what the call asked for.
+    #[test]
+    fn a_bad_prefix_and_a_bad_call_say_what_was_refused() {
+        assert_eq!(
+            StoreError::BadPrefix("xyz".to_owned()).to_string(),
+            r#"id prefix "xyz" is not 1 to 64 hex digits"#
+        );
+        let past = "entries 3..+1 are not within a sorted view of 3 entries";
+        assert_eq!(
+            StoreError::BadCall(past.to_owned()).to_string(),
+            format!("a call the store does not take: {past}")
+        );
+    }
 
     #[test]
     fn limit_errors_say_which_limit_and_by_how_much() {
