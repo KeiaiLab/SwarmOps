@@ -60,7 +60,8 @@ pub mod source;
 pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
 pub use export::{DivergedReason, ExportError, ExportReport, ExportRequest, export};
 pub use export_oid::{
-    ExportObjects, ExportOid, ExportReader, ExportedOid, blob_oid, register, tree_oid,
+    ExportObjects, ExportOid, ExportReader, ExportedOid, GitMemoMismatch, OidCache, blob_oid,
+    real_blob_oid, real_tree_oid, register, tree_oid, verify_export_oids,
 };
 pub use gix_sink::GixSink;
 pub use gix_source::GixSource;

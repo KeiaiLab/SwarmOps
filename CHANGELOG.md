@@ -1109,5 +1109,36 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   and any import, export or put that reached it, took its whole length in memory, enough for
   the system to kill the process (`swarmops mcp` with it), or failed with `E_IO` where the
   allocation was refused.
+- A `git export` trusted the git oids it had memoized in the derived store
+  (`meta/derived/git_blob_oid`, `git_tree_oid`, `git_oid`) as the truth about an object's content:
+  a memo placed there whole and with its checksum right, naming an object the destination already
+  held, could make the export write that object's bytes in place of the store's — git history a
+  CI or deploy pipeline consumes, with exit 0 and a clean `verify --deep` — or move the branch to
+  an arbitrary commit the destination held, neither rendered nor mapped by the export. The export
+  now derives every tree's, blob's and commit's git oid from the store's own bytes and binds what
+  it reuses, writes or moves the branch to to them (a native commit's oid from rendering over oids
+  derived that way, an imported commit's from the external-id mapping, which stays authoritative);
+  a memo that is not the oid the objects give is `E_STORE_CORRUPT` (`details.derivation`, hint
+  `swarmops verify --deep`), refused before any object is reused or the branch moves, never a
+  silent reuse. `verify --deep` now re-derives `git_tree_oid`, `git_blob_oid` and `git_oid` against
+  the objects too and reports each mismatch (`derived_mismatch`), as it does the other derived
+  values (`git_oid` names its changeset, the other two their object). The memo stays a hint that
+  saves a write, not a statement of content ([docs/known-limitations.md](docs/known-limitations.md),
+  "Crafted derived values that agree with each other are read as valid").
+- A `git export` still took the parents of the commits it wrote, where those parents were commits
+  it did not write, from the export oids memoized in the derived store (`meta/derived/git_oid`),
+  and so did its search for the commit the branch's history goes on from: a memo placed there
+  whole and with its checksum right, for an ancestor of those commits (a merge's side branch,
+  say), could give them as their parent any commit the destination held, or make a branch that
+  had diverged pass for the export of an ancestor, so the branch moved to a history the store does
+  not hold, with exit 0 and the files at its tip still the store's. The export now derives the
+  export oid of every changeset below the head from the store's own objects, each once a run,
+  parents first and without recursion, and only checks the memos against those: one that
+  disagrees is `E_STORE_CORRUPT` (`details.derivation` `git_oid`, `details.changeset`; hint
+  `swarmops verify --deep`, which names it), refused before anything is written or the branch
+  moves, a memo of the head that names the branch's commit included, which no longer passes for
+  up to date. So every export, an incremental one included, reads the whole history below its
+  head ([docs/known-limitations.md](docs/known-limitations.md), "An export reads the whole history
+  below its head").
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable

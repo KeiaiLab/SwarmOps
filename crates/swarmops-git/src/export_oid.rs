@@ -19,13 +19,23 @@
 //! never by recursion. As M2's engine does with its values, a memo whose put fails is dropped and
 //! the oid returned all the same; a read of the derived store that fails is the error.
 //!
+//! Neither the export nor a deep verify takes a `git_oid` memo as the truth: each derives every
+//! export oid it uses again, with the history below it, from the objects, the export checking each
+//! memo it meets against what it derives and refusing one that disagrees, the verify reporting it
+//! ([`verify_export_oids`]).
+//!
 //! Export oids read objects and derived values alone, never a ref, the journal or the clock, so a
 //! changeset's export oid never changes. Version 1 fixes git's tree order and modes, the commit
 //! layout, the signatures verbatim and the native trailer block ([`crate::native`]): a change to
 //! any of them is a new version, which every branch exported before it meets as divergence.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
-use swarmops_core::{BlobId, ChangesetId, EntryTarget, ObjectId, Tree, TreeEntry, TreeId};
+use swarmops_core::{
+    BlobId, Changeset, ChangesetId, EntryTarget, ObjectId, Tree, TreeEntry, TreeId,
+};
 use swarmops_repo::{Derivation, DeriveCtx, DeriveError, Repo, RepoError, RepoRead, Subject};
 use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore};
 
@@ -41,6 +51,10 @@ const BLOB_MEMO: &str = "git_blob_oid";
 
 /// The version of both memos: a slot with no key, holding the oid's 20 bytes.
 const MEMO_VERSION: u32 = 1;
+
+/// The length of a `git_oid` memo, an [`ExportedOid`] as postcard writes it: the oid's 20 bytes,
+/// then one for `kept`.
+const EXPORT_MEMO_LEN: usize = 21;
 
 /// The derivation of the git commit each changeset exports to (storage spec §5's `GitOid`,
 /// derived name `git_oid`): see [the module documentation](self). Its key is `()`, its value an
@@ -82,7 +96,9 @@ impl Derivation for ExportOid {
 
     /// The changeset's [`GIT_OID`], with no tree read, where it is an unchanged import (see [the
     /// module documentation](self)); otherwise the hash of its rendering over its parents' values
-    /// and its root's [`tree_oid`].
+    /// and its root's real tree oid ([`real_tree_oid`], the memo checked against the store's own
+    /// bytes, so a crafted tree or blob memo is refused here, before an export oid is stored over
+    /// it, not trusted).
     fn derive(
         &self,
         ctx: &DeriveCtx<'_>,
@@ -105,7 +121,8 @@ impl Derivation for ExportOid {
             });
         }
         let parents: Vec<GitOid> = parents.iter().map(ExportedOid::git_oid).collect();
-        let tree = tree_oid(ctx, cs.root)?;
+        let cache = OidCache::new();
+        let tree = real_tree_oid(ctx, &cache, subject.id, cs.root)?;
         let oid = git_hash(
             RawKind::Commit,
             &render_commit(subject.id, cs, &parents, tree),
@@ -236,6 +253,173 @@ pub fn blob_oid(objects: &dyn ExportObjects, blob: BlobId) -> Result<GitOid, Rep
     Ok(oid)
 }
 
+/// An export's own cache of the real git oids of the objects it has read in this run, each hashed
+/// once, so that a tree or a blob many of the commits it writes share is read once and the whole
+/// export binds to the store's own bytes without re-reading them. Keyed by the object's id.
+///
+/// This is not the derived store's memo ([`tree_oid`], [`blob_oid`]): [`real_tree_oid`] and
+/// [`real_blob_oid`] recompute from the store's bytes and only ever check a memo against what they
+/// compute, so a memo a store file names cannot stand in for an object's content.
+#[derive(Default)]
+pub struct OidCache(RefCell<HashMap<ObjectId, GitOid>>);
+
+impl OidCache {
+    /// A cache with nothing in it.
+    pub fn new() -> OidCache {
+        OidCache::default()
+    }
+
+    fn get(&self, id: ObjectId) -> Option<GitOid> {
+        self.0.borrow().get(&id).copied()
+    }
+
+    fn insert(&self, id: ObjectId, oid: GitOid) {
+        self.0.borrow_mut().insert(id, oid);
+    }
+}
+
+/// Whether a recomputation checks the memos it finds against what it computes: the export does
+/// ([`Against`], naming the changeset for the error a wrong memo raises); `verify --deep`, which
+/// reports every mismatch itself rather than stopping at the first, does not ([`Recompute`]).
+///
+/// [`Against`]: Memos::Against
+/// [`Recompute`]: Memos::Recompute
+#[derive(Clone, Copy)]
+enum Memos {
+    /// Check each memo, refusing a crafted one ([`check_memo`]); write one where none is there.
+    Against(ChangesetId),
+    /// Only recompute, reading or writing no memo.
+    Recompute,
+}
+
+/// The real git oid of blob `blob`, the hash of the store's own bytes as a git blob, never a memo:
+/// the git oid an export reuses or writes is bound to the content the store holds. Checks the memo
+/// the derived store holds for the blob against it, so a crafted memo is a typed
+/// refusal, not a silent reuse of another object; writes the memo where none is there. `about` is
+/// the changeset the export is on, for the error a wrong memo raises. Cached in `cache`.
+pub fn real_blob_oid(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    about: ChangesetId,
+    blob: BlobId,
+) -> Result<GitOid, RepoError> {
+    blob_git_oid(objects, cache, Memos::Against(about), blob)
+}
+
+/// The real git oid of the tree `root` renders to, computed from the store's own bytes — its
+/// blobs' real oids ([`real_blob_oid`]) and its subtrees' real oids — never a memo: the git oid an
+/// export reuses or writes for a tree, and the child oids it renders into a tree, are the store's.
+/// Checks the memo the derived store holds for each tree against what it computes,
+/// so a crafted tree memo is a typed refusal, not a silent reuse; writes a memo where none is
+/// there. Walks the trees below `root` with a stack of its own, never by recursion. `about` is the
+/// changeset the export is on, for the error a wrong memo raises. Cached in `cache`.
+pub fn real_tree_oid(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    about: ChangesetId,
+    root: TreeId,
+) -> Result<GitOid, RepoError> {
+    tree_git_oid(objects, cache, Memos::Against(about), root)
+}
+
+/// The git oid of blob `blob` from the store's own bytes, the memos handled as `memos` says.
+fn blob_git_oid(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    memos: Memos,
+    blob: BlobId,
+) -> Result<GitOid, RepoError> {
+    if let Some(oid) = cache.get(blob.0) {
+        return Ok(oid);
+    }
+    let real = git_hash(RawKind::Blob, &objects.blob(blob)?);
+    if let Memos::Against(about) = memos {
+        check_memo(objects.memo(), BLOB_MEMO, blob.0, real, about)?;
+    }
+    cache.insert(blob.0, real);
+    Ok(real)
+}
+
+/// The git oid of the tree `root` renders to from the store's own bytes, the memos handled as
+/// `memos` says. Walks the trees below `root` with a stack of its own, never by recursion.
+fn tree_git_oid(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    memos: Memos,
+    root: TreeId,
+) -> Result<GitOid, RepoError> {
+    if let Some(oid) = cache.get(root.0) {
+        return Ok(oid);
+    }
+    let mut stack = vec![Pending::new(root, objects.tree(root)?)];
+    loop {
+        let top = stack
+            .last()
+            .expect("the stack holds a tree until the root's oid is known");
+        let next = top
+            .tree
+            .entries()
+            .get(top.oids.len())
+            .map(|entry| entry.target);
+        let oid = match next {
+            Some(EntryTarget::Leaf(_, blob)) => blob_git_oid(objects, cache, memos, blob)?,
+            Some(EntryTarget::Dir(dir)) => {
+                if let Some(oid) = cache.get(dir.0) {
+                    oid
+                } else {
+                    stack.push(Pending::new(dir, objects.tree(dir)?));
+                    continue;
+                }
+            }
+            None => {
+                // Every entry's oid is known: the tree renders, its oid is checked and cached.
+                let done = stack.pop().expect("the tree on top");
+                let bytes = tree_bytes(&done.tree, |entry| done.oid_of(entry));
+                let oid = git_hash(RawKind::Tree, &bytes);
+                if let Memos::Against(about) = memos {
+                    check_memo(objects.memo(), TREE_MEMO, done.id.0, oid, about)?;
+                }
+                cache.insert(done.id.0, oid);
+                if stack.is_empty() {
+                    return Ok(oid);
+                }
+                oid
+            }
+        };
+        let top = stack.last_mut().expect("the tree the oid is an entry of");
+        top.oids.push(oid);
+    }
+}
+
+/// Checks the git oid the derived store memoized for `subject` under `name` against `real`, the oid
+/// the store's own bytes give: a memo that is another oid is [`RepoError::DerivedCorrupt`] (the git
+/// export's memo of `about`), so whoever can place a store file cannot make a reader take one
+/// object's content for another's; `verify --deep` names every such memo. A memo that agrees, or
+/// none (then `real` is written, as [`memoize`]), is no error.
+fn check_memo(
+    memo: &DerivedStore,
+    name: &str,
+    subject: ObjectId,
+    real: GitOid,
+    about: ChangesetId,
+) -> Result<(), RepoError> {
+    match memoized(memo, name, subject)? {
+        Some(stored) if stored != real => Err(RepoError::DerivedCorrupt {
+            name: name.to_owned(),
+            changeset: about,
+            why: format!(
+                "the git oid memoized for object {subject} is {stored}, but the store's bytes \
+                 render to {real}"
+            ),
+        }),
+        Some(_) => Ok(()),
+        None => {
+            memoize(memo, name, subject, real);
+            Ok(())
+        }
+    }
+}
+
 /// A tree [`tree_oid`] is rendering: its id, its object, and its entries' oids so far, in the
 /// tree's order.
 struct Pending {
@@ -333,5 +517,340 @@ fn repo_error(e: DeriveError) -> RepoError {
             name: ExportOid::NAME.to_owned(),
             why: need.to_string(),
         },
+    }
+}
+
+/// A git-export oid the derived store memoized (`git_tree_oid`, `git_blob_oid` or `git_oid`) that
+/// is not the one the store's own objects give, as a deep verify re-derives it ([`verify_export_oids`]):
+/// a file someone placed in the store, or a cache a faulty build wrote. Removing the file, or all
+/// of `meta/derived/`, has it derived again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitMemoMismatch {
+    /// The memo's derivation name: `git_tree_oid`, `git_blob_oid` or `git_oid`.
+    pub memo: String,
+    /// The object the memo is about: a tree, a blob, or (for `git_oid`) a changeset.
+    pub subject: ObjectId,
+    /// The git oid the memo holds.
+    pub stored: GitOid,
+    /// The git oid the store's own objects give.
+    pub real: GitOid,
+}
+
+/// Re-derives every git-export oid the derived store holds against the store's own objects, and
+/// reports each memo that is not what they give ([`GitMemoMismatch`]): the `git_tree_oid` and
+/// `git_blob_oid` of every tree and blob, recomputed from the store's bytes, and the `git_oid` of
+/// every changeset, rendered over oids recomputed that way. A deep `verify` calls this (storage
+/// spec §5, §7), so that a crafted or torn git memo is found as the other derived values' are; it
+/// reads no `meta/derived/` memo as the truth and writes none (unlike an export, it reports every
+/// mismatch rather than refusing at the first). A memo about an object the store lacks, or that
+/// does not decode, is passed over (the deep verify reports the missing or corrupt object on its
+/// own). [`RepoError`] only where a read cannot go on.
+pub fn verify_export_oids<O: ObjectStore>(
+    repo: &Repo<O>,
+) -> Result<Vec<GitMemoMismatch>, RepoError> {
+    let snapshot = repo.snapshot()?;
+    let reader = ExportReader {
+        read: &snapshot,
+        store: repo.derived_store(),
+    };
+    let store = repo.derived_store();
+    let cache = OidCache::new();
+    let mut found = Vec::new();
+
+    // Each blob's and each tree's memoized git oid, against the oid its bytes give. A memo about
+    // an object the store lacks or holds damaged is passed over (`Err`): the deep verify reports
+    // that object itself.
+    for (name, is_tree) in [(BLOB_MEMO, false), (TREE_MEMO, true)] {
+        for listed in store.list(name, MEMO_VERSION)? {
+            let subject = listed.subject;
+            let Some(stored) = listed_oid(store, name, subject)? else {
+                continue;
+            };
+            let recomputed = if is_tree {
+                tree_git_oid(&reader, &cache, Memos::Recompute, TreeId(subject))
+            } else {
+                blob_git_oid(&reader, &cache, Memos::Recompute, BlobId(subject))
+            };
+            if let Ok(got) = recomputed
+                && got != stored
+            {
+                found.push(GitMemoMismatch {
+                    memo: name.to_owned(),
+                    subject,
+                    stored,
+                    real: got,
+                });
+            }
+        }
+    }
+
+    // Each changeset's memoized export oid, against the one it renders to over real oids.
+    let mut expected = ExportOids::new(OnMemo::Skip);
+    for listed in store.list(ExportOid::NAME, ExportOid::VERSION)? {
+        let id = ChangesetId(listed.subject);
+        let Some(stored) = stored_export_oid(store, id)? else {
+            continue;
+        };
+        if let Ok(got) = expected.of(&snapshot, &reader, &cache, id)
+            && (got.oid != stored.oid || got.kept != stored.kept)
+        {
+            found.push(GitMemoMismatch {
+                memo: ExportOid::NAME.to_owned(),
+                subject: id.0,
+                stored: stored.git_oid(),
+                real: got.git_oid(),
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// The git oid a `git_tree_oid`/`git_blob_oid` memo (key `()`) holds for `subject`, if the store
+/// has one of an oid's 20 bytes; `None` for none, or a value of another length (a deep verify
+/// reports a torn or malformed value no further).
+fn listed_oid(
+    store: &DerivedStore,
+    name: &str,
+    subject: ObjectId,
+) -> Result<Option<GitOid>, RepoError> {
+    let Some(value) = store.get(&slot(name, subject))? else {
+        return Ok(None);
+    };
+    Ok(<[u8; 20]>::try_from(value.as_slice()).ok().map(GitOid))
+}
+
+/// The [`ExportedOid`] a `git_oid` memo holds for changeset `id`, as its 21 bytes record it (the
+/// oid's 20, then one for `kept`); `None` for none, or a value of another length.
+fn stored_export_oid(
+    store: &DerivedStore,
+    id: ChangesetId,
+) -> Result<Option<ExportedOid>, RepoError> {
+    let Some(value) = store.get(&export_slot(id))? else {
+        return Ok(None);
+    };
+    if value.len() != EXPORT_MEMO_LEN {
+        return Ok(None);
+    }
+    let oid = <[u8; 20]>::try_from(&value[..20]).expect("20 bytes of 21");
+    Ok(Some(ExportedOid {
+        oid,
+        kept: value[20] != 0,
+    }))
+}
+
+/// The derived store's slot of changeset `id`'s `git_oid` memo: [`ExportOid`]'s, whose key is
+/// `()`, of no bytes.
+fn export_slot(id: ChangesetId) -> DerivedSlot<'static> {
+    DerivedSlot {
+        name: ExportOid::NAME,
+        version: ExportOid::VERSION,
+        subject: id.0,
+        key: &[],
+    }
+}
+
+/// An [`ExportedOid`] as its `git_oid` memo holds it, as postcard writes one: the oid's 20 bytes,
+/// then one for `kept`.
+fn export_memo(value: ExportedOid) -> [u8; EXPORT_MEMO_LEN] {
+    let mut bytes = [0; EXPORT_MEMO_LEN];
+    bytes[..20].copy_from_slice(&value.oid);
+    bytes[20] = u8::from(value.kept);
+    bytes
+}
+
+/// Checks the export oid the derived store memoized for changeset `id` (its `git_oid` memo)
+/// against `real`, the one its history gives ([`ExportOids`]): a memo that is another value is
+/// [`RepoError::DerivedCorrupt`], so that no store file someone placed decides the parent a commit
+/// names or the commit a branch moves to; `verify --deep` names every such memo. A memo that
+/// agrees is no error, nor is none: then `real` is written, a put that fails dropped (as
+/// [`memoize`]). A value of another length than an export oid's is no memo the export reads, and
+/// is passed over.
+fn check_export_memo(
+    memo: &DerivedStore,
+    id: ChangesetId,
+    real: ExportedOid,
+) -> Result<(), RepoError> {
+    match stored_export_oid(memo, id)? {
+        Some(stored) if stored != real => Err(RepoError::DerivedCorrupt {
+            name: ExportOid::NAME.to_owned(),
+            changeset: id,
+            why: format!(
+                "the export oid memoized for it is {} (kept: {}), but its history gives {} \
+                 (kept: {})",
+                stored.git_oid(),
+                stored.kept,
+                real.git_oid(),
+                real.kept
+            ),
+        }),
+        Some(_) => Ok(()),
+        None => {
+            let _ = memo.put(&export_slot(id), &export_memo(real));
+            Ok(())
+        }
+    }
+}
+
+/// What re-deriving export oids does with the memos of the derived store it meets
+/// ([`ExportOids`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnMemo {
+    /// Checks each against what the store's objects give, a memo that disagrees refused
+    /// ([`check_memo`], [`check_export_memo`]), and writes one where none is: the export's.
+    Check,
+    /// Reads and writes none: a deep verify's, which compares the memos with the values itself
+    /// and reports every mismatch ([`verify_export_oids`]).
+    Skip,
+}
+
+/// The export oids of a snapshot's changesets, each re-derived from the store's own objects as
+/// [`ExportOid::derive`] computes it, but over its parents' re-derived values, never over a
+/// `git_oid` memo: an unchanged import's [`GIT_OID`], any other changeset's rendering over its
+/// parents' export oids and its root's real tree oid ([`tree_git_oid`]). What the export names as
+/// a commit's parents, compares a branch with and moves a branch to, so that no memo a store file
+/// could have placed decides any of them (with [`OnMemo::Check`]); what a deep verify compares the
+/// memos with (with [`OnMemo::Skip`]).
+///
+/// Each changeset is derived once, its value kept for the run: the history below one is walked
+/// parents first, with a stack of its own, never by recursion, so that no depth of history
+/// overflows the thread's stack.
+///
+/// ```text
+///   h        of(h): the stack is h, b, p2; p2 is derived first (a root), then b over p2's
+///  / \       value; then h's second parent, c, goes on top and is derived over p2's; then h
+/// b   c      over b's and c's. Each value comes from the objects and the values below it,
+///  \ /       never from a memo, and each changeset is derived once.
+///   p2
+/// ```
+pub(crate) struct ExportOids {
+    on_memo: OnMemo,
+    known: HashMap<ChangesetId, Known>,
+}
+
+/// What [`ExportOids`] keeps of a changeset it derived: its export oid, and whether it was
+/// imported (it has [`GIT_OID`]), which a child's check for an unchanged import reads.
+#[derive(Clone, Copy)]
+struct Known {
+    value: ExportedOid,
+    imported: bool,
+}
+
+impl ExportOids {
+    /// Export oids re-derived as `on_memo` says, none yet.
+    pub(crate) fn new(on_memo: OnMemo) -> ExportOids {
+        ExportOids {
+            on_memo,
+            known: HashMap::new(),
+        }
+    }
+
+    /// Changeset `id`'s export oid in `snapshot`, re-derived with every one below it not derived
+    /// yet ([`ExportOids`]); its trees and blobs read through `objects`, their real git oids
+    /// cached in `cache`. With [`OnMemo::Check`], the memos of each changeset it derives, its
+    /// `git_oid` and its trees' and blobs', are checked against what it computes:
+    /// [`RepoError::DerivedCorrupt`] for one that disagrees. [`RepoError::NotFound`] for a
+    /// changeset the snapshot does not hold; a read that fails is the error, and what was derived
+    /// before it is kept.
+    pub(crate) fn of<O: ObjectStore>(
+        &mut self,
+        snapshot: &RepoRead<'_, O>,
+        objects: &dyn ExportObjects,
+        cache: &OidCache,
+        id: ChangesetId,
+    ) -> Result<ExportedOid, RepoError> {
+        if let Some(known) = self.known.get(&id) {
+            return Ok(known.value);
+        }
+        let mut stack = vec![PendingChangeset::read(snapshot, id)?];
+        loop {
+            let top = stack
+                .last_mut()
+                .expect("the stack holds a changeset until id's value is known");
+
+            // The next parent's value: known, it joins the changeset's; else the parent goes on
+            // top.
+            if let Some(&parent) = top.changeset.parents.get(top.parents.len()) {
+                match self.known.get(&parent) {
+                    Some(&known) => top.parents.push(known),
+                    None => stack.push(PendingChangeset::read(snapshot, parent)?),
+                }
+                continue;
+            }
+
+            // Every parent's value is known: the changeset's own is kept, where the changeset
+            // below finds it next.
+            let done = stack.pop().expect("the changeset on top");
+            let known = self.derive(objects, cache, &done)?;
+            self.known.insert(done.id, known);
+            if stack.is_empty() {
+                return Ok(known.value);
+            }
+        }
+    }
+
+    /// The export oid of `done`, a changeset whose parents' values are all known, as
+    /// [`ExportOids::of`] says; its memos checked with [`OnMemo::Check`].
+    fn derive(
+        &self,
+        objects: &dyn ExportObjects,
+        cache: &OidCache,
+        done: &PendingChangeset,
+    ) -> Result<Known, RepoError> {
+        let (id, cs) = (done.id, &done.changeset);
+        let recorded = metadata(cs, GIT_OID);
+        let unchanged = metadata(cs, GIT_LOSSY).is_none()
+            && (done.parents.iter()).all(|parent| parent.imported && parent.value.kept);
+        let value = if let Some(own) = recorded.and_then(lowercase_oid).filter(|_| unchanged) {
+            ExportedOid {
+                oid: own.0,
+                kept: true,
+            }
+        } else {
+            let memos = match self.on_memo {
+                OnMemo::Check => Memos::Against(id),
+                OnMemo::Skip => Memos::Recompute,
+            };
+            let parents: Vec<GitOid> = (done.parents.iter())
+                .map(|parent| parent.value.git_oid())
+                .collect();
+            let tree = tree_git_oid(objects, cache, memos, cs.root)?;
+            let oid = git_hash(RawKind::Commit, &render_commit(id, cs, &parents, tree));
+            let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
+            ExportedOid { oid: oid.0, kept }
+        };
+        if self.on_memo == OnMemo::Check {
+            check_export_memo(objects.memo(), id, value)?;
+        }
+        Ok(Known {
+            value,
+            imported: recorded.is_some(),
+        })
+    }
+}
+
+/// A changeset [`ExportOids::of`] is re-deriving the export oid of: its id, its object, and what
+/// it knows of its parents so far, in the changeset's order.
+struct PendingChangeset {
+    id: ChangesetId,
+    changeset: Changeset,
+    parents: Vec<Known>,
+}
+
+impl PendingChangeset {
+    /// Changeset `id` of `snapshot`, nothing of its parents known yet. [`RepoError::NotFound`] if
+    /// the snapshot does not hold it.
+    fn read<O: ObjectStore>(
+        snapshot: &RepoRead<'_, O>,
+        id: ChangesetId,
+    ) -> Result<PendingChangeset, RepoError> {
+        let stored = snapshot
+            .changeset(id)?
+            .ok_or_else(|| RepoError::NotFound(id.to_string()))?;
+        let parents = Vec::with_capacity(stored.changeset.parents.len());
+        Ok(PendingChangeset {
+            id,
+            changeset: stored.changeset,
+            parents,
+        })
     }
 }

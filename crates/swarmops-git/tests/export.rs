@@ -1287,3 +1287,726 @@ fn two_exports_racing_end_at_the_same_head() {
     assert!(!lock.exists(), "a lock file is left");
     reachable(&destination.dir, head_oid);
 }
+
+/// Memos of the derived store (`meta/derived/git_blob_oid`, `git_tree_oid`, `git_oid`) placed
+/// with a value their object does not give, each file whole and its trailer right: anyone who
+/// writes a store's files can make one, as the trailer is a checksum over public fields, not a
+/// signature. An export never takes such a memo for what an object is: what the branch names
+/// holds the store's own content, never the object the memo names, which the repository holds
+/// (packed, as git trusts it, or loose); the export refuses, naming the memo, before it writes
+/// anything, and with the memo's file removed it writes the store's content.
+mod crafted_memos {
+    use std::io;
+
+    use swarmops_core::ObjectId;
+    use swarmops_git::{
+        ExportReader, RawTreeEntry, Stored, render_commit, tree_oid, verify_export_oids,
+    };
+    use swarmops_store::DerivedSlot;
+
+    use super::*;
+
+    /// Places `value` as the memo `name` (version 1, no key) of `subject` in `store`'s derived
+    /// store, its file whole and its trailer right, in place of any there. The file's path.
+    fn plant(store: &Store, name: &str, subject: ObjectId, value: &[u8]) -> Utf8PathBuf {
+        let slot = DerivedSlot {
+            name,
+            version: 1,
+            subject,
+            key: &[],
+        };
+        let file = Layout::new(&store.root).derived_path(&slot);
+        match fs::remove_file(&file) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove {file}: {error}"),
+        }
+        let placed = store.repo.derived_store().put(&slot, value);
+        assert!(
+            placed.expect("place the memo"),
+            "{file}: a memo is in the way"
+        );
+        file
+    }
+
+    /// A memo of `git_oid` for a changeset that exports to `commit`, as its file holds it: the
+    /// commit's 20 bytes, then 1 for a commit that is the changeset's own.
+    fn commit_memo(commit: GitOid) -> Vec<u8> {
+        let mut value = commit.0.to_vec();
+        value.push(1);
+        value
+    }
+
+    /// The bytes of the file at `path` (`/` between its names) in git's tree `tree` of the
+    /// repository at `dir`; `None` if nothing, or no file, is there.
+    fn file_at(dir: &Path, tree: GitOid, path: &str) -> Option<Vec<u8>> {
+        let source = GixSource::open(dir).unwrap();
+        let mut at = tree;
+        for name in path.split('/') {
+            let (kind, bytes) = source.read(at).unwrap();
+            if kind != RawKind::Tree {
+                return None;
+            }
+            let tree = RawTree::parse(&bytes).unwrap();
+            at = tree.entries.iter().find(|e| e.name == name.as_bytes())?.oid;
+        }
+        let (kind, bytes) = source.read(at).unwrap();
+        (kind == RawKind::Blob).then_some(bytes)
+    }
+
+    /// Checks what an export into the repository at `dir`, whose branch `main` named `before`,
+    /// did with a crafted memo of `memo` in the store, which holds `content` at `path` in the
+    /// head's tree: wherever the branch is, the file there is the store's; the export refused,
+    /// naming the memo; and the branch did not move.
+    #[track_caller]
+    fn refused(
+        result: &Result<ExportReport, ExportError>,
+        dir: &Path,
+        before: Option<GitOid>,
+        (path, content): (&str, &[u8]),
+        memo: &str,
+    ) {
+        let after = gix(dir).branch("main").unwrap();
+        if let Some(head) = after.filter(|&head| Some(head) != before) {
+            let tree = commit_at(dir, head).tree;
+            assert_eq!(
+                file_at(dir, tree, path).as_deref(),
+                Some(content),
+                "the branch moved to {head}, whose {path} is not the store's: {result:?}"
+            );
+        }
+        match result {
+            Err(ExportError::Repo(error)) => {
+                let text = error.to_string();
+                assert!(text.contains(memo), "{text}");
+            }
+            other => panic!("an export over a crafted {memo} memo: {other:?}"),
+        }
+        assert_eq!(after, before, "the branch moved");
+    }
+
+    /// With `file`, a crafted memo, removed, the export of `store`'s `main` into the repository
+    /// at `dir` moves the branch to a commit other than `planted`, whose `path` holds the store's
+    /// `content` and whose tree is the head's root.
+    #[track_caller]
+    fn exported_once_removed(
+        store: &Store,
+        dir: &Path,
+        file: &Utf8PathBuf,
+        (path, content): (&str, &[u8]),
+        planted: GitOid,
+    ) {
+        fs::remove_file(file).unwrap();
+        let report = exported(&store.repo, &mut gix(dir), &main_branch());
+        assert!(report.branch_moved, "{report:?}");
+        assert_ne!(report.head_oid, planted);
+        assert_eq!(gix(dir).branch("main"), Ok(Some(report.head_oid)));
+        let commit = commit_at(dir, report.head_oid);
+        assert_eq!(file_at(dir, commit.tree, path).as_deref(), Some(content));
+        let source = GixSource::open(dir).unwrap();
+        same_tree(&source, commit.tree, &store.repo, report.head);
+    }
+
+    /// A `git_blob_oid` memo naming another blob the repository holds: in a pack (the fixture's
+    /// own `hello.txt` of its first commit, under the content a native changeset gives it), or as
+    /// a loose file of an empty repository someone placed there.
+    #[test]
+    fn a_crafted_blob_memo_puts_no_other_blob_in_the_branch() {
+        let fx = Imported::new("linear");
+        let repo = &fx.store.repo;
+        let new: &[u8] = b"hello, again\n";
+        commit_on_main(repo, vec![put("hello.txt", new)], "Change hello.txt\n");
+        let packed = git_hash(RawKind::Blob, b"hello\n");
+        assert_eq!(gix(fx.repo_dir()).stored(packed), Ok(Stored::Packed));
+        let file = plant(&fx.store, "git_blob_oid", blob(new).0, &packed.0);
+        let result = export(repo, &mut gix(fx.repo_dir()), &main_branch());
+        let file_and_content = ("hello.txt", new);
+        refused(
+            &result,
+            fx.repo_dir(),
+            Some(fx.tip()),
+            file_and_content,
+            "git_blob_oid",
+        );
+        exported_once_removed(&fx.store, fx.repo_dir(), &file, file_and_content, packed);
+
+        let store = store();
+        let (good, evil): (&[u8], &[u8]) = (b"#!/bin/sh\necho GOOD\n", b"#!/bin/sh\necho EVIL\n");
+        let app = put_as("app.sh", LeafKind::Exec, good);
+        commit_on_main(&store.repo, vec![app], "Add app.sh\n");
+        let destination = git::empty_repository();
+        let mut sink = gix(&destination.dir);
+        let loose = sink.write_object(RawKind::Blob, evil).unwrap();
+        sink.sync(&[loose]).unwrap();
+        assert_eq!(sink.stored(loose), Ok(Stored::Loose));
+        let file = plant(&store, "git_blob_oid", blob(good).0, &loose.0);
+        let result = export(&store.repo, &mut gix(&destination.dir), &main_branch());
+        let file_and_content = ("app.sh", good);
+        refused(
+            &result,
+            &destination.dir,
+            None,
+            file_and_content,
+            "git_blob_oid",
+        );
+        exported_once_removed(&store, &destination.dir, &file, file_and_content, loose);
+    }
+
+    /// A `git_tree_oid` memo for a native changeset's root naming another tree the repository
+    /// holds in a pack: the fixture's tip's root, which a changed `hello.txt` is not.
+    #[test]
+    fn a_crafted_tree_memo_puts_no_other_tree_in_the_branch() {
+        let fx = Imported::new("linear");
+        let repo = &fx.store.repo;
+        let new: &[u8] = b"hello, again\n";
+        let native = commit_on_main(repo, vec![put("hello.txt", new)], "Change hello.txt\n");
+        let root = repo.changeset(native).unwrap().unwrap().changeset.root;
+        let packed = commit_at(fx.repo_dir(), fx.tip()).tree;
+        assert_eq!(gix(fx.repo_dir()).stored(packed), Ok(Stored::Packed));
+        let file = plant(&fx.store, "git_tree_oid", root.0, &packed.0);
+        let result = export(repo, &mut gix(fx.repo_dir()), &main_branch());
+        let file_and_content = ("hello.txt", new);
+        refused(
+            &result,
+            fx.repo_dir(),
+            Some(fx.tip()),
+            file_and_content,
+            "git_tree_oid",
+        );
+        exported_once_removed(&fx.store, fx.repo_dir(), &file, file_and_content, packed);
+    }
+
+    /// A `git_oid` memo for the head naming another commit the repository holds: in a pack (the
+    /// fixture's first commit, which the branch would go back to), or as a loose file someone
+    /// placed on the branch's commit (whose `app.sh` is not the store's). The branch never names
+    /// it.
+    #[test]
+    fn a_crafted_commit_memo_never_moves_the_branch_to_another_commit() {
+        let fx = Imported::new("linear");
+        let repo = &fx.store.repo;
+        let new: &[u8] = b"hello, again\n";
+        let native = commit_on_main(repo, vec![put("hello.txt", new)], "Change hello.txt\n");
+        let packed = oid(&fx.manifest().commits[0].oid);
+        assert_eq!(gix(fx.repo_dir()).stored(packed), Ok(Stored::Packed));
+        let file = plant(&fx.store, "git_oid", native.0, &commit_memo(packed));
+        let result = export(repo, &mut gix(fx.repo_dir()), &main_branch());
+        assert_ne!(gix(fx.repo_dir()).branch("main"), Ok(Some(packed)));
+        let file_and_content = ("hello.txt", new);
+        refused(
+            &result,
+            fx.repo_dir(),
+            Some(fx.tip()),
+            file_and_content,
+            "git_oid",
+        );
+        exported_once_removed(&fx.store, fx.repo_dir(), &file, file_and_content, packed);
+
+        let store = store();
+        let (one, two): (&[u8], &[u8]) = (b"echo one\n", b"echo two\n");
+        commit_on_main(&store.repo, vec![put("app.sh", one)], "Add app.sh\n");
+        let destination = git::empty_repository();
+        let first = exported(&store.repo, &mut gix(&destination.dir), &main_branch());
+        let second = commit_on_main(&store.repo, vec![put("app.sh", two)], "Change app.sh\n");
+        let mut sink = gix(&destination.dir);
+        let evil = sink.write_object(RawKind::Blob, b"echo EVIL\n").unwrap();
+        let tree = RawTree {
+            entries: vec![RawTreeEntry {
+                mode: b"100644".to_vec(),
+                name: b"app.sh".to_vec(),
+                oid: evil,
+            }],
+        };
+        let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
+        let parents = [first.head_oid];
+        let bytes = commit_bytes(tree, &parents, &signature(), &signature(), &[], b"two\n");
+        let loose = sink.write_object(RawKind::Commit, &bytes).unwrap();
+        sink.sync(&[evil, tree, loose]).unwrap();
+        assert_eq!(sink.stored(loose), Ok(Stored::Loose));
+        let file = plant(&store, "git_oid", second.0, &commit_memo(loose));
+        let result = export(&store.repo, &mut gix(&destination.dir), &main_branch());
+        assert_ne!(gix(&destination.dir).branch("main"), Ok(Some(loose)));
+        let file_and_content = ("app.sh", two);
+        refused(
+            &result,
+            &destination.dir,
+            Some(first.head_oid),
+            file_and_content,
+            "git_oid",
+        );
+        exported_once_removed(&store, &destination.dir, &file, file_and_content, loose);
+    }
+
+    /// A deep verify re-derives every git export oid memo against the store's objects and reports
+    /// each that is not what they give — a `git_blob_oid`, a `git_tree_oid` and a `git_oid` planted
+    /// over the oids a legit export wrote — as it does the other derived values; a sound store has
+    /// none.
+    #[test]
+    fn verify_deep_reports_a_crafted_git_memo() {
+        let store = store();
+        let repo = &store.repo;
+        let good: &[u8] = b"#!/bin/sh\necho GOOD\n";
+        let head = commit_on_main(repo, vec![put("app.sh", good)], "Add app.sh\n");
+        // A legit export writes every memo (git_blob_oid, git_tree_oid, git_oid).
+        let destination = git::empty_repository();
+        exported(repo, &mut gix(&destination.dir), &main_branch());
+        assert!(
+            verify_export_oids(repo).expect("verify").is_empty(),
+            "a sound store has no mismatch",
+        );
+
+        // A crafted git_blob_oid: the app.sh blob's memo names another blob's oid.
+        let app = blob(good).0;
+        let evil = git_hash(RawKind::Blob, b"#!/bin/sh\necho EVIL\n");
+        plant(&store, "git_blob_oid", app, &evil.0);
+        let found = verify_export_oids(repo).expect("verify");
+        let blob_memo = found
+            .iter()
+            .find(|m| m.memo == "git_blob_oid")
+            .unwrap_or_else(|| panic!("no git_blob_oid mismatch in {found:?}"));
+        assert_eq!(blob_memo.subject, app);
+        assert_eq!(blob_memo.stored, evil);
+
+        // A crafted git_tree_oid: the root's memo names another tree's oid.
+        let root = repo.changeset(head).unwrap().unwrap().changeset.root;
+        let other_tree = git_hash(RawKind::Tree, b"");
+        plant(&store, "git_tree_oid", root.0, &other_tree.0);
+        assert!(
+            (verify_export_oids(repo).expect("verify").iter())
+                .any(|m| m.memo == "git_tree_oid" && m.subject == root.0),
+            "no git_tree_oid mismatch reported",
+        );
+
+        // A crafted git_oid: the head's export oid memo names another commit.
+        let other_commit = git_hash(RawKind::Commit, b"");
+        plant(&store, "git_oid", head.0, &commit_memo(other_commit));
+        assert!(
+            (verify_export_oids(repo).expect("verify").iter())
+                .any(|m| m.memo == "git_oid" && m.subject == head.0 && m.stored == other_commit),
+            "no git_oid mismatch reported",
+        );
+    }
+
+    /// A deep verify re-derives the export oid of a changeset atop a long history without
+    /// recursion: over a first-parent chain of 10,000 native changesets and a merge of its tip
+    /// with a second root (recorded in one raw batch, on a filesystem that never syncs), whose
+    /// head alone has a `git_oid` memo, a crafted one, it reports that memo, with the oid the
+    /// engine derives over both parents in their order, on a thread with a 256 KiB stack, which a
+    /// walk that recursed once a parent would overflow.
+    #[test]
+    fn a_long_history_verifies_without_recursion() {
+        const DEPTH: usize = 10_000;
+        let store = store();
+        let repo = &store.repo;
+        let root = store_tree(repo, &[("f.txt", b"deep\n")]);
+        let mut batch = repo.raw_batch();
+        let mut tip: Option<ChangesetId> = None;
+        for i in 0..DEPTH {
+            let message = format!("{i}\n");
+            tip = Some(batch.push(raw(tip.as_slice(), root, &message)).unwrap());
+        }
+        let tip = tip.expect("a chain of at least one changeset");
+        let side = batch.push(raw(&[], root, "A second root\n")).unwrap();
+        let merge = raw(&[tip, side], root, "Merge the second root\n");
+        let head = batch.push(merge).unwrap();
+        batch.commit().unwrap();
+
+        // The head's memo alone, a crafted one: the verify derives the whole chain below it.
+        let crafted = git_hash(RawKind::Commit, b"");
+        let file = plant(&store, "git_oid", head.0, &commit_memo(crafted));
+        let found = thread::scope(|scope| {
+            thread::Builder::new()
+                .name("a deep verify".to_owned())
+                .stack_size(256 * 1024)
+                .spawn_scoped(scope, || verify_export_oids(repo))
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+        .expect("verify");
+
+        // That memo, against the export oid the engine derives once the memo is gone.
+        fs::remove_file(&file).unwrap();
+        let real = export_oid(repo, head);
+        let [mismatch] = found.as_slice() else {
+            panic!("one mismatch, the head's: {found:?}");
+        };
+        let got = (mismatch.memo.as_str(), mismatch.subject, mismatch.stored);
+        assert_eq!(got, ("git_oid", head.0, crafted));
+        assert_eq!(mismatch.real, real);
+    }
+
+    /// On `main`, a side branch forked from `p2` and merged into `b`, `main`'s head: `c` on `p2`,
+    /// then `h`, the merge of `b` and `c`, where `main` moves. `c` and `h`.
+    fn side_branch_merged(
+        repo: &LocalRepo,
+        p2: ChangesetId,
+        b: ChangesetId,
+    ) -> (ChangesetId, ChangesetId) {
+        let side = request(&[p2], vec![put("side.txt", b"c\n")], "C\n");
+        let c = repo.commit(side).expect("commit the side branch").id;
+        let merge = request(&[b, c], vec![put("side.txt", b"c\n")], "Merge C\n");
+        let h = repo.commit(merge).expect("commit the merge").id;
+        let moved = repo.cas_ref("main", Some(b), Some(h), ACTOR).unwrap();
+        assert!(
+            matches!(moved.result, CasResult::Applied { .. }),
+            "{moved:?}"
+        );
+        (c, h)
+    }
+
+    /// A commit someone placed in the repository `sink` writes, standing for any commit there: a
+    /// root holding one file, made durable. Its oid.
+    fn placed_commit(sink: &mut dyn GitSink) -> GitOid {
+        let blob = sink.write_object(RawKind::Blob, b"placed\n").unwrap();
+        let tree = RawTree {
+            entries: vec![RawTreeEntry {
+                mode: b"100644".to_vec(),
+                name: b"f.txt".to_vec(),
+                oid: blob,
+            }],
+        };
+        let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
+        let sig = signature();
+        let bytes = commit_bytes(tree, &[], &sig, &sig, &[], b"Placed\n");
+        let commit = sink.write_object(RawKind::Commit, &bytes).unwrap();
+        sink.sync(&[blob, tree, commit]).unwrap();
+        commit
+    }
+
+    /// Checks that the branch `main` of the repository at `dir`, if there is one, reaches no
+    /// `placed` commit: no memo spliced its history onto that commit.
+    #[track_caller]
+    fn unspliced(dir: &Path, placed: GitOid) {
+        let Some(head) = gix(dir).branch("main").unwrap() else {
+            return;
+        };
+        assert!(
+            !reachable(dir, head).contains_key(&placed),
+            "the branch names {head}, whose history reaches the placed commit {placed}"
+        );
+    }
+
+    /// Checks that `result` is the refusal of a crafted `git_oid` memo of changeset `of`:
+    /// [`RepoError::DerivedCorrupt`], which ops reports as `E_STORE_CORRUPT`.
+    #[track_caller]
+    fn refused_memo_of(result: &Result<ExportReport, ExportError>, of: ChangesetId) {
+        match result {
+            Err(ExportError::Repo(RepoError::DerivedCorrupt {
+                name, changeset, ..
+            })) => assert_eq!((name.as_str(), *changeset), ("git_oid", of)),
+            other => panic!("an export over a crafted git_oid memo of {of}: {other:?}"),
+        }
+    }
+
+    /// The git oid of the tree that holds the file `a` of `content` alone.
+    fn tree_of_a(content: &[u8]) -> GitOid {
+        let tree = RawTree {
+            entries: vec![RawTreeEntry {
+                mode: b"100644".to_vec(),
+                name: b"a".to_vec(),
+                oid: git_hash(RawKind::Blob, content),
+            }],
+        };
+        git_hash(RawKind::Tree, &tree.render())
+    }
+
+    /// The commit `oid` of `sink`, parsed.
+    fn commit_in(sink: &dyn GitSink, oid: GitOid) -> RawCommit {
+        let (kind, bytes) = sink.read(oid).unwrap();
+        assert_eq!(kind, RawKind::Commit, "{oid}");
+        RawCommit::parse(&bytes).unwrap()
+    }
+
+    /// What `run` returns, run on a thread with a 256 KiB stack, named `name`: a walk that
+    /// recursed once a parent would overflow it on a history thousands of changesets deep.
+    fn on_a_small_stack<T: Send>(name: &str, run: impl FnOnce() -> T + Send) -> T {
+        thread::scope(|scope| {
+            thread::Builder::new()
+                .name(name.to_owned())
+                .stack_size(256 * 1024)
+                .spawn_scoped(scope, run)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+
+    /// A crafted `git_oid` memo of a strict ancestor of the base, the fork point of a side branch
+    /// merged into the head, naming a commit the repository holds: an incremental export of the
+    /// merge refuses it (`E_STORE_CORRUPT`) and moves nothing, where it used to give the side
+    /// branch's commit that commit as its parent, every oid above consistent with it; a deep
+    /// verify names the memo; with the memo removed, the side branch's commit has the fork point's
+    /// real export as its parent, and the export after it writes nothing.
+    #[test]
+    fn a_crafted_ancestor_memo_splices_no_merge_parent() {
+        let store = store();
+        let repo = &store.repo;
+        let p2 = commit_on_main(repo, vec![put("f.txt", b"p2\n")], "P2\n");
+        let b = commit_on_main(repo, vec![put("f.txt", b"b\n")], "B\n");
+        let destination = git::empty_repository();
+        let first = exported(repo, &mut gix(&destination.dir), &main_branch());
+        assert_eq!(first.head, b);
+        let real = export_oid(repo, p2);
+        side_branch_merged(repo, p2, b);
+        let placed = placed_commit(&mut gix(&destination.dir));
+        let file = plant(&store, "git_oid", p2.0, &commit_memo(placed));
+
+        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        unspliced(&destination.dir, placed);
+        refused_memo_of(&result, p2);
+        let at = gix(&destination.dir).branch("main");
+        assert_eq!(at, Ok(Some(first.head_oid)));
+
+        // A deep verify names that memo, and only it.
+        let found = verify_export_oids(repo).expect("verify");
+        let [mismatch] = found.as_slice() else {
+            panic!("one mismatch, the fork point's: {found:?}");
+        };
+        let got = (mismatch.memo.as_str(), mismatch.subject, mismatch.stored);
+        assert_eq!((got, mismatch.real), (("git_oid", p2.0, placed), real));
+
+        // The memo removed: the side branch's commit is on the fork point's real export.
+        fs::remove_file(&file).unwrap();
+        let report = exported(repo, &mut gix(&destination.dir), &main_branch());
+        assert_eq!((report.base, report.commits_written), (Some(b), 2));
+        let merge = commit_at(&destination.dir, report.head_oid);
+        let side = commit_at(&destination.dir, merge.parents[1]);
+        assert_eq!(merge.parents[0], first.head_oid);
+        assert_eq!(side.parents, [real]);
+        unspliced(&destination.dir, placed);
+        let again = exported(repo, &mut gix(&destination.dir), &main_branch());
+        assert_eq!((again.branch_moved, again.objects_written), (false, 0));
+    }
+
+    /// The same crafted memo of the fork point, met by a fresh export of the merge: into an empty
+    /// repository that holds the commit the memo names, and into one that holds, packed, the
+    /// commit an export over that memo would make of the merge (as one an export before this fix
+    /// wrote and git then packed would hold it). Neither export takes the memo's history: each
+    /// refuses it (`E_STORE_CORRUPT`) and makes no branch; with `meta/derived/` removed, the merge
+    /// exports over the fork point's real export.
+    #[test]
+    fn a_crafted_ancestor_memo_splices_no_fresh_export() {
+        let store = store();
+        let repo = &store.repo;
+        let p2 = commit_on_main(repo, vec![put("f.txt", b"p2\n")], "P2\n");
+        let b = commit_on_main(repo, vec![put("f.txt", b"b\n")], "B\n");
+        let (c, h) = side_branch_merged(repo, p2, b);
+        let destination = git::empty_repository();
+        let placed = placed_commit(&mut gix(&destination.dir));
+        plant(&store, "git_oid", p2.0, &commit_memo(placed));
+        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        unspliced(&destination.dir, placed);
+        refused_memo_of(&result, p2);
+        assert_eq!(gix(&destination.dir).branch("main"), Ok(None));
+
+        // The merge's commit over the memo, as the derivation reads the memos: packed.
+        let spliced = export_oid(repo, h);
+        let read = repo.snapshot().unwrap();
+        let reader = ExportReader {
+            read: &read,
+            store: repo.derived_store(),
+        };
+        let cs = repo.changeset(h).unwrap().unwrap().changeset;
+        let tree = tree_oid(&reader, cs.root).unwrap();
+        let parents = [export_oid(repo, b), export_oid(repo, c)];
+        let bytes = render_commit(h, &cs, &parents, tree);
+        assert_eq!(git_hash(RawKind::Commit, &bytes), spliced);
+        let mut sink = MemSink::with_packed([(RawKind::Commit, bytes)]);
+        let result = export(repo, &mut sink, &main_branch());
+        let at = sink.branch("main");
+        assert_ne!(at, Ok(Some(spliced)), "the branch names the spliced merge");
+        refused_memo_of(&result, p2);
+        assert_eq!(at, Ok(None));
+
+        // Every memo removed: the side branch's commit is on the fork point's real export.
+        fs::remove_dir_all(store.root.join("meta/derived")).unwrap();
+        let report = exported(repo, &mut sink, &main_branch());
+        assert_ne!(report.head_oid, spliced);
+        let merge = commit_in(&sink, report.head_oid);
+        let side = commit_in(&sink, merge.parents[1]);
+        assert_eq!(side.parents, [export_oid(repo, p2)]);
+        let fork = commit_in(&sink, side.parents[0]);
+        assert_eq!(fork.parents, [] as [GitOid; 0]);
+    }
+
+    /// A branch that names a commit no export of the store wrote (one moved in git) is a
+    /// divergence however the memos read: a crafted `git_oid` memo of an ancestor of the head
+    /// naming that commit, met along the head's first parents, or through an external id entry
+    /// that names the ancestor for it as well, does not make the ancestor the base the export
+    /// goes on from, so nothing of the store's history is written on that commit and the branch
+    /// stays; with the memo removed, the entry alone is the divergence it is.
+    #[test]
+    fn a_crafted_memo_makes_no_diverged_branch_a_base() {
+        let store = store();
+        let repo = &store.repo;
+        let a = commit_on_main(repo, vec![put("f.txt", b"a\n")], "A\n");
+        commit_on_main(repo, vec![put("f.txt", b"b\n")], "B\n");
+        let destination = git::empty_repository();
+        let mut sink = gix(&destination.dir);
+        let placed = placed_commit(&mut sink);
+        assert_eq!(
+            sink.cas_branch("main", None, placed),
+            Ok(BranchUpdate::Applied)
+        );
+        let before = object_files(&destination.dir);
+        let file = plant(&store, "git_oid", a.0, &commit_memo(placed));
+
+        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        refused_memo_of(&result, a);
+        assert_eq!(gix(&destination.dir).branch("main"), Ok(Some(placed)));
+        assert_eq!(object_files(&destination.dir), before, "nothing written");
+
+        // An external id entry names the ancestor for the branch's commit too.
+        let entry = ExternalEntry {
+            changeset: a,
+            faithful: true,
+        };
+        let key = placed.0.to_vec();
+        repo.record_external_ids(SYSTEM_GIT, &[(key, entry)])
+            .unwrap();
+        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        refused_memo_of(&result, a);
+        assert_eq!(gix(&destination.dir).branch("main"), Ok(Some(placed)));
+
+        fs::remove_file(&file).unwrap();
+        let error = export(repo, &mut gix(&destination.dir), &main_branch()).unwrap_err();
+        let ExportError::Diverged { reason, .. } = error else {
+            panic!("a divergence, not {error}");
+        };
+        assert_eq!(reason, DivergedReason::LossyHistory { changeset: a });
+        assert_eq!(gix(&destination.dir).branch("main"), Ok(Some(placed)));
+        assert_eq!(object_files(&destination.dir), before, "nothing written");
+    }
+
+    /// A crafted `git_oid` memo of the head naming the commit the branch is at: the export does
+    /// not take the branch for up to date, it refuses the memo (`E_STORE_CORRUPT`); with the memo
+    /// removed it moves the branch on to the head's export.
+    #[test]
+    fn a_crafted_head_memo_makes_no_branch_up_to_date() {
+        let store = store();
+        let repo = &store.repo;
+        commit_on_main(repo, vec![put("f.txt", b"one\n")], "One\n");
+        let destination = git::empty_repository();
+        let first = exported(repo, &mut gix(&destination.dir), &main_branch());
+        let head = commit_on_main(repo, vec![put("f.txt", b"two\n")], "Two\n");
+        let file = plant(&store, "git_oid", head.0, &commit_memo(first.head_oid));
+
+        let result = export(repo, &mut gix(&destination.dir), &main_branch());
+        refused_memo_of(&result, head);
+        fs::remove_file(&file).unwrap();
+        let report = exported(repo, &mut gix(&destination.dir), &main_branch());
+        assert!(report.branch_moved, "{report:?}");
+        let commit = commit_at(&destination.dir, report.head_oid);
+        assert_eq!(commit.parents, [first.head_oid]);
+    }
+
+    /// The export oids the export derives for itself are the derivation's, for every kind of
+    /// changeset: an unchanged import; a lossy one and a faithful one on it, both rendered anew; a
+    /// native changeset on those; what git made on the native one's export, imported (its own
+    /// commit again); and the same commit under another `git.oid` (rendered, not kept). Each memo
+    /// the export writes holds what the derivation gives once every memo is gone.
+    #[test]
+    fn every_kind_of_changeset_exports_to_its_derived_oid() {
+        let store = store();
+        let repo = &store.repo;
+        let commit = |parents: &[ChangesetId], content: &[u8], metadata: &[(&str, &str)]| {
+            let mut req = request(parents, vec![put("a", content)], "a commit\n");
+            req.metadata = (metadata.iter())
+                .map(|&(key, value)| (key.to_owned(), value.as_bytes().to_vec()))
+                .collect();
+            repo.commit(req).expect("commit").id
+        };
+        // The commits git made, by the test kit's signature: the oid of one of `a` at `content`.
+        let sig = signature();
+        let git_commit = |content: &[u8], parents: &[GitOid]| {
+            let bytes = commit_bytes(tree_of_a(content), parents, &sig, &sig, &[], b"a commit\n");
+            git_hash(RawKind::Commit, &bytes).to_string()
+        };
+        // The lossy one's commit held what its changeset does not (a gitlink, say): another oid.
+        let root_git = git_commit(b"1\n", &[]);
+        let lossy_git = "2".repeat(40);
+        let above_git = git_commit(b"3\n", &[oid(&lossy_git)]);
+        let root = commit(&[], b"1\n", &[("git.oid", &root_git)]);
+        let lossy = [("git.lossy", "gitlinks"), ("git.oid", lossy_git.as_str())];
+        let lossy = commit(&[root], b"2\n", &lossy);
+        let above = commit(&[lossy], b"3\n", &[("git.oid", &above_git)]);
+        let native = commit(&[above], b"4\n", &[]);
+        // What git makes of a commit on the native one's export, as the derivation gives it.
+        let made = git_commit(b"5\n", &[export_oid(repo, native)]);
+        let built = commit(&[native], b"5\n", &[("git.oid", &made)]);
+        let other = commit(&[native], b"5\n", &[("git.oid", &"6".repeat(40))]);
+        let mut merge = request(&[built, other], vec![], "Merge\n");
+        merge.allow_empty = true;
+        let head = repo.commit(merge).expect("commit the merge").id;
+        let moved = repo.cas_ref("main", None, Some(head), ACTOR).unwrap();
+        assert!(matches!(moved.result, CasResult::Applied { .. }));
+        let all = [root, lossy, above, native, built, other, head];
+
+        // The export derives every value itself, every memo gone, and writes each one's memo.
+        fs::remove_dir_all(store.root.join("meta/derived")).unwrap();
+        let destination = git::empty_repository();
+        let report = exported(repo, &mut gix(&destination.dir), &main_branch());
+        assert_eq!(report.commits_written, 7);
+        let memo = |id: ChangesetId| {
+            let slot = DerivedSlot {
+                name: "git_oid",
+                version: 1,
+                subject: id.0,
+                key: &[],
+            };
+            repo.derived_store().get(&slot).unwrap().expect("a memo")
+        };
+        let written: Vec<Vec<u8>> = all.iter().map(|&id| memo(id)).collect();
+
+        // The derivation's own values, every memo gone again.
+        fs::remove_dir_all(store.root.join("meta/derived")).unwrap();
+        for (&id, written) in all.iter().zip(&written) {
+            let value = repo.derived::<ExportOid>(id, &()).unwrap();
+            let mut derived = value.oid.to_vec();
+            derived.push(u8::from(value.kept));
+            assert_eq!(*written, derived, "{id}");
+        }
+        let kept = |id| repo.derived::<ExportOid>(id, &()).unwrap().kept;
+        let kinds = all.map(kept);
+        assert_eq!(kinds, [true, false, false, true, true, false, true]);
+        assert_eq!(export_oid(repo, built).to_string(), made);
+    }
+
+    /// An export of a long history derives its export oids without recursion: a first-parent
+    /// chain of 10,000 native changesets (recorded in one raw batch, on a filesystem that never
+    /// syncs) exports into a [`MemSink`] on a thread with a 256 KiB stack; the branch names the
+    /// export oid the derivation engine gives the head, and a deep verify on such a thread finds
+    /// every memo the export wrote right.
+    #[test]
+    fn a_long_history_exports_without_recursion() {
+        const DEPTH: usize = 10_000;
+        let store = store();
+        let repo = &store.repo;
+        let root = store_tree(repo, &[("f.txt", b"deep\n")]);
+        let mut batch = repo.raw_batch();
+        let mut tip: Option<ChangesetId> = None;
+        for i in 0..DEPTH {
+            let message = format!("{i}\n");
+            tip = Some(batch.push(raw(tip.as_slice(), root, &message)).unwrap());
+        }
+        let head = tip.expect("a chain of at least one changeset");
+        batch.commit().unwrap();
+        let moved = repo.cas_ref("main", None, Some(head), ACTOR).unwrap();
+        assert!(matches!(moved.result, CasResult::Applied { .. }));
+
+        let (report, branch) = on_a_small_stack("a deep export", || {
+            let mut sink = MemSink::default();
+            let report = export(repo, &mut sink, &main_branch());
+            (report, sink.branch("main"))
+        });
+        let report = report.expect("export");
+        assert_eq!(report.commits_written, u64::try_from(DEPTH).unwrap());
+        assert_eq!(branch, Ok(Some(report.head_oid)));
+        let found = on_a_small_stack("a deep verify", || verify_export_oids(repo));
+        assert_eq!(found.expect("verify"), []);
+
+        // The engine's own derivation of the head, every memo gone.
+        fs::remove_dir_all(store.root.join("meta/derived")).unwrap();
+        assert_eq!(export_oid(repo, head), report.head_oid);
+    }
+}

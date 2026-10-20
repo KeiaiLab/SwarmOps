@@ -495,8 +495,9 @@ fn rendered_on_a_native_parent(store: &Recorded, above: ChangesetId, above_oid: 
         1,
         "{reads:#?}"
     );
-    // `a`'s oid is memoized from the native one's tree: its blob is not read again.
-    assert!(!reads.contains(&object_path(blob(b"4\n").0)), "{reads:#?}");
+    // The export oid is derived by recomputing its root tree from the store's own bytes, never a
+    // memo a store file could have placed: `a`'s blob is read for its git oid (M8 security fix).
+    assert!(reads.contains(&object_path(blob(b"4\n").0)), "{reads:#?}");
     // The same commit under another `git.oid`: exported to that rendering, and not kept.
     let six = "6".repeat(40);
     let other = [("git.oid", six.as_str())];
