@@ -1,15 +1,18 @@
 # Changelog
 
 Notable changes to SwarmOps. The format follows
-[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and versions will follow
+[Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/), and versions follow
 [the versioning policy](docs/policies/versioning-and-stability.md) (Semantic Versioning, read the
 pre-1.0 way).
 
-Nothing has been released or published yet: every crate is at 0.1.0 with `publish = false`, and
-there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything collects under
-**Unreleased**, grouped by milestone of the design (umbrella spec §13).
+SwarmOps 0.1.0 is the first release, tagged `v0.1.0`; no crate is published (`publish = false`).
+Its section holds every change up to it, grouped by milestone of the design (umbrella spec §13).
+From here, **Unreleased** collects the changes on `stable` that no release holds yet, until the
+next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-20
 
 ### Added
 
@@ -855,7 +858,8 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `StoreError::Limit` with the new `LimitKind::ObjectBytes`). A stored object whose header
   records more is refused as `E_STORE_CORRUPT` before anything is allocated for it (the store's
   `BadHeader`, where a zstd frame that claimed as much was `Corrupt`), so a compression bomb in a
-  crafted store costs a read at most 512 MiB (storage spec §2 rule 1, §10 item 6).
+  crafted store costs a read at most 512 MiB of payload, plus the decoder window of up to 128 MiB,
+  and about 1.1 GiB of address space (storage spec §2 rule 1, §10 item 6).
 
 #### M8: git export (2026-10-20)
 
@@ -1141,4 +1145,5 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   head ([docs/known-limitations.md](docs/known-limitations.md), "An export reads the whole history
   below its head").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.1.0...stable
+[0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0
