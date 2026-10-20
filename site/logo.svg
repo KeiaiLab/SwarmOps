@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-labelledby="logo-title logo-desc">
+  <title id="logo-title">SwarmOps</title>
+  <desc id="logo-desc">A honeycomb cell holding a commit graph: the branches of four agents merge into one linear main line.</desc>
+  <!--
+    Hand-written. Two tones, each with a contrast of at least 3:1 against GitHub's light
+    (#ffffff), dark (#0d1117) and dark dimmed (#22272e) backgrounds: violet #7c5cff
+    (4.35, 4.35, 3.46) and amber #d97706 (3.19, 5.94, 4.72). No currentColor: an SVG shown
+    through <img> does not inherit the page's text colour.
+  -->
+  <!-- The cell: one store. -->
+  <path d="M64 6 114.2 35v58L64 122 13.8 93V35z" fill="#7c5cff" fill-opacity=".12" stroke="#7c5cff" stroke-width="6" stroke-linejoin="round"/>
+  <!-- The agents' branches, each merging into a commit on main. -->
+  <g fill="none" stroke="#7c5cff" stroke-width="4.5" stroke-linecap="round">
+    <path d="M36 38c0 16 12 26 28 26M92 38c0 16-12 26-28 26M36 70c0 16 12 26 28 26M92 70c0 16-12 26-28 26"/>
+  </g>
+  <g fill="#7c5cff">
+    <circle cx="36" cy="36" r="6"/>
+    <circle cx="92" cy="36" r="6"/>
+    <circle cx="36" cy="68" r="6"/>
+    <circle cx="92" cy="68" r="6"/>
+  </g>
+  <!-- main: one linear history. -->
+  <path d="M64 30v66" stroke="#d97706" stroke-width="7" stroke-linecap="round"/>
+  <g fill="#d97706">
+    <circle cx="64" cy="30" r="8.5"/>
+    <circle cx="64" cy="64" r="8.5"/>
+    <circle cx="64" cy="96" r="8.5"/>
+  </g>
+</svg>
