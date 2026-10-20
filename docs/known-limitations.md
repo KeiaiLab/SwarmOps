@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M1.6, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M3, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -16,9 +16,10 @@ M7 blame and review · M9 simulation and benchmarks · M11 remote sync, offline-
 server. M1.5, the hardening milestone after M1
 ([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)), closed a few, and M1.6, the
 code-review follow-ups after it
-([its plan](superpowers/plans/2026-10-17-m1-6-review-followups.md)), closed more; the entry
-still marked M1.6 waits for its quiet-window measurements. "Unscheduled" means no milestone has
-taken the item yet; "documented" means it is the intended behaviour.
+([its plan](superpowers/plans/2026-10-17-m1-6-review-followups.md)), closed more. "Deferred
+until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
+piloted on a real repository. "Unscheduled" means no milestone has taken the item yet;
+"documented" means it is the intended behaviour.
 
 When a change closes an item, it removes the entry here in the same commit (or says what is
 left).
@@ -78,8 +79,9 @@ left).
 - **Full fsync is slow on this host.** An uncontended durable commit takes about 21 ms through
   the binary, at about 4 ms per fsync; the umbrella spec's commit target (5 ms plus 0.3 ms per
   file) leaves syncs out. Batching object and journal syncs, and whether any
-  `--durability fast` flag is justified, are re-evaluated with new measurements. *Target: M2.
-  Found: M1 Task 7b; final review, question 4.*
+  `--durability fast` flag is justified, are re-evaluated with new measurements. *Target: M2's
+  journal-sync decision (its plan's Task 4), deferred until after the pilot. Found: M1 Task 7b;
+  final review, question 4.*
 
 ## Concurrency and the lock
 
@@ -164,8 +166,8 @@ left).
   and a changeset's changes are those against its first parent: what a merge brought in from its
   other parents shows as the merge's own change, and the changesets on those parents are never
   listed. Native histories have no merge (`main` is linear, workspaces land squashed); git
-  import's do. *Target: M3, if imported merge histories need it (`LogReq.first_parent`). Found:
-  M2 Task 15 (M2 Decision 8).*
+  import's do. *Unscheduled: when imported merge histories need it (`LogReq.first_parent`).
+  Found: M2 Task 15 (M2 Decision 8).*
 - **`--expect` with a ref name cannot detect a move.** A ref name given as the expected target
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
@@ -237,8 +239,9 @@ left).
   too (`E_STORE_CORRUPT`, which `verify --deep` lists), before more than 64 MiB is reserved for its
   output, beside the decoder's window, which the frame's header sets up to zstd's default limit of
   128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store can hold one.
-  Streamed reads would bound `cat` below 512 MiB. *Target: M2 (streamed reads); M3 Task 4 set the
-  bound. Found: M1 Task 1; the 2026-10-16 code review.*
+  Since M2, streamed reads bound `cat` below 512 MiB (`read_chunks`); every other read of the
+  payload decodes it whole. *Unscheduled; M2 streamed `cat`, and M3 Task 4 set the bound. Found:
+  M1 Task 1; the 2026-10-16 code review.*
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range
@@ -306,8 +309,9 @@ left).
   and `show`'s `signatures` give their exact times. *Documented (storage spec §7). Found: M1
   Task 4a.*
 - **No test reads a real repository yet.** M1 had none, so the final review had nothing to judge
-  (question 14). The first come with the git import, behind `SWARMOPS_HOST_REPOS=1`. *Target:
-  M3.*
+  (question 14). The git import's tests read fixtures that real git made. *Target: M3's test of
+  this host's repositories behind `SWARMOPS_HOST_REPOS=1` (its plan's Task 13), deferred until
+  after the pilot.*
 - **A git import reports what its writes repaired only when it succeeds.** Its `meta.recovered`
   adds up what its frames' and its ref move's write transactions repaired of what earlier writers
   left. An import that fails reports none of it (the import's error carries no such record), and
@@ -345,11 +349,12 @@ left).
 - **Part of each lock pass through the binary is unexplained.** In the quiet-window run the lock
   passed every 8.27 ms at store level (about two raw `fdatasync`s, which is what a transaction
   makes) and every 13.75 ms through the binary; the difference appears only with the commits'
-  own object writes on the same filesystem. *Target: M1.6 (docs/perf.md),
-  then M2. Found: M1 Task 7b.*
+  own object writes on the same filesystem. *Target: M1.6's quiet-window runs (docs/perf.md),
+  then M2's journal-sync decision, both deferred until after the pilot. Found: M1 Task 7b.*
 - **Commit-path costs.** Every
   commit's materialization scans the index tail; and the reflog walks frames past the snapshot
-  only to drop them. *Target: M2. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
+  only to drop them. *Target: M2's measured decision on them (its plan's Task 3), deferred until
+  after the pilot. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
   store's mutex. *Unscheduled. Found: M1 Task 1.*
 - **No benchmark gate.** The benches run by hand (`just bench`, `just perf`); failing on a 20 %
@@ -383,10 +388,10 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `journal.off` a writer cut is tested only at the journal's level. *Target: M6 (the metadata
   read paths through `FsOps`, umbrella spec §14). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
-- **Golden envelopes cover 15 of the 24 error codes.** `error_codes_reach_the_cli` pins the
-  envelope of 15; the other nine are in its `NOT_RAISED` list, each with why the test cannot raise
-  it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6). Found: the
-  2026-10-16 comparison.*
+- **Golden envelopes cover 21 of the 30 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 21; the other nine are in its `NOT_RAISED` list, each with why the test cannot raise
+  it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6, the six `E_GIT_*`
+  codes in M3). Found: the 2026-10-16 comparison.*
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its
@@ -413,7 +418,7 @@ each ruling is tracked above:
 | 1 | Concurrent `init` on one directory | unsupported, documented; revisit with workspaces | M5, "Concurrent `init`" |
 | 2 | Readers return state from frames not yet synced | allowed for local readers; committed snapshots for off-host readers | M8, "Readers may return state" |
 | 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | M6, "bounded, not first-in, first-out" |
-| 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2, "Full fsync is slow" |
+| 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2 (its Task 4, after the pilot), "Full fsync is slow" |
 | 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | M6, "Recovery after a crash walks all of `journal.off`", "No repair tool" |
 | 6 | `read_file` reads the whole blob | ranged reads | M6, "`cat` reads the whole object file" (ranged reads: M2) |
 | 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | M6, "Crafted `journal.off` entries" |
@@ -423,4 +428,4 @@ each ruling is tracked above:
 | 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | M6, "The crash model" |
 | 12 | Second root commits | `commit_raw` | closed in M3: `Repo::commit_raw`, the git import's writer, makes a root changeset whatever refs exist |
 | 13 | `--expect` with a ref name | documented | "`--expect` with a ref name" |
-| 14 | Tests that read host repositories | none in M1: nothing to judge | M3, "No test reads a real repository" |
+| 14 | Tests that read host repositories | none in M1: nothing to judge | M3 (its Task 13, after the pilot), "No test reads a real repository" |

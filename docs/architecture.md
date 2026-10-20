@@ -1,6 +1,6 @@
 # SwarmOps architecture
 
-An overview, in English, of how SwarmOps is built, as of M1.6. The design specs are the
+An overview, in English, of how SwarmOps is built, as of M3. The design specs are the
 authority, and they are in Korean:
 
 - [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md) ("umbrella" below),
@@ -22,12 +22,13 @@ general-purpose git replacement. Its main users are LLM agents, so every operati
 function and the command line is a thin shell that prints JSON. It is fully embedded: one
 program, no external database, no daemon.
 
-M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening) and M1.6 (the
-code-review follow-ups, its quiet-window measurements aside) are done. Since M1,
+M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening), M1.6 (the
+code-review follow-ups), M2 (diff, history and the derived-data engine) and M3 (git import) are
+done, but for work of M1.6, M2 and M3 that waits until after the pilot. Since M1,
 SwarmOps is usable by one agent: its store already takes commits from many processes at once, safely, but
-nothing merges yet. Merging and landing (M4), git import and export (M3, M8), workspaces (M5)
+nothing merges yet. Merging and landing (M4), git export (M8), workspaces (M5)
 and review (M7) come later, in the order of umbrella §13.
-[known-limitations.md](known-limitations.md) lists what M1, M1.5 and M1.6 leave open.
+[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2 and M3 leave open.
 
 ## Crates and layering
 
@@ -457,7 +458,8 @@ that never ran.
 
 The price is measured in [perf.md](perf.md): about 4 ms per fsync on the reference host, and
 about 21 ms for an uncontended durable commit through the binary. The umbrella spec's commit
-target (5 ms plus 0.3 ms per file) counts no syncs; batching syncs is to be reconsidered in M2.
+target (5 ms plus 0.3 ms per file) counts no syncs; batching syncs is to be reconsidered by M2's
+journal-sync decision, which waits until after the pilot.
 
 Crash safety rests on four invariants (storage §3): a changeset enters the index only after its
 parents (I1), and only after every object it references is durable; refs change only by
@@ -556,9 +558,9 @@ plain text, and `mcp`, below, speaks MCP there instead):
 {"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth, recovered}}
 ```
 
-A failure's `code` is one of 24 stable `E_*` codes, from one table that also fixes each code's
-exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
-kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
+A failure's `code` is one of 30 stable `E_*` codes, from one table that also fixes each code's
+exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
+found) and whether retrying can help. `hint` is often the next command to run.
 `swarmops schema` prints the JSON Schema of 70 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
