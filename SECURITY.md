@@ -48,7 +48,11 @@ filesystem permissions are the access boundary. Within that model, these are vul
   as corrupt); crafted `journal.off` entries that agree with each other, deeper than
   the two links recovery and readers check, pass as valid, so a read that starts past them
   numbers its frames by them until `verify` walks the file and reports them (recovery checks
-  every listed frame before it cuts or lists anything, so no committed frame is lost); and a
+  every listed frame before it cuts or lists anything, so no committed frame is lost); the
+  generations a crafted index records (`meta/idx/gen.col`) are taken as they are, so the history
+  queries that prune by them (a land's merge base, a revision's `~N`) can answer wrongly, though
+  every changeset they reach is on the first-parent chain the changeset objects name, and
+  `verify` reports the damage; and a
   `journal.log`, `journal.off`, index column or sorted view whose length is huge (sparse or
   crafted) is read into one buffer of that length, so a read allocates without bound and aborts
   when the allocation fails instead of returning an error. `FORMAT`, `REPO` (an id and a name of

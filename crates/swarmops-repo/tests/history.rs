@@ -2,8 +2,9 @@
 //! first parents (`RepoRead::first_parents`), the ancestor `n` first-parent steps back
 //! (`RepoRead::ancestor`, which a revision's `~N` takes), whether a changeset is a first-parent
 //! ancestor of another (`RepoRead::is_ancestor`), and the newest changeset two first-parent chains
-//! share (`RepoRead::merge_base`). A walk across at most `SKIP_AFTER` generations takes narrow
-//! index lookups and derives nothing; a longer one lifts along the first-parent skip list.
+//! share (`RepoRead::merge_base`). A walk across at most `SKIP_AFTER` generations reads a
+//! changeset object per step and derives nothing; a longer one lifts along the first-parent skip
+//! list.
 //!
 //! Every test owns a fresh store. Random histories are committed through a filesystem that never
 //! syncs (`NoSyncFs`), and long chains are built straight through the stores, as the derivation
@@ -465,7 +466,8 @@ fn skip_list_reads(calls: &[String]) -> usize {
     calls.len()
 }
 
-/// On a chain of 3,000 changesets, a gap of `SKIP_AFTER` generations is walked by narrow lookups
+/// On a chain of 3,000 changesets, a gap of `SKIP_AFTER` generations is walked one first parent
+/// at a time, a changeset object read each (no walk takes the parents an index record names),
 /// and touches no derived value; `is_ancestor(root, head)`, across 2,999, lifts along the skip
 /// list: on a cold store it derives the list of every changeset of the chain (one file each),
 /// and answers `true`; asked again in a new snapshot, it derives nothing and reads at most
@@ -488,7 +490,17 @@ fn a_long_gap_lifts_along_the_skip_list() {
     assert!(!read.is_ancestor(c[short + 1], c[short]).unwrap());
     assert_eq!(read.ancestor(head, SKIP_AFTER).unwrap(), Some(c[short]));
     assert_eq!(read.merge_base(head, c[short]).unwrap(), Some(c[short]));
-    assert_eq!(calls(), Vec::<String>::new(), "narrow lookups only");
+    let walked = calls();
+    assert!(
+        walked.iter().all(|call| call.starts_with("read objects/")),
+        "changeset objects only: {walked:?}"
+    );
+    let steps = usize::try_from(SKIP_AFTER).unwrap();
+    assert_eq!(
+        walked.len(),
+        3 * steps,
+        "one object per step of the three walks"
+    );
     assert!(skip_lists(&root).is_empty());
 
     assert!(read.is_ancestor(c[0], head).unwrap());
@@ -524,10 +536,10 @@ fn a_long_gap_lifts_along_the_skip_list() {
 
 /// Umbrella spec §15's read targets on a chain of 200,000 changesets, measured on `RepoRead`: a
 /// `log -n 100` (`log_first_parent(head, 100)`) at a p50 under 10 ms, and a warm `cat` of a 4 KiB
-/// file (`read_blob_at`) under 1 ms; `resolve("main~1000")`, a walk of 1,000 narrow lookups, is
-/// printed beside them. The chain is built without a sync in the measurements' directory
-/// (`measure::base_dir`, on the native filesystem); each figure is the median of 101 runs after
-/// one that warms it.
+/// file (`read_blob_at`) under 1 ms; `resolve("main~1000")`, a walk of 1,000 first-parent steps,
+/// a changeset object read each, is printed beside them. The chain is built without a sync in the
+/// measurements' directory (`measure::base_dir`, on the native filesystem); each figure is the
+/// median of 101 runs after one that warms it.
 #[test]
 #[ignore = "measurement, ~2 min: a 200k chain"]
 fn reads_at_200k_meet_the_targets() {
