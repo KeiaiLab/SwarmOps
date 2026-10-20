@@ -180,6 +180,23 @@ left).
   resolves when the command runs, so it matches whatever the ref holds by then (it fails only
   if the ref is gone); give an id for an expectation that can fail, or be replayed.
   *Documented (`--expect` help). Found: M1 Task 5; final review, question 13.*
+- **An operation number can name another operation after a take-back.** `op log` numbers an
+  operation by its journal frame's seq, and it lists a frame before the frame's sync completes,
+  as every local reader does ("Readers may return state that is not durable yet", above). If the
+  store then takes the frame back, the next write's frame gets the same number, and an `op undo`
+  of the number listed in between moves back the refs of that next operation instead (another
+  agent's, perhaps), as long as they still hold what it set, with no error: `undo` reads the frame
+  under its lock, so it never undoes the frame taken back, but it cannot tell that the number
+  changed hands. Only a take-back frees a number: a frame whose sync failed (its writer gets
+  `E_IO_TRANSIENT` with `details.committed: false`), one that a power loss catches before its
+  sync completes, and, in the triple fault storage spec §2 rule 3 leaves open, one committed with
+  a warning; any other frame keeps its number. So an agent lists `op log` again before an
+  `op undo` (after an error above all) and checks that the operation's refs and changesets are
+  the ones it means; an undo's result lists the moves it made, and an undo is an operation of its
+  own, which `op undo` can take back. *Target: M8, whose committed snapshot (`read_committed`)
+  can give `op log` only frames that cannot be taken back; an operation identity that a
+  take-back cannot reuse, checked under the lock, is the other way. Found: the M4 consolidated
+  review (the op-log area's correctness lens and its judge).*
 - **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
   together, and up to about two to three times that while their objects are encoded in
   parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and
