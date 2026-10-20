@@ -1150,6 +1150,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `swarmops verify --deep`, which names it), refused before anything is written. It takes a tree
   or a blob of the head for a git object only where the store's own bytes render to that object's
   oid, so no commit it records holds other bytes than git's, whatever the store says of the head;
-  and in the library (`swarmops_git::import`) it no longer needs `ExportOid` registered.
+  and in the library (`swarmops_git::import`) it no longer needs `ExportOid` registered. So an
+  import onto a target reads the head's whole tree, and onto a native head the whole history below
+  it ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
+  head's whole tree, and onto a native head the whole history below it").
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
