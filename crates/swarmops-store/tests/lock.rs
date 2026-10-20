@@ -143,13 +143,12 @@ fn a_lock_file_that_is_not_a_regular_file_is_refused_before_it_is_opened() {
 
     use swarmops_store::FileOp;
 
-    let (dir, layout) = new_meta();
+    let (_root, layout) = new_meta();
     let lock = layout.meta_lock().into_std_path_buf();
-    let outside = dir.path().join("outside");
-    fs::create_dir(&outside).expect("create a directory beside the store");
-    let regular = outside.join("regular");
-    fs::write(&regular, b"not the lock").expect("write a file beside the store");
-    let nowhere = outside.join("nowhere");
+    let outside = tempfile::tempdir().expect("create a directory outside the store");
+    let regular = outside.path().join("regular");
+    fs::write(&regular, b"not the lock").expect("write a file outside the store");
+    let nowhere = outside.path().join("nowhere");
     let mkfifo = || {
         let made = Command::new("mkfifo").arg(&lock).status();
         assert!(made.expect("run mkfifo").success(), "mkfifo");
