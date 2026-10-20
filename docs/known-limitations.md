@@ -383,10 +383,12 @@ left).
   values a crafted file can steer: the export derives every tree's, blob's and commit's git oid
   from the store's own objects, a commit's over its parents' derived the same way down to the
   roots, and binds what it reuses, writes, names as a commit's parent, compares a branch with or
-  moves a branch to to them, so a memo it reads is never taken for an object's content or a
-  commit's history (a memo that disagrees is `E_STORE_CORRUPT`, refused before anything is
-  written or the branch moves), and a deep `verify` re-derives `git_tree_oid`, `git_blob_oid`
-  and `git_oid` against the objects too (`derived_mismatch`). A
+  moves a branch to to them; the git import derives the commit a target's head stands for the
+  same way, and takes a tree or a blob of the head for a git object only where the store's own
+  bytes render to that object's oid. So no memo either reads is taken for an object's content or
+  a commit's history (a memo that disagrees is `E_STORE_CORRUPT`, refused before anything is
+  written or a ref or a branch moves), and a deep `verify` re-derives `git_tree_oid`,
+  `git_blob_oid` and `git_oid` against the objects too (`derived_mismatch`). A
   keyed trailer whose key lives outside the store would make a placed file fail the built-in
   derivations' checks, at the cost of a new layout version. *Target: an authenticated cache is
   unscheduled. Found: the 2026-10-20 security review.*

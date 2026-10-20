@@ -867,9 +867,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   never exported, or that the source does not build on, is still `E_GIT_IMPORT_DIVERGED`, whose
   `details.base` now names the commit the head exports to, and whose message says the head stands
   for that commit. The import derives that export oid only where the head is native or the source
-  does not lead from the commit it holds, so in the library (`swarmops_git::import`) the repository
-  must have `ExportOid` registered there (`swarmops_git::register`), as every `LocalOps` does
-  (storage spec §7, operations spec §6).
+  does not lead from the commit it holds (storage spec §7, operations spec §6).
 
 #### Release preparation (2026-10-20)
 
@@ -1140,5 +1138,18 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   up to date. So every export, an incremental one included, reads the whole history below its
   head ([docs/known-limitations.md](docs/known-limitations.md), "An export reads the whole history
   below its head").
+- A `git import` onto a target whose head SwarmOps made, or imported with a loss, took the commit
+  that head exports to from the export oids memoized in the derived store (`meta/derived/git_oid`),
+  and took the trees and blobs of that commit for the head's by their names alone: a memo placed
+  there whole and with its checksum right could make the import go on from any commit of the
+  source as the head's export, and record the commits made on it as faithful changesets (their
+  `git.oid` set, no `git.lossy`) holding the head's files where git's differ, with exit 0. The
+  import now derives that export oid from the store's own objects, with the whole history below
+  the head, as the export does, and checks each memo it meets against what it derives: one that
+  disagrees is `E_STORE_CORRUPT` (`details.derivation` `git_oid`, `details.changeset`; hint
+  `swarmops verify --deep`, which names it), refused before anything is written. It takes a tree
+  or a blob of the head for a git object only where the store's own bytes render to that object's
+  oid, so no commit it records holds other bytes than git's, whatever the store says of the head;
+  and in the library (`swarmops_git::import`) it no longer needs `ExportOid` registered.
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable

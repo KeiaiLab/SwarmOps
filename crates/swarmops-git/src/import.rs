@@ -7,8 +7,8 @@
 //! 1. The source ref is resolved to a commit, the tip ([`GitSource::resolve`]), and the target
 //!    ref read. A target that exists has a base: the git commit its head changeset holds in its
 //!    `git.oid` metadata, or for a native head, which holds none, the commit it exports to
-//!    ([`ExportOid`], M8 decision 7), so that commits made in git on top of an export come back
-//!    on the changeset they were made on.
+//!    ([`ExportOid`](crate::ExportOid), M8 decision 7), so that commits made in git on top of an
+//!    export come back on the changeset they were made on.
 //! 2. The walk: from the tip over parents, first parents first, on a stack of its own, never by
 //!    recursion. A commit is known when it is the base, which stands for the target's head, or
 //!    when the external id index names a changeset the store holds for it; the walk stops there.
@@ -27,10 +27,12 @@
 //!    written.
 //! 4. A base whose tree the head's root holds without loss (a `git.oid` without `git.lossy`, or
 //!    the head's export, which is its root rendered) seeds the conversion: the head's root and
-//!    the base commit's git tree are walked together, entries matched by name and kind, so that
-//!    the trees and blobs the new commits share with the base are neither read nor converted
-//!    again. A base the walk did not meet, only reached, may be a commit the source lacks (one
-//!    the tip descends from through the head's export instead): then nothing is seeded.
+//!    the base commit's git tree are walked together, entries matched by name and kind, and a
+//!    pair taken only where the store's own bytes render to the git object's oid (no memo is
+//!    read), so that the trees and blobs the new commits share with the base are neither read
+//!    nor converted again, and no git object is taken for a store object of other bytes. A base
+//!    the walk did not meet, only reached, may be a commit the source lacks (one the tip
+//!    descends from through the head's export instead): then nothing is seeded.
 //! 5. The frames: each run of [`ImportRequest::frame_changesets`] commits is converted, its new
 //!    trees and blobs stored ([`Repo::put_objects`]) whenever
 //!    [`ImportRequest::object_batch_bytes`] of them accumulate and at its end, then recorded as
@@ -53,10 +55,14 @@
 //! import run again continues after the frames that committed. A commit the conversion refuses
 //! ([`ImportError::Convert`]) ends the import before the frame that would hold it.
 //!
-//! The export oids of steps 1 and 3 are derived values ([`swarmops_repo::Repo::derived`]): the
-//! import asks for one only where the target's head is native, or holds a git commit the tip does
-//! not lead from, so a plain incremental import derives nothing. Deriving one the derived store
-//! lacks derives those of the head's ancestors too, once, and stores them, as the export does.
+//! The export oids of steps 1 and 3 are derived from the store's own objects, as the export
+//! derives them: the import asks for one only where the target's head is native, or holds a git
+//! commit the tip does not lead from, so a plain incremental import derives none. Deriving one
+//! walks the whole history below the head, each changeset once, parents first, on a stack of its
+//! own, and takes no `git_oid` memo of the derived store as a value: a memo it meets that
+//! disagrees with what it derives is [`RepoError::DerivedCorrupt`] ([`ImportError::Store`]),
+//! before anything is written, and one that is missing is written. The target, those export oids
+//! and the trees and blobs that seed the conversion are read in one snapshot of the store.
 //!
 //! [`ExportedOid::kept`]: crate::ExportedOid::kept
 //! [`Repo::put_objects`]: swarmops_repo::Repo::put_objects
@@ -68,15 +74,21 @@
 use std::collections::{HashMap, HashSet};
 
 use swarmops_core::bytes::to_u64;
-use swarmops_core::{ChangesetId, EntryTarget, LeafKind, ObjectKind, RepoPath, TreeEntry, TreeId};
-use swarmops_repo::{CasResult, LocalRepo, MAX_RAW_BATCH, RawChangeset, RepoError, StoreError};
-use swarmops_store::{ExternalEntry, Recovered, SYSTEM_GIT, check_ref_name};
+use swarmops_core::{
+    BlobId, ChangesetId, EntryTarget, LeafKind, ObjectKind, RepoPath, TreeEntry, TreeId,
+};
+use swarmops_repo::{
+    CasResult, LocalRepo, MAX_RAW_BATCH, RawChangeset, RepoError, RepoRead, StoreError,
+};
+use swarmops_store::{ExternalEntry, FsObjectStore, Recovered, SYSTEM_GIT, check_ref_name};
 
 use crate::ancestry;
+use crate::export_oid::{ExportOids, OnMemo, rendered_blob_oid, rendered_tree_oid};
 use crate::source::read_bounded;
 use crate::{
-    ConvertError, Converted, Converter, ExportOid, GIT_LOSSY, GIT_OID, GitOid, GitSource, LossySet,
-    ObjectFormat, RawCommit, RawError, RawKind, RawTree, SourceError, Unsupported,
+    ConvertError, Converted, Converter, ExportReader, GIT_LOSSY, GIT_OID, GitOid, GitSource,
+    LossySet, ObjectFormat, OidCache, RawCommit, RawError, RawKind, RawTree, SourceError,
+    Unsupported,
 };
 
 /// How many changesets a frame of the import holds unless asked otherwise: issue 6 Stage 1's
@@ -207,9 +219,9 @@ pub enum ImportError {
         /// The changeset it names.
         target_head: ChangesetId,
         /// The git commit the import tried first: the one that changeset holds (`git.oid`), or
-        /// for a native changeset the one it exports to ([`ExportOid`]). [`import()`] always
-        /// names one since a native head goes on from its export (M8 decision 7); `None` would
-        /// say the head stands for no git commit.
+        /// for a native changeset the one it exports to ([`ExportOid`](crate::ExportOid)).
+        /// [`import()`] always names one since a native head goes on from its export (M8
+        /// decision 7); `None` would say the head stands for no git commit.
         base: Option<GitOid>,
         /// The tip.
         git_head: GitOid,
@@ -282,9 +294,10 @@ const DIR_MODE: &[u8] = b"40000";
 /// the steps and their errors.
 ///
 /// Where the target's head is native, or holds a git commit the tip does not lead from, the
-/// import derives the commit the head exports to, and `repo` must have [`ExportOid`] registered
-/// ([`crate::register`], as every `LocalOps` registers it): without it the import fails there with
-/// [`RepoError::Derived`] ([`ImportError::Store`]) before it writes anything.
+/// import derives the commit the head exports to from the store's objects itself, whether or not
+/// `repo` has [`ExportOid`](crate::ExportOid) registered: a `git_oid` memo that disagrees with what
+/// it derives fails the import there with [`RepoError::DerivedCorrupt`] ([`ImportError::Store`])
+/// before it writes anything.
 pub fn import(
     repo: &LocalRepo,
     source: &dyn GitSource,
@@ -299,14 +312,15 @@ pub fn import(
         return Err(SourceError::Unsupported(format).into());
     }
     let tip = source.resolve(&req.git_ref)?;
-    let mut base = Base::of(repo, req)?;
+    let mut oids = Oids::new(repo)?;
+    let mut base = Base::of(&mut oids, req)?;
     let mut walk = Walk::from_tip(repo, source, tip, base.as_ref())?;
     let old_head = base.as_ref().map(|base| base.head);
     // The commit that seeds the conversion, and whether the walk met it.
     let mut seeds = None;
     if let Some(base) = &mut base {
         let mut leads = base.leads(repo, tip, &walk)?;
-        if leads.is_none() && base.add_export(repo, &walk)? {
+        if leads.is_none() && base.add_export(&mut oids, &walk)? {
             // The tip may descend from the head's export, which the walk met: the walk again,
             // knowing it.
             walk = Walk::from_tip(repo, source, tip, Some(base))?;
@@ -350,8 +364,10 @@ pub fn import(
     if let Some(base) = &base
         && let Some((commit, met)) = seeds
     {
-        seed(repo, source, &mut run.converter, base, commit, met)?;
+        seed(&oids, source, &mut run.converter, base, commit, met)?;
     }
+    // Nothing is read in the snapshot past here: the frames' own writes follow.
+    drop(oids);
     for commits in walk
         .unknown
         .chunks(req.frame_changesets.clamp(1, MAX_RAW_BATCH))
@@ -402,15 +418,16 @@ enum Leads {
 }
 
 impl Base {
-    /// The base of `req.target_ref` in `repo`; `None` when the target does not exist. For a
-    /// native head, the commit it exports to, derived ([`ExportOid`]).
-    fn of(repo: &LocalRepo, req: &ImportRequest) -> Result<Option<Base>, ImportError> {
+    /// The base of `req.target_ref` as `oids`' snapshot shows it; `None` when the target does not
+    /// exist. For a native head, the commit it exports to, derived from the store's objects
+    /// ([`Oids::export_of`]).
+    fn of(oids: &mut Oids<'_>, req: &ImportRequest) -> Result<Option<Base>, ImportError> {
         let at_start = |source| stopped(source, 0, None);
-        let Some(state) = repo.get_ref(&req.target_ref).map_err(at_start)? else {
+        let Some(state) = oids.read.get_ref(&req.target_ref).map_err(at_start)? else {
             return Ok(None);
         };
         let head = state.target;
-        let Some(stored) = repo.changeset(head).map_err(at_start)? else {
+        let Some(stored) = oids.read.changeset(head).map_err(at_start)? else {
             return Err(at_start(RepoError::NotFound(head.to_string())));
         };
         let metadata = &stored.changeset.metadata;
@@ -421,7 +438,7 @@ impl Base {
                 seeds: value(metadata, GIT_LOSSY).is_none(),
             },
             None => BaseCommit {
-                oid: export_oid(repo, head)?,
+                oid: oids.export_of(head)?,
                 seeds: true,
             },
         };
@@ -461,12 +478,13 @@ impl Base {
 
     /// Adds the commit an imported head exports to, when that is another commit than the one it
     /// holds (it was imported with a loss, or above such a one) and `walk` met it: `true` then.
-    /// A native head's export is its first commit already. Derives the head's export oid.
-    fn add_export(&mut self, repo: &LocalRepo, walk: &Walk) -> Result<bool, ImportError> {
+    /// A native head's export is its first commit already. Derives the head's export oid
+    /// ([`Oids::export_of`]).
+    fn add_export(&mut self, oids: &mut Oids<'_>, walk: &Walk) -> Result<bool, ImportError> {
         if !self.imported {
             return Ok(false);
         }
-        let exported = export_oid(repo, self.head)?;
+        let exported = oids.export_of(self.head)?;
         if self.stands_for(exported) || !walk.met(exported) {
             return Ok(false);
         }
@@ -478,12 +496,67 @@ impl Base {
     }
 }
 
-/// The commit changeset `head` exports to ([`ExportOid`]): [`ImportError::Store`] when it cannot
-/// be derived, as when `repo` has no [`ExportOid`] registered.
-fn export_oid(repo: &LocalRepo, head: ChangesetId) -> Result<GitOid, ImportError> {
-    let exported = repo.derived::<ExportOid>(head, &());
-    let exported = exported.map_err(|source| stopped(source, 0, None))?;
-    Ok(exported.git_oid())
+/// What the store's own objects say of the target's head, read in one snapshot of the store: the
+/// commit a changeset exports to, derived with every export oid below it ([`ExportOids`], which
+/// checks each `git_oid` memo it meets against what it derives), and the git oids that the head's
+/// trees and blobs render to, from their bytes alone ([`rendered_tree_oid`],
+/// [`rendered_blob_oid`]): no memo of the derived store is taken for a value. Each object's git
+/// oid is computed once ([`OidCache`]).
+struct Oids<'r> {
+    repo: &'r LocalRepo,
+    /// The snapshot the target, its head's history and its objects are read in.
+    read: RepoRead<'r, FsObjectStore>,
+    cache: OidCache,
+    exports: ExportOids,
+}
+
+impl<'r> Oids<'r> {
+    /// A snapshot of `repo`, nothing derived yet.
+    fn new(repo: &'r LocalRepo) -> Result<Oids<'r>, ImportError> {
+        let read = repo.snapshot().map_err(|source| stopped(source, 0, None))?;
+        Ok(Oids {
+            repo,
+            read,
+            cache: OidCache::new(),
+            exports: ExportOids::new(OnMemo::Check),
+        })
+    }
+
+    /// The snapshot's trees and blobs, with the derived store whose memos are checked.
+    fn reader(&self) -> ExportReader<'_, FsObjectStore> {
+        ExportReader {
+            read: &self.read,
+            store: self.repo.derived_store(),
+        }
+    }
+
+    /// The commit changeset `id` exports to, derived from the store's objects with every export
+    /// oid below it, each once ([`ExportOids`]): never a memo, so that no store file someone placed
+    /// decides what the head stands for. A memo met on the way (a changeset's `git_oid`, a
+    /// rendered tree's or blob's git oid) that disagrees is [`RepoError::DerivedCorrupt`], and one
+    /// that is missing is written.
+    fn export_of(&mut self, id: ChangesetId) -> Result<GitOid, ImportError> {
+        let reader = ExportReader {
+            read: &self.read,
+            store: self.repo.derived_store(),
+        };
+        let exported = self.exports.of(&self.read, &reader, &self.cache, id);
+        Ok(exported
+            .map_err(|source| stopped(source, 0, None))?
+            .git_oid())
+    }
+
+    /// The git oid that tree `tree` renders to, from the store's own bytes.
+    fn tree_oid(&self, tree: TreeId) -> Result<GitOid, ImportError> {
+        let oid = rendered_tree_oid(&self.reader(), &self.cache, tree);
+        oid.map_err(|source| stopped(source, 0, None))
+    }
+
+    /// The git oid of blob `blob`, the hash of the store's own bytes.
+    fn blob_oid(&self, blob: BlobId) -> Result<GitOid, ImportError> {
+        let oid = rendered_blob_oid(&self.reader(), &self.cache, blob);
+        oid.map_err(|source| stopped(source, 0, None))
+    }
 }
 
 /// The value of metadata key `key`.
@@ -634,9 +707,11 @@ fn malformed(oid: GitOid, error: &RawError) -> ImportError {
 /// Step 4 of [the module documentation](self): the trees and blobs of `base`'s head, taken by
 /// `converter` as converted already, by walking the git tree of `commit`, a commit the head
 /// stands for whose tree its root holds without loss, and the root together, entries matched by
-/// name and kind. A commit the walk did not meet (`met` false) that `source` lacks seeds nothing.
+/// name and kind, each pair taken only where the store's own bytes render to the git object's oid
+/// ([`Oids`]): whatever the store says of the head, no git object is taken for a store object of
+/// other bytes. A commit the walk did not meet (`met` false) that `source` lacks seeds nothing.
 fn seed(
-    repo: &LocalRepo,
+    oids: &Oids<'_>,
     source: &dyn GitSource,
     converter: &mut Converter<'_>,
     base: &Base,
@@ -648,7 +723,9 @@ fn seed(
         Err(ImportError::Source(SourceError::Missing { .. })) if !met => return Ok(()),
         Err(error) => return Err(error),
     };
-    converter.remember_tree(git_root, base.root);
+    if oids.tree_oid(base.root)? == git_root {
+        converter.remember_tree(git_root, base.root);
+    }
     // Each directory to walk: its path in the base's tree (`None` for the root) and its git tree.
     let mut dirs: Vec<(Option<RepoPath>, GitOid)> = vec![(None, git_root)];
     // The git trees walked or about to be: a tree held at several paths is walked once.
@@ -660,7 +737,7 @@ fn seed(
             return Err(ConvertError::Malformed { oid: git, what }.into());
         }
         let tree = RawTree::parse(&bytes).map_err(|error| malformed(git, &error))?;
-        let listed = repo.list_tree(base.head, dir.as_ref());
+        let listed = oids.read.list_tree(base.head, dir.as_ref());
         let Some(held) = listed.map_err(|source| stopped(source, 0, None))? else {
             continue;
         };
@@ -672,10 +749,14 @@ fn seed(
                 (b"100644", EntryTarget::Leaf(LeafKind::File, blob))
                 | (b"100755", EntryTarget::Leaf(LeafKind::Exec, blob))
                 | (b"120000", EntryTarget::Leaf(LeafKind::Symlink, blob)) => {
-                    converter.remember_blob(entry.oid, blob);
+                    if oids.blob_oid(blob)? == entry.oid {
+                        converter.remember_blob(entry.oid, blob);
+                    }
                 }
                 (DIR_MODE, EntryTarget::Dir(tree)) => {
-                    converter.remember_tree(entry.oid, tree);
+                    if oids.tree_oid(tree)? == entry.oid {
+                        converter.remember_tree(entry.oid, tree);
+                    }
                     if walked.insert(entry.oid)
                         && let Some(path) = child_path(dir.as_ref(), &entry.name)
                     {
