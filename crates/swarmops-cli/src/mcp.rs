@@ -8,7 +8,7 @@
 //! carries nothing but answers. stderr gets a line for a message that has no answer although it
 //! is neither a request nor a notification (a response from the client), a line for the I/O
 //! error that stops the server, the panic hook's report of a bug, and the reason one of the
-//! store's three documented aborts (storage spec §2; README) writes before
+//! store's four documented aborts (storage spec §2; README) writes before
 //! `std::process::abort` ends the process; nothing else. The server exits 0 when stdin ends, 1
 //! if reading stdin or writing stdout fails, and by SIGABRT on those aborts.
 //!
