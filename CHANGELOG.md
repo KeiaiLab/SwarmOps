@@ -1097,5 +1097,20 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   values (`git_oid` names its changeset, the other two their object). The memo stays a hint that
   saves a write, not a statement of content ([docs/known-limitations.md](docs/known-limitations.md),
   "Crafted derived values that agree with each other are read as valid").
+- A `git export` still took the parents of the commits it wrote, where those parents were commits
+  it did not write, from the export oids memoized in the derived store (`meta/derived/git_oid`),
+  and so did its search for the commit the branch's history goes on from: a memo placed there
+  whole and with its checksum right, for an ancestor of those commits (a merge's side branch,
+  say), could give them as their parent any commit the destination held, or make a branch that
+  had diverged pass for the export of an ancestor, so the branch moved to a history the store does
+  not hold, with exit 0 and the files at its tip still the store's. The export now derives the
+  export oid of every changeset below the head from the store's own objects, each once a run,
+  parents first and without recursion, and only checks the memos against those: one that
+  disagrees is `E_STORE_CORRUPT` (`details.derivation` `git_oid`, `details.changeset`; hint
+  `swarmops verify --deep`, which names it), refused before anything is written or the branch
+  moves, a memo of the head that names the branch's commit included, which no longer passes for
+  up to date. So every export, an incremental one included, reads the whole history below its
+  head ([docs/known-limitations.md](docs/known-limitations.md), "An export reads the whole history
+  below its head").
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable

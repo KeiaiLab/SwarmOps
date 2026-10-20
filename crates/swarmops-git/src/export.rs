@@ -11,7 +11,12 @@
 //!    ([`Repo::snapshot_committed`]: taken under the writer lock after the journal's tail check,
 //!    so that nothing the export sends off the host can be taken back by a power loss or by a
 //!    failed sync's cut).
-//! 2. The branch is read, and the head's export oid derived ([`ExportOid`]).
+//! 2. The branch is read, and the head's export oid derived from the store's own objects
+//!    ([`ExportOid`](crate::ExportOid)'s value), with every export oid below it, each once: never
+//!    read from a memo of the derived store, whose memos are checked against what the objects give
+//!    instead (one that disagrees is [`RepoError::DerivedCorrupt`], and nothing is written). Every
+//!    export oid the steps after it compare a branch with, name as a commit's parent or move the
+//!    branch to is one of these.
 //! 3. A branch at the head's export is up to date: nothing is written, and it does not move.
 //! 4. A branch that exists must name the export of the head or of an ancestor of it, over every
 //!    parent: the base, found through the external id index (the changeset it names for the
@@ -53,16 +58,16 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{BlobId, Changeset, ChangesetId, EntryTarget, Tree, TreeEntry, TreeId};
-use swarmops_repo::{Derivation, LocalRepo, RepoError, RepoRead, StoreError};
+use swarmops_repo::{LocalRepo, RepoError, RepoRead, StoreError};
 use swarmops_store::{ExternalEntry, FsObjectStore, SYSTEM_GIT, TailRepair, check_ref_name};
 
 use crate::ancestry;
+use crate::export_oid::{ExportOids, OnMemo};
 use crate::native::{metadata, render_commit};
 use crate::render::tree_bytes;
 use crate::{
-    BranchUpdate, ExportOid, ExportReader, ExportedOid, GIT_OID, GitOid, GitSink, ObjectFormat,
-    OidCache, RawCommit, RawKind, SinkError, Stored, Unsupported, git_hash, real_blob_oid,
-    real_tree_oid,
+    BranchUpdate, ExportReader, ExportedOid, GIT_OID, GitOid, GitSink, ObjectFormat, OidCache,
+    RawCommit, RawKind, SinkError, Stored, Unsupported, git_hash, real_blob_oid, real_tree_oid,
 };
 
 /// How many first parents of the branch's commit step 4 reads in the repository, looking for the
@@ -100,7 +105,8 @@ impl ExportRequest {
 pub struct ExportReport {
     /// The changeset the source ref named in the committed snapshot the export read: the head.
     pub head: ChangesetId,
-    /// The commit the head exports to ([`ExportOid`]), which the branch names now.
+    /// The commit the head exports to ([`ExportOid`](crate::ExportOid)), which the branch names
+    /// now.
     pub head_oid: GitOid,
     /// The branch, by its short name.
     pub branch: String,
@@ -255,9 +261,9 @@ impl DivergedReason {
 
 /// Exports the history behind `req.source_ref` in `repo` into the branch `req.branch` of the
 /// repository `sink` writes, and moves the branch to the export of the ref's head: see [the
-/// module documentation](self) for the steps and their errors. `repo` must have [`ExportOid`]
-/// registered ([`crate::register`]); without it the export fails with [`RepoError::Derived`]
-/// before it writes anything.
+/// module documentation](self) for the steps and their errors. The export derives the export oids
+/// it needs itself, from the store's objects ([`ExportOid`](crate::ExportOid)'s values), whether
+/// or not `repo` has [`ExportOid`](crate::ExportOid) registered ([`crate::register`]).
 pub fn export(
     repo: &LocalRepo,
     sink: &mut dyn GitSink,
@@ -282,7 +288,8 @@ pub fn export(
     };
     let head = state.target;
     let old = sink.branch(&req.branch)?;
-    let head_oid = repo.derived::<ExportOid>(head, &())?.git_oid();
+    let mut run = Run::new(repo, &read, sink, head);
+    let head_oid = run.export_of(head)?.git_oid();
     let mut report = ExportReport {
         head,
         head_oid,
@@ -302,7 +309,6 @@ pub fn export(
         return Ok(report);
     }
 
-    let mut run = Run::new(repo, &read, sink, head);
     if let Some(branch) = old {
         report.base = match run.base(branch)? {
             Found::Base(base) => Some(base),
@@ -424,6 +430,9 @@ struct Run<'a, 'r> {
     cache: OidCache,
     /// The changeset the export is writing, for the error a wrong memo raises.
     current: ChangesetId,
+    /// The export oid of every changeset the run has needed, re-derived from the store's own
+    /// objects with the history below it, its memo checked ([`Run::export_of`]).
+    exports: ExportOids,
     commits_written: u64,
     objects_written: u64,
     objects_checked: u64,
@@ -447,6 +456,7 @@ impl<'a, 'r> Run<'a, 'r> {
             pending: Vec::new(),
             cache: OidCache::new(),
             current: head,
+            exports: ExportOids::new(OnMemo::Check),
             commits_written: 0,
             objects_written: 0,
             objects_checked: 0,
@@ -483,6 +493,21 @@ impl<'a, 'r> Run<'a, 'r> {
             self.current,
             blob,
         )?)
+    }
+
+    /// Changeset `id`'s export oid, derived from the store's own objects over the export oids of
+    /// its parents, derived the same way down to the roots, each once for the run
+    /// ([`ExportOids`]): never a memo, so that no store file someone placed decides a commit's
+    /// parent, the base the branch is found at, or where the branch moves. The memos met on the
+    /// way, `git_oid` and the trees' and blobs', are checked against what the objects give: one
+    /// that disagrees is [`RepoError::DerivedCorrupt`], which `verify --deep` names, and one that
+    /// is not there is written.
+    fn export_of(&mut self, id: ChangesetId) -> Result<ExportedOid, ExportError> {
+        let reader = ExportReader {
+            read: self.read,
+            store: self.repo.derived_store(),
+        };
+        Ok(self.exports.of(self.read, &reader, &self.cache, id)?)
     }
 
     /// Reads changeset `id`'s record and object into [`Run::nodes`], once; `false` when the
@@ -536,9 +561,10 @@ impl<'a, 'r> Run<'a, 'r> {
         }
         // No entry: the head's first parents, compared by export oid.
         let mut chain = HashMap::new();
-        for at in self.read.first_parents(self.head) {
+        let read = self.read;
+        for at in read.first_parents(self.head) {
             let at = at?;
-            let exported = self.repo.derived::<ExportOid>(at, &())?.git_oid();
+            let exported = self.export_of(at)?.git_oid();
             if exported == branch {
                 return Ok(Found::Base(at));
             }
@@ -597,7 +623,7 @@ impl<'a, 'r> Run<'a, 'r> {
             ));
             return Ok(None);
         }
-        let exported = self.repo.derived::<ExportOid>(entry.changeset, &())?;
+        let exported = self.export_of(entry.changeset)?;
         Ok(Some((entry.changeset, exported)))
     }
 
@@ -668,20 +694,20 @@ impl<'a, 'r> Run<'a, 'r> {
             }
             walk.wanted -= 1;
             self.current = id;
-            let exported = self.repo.derived::<ExportOid>(id, &())?;
+            let exported = self.export_of(id)?;
             let stored = self.sink.stored(exported.git_oid())?;
             if stored == Stored::Packed {
                 // Trust the pack for this commit and its whole history only once the commit is the
-                // one the changeset renders to over its real oids: a crafted git_oid memo naming a
-                // packed commit does not have the branch move onto it, nor its ancestors go
-                // unwritten. The render also checks the trees it reaches ([`Run::rendered_commit`]
-                // through [`Run::tree_git_oid`]).
+                // one the changeset renders to over its parents' derived export oids and its real
+                // tree ([`Run::rendered_commit`]): an unchanged import's export oid, its own
+                // `git.oid`, is taken without a tree read, and the rendering binds it to the
+                // changeset's content before the branch can move onto a packed commit.
                 let commit = Commit {
                     id,
                     exported,
                     stored,
                 };
-                self.rendered_commit(&commit, &HashMap::new())?;
+                self.rendered_commit(&commit)?;
                 self.seen.insert(exported.git_oid());
                 continue;
             }
@@ -722,9 +748,6 @@ impl<'a, 'r> Run<'a, 'r> {
     /// Step 6: each commit of `commits`, parents first, with the trees and blobs its root holds
     /// that its first parent's root does not.
     fn write(&mut self, commits: &[Commit]) -> Result<(), ExportError> {
-        let exported: HashMap<ChangesetId, ExportedOid> = (commits.iter())
-            .map(|commit| (commit.id, commit.exported))
-            .collect();
         for commit in commits {
             self.current = commit.id;
             let node = &self.nodes[&commit.id];
@@ -734,7 +757,7 @@ impl<'a, 'r> Run<'a, 'r> {
                 None => None,
             };
             self.trees(root, against)?;
-            self.commit(commit, &exported)?;
+            self.commit(commit)?;
         }
         Ok(())
     }
@@ -810,16 +833,10 @@ impl<'a, 'r> Run<'a, 'r> {
         Ok(())
     }
 
-    /// `commit`'s own object: rendered over real oids and verified against its memoized export oid
-    /// first ([`Run::rendered_commit`], so a crafted `git_oid` memo is refused before the branch
-    /// could move onto its commit), then absent, written; loose, read back. `exported` holds the
-    /// export oids of the commits of step 5.
-    fn commit(
-        &mut self,
-        commit: &Commit,
-        exported: &HashMap<ChangesetId, ExportedOid>,
-    ) -> Result<(), ExportError> {
-        let bytes = self.rendered_commit(commit, exported)?;
+    /// `commit`'s own object, rendered and checked against its export oid
+    /// ([`Run::rendered_commit`]): absent, written; loose, read back.
+    fn commit(&mut self, commit: &Commit) -> Result<(), ExportError> {
+        let bytes = self.rendered_commit(commit)?;
         let oid = commit.exported.git_oid();
         self.seen.insert(oid);
         let written = if commit.stored == Stored::Loose {
@@ -853,43 +870,31 @@ impl<'a, 'r> Run<'a, 'r> {
         }))
     }
 
-    /// The bytes of `commit`'s git commit ([`render_commit`]) over its parents' export oids and
-    /// its root's real tree oid ([`Run::tree_git_oid`]), which must hash to the export oid the
-    /// derived store memoized for the changeset: storage spec §7 (5)'s check. A memo that is
-    /// another oid (a store file someone placed, a cache a faulty build wrote) is
-    /// [`RepoError::DerivedCorrupt`] of `git_oid`, so the branch never moves to a commit the
-    /// export did not render; `verify --deep` names it. The oid is the changeset's own, not the
-    /// cached value, so no crafted `git_oid` memo stands in for it.
-    fn rendered_commit(
-        &self,
-        commit: &Commit,
-        exported: &HashMap<ChangesetId, ExportedOid>,
-    ) -> Result<Vec<u8>, ExportError> {
+    /// The bytes of `commit`'s git commit ([`render_commit`]) over its parents' export oids,
+    /// derived from the store's own objects ([`Run::export_of`], never a memo), and its root's
+    /// real tree oid ([`Run::tree_git_oid`]), which must hash to its export oid: storage spec §7
+    /// (5)'s check. A native changeset's export oid is that rendering's hash already; an unchanged
+    /// import's is its `git.oid`, taken without a tree read, which a changeset that does not
+    /// render to it fails: [`ExportError::Bug`], before anything of it is written.
+    fn rendered_commit(&mut self, commit: &Commit) -> Result<Vec<u8>, ExportError> {
         let stored = (self.read.changeset(commit.id)?)
             .ok_or_else(|| RepoError::NotFound(commit.id.to_string()))?;
         let cs = stored.changeset;
         let mut parents = Vec::with_capacity(cs.parents.len());
-        for parent in &cs.parents {
-            let value = match exported.get(parent) {
-                Some(&value) => value,
-                None => self.repo.derived::<ExportOid>(*parent, &())?,
-            };
-            parents.push(value.git_oid());
+        for &parent in &cs.parents {
+            parents.push(self.export_of(parent)?.git_oid());
         }
         let tree = self.tree_git_oid(cs.root)?;
         let bytes = render_commit(commit.id, &cs, &parents, tree);
         let rendered = git_hash(RawKind::Commit, &bytes);
         let expected = commit.exported.git_oid();
         if rendered != expected {
-            return Err(RepoError::DerivedCorrupt {
-                name: ExportOid::NAME.to_owned(),
-                changeset: commit.id,
-                why: format!(
-                    "the changeset renders to git commit {rendered}, but its memoized export oid \
-                     is {expected}"
+            return Err(ExportError::Bug {
+                reason: format!(
+                    "changeset {} renders to commit {rendered}, not to its export oid {expected}",
+                    commit.id
                 ),
-            }
-            .into());
+            });
         }
         Ok(bytes)
     }

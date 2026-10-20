@@ -19,6 +19,11 @@
 //! never by recursion. As M2's engine does with its values, a memo whose put fails is dropped and
 //! the oid returned all the same; a read of the derived store that fails is the error.
 //!
+//! Neither the export nor a deep verify takes a `git_oid` memo as the truth: each derives every
+//! export oid it uses again, with the history below it, from the objects, the export checking each
+//! memo it meets against what it derives and refusing one that disagrees, the verify reporting it
+//! ([`verify_export_oids`]).
+//!
 //! Export oids read objects and derived values alone, never a ref, the journal or the clock, so a
 //! changeset's export oid never changes. Version 1 fixes git's tree order and modes, the commit
 //! layout, the signatures verbatim and the native trailer block ([`crate::native`]): a change to
@@ -46,6 +51,10 @@ const BLOB_MEMO: &str = "git_blob_oid";
 
 /// The version of both memos: a slot with no key, holding the oid's 20 bytes.
 const MEMO_VERSION: u32 = 1;
+
+/// The length of a `git_oid` memo, an [`ExportedOid`] as postcard writes it: the oid's 20 bytes,
+/// then one for `kept`.
+const EXPORT_MEMO_LEN: usize = 21;
 
 /// The derivation of the git commit each changeset exports to (storage spec §5's `GitOid`,
 /// derived name `git_oid`): see [the module documentation](self). Its key is `()`, its value an
@@ -576,13 +585,13 @@ pub fn verify_export_oids<O: ObjectStore>(
     }
 
     // Each changeset's memoized export oid, against the one it renders to over real oids.
-    let mut expected = HashMap::new();
+    let mut expected = ExportOids::new(OnMemo::Skip);
     for listed in store.list(ExportOid::NAME, ExportOid::VERSION)? {
         let id = ChangesetId(listed.subject);
         let Some(stored) = stored_export_oid(store, id)? else {
             continue;
         };
-        if let Ok(got) = export_oid_expected(&snapshot, &reader, &cache, &mut expected, id)
+        if let Ok(got) = expected.of(&snapshot, &reader, &cache, id)
             && (got.oid != stored.oid || got.kept != stored.kept)
         {
             found.push(GitMemoMismatch {
@@ -616,11 +625,10 @@ fn stored_export_oid(
     store: &DerivedStore,
     id: ChangesetId,
 ) -> Result<Option<ExportedOid>, RepoError> {
-    let Some(value) = store.get(&slot(ExportOid::NAME, id.0))? else {
+    let Some(value) = store.get(&export_slot(id))? else {
         return Ok(None);
     };
-    // 21 bytes, as postcard writes an `ExportedOid`: the oid's 20, then one for `kept`.
-    if value.len() != 21 {
+    if value.len() != EXPORT_MEMO_LEN {
         return Ok(None);
     }
     let oid = <[u8; 20]>::try_from(&value[..20]).expect("20 bytes of 21");
@@ -630,59 +638,207 @@ fn stored_export_oid(
     }))
 }
 
-/// The export oid changeset `id` renders to over its real oids, as [`ExportOid::derive`] computes
-/// it but reading no memo as the truth ([`Memos::Recompute`]): its [`GIT_OID`] where it is an
-/// unchanged import, otherwise the hash of its rendering over its parents' recomputed export oids
-/// and its root's recomputed tree oid. Memoized in `expected` for the verify's run. Walks the
-/// history below `id` parents first, with a stack of its own, never by recursion: no depth of
-/// history overflows the thread's stack.
-fn export_oid_expected<O: ObjectStore>(
-    snapshot: &RepoRead<'_, O>,
-    reader: &dyn ExportObjects,
-    cache: &OidCache,
-    expected: &mut HashMap<ChangesetId, ExportedOid>,
-    id: ChangesetId,
-) -> Result<ExportedOid, RepoError> {
-    if let Some(&value) = expected.get(&id) {
-        return Ok(value);
+/// The derived store's slot of changeset `id`'s `git_oid` memo: [`ExportOid`]'s, whose key is
+/// `()`, of no bytes.
+fn export_slot(id: ChangesetId) -> DerivedSlot<'static> {
+    DerivedSlot {
+        name: ExportOid::NAME,
+        version: ExportOid::VERSION,
+        subject: id.0,
+        key: &[],
     }
-    let mut stack = vec![PendingChangeset::read(snapshot, id)?];
-    loop {
-        let top = stack
-            .last_mut()
-            .expect("the stack holds a changeset until id's value is known");
+}
 
-        // The next parent's value: known, it joins the changeset's; else the parent goes on top.
-        if let Some(&parent) = top.changeset.parents.get(top.parents.len()) {
-            match expected.get(&parent) {
-                Some(&value) => top.parents.push(value),
-                None => stack.push(PendingChangeset::read(snapshot, parent)?),
-            }
-            continue;
-        }
+/// An [`ExportedOid`] as its `git_oid` memo holds it, as postcard writes one: the oid's 20 bytes,
+/// then one for `kept`.
+fn export_memo(value: ExportedOid) -> [u8; EXPORT_MEMO_LEN] {
+    let mut bytes = [0; EXPORT_MEMO_LEN];
+    bytes[..20].copy_from_slice(&value.oid);
+    bytes[20] = u8::from(value.kept);
+    bytes
+}
 
-        // Every parent's value is known: the changeset's own is memoized, where the changeset
-        // below finds it next.
-        let done = stack.pop().expect("the changeset on top");
-        let value = expected_of(snapshot, reader, cache, &done)?;
-        expected.insert(done.id, value);
-        if stack.is_empty() {
-            return Ok(value);
+/// Checks the export oid the derived store memoized for changeset `id` (its `git_oid` memo)
+/// against `real`, the one its history gives ([`ExportOids`]): a memo that is another value is
+/// [`RepoError::DerivedCorrupt`], so that no store file someone placed decides the parent a commit
+/// names or the commit a branch moves to; `verify --deep` names every such memo. A memo that
+/// agrees is no error, nor is none: then `real` is written, a put that fails dropped (as
+/// [`memoize`]). A value of another length than an export oid's is no memo the export reads, and
+/// is passed over.
+fn check_export_memo(
+    memo: &DerivedStore,
+    id: ChangesetId,
+    real: ExportedOid,
+) -> Result<(), RepoError> {
+    match stored_export_oid(memo, id)? {
+        Some(stored) if stored != real => Err(RepoError::DerivedCorrupt {
+            name: ExportOid::NAME.to_owned(),
+            changeset: id,
+            why: format!(
+                "the export oid memoized for it is {} (kept: {}), but its history gives {} \
+                 (kept: {})",
+                stored.git_oid(),
+                stored.kept,
+                real.git_oid(),
+                real.kept
+            ),
+        }),
+        Some(_) => Ok(()),
+        None => {
+            let _ = memo.put(&export_slot(id), &export_memo(real));
+            Ok(())
         }
     }
 }
 
-/// A changeset [`export_oid_expected`] is re-deriving the export oid of: its id, its object, and
-/// its parents' expected export oids so far, in the changeset's order.
+/// What re-deriving export oids does with the memos of the derived store it meets
+/// ([`ExportOids`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OnMemo {
+    /// Checks each against what the store's objects give, a memo that disagrees refused
+    /// ([`check_memo`], [`check_export_memo`]), and writes one where none is: the export's.
+    Check,
+    /// Reads and writes none: a deep verify's, which compares the memos with the values itself
+    /// and reports every mismatch ([`verify_export_oids`]).
+    Skip,
+}
+
+/// The export oids of a snapshot's changesets, each re-derived from the store's own objects as
+/// [`ExportOid::derive`] computes it, but over its parents' re-derived values, never over a
+/// `git_oid` memo: an unchanged import's [`GIT_OID`], any other changeset's rendering over its
+/// parents' export oids and its root's real tree oid ([`tree_git_oid`]). What the export names as
+/// a commit's parents, compares a branch with and moves a branch to, so that no memo a store file
+/// could have placed decides any of them (with [`OnMemo::Check`]); what a deep verify compares the
+/// memos with (with [`OnMemo::Skip`]).
+///
+/// Each changeset is derived once, its value kept for the run: the history below one is walked
+/// parents first, with a stack of its own, never by recursion, so that no depth of history
+/// overflows the thread's stack.
+///
+/// ```text
+///   h        of(h): the stack is h, b, p2; p2 is derived first (a root), then b over p2's
+///  / \       value; then h's second parent, c, goes on top and is derived over p2's; then h
+/// b   c      over b's and c's. Each value comes from the objects and the values below it,
+///  \ /       never from a memo, and each changeset is derived once.
+///   p2
+/// ```
+pub(crate) struct ExportOids {
+    on_memo: OnMemo,
+    known: HashMap<ChangesetId, Known>,
+}
+
+/// What [`ExportOids`] keeps of a changeset it derived: its export oid, and whether it was
+/// imported (it has [`GIT_OID`]), which a child's check for an unchanged import reads.
+#[derive(Clone, Copy)]
+struct Known {
+    value: ExportedOid,
+    imported: bool,
+}
+
+impl ExportOids {
+    /// Export oids re-derived as `on_memo` says, none yet.
+    pub(crate) fn new(on_memo: OnMemo) -> ExportOids {
+        ExportOids {
+            on_memo,
+            known: HashMap::new(),
+        }
+    }
+
+    /// Changeset `id`'s export oid in `snapshot`, re-derived with every one below it not derived
+    /// yet ([`ExportOids`]); its trees and blobs read through `objects`, their real git oids
+    /// cached in `cache`. With [`OnMemo::Check`], the memos of each changeset it derives, its
+    /// `git_oid` and its trees' and blobs', are checked against what it computes:
+    /// [`RepoError::DerivedCorrupt`] for one that disagrees. [`RepoError::NotFound`] for a
+    /// changeset the snapshot does not hold; a read that fails is the error, and what was derived
+    /// before it is kept.
+    pub(crate) fn of<O: ObjectStore>(
+        &mut self,
+        snapshot: &RepoRead<'_, O>,
+        objects: &dyn ExportObjects,
+        cache: &OidCache,
+        id: ChangesetId,
+    ) -> Result<ExportedOid, RepoError> {
+        if let Some(known) = self.known.get(&id) {
+            return Ok(known.value);
+        }
+        let mut stack = vec![PendingChangeset::read(snapshot, id)?];
+        loop {
+            let top = stack
+                .last_mut()
+                .expect("the stack holds a changeset until id's value is known");
+
+            // The next parent's value: known, it joins the changeset's; else the parent goes on
+            // top.
+            if let Some(&parent) = top.changeset.parents.get(top.parents.len()) {
+                match self.known.get(&parent) {
+                    Some(&known) => top.parents.push(known),
+                    None => stack.push(PendingChangeset::read(snapshot, parent)?),
+                }
+                continue;
+            }
+
+            // Every parent's value is known: the changeset's own is kept, where the changeset
+            // below finds it next.
+            let done = stack.pop().expect("the changeset on top");
+            let known = self.derive(objects, cache, &done)?;
+            self.known.insert(done.id, known);
+            if stack.is_empty() {
+                return Ok(known.value);
+            }
+        }
+    }
+
+    /// The export oid of `done`, a changeset whose parents' values are all known, as
+    /// [`ExportOids::of`] says; its memos checked with [`OnMemo::Check`].
+    fn derive(
+        &self,
+        objects: &dyn ExportObjects,
+        cache: &OidCache,
+        done: &PendingChangeset,
+    ) -> Result<Known, RepoError> {
+        let (id, cs) = (done.id, &done.changeset);
+        let recorded = metadata(cs, GIT_OID);
+        let unchanged = metadata(cs, GIT_LOSSY).is_none()
+            && (done.parents.iter()).all(|parent| parent.imported && parent.value.kept);
+        let value = if let Some(own) = recorded.and_then(lowercase_oid).filter(|_| unchanged) {
+            ExportedOid {
+                oid: own.0,
+                kept: true,
+            }
+        } else {
+            let memos = match self.on_memo {
+                OnMemo::Check => Memos::Against(id),
+                OnMemo::Skip => Memos::Recompute,
+            };
+            let parents: Vec<GitOid> = (done.parents.iter())
+                .map(|parent| parent.value.git_oid())
+                .collect();
+            let tree = tree_git_oid(objects, cache, memos, cs.root)?;
+            let oid = git_hash(RawKind::Commit, &render_commit(id, cs, &parents, tree));
+            let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
+            ExportedOid { oid: oid.0, kept }
+        };
+        if self.on_memo == OnMemo::Check {
+            check_export_memo(objects.memo(), id, value)?;
+        }
+        Ok(Known {
+            value,
+            imported: recorded.is_some(),
+        })
+    }
+}
+
+/// A changeset [`ExportOids::of`] is re-deriving the export oid of: its id, its object, and what
+/// it knows of its parents so far, in the changeset's order.
 struct PendingChangeset {
     id: ChangesetId,
     changeset: Changeset,
-    parents: Vec<ExportedOid>,
+    parents: Vec<Known>,
 }
 
 impl PendingChangeset {
-    /// Changeset `id` of `snapshot`, no parent's value known yet. [`RepoError::NotFound`] if the
-    /// snapshot does not hold it.
+    /// Changeset `id` of `snapshot`, nothing of its parents known yet. [`RepoError::NotFound`] if
+    /// the snapshot does not hold it.
     fn read<O: ObjectStore>(
         snapshot: &RepoRead<'_, O>,
         id: ChangesetId,
@@ -697,36 +853,4 @@ impl PendingChangeset {
             parents,
         })
     }
-}
-
-/// The export oid of `done`, a changeset whose parents' expected export oids are all known, as
-/// [`export_oid_expected`] says.
-fn expected_of<O: ObjectStore>(
-    snapshot: &RepoRead<'_, O>,
-    reader: &dyn ExportObjects,
-    cache: &OidCache,
-    done: &PendingChangeset,
-) -> Result<ExportedOid, RepoError> {
-    let (id, cs, parents) = (done.id, &done.changeset, &done.parents);
-    let recorded = metadata(cs, GIT_OID);
-    let mut kept_import = metadata(cs, GIT_LOSSY).is_none() && recorded.is_some();
-    for (&parent, value) in cs.parents.iter().zip(parents) {
-        let imported = snapshot
-            .changeset(parent)?
-            .is_some_and(|p| metadata(&p.changeset, GIT_OID).is_some());
-        kept_import = kept_import && value.kept && imported;
-    }
-    let value = if let Some(own) = recorded.and_then(lowercase_oid).filter(|_| kept_import) {
-        ExportedOid {
-            oid: own.0,
-            kept: true,
-        }
-    } else {
-        let parent_oids: Vec<GitOid> = parents.iter().map(ExportedOid::git_oid).collect();
-        let tree = tree_git_oid(reader, cache, Memos::Recompute, cs.root)?;
-        let oid = git_hash(RawKind::Commit, &render_commit(id, cs, &parent_oids, tree));
-        let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
-        ExportedOid { oid: oid.0, kept }
-    };
-    Ok(value)
 }

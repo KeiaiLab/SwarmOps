@@ -337,10 +337,12 @@ left).
   (`derived_mismatch`), and removing `meta/derived/` has every value derived again. The git
   oids the export memoizes (`git_oid`, `git_tree_oid`, `git_blob_oid`) are no longer among the
   values a crafted file can steer: the export derives every tree's, blob's and commit's git oid
-  from the store's own bytes and binds what it reuses, writes or moves a branch to to them, so a
-  memo it reads is never taken for an object's content (a memo that disagrees is
-  `E_STORE_CORRUPT`, refused before the branch moves), and a deep `verify` re-derives
-  `git_tree_oid`, `git_blob_oid` and `git_oid` against the objects too (`derived_mismatch`). A
+  from the store's own objects, a commit's over its parents' derived the same way down to the
+  roots, and binds what it reuses, writes, names as a commit's parent, compares a branch with or
+  moves a branch to to them, so a memo it reads is never taken for an object's content or a
+  commit's history (a memo that disagrees is `E_STORE_CORRUPT`, refused before anything is
+  written or the branch moves), and a deep `verify` re-derives `git_tree_oid`, `git_blob_oid`
+  and `git_oid` against the objects too (`derived_mismatch`). A
   keyed trailer whose key lives outside the store would make a placed file fail the built-in
   derivations' checks, at the cost of a new layout version. *Target: an authenticated cache is
   unscheduled. Found: the 2026-10-20 security review.*
@@ -404,6 +406,20 @@ left).
   gc` packs them (M8 Decision 5; one pack per export is the alternative, which M8 Task 11's
   measurement of the service repositories weighs). *Documented (storage spec §7). Found: M8 Task
   5.*
+- **An export reads the whole history below its head.** The export takes no export oid the
+  derived store memoizes as the truth ("Crafted derived values that agree with each other are read
+  as valid", above), so every export, an incremental one and one with nothing to write included,
+  derives the export oid of each changeset below the head again: it reads each changeset's object
+  and its `git_oid` memo and, for a changeset other than an unchanged import, the trees and blobs
+  of its root the run has not hashed yet. That is about 20 µs a changeset (a release build, on
+  NVMe): an export of one new commit above 12,000 imported ones takes 0.25 s, where
+  trusting the memos took 0.03 s, while a first export costs what it did or less (12.5 s for those
+  12,000 commits' 36,000 objects, 13.1 s before; 1.2 s for 200 native commits over a 2,000-file
+  tree, 6.6 s before). An object missing or damaged anywhere in that history, a changeset or a
+  tree or blob of a native one, fails every export (`E_STORE_CORRUPT`, which `verify` lists) until
+  it is restored. A keyed memo trailer whose key lives outside the store would let the export trust
+  its own memos again. *Unscheduled: an authenticated cache. Found: the 2026-10-20 security
+  review's re-verification of the git export.*
 - **A crash while an export moves its branch leaves the branch's lock.** An export that dies
   between taking `refs/heads/<branch>.lock` and renaming it onto the branch leaves the lock file,
   as git does: every later export of that branch, and git itself, refuses the branch
