@@ -430,22 +430,50 @@ impl Index {
         Ok(results.into_iter().collect::<Result<(), IoFailure>>()?)
     }
 
-    /// Record `rec`: four `read_at`s of the columns, and one of `parents.log` if it has
-    /// parents. A rec this handle does not count is [`StoreError::BadCall`] (the lookups never
-    /// give one: they check the recs they read from a sorted view); parents off `parents.log`
-    /// are [`StoreError::IndexCorrupt`]. [`Index::id`], [`Index::generation`] and
+    /// Record `rec` as the files hold it: four `read_at`s of the columns, and one of
+    /// `parents.log` if it has parents. A rec this handle does not count is
+    /// [`StoreError::BadCall`] (the lookups never give one: they check the recs they read from a
+    /// sorted view); parents off `parents.log` are [`StoreError::IndexCorrupt`]. Its parents are
+    /// read where its `par.col` entry says, unchecked against the record before it: what verify
+    /// compares, field by field, with the journal, so as to name the record that disagrees. A
+    /// lookup by id reads the entry before it too, and checks the two agree
+    /// ([`crate::MetaRead::changeset`]). [`Index::id`], [`Index::generation`] and
     /// [`Index::first_parent`] read one field of it.
     pub fn get(&self, rec: u64) -> Result<ChangesetMeta, StoreError> {
         self.check_counted(rec)?;
-        let id = self.ids.entry(rec)?;
-        let generation = u64::from_le_bytes(self.gens.entry(rec)?);
-        let delta_hash = self.dhs.entry(rec)?;
+        let id = ChangesetId(ObjectId(self.ids.entry(rec)?));
         let at = ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(rec)?));
+        self.record(rec, id, at)
+    }
+
+    /// The record of changeset `id`, if this handle counts one: the rec [`Index::find`] gives,
+    /// which holds `id`, with the record's other fields as [`Index::get`] reads them, but for its
+    /// `par.col` entry, read with the one before it and checked against it, as
+    /// [`Index::first_parent`] reads it: parents that do not start where the record before leaves
+    /// off in `parents.log` are another record's, [`StoreError::IndexCorrupt`]. `ids.col` is not
+    /// read again: the search compared `id` with it, or found `id` in it. What a snapshot's and a
+    /// write transaction's lookups by id return.
+    pub(crate) fn lookup(&self, id: ChangesetId) -> Result<Option<ChangesetMeta>, StoreError> {
+        let Some(rec) = self.find(id)? else {
+            return Ok(None);
+        };
+        let at = self.placed(rec)?;
+        self.record(rec, id, at).map(Some)
+    }
+
+    /// Record `rec`, of changeset `id`, its parents at `at`: one `read_at` each of `gen.col` and
+    /// `dh.col`, and one of `parents.log` if it has parents.
+    fn record(
+        &self,
+        rec: u64,
+        id: ChangesetId,
+        at: ParentsAt,
+    ) -> Result<ChangesetMeta, StoreError> {
         Ok(ChangesetMeta {
-            id: ChangesetId(ObjectId(id)),
+            id,
             seq: rec,
-            generation,
-            delta_hash,
+            generation: u64::from_le_bytes(self.gens.entry(rec)?),
+            delta_hash: self.dhs.entry(rec)?,
             parents: parents::read(&self.parents, at, self.parents_len)?,
         })
     }
@@ -465,13 +493,17 @@ impl Index {
     }
 
     /// The first parent of record `rec`, `None` for a root: one `read_at` of its `par.col`
-    /// entry, then, if it has parents, one of the first 32 bytes of them in `parents.log`, and
-    /// nothing else. A rec this handle does not count is [`StoreError::BadCall`], and parents
-    /// off `parents.log` [`StoreError::IndexCorrupt`], as for [`Index::get`]: the entry is
-    /// checked whole, though only its first parent is read.
+    /// entry and the one before it, then, if it has parents, one of the first 32 bytes of them
+    /// in `parents.log`, and nothing else. A rec this handle does not count is
+    /// [`StoreError::BadCall`], and parents off `parents.log` [`StoreError::IndexCorrupt`], as for
+    /// [`Index::get`]: the entry is checked whole, though only its first parent is read. So are
+    /// parents that do not start where the record before leaves off in `parents.log` (record 0's
+    /// at 0): an entry out of that place points at another record's parents, as one flipped bit
+    /// makes it do, and the entry after it no longer starts where it ends. Which of the two is
+    /// wrong only the journal tells, so both records' lookups fail ([`Index::get`] reads them as
+    /// they are, for verify).
     pub fn first_parent(&self, rec: u64) -> Result<Option<ChangesetId>, StoreError> {
-        self.check_counted(rec)?;
-        let at = ParentsAt::from_entry(u64::from_le_bytes(self.pars.entry(rec)?));
+        let at = self.placed(rec)?;
         // `parents::read` refuses parents that lie off `parents.log` before it reads any: an
         // entry that does is passed whole, for that refusal; any other, cut to its first parent.
         let first = if at.lies_within(self.parents_len) {
@@ -487,19 +519,48 @@ impl Index {
             .copied())
     }
 
+    /// Where record `rec`'s parents lie, from its `par.col` entry, read with the entry before
+    /// it (one `read_at` of both): they must start where that record's leave off in
+    /// `parents.log`, as appends lay them out, record 0's at 0; else
+    /// [`StoreError::IndexCorrupt`]. A rec this handle does not count is
+    /// [`StoreError::BadCall`].
+    fn placed(&self, rec: u64) -> Result<ParentsAt, StoreError> {
+        self.check_counted(rec)?;
+        // Before record 0 there is no entry: a zero one stands for it, its parents ending at 0.
+        let mut bytes = [0; 16];
+        match rec.checked_sub(1) {
+            Some(before) => self.pars.read_at(before, &mut bytes)?,
+            None => self.pars.read_at(rec, &mut bytes[8..])?,
+        }
+        let entries = bytes.as_chunks::<8>().0;
+        let [before, at] =
+            [entries[0], entries[1]].map(|entry| ParentsAt::from_entry(u64::from_le_bytes(entry)));
+        if at.offset == before.end() {
+            Ok(at)
+        } else {
+            Err(StoreError::IndexCorrupt {
+                what: "a record's parents do not start where the record before it leaves off \
+                       in parents.log",
+            })
+        }
+    }
+
     /// The rec of changeset `id`, if the index holds it: a search of the id view's key
     /// column (one `read_at` per probe), which keeps the key it read at the bound it
     /// returns, so that no key is read twice ([`SortedView::lower_bound`]); then, if the view
-    /// lacks it, a scan of the tail of `ids.col`, read with one `read_at`. A rec the view names
-    /// that the view does not cover (a view of m entries holds the recs `[0, m)`) is
-    /// [`StoreError::IndexCorrupt`].
+    /// lacks it, a scan of the tail of `ids.col`, read with one `read_at`. The rec the view
+    /// names is checked before it is returned, with one more `read_at`: the view must cover it
+    /// (a view of m entries holds the recs `[0, m)`), and `ids.col` must hold `id` there, or the
+    /// view's entry names another changeset's record, as a damaged or crafted `.rec` file makes
+    /// it do; [`StoreError::IndexCorrupt`] either way, never another changeset's rec.
     pub fn find(&self, id: ChangesetId) -> Result<Option<u64>, StoreError> {
         let key = id.0.0;
         let view = &self.views.ids;
         if let (at, Some(found)) = view.lower_bound_with_key(&key)?
             && found == key
         {
-            return covered_by(view, view.rec_at(at)?).map(Some);
+            let rec = covered_by(view, view.rec_at(at)?)?;
+            return holding(&self.ids, rec, |held| *held == key).map(Some);
         }
         let from = view.len();
         let tail = self.ids.entries(from, self.len)?;
@@ -534,8 +595,11 @@ impl Index {
 
     /// The recs, ascending, of the records whose key `matches` accepts, the keys it accepts
     /// being a run in key order that starts at `low` or after it: that run of `view`, from a
-    /// lower-bound search, one read of its recs (each checked against what the view covers,
-    /// [`covered_by`]), and a scan of the tail of `column`.
+    /// lower-bound search, one read of its recs, and a scan of the tail of `column`. Each rec of
+    /// the run is checked against what the view covers ([`covered_by`]) and against `column`,
+    /// one `read_at` each, which must hold a key `matches` accepts there ([`holding`]); and no
+    /// rec may come twice, since a view names each record it covers once:
+    /// [`StoreError::IndexCorrupt`] otherwise.
     fn find_all(
         &self,
         view: &SortedView<32>,
@@ -547,8 +611,15 @@ impl Index {
         let end = view.run_end(start, &matches)?;
         let mut recs = view.recs(start..end)?;
         for &rec in &recs {
-            covered_by(view, rec)?;
+            holding(column, covered_by(view, rec)?, &matches)?;
         }
+        recs.sort_unstable();
+        if recs.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(StoreError::IndexCorrupt {
+                what: "a sorted view names a record twice",
+            });
+        }
+        // The tail's recs follow in order: the view's lie below its end, theirs at or past it.
         let from = view.len();
         let tail = column.entries(from, self.len)?;
         recs.extend(
@@ -557,7 +628,6 @@ impl Index {
                 .filter(|(_, key)| matches(key))
                 .map(|(rec, _)| rec),
         );
-        recs.sort_unstable();
         Ok(recs)
     }
 
@@ -1135,13 +1205,32 @@ impl fmt::Debug for Index {
 /// so a rec at or past m is damage (a bit flipped in a `.rec` file), never a record to read. It
 /// would point into the unsorted tail (another changeset's record) or past the index's end. The
 /// same rule as a compaction's when it merges the view; an in-memory comparison, no read. A
-/// wrong rec within `[0, m)` is verify's to find.
+/// wrong rec within `[0, m)` is [`holding`]'s to find.
 fn covered_by<const K: usize>(view: &SortedView<K>, rec: u64) -> Result<u64, StoreError> {
     if rec < view.len() {
         Ok(rec)
     } else {
         Err(StoreError::IndexCorrupt {
             what: "a sorted view points at a record it does not cover",
+        })
+    }
+}
+
+/// `rec`, which a sorted view names under a key that `matches` accepts, if `column`, the column
+/// the view sorts, holds such a key at it: one `read_at` of its entry. Else the view's entry
+/// names a record of another key, which no crash leaves (a compaction writes a view from the
+/// columns, synced first, and renames it into place whole): damage, or a crafted `.rec` file,
+/// [`StoreError::IndexCorrupt`], never a record to answer with.
+fn holding(
+    column: &AppendOnlyColumn<32>,
+    rec: u64,
+    matches: impl Fn(&[u8; 32]) -> bool,
+) -> Result<u64, StoreError> {
+    if matches(&column.entry(rec)?) {
+        Ok(rec)
+    } else {
+        Err(StoreError::IndexCorrupt {
+            what: "a sorted view's entry names a record that holds another key",
         })
     }
 }

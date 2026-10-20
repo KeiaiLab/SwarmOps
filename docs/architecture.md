@@ -389,6 +389,10 @@ linear scan of the records past the view and the in-memory frames; a lookup read
 small byte ranges. Files and directories at a revision are read from the trees, starting at the
 changeset's root: O(depth) object reads and no checkout.
 Every object read checks the object's header and hash.
+A lookup checks what the index says where it can do so cheaply: the record a sorted view names
+must hold the key looked up (one more `read_at`), and a record read by id must have its parents
+start where the record before it leaves off; a lookup that finds either broken fails with
+`E_STORE_CORRUPT` rather than answer with another changeset.
 
 A request reads in one snapshot (storage §8, operations §4). `Repo::snapshot()` returns a
 `RepoRead`; `LocalOps` takes one when an operation starts and resolves every revision and ref
