@@ -28,7 +28,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use swarmops_core::{BlobId, ChangesetId, EntryTarget, ObjectId, Tree, TreeEntry, TreeId};
+use swarmops_core::{
+    BlobId, Changeset, ChangesetId, EntryTarget, ObjectId, Tree, TreeEntry, TreeId,
+};
 use swarmops_repo::{Derivation, DeriveCtx, DeriveError, Repo, RepoError, RepoRead, Subject};
 use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore};
 
@@ -631,7 +633,9 @@ fn stored_export_oid(
 /// The export oid changeset `id` renders to over its real oids, as [`ExportOid::derive`] computes
 /// it but reading no memo as the truth ([`Memos::Recompute`]): its [`GIT_OID`] where it is an
 /// unchanged import, otherwise the hash of its rendering over its parents' recomputed export oids
-/// and its root's recomputed tree oid. Memoized in `expected` for the verify's run.
+/// and its root's recomputed tree oid. Memoized in `expected` for the verify's run. Walks the
+/// history below `id` parents first, with a stack of its own, never by recursion: no depth of
+/// history overflows the thread's stack.
 fn export_oid_expected<O: ObjectStore>(
     snapshot: &RepoRead<'_, O>,
     reader: &dyn ExportObjects,
@@ -642,19 +646,71 @@ fn export_oid_expected<O: ObjectStore>(
     if let Some(&value) = expected.get(&id) {
         return Ok(value);
     }
-    let stored = snapshot
-        .changeset(id)?
-        .ok_or_else(|| RepoError::NotFound(id.to_string()))?;
-    let cs = &stored.changeset;
-    let recorded = metadata(cs, GIT_OID);
-    let mut parents = Vec::with_capacity(cs.parents.len());
-    for &parent in &cs.parents {
-        parents.push(export_oid_expected(
-            snapshot, reader, cache, expected, parent,
-        )?);
+    let mut stack = vec![PendingChangeset::read(snapshot, id)?];
+    loop {
+        let top = stack
+            .last_mut()
+            .expect("the stack holds a changeset until id's value is known");
+
+        // The next parent's value: known, it joins the changeset's; else the parent goes on top.
+        if let Some(&parent) = top.changeset.parents.get(top.parents.len()) {
+            match expected.get(&parent) {
+                Some(&value) => top.parents.push(value),
+                None => stack.push(PendingChangeset::read(snapshot, parent)?),
+            }
+            continue;
+        }
+
+        // Every parent's value is known: the changeset's own is memoized, where the changeset
+        // below finds it next.
+        let done = stack.pop().expect("the changeset on top");
+        let value = expected_of(snapshot, reader, cache, &done)?;
+        expected.insert(done.id, value);
+        if stack.is_empty() {
+            return Ok(value);
+        }
     }
+}
+
+/// A changeset [`export_oid_expected`] is re-deriving the export oid of: its id, its object, and
+/// its parents' expected export oids so far, in the changeset's order.
+struct PendingChangeset {
+    id: ChangesetId,
+    changeset: Changeset,
+    parents: Vec<ExportedOid>,
+}
+
+impl PendingChangeset {
+    /// Changeset `id` of `snapshot`, no parent's value known yet. [`RepoError::NotFound`] if the
+    /// snapshot does not hold it.
+    fn read<O: ObjectStore>(
+        snapshot: &RepoRead<'_, O>,
+        id: ChangesetId,
+    ) -> Result<PendingChangeset, RepoError> {
+        let stored = snapshot
+            .changeset(id)?
+            .ok_or_else(|| RepoError::NotFound(id.to_string()))?;
+        let parents = Vec::with_capacity(stored.changeset.parents.len());
+        Ok(PendingChangeset {
+            id,
+            changeset: stored.changeset,
+            parents,
+        })
+    }
+}
+
+/// The export oid of `done`, a changeset whose parents' expected export oids are all known, as
+/// [`export_oid_expected`] says.
+fn expected_of<O: ObjectStore>(
+    snapshot: &RepoRead<'_, O>,
+    reader: &dyn ExportObjects,
+    cache: &OidCache,
+    done: &PendingChangeset,
+) -> Result<ExportedOid, RepoError> {
+    let (id, cs, parents) = (done.id, &done.changeset, &done.parents);
+    let recorded = metadata(cs, GIT_OID);
     let mut kept_import = metadata(cs, GIT_LOSSY).is_none() && recorded.is_some();
-    for (&parent, value) in cs.parents.iter().zip(&parents) {
+    for (&parent, value) in cs.parents.iter().zip(parents) {
         let imported = snapshot
             .changeset(parent)?
             .is_some_and(|p| metadata(&p.changeset, GIT_OID).is_some());
@@ -672,6 +728,5 @@ fn export_oid_expected<O: ObjectStore>(
         let kept = recorded.is_none_or(|hex| hex == oid.to_string().as_bytes());
         ExportedOid { oid: oid.0, kept }
     };
-    expected.insert(id, value);
     Ok(value)
 }

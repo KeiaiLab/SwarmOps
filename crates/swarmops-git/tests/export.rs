@@ -1583,4 +1583,53 @@ mod crafted_memos {
             "no git_oid mismatch reported",
         );
     }
+
+    /// A deep verify re-derives the export oid of a changeset atop a long history without
+    /// recursion: over a first-parent chain of 10,000 native changesets and a merge of its tip
+    /// with a second root (recorded in one raw batch, on a filesystem that never syncs), whose
+    /// head alone has a `git_oid` memo, a crafted one, it reports that memo, with the oid the
+    /// engine derives over both parents in their order, on a thread with a 256 KiB stack, which a
+    /// walk that recursed once a parent would overflow.
+    #[test]
+    fn a_long_history_verifies_without_recursion() {
+        const DEPTH: usize = 10_000;
+        let store = store();
+        let repo = &store.repo;
+        let root = store_tree(repo, &[("f.txt", b"deep\n")]);
+        let mut batch = repo.raw_batch();
+        let mut tip: Option<ChangesetId> = None;
+        for i in 0..DEPTH {
+            let message = format!("{i}\n");
+            tip = Some(batch.push(raw(tip.as_slice(), root, &message)).unwrap());
+        }
+        let tip = tip.expect("a chain of at least one changeset");
+        let side = batch.push(raw(&[], root, "A second root\n")).unwrap();
+        let merge = raw(&[tip, side], root, "Merge the second root\n");
+        let head = batch.push(merge).unwrap();
+        batch.commit().unwrap();
+
+        // The head's memo alone, a crafted one: the verify derives the whole chain below it.
+        let crafted = git_hash(RawKind::Commit, b"");
+        let file = plant(&store, "git_oid", head.0, &commit_memo(crafted));
+        let found = thread::scope(|scope| {
+            thread::Builder::new()
+                .name("a deep verify".to_owned())
+                .stack_size(256 * 1024)
+                .spawn_scoped(scope, || verify_export_oids(repo))
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+        .expect("verify");
+
+        // That memo, against the export oid the engine derives once the memo is gone.
+        fs::remove_file(&file).unwrap();
+        let real = export_oid(repo, head);
+        let [mismatch] = found.as_slice() else {
+            panic!("one mismatch, the head's: {found:?}");
+        };
+        let got = (mismatch.memo.as_str(), mismatch.subject, mismatch.stored);
+        assert_eq!(got, ("git_oid", head.0, crafted));
+        assert_eq!(mismatch.real, real);
+    }
 }
