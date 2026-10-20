@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="SwarmOps">
+  <!-- The favicon: docs/assets/logo.svg drawn for 16 to 64 pixels. A filled cell reads on light
+       and dark tabs alike; two agents' branches (white) merge into one main line (amber). -->
+  <path d="M32 3.5 56.7 17.75v28.5L32 60.5 7.3 46.25v-28.5z" fill="#7c5cff" stroke="#7c5cff" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M19 19.5c0 9 5.5 14.5 13 14.5M45 19.5c0 9-5.5 14.5-13 14.5" fill="none" stroke="#fff" stroke-width="5" stroke-linecap="round"/>
+  <circle cx="19" cy="19" r="5" fill="#fff"/>
+  <circle cx="45" cy="19" r="5" fill="#fff"/>
+  <path d="M32 15v35" stroke="#ffc861" stroke-width="6" stroke-linecap="round"/>
+  <circle cx="32" cy="15" r="6" fill="#ffc861"/>
+  <circle cx="32" cy="34" r="6" fill="#ffc861"/>
+  <circle cx="32" cy="50" r="6" fill="#ffc861"/>
+</svg>
