@@ -319,6 +319,33 @@ fn verify_deep_lists_an_object_whose_zstd_frame_lies_about_its_size() {
     assert_problems_when(&repo, false, Vec::new());
 }
 
+/// A blob's file grown to 2 GiB, sparse behind its header (no disk; that much memory, were it
+/// read), is longer than any object file: a deep check lists it as corrupt by its length, without
+/// reading it, and goes on. The recorder fails a read of that file, should one come, so that no
+/// run of this test reads gigabytes. A shallow check reads no blob.
+#[test]
+fn verify_deep_lists_an_object_file_of_huge_length_without_reading_it() {
+    let (_dir, root, repo) = new_repo();
+    let content = b"a blob whose file grows to 2 GiB\n";
+    commit(&repo, &[], vec![put("huge.txt", content)]);
+    drop(repo);
+    let huge = blob(content).0;
+    let file = object_file(&root, huge);
+    (fs::OpenOptions::new().write(true).open(&file).unwrap())
+        .set_len(2 << 30)
+        .unwrap();
+
+    let (recording, calls) = RecordingFs::new();
+    let read = format!("read {}", file.file_name().unwrap());
+    recording
+        .failing()
+        .set(Box::leak(read.clone().into_boxed_str()));
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(recording)).unwrap();
+    assert_problems_when(&repo, true, vec![VerifyProblem::CorruptObject(huge)]);
+    assert_problems_when(&repo, false, Vec::new());
+    assert!(!calls().contains(&read), "the blob's file is never read");
+}
+
 #[test]
 fn verify_detects_dangling_ref() {
     let (_dir, root, repo) = new_repo();
