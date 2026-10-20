@@ -8,7 +8,7 @@
 //! carries nothing but answers. stderr gets a line for a message that has no answer although it
 //! is neither a request nor a notification (a response from the client), a line for the I/O
 //! error that stops the server, the panic hook's report of a bug, and the reason one of the
-//! store's three documented aborts (storage spec §2; README) writes before
+//! store's four documented aborts (storage spec §2; README) writes before
 //! `std::process::abort` ends the process; nothing else. The server exits 0 when stdin ends, 1
 //! if reading stdin or writing stdout fails, and by SIGABRT on those aborts.
 //!
@@ -982,7 +982,8 @@ fn request_of<R: Refuse>(spec: &Spec, arguments: Value) -> Result<R, OpError> {
             output::printable(&format!("the arguments are not a {}: {e}", spec.request)),
         )
         .with_hint(format!(
-            "the {} tool's inputSchema gives its arguments, as swarmops schema {} does",
+            "the {} tool's inputSchema gives its arguments; swarmops schema {} gives the \
+             request type, without the rules this server adds",
             spec.name, spec.request
         ))
     })?;
@@ -1128,14 +1129,14 @@ fn full_id_pattern() -> String {
 }
 
 /// `E_INVALID_ARG` unless `expected`, the target a move or a delete of ref `name` expects, is a
-/// full changeset id ([`is_full_id`]), as the resolver takes them. Anything else (a ref name, a
-/// relative revision, an id's prefix) is read from the store when the call runs instead of
-/// pinning the id the caller read. The ref's own name always matches, so the compare-and-swap
-/// protects nothing: a move computed on a stale read would silently drop what another agent
-/// moved the ref to, and a move to `main~1` made twice would move the ref twice. `main~1` on
-/// `main` names main's parent and never matches, and a prefix stops resolving
-/// (`E_AMBIGUOUS_ID`) once another changeset shares it. The CLI takes any revision for
-/// `--expect`, whose help warns of this; an agent through this server gets the rule enforced.
+/// full changeset id ([`is_full_id`]), as the resolver takes them. A ref name or a relative
+/// revision is read from the store when the call runs instead of pinning the id the caller read.
+/// The ref's own name always matches, so the compare-and-swap protects nothing: a move computed
+/// on a stale read would silently drop what another agent moved the ref to, and a move to
+/// `main~1` made twice would move the ref twice. `main~1` on `main` names main's parent and never
+/// matches. An id's prefix names one changeset, but stops resolving (`E_AMBIGUOUS_ID`) once
+/// another changeset shares it. The CLI takes any revision for `--expect`, whose help warns of
+/// this; an agent through this server gets the rule enforced.
 fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
     let rev = expected.as_str();
     if is_full_id(rev) {
@@ -1145,10 +1146,11 @@ fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
         ErrorCode::InvalidArg,
         output::printable(&format!(
             "expected_old {rev:?} is not a full changeset id, which a compare-and-swap needs: a \
-             ref name, a relative revision or an id prefix is read when the call runs instead \
-             of pinning the id you read ({name} itself always matches, so the compare-and-swap \
-             would protect nothing, and {name}~1 never matches); pass the 64-hex id the ref \
-             held when you read it, from ref_list, show, log or a commit's result"
+             ref name or a relative revision is read when the call runs instead of pinning the \
+             id you read ({name} itself always matches, so the compare-and-swap would protect \
+             nothing, and {name}~1 never matches), and an id prefix stops resolving once another \
+             changeset shares it; pass the 64-hex id the ref held when you read it, from \
+             ref_list, show, log or a commit's result"
         )),
     )
     .with_details(Map::from_iter([
@@ -1162,10 +1164,10 @@ fn concrete_expectation(name: &str, expected: &Rev) -> Result<(), OpError> {
 /// changeset id ([`is_full_id`]). The move expects the ref to name the parent, so the parent is
 /// a compare-and-swap's expectation, which must pin the id the caller read
 /// ([`concrete_expectation`]): an omitted parent is the ref's head when the call runs, and a ref
-/// name, a relative revision or an id prefix is read when the call runs too, so the
-/// compare-and-swap would protect nothing. The CLI takes any parent with `--advance`, as a
-/// one-step fast-forward that detects a race from the moment it runs; an agent through this
-/// server gets the rule enforced.
+/// name or a relative revision is read when the call runs too, so the compare-and-swap would
+/// protect nothing; an id prefix stops resolving once another changeset shares it. The CLI takes
+/// any parent with `--advance`, as a one-step fast-forward that detects a race from the moment
+/// it runs; an agent through this server gets the rule enforced.
 fn full_parent(name: &str, parent: Option<&Rev>) -> Result<(), OpError> {
     let rev = parent.map(Rev::as_str);
     if rev.is_some_and(is_full_id) {
@@ -1184,9 +1186,10 @@ fn full_parent(name: &str, parent: Option<&Rev>) -> Result<(), OpError> {
         output::printable(&format!(
             "advance {name:?} needs a parent given as a full changeset id, {given}: its \
              compare-and-swap expects the ref to name the parent, and an omitted parent, a ref \
-             name, a relative revision or an id prefix is read when the call runs instead of \
-             pinning the id you read, so the compare-and-swap would protect nothing; pass the id \
-             the ref held when you read it, from ref_list, show, log or a commit's result"
+             name or a relative revision is read when the call runs instead of pinning the id \
+             you read, so the compare-and-swap would protect nothing, while an id prefix stops \
+             resolving once another changeset shares it; pass the id the ref held when you read \
+             it, from ref_list, show, log or a commit's result"
         )),
     )
     .with_details(details)
@@ -1854,6 +1857,97 @@ mod tests {
         }
     }
 
+    /// What the strip to a plain object ([`tool_input_schema`]) loses of `schema`, a request
+    /// type's schema standing alone: a key at its top that is neither plain ([`PLAIN_OBJECT`]) nor
+    /// a combinator (`oneOf`, `anyOf`, `allOf`), and, as `<combinator>.<name>`, a property a
+    /// combinator's branch names that the top's `properties` lack, or any other key of a branch
+    /// (a nested rule). The fields of a flattened enum are what schemars gives that way.
+    fn lost_by_the_strip(schema: &Value) -> BTreeSet<String> {
+        let top = &schema["properties"];
+        let mut lost = BTreeSet::new();
+        for (key, value) in schema.as_object().expect("a schema object") {
+            if PLAIN_OBJECT.contains(&key.as_str()) {
+                continue;
+            }
+            if !matches!(key.as_str(), "oneOf" | "anyOf" | "allOf") {
+                lost.insert(key.clone());
+                continue;
+            }
+            for branch in value.as_array().into_iter().flatten() {
+                let branch = branch.as_object().expect("a branch is a schema object");
+                for (inner, rule) in branch {
+                    let names: Vec<&str> = match inner.as_str() {
+                        "properties" => rule
+                            .as_object()
+                            .into_iter()
+                            .flatten()
+                            .map(|p| p.0.as_str())
+                            .collect(),
+                        "required" => rule
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .filter_map(Value::as_str)
+                            .collect(),
+                        "type" | "title" | "description" => continue,
+                        nested => {
+                            lost.insert(format!("{key}.{nested}"));
+                            continue;
+                        }
+                    };
+                    let missing = names.into_iter().filter(|name| top.get(name).is_none());
+                    lost.extend(missing.map(|name| format!("{key}.{name}")));
+                }
+            }
+        }
+        lost
+    }
+
+    /// The strip to a plain object drops a rule across a request type's own fields (today only
+    /// `RefSetReq`'s `oneOf`, which its description and the server's check carry), never a
+    /// field: one that a later request type gives under a top-level combinator, as schemars
+    /// writes a flattened enum's, would vanish from its tool's schema, and the other guards,
+    /// which compare the top's `properties`, would not see it go.
+    #[test]
+    fn the_strip_to_a_plain_object_drops_no_field() {
+        let all = schema_for_all();
+        let mut dropped = BTreeSet::new();
+        for spec in &TOOLS {
+            let schema = standalone(&all[spec.request]);
+            assert_eq!(lost_by_the_strip(&schema), BTreeSet::new(), "{}", spec.name);
+            let keys = schema.as_object().expect("a schema object").keys();
+            dropped.extend(
+                keys.filter(|key| !PLAIN_OBJECT.contains(&key.as_str()))
+                    .map(|key| format!("{}: {key}", spec.name)),
+            );
+        }
+        assert_eq!(dropped, BTreeSet::from(["ref_set: oneOf".to_owned()]));
+
+        // A flattened untagged enum, as schemars 1.2 gives it (an internally tagged one is the
+        // same under a `oneOf`), and a keyword that is no combinator.
+        let flattened = json!({
+            "type": "object",
+            "properties": {"name": {"type": "string"}},
+            "required": ["name"],
+            "anyOf": [
+                {"type": "object", "properties": {"alpha": {"type": "string"}}, "required": ["alpha"]},
+                {"type": "object", "properties": {"beta": {"type": "integer"}}, "required": ["beta"]},
+            ],
+        });
+        let lost = BTreeSet::from(["anyOf.alpha".to_owned(), "anyOf.beta".to_owned()]);
+        assert_eq!(lost_by_the_strip(&flattened), lost);
+        let nested = json!({"properties": {"a": {}}, "oneOf": [{"anyOf": [{"required": ["a"]}]}]});
+        assert_eq!(
+            lost_by_the_strip(&nested),
+            BTreeSet::from(["oneOf.anyOf".to_owned()])
+        );
+        let keyword = json!({"type": "object", "properties": {}, "if": {"required": ["x"]}});
+        assert_eq!(
+            lost_by_the_strip(&keyword),
+            BTreeSet::from(["if".to_owned()])
+        );
+    }
+
     /// The `expected_old` of `ref_set` and `ref_delete` asks in the schema for what the server
     /// takes there ([`concrete_expectation`]): a full changeset id, as a pattern. Its
     /// description is the field's own, without the revision's that offers a ref name; `new`
@@ -1943,9 +2037,14 @@ mod tests {
         }
     }
 
+    /// How each refusal of a client file ends: what to send instead.
+    const SEND_INSTEAD: &str =
+        ": name a regular file by its absolute path, or send the bytes as inline or base64 content";
+
     /// A commit's client file must be an absolute path, since the server would read a relative
     /// one from its own working directory, which the agent cannot see; and not this process's
-    /// own stdin or stdout, which carry the protocol. The refusal names the change and the file.
+    /// own stdin or stdout, which carry the protocol. The refusal names the change and the file,
+    /// and what to send instead.
     #[test]
     fn a_client_file_must_be_absolute_and_not_this_process_s_stdio() {
         let refused = |file: &str, why: &str| {
@@ -1956,6 +2055,7 @@ mod tests {
                 json!({"index": 1, "path": "src/lib.rs", "file": file})
             );
             assert!(error.message.contains(why), "{file}: {}", error.message);
+            assert!(error.message.ends_with(SEND_INSTEAD), "{}", error.message);
             assert!(!error.message.contains('\n'), "{}", error.message);
         };
         refused("src/lib.rs", "relative path");
@@ -1981,8 +2081,8 @@ mod tests {
 
     /// A commit's client file must be a regular file, a symlink to one included: a FIFO blocks
     /// the open until something opens it for writing, a socket cannot be opened, and a device
-    /// can block or never end, so the server refuses each before it reads anything. A missing
-    /// file is read later, and reported then.
+    /// can block or never end, so the server refuses each before it reads anything, and says
+    /// what to send instead. A missing file is read later, and reported then.
     #[test]
     fn a_client_file_must_be_a_regular_file() {
         let dir = tempfile::tempdir().unwrap();
@@ -2014,6 +2114,7 @@ mod tests {
                 "{file}: {}",
                 error.message
             );
+            assert!(error.message.ends_with(SEND_INSTEAD), "{}", error.message);
             assert!(!error.message.contains('\n'), "{}", error.message);
         }
         let regular = dir.path().join("lib.rs");

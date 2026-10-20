@@ -185,7 +185,9 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   lock, as a CLI commit writes its objects, and the table gives n and each transaction's time
   in the lock once `write()` returned (p50, p99 and max). A test in the default gate checks that
   the objects are new each time and durable before the lock is taken, and that none of their
-  calls is made under it.
+  calls is made under it. The run fails unless every writer put its n objects before each of its
+  transactions (its line says so, and the store holds them all), which a second test in the
+  default gate checks on a run of two writers.
 - A criterion bench of a compaction on its own (`crates/swarmops-store/benches/compaction.rs`,
   which `just bench` and `just perf` run): `Index::compact()` with every sync on, on an index of
   100k and of 1M records whose unsorted tail has just passed the threshold (1,025 records), the
@@ -233,12 +235,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   transaction moves REF to it, so one journal frame holds both and they are recorded together or
   not at all, and only as a one-step fast-forward from the commit's parent (for a root commit,
   only if REF does not exist yet). When REF names anything else, the commit records nothing and
-  fails with `E_CAS_MISMATCH` (exit 4, `details {name, actual, committed: false}`); the same
-  request made again is a replay (`advanced.already_applied`). Without `--parent` it builds on
-  REF's head. A publish takes one lock pass and four syncs, where a commit and then `ref set`
-  take two and six. `swarmops mcp` refuses `advance` without a full 64-hex `parent`
-  (`E_INVALID_ARG`), `swarmops schema` lists `Advanced`, and `swarmops_store::check_ref_name`
-  checks a ref name as every ref operation does.
+  fails with `E_CAS_MISMATCH` (exit 4, `details {name, actual, committed: false}`); the same request
+  made again in the same second (a commit signs in whole seconds) is the same changeset, so a replay
+  (`advanced.already_applied`), but made a second or more later it is another changeset, which gets
+  `E_CAS_MISMATCH` when the first attempt published, its `actual` being that attempt
+  (`commit --key`, M4, makes any retry a replay). Without `--parent` it builds on REF's head. A
+  publish takes one lock pass and four syncs, where a commit and then `ref set` take two and six.
+  `swarmops mcp` refuses `advance` without a full 64-hex `parent` (`E_INVALID_ARG`),
+  `swarmops schema` lists `Advanced`, and `swarmops_store::check_ref_name` checks a ref name as
+  every ref operation does.
 - The CLI-level 32-process contention measurement (`crates/swarmops-cli/tests/contention.rs`)
   can publish: with `SWARMOPS_TEST_CLI_CONTENTION_ADVANCE=1` each child publishes every commit
   on a ref of its own in one transaction (`commit --advance`), with `=0` in two (`commit`, then
@@ -373,7 +378,8 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   records in one transaction) and malformed id prefixes are `E_INVALID_ARG`, with
   `details.store_limit`, `max` and `got`, or `details.prefix`; they were `E_IO`. A call the
   store's API does not take, which only a bug makes, is `E_INTERNAL`. No CLI, `StoreOps` or MCP
-  request reaches them in M1 (storage spec §3, operations spec §0). In the Rust API,
+  request reaches these in M1 (storage spec §3, operations spec §0): the one request field that
+  reaches a store limit is `init`'s name (its 255-byte limit is below). In the Rust API,
   `StoreError` gains `Limit` (with `LimitKind`), `BadPrefix` and `BadCall`, its `Io` keeps the
   failures the filesystem reported, and `Record::encode` returns a `Result` instead of
   panicking on a record past the layout's lengths.
@@ -425,8 +431,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   name the file operation that failed and the store file it was on: `details.fs_op` (one of 22
   names, such as `"open"` or `"append_durable"`) and `details.store_file` (relative to the
   store's root, such as `meta/journal.off`; absent for a path outside it). Their messages say
-  the same before the operating system's text, no error carries the store's host path, and the
-  schema's descriptions of the three codes say so. A missing index file's `E_STORE_CORRUPT`
+  the same before the operating system's text, none of them carries the store's host path but
+  two `E_IO`s that operations spec §0 names (a symlink loop met while working out where that
+  path leads, and tempfile's giving up after 65,536 taken temp-file names), and the schema's
+  descriptions of the three codes say so. A missing index file's `E_STORE_CORRUPT`
   names it (`meta/idx/ids.col is missing`). In the Rust API, `StoreError::Io` and
   `NotCommitted` carry an `IoFailure` (`op`, `file`, `source`, `also`) in place of an
   `io::Error`, the new `StoreFs` locates the failure of every filesystem call the stores make,
@@ -437,6 +445,21 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   failed, where it was the non-retryable `E_IO`: nothing of the write was committed, and running
   it again lists the frame. In the Rust API it is `StoreError::NotCommitted`, where it was
   `StoreError::Io`.
+- `swarmops mcp`: refusing a `ref_set` or `ref_delete` whose `expected_old`, or a `commit` with
+  `advance` whose `parent`, is no full changeset id, the server says what an id prefix does
+  apart from a ref name and a relative revision (it stops resolving once another changeset
+  shares it), as the tool descriptions do; and arguments that do not fit a tool's request type
+  get a hint that the tool's `inputSchema` gives them, where `swarmops schema` gives the
+  request type without the rules the server adds. In the schema, `VerifyFinding.object` says
+  that `missing_object` also names an object the store holds as another kind.
+- A journal append that the filesystem refuses for want of permission (`EACCES`, `EPERM`) or
+  because it is read-only (`EROFS`), and that the store cut back, is `E_IO` (exit 1, not
+  retryable) with `details.committed: false` and a hint that says what to fix first, where it
+  was the retryable `E_IO_TRANSIENT`: nothing was committed, but running the same command again
+  meets the same refusal until its cause is fixed. So it is for the write's own frame, for the
+  tail check's listing of a frame left unlisted and for its rewrite of frames whose sync failed
+  (storage spec §2 rule 3 (a)-(c)); any other failure there stays `E_IO_TRANSIENT`. The
+  schema's description of `E_IO` says so.
 
 #### M2: diff, history and derived data (2026-10-19)
 
@@ -490,7 +513,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (`IndexCorrupt`) on every lookup that reads it. Before, a lookup by id, prefix or delta hash
   answered with another changeset's record where the entry pointed into the unsorted tail, and
   failed with `E_IO` past the index's end.
-- No error from the store carries the store's absolute path any more. A malformed
+- No failure of the store's filesystem calls carries the store's absolute path any more, but
+  tempfile's giving up after 65,536 taken temp-file names, which is not met in practice
+  ([docs/known-limitations.md](docs/known-limitations.md), "One temp-file error names a host
+  path"); the errors that answer for the path a command was given still name it, most of them
+  made absolute (`E_NOT_A_REPO`, `E_UNSUPPORTED_FS`, a symlink loop met while working out where
+  it leads; operations spec §0). A malformed
   `journal.ckpt` or ref file, and a ref file over its size cap, are named by their place in the
   store (`meta/journal.ckpt`, `meta/refs/<name>`), and a store file that is not a regular file
   by its name. A temp file that the store cannot create or write (an object write, or the
@@ -518,6 +546,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   frames were (another writer's bytes in between) is cut back and refused as damage
   (`JournalCorrupt` at the frames' offset, `E_STORE_CORRUPT`) before anything is listed, where it
   used to list entries that pointed into other bytes.
+- A `FORMAT` or `REPO` that is not a regular file, such as a directory, is refused by its read
+  as not a regular file (`E_STORE_CORRUPT`, `read REPO: REPO is not a regular file`, with
+  `details.fs_op` and `details.store_file`), no longer as one too long by the size a directory
+  reports (`E_NOT_A_REPO`, `<store>/REPO is 4096 bytes long, …`).
 
 #### M2: diff, history and derived data (2026-10-19)
 
@@ -538,8 +570,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 
 - An object file whose zstd frame records a huge decompressed size, in agreement with its header
   (17 bytes of frame are enough), no longer makes a read panic (`E_INTERNAL`) or abort the process
-  while it reserves that size: a read reserves at most 64 MiB before the frame's output arrives,
-  and such an object is `E_STORE_CORRUPT`, which `verify --deep` lists. An object whose frame
+  while it reserves that size: before the frame's output arrives, a read reserves at most 64 MiB
+  for it, beside the zstd decoder's window, which the frame's header sets up to zstd's default
+  limit of 128 MiB (this store's frames use at most 2 MiB): about 192 MiB at worst. Such an
+  object is `E_STORE_CORRUPT`, which `verify --deep` lists. An object whose frame
   really decompresses to a huge size is still decoded whole
   ([docs/known-limitations.md](docs/known-limitations.md), "A zstd bomb object is decoded
   whole").

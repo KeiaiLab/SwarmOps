@@ -561,9 +561,9 @@ fn a_huge_ref_file_is_not_a_ref_file_and_is_not_read_whole() {
 
 #[test]
 fn a_malformed_checkpoint_or_ref_file_is_reported_without_the_store_path() {
-    // The store's root is a host path, which no error carries to an agent (operations spec
-    // §0): a metadata file that does not read as one, or that is not a regular file, is named
-    // by its place in the store, as the read that failed.
+    // The store's root is a host path, which no filesystem failure carries to an agent
+    // (operations spec §0): a metadata file that does not read as one, or that is not a regular
+    // file, is named by its place in the store, as the read that failed.
     let (_dir, root, store) = new_store();
     insert(&store, &[cs(1, &[])]);
     cas(&store, "main", None, Some(1));
@@ -2459,6 +2459,92 @@ fn a_failed_off_append_after_the_log_sync_is_post_commit() {
     }
 }
 
+/// When the cut that takes a failed listing back off `journal.off` fails too (the entry was
+/// written and its sync failed, then the cut is refused), the error tells both: the listing's
+/// failure, and the cut's as what else failed. The transaction committed all the same
+/// ([`StoreError::PostCommit`]).
+#[test]
+fn a_failed_listing_whose_cut_fails_too_tells_both() {
+    let (_dir, root) = new_root();
+    let mut fails = Fails::new("append_durable journal.off", Strike::After);
+    fails.cut = Some("truncate journal.off");
+    let fails = Arc::new(Watched(fails, RealFs));
+    let store = MetaStore::create_with_fs(&root, Arc::clone(&fails) as Arc<dyn FsOps>).unwrap();
+    insert(&store, &[cs(0, &[])]);
+    fails.arm();
+    let mut write = store.write().unwrap();
+    write.insert_changeset(cs(1, &[0])).unwrap();
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 1,
+            source,
+        }) => {
+            let StoreError::Io(failure) = &*source else {
+                panic!("expected the listing's I/O failure, got {source:?}");
+            };
+            let also = failure.also.as_deref().unwrap_or_default();
+            assert!(
+                also.starts_with(
+                    "cutting back what reached it failed too: truncate meta/journal.off: injected"
+                ),
+                "{failure}"
+            );
+        }
+        other => panic!("expected PostCommit at frame 1, got {other:?}"),
+    }
+}
+
+/// When the append of the `Compacted` marker after a compaction fails (refused before it wrote
+/// anything, so there is nothing to cut), the transaction, which committed before it, says so
+/// ([`StoreError::PostCommit`]) around the plain I/O failure the append was, saying what it was:
+/// not [`StoreError::NotCommitted`], which would say that the transaction did not commit.
+#[test]
+fn a_failed_compacted_marker_is_told_as_the_append_it_was() {
+    use std::sync::atomic::AtomicUsize;
+
+    use swarmops_testkit::fs::FailingFs;
+
+    let (_dir, root) = new_root();
+    let armed = Arc::new(AtomicBool::new(false));
+    let appends = Arc::new(AtomicUsize::new(0));
+    let fs = {
+        let (armed, appends) = (Arc::clone(&armed), Arc::clone(&appends));
+        // The second append to journal.log once armed: the frame's, then the marker's.
+        FailingFs::new(move |method, path| {
+            method == "append_durable"
+                && path.ends_with("journal.log")
+                && armed.load(Ordering::SeqCst)
+                && appends.fetch_add(1, Ordering::SeqCst) == 1
+        })
+    };
+    let store = MetaStore::create_with_fs(&root, Arc::new(fs)).unwrap();
+    armed.store(true, Ordering::SeqCst);
+    let mut write = store.write().unwrap();
+    for n in 0..=Index::COMPACT_THRESHOLD {
+        write.insert_changeset(cs(n, &[])).unwrap();
+    }
+    match write.commit() {
+        Err(StoreError::PostCommit {
+            frame_seq: 0,
+            source,
+        }) => {
+            let StoreError::Io(failure) = &*source else {
+                panic!("expected the marker's I/O failure, got {source:?}");
+            };
+            assert_eq!(
+                failure.also.as_deref(),
+                Some(
+                    "it was appending the Compacted marker, which was cut back off the journal \
+                     (the compaction itself is done)"
+                ),
+                "{failure}"
+            );
+        }
+        other => panic!("expected PostCommit at frame 0, got {other:?}"),
+    }
+    assert_eq!(frames(&root).len(), 1, "no marker frame in the journal");
+}
+
 /// A write whose tail check cannot list a frame that a transaction before it left whole and
 /// unlisted (its own listing failed: committed, [`StoreError::PostCommit`]) has committed nothing
 /// of its own: its transaction never began, and running it again lists the frame. So the error is
@@ -2652,7 +2738,7 @@ fn a_write_reports_each_repair_it_makes() {
     // The entries of frames 1 and 2 zeroed at the end of journal.off, its length kept: what a
     // power loss leaves of entries appended and never synced. They are dropped, and the frames
     // listed again. A process that opens the store after the power loss repairs it, on the real
-    // filesystem.
+    // filesystem, under the order checker.
     let (_dir, root, store) = new_store();
     for n in 0..3 {
         insert(&store, &[cs(n, &[])]); // frames 0..=2
@@ -2662,7 +2748,7 @@ fn a_write_reports_each_repair_it_makes() {
     let mut entries = fs::read(&off).unwrap();
     entries[8..].fill(0);
     fs::write(&off, entries).unwrap();
-    let after_power_loss = MetaStore::open(&root).unwrap();
+    let after_power_loss = open_checked(&root).unwrap();
     let want = Recovered {
         frames_listed: 2,
         off_bytes_dropped: 16,
@@ -2918,6 +3004,81 @@ fn a_direct_read_that_fails_names_its_file() {
     }
 }
 
+/// More reads of the metadata store's own, off the `FsOps` seam, that name their file relative
+/// to the store's root and never the root, as [`a_direct_read_that_fails_names_its_file`]'s do:
+/// a `meta/refs/release` that is a regular file fails the listing of the release refs
+/// (`read_dir`, `ENOTDIR`); and a `journal.log`, an index column or a sorted view file that is
+/// a directory fails its open as damage (`InvalidData`: a store file that is not a regular file
+/// is refused before it is opened), not as a missing file. Root-safe: no file mode is
+/// involved.
+#[test]
+fn a_listing_or_an_open_that_fails_names_its_file() {
+    use swarmops_store::FileOp;
+
+    let (_dir, template, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    drop(store);
+    let index: fn(&Utf8Path) -> Result<(), StoreError> =
+        |root| Index::open(&Layout::new(root), Arc::new(RealFs)).map(drop);
+    let cases = [
+        DirectRead {
+            what: "refs/release a regular file",
+            damage: |meta| {
+                let release = meta.join("refs/release");
+                if release.is_dir() {
+                    fs::remove_dir(&release).unwrap();
+                }
+                fs::write(release, b"not a directory").unwrap();
+            },
+            run: |root| MetaStore::open(root).and_then(|store| store.read().map(drop)),
+            op: FileOp::ReadDir,
+            file: "meta/refs/release",
+            kind: io::ErrorKind::NotADirectory,
+        },
+        DirectRead {
+            what: "journal.log a directory",
+            damage: |meta| a_directory_for(meta, "journal.log"),
+            run: |root| MetaStore::open(root).map(drop),
+            op: FileOp::Open,
+            file: "meta/journal.log",
+            kind: io::ErrorKind::InvalidData,
+        },
+        DirectRead {
+            what: "idx/ids.col a directory",
+            damage: |meta| a_directory_for(meta, "idx/ids.col"),
+            run: index,
+            op: FileOp::Open,
+            file: "meta/idx/ids.col",
+            kind: io::ErrorKind::InvalidData,
+        },
+        DirectRead {
+            what: "sorted/dh.rec a directory",
+            damage: |meta| a_directory_for(meta, "sorted/dh.rec"),
+            run: index,
+            op: FileOp::Open,
+            file: "meta/sorted/dh.rec",
+            kind: io::ErrorKind::InvalidData,
+        },
+    ];
+    for case in cases {
+        let (_dir, root) = new_root();
+        copy_dir(template.as_std_path(), root.as_std_path());
+        (case.damage)(&Layout::new(&root).meta_dir());
+        let failure = match (case.run)(&root) {
+            Err(StoreError::Io(failure)) => failure,
+            other => panic!("{}: expected an I/O failure, got {other:?}", case.what),
+        };
+        assert_eq!(
+            (failure.op, failure.file.as_deref(), failure.kind()),
+            (case.op, Some(Utf8Path::new(case.file)), case.kind),
+            "{}: {failure}",
+            case.what
+        );
+        let text = failure.to_string();
+        assert!(!text.contains(root.as_str()), "{}: {text}", case.what);
+    }
+}
+
 /// The I/O failure `e` reports: its own, a [`StoreError::NotCommitted`]'s, or that of the step
 /// a [`StoreError::PostCommit`] says failed; `None` for an error of another kind.
 fn io_failure(e: &StoreError) -> Option<&swarmops_store::IoFailure> {
@@ -3152,6 +3313,27 @@ fn a_transaction_refuses_more_records_than_a_frame_holds() {
     assert_eq!(
         store.read().unwrap().get_ref("main").unwrap(),
         Some(ref_state(1, 1))
+    );
+}
+
+/// A changeset with more parents than a journal record and `par.col` count in one byte (255)
+/// is refused as it is queued, [`StoreError::Limit`] with 256 (the limit is checked before the
+/// parents are looked up, so none of them need be in the store), and nothing of it is queued:
+/// the transaction commits what it queued besides. The repository refuses such a changeset
+/// before it reaches the store, so only a direct call meets this.
+#[test]
+fn insert_changeset_refuses_more_than_255_parents() {
+    let (_dir, root, store) = new_store();
+    let parents: Vec<u64> = (0..256).collect();
+    let mut write = store.write().unwrap();
+    let refused = write.insert_changeset(cs(1000, &parents));
+    assert_limit(refused, LimitKind::Parents, 255, 256);
+    write.insert_changeset(cs(1, &[])).unwrap();
+    write.commit().unwrap();
+    assert_eq!(
+        frames(&root)[0].records.len(),
+        1,
+        "the refused changeset was not queued"
     );
 }
 
@@ -3755,13 +3937,17 @@ fn reader_racing_commits(commits: u32) -> (TempDir, Utf8PathBuf, MetaStore) {
 
 /// A snapshot reads the ref files and the frames past the checkpoint again when a commit lands
 /// in between, but not without end: when one lands during every one of its
-/// [`MetaStore::SNAPSHOT_ROUNDS`] rounds, it gives up with [`StoreError::SnapshotContended`]
-/// (the API's retryable `E_BUSY`) and leaves nothing behind. (It used to read again for as long
-/// as commits kept landing.) The 30th commit here moves the checkpoint while the reader holds
-/// the one it read first.
+/// [`MetaStore::SNAPSHOT_ROUNDS`] rounds, 32 as the specs and the documents say, it gives up
+/// with [`StoreError::SnapshotContended`] (the API's retryable `E_BUSY`) and leaves nothing
+/// behind. (It used to read again for as long as commits kept landing.) The 30th commit here
+/// moves the checkpoint while the reader holds the one it read first.
 #[test]
 fn a_snapshot_gives_up_as_contended_when_every_round_sees_a_new_frame() {
     let rounds = MetaStore::SNAPSHOT_ROUNDS;
+    assert_eq!(
+        rounds, 32,
+        "the bound storage spec §3 and operations spec §4 state"
+    );
     let (_dir, root, reader) = reader_racing_commits(rounds);
     match reader.read().map(|read| read.count_changesets()) {
         Err(StoreError::SnapshotContended { rounds: made }) => assert_eq!(made, rounds),
@@ -3901,6 +4087,70 @@ fn a_snapshot_racing_a_journal_off_cut_reads_again_and_reports_no_damage() {
         (listed(&root), frames(&root).len()),
         (2, 3),
         "the frame is whole in journal.log, unlisted"
+    );
+}
+
+/// Cuts the last entry off `journal.off` right after its `n`th measurement, once: a writer's cut
+/// of an entry whose own listing failed (storage spec §2 rule 3 (b)), landing between a reader's
+/// measurement and its read of the entries. Records every call, by name ([`Call::named`]).
+struct CutAfterMeasurement {
+    n: u32,
+    seen: AtomicU32,
+    calls: Arc<Mutex<Vec<String>>>,
+}
+
+impl Watch for CutAfterMeasurement {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        self.calls.lock().unwrap().push(call.named());
+        Ok(())
+    }
+
+    fn after(&self, call: &Call<'_>) {
+        if call.named() == "file_len journal.off"
+            && self.seen.fetch_add(1, Ordering::SeqCst) + 1 == self.n
+        {
+            set_len(call.path(), file_len(call.path()) - 8);
+        }
+    }
+}
+
+/// A cut that a round's second read of the frames meets, the one after the ref files are read,
+/// takes that round as a cut its first read meets does: the snapshot reads the ref files and the
+/// frames again, and shows the store as the cut leaves it, the frame whose entry was cut whole
+/// in `journal.log` and read as one not listed yet. (Before Task 3 of M1.6, it reported the
+/// journal corrupt.)
+#[test]
+fn a_snapshot_whose_second_read_of_the_frames_meets_a_cut_takes_another_round() {
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(1, &[])]); // frame 0
+    cas(&store, "main", None, Some(1)); // frame 1
+    drop(store);
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let cutting = CutAfterMeasurement {
+        n: 2,
+        seen: AtomicU32::new(0),
+        calls: Arc::clone(&calls),
+    };
+    let reader = MetaStore::open_with_fs(&root, checked(Watched(cutting, RealFs))).unwrap();
+    let read = match reader.read() {
+        Ok(read) => read,
+        Err(e) => panic!("expected a snapshot, got {e:?}"),
+    };
+    assert_eq!(read.get_ref("main").unwrap(), Some(ref_state(1, 1)));
+    assert_eq!(read.changeset(id(1)).unwrap(), Some(stored(1, &[], 0, 1)));
+    assert_eq!(read.count_changesets().unwrap(), 1);
+    // The first round: the frames read as the index opens, `main`, then the second read, which
+    // meets the cut before it measures journal.log. The next round reads `main` and the frames.
+    let (off, log) = ("file_len journal.off", "file_len journal.log");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        [off, log, "read main", off, "read main", off, log],
+        "the second read met the cut, and one more round"
+    );
+    assert_eq!(
+        (listed(&root), frames(&root).len()),
+        (1, 2),
+        "frame 1 is whole in journal.log, unlisted"
     );
 }
 
@@ -4440,6 +4690,58 @@ fn a_batched_sync_with_no_thread_to_spare_syncs_on_the_committer() {
     } else {
         assert_eq!(report, "checkpointed");
     }
+}
+
+/// Set only in the child of `a_temp_file_write_that_fails_keeps_the_os_error`: the directory it
+/// writes its temp files in.
+#[cfg(target_os = "linux")]
+const FSIZE_DIR: &str = "SWARMOPS_TEST_META_FSIZE_DIR";
+
+/// What the child of [`a_temp_file_write_that_fails_keeps_the_os_error`] reports of an object's
+/// temp file and of a replacement that `RealFs` could not write past one block: each one's errno,
+/// and whether its text names `dir`.
+#[cfg(target_os = "linux")]
+fn temp_write_failures(dir: &Utf8Path) {
+    let bytes = vec![0; 64 * 1024];
+    let reported = [
+        RealFs
+            .write_durable_temp(dir.as_std_path(), &bytes)
+            .map(drop),
+        RealFs.atomic_replace(dir.join("f").as_std_path(), &bytes),
+    ]
+    .map(|result| match result {
+        Ok(()) => "written".to_owned(),
+        Err(e) => format!(
+            "{:?} {}",
+            e.raw_os_error(),
+            e.to_string().contains(dir.as_str())
+        ),
+    });
+    println!("{REPORT}{}", reported.join(", "));
+}
+
+/// A temp file that `RealFs` cannot write, for an object or a replacement, fails with the
+/// operating system's own error, its errno kept and no path in its text: the store writes
+/// through the file itself, not through tempfile's `NamedTempFile`, whose writes wrap a failure
+/// with the temp file's absolute path and drop the errno. The child's files are limited to one
+/// block (`ulimit -f 1`, `RLIMIT_FSIZE`, which binds root too) and it ignores `SIGXFSZ`, so a
+/// write past the block fails with `EFBIG` (27).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_temp_file_write_that_fails_keeps_the_os_error() {
+    const TEST: &str = "a_temp_file_write_that_fails_keeps_the_os_error";
+    if let Some(dir) = std::env::var_os(FSIZE_DIR) {
+        temp_write_failures(&Utf8PathBuf::from_path_buf(dir.into()).unwrap());
+        return;
+    }
+    let (_dir, root) = new_root();
+    let child = run(Command::new("sh")
+        .arg("-c")
+        .arg("trap '' XFSZ; ulimit -f 1; exec \"$0\" \"$@\"")
+        .arg(std::env::current_exe().unwrap())
+        .args(test_args(&test_name!(TEST)))
+        .env(FSIZE_DIR, &root));
+    assert_eq!(report(0, &child), "Some(27) false, Some(27) false");
 }
 
 /// The five index syncs, sorted.

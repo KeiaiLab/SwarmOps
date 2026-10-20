@@ -27,6 +27,7 @@ use swarmops_store::{
 };
 use swarmops_testkit::fs::{Call, RecordingFs, Watch, Watched, When};
 use swarmops_testkit::repo::{blob, commit, delete, new_repo, path, put, put_as, signature};
+use swarmops_testkit::store::lying_zstd;
 use tempfile::TempDir;
 
 /// The file of object `id` in the store at `root`.
@@ -295,17 +296,12 @@ fn verify_detects_corrupt_blob_and_missing_object() {
 }
 
 /// Rewrites the file of object `id` in the store at `root` as a zstd object whose header and
-/// frame both record `size` bytes, around a frame holding one empty raw block: a lie that agrees
-/// with itself, so that the header check passes and only decoding finds it out.
+/// frame both record `size` bytes ([`lying_zstd`]): a lie that agrees with itself, so that the
+/// header check passes and only decoding finds it out.
 fn lie_about_its_size(root: &Utf8Path, id: ObjectId, size: u64) {
     let file = object_file(root, id);
     let mut bytes = fs::read(&file).unwrap();
-    bytes.truncate(16); // "SOB1" | kind | enc | rsvd | ulen
-    bytes[5] = 1; // zstd
-    bytes[8..16].copy_from_slice(&size.to_le_bytes());
-    bytes.extend([0x28, 0xB5, 0x2F, 0xFD, 0xC0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
-    bytes.extend(size.to_le_bytes()); // frame content size
-    bytes.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
+    lying_zstd(&mut bytes, size);
     fs::write(&file, bytes).unwrap();
 }
 
