@@ -1086,10 +1086,9 @@ fn assert_up_to_date(result: &Value, head_sha: &str) {
 ///   deterministic, whichever repository it writes to.
 /// - The commit made in git on top of the export comes back with `git import --ref main --into
 ///   main`: that commit alone (`imported 1`, `skipped 1`), onto the second land, and `main`
-///   names its changeset, which carries the commit's id in `git.oid`. That works only because
-///   every `LocalOps` registers `ExportOid` (M8 Task 6), which the import derives the native
-///   head's export oid with. The export after it is a no-op again: the commit is its changeset's
-///   own export.
+///   names its changeset, which carries the commit's id in `git.oid`: the import derives the
+///   native head's export oid from the store's objects, as the export does. The export after it
+///   is a no-op again: the commit is its changeset's own export.
 #[test]
 fn the_round_trip_through_the_binary() {
     let store = Store::init();
@@ -1151,6 +1150,108 @@ fn the_round_trip_through_the_binary() {
     assert_eq!(last["head_changeset"], back["head_changeset"], "{last}");
     assert_eq!(branch_at(dir, "main"), made);
     store.assert_clean("after the round trip");
+}
+
+/// A crafted `git_oid` memo (a file under `meta/derived/git_oid/`, placed whole with its checksum
+/// right) that says `main`'s native head exports to a commit of the source, `x`: `swarmops git
+/// import` of `c`, a commit made on `x` that keeps its `foo.txt`, refuses it with
+/// `E_STORE_CORRUPT`, naming the derivation and the head, its hint a deep verify, and moves and
+/// records nothing, where it used to record `c` as a faithful changeset holding the head's
+/// `foo.txt`; `verify --deep` names the memo. With the memo removed, the import is
+/// `E_GIT_IMPORT_DIVERGED` (exit 3), from the commit the head really exports to, and the store
+/// verifies clean.
+#[test]
+fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
+    use std::sync::Arc;
+
+    use swarmops_core::{ChangesetId, ObjectId};
+    use swarmops_git::{
+        BranchUpdate, GitOid, GitSink as _, GixSink, RawKind, RawTree, RawTreeEntry, commit_bytes,
+    };
+    use swarmops_store::{DerivedSlot, DerivedStore, RealFs};
+    use swarmops_testkit::repo::signature;
+
+    let store = Store::init();
+    let native = store.commit(AGENT, "foo.txt", "store\n", None);
+    let main = ["ref", "set", "main", &native, "--create"];
+    store.run_as(AGENT, &main, &[]).ok();
+
+    // The source: `x`, a root whose `foo.txt` holds other bytes, and `c` on it.
+    let source = swarmops_testkit::git::empty_repository();
+    let mut sink = GixSink::open(&source.dir).expect("open the source");
+    let mut write = |kind, bytes: &[u8]| sink.write_object(kind, bytes).unwrap();
+    let file = |name: &str, oid| RawTreeEntry {
+        mode: b"100644".to_vec(),
+        name: name.as_bytes().to_vec(),
+        oid,
+    };
+    let evil = write(RawKind::Blob, b"evil\n");
+    let x_tree = RawTree {
+        entries: vec![file("foo.txt", evil)],
+    };
+    let x_tree = write(RawKind::Tree, &x_tree.render());
+    let sig = signature();
+    let x = write(
+        RawKind::Commit,
+        &commit_bytes(x_tree, &[], &sig, &sig, &[], b"X\n"),
+    );
+    let new = write(RawKind::Blob, b"new\n");
+    let c_tree = RawTree {
+        entries: vec![file("foo.txt", evil), file("new.txt", new)],
+    };
+    let c_tree = write(RawKind::Tree, &c_tree.render());
+    let c = write(
+        RawKind::Commit,
+        &commit_bytes(c_tree, &[x], &sig, &sig, &[], b"C\n"),
+    );
+    sink.sync(&[evil, x_tree, x, new, c_tree, c]).unwrap();
+    assert_eq!(sink.cas_branch("main", None, c), Ok(BranchUpdate::Applied));
+
+    // The memo: the head's export oid, it says, is `x`'s (20 bytes, then 1 for `kept`).
+    let head = ChangesetId(ObjectId::from_hex(&native).expect("a changeset id"));
+    let slot = DerivedSlot {
+        name: "git_oid",
+        version: 1,
+        subject: head.0,
+        key: &[],
+    };
+    let mut memo = x.0.to_vec();
+    memo.push(1);
+    let derived = DerivedStore::open(store.layout(), Arc::new(RealFs));
+    assert!(
+        derived.put(&slot, &memo).expect("plant the memo"),
+        "planted"
+    );
+    let journal = store.journal_len();
+
+    let path = utf8(&source.dir);
+    let args = ["--ref", "main", "--into", "main"];
+    let refused = import(&store, &path, &args);
+    let error = refused.err("E_STORE_CORRUPT");
+    assert_eq!(error["details"]["derivation"], "git_oid", "{error}");
+    assert_eq!(error["details"]["changeset"], native.as_str(), "{error}");
+    assert_eq!(error["details"]["imported"], 0, "{error}");
+    assert_eq!(error["hint"], "swarmops verify --deep", "{error}");
+    assert_eq!(store.show("main")["id"], native.as_str());
+    assert_eq!(store.journal_len(), journal, "a frame was written");
+    let verify = store.read(&["verify", "--deep"]);
+    let findings = &verify.err("E_STORE_CORRUPT")["details"]["findings"];
+    let finding = json!({"kind": "derived_mismatch", "changeset": native, "derivation": "git_oid"});
+    assert_eq!(findings, &json!([finding]));
+
+    std::fs::remove_file(store.layout().derived_path(&slot)).unwrap();
+    let diverged = import(&store, &path, &args);
+    assert_eq!(diverged.exit(), 3, "{diverged}");
+    let error = diverged.err("E_GIT_IMPORT_DIVERGED");
+    assert_eq!(error["details"]["target_head"], native.as_str(), "{error}");
+    let base: GitOid = error["details"]["base"]
+        .as_str()
+        .expect("a base")
+        .parse()
+        .expect("a commit id");
+    assert_ne!(base, x, "{error}");
+    assert_eq!(store.show("main")["id"], native.as_str());
+    store.assert_clean("after the memo was removed");
 }
 
 /// `swarmops git export` cut short at each of the store's filesystem calls, through the binary

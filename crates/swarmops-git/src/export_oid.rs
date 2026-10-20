@@ -19,10 +19,10 @@
 //! never by recursion. As M2's engine does with its values, a memo whose put fails is dropped and
 //! the oid returned all the same; a read of the derived store that fails is the error.
 //!
-//! Neither the export nor a deep verify takes a `git_oid` memo as the truth: each derives every
-//! export oid it uses again, with the history below it, from the objects, the export checking each
-//! memo it meets against what it derives and refusing one that disagrees, the verify reporting it
-//! ([`verify_export_oids`]).
+//! Neither the export, the import nor a deep verify takes a `git_oid` memo as the truth: each
+//! derives every export oid it uses again, with the history below it, from the objects, the export
+//! and the import checking each memo they meet against what they derive and refusing one that
+//! disagrees, the verify reporting it ([`verify_export_oids`]).
 //!
 //! Export oids read objects and derived values alone, never a ref, the journal or the clock, so a
 //! changeset's export oid never changes. Version 1 fixes git's tree order and modes, the commit
@@ -320,6 +320,29 @@ pub fn real_tree_oid(
     root: TreeId,
 ) -> Result<GitOid, RepoError> {
     tree_git_oid(objects, cache, Memos::Against(about), root)
+}
+
+/// The git oid of the tree `root` renders to, from the store's own bytes alone, as
+/// [`real_tree_oid`] computes it but reading and writing no memo of the derived store: what the
+/// import compares a git tree with before it takes the tree as converted ([`crate::import()`]).
+/// Cached in `cache`.
+pub(crate) fn rendered_tree_oid(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    root: TreeId,
+) -> Result<GitOid, RepoError> {
+    tree_git_oid(objects, cache, Memos::Recompute, root)
+}
+
+/// The git oid of blob `blob`, the hash of the store's own bytes, reading and writing no memo:
+/// what the import compares a git blob with before it takes the blob as converted. Cached in
+/// `cache`.
+pub(crate) fn rendered_blob_oid(
+    objects: &dyn ExportObjects,
+    cache: &OidCache,
+    blob: BlobId,
+) -> Result<GitOid, RepoError> {
+    blob_git_oid(objects, cache, Memos::Recompute, blob)
 }
 
 /// The git oid of blob `blob` from the store's own bytes, the memos handled as `memos` says.
@@ -696,7 +719,8 @@ fn check_export_memo(
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum OnMemo {
     /// Checks each against what the store's objects give, a memo that disagrees refused
-    /// ([`check_memo`], [`check_export_memo`]), and writes one where none is: the export's.
+    /// ([`check_memo`], [`check_export_memo`]), and writes one where none is: the export's and
+    /// the import's.
     Check,
     /// Reads and writes none: a deep verify's, which compares the memos with the values itself
     /// and reports every mismatch ([`verify_export_oids`]).
@@ -707,9 +731,10 @@ pub(crate) enum OnMemo {
 /// [`ExportOid::derive`] computes it, but over its parents' re-derived values, never over a
 /// `git_oid` memo: an unchanged import's [`GIT_OID`], any other changeset's rendering over its
 /// parents' export oids and its root's real tree oid ([`tree_git_oid`]). What the export names as
-/// a commit's parents, compares a branch with and moves a branch to, so that no memo a store file
-/// could have placed decides any of them (with [`OnMemo::Check`]); what a deep verify compares the
-/// memos with (with [`OnMemo::Skip`]).
+/// a commit's parents, compares a branch with and moves a branch to, and what the import takes as
+/// the commit a target's head stands for, so that no memo a store file could have placed decides
+/// any of them (with [`OnMemo::Check`]); what a deep verify compares the memos with (with
+/// [`OnMemo::Skip`]).
 ///
 /// Each changeset is derived once, its value kept for the run: the history below one is walked
 /// parents first, with a stack of its own, never by recursion, so that no depth of history

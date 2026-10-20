@@ -383,10 +383,12 @@ left).
   values a crafted file can steer: the export derives every tree's, blob's and commit's git oid
   from the store's own objects, a commit's over its parents' derived the same way down to the
   roots, and binds what it reuses, writes, names as a commit's parent, compares a branch with or
-  moves a branch to to them, so a memo it reads is never taken for an object's content or a
-  commit's history (a memo that disagrees is `E_STORE_CORRUPT`, refused before anything is
-  written or the branch moves), and a deep `verify` re-derives `git_tree_oid`, `git_blob_oid`
-  and `git_oid` against the objects too (`derived_mismatch`). A
+  moves a branch to to them; the git import derives the commit a target's head stands for the
+  same way, and takes a tree or a blob of the head for a git object only where the store's own
+  bytes render to that object's oid. So no memo either reads is taken for an object's content or
+  a commit's history (a memo that disagrees is `E_STORE_CORRUPT`, refused before anything is
+  written or a ref or a branch moves), and a deep `verify` re-derives `git_tree_oid`,
+  `git_blob_oid` and `git_oid` against the objects too (`derived_mismatch`). A
   keyed trailer whose key lives outside the store would make a placed file fail the built-in
   derivations' checks, at the cost of a new layout version. *Target: an authenticated cache is
   unscheduled. Found: the 2026-10-20 security review.*
@@ -465,6 +467,19 @@ left).
   it is restored. A keyed memo trailer whose key lives outside the store would let the export trust
   its own memos again. *Unscheduled: an authenticated cache. Found: the 2026-10-20 security
   review's re-verification of the git export.*
+- **An import onto a target reads the head's whole tree, and onto a native head the whole history
+  below it.** The import takes no git oid the derived store memoizes as the truth ("Crafted derived
+  values that agree with each other are read as valid", above): before the head's trees and blobs
+  seed its conversion it reads and hashes each of them, and where the head is native, or holds a
+  git commit the source does not go on from, it derives the head's export oid with the whole
+  history below it, as an export does ("An export reads the whole history below its head").
+  In a release build on NVMe, at a load of about 20, an import of one commit onto an imported head
+  of 2,000 small files takes 0.08 s (0.07 s before), and onto one of 2,000 files of 64 KiB 0.18 s
+  (0.07 s); onto a native head above 12,000 imported commits it takes 0.31 to 0.36 s, about 25 µs
+  a changeset, where trusting the memo took 0.05 s. A fresh import costs what it did. An object
+  missing or damaged in that tree or history fails the import (`E_STORE_CORRUPT`, which `verify`
+  lists) until it is restored. *Unscheduled: an authenticated cache. Found: the 2026-10-20
+  security review's re-verification of the git export.*
 - **A crash while an export moves its branch leaves the branch's lock.** An export that dies
   between taking `refs/heads/<branch>.lock` and renaming it onto the branch leaves the lock file,
   as git does: every later export of that branch, and git itself, refuses the branch
