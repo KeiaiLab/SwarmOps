@@ -609,6 +609,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   hint is `git init --bare`), `E_GIT_UNSUPPORTED`, `E_GIT_READ`, `E_REF_NAME_INVALID` (a source
   ref, or a branch name git does not take) and `E_REV_NOT_FOUND`. Every `LocalOps` registers the
   derivation of export oids as it opens a store. Like `git import`, it is no MCP tool.
+- The round trip's acceptance tests (`crates/swarmops-git/tests/round_trip.rs`), umbrella §13's
+  completion condition for M8: every faithful git fixture, imported, with two changes landed on it
+  by keyed lands and exported back into its own repository, keeps every commit byte for byte and
+  gains two single-parent commits on its tip, each message ending in the `SwarmOps-Changeset`,
+  `SwarmOps-Land-Key` and `SwarmOps-Squashed-From` trailers, authored by the agent that made the
+  change and committed by the lander, with the files the store holds; exported into an empty
+  repository, the same history comes out under the same branch oid. A land undone after its export
+  stops the next export (`source_moved_back`) until it is forced, which moves the branch back. The
+  single-writer layout through a git remote round-trips, one host landing and exporting and the
+  other importing, each step taking only what is new; when both hosts write, the export stops on
+  `both_moved` and the imports on `E_GIT_IMPORT_DIVERGED`, and nothing is merged.
 
 ### Changed
 
