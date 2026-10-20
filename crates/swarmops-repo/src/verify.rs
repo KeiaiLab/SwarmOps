@@ -5,13 +5,13 @@
 //! boundary, index files that do not open) is a [`VerifyProblem::MetaCorrupt`], and the rest is
 //! checked without it.
 //!
-//! It reads in this order, so that a commit running meanwhile never looks like damage (one whose
-//! `journal.off` listing fails meanwhile and is cut back is the exception M1.5 keeps: it reads as
-//! a `JournalCorrupt` problem once): the checkpoint, the changeset index, the ref files and the
-//! external id index's entries, then the journal (whatever the index, a ref file or an entry shows
-//! had its frame in the journal before: an entry is linked only once the frame that records its
-//! changeset is durable, W8), then the objects (every object a recorded changeset references was
-//! durable before its frame).
+//! It reads in this order, so that a commit running meanwhile never looks like damage (an entry
+//! of `journal.off` that a failed listing cuts back meanwhile is read again, as the journal's
+//! reads do): the checkpoint, the changeset index, the ref files and the external id index's
+//! entries, then the journal (whatever the index, a ref file or an entry shows had its frame in the
+//! journal before: an entry is linked only once the frame that records its changeset is durable,
+//! W8), then the objects (every object a recorded changeset references was durable before its
+//! frame).
 //!
 //! - The metadata. The index's records are compared with the journal's changeset records, place
 //!   by place: a record unlike the journal's at its seq, one the journal does not hold, and a

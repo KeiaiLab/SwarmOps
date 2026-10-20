@@ -1187,6 +1187,70 @@ mod advance {
         assert_eq!(err.details["name"], "feature/x");
         assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 4);
     }
+
+    /// The same advancing request made again in the second it signs in (a commit signs in whole
+    /// seconds) is the same changeset, its move made already: a replay that says so in
+    /// `advanced.already_applied`, and writes no frame.
+    #[test]
+    fn an_advancing_request_made_again_is_a_replay() {
+        let who = agent();
+        // Only two requests in the same second of the clock make the same changeset: a pair that
+        // straddles a second runs again, on a fresh store.
+        for _ in 0..10 {
+            let (_dir, root, ops) = new_store();
+            let c1 = commit(&ops, None, vec![text("f", "1")]);
+            ops.ref_set(&who, set("main", &c1, None, true)).unwrap();
+            let req = advancing(Some(&c1), vec![text("f", "2")], "main");
+            let second = unix_secs();
+            let first = ops.commit(&who, req.clone()).unwrap();
+            let written = frames(&root);
+            let again = ops.commit(&who, req);
+            if unix_secs() != second {
+                continue;
+            }
+            let again = again.unwrap();
+            assert_eq!(again.changeset, first.changeset);
+            let replay = Advanced {
+                name: "main".to_owned(),
+                old: Some(c1),
+                new: first.changeset,
+                already_applied: true,
+            };
+            assert_eq!(again.advanced, Some(replay));
+            assert_eq!(again.warnings, Vec::<String>::new());
+            assert_eq!(frames(&root), written, "no new frame");
+            return;
+        }
+        panic!("ten pairs of requests each straddled a second of the clock");
+    }
+
+    /// An advancing commit's move is recorded for the agent that asked, as a `ref_set`'s is: the
+    /// ref's reflog names that agent, beside the move another agent made before it.
+    #[test]
+    fn an_advancing_commit_s_move_names_its_agent() {
+        let (_dir, root, ops) = new_store();
+        let other = Identity::parse("agent/worker-3").unwrap();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        ops.ref_set(&other, set("main", &c1, None, true)).unwrap();
+        let c2 = ops
+            .commit(&agent(), advancing(Some(&c1), vec![text("f", "2")], "main"))
+            .unwrap()
+            .changeset;
+        let meta = MetaStore::open(&root).unwrap();
+        let moves = meta.read().unwrap().reflog("main", 10).unwrap();
+        let hex = |id: Option<ChangesetId>| id.map(|id| id.to_string());
+        let moves: Vec<(Option<String>, Option<String>, &str)> = moves
+            .iter()
+            .map(|entry| (hex(entry.old), hex(entry.new), entry.actor.as_str()))
+            .collect();
+        assert_eq!(
+            moves,
+            [
+                (Some(c1.clone()), Some(c2), "agent/worker-17"),
+                (None, Some(c1), "agent/worker-3"),
+            ]
+        );
+    }
 }
 
 #[test]
@@ -1792,4 +1856,40 @@ fn verify_reports_each_problem_as_a_finding() {
             "deep {deep}"
         );
     }
+}
+
+/// With problems of two kinds, `findings[i]` is the finding of `problems[i]`, one for one and in
+/// the same order: a blob gone from the store and one whose file is damaged (which a deep
+/// verify reads) each name their object in the line and in the finding at its index.
+#[test]
+fn verify_findings_stand_beside_their_problems_one_for_one() {
+    let (_dir, root, ops) = new_store();
+    let c = commit(&ops, None, vec![text("f", "content"), text("g", "other")]);
+    let layout = Layout::new(root.clone());
+    let gone = hash_object(ObjectKind::Blob, b"content");
+    fs::remove_file(layout.object_path(gone)).unwrap();
+    let damaged = hash_object(ObjectKind::Blob, b"other");
+    let mut bytes = fs::read(layout.object_path(damaged)).unwrap();
+    *bytes.last_mut().unwrap() ^= 0x01;
+    fs::write(layout.object_path(damaged), bytes).unwrap();
+
+    let report = ops.verify(VerifyReq { deep: true }).unwrap();
+    assert_eq!(report.problems.len(), 2, "{report:?}");
+    assert_eq!(report.findings.len(), report.problems.len(), "{report:?}");
+    for (problem, finding) in report.problems.iter().zip(&report.findings) {
+        let (kind, object, changeset) = if problem.ends_with("is corrupt") {
+            ("corrupt_object", damaged, None)
+        } else {
+            ("missing_object", gone, Some(c.as_str()))
+        };
+        assert!(problem.contains(&object.to_hex()), "{problem}");
+        assert_eq!(finding.kind, kind, "{problem}: {finding:?}");
+        assert_eq!(
+            finding.object.as_deref(),
+            Some(object.to_hex().as_str()),
+            "{problem}"
+        );
+        assert_eq!(finding.changeset.as_deref(), changeset, "{problem}");
+    }
+    assert_ne!(report.findings[0].kind, report.findings[1].kind);
 }

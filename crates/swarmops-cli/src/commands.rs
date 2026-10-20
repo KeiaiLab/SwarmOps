@@ -811,4 +811,57 @@ mod tests {
         assert_eq!(quoted(""), "''");
         assert_eq!(quoted("a\nb"), r"'a\nb'");
     }
+
+    /// A panic's envelope reports what the command's write repaired before the panic, as the
+    /// command's own envelope would ([`Used`]): here a commit whose write listed again the frame
+    /// of a ref move that `journal.off` no longer listed.
+    #[test]
+    fn a_panic_s_envelope_reports_what_the_write_repaired() {
+        use camino::Utf8PathBuf;
+        use swarmops_api::{ChangeOp, Identity};
+        use swarmops_store::Layout;
+        use swarmops_testkit::store::{file_len, set_len};
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let commit = |content: &str| CommitReq {
+            parent: None,
+            changes: vec![ChangeInput {
+                path: "f".to_owned(),
+                op: ChangeOp::Put,
+                content: Some(ContentInput::Inline(content.to_owned())),
+                mode: None,
+            }],
+            message: "m".to_owned(),
+            advance: None,
+            allow_empty: false,
+        };
+        let c1 = ops.commit(&who, commit("1")).unwrap().changeset;
+        let main = RefSetReq {
+            name: "main".to_owned(),
+            new: c1.as_str().into(),
+            expected_old: None,
+            create: true,
+        };
+        ops.ref_set(&who, main).unwrap();
+        drop(ops);
+        // main's frame stays whole in journal.log, its entry gone from journal.off, as when its
+        // writer died before listing it: the next write lists it.
+        let off = Layout::new(&root).journal_off();
+        set_len(&off, file_len(&off) - 8);
+
+        let used = Used::default();
+        let ops = LocalOps::open(&root).unwrap();
+        ops.recording(&used.resolved)
+            .commit(&who, commit("2"))
+            .unwrap();
+        let envelope = failed_envelope("commit", panicked(&"boom"), &used, Instant::now());
+        let listed = RecoveredOut {
+            frames_listed: 1,
+            ..RecoveredOut::default()
+        };
+        assert_eq!(envelope.meta.recovered, Some(listed));
+    }
 }

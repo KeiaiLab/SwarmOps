@@ -1222,7 +1222,7 @@ fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit() {
 /// the five index files, for each record, as every commit's materialization makes). Of their
 /// cuts it checks the first and last eight and every 64th.
 #[test]
-#[ignore = "slow: thousands of images through the binary; just check-slow runs it"]
+#[ignore = "slow, ~280 s: images of 830 cuts x 10 seeds through the binary; just check-slow runs it"]
 fn power_loss_images_recover_a_prefix_with_every_acknowledged_commit_at_every_cut() {
     let ops: Vec<Op> = RUN.iter().copied().chain([Op::Bulk]).collect();
     let rec = record_ops(&ops);
@@ -1324,6 +1324,12 @@ fn a_lost_header_sector_is_a_torn_tail() {
         assert!(
             bytes[start..start + lost].iter().all(|&byte| byte == 0),
             "frame {n}: the first {lost} bytes of its length lost"
+        );
+        // A length that straddles the boundary keeps a byte that is not 0 (its payload is over
+        // 255 bytes), so it reads as a length that is wrong, not as 0.
+        assert!(
+            lost == 4 || bytes[start + lost..start + 4].iter().any(|&byte| byte != 0),
+            "frame {n}: the rest of its length is 0"
         );
         assert!(
             bytes[start..].iter().any(|&byte| byte != 0),
@@ -1506,4 +1512,75 @@ fn objects_referenced_by_a_durable_frame_survive_power_loss() {
         let found = found_in(&rec, &least(durable), durable);
         assert_eq!(found, Ok(Found::Prefix(n + 1)), "frame {n} just durable");
     }
+}
+
+/// A run of one root commit that creates main with `advance`: one [`Txn::CommitAdvance`] frame,
+/// for the oracles' own checks.
+fn one_advancing_commit() -> Recorded {
+    record_ops(&[Op::CommitAdvance {
+        parent: None,
+        puts: &[("a.txt", "a\n")],
+        name: "main",
+    }])
+}
+
+/// The prefix oracle's own check for an advancing commit's frame: after it, the store holds the
+/// changeset and the ref names it, together; before it, neither.
+#[test]
+fn the_prefix_oracle_takes_an_advancing_commit_s_changeset_and_move_together() {
+    let rec = one_advancing_commit();
+    let none = State {
+        changesets: 0,
+        refs: BTreeMap::new(),
+    };
+    assert_eq!(rec.state_after(0), none);
+    let both = State {
+        changesets: 1,
+        refs: BTreeMap::from([("main".to_owned(), (rec.commits[0].clone(), 1))]),
+    };
+    assert_eq!(rec.state_after(1), both);
+}
+
+/// The recovery oracle's own check ([`recovered_as_imaged`]): it takes a report of exactly what
+/// the next commit's write repaired, and refuses one that misstates the cut or the frames listed,
+/// or that lists a frame the run had not begun to write by the cut.
+#[test]
+fn the_recovery_oracle_refuses_a_report_that_misstates_the_repair() {
+    let rec = one_advancing_commit();
+    let write = rec.frames[0].write;
+    // The image holds the frame whole and unlisted, then 8 torn bytes: the next commit lists the
+    // frame, cuts the 8 bytes, and lands where they began.
+    let torn = Imaged {
+        log_len: 100,
+        whole: 1,
+        entries: 0,
+    };
+    let exact = json!({"log_cut": {"at": 92, "bytes": 8}, "frames_listed": 1});
+    assert_eq!(
+        recovered_as_imaged(&rec, write + 1, &exact, torn, 92),
+        Ok(())
+    );
+    for wrong in [
+        Value::Null,
+        json!({"frames_listed": 1}),
+        json!({"log_cut": {"at": 92, "bytes": 7}, "frames_listed": 1}),
+        json!({"log_cut": {"at": 92, "bytes": 8}}),
+        json!({"log_cut": {"at": 92, "bytes": 8}, "frames_listed": 2}),
+    ] {
+        let judged = recovered_as_imaged(&rec, write + 1, &wrong, torn, 92);
+        assert!(judged.is_err(), "{wrong} was taken");
+    }
+    // At a cut before the frame's write began, the run had no frame there to list.
+    assert!(recovered_as_imaged(&rec, write, &exact, torn, 92).is_err());
+    // A commit that lands at the image's end cuts nothing, and must not say it did.
+    let clean = Imaged {
+        log_len: 92,
+        ..torn
+    };
+    let listed = json!({"frames_listed": 1});
+    assert_eq!(
+        recovered_as_imaged(&rec, write + 1, &listed, clean, 92),
+        Ok(())
+    );
+    assert!(recovered_as_imaged(&rec, write + 1, &exact, clean, 92).is_err());
 }

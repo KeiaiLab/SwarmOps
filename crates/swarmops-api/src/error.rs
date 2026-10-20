@@ -90,7 +90,10 @@ error_codes! {
     /// The store path is not on a native Linux filesystem (for example WSL's `/mnt/*`).
     UnsupportedFs => "E_UNSUPPORTED_FS", EXIT_ERROR, false;
     /// The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`
-    /// the file of the store it was on, relative to the store's root.
+    /// the file of the store it was on, relative to the store's root. A journal append it
+    /// refused for want of permission or as a read-only filesystem also says
+    /// `details.committed: false`: nothing was committed, and running the same operation again
+    /// fails the same way until the hint's cause is fixed.
     Io => "E_IO", EXIT_ERROR, false;
     /// A journal append failed, and the store cut what it wrote back off the journal
     /// (`details.committed` is `false`): nothing was committed, so running the same operation

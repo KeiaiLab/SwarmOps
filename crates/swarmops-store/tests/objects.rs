@@ -27,7 +27,7 @@ use swarmops_store::{FsMethod, FsObjectStore, Layout, ObjectStore, RealFs, Store
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::child::{self, SIGABRT, this_test};
 use swarmops_testkit::fs::{Call, Rendezvous, Watch, Watched};
-use swarmops_testkit::store::new_root;
+use swarmops_testkit::store::{lying_zstd, new_root};
 #[cfg(feature = "test-hooks")]
 use swarmops_testkit::test_name;
 
@@ -231,18 +231,6 @@ fn get_damaged(
     let got = store.get(id);
     fs::write(&path, &pristine).unwrap();
     got
-}
-
-/// Makes `file` a SOB1 zstd object whose header and frame both record `size`, around a frame
-/// holding one empty raw block: a lie that agrees with itself, so that the header check passes
-/// and only decoding finds it out.
-fn lying_zstd(file: &mut Vec<u8>, size: u64) {
-    file.truncate(HEADER_LEN);
-    file[5] = ENC_ZSTD;
-    file[8..16].copy_from_slice(&size.to_le_bytes());
-    file.extend([0x28, 0xB5, 0x2F, 0xFD, 0xC0, 0x00]); // magic, FHD (8-byte FCS), window 1 KiB
-    file.extend(size.to_le_bytes()); // frame content size
-    file.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
 }
 
 fn fanout_dir(layout: &Layout, blob: &[u8]) -> PathBuf {
@@ -601,23 +589,37 @@ fn a_header_claiming_more_than_the_object_limit_is_bad_header() {
     }
 }
 
+/// One byte past the largest payload decoded in one pass, 64 MiB, `get` decodes a zstd object as
+/// a stream, into a buffer that grows only as the output arrives: past the payload's length once
+/// its last byte arrives. A payload of 64 MiB it decodes in one pass, into a buffer of the size
+/// the file records. So the two sizes pin the cap (with a cap of 1 GiB, both would be read in
+/// one pass), and the stream round-trips a real object. About 0.4 s and 140 MB at most.
 #[test]
-#[ignore = "slow, ~5 s: a 64 MiB + 1 object put and read back whole (~200 MiB peak); just check-slow runs it"]
 fn a_zstd_object_past_the_cap_round_trips_through_the_store() {
     let (_root, layout) = new_root();
     let store = real_store(&layout);
-    // One byte past the largest payload decoded in one pass: `get` decodes it as a stream.
-    let payload = vec![0; (64 << 20) + 1];
-    let id = store.put(ObjectKind::Blob, &payload).unwrap();
-    let file = fs::read(layout.object_path(id)).unwrap();
-    assert_eq!(file[5], ENC_ZSTD);
-    assert!(
-        file.len() < 64 << 10,
-        "{} bytes of zstd for 64 MiB of zeros",
-        file.len()
-    );
-    let got = store.get(id).unwrap().expect("stored");
-    assert!(got == (ObjectKind::Blob, payload), "the payload comes back");
+    for (len, streamed) in [((64 << 20) + 1, true), (64 << 20, false)] {
+        let payload = vec![0; len];
+        let id = store.put(ObjectKind::Blob, &payload).unwrap();
+        let file = fs::read(layout.object_path(id)).unwrap();
+        assert_eq!(file[5], ENC_ZSTD);
+        assert!(
+            file.len() < 64 << 10,
+            "{} bytes of zstd for {len} zeros",
+            file.len()
+        );
+        let (kind, got) = store.get(id).unwrap().expect("stored");
+        assert!(
+            kind == ObjectKind::Blob && got == payload,
+            "the {len} bytes come back"
+        );
+        assert_eq!(
+            got.capacity() > got.len(),
+            streamed,
+            "{len} bytes in a buffer of {}",
+            got.capacity()
+        );
+    }
 }
 
 #[test]
@@ -915,6 +917,36 @@ fn list_returns_every_stored_object_in_id_order() {
 
     ids.sort();
     assert_eq!(store.list().unwrap(), ids);
+}
+
+/// A fan-out directory that cannot be listed (a regular file in its place: `ENOTDIR`) fails
+/// `list` with the listing's failure (`read_dir`), named by its place in the store, never by
+/// the store's root. Root-safe: no file mode is involved.
+#[test]
+fn list_names_a_fanout_directory_it_cannot_list() {
+    use camino::Utf8Path;
+    use swarmops_store::FileOp;
+
+    let (_root, layout) = new_root();
+    let store = real_store(&layout);
+    fs::create_dir_all(layout.objects_dir()).unwrap();
+    fs::write(layout.objects_dir().join("ab"), b"not a directory").unwrap();
+    match store.list() {
+        Err(StoreError::Io(failure)) => {
+            assert_eq!(
+                (failure.op, failure.file.as_deref(), failure.kind()),
+                (
+                    FileOp::ReadDir,
+                    Some(Utf8Path::new("objects/ab")),
+                    io::ErrorKind::NotADirectory
+                ),
+                "{failure}"
+            );
+            let text = failure.to_string();
+            assert!(!text.contains(layout.root().as_str()), "{text}");
+        }
+        other => panic!("expected the listing's failure, got {other:?}"),
+    }
 }
 
 /// The batch the children of `open_default_under_crash_at_puts_one_object_at_a_time` put.

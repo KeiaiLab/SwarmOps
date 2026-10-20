@@ -15,7 +15,8 @@
 //! between two transactions of a child, as an agent leaves at least a process start between
 //! two commits. [`OBJECT_SYNCS`] has each child put and flush that many new objects of its
 //! own before each transaction, outside the lock, as a CLI commit writes its objects before
-//! its transaction takes the lock ([`Prelude`]). For every transaction a child times
+//! its transaction takes the lock ([`Prelude`]); the parent reads it and hands it to every
+//! child. For every transaction a child times
 //!
 //! - the transaction: from calling [`MetaStore::write`] until `commit` returns;
 //! - the lock wait: until [`MetaStore::write`] returns, which is the wait for `meta/lock`
@@ -27,13 +28,16 @@
 //! transaction's time in the lock once `write` returned (the transaction minus its lock
 //! wait), and the uncontended `write`s' cost; then it checks the store as `verify` would
 //! (every changeset there, each chain intact, one frame per transaction, and the seqs
-//! contiguous in journal order), prints what an uncontended transaction costs, and asserts
-//! last that no child met `Busy`.
+//! contiguous in journal order) and that every child put the objects it was handed (its JSON
+//! line gives their number, and `objects/` holds them all), prints what an uncontended
+//! transaction costs, and asserts last that no child met `Busy`.
 //!
-//! One test runs in the default gate: `object_syncs_prelude_writes_new_objects_and_flushes_them`
-//! checks the prelude on a store whose filesystem calls are recorded (new objects each time,
-//! their fan-out directories fsynced before `write` takes the lock, no call under it), so that
-//! a run with [`OBJECT_SYNCS`] measures the object syncs it says it adds.
+//! Two tests run in the default gate, so that a run with [`OBJECT_SYNCS`] measures the object
+//! syncs it says it adds: `object_syncs_prelude_writes_new_objects_and_flushes_them` checks the
+//! prelude on a store whose filesystem calls are recorded (new objects each time, their fan-out
+//! directories fsynced before `write` takes the lock, no call under it), and
+//! `object_syncs_reach_every_child` runs the parent and its children as the measurement does,
+//! at [`SMALL`]'s size, each child handed two objects to put before each transaction.
 //!
 //! The 0-`Busy` assertion assumes a disk no more than about a third slower than this host's:
 //! with the kernel-queue lock a waiter can lose a few hundred releases in a row (docs/perf.md,
@@ -44,8 +48,9 @@
 //!
 //! Nothing in it waits forever, whatever the lock does. A child gives up at its
 //! [`MAX_BUSY_IN_A_ROW`]th `Busy` in a row, and past [`CHILD_DEADLINE`]; the parent fails the
-//! test as soon as a child fails, and waits for the children only until [`PARENT_DEADLINE`];
-//! and whatever ends the test early, [`Children`] kills and reaps every child still running.
+//! test as soon as a child fails, and waits for the children only until [`PARENT_DEADLINE`]
+//! ([`SMALL`]'s own in the default gate); and whatever ends the test early, [`Children`] kills
+//! and reaps every child still running.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -63,23 +68,35 @@ use swarmops_store::{
     ChangesetMeta, Frame, FsObjectStore, InsertOutcome, Journal, Layout, MetaStore, ObjectStore,
     RealFs, Record, StoreError,
 };
+use swarmops_testkit::child::test_args;
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::RecordingFs;
 use swarmops_testkit::measure::{base_dir, mix, percentile};
 use swarmops_testkit::store::new_root;
 use swarmops_testkit::test_name;
 
-/// How many writer processes the test runs.
+/// How many writer processes the measurement runs.
 const CHILDREN: u64 = 32;
 
-/// How many write transactions each child runs.
+/// How many write transactions each of the measurement's children runs.
 const PER_CHILD: u64 = 1_000;
 
-/// Every child's transactions together.
-const TOTAL: u64 = CHILDREN * PER_CHILD;
+/// The measurement: [`CHILDREN`] children of [`PER_CHILD`] transactions each.
+const MEASUREMENT: Shape = Shape {
+    test: "thirty_two_processes_thousand_transactions_each",
+    children: CHILDREN,
+    per_child: PER_CHILD,
+    deadline: PARENT_DEADLINE,
+};
 
-/// This test's name, which the children are run with.
-const TEST: &str = "thirty_two_processes_thousand_transactions_each";
+/// The measurement's parent and children in the default gate: 2 children of 3 transactions
+/// each.
+const SMALL: Shape = Shape {
+    test: "object_syncs_reach_every_child",
+    children: 2,
+    per_child: 3,
+    deadline: Duration::from_mins(2),
+};
 
 /// Set only in the children: the work directory, which holds the store (`store/`), the
 /// barrier files (`ready-<n>`, `go`), the children's samples (`samples-<n>`) and their output
@@ -93,7 +110,8 @@ const CHILD_NUMBER: &str = "SWARMOPS_TEST_CONTENTION_CHILD";
 const PAUSE: &str = "SWARMOPS_TEST_CONTENTION_PAUSE_US";
 
 /// Set to make a child put and flush that many new objects before each transaction, outside
-/// the lock ([`Prelude`]): other writers' object syncs.
+/// the lock ([`Prelude`]): other writers' object syncs. The measurement reads it, and the
+/// parent sets it for every child it starts.
 const OBJECT_SYNCS: &str = "SWARMOPS_TEST_CONTENTION_OBJECT_SYNCS";
 
 /// The length of each blob a [`Prelude`] puts: 4 KiB.
@@ -120,6 +138,24 @@ const SOLO: u64 = 100;
 
 /// How long a process waits at the barrier before it gives up.
 const BARRIER_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// A run of the parent and its children: the test the children are run as, which runs
+/// [`child`] with this shape; how many children it starts, and how many write transactions each
+/// runs; and how long after the go the parent waits for them before it kills them.
+#[derive(Clone, Copy)]
+struct Shape {
+    test: &'static str,
+    children: u64,
+    per_child: u64,
+    deadline: Duration,
+}
+
+impl Shape {
+    /// Every child's transactions together.
+    const fn total(self) -> u64 {
+        self.children * self.per_child
+    }
+}
 
 fn store_root(work: &Path) -> Utf8PathBuf {
     Utf8PathBuf::from_path_buf(work.join("store")).expect("UTF-8 work dir")
@@ -309,9 +345,9 @@ fn child_env() -> Option<(PathBuf, u64)> {
     Some((PathBuf::from(work), number))
 }
 
-/// A child: [`PER_CHILD`] write transactions on chain `number`, timed; see the module
+/// A child: `per_child` write transactions on chain `number`, timed; see the module
 /// documentation.
-fn child(work: &Path, number: u64) {
+fn child(work: &Path, number: u64, per_child: u64) {
     let root = store_root(work);
     let store = MetaStore::open(&root).expect("open the store");
     let prelude = Prelude {
@@ -323,11 +359,11 @@ fn child(work: &Path, number: u64) {
     let pause = pause();
     let started = Instant::now();
     let deadline = started + CHILD_DEADLINE;
-    let capacity = usize::try_from(PER_CHILD).expect("PER_CHILD fits in usize");
+    let capacity = usize::try_from(per_child).expect("per_child fits in usize");
     let (mut transactions, mut waits) =
         (Vec::with_capacity(capacity), Vec::with_capacity(capacity));
     let (mut busy, mut checkpoints) = (0_u64, 0_u64);
-    for j in 0..PER_CHILD {
+    for j in 0..per_child {
         if j > 0 && !pause.is_zero() {
             thread::sleep(pause);
         }
@@ -350,7 +386,7 @@ fn child(work: &Path, number: u64) {
     let [txn_p50, txn_p99, txn_max] = spread(&mut transactions).map(|d| d.as_micros());
     let [lock_p50, lock_p99, lock_max] = spread(&mut waits).map(|d| d.as_micros());
     println!(
-        "{SUMMARY}{number},\"transactions\":{PER_CHILD},\"pause_us\":{},\"object_syncs\":{},\
+        "{SUMMARY}{number},\"transactions\":{per_child},\"pause_us\":{},\"object_syncs\":{},\
          \"busy\":{busy},\"checkpoints\":{checkpoints},\"elapsed_us\":{},\
          \"txn_p50_us\":{txn_p50},\"txn_p99_us\":{txn_p99},\"txn_max_us\":{txn_max},\
          \"lock_p50_us\":{lock_p50},\"lock_p99_us\":{lock_p99},\"lock_max_us\":{lock_max}}}",
@@ -400,19 +436,20 @@ fn output(work: &Path, stream: &str, number: u64) -> String {
         .unwrap_or_else(|e| format!("({stream} of child {number} unreadable: {e})"))
 }
 
-/// Spawns the children on the store in `work`, each writing its stdout and stderr to files
-/// there.
-fn spawn_children(work: &Path) -> Children {
+/// Spawns `shape`'s children on the store in `work`, each handed `objects` ([`OBJECT_SYNCS`])
+/// and writing its stdout and stderr to files there.
+fn spawn_children(work: &Path, shape: Shape, objects: u64) -> Children {
     let exe = std::env::current_exe().expect("this test binary");
     let mut children = Children(Vec::new());
-    for number in 0..CHILDREN {
+    for number in 0..shape.children {
         let file = |stream| {
             File::create(output_file(work, stream, number)).expect("create a child's output file")
         };
         let child = Command::new(&exe)
-            .args(["--exact", &test_name!(TEST), "--ignored", "--nocapture"])
+            .args(test_args(&test_name!(shape.test)))
             .env(WORK_DIR, work)
             .env(CHILD_NUMBER, number.to_string())
+            .env(OBJECT_SYNCS, objects.to_string())
             .stdout(file("stdout"))
             .stderr(file("stderr"))
             .spawn()
@@ -427,7 +464,8 @@ fn spawn_children(work: &Path) -> Children {
 fn wait_until_ready(work: &Path, children: &mut Children) {
     let deadline = Instant::now() + BARRIER_TIMEOUT;
     let ready = |number| work.join(format!("ready-{number}")).exists();
-    while !(0..CHILDREN).all(ready) {
+    let count = to_u64(children.0.len());
+    while !(0..count).all(ready) {
         for (number, child) in (0..).zip(&mut children.0) {
             if let Some(status) = child.try_wait().expect("poll a child") {
                 let stderr = output(work, "stderr", number);
@@ -440,9 +478,9 @@ fn wait_until_ready(work: &Path, children: &mut Children) {
 }
 
 /// Waits until every child has exited cleanly. A child that fails fails the test at once,
-/// with its output, and so do children still running at `deadline`; the guard then kills the
-/// rest.
-fn wait_for_children(work: &Path, children: &mut Children, deadline: Instant) {
+/// with its output, and so do children still running `deadline` after the go (`started`); the
+/// guard then kills the rest.
+fn wait_for_children(work: &Path, children: &mut Children, started: Instant, deadline: Duration) {
     loop {
         let mut running = Vec::new();
         for (number, child) in (0..).zip(&mut children.0) {
@@ -460,8 +498,8 @@ fn wait_for_children(work: &Path, children: &mut Children, deadline: Instant) {
             return;
         }
         assert!(
-            Instant::now() < deadline,
-            "children {running:?} still running {PARENT_DEADLINE:?} after the go"
+            started.elapsed() < deadline,
+            "children {running:?} still running {deadline:?} after the go"
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -478,9 +516,9 @@ fn summary(work: &Path, number: u64) -> String {
 }
 
 /// Every child's samples: the transactions' times and the lock waits.
-fn samples(work: &Path) -> (Vec<Duration>, Vec<Duration>) {
+fn samples(work: &Path, children: u64) -> (Vec<Duration>, Vec<Duration>) {
     let (mut transactions, mut waits) = (Vec::new(), Vec::new());
-    for number in 0..CHILDREN {
+    for number in 0..children {
         let text = fs::read_to_string(work.join(format!("samples-{number}"))).expect("samples");
         for line in text.lines() {
             let (transaction, wait) = line.split_once(' ').expect("two samples a line");
@@ -492,30 +530,43 @@ fn samples(work: &Path) -> (Vec<Duration>, Vec<Duration>) {
     (transactions, waits)
 }
 
-/// Runs the children on the store in `work`, lets them go together once all are ready, and
-/// returns their summary lines and the time from the go until the last one exited.
-fn run_children(work: &Path) -> (Vec<String>, Duration) {
-    let mut children = spawn_children(work);
+/// Runs `shape`'s children on the store in `work`, each handed `objects`, lets them go together
+/// once all are ready, and returns their summary lines and the time from the go until the last
+/// one exited.
+fn run_children(work: &Path, shape: Shape, objects: u64) -> (Vec<String>, Duration) {
+    let mut children = spawn_children(work, shape, objects);
     wait_until_ready(work, &mut children);
     let started = Instant::now();
     fs::write(work.join("go"), b"").expect("say go");
-    wait_for_children(work, &mut children, started + PARENT_DEADLINE);
+    wait_for_children(work, &mut children, started, shape.deadline);
     let wall = started.elapsed();
-    let lines = (0..CHILDREN).map(|number| summary(work, number)).collect();
+    let lines = (0..shape.children)
+        .map(|number| summary(work, number))
+        .collect();
     (lines, wall)
 }
 
 /// Prints what the children measured, aggregated, and returns how many `Busy` errors they
 /// met. Besides the transaction and the lock wait, it gives each transaction's time in the
 /// lock once `write` returned (the transaction minus its lock wait): the insert and the
-/// commit, the two journal syncs included, which is what [`OBJECT_SYNCS`] may slow.
-fn print_contention(work: &Path, lines: &[String], wall: Duration) -> u64 {
+/// commit, the two journal syncs included, which is what [`OBJECT_SYNCS`] may slow. The children
+/// are `shape`'s, each handed `objects`.
+fn print_contention(
+    work: &Path,
+    shape: Shape,
+    objects: u64,
+    lines: &[String],
+    wall: Duration,
+) -> u64 {
     let busy = lines.iter().map(|line| field(line, "busy")).sum();
     let elapsed = |line: &String| Duration::from_micros(field(line, "elapsed_us"));
     let fastest = lines.iter().map(elapsed).min().expect("children");
     let slowest = lines.iter().map(elapsed).max().expect("children");
-    let (mut transactions, mut waits) = samples(work);
-    assert_eq!(transactions.len(), usize::try_from(TOTAL).expect("fits"));
+    let (mut transactions, mut waits) = samples(work, shape.children);
+    assert_eq!(
+        transactions.len(),
+        usize::try_from(shape.total()).expect("fits")
+    );
     // Paired sample by sample, before the sorts below.
     let mut in_lock: Vec<Duration> = transactions
         .iter()
@@ -525,12 +576,13 @@ fn print_contention(work: &Path, lines: &[String], wall: Duration) -> u64 {
     let [txn_p50, txn_p99, txn_max] = spread(&mut transactions);
     let [lock_p50, lock_p99, lock_max] = spread(&mut waits);
     let [held_p50, held_p99, held_max] = spread(&mut in_lock);
-    let total = f64::from(u32::try_from(TOTAL).expect("TOTAL fits in u32"));
+    let total = f64::from(u32::try_from(shape.total()).expect("the total fits in u32"));
     println!(
-        "{CHILDREN} processes x {PER_CHILD} write transactions of one changeset, {} us apart, \
-         {} new objects put and flushed before each:",
+        "{} processes x {} write transactions of one changeset, {} us apart, \
+         {objects} new objects put and flushed before each:",
+        shape.children,
+        shape.per_child,
         pause().as_micros(),
-        object_syncs()
     );
     println!(
         "  wall {:.1} s, {:.1} transactions/s, Busy {busy}",
@@ -601,10 +653,10 @@ impl JournalShape {
 
 /// Checks the store as `verify` would, through a snapshot: every changeset there, each in the
 /// frame of a transaction of its own with the seqs contiguous in journal order, and every
-/// chain intact.
-fn check_store(store: &MetaStore, frames: &[Frame]) {
+/// chain intact. The children are `shape`'s.
+fn check_store(store: &MetaStore, shape: Shape, frames: &[Frame]) {
     let read = store.read().expect("a snapshot");
-    assert_eq!(read.count_changesets().expect("count"), TOTAL);
+    assert_eq!(read.count_changesets().expect("count"), shape.total());
     let mut seq = 0;
     for frame in frames {
         match &frame.records[..] {
@@ -617,9 +669,9 @@ fn check_store(store: &MetaStore, frames: &[Frame]) {
             records => panic!("frame {} holds {records:?}", frame.seq),
         }
     }
-    assert_eq!(seq, TOTAL, "a frame per transaction");
-    for chain in 0..CHILDREN {
-        for j in 0..PER_CHILD {
+    assert_eq!(seq, shape.total(), "a frame per transaction");
+    for chain in 0..shape.children {
+        for j in 0..shape.per_child {
             let got = read
                 .changeset(id(chain, j))
                 .expect("find")
@@ -631,6 +683,27 @@ fn check_store(store: &MetaStore, frames: &[Frame]) {
             );
         }
     }
+}
+
+/// Checks that every one of `shape`'s children put the `objects` new objects it was handed
+/// before each of its transactions: its summary line gives that number, and the store at
+/// `root` holds them all, `objects` for each transaction.
+fn check_object_syncs(root: &Utf8Path, shape: Shape, objects: u64, lines: &[String]) {
+    for (number, line) in lines.iter().enumerate() {
+        assert_eq!(
+            field(line, "object_syncs"),
+            objects,
+            "child {number} was handed {objects} objects a transaction: {line}"
+        );
+    }
+    let stored = FsObjectStore::open(Layout::new(root), Box::new(RealFs))
+        .list()
+        .expect("list the objects");
+    assert_eq!(
+        to_u64(stored.len()),
+        shape.total() * objects,
+        "the objects the children put"
+    );
 }
 
 /// Times `f` [`SOLO`] times and returns its p50 and p99.
@@ -671,19 +744,21 @@ fn print_uncontended_transaction(store: &MetaStore) {
 #[ignore = "measurement, 5-15 min (fsync-bound): 32 processes x 1,000 fsync'd write transactions; prints the table docs/perf.md cites"]
 fn thirty_two_processes_thousand_transactions_each() {
     if let Some((work, number)) = child_env() {
-        child(&work, number);
+        child(&work, number, MEASUREMENT.per_child);
         return;
     }
+    let objects = object_syncs();
     let work = tempfile::tempdir_in(base_dir()).expect("create the work dir");
     let root = store_root(work.path());
     fs::create_dir(&root).expect("create the store root");
     let store = MetaStore::create(&root).expect("create the store");
 
-    let (lines, wall) = run_children(work.path());
-    let busy = print_contention(work.path(), &lines, wall);
+    let (lines, wall) = run_children(work.path(), MEASUREMENT, objects);
+    let busy = print_contention(work.path(), MEASUREMENT, objects, &lines, wall);
     let journal = JournalShape::read(&root);
     print_uncontended_write(&store);
-    check_store(&store, &journal.frames);
+    check_store(&store, MEASUREMENT, &journal.frames);
+    check_object_syncs(&root, MEASUREMENT, objects, &lines);
     assert!(
         journal.past_ckpt < 32,
         "{} frames past the checkpoint",
@@ -692,6 +767,25 @@ fn thirty_two_processes_thousand_transactions_each() {
     print_uncontended_transaction(&store);
     // Last, so that a run that meets `Busy` still checks the store and prints everything.
     assert_eq!(busy, 0, "Busy errors");
+}
+
+#[test]
+fn object_syncs_reach_every_child() {
+    const OBJECTS: u64 = 2;
+    if let Some((work, number)) = child_env() {
+        child(&work, number, SMALL.per_child);
+        return;
+    }
+    let work = tempfile::tempdir().expect("create the work dir");
+    let root = store_root(work.path());
+    fs::create_dir(&root).expect("create the store root");
+    let store = MetaStore::create(&root).expect("create the store");
+
+    let (lines, wall) = run_children(work.path(), SMALL, OBJECTS);
+    print_contention(work.path(), SMALL, OBJECTS, &lines, wall);
+    let journal = JournalShape::read(&root);
+    check_store(&store, SMALL, &journal.frames);
+    check_object_syncs(&root, SMALL, OBJECTS, &lines);
 }
 
 #[test]

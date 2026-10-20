@@ -70,6 +70,14 @@ fn assert_breaks(rule: &str, run: impl FnOnce()) {
     assert_eq!(broken(run).as_deref(), Some(rule));
 }
 
+/// [`assert_breaks`], and the panic names `method` as the call that broke the rule.
+#[track_caller]
+fn assert_breaks_by(rule: &str, method: &str, run: impl FnOnce()) {
+    let message = panic_message(run).unwrap_or_default();
+    let by = format!("order check: {rule} violated by {method} ");
+    assert!(message.starts_with(&by), "{message:?} is not {by:?}");
+}
+
 /// The rule ids are W1 to W8, the names storage spec §2 rule 4 states the rules under, and
 /// a violation's panic starts with its rule's id.
 #[test]
@@ -94,35 +102,66 @@ fn rule_ids_are_w1_to_w8() {
     }
 }
 
+/// Section `n` of storage spec `spec`, from its heading to the next.
+fn section(spec: &str, n: u32) -> &str {
+    let start = spec
+        .find(&format!("\n## {n}. "))
+        .expect("the section's heading");
+    let len = spec[start + 1..]
+        .find("\n## ")
+        .map_or(spec.len() - start, |end| end + 1);
+    &spec[start..start + len]
+}
+
+/// The rules the checker enforces that §2 of storage spec `spec` does not state under their ids.
+fn unstated(spec: &str) -> Vec<Rule> {
+    let disk = section(spec, 2);
+    (Rule::ALL.into_iter())
+        .filter(|rule| !disk.contains(&format!("- {rule} ")))
+        .collect()
+}
+
+/// The checker's old ids, R1 to R7, that storage spec `spec` names outside §6, whose review
+/// invariants R1 to R4 are: each counted where it stands as a word of its own (not in `R10`).
+fn old_ids_outside_the_reviews(spec: &str) -> Vec<String> {
+    let words = |text: &str, id: &str| {
+        let alone = |c: Option<char>| !c.is_some_and(char::is_alphanumeric);
+        (text.match_indices(id))
+            .filter(|&(at, _)| {
+                alone(text[..at].chars().next_back()) && alone(text[at + id.len()..].chars().next())
+            })
+            .count()
+    };
+    let review = section(spec, 6);
+    (1..=7)
+        .map(|n| format!("R{n}"))
+        .filter(|id| words(spec, id) != words(review, id))
+        .collect()
+}
+
 /// Storage spec §2 rule 4 states every rule the checker enforces, under its id, and the
-/// checker's old ids are gone from the spec: "R1" is only §6's first review invariant.
+/// checker's old ids, R1 to R7, are gone from the spec: R1 to R4 are only §6's review
+/// invariants. A spec that leaves a rule out, or names an old id beside its rule, fails.
 #[test]
 fn the_spec_states_every_write_order_rule() {
     const SPEC: &str = include_str!(
         "../../../../docs/superpowers/specs/2026-10-15-swarmops-storage-core-design.md"
     );
-    let section = |n: u32| {
-        let start = SPEC
-            .find(&format!("\n## {n}. "))
-            .expect("the section's heading");
-        let len = SPEC[start + 1..]
-            .find("\n## ")
-            .map_or(SPEC.len() - start, |end| end + 1);
-        &SPEC[start..start + len]
-    };
-    let disk = section(2);
-    for rule in Rule::ALL {
-        assert!(
-            disk.contains(&format!("- {rule} ")),
-            "storage spec §2 does not state {rule}"
-        );
-    }
-    let review = section(6);
     assert_eq!(
-        SPEC.matches("R1").count(),
-        review.matches("R1").count(),
-        "storage spec names R1 outside §6"
+        unstated(SPEC),
+        [],
+        "storage spec §2 does not state these rules"
     );
+    assert_eq!(
+        old_ids_outside_the_reviews(SPEC),
+        Vec::<String>::new(),
+        "storage spec names these old ids outside §6"
+    );
+    assert_eq!(unstated(&SPEC.replacen("- W3 ", "- ", 1)), [Rule::W3]);
+    let stale = SPEC.replacen("- W7 ", "- W7 (옛 R7) ", 1);
+    assert_eq!(old_ids_outside_the_reviews(&stale), ["R7"]);
+    let stale = SPEC.replacen("- W1 ", "- W1 (R1) ", 1);
+    assert_eq!(old_ids_outside_the_reviews(&stale), ["R1"]);
 }
 
 /// `RealFs` whose `k`-th call fails with `EIO` once: a flushing call does its work first.
@@ -142,7 +181,7 @@ fn w1_a_frame_is_listed_only_once_it_is_durable() {
     let fs = OrderCheckFs::new(RealFs);
     // Written, never synced: listing it breaks W1.
     let at = fs.append(&log, &compacted()).unwrap();
-    assert_breaks("W1", || {
+    assert_breaks_by("W1", "append_durable", || {
         fs.append_durable(&off, &at.to_le_bytes()).unwrap();
     });
     // Synced first, it may be listed.
@@ -198,8 +237,9 @@ fn w1_a_cut_never_takes_a_listed_frame_or_a_synced_entry() {
     let at = fs.append_durable(&log, &compacted()).unwrap();
     fs.append_durable(&off, &at.to_le_bytes()).unwrap();
     let end = at + to_u64(compacted().len());
-    assert_breaks("W1", || fs.truncate(&log, end - 1).unwrap());
+    assert_breaks_by("W1", "truncate", || fs.truncate(&log, end - 1).unwrap());
     assert_breaks("W1", || fs.truncate(&off, 4).unwrap());
+    assert_breaks("W1", || fs.truncate(&off, ENTRY_LEN - 1).unwrap());
     fs.append(&log, b"torn").unwrap();
     fs.truncate(&log, end).unwrap();
     fs.append(&off, &[1, 2, 3]).unwrap();
@@ -213,9 +253,30 @@ fn w1_a_cut_never_takes_a_listed_frame_or_a_synced_entry() {
     fs::write(&off, &entries).unwrap();
     let fs = OrderCheckFs::new(RealFs);
     assert_breaks("W1", || fs.truncate(&off, ENTRY_LEN).unwrap());
+    assert_breaks("W1", || fs.truncate(&off, 2 * ENTRY_LEN - 1).unwrap());
     assert_breaks("W1", || fs.truncate(&log, second).unwrap());
     fs.truncate(&off, 2 * ENTRY_LEN).unwrap();
     fs.truncate(&log, to_u64(frames.len())).unwrap();
+}
+
+/// An entry of `journal.off` that the checker cannot read counts as one that lists a frame (the
+/// safe way): a `journal.off` that holds no entry it can read, a directory in its place here, is
+/// not cut below the entries this process synced there.
+#[test]
+fn w1_an_entry_the_checker_cannot_read_counts_as_listed() {
+    let (_dir, root) = root();
+    let (log, off) = (root.join("meta/journal.log"), root.join("meta/journal.off"));
+    let fs = OrderCheckFs::new(RealFs);
+    let first = fs.append_durable(&log, &compacted()).unwrap();
+    fs.append_durable(&off, &first.to_le_bytes()).unwrap();
+    let second = fs.append_durable(&log, &compacted()).unwrap();
+    fs.append_durable(&off, &second.to_le_bytes()).unwrap();
+    fs::remove_file(&off).unwrap();
+    fs::create_dir(&off).unwrap();
+    // A long name, so that the directory's length covers both entries on any filesystem.
+    File::create(off.join("a-name-of-thirty-two-characters.")).unwrap();
+    assert!(real_len(&off) >= 2 * ENTRY_LEN, "{}", real_len(&off));
+    assert_breaks("W1", || fs.truncate(&off, ENTRY_LEN).unwrap());
 }
 
 #[test]
@@ -224,11 +285,13 @@ fn w2_a_ref_moves_only_once_its_frame_is_durable() {
     let (log, main) = (root.join("meta/journal.log"), root.join("meta/refs/main"));
     let fs = OrderCheckFs::new(RealFs);
     fs.append(&log, &compacted()).unwrap();
-    assert_breaks("W2", || fs.atomic_replace(&main, b"x").unwrap());
+    assert_breaks_by("W2", "atomic_replace", || {
+        fs.atomic_replace(&main, b"x").unwrap();
+    });
     fs.sync_data(&log).unwrap();
     fs.atomic_replace(&main, b"x").unwrap();
     fs.append(&log, &compacted()).unwrap();
-    assert_breaks("W2", || fs.remove(&main).unwrap());
+    assert_breaks_by("W2", "remove", || fs.remove(&main).unwrap());
 }
 
 #[test]
@@ -319,9 +382,11 @@ fn compacting(
 #[test]
 fn w4_views_are_renamed_synced_after_the_index_and_in_order() {
     let (_dir, _root, fs, rename) = compacting(false);
-    assert_breaks("W4", || rename(&fs, "ids.key")); // the index is not synced
+    // The index is not synced: refused before the rename.
+    assert_breaks_by("W4", "rename_durable", || rename(&fs, "ids.key"));
     let (_dir, _root, fs, rename) = compacting(true);
-    assert_breaks("W4", || rename(&fs, "dh.key")); // the counts grow along the order
+    // The counts grow along the order: refused once the rename is done.
+    assert_breaks_by("W4", "rename_durable", || rename(&fs, "dh.key"));
     let (_dir, root, fs, rename) = compacting(true);
     for view in ["ids.key", "ids.rec", "dh.key", "dh.rec"] {
         rename(&fs, view);
@@ -348,7 +413,7 @@ fn w5_objects_are_durable_before_the_frame_that_names_them() {
     let fs = OrderCheckFs::new(RealFs);
     let unsynced = staging.join("unsynced");
     fs.append(&unsynced, b"object").unwrap();
-    assert_breaks("W5", || {
+    assert_breaks_by("W5", "link_noclobber", || {
         fs.link_noclobber(&unsynced, &object).unwrap();
     });
     let temp = fs.write_durable_temp(&staging, b"object").unwrap();
