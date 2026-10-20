@@ -16,10 +16,12 @@
 // pinned commit's, so every output reproduces byte for byte.
 //
 // The mapping, one part per idea of the storage spec:
-//   commit cartridges on the feed rail  - writers' metadata transactions, queued
+//   commit cartridges on the feed rail  - writers' metadata transactions waiting for the lock;
+//                                         the kernel wakes them in no strict order, so now and
+//                                         then one hops to the head of the line
 //   the lifting gate                    - meta/lock, one flock for every writer
 //   the press stamping the paper tape   - one CRC-framed frame appended to journal.log
-//   the tape folding into the tray      - the journal: append-only, never rewritten
+//   the tape folding into the tray      - the journal, one frame after another
 //   pellets dropping into 16 bins       - object files into fan-out directories, no lock
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -294,7 +296,7 @@ function body() {
   return parts;
 }
 
-const label = "The SwarmOps store drawn as a machine. Commit cartridges wait on a feed rail behind a gate, the one metadata lock; the gate lets one through at a time, a press stamps it as one frame onto a paper tape, the append-only journal, and the tape folds into a tray. Beside it, object pellets drop into sixteen bins with no gate at all.";
+const label = "The SwarmOps store drawn as a machine. Commit cartridges wait on a feed rail behind a gate, the one metadata lock, which lets one through at a time, in no strict order; a press stamps it as one frame onto a paper tape, the append-only journal, and the tape folds into a tray. Beside it, object pellets drop into sixteen bins with no gate at all.";
 
 function stillSvg(theme) {
   const svg = k.figureSvg({ width: WIDTH, height: HEIGHT, label, body: body(), standalone: theme });
@@ -325,6 +327,20 @@ const still = matchMedia("(prefers-reduced-motion: reduce)");
 const ease = (t) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
 const span = (t, a, b) => ease((t - a) / (b - a));
 const CYCLE = 1.7;
+// At each release the kernel wakes every waiter and the first to run takes the lock: no strict
+// order. So in some cycles, while the press runs, a waiter further back hops to the head of the
+// line, over the ones it passes (HOPS gives the waiter, by its place in the line; 0 is none).
+const HOPS = [0, 3, 0, 1, 4, 0, 2, 0];
+const HOP_Z = C.CART_H + 8;
+const layer = gate.parentNode;
+let hopper = -1;
+// Waiting cartridges are drawn farthest first, and the one hopping over them last.
+function lift(k) {
+  if (k === hopper) return;
+  for (let i = C.QUEUE - 1; i >= 0; i--) if (i !== k) layer.insertBefore(queued[i], gate);
+  if (k >= 0) layer.insertBefore(queued[k], gate);
+  hopper = k;
+}
 let clock = 0, last = 0, frame = 0, visible = false, written = 0, objects = 0, speed = 1;
 const drops = pellets.map((_, i) => ({ t: -i * 0.29, el: pellets[i], halo: landings[i] }));
 const TOP = 46, FALL = 1.15;
@@ -336,9 +352,17 @@ function pose(t) {
   active.setAttribute("transform", translateAlong(P, [C.HEAD_X + (C.PRESS_X - C.HEAD_X) * travel + (C.EXIT_X - C.PRESS_X) * span(f, 0.66, 0.86), 0, 0]));
   active.style.opacity = String(1 - span(f, 0.8, 0.9));
   const advance = span(f, 0.06, 0.3);
+  const k = HOPS[n % HOPS.length];
+  const hop = k > 0 && f >= 0.46;
+  lift(hop ? k : -1);
+  const up = hop ? span(f, 0.46, 0.54) * (1 - span(f, 0.8, 0.88)) : 0;
+  const along = hop ? span(f, 0.52, 0.82) : 0;
   queued.forEach((el, i) => {
-    const x = C.HEAD_X - C.SLOT * (i + 1) + C.SLOT * advance;
-    el.setAttribute("transform", translateAlong(P, [x, 0, 0]));
+    const slot = C.HEAD_X - C.SLOT * i;
+    let x = slot - C.SLOT + C.SLOT * advance, z = 0;
+    if (hop && i < k) x = slot - C.SLOT * along;
+    if (hop && i === k) { x = slot + C.SLOT * k * along; z = HOP_Z * up; }
+    el.setAttribute("transform", translateAlong(P, [x, 0, z]));
     el.style.opacity = i === C.QUEUE - 1 ? String(advance) : "1";
   });
   const press = span(f, 0.34, 0.46) * (1 - span(f, 0.5, 0.62));
@@ -397,10 +421,10 @@ function page(theme) {
     readout: "frame 128 · 4 waiting for meta/lock · 2048 objects, no lock",
     keys: [
       { mark: "lit", label: "The commit in flight: the one writer holding meta/lock" },
-      { mark: "raised", label: "Queued commits, and objects dropping into fan-out bins with no lock" },
+      { mark: "raised", label: "Commits waiting for the lock, in no strict order, and objects dropping into fan-out bins with no lock" },
     ],
     caption:
-      "Writers' metadata transactions queue for one lock and each becomes one CRC-framed frame appended to journal.log; objects are written before any frame names them, into 256 fan-out directories, without a lock (sixteen bins drawn). Measured on one busy host (docs/perf.md, 2026-10-16, with the writer lock that ships): with 32 processes committing through the binary at once, 72.7 commits a second and a median commit of 427 ms (p99 656 ms), about 406 ms of it the wait for the lock; the metadata transactions alone, at store level, 120.9 a second; and object writes on 32 threads in one process 13.8× as fast as on one thread, as the disk and ext4's journal commit concurrent fsyncs together.",
+      "Writers' metadata transactions wait for one lock, an flock: at each release the kernel wakes every waiter and the first to run takes it, so the order is not strict and a later writer can go first. Each transaction becomes one CRC-framed frame appended to journal.log; objects are made durable before any frame names them, into 256 fan-out directories, without a lock (sixteen bins drawn). Measured on one busy host (docs/perf.md, 2026-10-16, with the writer lock that ships): with 32 processes committing through the binary at once, 72.7 commits a second and a median commit of 427 ms (p99 656 ms), about 406 ms of it the wait for the lock; the metadata transactions alone, at store level, 120.9 a second; and object writes on 32 threads in one process 13.8× as fast as on one thread, as the disk and ext4's journal commit concurrent fsyncs together.",
     body: `<div class="iso-stage" tabindex="0" role="img" aria-label="${label}">${svg}</div>`,
   });
   const credit = `<p style="text-align:center;opacity:.7;font-size:12px">Drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT, <a href="/THIRD-PARTY-NOTICES.txt">notice</a>) · <a href="/">swarmops.cc</a></p>`;

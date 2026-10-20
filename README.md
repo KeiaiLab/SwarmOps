@@ -89,11 +89,12 @@ measurements are in [docs/perf.md](docs/perf.md).
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/store-dark.svg">
-    <img src="docs/assets/store-light.svg" alt="An isometric drawing of the store as a machine: commit cartridges wait on a feed rail behind one gate, the metadata lock; a press stamps each one as a frame onto a paper tape, the append-only journal; beside it, object pellets drop into sixteen bins with no gate." width="760">
+    <img src="docs/assets/store-light.svg" alt="An isometric drawing of the store as a machine: commit cartridges wait on a feed rail behind one gate, the metadata lock, which lets one through at a time in no strict order; a press stamps each one as a frame onto a paper tape, the append-only journal; beside it, object pellets drop into sixteen bins with no gate." width="760">
   </picture>
   <br>
-  <sub>The store as a machine: writers queue for one lock and each commit becomes one CRC-framed
-  frame of the journal, while objects need no lock.
+  <sub>The store as a machine: writers wait for one lock, which the kernel hands to one of them at
+  a time, in no strict order, and each commit becomes one CRC-framed frame of the journal, while
+  objects need no lock.
   <a href="https://swarmops.cc/explainers/store.html">Interactive version</a>, drawn with
   <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT,
   <a href="site/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
