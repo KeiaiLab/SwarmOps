@@ -1772,8 +1772,8 @@ pub trait StoreOps {
     /// [`ContentInput::File`] names a file on the caller's machine, so it is resolved on the
     /// client: a store that runs in the caller's process reads the file there, and a store that
     /// serves these operations over a wire must refuse such content rather than read a path its
-    /// caller names (M10 adds the client-side pass that turns it into bytes before a request
-    /// leaves the client).
+    /// caller names (the first such server, M11's `serve`, comes with the client-side pass that
+    /// turns it into bytes before a request leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
 
     /// Merges a change three-way onto a ref, `main` by default, and publishes the result there as

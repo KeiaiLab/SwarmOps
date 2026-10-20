@@ -1,9 +1,9 @@
 # Versioning and stability
 
-SwarmOps has not been released. Every crate is at version 0.1.0 (the workspace version), none is
-published (`publish = false`), and there are no tags. This page says what users and agents may
-rely on, what they may not, and how a change to a public surface is made. The release steps are
-in [RELEASE.md](../../RELEASE.md).
+SwarmOps 0.1.0 is the first release, tagged `v0.1.0`. Every crate of the workspace is at version
+0.1.0 (the workspace version), and none is published (`publish = false`). This page says what
+users and agents may rely on, what they may not, and how a change to a public surface is made.
+The release steps are in [RELEASE.md](../../RELEASE.md).
 
 ## Public surfaces
 
@@ -56,7 +56,7 @@ a code's exit code or `retryable` flag; or makes an optional input required.
 
 No compatibility is promised for:
 
-- **The Rust crate APIs**, all seven of them (the six product crates and `swarmops-testkit`).
+- **The Rust crate APIs**, all nine of them (the eight product crates and `swarmops-testkit`).
   They are internal to the workspace and unpublished; `swarmops-api`'s types are a contract only
   through their JSON.
 - **Performance.** The spec's targets and the numbers in [docs/perf.md](../perf.md) are goals

@@ -36,9 +36,9 @@ body:
         - "M5: workspaces"
         - "M6: verify, crash safety, fuzzing"
         - "M7: blame and review"
-        - "M9: simulation and benchmarks"
+        - "M9: simulation and a benchmark gate"
         - "M11: remote sync, offline-first"
-        - "M10: RPC server"
+        - "After v1 (umbrella spec §17)"
         - Not sure
   - type: checkboxes
     id: surfaces
