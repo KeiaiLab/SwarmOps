@@ -205,8 +205,15 @@ other change.
   fixture and names each difference from the archives' manifests (`check_git_fixtures`), then
   runs the fixture tests and the git import's on what that git made
   (`SWARMOPS_GIT_FIXTURES_DIR`). A script a git is too old for (`# needs git X.Y`) is skipped
-  there and said to be. The newest release is moved by hand, in a `ci:` commit, with the SHA-256
-  that kernel.org's signed `sha256sums.asc` gives: Dependabot does not know it.
+  there and said to be. Last, that git checks the git export's repositories
+  (`exported_repositories_pass_git_fsck`, ignored in the default gate because it runs git; run it
+  with `--run-ignored ignored-only`): the fixtures git made, imported, landed on and exported into
+  an empty repository, pass its `git fsck --strict`, and a checkout of the branch gives the
+  store's files, modes and symlinks; for the crafted fixtures, git finds in the export what it
+  finds in the fixture. It refuses a git other than the declared one unless
+  `SWARMOPS_GIT_FIXTURES_ANY_GIT=1`, which the matrix sets. The newest release is moved by hand,
+  in a `ci:` commit, with the SHA-256 that kernel.org's signed `sha256sums.asc` gives: Dependabot
+  does not know it.
 - **A new RustSec advisory turns every push red** through `cargo deny check`, on purpose. Update
   the affected crate; if no fixed release exists and the advisory cannot affect SwarmOps, add an
   `ignore` entry with the advisory id and the reason to `[advisories]` in `deny.toml`, in a

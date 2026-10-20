@@ -782,6 +782,261 @@ fn git_export_is_not_an_mcp_tool() {
     assert_eq!(called["error"]["code"], -32602, "{called}");
 }
 
+/// The commit `sha` of the git repository at `git_dir`, parsed, read through the git side's
+/// reader.
+fn commit_in(git_dir: &std::path::Path, sha: &str) -> swarmops_git::RawCommit {
+    use swarmops_git::{GitSource as _, GixSource, RawCommit, RawKind};
+
+    let repository = GixSource::open(git_dir).expect("open the repository");
+    let oid = sha.parse().expect("a commit id");
+    let (kind, bytes) = repository
+        .read(oid)
+        .expect("the repository holds the commit");
+    assert_eq!(kind, RawKind::Commit, "{sha}");
+    RawCommit::parse(&bytes).expect("a commit")
+}
+
+/// The bytes of the file `path` (`/` between its names) in git's tree `tree` of the repository at
+/// `git_dir`.
+fn file_in(git_dir: &std::path::Path, tree: swarmops_git::GitOid, path: &str) -> Vec<u8> {
+    use swarmops_git::{GitSource as _, GixSource, RawKind, RawTree};
+
+    let repository = GixSource::open(git_dir).expect("open the repository");
+    let mut at = tree;
+    for name in path.split('/') {
+        let (kind, bytes) = repository.read(at).expect("the repository holds the tree");
+        assert_eq!(kind, RawKind::Tree, "{path}");
+        let tree = RawTree::parse(&bytes).expect("a tree");
+        let entry = (tree
+            .entries
+            .iter()
+            .find(|entry| entry.name == name.as_bytes()))
+        .unwrap_or_else(|| panic!("{path}: no {name}"));
+        at = entry.oid;
+    }
+    let (kind, bytes) = repository.read(at).expect("the repository holds the file");
+    assert_eq!(kind, RawKind::Blob, "{path}");
+    bytes
+}
+
+/// A commit made in git, as a person with git would on top of the export: `parent` is the commit
+/// the branch `main` of the repository at `git_dir` names, and the commit's tree is `parent`'s
+/// with one more file, `file`, which holds its own name. Its bytes are `commit_bytes`', author and
+/// committer a person one hour east of UTC. Written through the git side's writer, and the branch
+/// moved to it from `parent`. The commit's sha.
+fn commit_made_in_git(git_dir: &std::path::Path, parent: &str, file: &str) -> String {
+    use swarmops_core::Signature;
+    use swarmops_git::{
+        BranchUpdate, GitSink as _, GixSink, RawCommit, RawKind, RawTree, RawTreeEntry,
+        commit_bytes,
+    };
+
+    let mut sink = GixSink::open(git_dir).expect("open the repository");
+    let parent = parent.parse().expect("a commit id");
+    let (_, bytes) = sink.read(parent).expect("the parent commit");
+    let (_, bytes) = sink
+        .read(RawCommit::parse(&bytes).expect("a commit").tree)
+        .expect("the parent's tree");
+    let mut tree = RawTree::parse(&bytes).expect("a tree");
+    let blob = sink.write_object(RawKind::Blob, file.as_bytes()).unwrap();
+    tree.entries.push(RawTreeEntry {
+        mode: b"100644".to_vec(),
+        name: file.as_bytes().to_vec(),
+        oid: blob,
+    });
+    // git's order: the names' bytes, a directory's as if it ended in `/`.
+    tree.entries.sort_by_key(|entry| {
+        let mut key = entry.name.clone();
+        if entry.mode == b"40000" {
+            key.push(b'/');
+        }
+        key
+    });
+    let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
+    let person = Signature {
+        name: b"A Git User".to_vec(),
+        email: b"git@example.com".to_vec(),
+        secs: 1_760_000_200,
+        offset_secs: 3_600,
+        negative_zero: false,
+    };
+    let message = format!("Add {file}\n");
+    let bytes = commit_bytes(tree, &[parent], &person, &person, &[], message.as_bytes());
+    let commit = sink.write_object(RawKind::Commit, &bytes).unwrap();
+    sink.sync(&[blob, tree, commit]).unwrap();
+    let moved = sink.cas_branch("main", Some(parent), commit);
+    assert_eq!(moved, Ok(BranchUpdate::Applied));
+    commit.to_string()
+}
+
+/// The agent that lands the changes of [`the_round_trip_through_the_binary`]: another one than
+/// [`AGENT`], who commits them.
+const LANDER: &str = "agent/lander-1";
+
+/// The keys of that test's two lands.
+const LAND_KEYS: [&str; 2] = ["binary-land-1", "binary-land-2"];
+
+/// A change landed through the binary.
+struct Landed {
+    /// The changeset [`AGENT`] committed, which the land squashed.
+    change: String,
+    /// The changeset the land made.
+    landed: String,
+}
+
+/// Two changes committed on `main`'s head by [`AGENT`] (`landed/0.txt`, then `landed/1.txt`),
+/// each landed on `main` by [`LANDER`] with its key ([`LAND_KEYS`]).
+fn land_two_changes(store: &Store) -> [Landed; 2] {
+    std::array::from_fn(|n| {
+        let (path, content) = (format!("landed/{n}.txt"), format!("change {n}\n"));
+        let change = store.commit(AGENT, &path, &content, None);
+        let key = LAND_KEYS[n];
+        let landed = (store.run_as(LANDER, &["land", &change, "--key", key], &[])).ok();
+        assert_eq!(landed["status"], "landed", "{landed}");
+        assert_eq!(landed["squashed_from"], json!([change]), "{landed}");
+        let landed = landed["landed"].as_str().expect("an id").to_owned();
+        Landed { change, landed }
+    })
+}
+
+/// What an export of [`land_two_changes`] on top of `linear` leaves in the repository at `dir`,
+/// read back through the git side: the branch `main` names `head_sha`, two linear commits on
+/// `tip`, each message the change's title and the land's trailers (the changeset, the key, the
+/// change squashed), authored by [`AGENT`] and committed by [`LANDER`], neither with an extra
+/// header, and the files of the store: `linear`'s and what the lands added.
+fn assert_lands_exported(
+    store: &Store,
+    dir: &std::path::Path,
+    tip: &str,
+    head_sha: &str,
+    lands: &[Landed; 2],
+) {
+    assert_eq!(branch_at(dir, "main"), head_sha);
+    let second = commit_in(dir, head_sha);
+    let [first_sha] = &second.parents[..] else {
+        panic!("one parent: {second:?}");
+    };
+    let first = commit_in(dir, &first_sha.to_string());
+    let first_parents: Vec<String> = first.parents.iter().map(ToString::to_string).collect();
+    assert_eq!(first_parents, [tip]);
+    for (n, commit) in [&first, &second].into_iter().enumerate() {
+        let Landed { change, landed } = &lands[n];
+        let message = format!(
+            "landed/{n}.txt\n\nSwarmOps-Changeset: {landed}\nSwarmOps-Land-Key: {}\n\
+             SwarmOps-Squashed-From: {change}\n",
+            LAND_KEYS[n]
+        );
+        let text = String::from_utf8_lossy(&commit.message);
+        assert_eq!(text, message, "land {n}");
+        let (author, committer) = (&commit.author, &commit.committer);
+        assert_eq!(author.name, AGENT.as_bytes(), "land {n}");
+        assert_eq!(author.email, b"worker-17@claude-code.swarmops.local");
+        assert_eq!(committer.name, LANDER.as_bytes(), "land {n}");
+        assert_eq!(committer.email, b"lander-1@claude-code.swarmops.local");
+        assert_eq!((author.offset_secs, committer.offset_secs), (0, 0));
+        assert!(commit.extra_headers.is_empty(), "land {n}");
+    }
+    assert_eq!(file_in(dir, first.tree, "landed/0.txt"), b"change 0\n");
+    assert_eq!(file_in(dir, second.tree, "landed/0.txt"), b"change 0\n");
+    assert_eq!(file_in(dir, second.tree, "landed/1.txt"), b"change 1\n");
+    let hello = store.read(&["cat", "main:hello.txt"]).ok();
+    let hello = hello["content"].as_str().expect("text").as_bytes();
+    assert_eq!(file_in(dir, second.tree, "hello.txt"), hello);
+}
+
+/// An export that finds the branch at the export of the head: it exports nothing, writes no
+/// object, leaves the branch at `head_sha` (`old_sha` too) and goes on from the export the
+/// branch holds.
+fn assert_up_to_date(result: &Value, head_sha: &str) {
+    assert_eq!(result["exported"], 0, "{result}");
+    assert_eq!(result["objects_written"], 0, "{result}");
+    assert_eq!(result["branch_moved"], false, "{result}");
+    assert_eq!(result["incremental"], true, "{result}");
+    assert_eq!(result["head_sha"], head_sha, "{result}");
+    assert_eq!(result["old_sha"], head_sha, "{result}");
+    assert!(result.get("warnings").is_none(), "{result}");
+}
+
+/// The round trip through the binary, umbrella §13's completion condition for M8 (the M8 plan's
+/// decisions 4 and 7), every step a run of `swarmops`: `linear` imported, two changes committed
+/// and landed with keys by another agent, the history exported into the fixture's own repository
+/// and into an empty one, a commit made in git on top of the export and imported back onto
+/// `main`, and the export after it a no-op.
+///
+/// - The first export goes on from the fixture's tip: `exported 2`, incremental, the branch moved
+///   from the tip to the second land, and read back it is two linear commits with the land's
+///   trailers ([`assert_lands_exported`]). Run again it exports nothing and writes no object.
+/// - The same store exported into an empty repository gives the same branch sha: the export is
+///   deterministic, whichever repository it writes to.
+/// - The commit made in git on top of the export comes back with `git import --ref main --into
+///   main`: that commit alone (`imported 1`, `skipped 1`), onto the second land, and `main`
+///   names its changeset, which carries the commit's id in `git.oid`. That works only because
+///   every `LocalOps` registers `ExportOid` (M8 Task 6), which the import derives the native
+///   head's export oid with. The export after it is a no-op again: the commit is its changeset's
+///   own export.
+#[test]
+fn the_round_trip_through_the_binary() {
+    let store = Store::init();
+    let linear = Source::new("linear");
+    let tip = linear.commit("refs/heads/main");
+    let dir = (linear.fixture.repo.as_deref()).expect("the fixture holds a repository");
+    let from_git = import(&store, &linear.path, &[]).ok();
+    assert_eq!(from_git["imported"], 5, "{from_git}");
+    assert_eq!(from_git["git_head_sha"], tip.as_str(), "{from_git}");
+    let lands = land_two_changes(&store);
+    let second_land = lands[1].landed.as_str();
+
+    // The export goes on from the fixture's tip, writing the two lands: a commit, two trees (the
+    // root and `landed/`) and a blob for each, as loose files, `linear` being all in a pack.
+    let exported = export(&store, &linear.path, &[]).ok();
+    assert_eq!(exported["exported"], 2, "{exported}");
+    assert_eq!(exported["incremental"], true, "{exported}");
+    assert_eq!(exported["branch_moved"], true, "{exported}");
+    assert_eq!(exported["old_sha"], tip.as_str(), "{exported}");
+    assert_eq!(exported["rewritten"], 0, "{exported}");
+    assert_eq!(exported["head_changeset"], second_land, "{exported}");
+    assert_eq!(exported["objects_written"], 8, "{exported}");
+    assert!(exported.get("warnings").is_none(), "{exported}");
+    assert_eq!(loose_objects(dir), 8);
+    let head_sha = exported["head_sha"].as_str().expect("a sha").to_owned();
+    assert_lands_exported(&store, dir, &tip, &head_sha, &lands);
+
+    // The same export again: nothing to write.
+    assert_up_to_date(&export(&store, &linear.path, &[]).ok(), &head_sha);
+    assert_eq!(loose_objects(dir), 8, "objects were written");
+
+    // The same store into an empty repository: the same sha, all seven commits written.
+    let empty = swarmops_testkit::git::empty_repository();
+    let whole = export(&store, &utf8(&empty.dir), &[]).ok();
+    assert_eq!(whole["head_sha"], head_sha.as_str(), "{whole}");
+    assert_eq!(whole["exported"], 7, "{whole}");
+    assert_eq!(whole["incremental"], false, "{whole}");
+    assert!(whole.get("old_sha").is_none(), "{whole}");
+    assert_eq!(branch_at(&empty.dir, "main"), head_sha);
+
+    // A commit made in git on top of the export comes back, alone, onto the second land.
+    let made = commit_made_in_git(dir, &head_sha, "git-side.txt");
+    let back = import(&store, &linear.path, &["--ref", "main", "--into", "main"]).ok();
+    assert_eq!(back["imported"], 1, "{back}");
+    assert_eq!(back["skipped"], 1, "{back}");
+    assert_eq!(back["ref_moved"], true, "{back}");
+    assert_eq!(back["old_head"], second_land, "{back}");
+    assert_eq!(back["git_head_sha"], made.as_str(), "{back}");
+    let show = store.show("main");
+    assert_eq!(show["id"], back["head_changeset"], "{show}");
+    assert_eq!(show["parents"], json!([second_land]), "{show}");
+    assert_eq!(show["metadata"], json!({"git.oid": made}), "{show}");
+    let cat = store.read(&["cat", "main:git-side.txt"]).ok();
+    assert_eq!(cat["content"], "git-side.txt", "{cat}");
+
+    // The commit is its changeset's own export: nothing to write.
+    let last = export(&store, &linear.path, &[]).ok();
+    assert_up_to_date(&last, &made);
+    assert_eq!(last["head_changeset"], back["head_changeset"], "{last}");
+    assert_eq!(branch_at(dir, "main"), made);
+    store.assert_clean("after the round trip");
+}
+
 /// `swarmops git export` cut short at each of the store's filesystem calls, through the binary
 /// (the M8 plan's Review Focus 3): an export crashed (`SWARMOPS_TEST_CRASH_AT`) or failed
 /// (`SWARMOPS_TEST_FAIL_AT`) at any store call leaves the branch where it was and a store that

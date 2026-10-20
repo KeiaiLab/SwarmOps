@@ -642,6 +642,22 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   single-writer layout through a git remote round-trips, one host landing and exporting and the
   other importing, each step taking only what is new; when both hosts write, the export stops on
   `both_moved` and the imports on `E_GIT_IMPORT_DIVERGED`, and nothing is merged.
+- The round trip through the binary, and `git fsck` of every export in the weekly version matrix.
+  `the_round_trip_through_the_binary` runs the whole of it as `swarmops` commands: `git import` of
+  `linear`, two changes committed and landed with keys (`land --key`) by another agent, `git export`
+  into the fixture's own repository (the two lands as linear commits on its tip, each with its
+  trailers, written as 8 loose objects), the same export again (nothing to write), the same store
+  exported into an empty repository (the same branch sha), a commit made in git on top of the export
+  and brought in by `git import --ref main --into main` (that commit alone, onto the second land),
+  and the export after it, again nothing to write. `exported_repositories_pass_git_fsck` (ignored:
+  it runs git, the one `SWARMOPS_GIT` names or `git` on `PATH`, and refuses a version other than
+  `git-fixtures/GIT_VERSION`'s unless `SWARMOPS_GIT_FIXTURES_ANY_GIT=1`) imports the fixtures git
+  made (`linear`, `merges`, `modes`, `roots`, `refs`, `loose_and_packed`), lands two changes on each
+  and exports them into an empty repository, which `git fsck --strict --no-dangling` accepts and
+  whose checkout gives the store's files, executable bits and symlink targets; for the crafted
+  `signatures`, `headers` and `many_parents`, git finds in the export exactly what it finds in the
+  fixture. The `git-matrix` job of `scheduled.yml` runs it with each of its gits (2.39.5, 2.43.0,
+  2.56.0).
 
 ### Changed
 
