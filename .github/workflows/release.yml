@@ -171,8 +171,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-          # Cross-compiled: Ubuntu's aarch64 GCC links the binaries and compiles the C sources
-          # of zstd-sys and blake3, and QEMU's user-mode emulator runs them for the smoke test.
+          # Cross-compiled: Ubuntu's aarch64 GCC compiles the C sources of zstd-sys and blake3
+          # and drives the link, which the toolchain's rust-lld does (a step below says why);
+          # QEMU's user-mode emulator runs the binaries for the smoke test.
           - target: aarch64-unknown-linux-gnu
             packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
             run-with: qemu-aarch64 -L /usr/aarch64-linux-gnu
@@ -203,6 +204,22 @@ jobs:
           read -ra packages <<<"$PACKAGES"
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+      # GNU ld, which aarch64-linux-gnu-gcc runs by default, flags no version need WEAK, nor
+      # does Ubuntu's LLD 18, so the binaries they link need glibc 2.39 (the smoke test says
+      # why the flag matters). The aarch64 build is linked by the toolchain's own rust-lld,
+      # which links the x86_64 build and flags those needs: GCC runs it for `-fuse-ld=lld`
+      # from the toolchain's `gcc-ld` directory, as rustc has GCC do for x86_64.
+      - name: Link the aarch64 build with the toolchain's rust-lld
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          gcc_ld="$(rustc --print sysroot)/lib/rustlib/$(rustc --print host-tuple)/bin/gcc-ld"
+          if [ ! -x "$gcc_ld/ld.lld" ]; then
+            echo "::error::the pinned toolchain has no rust-lld at $gcc_ld/ld.lld"
+            exit 1
+          fi
+          "$gcc_ld/ld.lld" --version
+          flags="-C link-arg=-fuse-ld=lld -C link-arg=-B$gcc_ld"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=$flags" >>"$GITHUB_ENV"
       - name: Build swarmops and so
         run: cargo build --release --locked -p swarmops-cli --bins --target "$TARGET_TRIPLE"
       # Each binary prints the tag's version and needs no glibc newer than GLIBC_FLOOR; then a
@@ -216,8 +233,23 @@ jobs:
           bin="target/$TARGET_TRIPLE/release"
           file "$bin/swarmops" "$bin/so"
           for name in swarmops so; do
-            glibc=$(readelf --version-info --wide "$bin/$name" | grep -o 'GLIBC_[0-9][0-9.]*' |
-              cut -d_ -f2 | sort -V | tail -n 1)
+            # The glibc a binary needs is the newest of readelf's version needs
+            # (`Name: GLIBC_2.34  Flags: none`) that is not flagged WEAK. A need is flagged WEAK
+            # when every symbol bound to it is a weak reference and the linker marks it so
+            # (rust-lld, which links both builds, does; GNU ld and Ubuntu's LLD 18 do not).
+            # ld.so starts such a binary on a glibc without that version all the same,
+            # saying on stderr "weak version `GLIBC_2.39' not found", and resolves those symbols
+            # to null, which Rust's std checks before it calls `pidfd_spawnp` or `pidfd_getpid`
+            # (GLIBC_2.39).
+            needs=$(readelf --version-info --wide "$bin/$name")
+            glibc=$(sed -n -E '/ Flags: [^:]*WEAK/d; s/.* Name: GLIBC_([0-9][0-9.]*) .*/\1/p' \
+              <<<"$needs" | sort -V | tail -n 1)
+            weak=$(sed -n -E 's/.* Name: GLIBC_([0-9][0-9.]*) +Flags: [^:]*WEAK.*/\1/p' \
+              <<<"$needs" | sort -V | tail -n 1)
+            if [ -z "$glibc" ]; then
+              echo "::error::readelf lists no glibc version that $name needs"
+              exit 1
+            fi
             newest=$(printf '%s\n' "$glibc" "$GLIBC_FLOOR" | sort -V | tail -n 1)
             if [ "$newest" != "$GLIBC_FLOOR" ]; then
               echo "::error::$name needs glibc $glibc, newer than the $GLIBC_FLOOR README promises"
@@ -228,7 +260,7 @@ jobs:
               echo "::error::$name --version printed '$printed', not 'swarmops $VERSION'"
               exit 1
             fi
-            echo "$name: '$printed', glibc $glibc at most"
+            echo "$name: '$printed', glibc $glibc at most${weak:+, $weak for weak symbols only}"
           done
 
           smoke="$RUNNER_TEMP/smoke"
