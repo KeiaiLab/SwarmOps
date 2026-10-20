@@ -2213,6 +2213,7 @@ dependencies = [
  "camino",
  "crc32fast",
  "criterion",
+ "libc",
  "proptest",
  "rayon",
  "swarmops-core",

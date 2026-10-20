@@ -834,6 +834,54 @@ fn verify_reports_a_checkpoint_that_is_not_a_frame_boundary() {
     }
 }
 
+#[test]
+fn verify_reports_a_lock_file_that_is_not_a_regular_file() {
+    // Every write refuses a `meta/lock` that is not a regular file, as damage (E_STORE_CORRUPT,
+    // whose hint is to run verify), so verify must name it too; it only looks at the file, without
+    // opening it or following a symlink, and checks the rest as before. A lock file that is
+    // missing is no damage: the next write makes it.
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+
+    let lock_text = "meta/lock is not a regular file: every write fails on it until it is \
+                     removed, and the next write makes a new one";
+    let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
+    let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
+    for what in ["a FIFO", "a symlink to a regular file", "a directory"] {
+        let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
+        let lock = Layout::new(&root).meta_lock();
+        fs::remove_file(&lock).unwrap();
+        match what {
+            "a FIFO" => {
+                let made = Command::new("mkfifo").arg(&lock).status();
+                assert!(made.expect("run mkfifo").success(), "mkfifo");
+            }
+            "a symlink to a regular file" => {
+                let regular = root.join("regular");
+                fs::write(&regular, b"").unwrap();
+                symlink(regular, &lock).unwrap();
+            }
+            _ => fs::create_dir(&lock).unwrap(),
+        }
+        let report = repo.verify(true).unwrap();
+        assert_eq!(
+            report.problems,
+            [
+                VerifyProblem::MetaCorrupt(lock_text.to_owned()),
+                dangling.clone(),
+                corrupt.clone()
+            ],
+            "{what}"
+        );
+        assert_eq!(report.changesets_checked, 2, "{what}");
+    }
+
+    let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
+    fs::remove_file(Layout::new(&root).meta_lock()).unwrap();
+    let report = repo.verify(true).unwrap();
+    assert_eq!(report.problems, [dangling, corrupt], "a missing lock file");
+}
+
 /// Damages metadata file `file` of the store at `root`: `journal.ckpt` malformed, a journal
 /// file removed, or a sorted view (compacted first) cut inside an entry.
 fn damage_meta(root: &Utf8Path, file: &str) {

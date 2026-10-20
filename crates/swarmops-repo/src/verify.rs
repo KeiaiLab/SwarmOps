@@ -37,6 +37,9 @@
 //!   A ref's target is checked only if the journal reads whole or the index opens: with
 //!   neither, no changeset is known for certain, and the [`VerifyProblem::MetaCorrupt`] says
 //!   that the refs' targets go unchecked.
+//! - The lock file: a `meta/lock` that is not a regular file, which every write refuses before
+//!   it opens it, is a [`VerifyProblem::MetaCorrupt`]. Verify only looks at it
+//!   (`MetaLock::refuses`), and checks it first.
 //! - Every changeset, in seq order: its object, its record against its object (parents, delta
 //!   hash) and its parents' generations, its parents ([`VerifyProblem::MissingParent`]), every
 //!   tree under its root, and its root against its first parent's root with its delta applied
@@ -140,6 +143,8 @@ pub enum VerifyProblem {
     /// A metadata file that verify cannot read as one, so that what depends on it goes
     /// unchecked: a journal file missing, `journal.ckpt` malformed or not a frame boundary, or
     /// index files that do not open. Carries what is damaged and what is not checked for it.
+    /// A `meta/lock` that is not a regular file, which every write refuses, is one too; it then
+    /// carries what to do.
     MetaCorrupt(String),
     /// An entry of the external id index (storage spec §7) that is not one: its file is not 44
     /// bytes of a version-1 entry with a CRC that matches, or not a regular file.
@@ -266,6 +271,7 @@ impl<O: ObjectStore> Repo<O> {
     /// Errors only where it cannot read on.
     pub fn verify(&self, deep: bool) -> Result<VerifyReport, RepoError> {
         let mut check = Check::new(self, deep);
+        check.lock_file();
         let changesets = check.metadata()?;
         for meta in &changesets {
             check.changeset(meta)?;
@@ -467,6 +473,18 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             listed.push((system, entries));
         }
         Ok(listed)
+    }
+
+    /// Reports a `meta/lock` that every write refuses before it opens it (one that is not a
+    /// regular file), looked at without opening it.
+    fn lock_file(&mut self) {
+        if swarmops_store::MetaLock::refuses(&self.repo.layout) {
+            self.meta.push(VerifyProblem::MetaCorrupt(
+                "meta/lock is not a regular file: every write fails on it until it is removed, \
+                 and the next write makes a new one"
+                    .to_owned(),
+            ));
+        }
     }
 
     /// A handle on the journal, or what is wrong with it if one of its files is missing: the
