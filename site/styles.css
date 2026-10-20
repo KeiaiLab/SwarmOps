@@ -146,6 +146,9 @@ h3 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
 .figure { margin: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
 .figure img { display: block; width: 100%; }
 .figure figcaption { padding: 14px 20px 18px; color: var(--muted); font-size: 14.5px; border-top: 1px solid var(--border); }
+/* The interactive figure comes in a dark and a light page: link the one the reader's theme wants. */
+.on-light { display: none; }
+@media (prefers-color-scheme: light) { .on-dark { display: none; } .on-light { display: inline; } }
 
 /* Architecture */
 .arch { display: grid; grid-template-columns: 1fr 1fr; gap: 28px; align-items: start; }
