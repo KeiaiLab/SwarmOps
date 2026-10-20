@@ -1244,6 +1244,23 @@ fn listings_page_with_truncated_and_cursor() {
     );
 }
 
+/// `docs/architecture.md` says how many types `swarmops schema` prints, and the count is the
+/// schema's: it drifted as types were added (41 for 42, then 44 for 45).
+#[test]
+fn the_architecture_overview_counts_the_schema_s_types() {
+    const OVERVIEW: &str = include_str!("../../../docs/architecture.md");
+    let text = OVERVIEW.split_whitespace().collect::<Vec<_>>().join(" ");
+    let said = text
+        .split_once("prints the JSON Schema of ")
+        .and_then(|(_, rest)| rest.split_once(" types"))
+        .and_then(|(count, _)| count.parse::<usize>().ok());
+    let types = schema_for_all().as_object().map(Map::len);
+    assert_eq!(
+        said, types,
+        "docs/architecture.md: `swarmops schema` prints the JSON Schema of <n> types"
+    );
+}
+
 /// `path_history` and `log`'s `paths` (M2 Task 15).
 mod path_history {
     use swarmops_api::{

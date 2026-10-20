@@ -12,7 +12,8 @@ pub enum RepoError {
     /// The store failed: I/O, a corrupt object file, damaged metadata, a writer lock held for
     /// the whole wait ([`StoreError::Busy`], retryable), commits landing during every round of a
     /// snapshot ([`StoreError::SnapshotContended`], retryable), a journal append that failed and
-    /// was undone ([`StoreError::NotCommitted`], retryable), or a store that is not what the call
+    /// was undone ([`StoreError::NotCommitted`], retryable but for a refusal that lasts: for want
+    /// of permission, or by a read-only filesystem), or a store that is not what the call
     /// needs ([`StoreError::Format`]: `open` of a directory that holds no store, or one of a
     /// layout this build does not read; [`StoreError::UnsupportedFs`]: a path under `/mnt/`).
     #[error(transparent)]

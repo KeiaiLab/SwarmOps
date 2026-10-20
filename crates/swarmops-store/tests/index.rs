@@ -326,8 +326,9 @@ fn find_prefix_rejects_what_is_not_a_hex_prefix() {
 
 #[test]
 fn find_delta_hash_groups_rebases() {
-    // A rebase that applies cleanly keeps the delta hash, so the original changeset and the
-    // rebased one share it: one in the sorted view, one in the tail, then both sorted.
+    // A rebase onto an upstream that left the files the change touches alone keeps the delta
+    // hash, so the original changeset and the rebased one share it: one in the sorted view, one
+    // in the tail, then both sorted.
     let change = [0xc1; 32];
     let other = [0xc2; 32];
     let original = meta(spread_id(1), 1, change, vec![]);
@@ -519,6 +520,33 @@ proptest! {
         }
         check_lookups(&index, &model, &probes)?;
         check_lookups(&Index::open(&layout, fast()).unwrap(), &model, &probes)?;
+    }
+}
+
+/// A read of a sorted view's entries past its end, which no lookup asks for, is refused as a
+/// call the store does not take ([`StoreError::BadCall`]), by key and by rec alike, and so is
+/// any read of a view that holds nothing yet.
+#[test]
+fn a_sorted_view_read_past_its_end_is_a_bad_call() {
+    let (_root, layout) = new_root();
+    let mut index = open(&layout);
+    assert_bad_call(index.ids_view().key_at(0), "a key of an empty view");
+    let metas: Vec<ChangesetMeta> = (0..3).map(spread_meta).collect();
+    append_all(&mut index, &metas);
+    assert_eq!(index.compact().unwrap(), 3);
+    let view = index.ids_view();
+    assert_eq!(view.len(), 3);
+    view.key_at(2).unwrap();
+    view.rec_at(2).unwrap();
+    assert_bad_call(view.key_at(3), "the key past the end");
+    assert_bad_call(view.rec_at(3), "the rec past the end");
+    assert_bad_call(view.key_at(u64::MAX), "a key at u64::MAX");
+    match view.rec_at(3) {
+        Err(StoreError::BadCall(what)) => assert_eq!(
+            what,
+            "entries 3..+1 are not within a sorted view of 3 entries"
+        ),
+        other => panic!("expected BadCall, got {other:?}"),
     }
 }
 

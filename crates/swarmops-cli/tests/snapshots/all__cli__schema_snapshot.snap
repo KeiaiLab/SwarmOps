@@ -2011,7 +2011,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_IO",
-          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root.",
+          "description": "The filesystem refused an operation: `details.fs_op` names it, and `details.store_file`\nthe file of the store it was on, relative to the store's root. A journal append it\nrefused for want of permission or as a read-only filesystem also says\n`details.committed: false`: nothing was committed, and running the same operation again\nfails the same way until the hint's cause is fixed.",
           "type": "string"
         },
         {
@@ -4028,7 +4028,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "object": {
-          "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks\n(`missing_object`).",
+          "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks, or holds as\nanother kind (`missing_object`).",
           "type": [
             "string",
             "null"
@@ -4097,7 +4097,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "object": {
-              "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks\n(`missing_object`).",
+              "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks, or holds as\nanother kind (`missing_object`).",
               "type": [
                 "string",
                 "null"

@@ -27,10 +27,10 @@
 //! Each commit puts one small file, `agents/<n>.txt`, whose content names the commit, on
 //! `--parent` the child's own previous changeset (the base for its first), so that no two
 //! children's commits depend on each other. A commit that fails with `E_BUSY` (exit 4,
-//! retryable) is counted and run again; anything else fails the child. The child prints one
-//! report line: each commit's `meta.elapsed_ms` and its wall time from spawn to exit, the
-//! `meta.elapsed_ms` of each `E_BUSY`, its total time from go to its last exit, and its last
-//! changeset.
+//! retryable) is counted, by its cause ([`Busy`]), and run again; anything else fails the child.
+//! The child prints one report line: each commit's `meta.elapsed_ms` and its wall time from
+//! spawn to exit, the `meta.elapsed_ms` of each `E_BUSY` by cause, its total time from go to its
+//! last exit, and its last changeset.
 //!
 //! The parent prints the summary, every line starting [`SUMMARY`]: the 1-minute load average
 //! before, during and after the run, throughput, per-commit latency (nearest-rank
@@ -38,13 +38,22 @@
 //! the fastest; then what [`SOLO`] uncontended commits cost on the final store (and so roughly
 //! how long the contended commits waited for the lock), and what `verify --deep` and
 //! `log -n 5` (from main, moved to child 0's last changeset) return and cost. Only then does
-//! it assert: every `E_BUSY` after the lock timeout, none at all, every commit made (as `info`
-//! counts them), `verify --deep` clean, and the log as committed.
+//! it assert: every `E_BUSY` of the lock after the lock timeout, none at all of either cause,
+//! every commit made (as `info` counts them), `verify --deep` clean, and the log as committed.
+//!
+//! `E_BUSY` has two causes (operations spec §4): the store's lock taken for the whole of its
+//! 10 s timeout, or a read snapshot that met a commit landing in each of its 32 rounds
+//! (`MetaStore::SNAPSHOT_ROUNDS`) and gave up, which waits for no lock and so can come at any
+//! time. The timing check holds an `E_BUSY` of the lock to the timeout, and only that one:
+//! [`Busy::of`] tells a snapshot's by its message, the store's own for a snapshot that gave up,
+//! and takes any other `E_BUSY` for the lock's.
 //!
 //! The 0-`E_BUSY` assertion assumes a disk no more than about a third slower than this host's:
 //! with the kernel-queue lock the longest wait measured here was about 500 lock passes (7.9 s
 //! at 15.7 ms a pass, docs/perf.md "After 7c"), and a third more per pass takes that past the
-//! 10 s timeout.
+//! 10 s timeout. It also holds a snapshot's `E_BUSY` to none: one would take a commit landing in
+//! each of 32 rounds in a row, and would show readers giving up under sustained commits
+//! (docs/known-limitations.md), not a slow lock.
 //!
 //! Nothing in it waits forever, whatever the lock or the binary does. Every `swarmops` run goes
 //! through the support runner, which kills one still running past its deadline and fails with
@@ -65,7 +74,7 @@ use std::time::{Duration, Instant};
 use camino::Utf8PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use swarmops_store::{Journal, Layout, MetaLock, RealFs};
+use swarmops_store::{Journal, Layout, MetaLock, MetaStore, RealFs, StoreError};
 use swarmops_testkit::test_name;
 
 use crate::support;
@@ -177,17 +186,13 @@ fn thirty_two_processes_thousand_commits_each() {
         started.elapsed().as_secs_f64()
     );
 
-    // Every E_BUSY must have come after the lock timeout: one sooner is a fault, not a wait.
-    let early: Vec<u64> = run
-        .reports
-        .iter()
-        .flatten()
-        .flat_map(|report| report.busy_ms.iter().copied())
-        .filter(|&ms| ms < LOCK_TIMEOUT_MS)
-        .collect();
+    // Every E_BUSY of the lock must have come after the lock timeout: one sooner is a fault, not
+    // a wait. A snapshot's E_BUSY waits for no lock, so its time is no fault here; the count
+    // below still holds it to none.
+    let early = early_lock_busy(run.reports.iter().flatten());
     assert!(
         early.is_empty(),
-        "E_BUSY before the lock timeout: {early:?} ms"
+        "E_BUSY of the lock before the lock timeout: {early:?} ms"
     );
     let missing: Vec<&String> = run
         .reports
@@ -201,11 +206,11 @@ fn thirty_two_processes_thousand_commits_each() {
     assert_eq!(
         busy,
         0,
-        "E_BUSY per child: {:?}",
+        "E_BUSY per child, of the lock and of a snapshot: {:?}",
         run.reports
             .iter()
             .flatten()
-            .map(|report| report.busy_ms.len())
+            .map(|report| (report.busy_ms.len(), report.snapshot_busy_ms.len()))
             .collect::<Vec<_>>()
     );
     for report in run.reports.iter().flatten() {
@@ -286,6 +291,34 @@ fn a_hung_child_is_killed_and_reported() {
     assert_eq!(zero.elapsed_ms.len(), 1, "{zero:?}");
 }
 
+/// The parent's timing check, cause by cause: an `E_BUSY` whose message is the store's for a
+/// snapshot that gave up waited for no lock, so it is no early fault however soon it came; any
+/// other `E_BUSY` is the lock's and is held to the lock timeout, to the millisecond.
+#[test]
+fn only_an_e_busy_of_the_lock_is_held_to_the_lock_timeout() {
+    let busy =
+        |e: StoreError| json!({"ok": false, "error": {"code": "E_BUSY", "message": e.to_string()}});
+    let lock = busy(StoreError::Busy);
+    let snapshot = busy(StoreError::SnapshotContended {
+        rounds: MetaStore::SNAPSHOT_ROUNDS,
+    });
+    assert_eq!(Busy::of(&lock), Busy::Lock);
+    assert_eq!(Busy::of(&snapshot), Busy::Snapshot);
+    let mut report = Report {
+        child: 0,
+        elapsed_ms: Vec::new(),
+        wall_us: Vec::new(),
+        busy_ms: Vec::new(),
+        snapshot_busy_ms: Vec::new(),
+        total_us: 0,
+        head: String::new(),
+    };
+    report.met(Busy::of(&snapshot), 5);
+    report.met(Busy::of(&lock), LOCK_TIMEOUT_MS);
+    report.met(Busy::of(&lock), LOCK_TIMEOUT_MS - 1);
+    assert_eq!(early_lock_busy([&report]), [LOCK_TIMEOUT_MS - 1]);
+}
+
 // ---------------------------------------------------------------------------------------------
 // The children.
 // ---------------------------------------------------------------------------------------------
@@ -299,12 +332,49 @@ struct Report {
     elapsed_ms: Vec<u64>,
     /// The wall time of each commit made, from spawn to exit, in µs.
     wall_us: Vec<u64>,
-    /// `meta.elapsed_ms` of each `E_BUSY`.
+    /// `meta.elapsed_ms` of each `E_BUSY` of the lock ([`Busy::Lock`]).
     busy_ms: Vec<u64>,
+    /// `meta.elapsed_ms` of each `E_BUSY` of a snapshot that gave up ([`Busy::Snapshot`]).
+    snapshot_busy_ms: Vec<u64>,
     /// From go to the last commit's exit, in µs.
     total_us: u64,
     /// The last changeset committed: the base if none was.
     head: String,
+}
+
+impl Report {
+    /// Counts an `E_BUSY` of `cause` whose `meta.elapsed_ms` is `elapsed_ms`.
+    fn met(&mut self, cause: Busy, elapsed_ms: u64) {
+        match cause {
+            Busy::Lock => self.busy_ms.push(elapsed_ms),
+            Busy::Snapshot => self.snapshot_busy_ms.push(elapsed_ms),
+        }
+    }
+
+    /// Each `E_BUSY` met, for the summary: the lock's by its time, a snapshot's named as one.
+    fn busy_at(&self) -> impl Iterator<Item = String> + '_ {
+        let child = self.child;
+        let lock = self
+            .busy_ms
+            .iter()
+            .map(move |ms| format!("child {child} after {ms} ms"));
+        let snapshot = self
+            .snapshot_busy_ms
+            .iter()
+            .map(move |ms| format!("child {child}, a snapshot that gave up, after {ms} ms"));
+        lock.chain(snapshot)
+    }
+}
+
+/// The `meta.elapsed_ms` of each `E_BUSY` of the lock in `reports` that came before the lock
+/// timeout, which no lock wait explains. A snapshot's `E_BUSY` is never among them, whenever it
+/// came.
+fn early_lock_busy<'a>(reports: impl IntoIterator<Item = &'a Report>) -> Vec<u64> {
+    reports
+        .into_iter()
+        .flat_map(|report| report.busy_ms.iter().copied())
+        .filter(|&ms| ms < LOCK_TIMEOUT_MS)
+        .collect()
 }
 
 /// What a child runs with: its work directory, its number and the base changeset.
@@ -395,6 +465,7 @@ fn child(env: &ChildEnv) {
         elapsed_ms: Vec::with_capacity(commits),
         wall_us: Vec::with_capacity(commits),
         busy_ms: Vec::new(),
+        snapshot_busy_ms: Vec::new(),
         total_us: 0,
         head: env.base.clone(),
     };
@@ -438,7 +509,7 @@ fn child(env: &ChildEnv) {
                     }
                     Publish::TwoStep => {
                         let mv = (own.as_str(), parent.as_str(), id.as_str());
-                        let (ms, took) = move_ref(&store, &agent, mv, &mut report.busy_ms, &label);
+                        let (ms, took) = move_ref(&store, &agent, mv, &mut report, &label);
                         (elapsed_ms + ms, wall + took)
                     }
                 };
@@ -447,8 +518,8 @@ fn child(env: &ChildEnv) {
                 report.head = id;
                 in_a_row = 0;
             }
-            Outcome::Busy { elapsed_ms } => {
-                report.busy_ms.push(elapsed_ms);
+            Outcome::Busy { elapsed_ms, cause } => {
+                report.met(cause, elapsed_ms);
                 in_a_row += 1;
                 assert!(
                     in_a_row < MAX_BUSY_IN_A_ROW,
@@ -531,14 +602,14 @@ fn commit(
 }
 
 /// Moves ref `name` from `old` to `new` (`(name, old, new)`) as `agent` on `store`: the second
-/// transaction of a publish in two steps. Each `E_BUSY` goes into `busy`, and the move is run
-/// again; anything else but the move fails the test, named after `what`. The move's
-/// `meta.elapsed_ms` and wall time, its `E_BUSY` runs' not counted.
+/// transaction of a publish in two steps. Each `E_BUSY` goes into `report`, by its cause, and
+/// the move is run again; anything else but the move fails the test, named after `what`. The
+/// move's `meta.elapsed_ms` and wall time, its `E_BUSY` runs' not counted.
 fn move_ref(
     store: &str,
     agent: &str,
     (name, old, new): (&str, &str, &str),
-    busy: &mut Vec<u64>,
+    report: &mut Report,
     what: &str,
 ) -> (u64, Duration) {
     let args = [
@@ -554,7 +625,9 @@ fn move_ref(
                 assert_eq!(applied, false, "{what}: the move: {run}");
                 return (elapsed_ms, wall);
             }
-            4 if envelope["error"]["code"] == "E_BUSY" => busy.push(elapsed_ms),
+            4 if envelope["error"]["code"] == "E_BUSY" => {
+                report.met(Busy::of(&envelope), elapsed_ms);
+            }
             _ => panic!("{what}: the move: {run}"),
         }
     }
@@ -565,8 +638,38 @@ fn move_ref(
 enum Outcome {
     /// It made changeset `id`, on the parent it was given.
     Committed { id: String, elapsed_ms: u64 },
-    /// `E_BUSY` (exit 4, retryable): the store's lock stayed taken for the whole timeout.
-    Busy { elapsed_ms: u64 },
+    /// `E_BUSY` (exit 4, retryable), of `cause`.
+    Busy { elapsed_ms: u64, cause: Busy },
+}
+
+/// What an `E_BUSY` came from: the operations spec gives it two causes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Busy {
+    /// The store's lock stayed taken for the whole of its timeout: never sooner than
+    /// [`LOCK_TIMEOUT_MS`].
+    Lock,
+    /// A read snapshot met a commit landing in each of its [`MetaStore::SNAPSHOT_ROUNDS`]
+    /// rounds and gave up ([`StoreError::SnapshotContended`]): it waits for no lock, so it can
+    /// come at any time.
+    Snapshot,
+}
+
+impl Busy {
+    /// The cause of the `E_BUSY` in `envelope`: [`Busy::Snapshot`] if its message carries the
+    /// store's own for a snapshot that gave up, and [`Busy::Lock`] for any other, which the
+    /// timing check holds to the lock timeout.
+    fn of(envelope: &Value) -> Self {
+        let gave_up = StoreError::SnapshotContended {
+            rounds: MetaStore::SNAPSHOT_ROUNDS,
+        }
+        .to_string();
+        let message = envelope["error"]["message"].as_str().unwrap_or_default();
+        if message.contains(&gave_up) {
+            Self::Snapshot
+        } else {
+            Self::Lock
+        }
+    }
 }
 
 /// What `run`, a commit on `parent` that `what` names, came to. Anything else (another error,
@@ -591,7 +694,10 @@ fn outcome(run: &support::Run, parent: Option<&str>, what: &str) -> Outcome {
                 elapsed_ms,
             }
         }
-        4 if envelope["error"]["code"] == "E_BUSY" => Outcome::Busy { elapsed_ms },
+        4 if envelope["error"]["code"] == "E_BUSY" => Outcome::Busy {
+            elapsed_ms,
+            cause: Busy::of(&envelope),
+        },
         _ => panic!("{what}: {run}"),
     }
 }
@@ -683,7 +789,8 @@ fn journal_frames(store: &str) -> u64 {
 }
 
 /// Checks that the harness sees a `Busy`: a commit while this process holds `meta/lock` must
-/// get `E_BUSY` (exit 4) after the store's lock timeout. Returns its `meta.elapsed_ms`.
+/// get the lock's `E_BUSY` (exit 4) after the store's lock timeout. Returns its
+/// `meta.elapsed_ms`.
 fn busy_control(work: &Path, base: &str) -> u64 {
     let store = store_path(work);
     let layout = Layout::new(Utf8PathBuf::from(store.as_str()));
@@ -699,8 +806,13 @@ fn busy_control(work: &Path, base: &str) -> u64 {
         None,
     );
     drop(held);
-    let Outcome::Busy { elapsed_ms } = outcome(&run, Some(base), "the control commit") else {
-        panic!("a commit against a held lock committed: {run}");
+    let control = outcome(&run, Some(base), "the control commit");
+    let Outcome::Busy {
+        elapsed_ms,
+        cause: Busy::Lock,
+    } = control
+    else {
+        panic!("a commit against a held lock did not meet the lock's E_BUSY: {run}");
     };
     assert!(elapsed_ms >= LOCK_TIMEOUT_MS, "{run}");
     println!(
@@ -919,7 +1031,7 @@ fn run_children(work: &Path, base: &str, publish: Publish) -> Contention {
 }
 
 /// Prints what the children measured, with how they published and the journal frames their
-/// run wrote (`(publish, frames)`), and returns how many `E_BUSY`s they met.
+/// run wrote (`(publish, frames)`), and returns how many `E_BUSY`s they met, of either cause.
 fn print_contention(
     run: &Contention,
     commits: usize,
@@ -937,7 +1049,6 @@ fn print_contention(
         .collect();
     elapsed.sort_unstable();
     wall.sort_unstable();
-    let busy: usize = reports.iter().map(|report| report.busy_ms.len()).sum();
     let [before, low, high, after] = run.load;
     let how = match publish {
         Publish::No => "",
@@ -998,16 +1109,8 @@ fn print_contention(
             ms(wall[wall.len() - 1])
         );
     }
-    let busy_at: Vec<String> = reports
-        .iter()
-        .flat_map(|report| {
-            let child = report.child;
-            report
-                .busy_ms
-                .iter()
-                .map(move |ms| format!("child {child} after {ms} ms"))
-        })
-        .collect();
+    let busy_at: Vec<String> = reports.iter().flat_map(|report| report.busy_at()).collect();
+    let busy = busy_at.len();
     println!(
         "{SUMMARY}E_BUSY {busy}{}, children without a report {} (control: E_BUSY after \
          {control_ms} ms)",

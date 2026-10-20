@@ -1,66 +1,45 @@
 //! The metadata store's facade (storage spec §3): [`MetaStore`] opens a store's `meta/`,
 //! [`MetaStore::read`] takes a lock-free snapshot ([`MetaRead`]) and [`MetaStore::write`]
-//! starts a write transaction ([`MetaWrite`]).
+//! starts a write transaction ([`MetaWrite`]). The protocol is the spec's: §3's write
+//! transaction, its commit results and errors, and its reads, with §2 rule 3 for a failed append
+//! or sync. What follows says which method does which part, and what a caller must read again.
 //!
 //! # A write transaction
 //!
-//! [`MetaStore::write`] takes [`MetaLock`], cuts a torn journal tail
-//! ([`Journal::truncate_torn_tail`]) and a torn index tail ([`Index::repair_tail`]), and
-//! replays the frames past `journal.ckpt` into the index and the ref files, so that both
-//! show every committed frame. [`MetaWrite`] then queues records, checking them against the
-//! index, the ref files and what it has queued already. [`MetaWrite::commit`] appends them
-//! as one frame ([`Journal::append_frame`]: the commit point), materializes the frame (an
-//! [`Index::append`] per changeset, without a sync; a ref file replaced per moved ref), and
-//! unlocks. Every 32 frames past the checkpoint, when it compacts (the sync first), and on
-//! [`MetaStore::flush`] if any frame lies past the checkpoint, it also syncs the index and
-//! moves the checkpoint to the end of the journal: the batched durability of the projections.
+//! [`MetaStore::write`] takes [`MetaLock`] and, before it returns, repairs what the writers
+//! before it left: the journal's tail ([`Journal::repair_tail`]), the index's
+//! ([`Index::repair_tail`]), and the frames past `journal.ckpt`, which it replays into the index
+//! and the ref files. [`MetaWrite::recovered`] says what that repair did ([`Recovered`]: all
+//! zero when those writers finished cleanly). The [`MetaWrite`] holds the lock until
+//! [`MetaWrite::commit`] returns, or until it is dropped, which discards what it queued. It
+//! checks each record it queues against the index, the ref files and its queue;
+//! [`MetaWrite::commit`] appends them as one frame ([`Journal::append_frame`]: the commit
+//! point), materializes the frame (an [`Index::append`] per changeset, a ref file per moved
+//! ref), and, in §3's batches or on [`MetaStore::flush`], syncs the index and moves the
+//! checkpoint.
 //!
-//! What the repairs at the start of a write transaction did, [`MetaWrite::recovered`] says
-//! ([`Recovered`]): all zero when the writers before it finished cleanly.
-//!
-//! An error from [`MetaWrite::commit`] says whether the transaction committed. Once its frame
-//! is appended, every error is [`StoreError::PostCommit`]: the frame is durable, a step after
-//! it failed, and the next [`MetaStore::write`] repairs that. A failed index sync returns
-//! before the checkpoint moves, so the checkpoint never passes records that are not durable;
-//! and it first cuts the index back to the records the checkpoint has passed, or to those the
-//! sorted views cover if more ([`Index::truncate_to`]), since a later sync may succeed without
-//! the pages a failed writeback dropped: the next write's replay appends them again, to be
-//! synced afresh. A snapshot taken before the cut can then fail with an I/O error on lookups
-//! that read cut records or scan the index's tail (as [`Index::truncate_to`] lists); a new one
-//! reads right.
-//! An error from the append itself says it as definitely (storage spec §2 rule 3): a failed
-//! append of the frame to `journal.log`, its write or its fdatasync, is
-//! [`StoreError::NotCommitted`], the frame cut back off the journal under the lock before the
-//! error returns (or the process aborted, should the cut fail too), so that the transaction did
-//! not commit and no later writer can list its frame; a failed listing of the durable frame in
-//! `journal.off` is [`StoreError::PostCommit`], since the frame is the commit point. A caller
-//! that retries after `PostCommit` must look again first: an insert is idempotent
-//! ([`InsertOutcome::AlreadyPresent`]), and a ref move compares against the ref as it is then.
-//! After `NotCommitted` nothing of the transaction is in the store.
-//!
-//! A compaction appends a `Compacted` record, in a frame of its own, as an advisory marker: a
-//! compaction that [`Index::repair_tail`] finishes after a crash appends none, so nothing may
-//! expect one per rebuild of the sorted views.
+//! An error says which side of the commit point it fell on. After [`StoreError::NotCommitted`]
+//! nothing of the transaction is in the store. After [`StoreError::PostCommit`] the frame is
+//! durable and the next [`MetaStore::write`] repairs the rest, and a caller that retries must
+//! look again first: an insert is idempotent ([`InsertOutcome::AlreadyPresent`]), and a ref
+//! move compares against the ref as it is then. A failed index sync cuts the index back
+//! ([`Index::truncate_to`]) before it returns, so a snapshot taken before the cut can then fail
+//! with an I/O error on the lookups that method lists; a new snapshot reads right. A
+//! compaction's `Compacted` record is an advisory marker: a compaction that
+//! [`Index::repair_tail`] finishes after a crash appends none, so nothing may expect one per
+//! rebuild of the sorted views.
 //!
 //! # A snapshot
 //!
-//! [`MetaStore::read`] takes no lock and writes nothing. It reads `journal.ckpt`, opens the
-//! index, reads the frames past the checkpoint (which vouch for the index's records past it,
-//! as [`Index::open`] says) and every ref file, and reads those frames again: if they are not
-//! the frames it read before (new ones have appeared, or the next writer's frame has taken the
-//! place of one that a failed sync or rewrite cut back, storage §2 rule 3 (a)/(c)), a ref file
-//! may already show a move of a frame it did not read, so it reads the files and the frames
-//! again. A `journal.off` that holds fewer entries when the frames are read than when it was
-//! measured is no damage either (a writer cut entries that were never genuine: one whose own
-//! append failed, storage §2 rule 3 (b), or zeroed ones a crash left at its end): it reads the
-//! files and the frames again, and opens the index again if the cut met that open. Each such
-//! reading of the files and the frames is a round. When the metadata changed during every one
-//! of [`MetaStore::SNAPSHOT_ROUNDS`] (32) rounds, commits kept landing as it read, and it gives
-//! up with [`StoreError::SnapshotContended`] (retryable) rather than wait for them to stop. It
-//! reads `journal.ckpt` once, so each round reads every frame past that checkpoint, which stays
-//! a frame boundary as the journal grows. The frames past the checkpoint (usually 0 to 31, and
-//! more only after a crash) then apply on top in memory: their changesets the index handle does
-//! not count, and their ref moves the ref files do not show yet.
+//! [`MetaStore::read`] takes no lock and writes nothing. It reads `journal.ckpt` once, opens the
+//! index ([`Index::open`] says which of its records it counts), and reads the frames past the
+//! checkpoint and every ref file, in rounds, until the frames hold still: a round that finds them
+//! changed, or `journal.off` cut back since it was measured, reads again (and opens the index
+//! again if the cut met that open). When they changed during every one of
+//! [`MetaStore::SNAPSHOT_ROUNDS`] rounds, it gives up with [`StoreError::SnapshotContended`]
+//! (retryable). The frames it read then apply on top of the index and the ref files, in memory.
+//! A [`MetaRead`] shows no later commit, and a new [`MetaStore::read`] shows this process's
+//! writes at once.
 
 use std::collections::HashMap;
 use std::fmt;
