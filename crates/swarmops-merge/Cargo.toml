@@ -1,6 +1,6 @@
 [package]
 name = "swarmops-merge"
-description = "SwarmOps merge algorithms over trees and lines: tree diff and line diff, later three-way merge (no I/O)"
+description = "SwarmOps merge algorithms over trees and lines: tree diff, line diff and three-way merge (no I/O)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
