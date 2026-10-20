@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://swarmops.cc">Website</a> ·
   <a href="#why-swarmops">Why</a> ·
   <a href="#swarmops-and-git">SwarmOps and git</a> ·
   <a href="#how-it-works">How it works</a> ·
@@ -84,6 +85,18 @@ No git baseline has been measured yet: these verdicts come from the design, the 
 own documentation and source, not from a benchmark. The first measured comparison is planned for
 M9: SwarmOps' 32-agent contention scenario, run side by side with git worktrees. SwarmOps' own
 measurements are in [docs/perf.md](docs/perf.md).
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/store-dark.svg">
+    <img src="docs/assets/store-light.svg" alt="An isometric drawing of the store as a machine: commit cartridges wait on a feed rail behind one gate, the metadata lock; a press stamps each one as a frame onto a paper tape, the append-only journal; beside it, object pellets drop into sixteen bins with no gate." width="760">
+  </picture>
+  <br>
+  <sub>The store as a machine: writers queue for one lock and each commit becomes one CRC-framed
+  frame of the journal, while objects need no lock.
+  <a href="https://swarmops.cc/explainers/store.html">Interactive version</a>, drawn with
+  <a href="https://github.com/wheresryan22/anatomy">Anatomy</a>.</sub>
+</p>
 
 ## How it works
 
