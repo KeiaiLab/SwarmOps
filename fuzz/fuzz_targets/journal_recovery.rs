@@ -17,15 +17,19 @@
 //! is whole in the `journal.log` they read: for them, as for recovery, a listed frame cut
 //! short, missing or failing its CRC is damage.
 //!
-//! - (a) `open`, `frame_count` and `ckpt` succeed; `tail_frames_from` (from the checkpoint and
-//!   from 0), `frames_from(0, 64)`, `frames_after(0, 64)` and `frames_from(0, usize::MAX)` return
-//!   `Ok` or a typed error, before recovery and after it. A frame they return is the canonical
-//!   encoding of its records at its offset (so its CRC matches), a listed one at its entry;
-//!   frames returned together abut, readers agree where they overlap, and a reader stops early
-//!   only at a torn tail, never before a listed frame. When `journal.off`'s entries are sound,
-//!   readers from the start return exactly what the model says, before recovery and after it:
-//!   the listed frames (and for `tail_frames_from(0)` the unlisted whole ones after them), or
-//!   `JournalCorrupt` at the first listed frame that is not whole.
+//! - (a) `open` and `ckpt` succeed, and so does `frame_count`; `tail_frames_from` (from the
+//!   checkpoint and from 0), `frames_from(0, 64)`, `frames_after(0, 64)` and
+//!   `frames_from(0, usize::MAX)` return `Ok` or a typed error, before recovery and after it.
+//!   But where `journal.off` ends in more zeroed entries past frame 0 than readers and recovery
+//!   drop (`MAX_ZEROED`, a 4 KiB block: more than a power loss leaves), every one of them,
+//!   `frame_count` and recovery included, fails with `JournalCorrupt` at 0, and recovery
+//!   changes nothing. A frame they return is the canonical encoding of its records at its
+//!   offset (so its CRC matches), a listed one at its entry; frames returned together abut,
+//!   readers agree where they overlap, and a reader stops early only at a torn tail, never
+//!   before a listed frame. When `journal.off`'s entries are sound, readers from the start
+//!   return exactly what the model says, before recovery and after it: the listed frames (and
+//!   for `tail_frames_from(0)` the unlisted whole ones after them), or `JournalCorrupt` at the
+//!   first listed frame that is not whole.
 //! - (b) `repair_tail` does exactly what a model of recovery says: `JournalCorrupt` at the
 //!   model's offset with no file changed, or `Ok` with the model's cut, `journal.log` the prefix
 //!   up to it, and `journal.off` the whole entries it held, then one per frame listed. Its report
@@ -55,7 +59,8 @@ use arbitrary::Arbitrary;
 use libfuzzer_sys::fuzz_target;
 use swarmops_core::{ChangesetId, ObjectId};
 use swarmops_fuzz::{
-    ENTRY_LEN, HEADER_LEN, Model, frame_around, frame_bytes, is_typed, model, to_u64, zero_length,
+    ENTRY_LEN, HEADER_LEN, MAX_ZEROED, Model, frame_around, frame_bytes, is_typed, model, to_u64,
+    zero_length,
 };
 use swarmops_store::{Frame, FsOps, Journal, Layout, Record, StoreError, TailRepair};
 use swarmops_testkit::fs::NoSyncFs;
@@ -286,13 +291,14 @@ fn reported_as_modelled(recovery: &Recovery, repair: &TailRepair, before: &Files
 
 /// What `repair_tail` does with `files`, by the model. Under the lock the files are
 /// quiescent. A partial entry is dropped, and so are zeroed entries past frame 0 at the end of
-/// `journal.off`. The last listed frame must lie within `journal.log`, start where the header of
-/// the frame listed before it says that one ends (frame 0 at 0), as must that frame, one link
-/// further back, and read whole: cut short, missing, failing its CRC or not decoding, it is
-/// damage, as is a header before it announcing an empty payload. After it, unlisted whole
-/// frames are listed up to the end of the file or a torn tail, which is cut; an unlisted frame
-/// no writer produces is damage. Before anything is cut or listed, every listed frame must be
-/// sound (start where the one listed before it ends, and read whole), or that is damage too.
+/// `journal.off`, [`MAX_ZEROED`] at most (more is damage at 0). The last listed frame must lie
+/// within `journal.log`, start where the header of the frame listed before it says that one ends
+/// (frame 0 at 0), as must that frame, one link further back, and read whole: cut short,
+/// missing, failing its CRC or not decoding, it is damage, as is a header before it announcing
+/// an empty payload. After it, unlisted whole frames are listed up to the end of the file or a
+/// torn tail, which is cut; an unlisted frame no writer produces is damage. Before anything is
+/// cut or listed, every listed frame must be sound (start where the one listed before it ends,
+/// and read whole), or that is damage too.
 #[derive(Debug, PartialEq, Eq)]
 enum Recovery {
     /// Recovery succeeds: `journal.off` lists `entries` after it, and `journal.log` is cut at
@@ -304,6 +310,9 @@ enum Recovery {
 
 impl Recovery {
     fn of(files: &Files) -> Recovery {
+        if files.zeroed_past_the_bound() {
+            return Recovery::Corrupt { offset: 0 };
+        }
         let log_len = to_u64(files.log.len());
         let mut entries = files.entries();
         // Zeroed entries past frame 0 at the end are dropped, like a partial entry.
@@ -393,8 +402,12 @@ fn unsound_entry(files: &Files, entries: &[u64]) -> Option<u64> {
 /// `journal.off` before `journal.log`, so every frame listed then is whole in the `journal.log`
 /// it reads: `Ok` with them all, or `Err` with the start of the first that is not (cut short,
 /// missing, failing its CRC or not decoding), where frames_from and tail_frames_from fail with
-/// `JournalCorrupt`. `None` if the entries are not sound up to there.
+/// `JournalCorrupt`; `Err(0)` if `journal.off` ends in more zeroed entries than readers drop.
+/// `None` if the entries are not sound up to there.
 fn listed_frames(files: &Files) -> Option<Result<Vec<Frame>, u64>> {
+    if files.zeroed_past_the_bound() {
+        return Some(Err(0));
+    }
     let entries = files.listed();
     let mut frames = Vec::new();
     let mut next = 0;
@@ -472,8 +485,17 @@ struct Seen {
 impl Seen {
     /// Runs every reader once, checking each result and how they agree.
     fn read(journal: &Journal, files: &Files, ckpt: u64) -> Seen {
-        let listed = to_u64(files.listed().len());
-        assert_eq!(journal.frame_count().expect("frame_count"), listed);
+        let past_the_bound = files.zeroed_past_the_bound();
+        if past_the_bound {
+            let count = journal.frame_count();
+            assert!(
+                matches!(count, Err(StoreError::JournalCorrupt { offset: 0 })),
+                "frame_count past {MAX_ZEROED} zeroed entries returned {count:?}"
+            );
+        } else {
+            let listed = to_u64(files.listed().len());
+            assert_eq!(journal.frame_count().expect("frame_count"), listed);
+        }
         assert_eq!(
             journal
                 .ckpt()
@@ -510,6 +532,21 @@ impl Seen {
                 files,
             ),
         };
+        if past_the_bound {
+            // More zeroed entries than a power loss leaves: every reader refuses them, at 0.
+            for (what, run) in [
+                ("tail_frames_from(ckpt)", &seen.from_ckpt),
+                ("tail_frames_from(0)", &seen.from_start),
+                ("frames_from(0, 64)", &seen.first),
+                ("frames_after(0, 64)", &seen.after_first),
+                ("frames_from(0, usize::MAX)", &seen.listed),
+            ] {
+                assert!(
+                    matches!(run, Err(StoreError::JournalCorrupt { offset: 0 })),
+                    "{what} past {MAX_ZEROED} zeroed entries returned {run:?}"
+                );
+            }
+        }
         // Where readers overlap, they return the same frames.
         if let Ok(start) = &seen.from_start {
             for (what, run) in [
@@ -899,6 +936,19 @@ impl Files {
         entries
     }
 
+    /// Whether `journal.off` ends in more zeroed entries past frame 0 than readers and recovery
+    /// drop ([`MAX_ZEROED`]): more than a power loss leaves, damage, which they refuse with
+    /// `JournalCorrupt` at 0.
+    fn zeroed_past_the_bound(&self) -> bool {
+        let entries = self.entries();
+        let zeroed = entries
+            .iter()
+            .skip(1)
+            .rev()
+            .take_while(|&&entry| entry == 0);
+        zeroed.count() > MAX_ZEROED
+    }
+
     /// How the frame at `offset` reads; past the end of `journal.log` it is cut short.
     fn frame_at(&self, offset: u64) -> Model {
         let at = usize::try_from(offset).unwrap_or(usize::MAX);
@@ -995,7 +1045,8 @@ impl Built {
 
     /// Undamaged (`files` as built), every frame reads back unchanged through every reader.
     /// Damaged, the frames before the first damaged byte of `journal.log` still read back from
-    /// the start, and, if their entries are undamaged too, through `frames_from`.
+    /// the start, and, if their entries are undamaged too, through `frames_from`; unless
+    /// `journal.off` ends in more zeroed entries than readers drop, which they refuse.
     fn reads_back(&self, journal: &Journal, files: &Files, seen: &Seen) {
         if *files == self.files {
             let all = Some(&self.frames);
@@ -1045,6 +1096,13 @@ impl Built {
             intact = intact.saturating_sub(1);
         }
         let got = journal.frames_from(0, intact);
+        if files.zeroed_past_the_bound() {
+            assert!(
+                matches!(got, Err(StoreError::JournalCorrupt { offset: 0 })),
+                "frames_from(0, {intact}) past {MAX_ZEROED} zeroed entries returned {got:?}"
+            );
+            return;
+        }
         assert!(
             got.as_ref().ok().map(Vec::as_slice) == Some(&self.frames[..intact]),
             "frames_from(0, {intact}) lost an undamaged frame: {got:?}"

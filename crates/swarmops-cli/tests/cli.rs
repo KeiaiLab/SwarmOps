@@ -972,6 +972,55 @@ fn a_store_that_leads_under_mnt_is_refused_on_open() {
     );
 }
 
+/// A `journal.off` zero-filled far past its entries (1 TiB here, a sparse file, which costs no
+/// disk) is damage, more zeroed entries at its end than a power loss leaves: `so log` and
+/// `so ref set` fail with `E_STORE_CORRUPT` (exit 1) at once (the store looks at no more than
+/// the last 4 KiB of `journal.off` to find where its zeroed entries start), and change nothing.
+/// The message names no host path. Each run has a deadline, so that a regression fails the test
+/// instead of hanging it.
+#[test]
+fn a_journal_off_zero_filled_far_past_its_entries_fails_reads_and_writes_at_once() {
+    use std::time::Duration;
+
+    use crate::support::{SO, Store, run_bin_within};
+
+    let store = Store::init();
+    let c1 = store.commit(AGENT, "a.txt", "a\n", None);
+    store
+        .run_as(AGENT, &["ref", "set", "main", &c1, "--create"], &[])
+        .ok();
+    let layout = store.layout();
+    let len = |path: Utf8PathBuf| fs::metadata(path).unwrap().len();
+    let log_len = len(layout.journal_log());
+    fs::OpenOptions::new()
+        .write(true)
+        .open(layout.journal_off())
+        .unwrap()
+        .set_len(1 << 40)
+        .unwrap();
+    let path = store.path();
+    let release = ["--as", AGENT, "ref", "set", "release", &c1, "--create"];
+    for args in [&["log"][..], &release] {
+        let args = [&["--repo", path][..], args].concat();
+        let run = run_bin_within(SO, &args, &[], "", Duration::from_secs(30));
+        assert_eq!(run.exit(), 1, "{run}");
+        let error = run.err("E_STORE_CORRUPT");
+        assert_eq!(
+            (&error["message"], &error["hint"]),
+            (
+                &json!("the metadata journal is corrupt at offset 0"),
+                &json!("swarmops verify")
+            ),
+            "{run}"
+        );
+    }
+    assert_eq!(
+        (len(layout.journal_off()), len(layout.journal_log())),
+        (1 << 40, log_len),
+        "nothing changed"
+    );
+}
+
 /// `init` refuses a repository name of more than 255 bytes before it makes anything:
 /// `E_INVALID_ARG`, exit 2, with the store's limit in `details`. A name of 255 bytes is kept
 /// whole.
