@@ -698,9 +698,22 @@ mod tests {
         assert!(left.iter().any(|(path, _)| path == ".tmp*"), "{left:?}");
     }
 
+    /// Records the method of every call it sees.
+    #[derive(Default)]
+    struct Methods(Mutex<Vec<FsMethod>>);
+
+    impl Watch for Methods {
+        fn before(&self, call: &Call<'_>) -> io::Result<()> {
+            self.0.lock().unwrap().push(call.method);
+            Ok(())
+        }
+    }
+
     /// A watched double runs over any filesystem: a [`FailWhen`] over [`NoSyncFs`] fails the
     /// call it picks, before it runs, and the others run on the double, which fails a sync of a
-    /// missing path as the real filesystem does.
+    /// missing path as the real filesystem does. Each of the 14 methods reaches the filesystem
+    /// the double is over: over a recorder, the calls of a script of all of them arrive there,
+    /// call for call, as they arrive at a recorder called directly.
     #[test]
     fn failing_fs_over_any_inner_filesystem() {
         let dir = tempfile::tempdir().unwrap();
@@ -720,5 +733,49 @@ mod tests {
         assert_eq!(fs::read(&file).unwrap(), b"abcd");
         let missing = fs.fsync_dir(&dir.path().join("missing")).unwrap_err();
         assert_eq!(missing.kind(), io::ErrorKind::NotFound, "{missing}");
+
+        let (alone, wrapped) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let direct = Watched(Methods::default(), RealFs);
+        script(&direct, alone.path());
+        let watched = Watched(
+            FailWhen::new(|_, _| false),
+            Watched(Methods::default(), RealFs),
+        );
+        script(&watched, wrapped.path());
+        let Watched(_, Watched(Methods(reached), _)) = &watched;
+        let reached = reached.lock().unwrap().clone();
+        let Watched(Methods(called), _) = &direct;
+        assert_eq!(reached, *called.lock().unwrap());
+        let methods: std::collections::BTreeSet<FsMethod> = reached.into_iter().collect();
+        assert_eq!(methods.len(), FsMethod::ALL.len(), "{methods:?}");
+    }
+
+    /// The double opens the directory that `RealFs` syncs after a replace or a rename into it,
+    /// so that a directory the process may write but not read fails there as on the real
+    /// filesystem, the work done (`PermissionDenied`; a process that reads every directory, as
+    /// root does, gets `Ok` from both).
+    #[test]
+    fn no_sync_fs_opens_the_directory_real_fs_syncs() {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+
+        for method in [FsMethod::AtomicReplace, FsMethod::RenameDurable] {
+            let outcomes = [&RealFs as &dyn FsOps, &NoSyncFs].map(|fs| {
+                let dir = tempfile::tempdir().unwrap();
+                let (shut, file) = (dir.path().join("shut"), dir.path().join("file"));
+                fs::create_dir(&shut).unwrap();
+                fs::write(&file, b"a file").unwrap();
+                fs::set_permissions(&shut, Permissions::from_mode(0o300)).unwrap();
+                let path = if method == FsMethod::AtomicReplace {
+                    shut.join("file")
+                } else {
+                    file
+                };
+                let outcome = call(fs, method, &path, &shut.join("file"));
+                fs::set_permissions(&shut, Permissions::from_mode(0o700)).unwrap();
+                outcome
+            });
+            assert_eq!(outcomes[0], outcomes[1], "{method}");
+        }
     }
 }

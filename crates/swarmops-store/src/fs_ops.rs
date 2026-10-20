@@ -109,81 +109,66 @@ pub enum LinkOutcome {
     AlreadyExists,
 }
 
-/// One method of [`FsOps`], by name: the seam's vocabulary, which every double classifies
-/// calls with ([`FsMethod::is_mutating`], [`FsMethod::flushes`]) so that one list names the 14
-/// methods. It compares equal to the method's name ([`FsMethod::as_str`]), so a test's
-/// `call.method == "append"` reads as before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum FsMethod {
+/// Declares [`FsMethod`] from one list of the methods, each with its documentation and its
+/// name: [`FsMethod::ALL`] and [`FsMethod::as_str`] come from the same list, so that a method
+/// cannot be left out of either.
+macro_rules! fs_methods {
+    ($($(#[$attr:meta])* $method:ident = $name:literal,)+) => {
+        /// One method of [`FsOps`], by name: the seam's vocabulary, which every double classifies
+        /// calls with ([`FsMethod::is_mutating`], [`FsMethod::flushes`]) so that one list names
+        /// the 14 methods. It compares equal to the method's name ([`FsMethod::as_str`]), so a
+        /// test's `call.method == "append"` reads as before.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+        pub enum FsMethod {
+            $($(#[$attr])* $method,)+
+        }
+
+        impl FsMethod {
+            /// Every method, in the order the trait declares them.
+            pub const ALL: [FsMethod; [$($name),+].len()] = [$(FsMethod::$method),+];
+
+            /// The method's name, as the trait spells it: `"append_durable"`, say.
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(FsMethod::$method => $name,)+
+                }
+            }
+        }
+    };
+}
+
+fs_methods! {
     /// [`FsOps::create_dir_all`].
-    CreateDirAll,
+    CreateDirAll = "create_dir_all",
     /// [`FsOps::write_durable_temp`].
-    WriteDurableTemp,
+    WriteDurableTemp = "write_durable_temp",
     /// [`FsOps::link_noclobber`].
-    LinkNoclobber,
+    LinkNoclobber = "link_noclobber",
     /// [`FsOps::fsync_dir`].
-    FsyncDir,
+    FsyncDir = "fsync_dir",
     /// [`FsOps::read`].
-    Read,
+    Read = "read",
     /// [`FsOps::exists`].
-    Exists,
+    Exists = "exists",
     /// [`FsOps::remove`].
-    Remove,
+    Remove = "remove",
     /// [`FsOps::append_durable`].
-    AppendDurable,
+    AppendDurable = "append_durable",
     /// [`FsOps::file_len`].
-    FileLen,
+    FileLen = "file_len",
     /// [`FsOps::truncate`].
-    Truncate,
+    Truncate = "truncate",
     /// [`FsOps::atomic_replace`].
-    AtomicReplace,
+    AtomicReplace = "atomic_replace",
     /// [`FsOps::sync_data`].
-    SyncData,
+    SyncData = "sync_data",
     /// [`FsOps::append`].
-    Append,
+    Append = "append",
     /// [`FsOps::rename_durable`].
-    RenameDurable,
+    RenameDurable = "rename_durable",
 }
 
 impl FsMethod {
-    /// Every method, in the order the trait declares them.
-    pub const ALL: [FsMethod; 14] = [
-        FsMethod::CreateDirAll,
-        FsMethod::WriteDurableTemp,
-        FsMethod::LinkNoclobber,
-        FsMethod::FsyncDir,
-        FsMethod::Read,
-        FsMethod::Exists,
-        FsMethod::Remove,
-        FsMethod::AppendDurable,
-        FsMethod::FileLen,
-        FsMethod::Truncate,
-        FsMethod::AtomicReplace,
-        FsMethod::SyncData,
-        FsMethod::Append,
-        FsMethod::RenameDurable,
-    ];
-
-    /// The method's name, as the trait spells it: `"append_durable"`, say.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            FsMethod::CreateDirAll => "create_dir_all",
-            FsMethod::WriteDurableTemp => "write_durable_temp",
-            FsMethod::LinkNoclobber => "link_noclobber",
-            FsMethod::FsyncDir => "fsync_dir",
-            FsMethod::Read => "read",
-            FsMethod::Exists => "exists",
-            FsMethod::Remove => "remove",
-            FsMethod::AppendDurable => "append_durable",
-            FsMethod::FileLen => "file_len",
-            FsMethod::Truncate => "truncate",
-            FsMethod::AtomicReplace => "atomic_replace",
-            FsMethod::SyncData => "sync_data",
-            FsMethod::Append => "append",
-            FsMethod::RenameDurable => "rename_durable",
-        }
-    }
-
     /// Whether the method may change a file or a directory: every one but the three reads,
     /// `read`, `exists` and `file_len`.
     pub const fn is_mutating(self) -> bool {
@@ -1469,6 +1454,31 @@ mod tests {
         );
         assert_eq!(counter.calls(), 7, "locating makes no call");
         assert_eq!(store_fs.root(), root);
+    }
+
+    /// `StoreFs::exists`, which the test above runs only where it succeeds, names its failure as
+    /// every forwarded call does: the method, and the path relative to the store's root.
+    #[test]
+    fn store_fs_names_a_failed_exists() {
+        use crate::error::FileOp;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let fail = FailAt {
+            at: 1,
+            mode: FailMode::Once,
+            error: InjectedError::Eio,
+        };
+        let store_fs = StoreFs::new(Arc::new(FailAtFs::new(RealFs, fail)), root);
+        let failure = store_fs.exists(root.join("meta/journal.off")).unwrap_err();
+        assert_eq!(
+            (failure.op, failure.file.as_deref(), failure.raw_os_error()),
+            (
+                FileOp::Fs(FsMethod::Exists),
+                Some(Utf8Path::new("meta/journal.off")),
+                Some(5)
+            )
+        );
     }
 }
 

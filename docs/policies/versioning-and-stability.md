@@ -30,8 +30,10 @@ to the weakest:
 4. **The API schema.** The JSON Schema of every request and response type that
    `swarmops schema` prints (`schema_for_all` in `swarmops-api`), and the `StoreOps` operations
    it describes.
-5. **The MCP tools.** The tools `swarmops mcp` lists, their names, their `inputSchema` (the
-   request types' schemas) and their results (the same envelope the CLI prints).
+5. **The MCP tools.** The tools `swarmops mcp` lists, their names, their `inputSchema` (each
+   the request type's schema, kept a plain object, with the `expected_old` of `ref_set` and
+   `ref_delete` narrowed to a full changeset id) and their results (the same envelope the CLI
+   prints).
 
 The contract surfaces (3 to 5) grow without breaking: a new field, a new optional argument, a new
 command, a new error code or a new tool is not a breaking change. Clients must allow for that.
