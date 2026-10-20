@@ -248,8 +248,10 @@ const MAX_LAND_KEY: usize = 64;
 ///   check, and records it under the ref's name as a revision it resolved. A changeset imported
 ///   from git exports to the commit it came from, one made in the store to a commit with its own
 ///   signatures and `SwarmOps-*` trailers. It needs no identity: it writes no journal frame, only
-///   the git repository and the store's caches (derived values, external id entries). Every
-///   `LocalOps` has the derivation of export oids registered, which the export reads.
+///   the git repository and the store's caches (derived values, external id entries). The
+///   export oids it compares the branch with, names as parents and moves the branch to are
+///   derived from the store's own objects, each memo it meets checked against them, not read
+///   from the derivation of export oids that every `LocalOps` has registered.
 /// - `op_log` lists the store's operations, newest first, below `before`: each one write
 ///   transaction, a journal frame numbered from 0 in commit order, with its kind (read from its
 ///   records: one changeset and a move of a ref to it is a `land` when the changeset's metadata
@@ -514,8 +516,8 @@ impl LocalOps {
     }
 
     /// The operations over `repo`, the store at `path`, with the derivation of export oids
-    /// registered ([`swarmops_git::register`]), which `git export` reads and which the import of
-    /// an exported head will read: so every `LocalOps` has it, once.
+    /// registered ([`swarmops_git::register`]), once. Neither `git export` nor `git import` reads
+    /// its values: each derives the export oids it uses from the store's own objects.
     fn with_repo(mut repo: LocalRepo, path: &Utf8Path) -> LocalOps {
         // A repository just opened has only the built-in derivations, none named `git_oid`.
         swarmops_git::register(&mut repo).expect("a repository just opened has no git_oid");
