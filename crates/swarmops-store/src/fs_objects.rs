@@ -4,6 +4,8 @@
 //! 1 zstd} | u16le 0 | u64le ulen | payload`; the id is always the hash of the decoded
 //! payload, so every read of an object is verified. [`ObjectStore::stat`] reads the header
 //! alone, for the kind and the length it records, and verifies nothing.
+//! [`ObjectStore::read_chunks`] verifies as [`ObjectStore::get`] does, but hands the payload over
+//! in pieces, a zstd one as its stream decodes, for a caller that keeps only part of it.
 //!
 //! A write takes the payload with its id ([`Hashed`]: its caller hashed it, once;
 //! [`ObjectStore::put`] hashes its own), skips the work if the object file exists, writes and
@@ -42,6 +44,9 @@ const ZSTD_LEVEL: i32 = 3;
 /// file whose recorded size is false costs at most this much memory before it is found out
 /// (storage spec §2 rule 1).
 const PREALLOC_MAX: usize = 64 << 20;
+/// The most bytes of a zstd payload that [`ObjectStore::read_chunks`] hands over at once: the
+/// buffer its stream decodes into.
+const PIECE_LEN: usize = 64 << 10;
 
 /// The most bytes an object's payload holds: 512 MiB (2^29), umbrella spec §5's bound on a blob
 /// and the operations' bound on a put's content (storage spec §2 rule 1, §10 item 6).
@@ -77,6 +82,20 @@ pub trait ObjectStore: Send + Sync {
     /// header records a payload longer than [`MAX_OBJECT_LEN`] is [`StoreError::BadHeader`],
     /// refused before anything is allocated for the payload.
     fn get(&self, id: ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, StoreError>;
+
+    /// Reads one object as [`ObjectStore::get`] does, but hands its payload to `visit` in pieces,
+    /// in order, instead of returning it: a raw payload from the buffer its file was read into, a
+    /// zstd one as its stream decodes, so that no buffer holds the whole payload decoded. The
+    /// pieces are hashed as they go and checked against `id` at the end: a header this store does
+    /// not write is [`StoreError::BadHeader`] before any piece goes by, and bytes that are not the
+    /// object's are [`StoreError::Corrupt`], as `get` finds them, once the pieces before the damage
+    /// have gone by. On an error the caller drops what it kept of them. Returns the object's kind
+    /// and payload length; `None`, with nothing visited, if it is not stored.
+    fn read_chunks(
+        &self,
+        id: ObjectId,
+        visit: &mut dyn FnMut(&[u8]),
+    ) -> Result<Option<ObjectStat>, StoreError>;
 
     /// Whether an object file for `id` exists (not verified).
     fn contains(&self, id: ObjectId) -> Result<bool, StoreError>;
@@ -361,6 +380,19 @@ impl ObjectStore for FsObjectStore {
     fn get(&self, id: ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, StoreError> {
         match self.fs.read(self.layout.object_path(id).as_std_path())? {
             Some(file) => decode(id, file).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// Reads the object's file whole through [`FsOps::read`], as [`ObjectStore::get`] does, and
+    /// hands its payload over piece by piece (`visit_payload`).
+    fn read_chunks(
+        &self,
+        id: ObjectId,
+        visit: &mut dyn FnMut(&[u8]),
+    ) -> Result<Option<ObjectStat>, StoreError> {
+        match self.fs.read(self.layout.object_path(id).as_std_path())? {
+            Some(file) => visit_payload(id, &file, visit).map(Some),
             None => Ok(None),
         }
     }
@@ -657,9 +689,9 @@ fn decode_capped(
     Ok((kind, payload))
 }
 
-/// What a failed [`stream_decode`] of object `id` is: a growth of its buffer the host could not
-/// back (`OutOfMemory`) is not the file's fault, but a failed read of it, named by its place in
-/// the store; anything else is zstd damage.
+/// What a failure of the zstd stream of object `id` is: a host that could not hold what the frame
+/// really produces is not the file's fault, but a failed read of it, named by its place in the
+/// store; any other failure is the frame's damage ([`StoreError::Corrupt`]).
 fn stream_failure(id: ObjectId, e: io::Error) -> StoreError {
     match e.kind() {
         io::ErrorKind::OutOfMemory => {
@@ -667,6 +699,103 @@ fn stream_failure(id: ObjectId, e: io::Error) -> StoreError {
             IoFailure::new(FileOp::Fs(FsMethod::Read), Some(file), e).into()
         }
         _ => StoreError::Corrupt { id },
+    }
+}
+
+/// Hands the payload of `file`, the object file read for `id`, to `visit` in order, as
+/// [`ObjectStore::read_chunks`] says: a raw payload in one piece, from `file` itself (none when it
+/// is empty); a zstd one in pieces of at most [`PIECE_LEN`] bytes, as zstd's streaming decoder
+/// makes them. Checks what [`decode`] checks, in the same order and with the same errors: the
+/// header; for zstd, that the frame records the length the header does, and that the stream makes
+/// exactly that many bytes (stopping as soon as it makes more); and that the payload hashes to
+/// `id` ([`PayloadHash`]). The decoder keeps zstd's default window limit, as [`stream_decode`]'s
+/// does.
+fn visit_payload(
+    id: ObjectId,
+    file: &[u8],
+    visit: &mut dyn FnMut(&[u8]),
+) -> Result<ObjectStat, StoreError> {
+    let bad_header = || StoreError::BadHeader { id };
+    let corrupt = || StoreError::Corrupt { id };
+    let (header, body) = file
+        .split_first_chunk::<HEADER_LEN>()
+        .ok_or_else(bad_header)?;
+    let (kind, enc, size) = header_fields(header).ok_or_else(bad_header)?;
+    // No object holds more, whatever its encoding: refused as `decode` refuses it.
+    if size > MAX_OBJECT_LEN {
+        return Err(bad_header());
+    }
+    let mut hash = PayloadHash::new(kind, size);
+    let mut piece = |bytes: &[u8]| {
+        hash.update(bytes);
+        visit(bytes);
+    };
+    match enc {
+        ENC_RAW if to_u64(body.len()) == size => {
+            if !body.is_empty() {
+                piece(body);
+            }
+        }
+        ENC_ZSTD => {
+            // Every frame this store writes records its decompressed size, which must equal the
+            // header's (storage spec §2 rule 1).
+            let frame_len = zstd::bulk::Decompressor::upper_bound(body).ok_or_else(corrupt)?;
+            if to_u64(frame_len) != size {
+                return Err(bad_header());
+            }
+            let mut decoder = zstd::stream::read::Decoder::with_buffer(body)
+                .map_err(|e| stream_failure(id, e))?;
+            let mut buffer = vec![0; PIECE_LEN];
+            let mut made: u64 = 0;
+            loop {
+                let len = match decoder.read(&mut buffer) {
+                    Ok(0) => break,
+                    Ok(len) => len,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(stream_failure(id, e)),
+                };
+                made += to_u64(len);
+                // A frame that produces more than it records is zstd damage.
+                if made > size {
+                    return Err(corrupt());
+                }
+                piece(&buffer[..len]);
+            }
+            // And so is one that produces less.
+            if made != size {
+                return Err(corrupt());
+            }
+        }
+        _ => return Err(bad_header()),
+    }
+    if hash.finish() != id {
+        return Err(corrupt());
+    }
+    Ok(ObjectStat { kind, size })
+}
+
+/// [`hash_object`]'s recipe, `blake3(domain(kind) ++ u64le(len) ++ payload)`, fed the payload in
+/// pieces: `len` is the length the object's header records, which the caller checks the pieces
+/// add up to. A unit test holds it to `hash_object`.
+struct PayloadHash(blake3::Hasher);
+
+impl PayloadHash {
+    /// The hash of a payload of `kind` and `len` bytes, before any of them.
+    fn new(kind: ObjectKind, len: u64) -> Self {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(kind.domain());
+        hasher.update(&len.to_le_bytes());
+        Self(hasher)
+    }
+
+    /// Feeds the payload's next piece.
+    fn update(&mut self, piece: &[u8]) {
+        self.0.update(piece);
+    }
+
+    /// The object's id, once every piece is fed.
+    fn finish(&self) -> ObjectId {
+        ObjectId(*self.0.finalize().as_bytes())
     }
 }
 
@@ -700,6 +829,25 @@ mod tests {
         file.extend(size.to_le_bytes()); // frame content size
         file.extend([0x01, 0x00, 0x00]); // last block, raw, 0 bytes
         file
+    }
+
+    #[test]
+    fn a_payload_hashed_in_pieces_is_hash_object() {
+        let text = b"sixteen bytes, \n".repeat(1024);
+        for kind in [ObjectKind::Blob, ObjectKind::Tree, ObjectKind::Changeset] {
+            for len in [0, 1, 15, 16, 16 << 10] {
+                let payload = &text[..len];
+                for piece in [1, 7, 4096, 16 << 10] {
+                    let mut hash = PayloadHash::new(kind, to_u64(len));
+                    payload.chunks(piece).for_each(|bytes| hash.update(bytes));
+                    assert_eq!(
+                        hash.finish(),
+                        hash_object(kind, payload),
+                        "{kind:?}, {len} bytes in pieces of {piece}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

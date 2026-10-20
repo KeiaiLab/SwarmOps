@@ -68,6 +68,143 @@ expression: s.redact(&all)
       "title": "Attribution",
       "type": "object"
     },
+    "BlobHasReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_has` (CLI `blob has`): which of some blobs the store holds.",
+      "properties": {
+        "ids": {
+          "description": "The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "title": "BlobHasReq",
+      "type": "object"
+    },
+    "BlobHasResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_has`: the blobs the store holds, of those asked for.",
+      "properties": {
+        "present": {
+          "description": "The ids of `ids` that the store holds a blob under, in lowercase hex, in the order first\ngiven, each once; an id of another kind of object (a tree, a changeset) is not among them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "present"
+      ],
+      "title": "BlobHasResp",
+      "type": "object"
+    },
+    "BlobPutReq": {
+      "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's\nchange list can name it by its id (`{\"blob\": id}`) instead of carrying its bytes. The blob is\ndurable once the call returns; until a commit names it, nothing references it.",
+      "properties": {
+        "content": {
+          "$ref": "#/$defs/ContentInput",
+          "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with\n`scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`\nhere."
+        }
+      },
+      "required": [
+        "content"
+      ],
+      "title": "BlobPutReq",
+      "type": "object"
+    },
+    "BlobPutResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_put`: the blob stored.",
+      "properties": {
+        "blob": {
+          "description": "The blob's id, which a change names it by: `{\"blob\": id}`.",
+          "type": "string"
+        },
+        "size": {
+          "description": "The content's size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "written": {
+          "description": "Whether this call placed the blob in the object store; false when the store held it\nalready, or a concurrent writer placed it first.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "blob",
+        "size",
+        "written"
+      ],
+      "title": "BlobPutResp",
+      "type": "object"
+    },
     "ChangeInput": {
       "$defs": {
         "ChangeOp": {
@@ -111,6 +248,19 @@ expression: s.redact(&all)
               },
               "required": [
                 "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
               ],
               "type": "object"
             },
@@ -162,7 +312,7 @@ expression: s.redact(&all)
               "type": "null"
             }
           ],
-          "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`\ntakes none."
+          "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
         },
         "mode": {
           "anyOf": [
@@ -570,7 +720,7 @@ expression: s.redact(&all)
                   "type": "null"
                 }
               ],
-              "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`\ntakes none."
+              "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
             },
             "mode": {
               "anyOf": [
@@ -644,6 +794,19 @@ expression: s.redact(&all)
             },
             {
               "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
               "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
               "properties": {
                 "file": {
@@ -698,7 +861,7 @@ expression: s.redact(&all)
           "type": "boolean"
         },
         "changes": {
-          "description": "What to change, relative to the parent.",
+          "description": "What to change, relative to the parent. The contents hold at most 1 GiB together, by the\nsizes they declare (inline text's length, the bytes base64 decodes to, a client file's\nlength; a `blob` named by id counts nothing): more is `E_TOO_LARGE` with `scope`\n`commit`, refused before any content is read. Store large contents with `blob_put` first,\nand name them by id.",
           "items": {
             "$ref": "#/$defs/ChangeInput"
           },
@@ -867,6 +1030,19 @@ expression: s.redact(&all)
         },
         {
           "additionalProperties": false,
+          "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+          "properties": {
+            "blob": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "blob"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
           "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
           "properties": {
             "file": {
@@ -880,6 +1056,591 @@ expression: s.redact(&all)
         }
       ],
       "title": "ContentInput"
+    },
+    "DeriveReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`derive`: derive ahead of any reader the eager derived values (storage spec §5: each\nchangeset's first-parent skip list) of the changesets the journal records after a frame, so\nthat reads find them stored. It writes only the store's cache of derived values, so it takes\nno identity.",
+      "properties": {
+        "after": {
+          "description": "Go on after this journal frame: a previous call's `next`. From the journal's first frame\nwhen omitted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 1000,
+          "description": "The most journal frames to read; a frame is one transaction, a commit or a ref's move. 0\nreads none and derives nothing: `next` is then the journal's last frame, from where the\nnext calls derive only what is recorded later.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "title": "DeriveReq",
+      "type": "object"
+    },
+    "DeriveResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`derive`: how many values one call derived, how many the store held already, and where to\ngo on.",
+      "properties": {
+        "cached": {
+          "description": "How many of those values the store held already.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "derived": {
+          "description": "How many values it derived: of each eager derivation, one for each changeset its frames\nrecord whose value the store lacked. Values those needed on the way, an older\nchangeset's, are derived too and not counted.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "next": {
+          "description": "The last frame it read: pass it as the next call's `after` to go on, through a journal\nlonger than `limit` frames or through the frames recorded since. Omitted when it read no\nframe, as none follows `after`: it is at the journal's end. With `limit` 0, the journal's\nlast frame, omitted while the journal holds none.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "derived",
+        "cached"
+      ],
+      "title": "DeriveResp",
+      "type": "object"
+    },
+    "Diff": {
+      "$defs": {
+        "DiffHunk": {
+          "description": "A hunk of a unified diff: one or more changes and the unchanged lines around them, with the\nnumbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.",
+          "properties": {
+            "lines": {
+              "description": "Its lines, in order; each change's removed lines come before its added lines.",
+              "items": {
+                "$ref": "#/$defs/DiffLineOut"
+              },
+              "type": "array"
+            },
+            "new_lines": {
+              "description": "How many new lines it holds: its context and added lines.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "new_start": {
+              "description": "The first new line it holds, counted as `old_start` is.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_lines": {
+              "description": "How many old lines it holds: its context and removed lines.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_start": {
+              "description": "The first old line it holds, counted from 1; when it holds none, the line before where\nthey would be (0 at the top), as git prints it.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "old_start",
+            "old_lines",
+            "new_start",
+            "new_lines",
+            "lines"
+          ],
+          "type": "object"
+        },
+        "DiffLineOut": {
+          "description": "One line of a hunk.",
+          "properties": {
+            "op": {
+              "$ref": "#/$defs/LineOp",
+              "description": "Whether both sides have it, only the new one, or only the old one."
+            },
+            "text": {
+              "description": "The line with its line break, a carriage return before it kept; a file's last line has\nnone when the file does not end in one.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "text"
+          ],
+          "type": "object"
+        },
+        "DiffStatus": {
+          "description": "What happened to a file between the two revisions.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "It is in `to` only: in `from`, nothing or a directory is there.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is in `from` only.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content or its exec bit changed: a file or an executable on both sides, or a\nsymlink on both sides.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A symlink on one side, a file or an executable on the other.",
+              "type": "string"
+            }
+          ]
+        },
+        "FileDiff": {
+          "description": "One file that differs: a file, an executable or a symlink whose content or kind changed, or\nthat is on one side only. A directory never is one: a file that becomes a directory is that\nfile deleted and the directory's files added. No rename is detected: a file that moved is\none deleted and one added. Which fields follow `status` depends on the request's `format`,\nand a field that says nothing is omitted.",
+          "properties": {
+            "binary": {
+              "description": "`stat` and `unified`: whether it is binary, which gets no line counts and no hunks: a side\nthat is not UTF-8, or holds a NUL in its first 8,000 bytes.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "deletions": {
+              "description": "`stat` and `unified`, for text: the lines the change deletes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "hunks": {
+              "description": "`unified`, for text: the hunks, in order; empty when only the exec bit or the kind\nchanged.",
+              "items": {
+                "$ref": "#/$defs/DiffHunk"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "hunks_truncated": {
+              "description": "`unified`: true when `hunks` stops before the file's last hunk, to keep the page within\n`max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the\nsame.",
+              "type": [
+                "boolean",
+                "null"
+              ]
+            },
+            "insertions": {
+              "description": "`stat` and `unified`, for text: the lines the change inserts.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "new_blob": {
+              "description": "`unified`: its blob id in `to`; omitted for a deleted file.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "new_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FileKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`unified`: its kind in `to`; omitted for a deleted file."
+            },
+            "old_blob": {
+              "description": "`unified`: its blob id in `from`; omitted for an added file.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old_kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/FileKind"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "`unified`: its kind in `from`; omitted for an added file."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "status": {
+              "$ref": "#/$defs/DiffStatus",
+              "description": "What happened to it."
+            }
+          },
+          "required": [
+            "path",
+            "status"
+          ],
+          "type": "object"
+        },
+        "FileKind": {
+          "description": "What a file is; never a directory.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            }
+          ]
+        },
+        "LineOp": {
+          "description": "Which side of a diff a hunk's line is on.",
+          "oneOf": [
+            {
+              "const": "context",
+              "description": "Both: an unchanged line around a change.",
+              "type": "string"
+            },
+            {
+              "const": "add",
+              "description": "The new side only.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "The old side only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`diff`: a page of the files that differ between two revisions, in path order (by bytes).",
+      "properties": {
+        "cursor": {
+          "description": "When `truncated`: where the next page starts. Opaque: pass it back as given, as the next\nrequest's `cursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "files": {
+          "description": "The files.",
+          "items": {
+            "$ref": "#/$defs/FileDiff"
+          },
+          "type": "array"
+        },
+        "from": {
+          "description": "The changeset `from` named.",
+          "type": "string"
+        },
+        "to": {
+          "description": "The changeset `to` named.",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "Whether more files follow this page.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "from",
+        "to",
+        "files",
+        "truncated"
+      ],
+      "title": "Diff",
+      "type": "object"
+    },
+    "DiffFormat": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What `diff` says of each file.",
+      "oneOf": [
+        {
+          "const": "names",
+          "description": "Its path and status.",
+          "type": "string"
+        },
+        {
+          "const": "stat",
+          "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+          "type": "string"
+        },
+        {
+          "const": "unified",
+          "description": "Also its kinds, its blobs and, for text, its hunks.",
+          "type": "string"
+        }
+      ],
+      "title": "DiffFormat"
+    },
+    "DiffHunk": {
+      "$defs": {
+        "DiffLineOut": {
+          "description": "One line of a hunk.",
+          "properties": {
+            "op": {
+              "$ref": "#/$defs/LineOp",
+              "description": "Whether both sides have it, only the new one, or only the old one."
+            },
+            "text": {
+              "description": "The line with its line break, a carriage return before it kept; a file's last line has\nnone when the file does not end in one.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "text"
+          ],
+          "type": "object"
+        },
+        "LineOp": {
+          "description": "Which side of a diff a hunk's line is on.",
+          "oneOf": [
+            {
+              "const": "context",
+              "description": "Both: an unchanged line around a change.",
+              "type": "string"
+            },
+            {
+              "const": "add",
+              "description": "The new side only.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "The old side only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A hunk of a unified diff: one or more changes and the unchanged lines around them, with the\nnumbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.",
+      "properties": {
+        "lines": {
+          "description": "Its lines, in order; each change's removed lines come before its added lines.",
+          "items": {
+            "$ref": "#/$defs/DiffLineOut"
+          },
+          "type": "array"
+        },
+        "new_lines": {
+          "description": "How many new lines it holds: its context and added lines.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "new_start": {
+          "description": "The first new line it holds, counted as `old_start` is.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_lines": {
+          "description": "How many old lines it holds: its context and removed lines.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_start": {
+          "description": "The first old line it holds, counted from 1; when it holds none, the line before where\nthey would be (0 at the top), as git prints it.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "old_start",
+        "old_lines",
+        "new_start",
+        "new_lines",
+        "lines"
+      ],
+      "title": "DiffHunk",
+      "type": "object"
+    },
+    "DiffLineOut": {
+      "$defs": {
+        "LineOp": {
+          "description": "Which side of a diff a hunk's line is on.",
+          "oneOf": [
+            {
+              "const": "context",
+              "description": "Both: an unchanged line around a change.",
+              "type": "string"
+            },
+            {
+              "const": "add",
+              "description": "The new side only.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "The old side only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One line of a hunk.",
+      "properties": {
+        "op": {
+          "$ref": "#/$defs/LineOp",
+          "description": "Whether both sides have it, only the new one, or only the old one."
+        },
+        "text": {
+          "description": "The line with its line break, a carriage return before it kept; a file's last line has\nnone when the file does not end in one.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "op",
+        "text"
+      ],
+      "title": "DiffLineOut",
+      "type": "object"
+    },
+    "DiffReq": {
+      "$defs": {
+        "DiffFormat": {
+          "description": "What `diff` says of each file.",
+          "oneOf": [
+            {
+              "const": "names",
+              "description": "Its path and status.",
+              "type": "string"
+            },
+            {
+              "const": "stat",
+              "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+              "type": "string"
+            },
+            {
+              "const": "unified",
+              "description": "Also its kinds, its blobs and, for text, its hunks.",
+              "type": "string"
+            }
+          ]
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`diff`: the files that differ between two revisions, in path order, a page at a time.",
+      "properties": {
+        "context": {
+          "default": 3,
+          "description": "The unchanged lines around each change in a `unified` hunk.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cursor": {
+          "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "$ref": "#/$defs/DiffFormat",
+          "default": "names",
+          "description": "What to say of each file: `names` its path and status; `stat` also whether it is binary\nand, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and,\nfor text, its hunks."
+        },
+        "from": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to diff from: the old side."
+        },
+        "limit": {
+          "default": 500,
+          "description": "The most files to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 32768,
+          "description": "The most bytes a `unified` page's files take, as the JSON array `files` they print as: at\nleast 1 (0 is `E_INVALID_ARG`). The page stops before the first file that would take it\npast this, but always holds one file, whose hunks are cut to the first ones that fit\n(`hunks_truncated`) when they alone would pass it. A `names` or `stat` page is held by\n`limit` alone.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "paths": {
+          "description": "Only the files at or below these repository paths (a file's path takes that file; one\ntrailing `/` is taken); every file when empty or omitted.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "to": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to diff to: the new side."
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "title": "DiffReq",
+      "type": "object"
+    },
+    "DiffStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What happened to a file between the two revisions.",
+      "oneOf": [
+        {
+          "const": "added",
+          "description": "It is in `to` only: in `from`, nothing or a directory is there.",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "description": "It is in `from` only.",
+          "type": "string"
+        },
+        {
+          "const": "modified",
+          "description": "Its content or its exec bit changed: a file or an executable on both sides, or a\nsymlink on both sides.",
+          "type": "string"
+        },
+        {
+          "const": "type_changed",
+          "description": "A symlink on one side, a file or an executable on the other.",
+          "type": "string"
+        }
+      ],
+      "title": "DiffStatus"
     },
     "EntryKindOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -1352,35 +2113,86 @@ expression: s.redact(&all)
               "type": "string"
             }
           ]
+        },
+        "LineRange": {
+          "description": "A range of a file's lines, numbered from 1: `first` to `last`, both included.",
+          "properties": {
+            "first": {
+              "description": "The range's first line: at least 1.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The range's last line: at least `first`.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`read_file` (CLI `cat`): a file's content.",
+      "description": "`read_file` (CLI `cat`): a file's content, or the part of it the request names.",
       "properties": {
         "blob": {
           "description": "The blob's id.",
           "type": "string"
         },
         "content": {
-          "description": "The bytes returned: the whole blob, or the start of it when `truncated`. A cut keeps text\nas text: it falls where a character starts, so text may stop up to 3 bytes short of\n`max_bytes`, while bytes that are not text stop at exactly `max_bytes`.",
+          "description": "The bytes returned: those from `offset`, or the requested lines, at most `max_bytes` of\nthem. A cut keeps text as text: it falls where a character starts, so text may stop up to\n3 bytes short of `max_bytes`, while bytes that are not text stop at exactly `max_bytes`.",
           "type": "string"
         },
         "encoding": {
           "$ref": "#/$defs/ContentEncoding",
-          "description": "How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they\nare not."
+          "description": "How `content` encodes the bytes it returns: `utf8` when they are text, `base64` when they\nare not (as when `offset` falls inside a character)."
         },
         "kind": {
           "$ref": "#/$defs/FileKind",
           "description": "The file's kind."
         },
+        "lines": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "For a request by `lines`: the lines of its range that exist, which `content` holds (the\nstart of them when `truncated`); omitted when none does."
+        },
+        "next_offset": {
+          "description": "When `truncated`: where `content` stops, the `offset` that reads on from there. A cut text\nholds whole characters, so a `max_bytes` under 4 can stop before a longer character at\nthe `offset` it started from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "offset": {
+          "description": "Where `content` starts in the file, in bytes: the request's `offset`, or where the first\nof its `lines` that exists starts (the file's size when none does); omitted when that is\nthe file's start.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "size": {
-          "description": "The whole blob's size in bytes, also when `content` is truncated.",
+          "description": "The whole blob's size in bytes, also when `content` is part of it.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
         },
         "truncated": {
-          "description": "Whether `content` stops before the end of the blob.",
+          "description": "Whether `content` stops before the end of what was asked for: the file, from `offset`; or\nthe requested lines that exist.",
           "type": "boolean"
         }
       },
@@ -1393,6 +2205,233 @@ expression: s.redact(&all)
         "truncated"
       ],
       "title": "FileContent",
+      "type": "object"
+    },
+    "FileDiff": {
+      "$defs": {
+        "DiffHunk": {
+          "description": "A hunk of a unified diff: one or more changes and the unchanged lines around them, with the\nnumbers of its header, `@@ -old_start,old_lines +new_start,new_lines @@`.",
+          "properties": {
+            "lines": {
+              "description": "Its lines, in order; each change's removed lines come before its added lines.",
+              "items": {
+                "$ref": "#/$defs/DiffLineOut"
+              },
+              "type": "array"
+            },
+            "new_lines": {
+              "description": "How many new lines it holds: its context and added lines.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "new_start": {
+              "description": "The first new line it holds, counted as `old_start` is.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_lines": {
+              "description": "How many old lines it holds: its context and removed lines.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_start": {
+              "description": "The first old line it holds, counted from 1; when it holds none, the line before where\nthey would be (0 at the top), as git prints it.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "old_start",
+            "old_lines",
+            "new_start",
+            "new_lines",
+            "lines"
+          ],
+          "type": "object"
+        },
+        "DiffLineOut": {
+          "description": "One line of a hunk.",
+          "properties": {
+            "op": {
+              "$ref": "#/$defs/LineOp",
+              "description": "Whether both sides have it, only the new one, or only the old one."
+            },
+            "text": {
+              "description": "The line with its line break, a carriage return before it kept; a file's last line has\nnone when the file does not end in one.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "op",
+            "text"
+          ],
+          "type": "object"
+        },
+        "DiffStatus": {
+          "description": "What happened to a file between the two revisions.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "It is in `to` only: in `from`, nothing or a directory is there.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is in `from` only.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content or its exec bit changed: a file or an executable on both sides, or a\nsymlink on both sides.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A symlink on one side, a file or an executable on the other.",
+              "type": "string"
+            }
+          ]
+        },
+        "FileKind": {
+          "description": "What a file is; never a directory.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            }
+          ]
+        },
+        "LineOp": {
+          "description": "Which side of a diff a hunk's line is on.",
+          "oneOf": [
+            {
+              "const": "context",
+              "description": "Both: an unchanged line around a change.",
+              "type": "string"
+            },
+            {
+              "const": "add",
+              "description": "The new side only.",
+              "type": "string"
+            },
+            {
+              "const": "remove",
+              "description": "The old side only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One file that differs: a file, an executable or a symlink whose content or kind changed, or\nthat is on one side only. A directory never is one: a file that becomes a directory is that\nfile deleted and the directory's files added. No rename is detected: a file that moved is\none deleted and one added. Which fields follow `status` depends on the request's `format`,\nand a field that says nothing is omitted.",
+      "properties": {
+        "binary": {
+          "description": "`stat` and `unified`: whether it is binary, which gets no line counts and no hunks: a side\nthat is not UTF-8, or holds a NUL in its first 8,000 bytes.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "deletions": {
+          "description": "`stat` and `unified`, for text: the lines the change deletes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "hunks": {
+          "description": "`unified`, for text: the hunks, in order; empty when only the exec bit or the kind\nchanged.",
+          "items": {
+            "$ref": "#/$defs/DiffHunk"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "hunks_truncated": {
+          "description": "`unified`: true when `hunks` stops before the file's last hunk, to keep the page within\n`max_bytes`; omitted otherwise. `insertions` and `deletions` count every line all the\nsame.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "insertions": {
+          "description": "`stat` and `unified`, for text: the lines the change inserts.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "new_blob": {
+          "description": "`unified`: its blob id in `to`; omitted for a deleted file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "new_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`unified`: its kind in `to`; omitted for a deleted file."
+        },
+        "old_blob": {
+          "description": "`unified`: its blob id in `from`; omitted for an added file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old_kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FileKind"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`unified`: its kind in `from`; omitted for an added file."
+        },
+        "path": {
+          "description": "The repository path.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/DiffStatus",
+          "description": "What happened to it."
+        }
+      },
+      "required": [
+        "path",
+        "status"
+      ],
+      "title": "FileDiff",
       "type": "object"
     },
     "FileKind": {
@@ -1702,6 +2741,52 @@ expression: s.redact(&all)
       "title": "InitReq",
       "type": "object"
     },
+    "LineOp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Which side of a diff a hunk's line is on.",
+      "oneOf": [
+        {
+          "const": "context",
+          "description": "Both: an unchanged line around a change.",
+          "type": "string"
+        },
+        {
+          "const": "add",
+          "description": "The new side only.",
+          "type": "string"
+        },
+        {
+          "const": "remove",
+          "description": "The old side only.",
+          "type": "string"
+        }
+      ],
+      "title": "LineOp"
+    },
+    "LineRange": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A range of a file's lines, numbered from 1: `first` to `last`, both included.",
+      "properties": {
+        "first": {
+          "description": "The range's first line: at least 1.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "last": {
+          "description": "The range's last line: at least `first`.",
+          "format": "uint64",
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "first",
+        "last"
+      ],
+      "title": "LineRange",
+      "type": "object"
+    },
     "LogCutOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Where the journal was cut (`meta.recovered.log_cut`).",
@@ -1819,6 +2904,13 @@ expression: s.redact(&all)
           "format": "uint",
           "minimum": 1,
           "type": "integer"
+        },
+        "paths": {
+          "description": "Only the changesets that change one of these paths: a file (its content or kind, or\nwhether it is there), or a directory and anything below it; one trailing `/` is taken.\nOmitted or empty for every changeset.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "rev": {
           "anyOf": [
@@ -2143,7 +3235,234 @@ expression: s.redact(&all)
       "title": "OpError",
       "type": "object"
     },
-    "ReadFileReq": {
+    "PathHistoryEntry": {
+      "$defs": {
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
+        "EntryKindOut": {
+          "description": "What a tree entry is.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            },
+            {
+              "const": "dir",
+              "description": "A directory.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One changeset of a path's history, and what the path holds after it.",
+      "properties": {
+        "author_agent": {
+          "description": "The agent that wrote the changeset, as `log` gives it.",
+          "type": "string"
+        },
+        "changeset": {
+          "description": "The changeset's id.",
+          "type": "string"
+        },
+        "created_at": {
+          "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "id": {
+          "description": "A blob id for a file, an executable or a symlink; a tree id for a directory; omitted after\na `delete`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EntryKindOut"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What is at the path after it; omitted after a `delete`."
+        },
+        "op": {
+          "$ref": "#/$defs/ChangeOp",
+          "description": "`put` when something is at the path after the changeset, `delete` when nothing is."
+        },
+        "title": {
+          "description": "The message's first line.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeset",
+        "op",
+        "author_agent",
+        "created_at",
+        "title"
+      ],
+      "title": "PathHistoryEntry",
+      "type": "object"
+    },
+    "PathHistoryPage": {
+      "$defs": {
+        "ChangeOp": {
+          "description": "What a change does to its path, in a commit's change list and a changeset's changes alike.",
+          "oneOf": [
+            {
+              "const": "put",
+              "description": "Write the content at the path, creating or replacing the entry.",
+              "type": "string"
+            },
+            {
+              "const": "delete",
+              "description": "Remove the path.",
+              "type": "string"
+            }
+          ]
+        },
+        "EntryKindOut": {
+          "description": "What a tree entry is.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file.",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file.",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink.",
+              "type": "string"
+            },
+            {
+              "const": "dir",
+              "description": "A directory.",
+              "type": "string"
+            }
+          ]
+        },
+        "PathHistoryEntry": {
+          "description": "One changeset of a path's history, and what the path holds after it.",
+          "properties": {
+            "author_agent": {
+              "description": "The agent that wrote the changeset, as `log` gives it.",
+              "type": "string"
+            },
+            "changeset": {
+              "description": "The changeset's id.",
+              "type": "string"
+            },
+            "created_at": {
+              "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "description": "A blob id for a file, an executable or a symlink; a tree id for a directory; omitted after\na `delete`.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "kind": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/EntryKindOut"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What is at the path after it; omitted after a `delete`."
+            },
+            "op": {
+              "$ref": "#/$defs/ChangeOp",
+              "description": "`put` when something is at the path after the changeset, `delete` when nothing is."
+            },
+            "title": {
+              "description": "The message's first line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeset",
+            "op",
+            "author_agent",
+            "created_at",
+            "title"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`path_history` (CLI `history`): a page of a path's history, newest first.",
+      "properties": {
+        "cursor": {
+          "description": "When `truncated`: where the next page continues. Opaque: pass it back as given, as the\nnext request's `cursor`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "entries": {
+          "description": "The changesets that changed what it holds.",
+          "items": {
+            "$ref": "#/$defs/PathHistoryEntry"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "The path, without a trailing `/`.",
+          "type": "string"
+        },
+        "truncated": {
+          "description": "Whether an older changeset that changed it follows this page.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "entries",
+        "truncated"
+      ],
+      "title": "PathHistoryPage",
+      "type": "object"
+    },
+    "PathHistoryReq": {
       "$defs": {
         "Rev": {
           "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
@@ -2151,11 +3470,97 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout.",
+      "description": "`path_history` (CLI `history`): the changesets that changed what a path holds, newest first,\nfollowing first parents, a page at a time.",
       "properties": {
+        "cursor": {
+          "description": "Resume a history: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page continues from the first parent of the\nchangeset it names, and `rev` is not used.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit": {
+          "default": 50,
+          "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "The repository path: a file, whose history is that of its content and kind, or a\ndirectory, whose history is that of everything below it. One trailing `/` is taken.",
+          "type": "string"
+        },
+        "rev": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where to start; `main` when omitted."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "title": "PathHistoryReq",
+      "type": "object"
+    },
+    "ReadFileReq": {
+      "$defs": {
+        "LineRange": {
+          "description": "A range of a file's lines, numbered from 1: `first` to `last`, both included.",
+          "properties": {
+            "first": {
+              "description": "The range's first line: at least 1.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "last": {
+              "description": "The range's last line: at least `first`.",
+              "format": "uint64",
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "first",
+            "last"
+          ],
+          "type": "object"
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or\na range of its lines.",
+      "properties": {
+        "lines": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LineRange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Read these lines instead, numbered from 1, both ends included: a line ends after its\nnewline, and a last line without one is a line too. The lines of the range that exist\ncome back, none past the file's last. Give this or `offset`, not both (`E_INVALID_ARG`)."
+        },
         "max_bytes": {
           "default": 1048576,
-          "description": "The most content bytes to return; a longer file comes back truncated.",
+          "description": "The most content bytes to return; more comes back truncated, with the `next_offset` to\nread on from.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "description": "Where to start reading, in bytes from the file's start: a truncated read's `next_offset`\nreads on from where it stopped. An offset past the end gives empty content. Give this or\n`lines`, not both (`E_INVALID_ARG`).",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -2184,7 +3589,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime.",
+      "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime; with `depth`, the directories below it too.",
       "properties": {
         "cursor": {
           "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
@@ -2193,8 +3598,16 @@ expression: s.redact(&all)
             "null"
           ]
         },
+        "depth": {
+          "default": 1,
+          "description": "How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so on, up\nto 64 (0 or more than 64 is `E_INVALID_ARG`).",
+          "format": "uint32",
+          "maximum": 64,
+          "minimum": 1,
+          "type": "integer"
+        },
         "limit": {
-          "default": 500,
+          "default": 250,
           "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
           "format": "uint",
           "minimum": 1,
@@ -2573,11 +3986,86 @@ expression: s.redact(&all)
       "title": "RepoInfo",
       "type": "object"
     },
+    "ResolveRevReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it.",
+      "properties": {
+        "rev": {
+          "$ref": "#/$defs/Rev",
+          "description": "The revision to resolve."
+        }
+      },
+      "required": [
+        "rev"
+      ],
+      "title": "ResolveRevReq",
+      "type": "object"
+    },
+    "ResolvedRev": {
+      "$defs": {
+        "RevKind": {
+          "description": "What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and\nthe edits not committed yet (`ws:<name>`).",
+          "oneOf": [
+            {
+              "const": "ref",
+              "description": "Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves\nwhen the ref does.",
+              "type": "string"
+            },
+            {
+              "const": "changeset",
+              "description": "Any other revision: a full changeset id, a unique prefix of one, or a revision followed by\n`~N` suffixes, a ref's name among them.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`resolve_rev` (CLI `resolve`): the changeset a revision names, and what kind of revision it is.",
+      "properties": {
+        "id": {
+          "description": "The full id of the changeset the revision names.",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/RevKind",
+          "description": "What the revision is: `ref` when it is exactly a ref's name, `changeset` otherwise."
+        }
+      },
+      "required": [
+        "id",
+        "kind"
+      ],
+      "title": "ResolvedRev",
+      "type": "object"
+    },
     "Rev": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
       "title": "Rev",
       "type": "string"
+    },
+    "RevKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and\nthe edits not committed yet (`ws:<name>`).",
+      "oneOf": [
+        {
+          "const": "ref",
+          "description": "Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves\nwhen the ref does.",
+          "type": "string"
+        },
+        {
+          "const": "changeset",
+          "description": "Any other revision: a full changeset id, a unique prefix of one, or a revision followed by\n`~N` suffixes, a ref's name among them.",
+          "type": "string"
+        }
+      ],
+      "title": "RevKind"
     },
     "ShowReq": {
       "$defs": {
@@ -2720,7 +4208,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "One entry of a directory.",
+      "description": "One entry of a listing.",
       "properties": {
         "id": {
           "description": "A blob id for a file, an executable or a symlink; a tree id for a directory.",
@@ -2733,6 +4221,22 @@ expression: s.redact(&all)
         "name": {
           "description": "The entry's name: one path component.",
           "type": "string"
+        },
+        "path": {
+          "description": "Its path below the listed directory, given when the request's `depth` is more than 1: its\nname, for one of the directory's own entries.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "size": {
+          "description": "For a file, an executable or a symlink: its content's size in bytes; omitted for a\ndirectory.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         }
       },
       "required": [
@@ -2771,7 +4275,7 @@ expression: s.redact(&all)
           ]
         },
         "TreeEntryOut": {
-          "description": "One entry of a directory.",
+          "description": "One entry of a listing.",
           "properties": {
             "id": {
               "description": "A blob id for a file, an executable or a symlink; a tree id for a directory.",
@@ -2784,6 +4288,22 @@ expression: s.redact(&all)
             "name": {
               "description": "The entry's name: one path component.",
               "type": "string"
+            },
+            "path": {
+              "description": "Its path below the listed directory, given when the request's `depth` is more than 1: its\nname, for one of the directory's own entries.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "size": {
+              "description": "For a file, an executable or a symlink: its content's size in bytes; omitted for a\ndirectory.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
             }
           },
           "required": [
@@ -2795,7 +4315,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "`read_tree` (CLI `ls`): a page of a directory's entries, in the tree's order (by name bytes).",
+      "description": "`read_tree` (CLI `ls`): a page of a directory's entries, in pre-order: a directory, then the\nentries below it to the request's `depth`, each directory's entries by name bytes (at `depth`\n1, the tree's order).",
       "properties": {
         "cursor": {
           "description": "When `truncated`: where the next page starts. Opaque: pass it back as given, as the next\nrequest's `cursor`.",

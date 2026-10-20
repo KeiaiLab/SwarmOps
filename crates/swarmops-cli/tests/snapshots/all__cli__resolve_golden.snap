@@ -1,0 +1,294 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store --name acme",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "acme",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m 'first commit\n\nwith a body' --changes [tmp]/changes.json",
+    "env": {
+      "SWARMOPS_RUN_ID": "run-1"
+    },
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[root1]",
+        "files_changed": 6,
+        "blobs_written": 6
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m second --changes -",
+    "stdin": [
+      {
+        "content": {
+          "inline": "# acme\n\nversion 2\n"
+        },
+        "op": "put",
+        "path": "README.md"
+      },
+      {
+        "op": "delete",
+        "path": "notes.txt"
+      }
+    ],
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[root2]",
+        "files_changed": 2,
+        "blobs_written": 1
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "old": "[c1]",
+        "new": "[c2]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store resolve main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "resolve_rev",
+      "api": 1,
+      "result": {
+        "id": "[c2]",
+        "kind": "ref"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store resolve main~1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "resolve_rev",
+      "api": 1,
+      "result": {
+        "id": "[c1]",
+        "kind": "changeset"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main~1": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store resolve [c1:12]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "resolve_rev",
+      "api": 1,
+      "result": {
+        "id": "[c1]",
+        "kind": "changeset"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1:12]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store resolve [c2]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "resolve_rev",
+      "api": 1,
+      "result": {
+        "id": "[c2]",
+        "kind": "changeset"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store resolve release/none",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "resolve_rev",
+      "api": 1,
+      "error": {
+        "code": "E_REV_NOT_FOUND",
+        "message": "release/none: not found",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "rev": "release/none"
+        },
+        "hint": "swarmops ref list"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store resolve main~2",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "resolve_rev",
+      "api": 1,
+      "error": {
+        "code": "E_REV_NOT_FOUND",
+        "message": "main~2: not found",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "rev": "main~2"
+        },
+        "hint": "swarmops log main"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store resolve HEAD",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "resolve_rev",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "\"HEAD\" is not a revision",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "rev": "HEAD"
+        },
+        "hint": "a revision is main, release/<name>, a changeset id or 12 or more of its first hex digits, then optionally ~N for the N-th first parent"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

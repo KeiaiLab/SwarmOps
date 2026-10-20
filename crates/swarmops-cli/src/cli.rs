@@ -9,7 +9,9 @@ use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
 };
 use swarmops_api::{
-    DEFAULT_LOG_LIMIT, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_READ_TREE_LIMIT, LossyClass,
+    DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
+    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT,
+    LineRange, LossyClass,
 };
 
 use crate::output::printable;
@@ -174,7 +176,7 @@ pub enum Command {
         /// The commit message.
         #[arg(short, long)]
         message: String,
-        /// A JSON file holding an array of changes, or - for stdin.
+        /// A JSON file holding an array of changes, or - for stdin: at most 64 MiB.
         #[arg(long, value_name = "FILE")]
         changes: String,
         /// The changeset to commit on top of (default: main's head, if main exists).
@@ -186,23 +188,44 @@ pub enum Command {
         #[arg(long, value_name = "REF", help = ADVANCE_HELP, long_help = ADVANCE_LONG_HELP)]
         advance: Option<String>,
     },
-    /// Print one file at a revision.
+    /// Store content as a blob for a commit to name by its id, or ask which blobs the store
+    /// holds.
+    #[command(subcommand)]
+    Blob(BlobCommand),
+    /// Name the changeset REV names, and whether REV is a ref's name.
+    Resolve {
+        /// The revision: a ref name, a full changeset id or a unique prefix of 12 or more of its
+        /// hex digits, then any number of ~N suffixes.
+        rev: String,
+    },
+    /// Print one file at a revision, or part of it: from a byte, or a range of lines.
     Cat {
         // Split at the first ':' by commands::split_target: M1's revision grammar has no ':'.
         // `ws:<name>` and `cr:CR-n[@k]` arrive later, and the split must become prefix-aware.
         /// The revision and the file's path, split at the first ':'.
         #[arg(value_name = "REV:PATH")]
         target: String,
+        /// Start at byte N of the file; a truncated result's next_offset reads on from there.
+        #[arg(long, value_name = "N", default_value_t = 0, conflicts_with = "lines")]
+        offset: u64,
+        /// Print lines A to B only, numbered from 1, both included, such as 10-20.
+        #[arg(long, value_name = "A-B", value_parser = line_range)]
+        lines: Option<LineRange>,
         /// The most content bytes to print.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_BYTES)]
         max_bytes: u64,
     },
-    /// List one directory at a revision (the root without a PATH).
+    /// List one directory at a revision (the root without a PATH), and with --depth the
+    /// directories below it.
     Ls {
         // Split at the first ':' as `cat`'s target is (see there).
         /// The revision, and the directory's path after the first ':'.
         #[arg(value_name = "REV[:PATH]")]
         target: String,
+        /// How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so
+        /// on, up to 64.
+        #[arg(long, value_name = "N", default_value_t = 1)]
+        depth: u32,
         /// The most entries to list.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_READ_TREE_LIMIT)]
         limit: usize,
@@ -228,7 +251,25 @@ pub enum Command {
         /// Resume a log: the previous page's cursor, exactly as it was returned.
         #[arg(long)]
         cursor: Option<String>,
+        /// Only the changesets that change PATH, or anything below it; give it again for more.
+        #[arg(long = "path", value_name = "PATH")]
+        paths: Vec<String>,
     },
+    /// List the changesets that changed a path, newest first, along first parents.
+    History {
+        // Split at the first ':' as `cat`'s target is (see there).
+        /// The revision and the path (a file, or a directory), split at the first ':'.
+        #[arg(value_name = "REV:PATH")]
+        target: String,
+        /// The most changesets to list.
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_PATH_HISTORY_LIMIT)]
+        limit: usize,
+        /// Resume a history: the previous page's cursor, exactly as it was returned.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// List the files that differ between two revisions, a page at a time.
+    Diff(DiffArgs),
     /// List refs, or move one by compare-and-swap.
     #[command(subcommand)]
     Ref(RefCommand),
@@ -243,14 +284,103 @@ pub enum Command {
     Git(GitCommand),
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
-    /// One tool per operation (repo_info, read_file, read_tree, show, log, ref_list, ref_set,
-    /// ref_delete, commit, verify), each taking the operation's request as its arguments and
-    /// returning the envelope the other commands print. The store and the identity are the
-    /// server's, --repo and --as or their variables, never a call's. Speaks MCP 2026-07-28,
-    /// and 2025-11-25 and 2025-06-18 to clients that open with initialize. Prints no envelope:
-    /// stdout carries the protocol until stdin ends, and a command line it refuses has its
-    /// envelope on stderr.
+    /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log,
+    /// path_history, diff, ref_list, ref_set, ref_delete, commit, blob_put, blob_has, verify), each
+    /// taking the operation's request as its arguments and returning the envelope the other
+    /// commands print. The store and the identity are the server's, --repo and --as or their
+    /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients
+    /// that open with initialize. Prints no envelope: stdout carries the protocol until stdin ends,
+    /// and a command line it refuses has its envelope on stderr. The derive command has no tool: it
+    /// is maintenance, no agent's work.
     Mcp,
+    /// Derive the eager derived values of new changesets, ahead of any reader.
+    ///
+    /// Once, it derives the values of the changesets the journal records in up to 1,000 frames,
+    /// from its first frame or after --after N, and gives the last frame it read as next: run it
+    /// with --after next to go on. With --follow it runs until it is killed: from the journal's
+    /// end (from its first frame with --from-start, or after --after N) it derives the changesets
+    /// as they are recorded, looking again every --interval-ms once it has caught up, and prints
+    /// one envelope a line for each run that derived something. A run that fails ends it with
+    /// that run's envelope and exit code. Commits derive nothing.
+    Derive {
+        /// Go on after journal frame N, a previous run's next (default: the first frame; with
+        /// --follow, the journal's end).
+        #[arg(long, value_name = "N", conflicts_with = "from_start")]
+        after: Option<u64>,
+        /// Keep deriving what the journal records, until killed.
+        #[arg(long)]
+        follow: bool,
+        /// With --follow: how many milliseconds to wait before looking again, once caught up.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = 500,
+            requires = "follow",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        interval_ms: u64,
+        /// With --follow: start from the journal's first frame, not its end.
+        #[arg(long, requires = "follow")]
+        from_start: bool,
+    },
+}
+
+/// `blob`'s operations.
+#[derive(Subcommand, Debug)]
+pub enum BlobCommand {
+    /// Store FILE's content as a blob, outside any commit, and print its id, which a change
+    /// names it by: {"blob": ID}. A change list holds at most 64 MiB and a commit's contents
+    /// 1 GiB together; a blob named by id counts toward neither.
+    Put {
+        /// The file whose content to store, or - for stdin.
+        #[arg(value_name = "FILE")]
+        file: String,
+    },
+    /// Of the IDs given, list those the store holds blobs under.
+    Has {
+        /// Blob ids, 64 hex digits each.
+        #[arg(value_name = "ID", required = true)]
+        ids: Vec<String>,
+    },
+}
+
+/// `diff`'s arguments.
+#[derive(Args, Debug)]
+pub struct DiffArgs {
+    /// The revision to diff from.
+    pub from: String,
+    /// The revision to diff to.
+    pub to: String,
+    /// Only the files at or below this path; give it again for more.
+    #[arg(long = "path", value_name = "P")]
+    pub paths: Vec<String>,
+    /// What to say of each file.
+    #[arg(long, value_enum, default_value_t = DiffFormatArg::Names)]
+    pub format: DiffFormatArg,
+    /// The unchanged lines around each change in a unified hunk.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_CONTEXT)]
+    pub context: u32,
+    /// The most files to list.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_LIMIT)]
+    pub limit: usize,
+    /// Resume a diff: the previous page's cursor, exactly as it was returned.
+    #[arg(long)]
+    pub cursor: Option<String>,
+    /// The most bytes of a unified page's files, as JSON (the first file comes all the same,
+    /// its hunks cut to fit).
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_MAX_BYTES)]
+    pub max_bytes: u64,
+}
+
+/// What `diff` says of each file (`--format`).
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffFormatArg {
+    /// Its path and status.
+    Names,
+    /// Also whether it is binary and, for text, the lines it inserts and deletes.
+    Stat,
+    /// Also its kinds, its blobs and, for text, its hunks.
+    Unified,
 }
 
 /// `ref`'s operations.
@@ -479,18 +609,40 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["whoami"] => "whoami",
         ["schema"] => "schema",
         ["commit"] => "commit",
+        ["resolve"] => "resolve_rev",
+        ["blob", "put"] => "blob_put",
+        ["blob", "has"] => "blob_has",
         ["cat"] => "read_file",
         ["ls"] => "read_tree",
         ["show"] => "show",
         ["log"] => "log",
+        ["history"] => "path_history",
+        ["diff"] => "diff",
         ["ref", "list"] => "ref_list",
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
         ["verify"] => "verify",
         ["git", "import"] => "git_import",
         ["mcp"] => "mcp",
+        ["derive"] => "derive",
         _ => return None,
     })
+}
+
+/// `cat --lines A-B`: two line numbers, such as 10-20. Whether they make a range `read_file` takes
+/// (numbered from 1, ending at or after its start) is the operation's to say, as for every client.
+fn line_range(text: &str) -> Result<LineRange, String> {
+    let number = |digits: &str| {
+        let decimal = !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit());
+        decimal.then(|| digits.parse().ok()).flatten()
+    };
+    let range = text.split_once('-').and_then(|(first, last)| {
+        Some(LineRange {
+            first: number(first)?,
+            last: number(last)?,
+        })
+    });
+    range.ok_or_else(|| "expected two line numbers, A-B, such as 10-20".to_owned())
 }
 
 /// The usage line of the subcommand `path` names, or of the deepest part of it that names
@@ -517,6 +669,7 @@ fn command() -> clap::Command {
     Cli::command()
         .arg_required_else_help(false)
         .mut_subcommand("ref", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("blob", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("git", |cmd| cmd.arg_required_else_help(false))
 }
 
@@ -597,11 +750,12 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 15);
+        assert_eq!(ops.len(), 21);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 15, "two subcommands name one op");
+        assert_eq!(ops.len(), 21, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
+        assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["git"]), None);
     }
 
@@ -655,7 +809,7 @@ mod tests {
             panic!("a usage error");
         };
         assert_eq!(path, Vec::<String>::new());
-        for line in [&[][..], &["ref"], &["git"]] {
+        for line in [&[][..], &["ref"], &["blob"], &["git"]] {
             let Parsed::Usage { error, .. } = parse(&args(line)) else {
                 panic!("{line:?}: a usage error, not a help screen");
             };
