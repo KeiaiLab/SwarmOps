@@ -18,12 +18,13 @@ what it lets an attacker do, and the commit you tested. A fix lands on `stable`,
 
 ## Supported versions
 
-SwarmOps has not been released: there are no tags, binaries or published crates. Security fixes
-go to the main line, the `stable` branch, and nowhere else.
+SwarmOps 0.1.0 is released as the tag `v0.1.0`, with its archives; no crate is published.
+Security fixes go to the main line, the `stable` branch, and nowhere else.
 
 | Version | Supported |
 | --- | --- |
-| `stable` (pre-release, 0.1.0) | yes |
+| `stable` (the main line) | yes |
+| `0.1.0` (released; fixes go to `stable`) | no |
 | anything else | no |
 
 ## What is in scope
@@ -44,7 +45,8 @@ filesystem permissions are the access boundary. Within that model, these are vul
   over their slot and value, not a signature). These cases are known and tracked
   ([docs/known-limitations.md](docs/known-limitations.md), "Hostile input"): an object whose
   zstd frame really decompresses to a large size (a compression bomb) is decompressed in full
-  before its hash is checked, so reading it takes up to 512 MiB, the most an object holds (a
+  before its hash is checked, so reading it takes 512 MiB of payload, the most an object holds,
+  plus the decoder window of up to 128 MiB, and about 1.1 GiB of address space (a
   header that records more is refused before any allocation, a frame that only records its size
   as corrupt); crafted `journal.off` entries that agree with each other, deeper than
   the two links recovery and readers check, pass as valid, so a read that starts past them
@@ -70,9 +72,10 @@ filesystem permissions are the access boundary. Within that model, these are vul
   path with a `..` component, a leading `/` or a NUL byte; a request that makes SwarmOps write
   outside the store; one that corrupts the store; or one that makes it allocate without bound.
   A request's size is checked before it is read: its text (a `--changes` file or stdin, or one
-  line of `swarmops mcp`'s input) holds at most 64 MiB, a put's content 512 MiB, and a commit's
-  contents 1 GiB together, measured by the sizes they declare (a client file's length) before
-  a byte of them is read.
+  line of `swarmops mcp`'s input) holds at most 64 MiB. A commit's contents hold at most 1 GiB
+  together, measured by the sizes they declare (a client file's length) before a byte of them is
+  read; a put's content holds at most 512 MiB, checked as each content is converted, in list
+  order, so the contents before it may already have been read.
 - **Test hooks in a release build.** The `SWARMOPS_TEST_*` variables make a process crash or
   fail at a chosen filesystem call, count its calls, or pin its clock. A build without the
   `test-hooks` feature, as `cargo build --release` is, must ignore them; one that honours them
@@ -89,6 +92,10 @@ filesystem permissions are the access boundary. Within that model, these are vul
   writes outside the store, follows a symlink out of a workspace, or exhausts memory on a
   crafted repository is a vulnerability. Workspaces (M5), which write files to disk, are in
   scope the same way.
+- **The git export (M8).** `swarmops git export` writes git objects and one branch into a git
+  repository at a path that the request names, on the caller's host, so the export is a trust
+  boundary. A request that makes SwarmOps write outside that repository, move a branch other than
+  the one it names, or write through a name that git does not take as a branch is a vulnerability.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
   or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the
   project builds: the workspace's and the fuzz crate's in every `just check`, and
@@ -109,13 +116,14 @@ filesystem permissions are the access boundary. Within that model, these are vul
   and checks the derived values against them); preventing it is not.
 - **Reading files the caller can read.** A change list's `{"file": "<path>"}` content is read
   on the client, with the caller's own permissions, as any program the caller runs could read
-  it; the stdio MCP server runs as its caller and reads it the same way. A server that takes
-  requests from another host, M11's `swarmops serve --stdio` over ssh and then M10's network
-  server, must refuse such content, and will (operations spec §7).
+  it, and `land --resolve` reads its `{"file"}` content on the client the same way; the stdio MCP
+  server runs as its caller and reads it the same way. A server that takes requests from another
+  host, M11's `swarmops serve --stdio` over ssh first, must refuse such content, and will
+  (operations spec §7).
 - **Durability failures.** Data lost after a crash, a power loss or a disk error is a serious
   bug, not a vulnerability: report it as an issue. [docs/architecture.md](docs/architecture.md)
   describes the durability model and its tests.
 - **Builds with the `test-hooks` feature**, which exist for the test suite only.
 
-When SwarmOps gains a server that takes requests from another host (M11's `serve`, then M10's
-network server), the trust model changes, and this policy with it.
+When SwarmOps gains a server that takes requests from another host (M11's `serve` first), the
+trust model changes, and this policy with it.

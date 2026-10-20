@@ -25,10 +25,13 @@ builds at it. Moving to a newer Rust is a change of its own: `rust-toolchain.tom
 `rust-version` move together, `just check` passes on the new compiler (new lints included), and
 the changelog notes it.
 
-## Linux only
+## Linux today, macOS and Windows next
 
-SwarmOps supports Linux, and is built and tested on x86_64 Linux. Other systems (macOS, Windows,
-the BSDs) are not tested and not supported.
+SwarmOps is built and tested on x86_64 Linux. Its release builds cover x86_64 and aarch64
+(glibc 2.34 or newer); the aarch64 ones are only smoke-tested, under QEMU. macOS and Windows are the
+next milestone, M12: macOS durability through `F_FULLFSYNC`, Windows's lock and fsync model, file
+modes and symlinks, and CI runners for both. Until M12 lands, other systems (macOS, Windows, the
+BSDs) are not tested and not supported.
 
 The store relies on what a native Linux filesystem gives:
 
