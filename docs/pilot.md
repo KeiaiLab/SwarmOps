@@ -30,9 +30,11 @@ the **maintainer** reads the report and decides whether SwarmOps goes on to a se
   `cargo-nextest` 0.9.146 and `cargo-deny` 0.20.2.
 - **Claude Code** for the agent session, or `python3` for the scripted one.
 - **A directory on a local, native Linux filesystem** (ext4 or XFS; not NFS, not under `/mnt/`)
-  with about 3 GB free: the store holds SwarmOps' 422 commits in 51 MB, and the gate's build output
-  took 2.2 GB in the dry run (built with `CARGO_PROFILE_DEV_DEBUG=line-tables-only`; more without
-  it).
+  with about 4 GB free. On `stable` at 470 commits (a run on 2026-10-20, later than the dry run),
+  the pilot's directory took 3.9 GB, the gate's build output 3.3 GB of it, and the store 57 MB
+  after the import and 92 MB after the exports. With `CARGO_PROFILE_DEV_DEBUG=line-tables-only` in
+  step 6's environment the build output is smaller (line tables and no other debug info; the same
+  tests run): 2.2 GB in the dry run, whose store held SwarmOps' 422 commits in 51 MB.
 
 Write the report as you go: each step's command, exit code, wall time, the load average before
 and after (`uptime`), and the figures [Measure](#measure) lists.
@@ -95,6 +97,8 @@ du -sh "$SWARMOPS_REPO"
 
 `imported` must equal step 1's count, with `lossy_total` 0: the import takes no `--lossy` class
 here, so a commit SwarmOps could not hold exactly would have failed the import instead.
+`skipped` is 0 in a new store: it counts the commits the store held already that the import's
+walk met at its frontier, where it stopped, not the history the store holds.
 
 ## Step 3: One agent session
 
@@ -102,6 +106,8 @@ Pick the change before the session starts, and write it in the report: one small
 maintainers want anyway, touching one to three files, that `just check` covers. A documentation
 fix from the open issues is the right size. The dry run changed one line of
 `docs/known-limitations.md`, whose first paragraph still said "as of M1.6" after M2 had landed.
+Such a line moves on with the landings, so the steps below make no edit of their own: they take
+the change you picked.
 
 The agent reaches the store through `swarmops mcp` alone, with its own identity, `pilot/agent-1`:
 
@@ -149,11 +155,33 @@ it, shows the result, and prints one line per tool call. The message ends with t
 names the model of the agent that wrote the change, as CONTRIBUTING.md asks of every tool-assisted
 commit; the export keeps it, and adds its own trailers to that block.
 
+Save the appendix's script as `$PILOT/mcp_session.py`. It changes one file: `FILE` names it by
+its path in the repository, `SUBJECT` is the change in one line, and `MODEL` the model of the
+agent that makes it. Set them for your change, and start the new content from the file as
+`$START` holds it:
+
 ```sh
-git -C "$PILOT/source.git" show "$START:docs/known-limitations.md" | sed "3s/as of M1.6/as of M2/" > "$PILOT/new-content.md"
-python3 -I mcp_session.py "$PILOT/agent/.mcp.json" docs/known-limitations.md "$PILOT/new-content.md" \
-  "$(printf 'docs: known limitations as of M2\n\nCo-Authored-By: the coding agent <agent@example.invalid>')"
+FILE=docs/known-limitations.md    # the file your change touches: the example is yours to replace
+SUBJECT='docs: …'                 # your change in one line, the commit's subject
+MODEL='the coding agent'           # the model of the agent that makes the change
+git -C "$PILOT/source.git" show "$START:$FILE" > "$PILOT/new-content"
 ```
+
+Make the change in `$PILOT/new-content`, with an editor or with the agent's own edit, then run
+the session:
+
+```sh
+python3 -I "$PILOT/mcp_session.py" "$PILOT/agent/.mcp.json" "$FILE" "$PILOT/new-content" \
+  "$(printf '%s\n\nCo-Authored-By: %s <agent@example.invalid>' "$SUBJECT" "$MODEL")"
+```
+
+Before the commit, the script compares the new content with the whole file it read at main's
+head. When the two are the same, as when the change was not made, it stops with a message that
+says so and exits 1, and nothing is recorded: make the change, and run it again.
+
+The dry run's lines, for its change and the subject `docs: known limitations as of M2`; its file
+fit in one `read_file` page. The block as written here ran on 2026-10-20 too, against `stable` at
+`23ce4a1`, whose `docs/known-limitations.md` takes two pages, and so two `read_file` lines:
 
 ```text
 {"tools": 18}
@@ -400,12 +428,18 @@ since.
 It starts the server that a `.mcp.json` names (expanding `${VAR}` and `${VAR:-default}` in its
 arguments and environment, as Claude Code does), opens the session with
 `initialize`, lists the tools, then calls `ref_list`, `read_file`, `commit`, `land` and `show`. It
-prints one JSON line per call and stops at the first error, printing it.
+prints one JSON line per call and stops at the first error, printing it. It reads the whole file,
+one `read_file` call per page of up to 32 KiB, and compares it with the new content before the
+commit: when the two are the same, it stops with a message instead, since `commit` refuses a
+change that changes nothing (`E_EMPTY_COMMIT`). Save it as `$PILOT/mcp_session.py`; step 3 gives
+it four arguments: the `.mcp.json`, the file's path in the repository, the file that holds the
+new content, and the commit message.
 
 ```python
 """One scripted agent session through `swarmops mcp`: read a file at main, commit a new version
-of it on the head it read, land it, and print one JSON line per tool call."""
-import json, os, re, subprocess, sys, time, uuid
+of it on the head it read, land it, and print one JSON line per tool call. A new version that is
+the file as it was stops the session before the commit."""
+import base64, json, os, re, subprocess, sys, time, uuid
 
 mcp_json, path, new_file, message = sys.argv[1:5]
 server = json.load(open(mcp_json))["mcpServers"]["swarmops"]
@@ -440,8 +474,18 @@ rpc("initialize", {"protocolVersion": "2025-11-25", "capabilities": {},
 rpc("notifications/initialized")
 print(json.dumps({"tools": len(rpc("tools/list")["result"]["tools"])}))
 head = next(r["target"] for r in call("ref_list", {})["refs"] if r["name"] == "main")
-call("read_file", {"rev": head, "path": path, "max_bytes": 32768})
+old, offset = b"", 0
+while True:  # the whole file: read on from next_offset while truncated
+    page = call("read_file", {"rev": head, "path": path, "offset": offset, "max_bytes": 32768})
+    old += (base64.b64decode(page["content"]) if page["encoding"] == "base64"
+            else page["content"].encode("utf-8"))
+    if not page["truncated"]:
+        break
+    offset = page["next_offset"]
 new = open(new_file, encoding="utf-8").read()
+if new.encode("utf-8") == old:
+    sys.exit(f"{path}: the new content is the same as at main's head: make the change first "
+             "(nothing was committed)")
 commit = call("commit", {"message": message, "parent": head,
                          "changes": [{"path": path, "op": "put", "content": {"inline": new}}]})
 land = call("land", {"head": commit["changeset"], "idempotency_key": str(uuid.uuid4())})

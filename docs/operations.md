@@ -25,7 +25,14 @@ The examples run the long name, `swarmops`; `so` is the same program.
 - **One Unix user.** The store's object files, ref files and checkpoint are created readable by
   their owner only (mode `0600`), so every agent, MCP server and command that uses a store runs as
   the user who owns it. The store directory's filesystem permissions are its only access control
-  ([SECURITY.md](../SECURITY.md)).
+  ([SECURITY.md](../SECURITY.md)). Those `0600` files are the objects, the refs, the checkpoint,
+  the external ids, `FORMAT` and `REPO`. The rest follow the umask: the store's directories, its
+  journal (`meta/journal.log` and `meta/journal.off`), `meta/parents.log`, `meta/lock`, the index
+  columns, the sorted views and the derived values (`0775` and `0664` under a umask of `0002`:
+  whoever can reach the store's directory can then list it and read its journal, and the store's
+  group can write to it). So keep a store meant for one user in a directory of mode `0700`:
+  `install -d -m 0700 ~/.local/state/swarmops/repos` before the first `swarmops init` under it
+  (on a directory that exists, it sets the mode).
 - **git** on the host, for `clone`, `fetch` and `push`. `swarmops git import` and
   `swarmops git export` read and write git repositories themselves.
 
@@ -88,9 +95,14 @@ after it were run on an archive packed the way the release workflow packs one.
 
 A store is one directory. Put it on the host's local disk with room to grow: it keeps one file per
 object (zstd-compressed when that is smaller), packs nothing and removes nothing yet. A new store
-takes about 1 MB (its 256 object directories); SwarmOps' own history, 422 commits, takes 51 MB in
-8,085 files. Every command finds the store by `--repo` or `SWARMOPS_REPO`; there is no default
-location, and `~/.local/state/swarmops/repos/<name>` is only the convention used here.
+takes about 1 MB (its 256 object directories); SwarmOps' own history, 422 commits, took 51 MB in
+8,085 files in the pilot's dry run of 2026-10-20 ([pilot.md](pilot.md)), and 57 MB in 8,854 files
+at 470 commits, measured again later that day. The first export of a history then writes one
+small file of derived git ids per object it exports, under `meta/derived/`, and later exports one
+per object none exported before: at 470 commits the first export wrote 8,372 of them, and the
+store took 92 MB in 17,232 files. Every command finds the store by `--repo` or `SWARMOPS_REPO`;
+there is no default location, and `~/.local/state/swarmops/repos/<name>` is only the convention
+used here.
 
 ```sh
 export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme
@@ -177,6 +189,10 @@ them, not the agents.
 - The store and the identity are the server's: `--repo` (else `SWARMOPS_REPO`) and `--as` (else
   `SWARMOPS_AGENT`). No call can name others, and without an identity every write fails with
   `E_IDENTITY_REQUIRED`.
+- Content given as `{"file": <absolute path>}`, in `commit`, `blob_put` or `land`'s
+  `resolutions`, makes the server read that path itself, with the permissions of the user it runs
+  as: an agent can store any file that user can read, also one that a sandbox of the agent's own
+  file access keeps from it ([SECURITY.md](../SECURITY.md)).
 - Claude Code starts one server for a session, and the session's subagents share it and its
   identity. An agent that needs an identity of its own runs as its own Claude Code process.
 - The server opens the store for each call, so it sees what other agents commit meanwhile. It
@@ -217,6 +233,9 @@ swarmops git import "$GIT_SIDE" --ref stable --into main
 ```
 
 The store's `main` now holds the trunk's history, each changeset the git commit it came from.
+`imported` counts the commits that became changesets, and `skipped` the commits the store held
+already that the import's walk met at its frontier and stopped at, not the history the store
+holds (0 in a new store).
 `--ref` and `--into` name the git side's branch and the store's ref (`--ref` defaults to `HEAD`,
 `--into` to `main`). Content a changeset cannot hold as git has it (a submodule, a name that is
 not UTF-8, a mode or a tree order git does not write, an empty directory, a commit whose bytes
@@ -236,8 +255,9 @@ swarmops git import "$GIT_SIDE" --ref stable --into main
 {"ok":true,"op":"git_import","api":1,"result":{"imported":0,"skipped":1,"head_changeset":"c893148f…","git_head_sha":"84226f3190a555751039017a08ef8485fd9f514b","target_ref":"main","ref_moved":false,"old_head":"c893148f…","lossy":[],"lossy_total":0},"meta":{"repo":"…","elapsed_ms":0,"resolved":{},"auth":"trust"}}
 ```
 
-With nothing new, the import writes nothing. Commits pushed to the trunk on top of the last export
-come in, and `main` moves to the last of them (`"imported":1` for one). The fetch moves the git
+With nothing new, the import writes nothing. Its walk stopped at once, at the commit `main` holds:
+that one commit is the `skipped` 1. Commits pushed to the trunk on top of the last export come in,
+and `main` moves to the last of them (`"imported":1` for one). The fetch moves the git
 side's `stable` only forward. When it refuses (`! [rejected] stable -> stable
 (non-fast-forward)`, exit 1), the git side holds commits the remote lacks: an export whose push
 did not happen (push it, then fetch again), or a trunk that moved on both sides
@@ -547,7 +567,9 @@ swarmops verify --deep
 
 `verify` checks the structure: the journal, the index, the refs, every changeset and tree, the
 external id entries, and that every blob is there. `--deep` also re-hashes every object file. On
-SwarmOps' own history (7,647 objects) they took 0.1 s and 0.3 s. A store with damage fails with
+SwarmOps' own history (7,647 objects) they took 0.1 s and 0.3 s in the pilot's dry run of
+2026-10-20, and 0.09 s and 0.23 s for 8,368 objects, measured again later that day at a load
+average of about 20. A store with damage fails with
 `E_STORE_CORRUPT` (exit 1), each damaged object, record or ref in `details.findings`; this is
 `verify --deep --pretty` on a copy of the store with one byte of one object file changed:
 
@@ -734,9 +756,11 @@ each with the milestone that takes it.
   commit can wait a few hundred transactions; on a slow enough disk that passes the 10 s wait for
   the lock, and the commit fails with `E_BUSY`.
 - **Exports write loose objects**, one file and one fsync per object, until `git gc` packs them:
-  exporting SwarmOps' history into an empty repository wrote 7,651 objects in 12 s on a busy
-  host. An export that dies while it moves the branch leaves `refs/heads/<branch>.lock`, and an
-  export leaves no reflog entry.
+  in the pilot's dry runs of 2026-10-20, exporting SwarmOps' history into an empty repository
+  wrote 7,651 objects in 12 s on a busy host (a load average of 150 to 500) and in 6.1 s at 80 to
+  130; measured again later that day, 8,372 objects took 4.0 s at a load of about 20. An export
+  that dies while it moves the branch leaves `refs/heads/<branch>.lock`, and an export leaves no
+  reflog entry.
 - **Content git can hold and a changeset cannot** (submodules, names that are not UTF-8, odd modes
   and tree orders) is refused by the import unless `--lossy` allows it, and a history imported with
   a loss exports as new commits.
@@ -760,7 +784,11 @@ is the monitoring data. What to read in them:
 - **`meta.elapsed_ms`** of commits and lands: the lock's wait is in it.
 - **`verify --deep`**: `problems` and `findings` empty, on a schedule and on every backup.
 - **Disk**: free space on the store's filesystem, and the size of `objects/`, `objects/tmp/` and
-  `meta/derived/`, which only grow.
+  `meta/derived/`, which only grow. `meta/derived/` grows with the exports: the first export of a
+  history writes one file of derived git ids per object it exports, about as many files as
+  `objects/` holds, each taking a whole filesystem block (4 KiB on ext4) for its 72 or 73 bytes. At
+  470 commits the store took 57 MB in 8,854 files after the import, and 92 MB in 17,232 files after
+  the first export.
 - **The git side**: each export's `exported`, `branch_moved` and `rewritten` (0 unless the history
   was imported with a loss), any `E_GIT_EXPORT_DIVERGED` (someone wrote the trunk) or `E_GIT_WRITE`,
   and the CI and deployment runs on each push, as before.
