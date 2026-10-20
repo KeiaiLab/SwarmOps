@@ -11,7 +11,10 @@ use camino::Utf8Path;
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
-use swarmops_git::{ConvertError, GitOid, ImportError, SourceError, Unsupported};
+use swarmops_git::{
+    ConvertError, DivergedReason, ExportError, GitOid, ImportError, SinkError, SourceError,
+    Unsupported,
+};
 use swarmops_repo::{RepoError, StoreError};
 use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN};
 
@@ -407,31 +410,35 @@ fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) 
                 ("kind", kind.as_str().into()),
             ]))
             .with_hint(refs()),
-        SourceError::Unsupported(why) => {
-            let found = match why {
-                Unsupported::ObjectFormat(format) => details([
-                    ("reason", "object_format".into()),
-                    ("object_format", format.into()),
-                ]),
-                Unsupported::RefStorage(storage) => details([
-                    ("reason", "ref_storage".into()),
-                    ("ref_storage", storage.into()),
-                ]),
-                Unsupported::Shallow => {
-                    return error(ErrorCode::GitUnsupported, message)
-                        .with_details(details([("reason", "shallow".into())]))
-                        .with_hint(hint(format!(
-                            "git -C {} fetch --unshallow",
-                            shell_word(git_path)
-                        )));
-                }
-            };
-            error(ErrorCode::GitUnsupported, message).with_details(found)
-        }
+        SourceError::Unsupported(why) => unsupported(why, message, git_path),
         SourceError::Missing { oid } => unreadable(message, Some(oid), "missing", git_path),
         SourceError::Corrupt { oid, .. } => unreadable(message, Some(oid), "corrupt", git_path),
         SourceError::Io { .. } => unreadable(message, None, "io", git_path),
     }
+}
+
+/// `E_GIT_UNSUPPORTED`: the repository at `git_path` is one the git side does not read or write
+/// as it is, `why` (a SHA-256 repository, reftable refs, a shallow clone, which a hint deepens).
+fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
+    let found = match why {
+        Unsupported::ObjectFormat(format) => details([
+            ("reason", "object_format".into()),
+            ("object_format", format.into()),
+        ]),
+        Unsupported::RefStorage(storage) => details([
+            ("reason", "ref_storage".into()),
+            ("ref_storage", storage.into()),
+        ]),
+        Unsupported::Shallow => {
+            return error(ErrorCode::GitUnsupported, message)
+                .with_details(details([("reason", "shallow".into())]))
+                .with_hint(hint(format!(
+                    "git -C {} fetch --unshallow",
+                    shell_word(git_path)
+                )));
+        }
+    };
+    error(ErrorCode::GitUnsupported, message).with_details(found)
 }
 
 /// [`git_import_error`] for the conversion's refusal `e`, whose message is `message`.
@@ -498,6 +505,192 @@ fn unreadable(message: String, object: Option<GitOid>, reason: &str, git_path: &
     error(ErrorCode::GitRead, message)
         .with_details(found)
         .with_hint(hint(format!("git -C {} fsck", shell_word(git_path))))
+}
+
+/// The operations-spec error for a `git export` of `source_ref` into the branch `branch` of the
+/// repository at `git_path` that failed with `e`: the table in [`crate::LocalOps`]'s
+/// documentation. The repository is named by the path the request gave, its files relative to its
+/// git directory and its objects by their git ids; a store failure is the code the operations give
+/// it.
+pub(crate) fn git_export_error(
+    e: ExportError,
+    git_path: &str,
+    source_ref: &str,
+    branch: &str,
+) -> OpError {
+    let message = e.to_string();
+    match e {
+        ExportError::SourceRef(name) => OpError {
+            message: one_line(message),
+            ..op(RepoError::NotFound(name))
+        },
+        ExportError::RefName(name) => ref_name_invalid(name, message),
+        ExportError::CheckedOut {
+            branch: checked_out,
+        } => {
+            let elsewhere = hint(format!(
+                "detach the work tree's HEAD (git -C {} switch --detach), or export to another \
+                 branch (--branch <name>)",
+                shell_word(git_path)
+            ));
+            error(ErrorCode::InvalidArg, message)
+                .with_details(details([
+                    ("reason", "checked_out".into()),
+                    ("branch", checked_out.into()),
+                ]))
+                .with_hint(elsewhere)
+        }
+        ExportError::Diverged {
+            branch: diverged_branch,
+            git_head,
+            head,
+            reason,
+        } => {
+            let found = Diverged {
+                branch: &diverged_branch,
+                git_head,
+                head,
+                reason,
+            };
+            found.error(message, git_path, source_ref)
+        }
+        ExportError::Sink(e) => sink_error(e, message, git_path, branch),
+        ExportError::Repo(e) => op(e),
+        ExportError::Bug { .. } => error(ErrorCode::Internal, message),
+    }
+}
+
+/// What an [`ExportError::Diverged`] says: the branch, the commit it names, the source's head and
+/// why that commit is no export the head goes on from.
+struct Diverged<'a> {
+    branch: &'a str,
+    git_head: GitOid,
+    head: ChangesetId,
+    reason: DivergedReason,
+}
+
+impl Diverged<'_> {
+    /// `E_GIT_EXPORT_DIVERGED` (exit 3), the branch being one of the repository at `git_path` and
+    /// the head `source_ref`'s: `details` name the reason, the branch, the commit it names (null
+    /// for a branch deleted while the export wrote), the head and, when the branch holds the
+    /// export of a changeset, that changeset; the hint is the next step the reason calls for.
+    fn error(self, message: String, git_path: &str, source_ref: &str) -> OpError {
+        let Diverged {
+            branch,
+            git_head,
+            head,
+            reason,
+        } = self;
+        let path = shell_word(git_path);
+        let full = shell_word(&format!("refs/heads/{branch}"));
+        let source = shell_word(source_ref);
+        let mut found = details([
+            ("reason", reason.as_str().into()),
+            ("branch", branch.into()),
+            ("git_head", git_head.to_string().into()),
+            ("head_changeset", head.to_string().into()),
+        ]);
+        let mut message = message;
+        let next = match reason {
+            DivergedReason::BranchAhead { exported } => {
+                found.insert("exported_changeset".to_owned(), exported.to_string().into());
+                format!(
+                    "swarmops git import {path} --ref {full} --into {source} brings the commits \
+                     made in git into the store, then run the export again; --force replaces \
+                     them instead"
+                )
+            }
+            DivergedReason::BothMoved { exported } => {
+                found.insert("exported_changeset".to_owned(), exported.to_string().into());
+                format!(
+                    "both git and {source} moved past {exported}, and nothing is merged: git -C \
+                     {path} log {full} shows the git side, and --force replaces it"
+                )
+            }
+            DivergedReason::BranchMoved => format!(
+                "git -C {path} log {full} shows what the branch holds; --force replaces it with \
+                 the export"
+            ),
+            DivergedReason::SourceMovedBack { exported } => {
+                found.insert("exported_changeset".to_owned(), exported.to_string().into());
+                format!(
+                    "swarmops op log names what moved {source}; --force moves the branch back to \
+                     the export of its head"
+                )
+            }
+            DivergedReason::LossyHistory { .. } => "export to another branch (--branch <name>), \
+                                                     or --force replaces the original commits \
+                                                     with the export"
+                .to_owned(),
+            DivergedReason::MovedDuringExport { actual } => {
+                if actual.is_none() {
+                    found.insert("git_head".to_owned(), Value::Null);
+                    message = format!(
+                        "the branch {branch} was deleted while the export wrote, so it has \
+                         diverged from {head} (moved_during_export)"
+                    );
+                }
+                "run the same git export again".to_owned()
+            }
+        };
+        error(ErrorCode::GitExportDiverged, message)
+            .with_details(found)
+            .with_hint(hint(next))
+    }
+}
+
+/// [`git_export_error`] for the repository's failure `e`, whose message is `message`: the
+/// repository at `git_path`, whose branch `branch` the export writes.
+fn sink_error(e: SinkError, message: String, git_path: &str, branch: &str) -> OpError {
+    let path = shell_word(git_path);
+    match e {
+        SinkError::NotARepo { .. } => error(ErrorCode::GitNotARepo, message)
+            .with_details(details([("git_path", git_path.into())]))
+            .with_hint(hint(format!(
+                "git init --bare {path} makes an empty repository to export to"
+            ))),
+        SinkError::Unsupported(why) => unsupported(why, message, git_path),
+        SinkError::BadBranch { name } => {
+            let why = hint(format!(
+                "git check-ref-format --branch {} says why git takes no such branch",
+                shell_word(&name)
+            ));
+            error(ErrorCode::RefNameInvalid, message)
+                .with_details(details([("name", name.into())]))
+                .with_hint(why)
+        }
+        SinkError::RefLocked { lock } => {
+            let remove = hint(format!(
+                "once no git process runs in the repository, remove {lock} from its git directory \
+                 (git -C {path} rev-parse --git-path {lock} names it), as git itself says, then \
+                 run the export again"
+            ));
+            error(ErrorCode::GitWrite, message)
+                .with_details(details([
+                    ("reason", "ref_locked".into()),
+                    ("path", lock.into()),
+                ]))
+                .with_hint(remove)
+        }
+        SinkError::RefConflict { .. } => error(ErrorCode::GitWrite, message)
+            .with_details(details([
+                ("reason", "ref_name_conflict".into()),
+                ("branch", branch.into()),
+            ]))
+            .with_hint(hint(format!(
+                "git -C {path} for-each-ref lists the refs in the way; export to another branch \
+                 (--branch <name>)"
+            ))),
+        SinkError::Missing { oid } => unreadable(message, Some(oid), "missing", git_path),
+        SinkError::Corrupt { oid, .. } => unreadable(message, Some(oid), "corrupt", git_path),
+        SinkError::Read { .. } => unreadable(message, None, "io", git_path),
+        SinkError::Write { what, .. } => error(ErrorCode::GitWrite, message)
+            .with_details(details([("reason", "io".into()), ("path", what.into())]))
+            .with_hint(
+                "run the same git export again once the cause is gone: it writes only what is \
+                 still missing",
+            ),
+    }
 }
 
 /// Puts `path`, an entry's path as git has it, into `found` as `path`; a path that is not UTF-8
@@ -1269,5 +1462,197 @@ mod tests {
         });
         let error = git_maps(post, ErrorCode::Io, &want);
         assert_eq!(error.hint.as_deref(), Some(RESUME_HINT));
+    }
+
+    /// `e`, a `git export` of `main` into the branch `main` of [`GIT_PATH`] that failed, maps to
+    /// `code`: its string, exit code and retry advice, and `details` as `want`; the error.
+    #[track_caller]
+    fn export_maps(e: ExportError, code: ErrorCode, want: &Value) -> OpError {
+        let shown = format!("{e:?}");
+        let error = git_export_error(e, GIT_PATH, "main", "main");
+        assert_eq!(error.code, code.as_str(), "{shown}");
+        let advice = (error.exit, error.retryable);
+        assert_eq!(advice, (code.exit(), code.retryable()), "{shown}");
+        assert_eq!(&Value::Object(error.details.clone()), want, "{shown}");
+        assert!(!error.message.is_empty(), "{shown}");
+        error
+    }
+
+    /// Each reason a branch diverged is `E_GIT_EXPORT_DIVERGED`, exit 3: its details name the
+    /// reason, the branch, the commit it names, the source's head and, where the branch holds the
+    /// export of a changeset, that changeset; each hint names the next step the reason calls for,
+    /// and `--force` but for a branch moved during the export, which is run again. A branch
+    /// deleted during the export names no commit: null, and no forty zeros in the message.
+    #[test]
+    fn git_export_divergences_map_to_their_reasons() {
+        use serde_json::json;
+
+        let head = ChangesetId(ObjectId([7; 32]));
+        let exported = ChangesetId(ObjectId([8; 32]));
+        let diverged = |git_head, reason| ExportError::Diverged {
+            branch: "main".into(),
+            git_head,
+            head,
+            reason,
+        };
+        let want = |reason: &str, exported: Option<ChangesetId>| {
+            let mut want = json!({
+                "reason": reason,
+                "branch": "main",
+                "git_head": COMMIT.to_string(),
+                "head_changeset": head.to_string(),
+            });
+            if let Some(exported) = exported {
+                want["exported_changeset"] = exported.to_string().into();
+            }
+            want
+        };
+        let log = "git -C /nonexistent/swarmops-test/repo.git log refs/heads/main";
+        let import = "swarmops git import /nonexistent/swarmops-test/repo.git --ref refs/heads/main \
+                      --into main";
+        let cases = [
+            (
+                DivergedReason::BranchAhead { exported },
+                Some(exported),
+                import,
+            ),
+            (DivergedReason::BothMoved { exported }, Some(exported), log),
+            (DivergedReason::BranchMoved, None, log),
+            (
+                DivergedReason::SourceMovedBack { exported },
+                Some(exported),
+                "swarmops op log",
+            ),
+            (
+                DivergedReason::LossyHistory {
+                    changeset: exported,
+                },
+                None,
+                "--branch <name>",
+            ),
+        ];
+        let code = ErrorCode::GitExportDiverged;
+        for (reason, holds, next) in cases {
+            let want = want(reason.as_str(), holds);
+            let error = export_maps(diverged(COMMIT, reason), code, &want);
+            assert_eq!(error.exit, 3);
+            let hint = error.hint.unwrap_or_default();
+            assert!(hint.contains(next) && hint.contains("--force"), "{hint}");
+        }
+        let during = |actual| DivergedReason::MovedDuringExport { actual };
+        let moved = diverged(COMMIT, during(Some(COMMIT)));
+        let error = export_maps(moved, code, &want("moved_during_export", None));
+        assert_eq!(error.hint.as_deref(), Some("run the same git export again"));
+        let mut gone = want("moved_during_export", None);
+        gone["git_head"] = Value::Null;
+        let deleted = export_maps(diverged(GitOid::NULL, during(None)), code, &gone);
+        assert!(deleted.message.contains("deleted"), "{deleted:?}");
+        let zeros = GitOid::NULL.to_string();
+        assert!(!deleted.message.contains(&zeros), "{deleted:?}");
+    }
+
+    /// What a `git export` request names, refused: a source ref the store does not have
+    /// (`E_REV_NOT_FOUND`, whose hint lists the refs) or that is no ref name, and a branch a work
+    /// tree has checked out (`E_INVALID_ARG`, whose hint detaches `HEAD`); a bug is
+    /// `E_INTERNAL`, and a store failure the code the operations give it.
+    #[test]
+    fn git_export_request_errors_map_to_their_codes() {
+        use serde_json::json;
+
+        let missing = ExportError::SourceRef("release/none".into());
+        let want = json!({"rev": "release/none"});
+        let error = export_maps(missing, ErrorCode::RevNotFound, &want);
+        assert_eq!(error.hint.as_deref(), Some("swarmops ref list"));
+        let bad = ExportError::RefName("feature/x".into());
+        let want = json!({"name": "feature/x"});
+        export_maps(bad, ErrorCode::RefNameInvalid, &want);
+        let checked_out = ExportError::CheckedOut {
+            branch: "main".into(),
+        };
+        let want = json!({"reason": "checked_out", "branch": "main"});
+        let error = export_maps(checked_out, ErrorCode::InvalidArg, &want);
+        let hint = error.hint.unwrap_or_default();
+        let detach = "git -C /nonexistent/swarmops-test/repo.git switch --detach";
+        assert!(hint.contains(detach), "{hint}");
+        let bug = ExportError::Bug {
+            reason: "a rendering hashed to another oid".into(),
+        };
+        export_maps(bug, ErrorCode::Internal, &json!({}));
+        let busy = ExportError::Repo(RepoError::Store(StoreError::Busy));
+        export_maps(busy, ErrorCode::Busy, &json!({}));
+    }
+
+    /// The repository's refusals and failures: no repository (the hint makes one), one the
+    /// export does not write as it is, a branch name git does not take (the hint is git's own
+    /// check), a held lock and a ref in the branch's way (`E_GIT_WRITE`, each with what to do), a
+    /// write that failed, and an object missing or damaged, or a read that failed (`E_GIT_READ`).
+    #[test]
+    fn git_export_repository_errors_map_to_their_codes() {
+        use serde_json::json;
+
+        let sink = ExportError::Sink;
+        let not_a_repo = sink(SinkError::NotARepo {
+            reason: "no HEAD".into(),
+        });
+        let want = json!({"git_path": GIT_PATH});
+        let error = export_maps(not_a_repo, ErrorCode::GitNotARepo, &want);
+        let make = "git init --bare /nonexistent/swarmops-test/repo.git makes an empty repository \
+                    to export to";
+        assert_eq!(error.hint.as_deref(), Some(make));
+        let shallow = sink(SinkError::Unsupported(Unsupported::Shallow));
+        export_maps(
+            shallow,
+            ErrorCode::GitUnsupported,
+            &json!({"reason": "shallow"}),
+        );
+        let sha256 = Unsupported::ObjectFormat("sha256".into());
+        let want = json!({"reason": "object_format", "object_format": "sha256"});
+        export_maps(
+            sink(SinkError::Unsupported(sha256)),
+            ErrorCode::GitUnsupported,
+            &want,
+        );
+        let bad = sink(SinkError::BadBranch {
+            name: "a..b".into(),
+        });
+        let error = export_maps(bad, ErrorCode::RefNameInvalid, &json!({"name": "a..b"}));
+        let check = "git check-ref-format --branch a..b says why git takes no such branch";
+        assert_eq!(error.hint.as_deref(), Some(check));
+        let locked = sink(SinkError::RefLocked {
+            lock: "refs/heads/main.lock".into(),
+        });
+        let want = json!({"reason": "ref_locked", "path": "refs/heads/main.lock"});
+        let error = export_maps(locked, ErrorCode::GitWrite, &want);
+        let hint = error.hint.unwrap_or_default();
+        assert!(hint.contains("remove refs/heads/main.lock"), "{hint}");
+        let conflict = sink(SinkError::RefConflict {
+            name: "refs/heads/main/x".into(),
+        });
+        let want = json!({"reason": "ref_name_conflict", "branch": "main"});
+        export_maps(conflict, ErrorCode::GitWrite, &want);
+        let full = sink(SinkError::Write {
+            what: "objects/ab".into(),
+            reason: "No space left on device".into(),
+        });
+        let want = json!({"reason": "io", "path": "objects/ab"});
+        export_maps(full, ErrorCode::GitWrite, &want);
+
+        let object = OBJECT.to_string();
+        let missing = sink(SinkError::Missing { oid: OBJECT });
+        let want = json!({"reason": "missing", "object": object});
+        let error = export_maps(missing, ErrorCode::GitRead, &want);
+        let fsck = "git -C /nonexistent/swarmops-test/repo.git fsck";
+        assert_eq!(error.hint.as_deref(), Some(fsck));
+        let corrupt = sink(SinkError::Corrupt {
+            oid: OBJECT,
+            reason: "it is empty".into(),
+        });
+        let want = json!({"reason": "corrupt", "object": object});
+        export_maps(corrupt, ErrorCode::GitRead, &want);
+        let unread = sink(SinkError::Read {
+            what: "packed-refs".into(),
+            reason: "Input/output error".into(),
+        });
+        export_maps(unread, ErrorCode::GitRead, &json!({"reason": "io"}));
     }
 }

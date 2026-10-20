@@ -71,7 +71,9 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 /// [`LocalOps::recording`] record what their write repaired, when it repaired anything, in the
 /// request's [`Resolved`], which the CLI and the MCP server report as `meta.recovered`: on
 /// success and on `E_CAS_MISMATCH` alike, never as a warning, and not when the operation then
-/// fails otherwise. `git_import` records what its writes repaired, added up, on success only.
+/// fails otherwise. `git_import` records what its writes repaired, added up, on success only;
+/// `git_export`, what the tail check of its committed snapshot repaired (frames listed or written
+/// afresh, a torn tail cut), on success only.
 ///
 /// # Operations
 ///
@@ -176,6 +178,18 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   repository is opened. An imported changeset has no `agent` metadata: its author is its git
 ///   author, in `signatures`, and `show` attributes it to `unknown/unknown` (the M3 plan's
 ///   decision 15).
+/// - `git_export` is client-side too ([`LocalOps::git_export`], [`Recording::git_export`]): it
+///   writes into the git repository at `git_path` on this host (a relative path from the working
+///   directory; one that exists, which `git init --bare` makes) every commit of `source_ref`'s
+///   history that the branch `branch`'s last export does not reach, parents first, makes them
+///   durable, records the oids of the commits made in the store in the external id index, then
+///   moves the branch to the export of the ref's head by compare-and-swap (storage spec §7). It
+///   reads the head in a committed snapshot, taken under the store's lock after the journal's tail
+///   check, and records it under the ref's name as a revision it resolved. A changeset imported
+///   from git exports to the commit it came from, one made in the store to a commit with its own
+///   signatures and `SwarmOps-*` trailers. It needs no identity: it writes no journal frame, only
+///   the git repository and the store's caches (derived values, external id entries). Every
+///   `LocalOps` has the derivation of export oids registered, which the export reads.
 ///
 /// Limits of 0 (`limit`, `max_changes`, and `diff`'s `max_bytes`) are `E_INVALID_ARG`, but for
 /// `derive`'s `limit`.
@@ -293,6 +307,40 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   committed recorded and the last of them (null for none). The hint is to run the same import
 ///   again, which continues after them, unless the store is damaged (`swarmops verify`).
 /// - `E_INTERNAL` `{commit}`: a commit whose conversion disagrees with its own check, a bug.
+///
+/// `git_export`'s failures map as follows, the repository named by the path the request gave,
+/// its files relative to its git directory and its objects by their git ids:
+///
+/// - `E_REF_NAME_INVALID` `{name}`: a source ref that is no ref name, before the repository is
+///   opened; or a branch name git does not take, whose hint is `git check-ref-format --branch`.
+/// - `E_GIT_NOT_A_REPO` `{git_path}`: no git repository gix can open at that path; the hint makes
+///   one (`git init --bare <path>`).
+/// - `E_GIT_UNSUPPORTED` `{reason, …}`: a repository the export does not write as it is, as the
+///   import refuses a source: `object_format`, `ref_storage` or `shallow`.
+/// - `E_INVALID_ARG` `{reason: "checked_out", branch}`: the branch `HEAD` names in a repository
+///   with a work tree, refused with or without `force`, before the store is read; the hint
+///   detaches `HEAD` or names another branch.
+/// - `E_REV_NOT_FOUND` `{rev}`: a source ref the store does not have; the hint lists the refs.
+/// - `E_GIT_EXPORT_DIVERGED` (exit 3) `{reason, branch, git_head, head_changeset,
+///   exported_changeset?}`: the branch names no export of the source's head or of an ancestor of
+///   it, and nothing was written; `reason` says why: `branch_ahead` (commits made in git on the
+///   head's export: the hint imports them), `both_moved` (on an older export, while the source
+///   moved too), `branch_moved` (a commit of no export of the history), `source_moved_back` (the
+///   export of a changeset that is no ancestor of the head: the hint is `swarmops op log`),
+///   `lossy_history` (the commits a lossy import was made of) or `moved_during_export` (another
+///   writer moved the branch while the export wrote, so what it wrote stays; `git_head` null when
+///   it deleted it). `exported_changeset` names the changeset the branch holds the export of,
+///   and the hints but the last name `--force`, which moves the branch all the same, by
+///   compare-and-swap against the commit the export read.
+/// - `E_GIT_WRITE` `{reason, path?, branch?}`: the repository could not be written: `ref_locked`
+///   `{path}` (the branch's lock file is there; the hint removes it once no git process runs),
+///   `ref_name_conflict` `{branch}` (a ref in the branch's way) or `io` `{path}`. The objects
+///   written stay, loose, and the branch is as it was.
+/// - `E_GIT_READ` `{reason, object?}`: an object of the repository that is missing or damaged, or
+///   a read that failed (`io`).
+/// - A store failure is the code its repository error has above (`E_BUSY` when the committed
+///   snapshot's lock wait runs out, `E_IO`, `E_STORE_CORRUPT`, …), and a commit whose rendering
+///   disagrees with its export oid is `E_INTERNAL`, a bug; either way the branch did not move.
 pub struct LocalOps {
     pub(crate) repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.
@@ -344,7 +392,12 @@ impl LocalOps {
         }
     }
 
-    fn with_repo(repo: LocalRepo, path: &Utf8Path) -> LocalOps {
+    /// The operations over `repo`, the store at `path`, with the derivation of export oids
+    /// registered ([`swarmops_git::register`]), which `git export` reads and which the import of
+    /// an exported head will read: so every `LocalOps` has it, once.
+    fn with_repo(mut repo: LocalRepo, path: &Utf8Path) -> LocalOps {
+        // A repository just opened has only the built-in derivations, none named `git_oid`.
+        swarmops_git::register(&mut repo).expect("a repository just opened has no git_oid");
         LocalOps {
             repo,
             store_path: path.to_owned(),
@@ -730,7 +783,8 @@ impl Resolved {
         self.recovered.take().map(recovered_out)
     }
 
-    fn record(&self, rev: &str, id: ChangesetId) {
+    /// Records that the revision `rev` named the changeset `id`.
+    pub(crate) fn record(&self, rev: &str, id: ChangesetId) {
         self.revs
             .borrow_mut()
             .insert(rev.to_owned(), id.to_string());
@@ -2534,5 +2588,63 @@ mod tests {
             ..RecoveredOut::default()
         };
         assert_eq!(resolved.take_recovered(), Some(listed_and_written));
+    }
+
+    /// `git_export` made through a request's record records the head its source ref named, as a
+    /// revision it resolved, and what its committed snapshot's tail check repaired: after a ref
+    /// move whose listing in `journal.off` failed, the check lists that frame, and replays nothing
+    /// (the snapshot reads the frame), which the CLI reports as `meta.recovered`. Exported again,
+    /// the tail is clean, and the record says nothing of repairs.
+    #[test]
+    fn a_git_export_records_its_source_and_what_its_tail_check_repaired() {
+        use swarmops_api::GitExportReq;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let req = CommitReq {
+            parent: None,
+            changes: vec![ChangeInput {
+                path: "src/f".to_owned(),
+                op: ChangeOp::Put,
+                content: Some(ContentInput::Inline("1".to_owned())),
+                mode: None,
+            }],
+            message: "m".to_owned(),
+            advance: Some("main".to_owned()),
+            allow_empty: false,
+        };
+        let head = ops.commit(&who, req).unwrap().changeset;
+        let id = ObjectId::from_hex(&head).map(ChangesetId).unwrap();
+        let moved = ops_on(&root, failing("append_durable", "journal.off"))
+            .repo
+            .cas_ref("release/x", None, Some(id), who.agent())
+            .unwrap();
+        one_injected(&moved.warnings);
+
+        let destination = swarmops_testkit::git::empty_repository();
+        let git_path = destination.dir.to_str().expect("a UTF-8 path").to_owned();
+        let export = || GitExportReq {
+            git_path: git_path.clone(),
+            source_ref: "main".to_owned(),
+            branch: "main".to_owned(),
+            force: false,
+        };
+        let resolved = Resolved::default();
+        let exported = ops.recording(&resolved).git_export(export()).unwrap();
+        assert_eq!((exported.exported, exported.branch_moved), (1, true));
+        assert_eq!(exported.head_changeset, head);
+        let listed = RecoveredOut {
+            frames_listed: 1,
+            ..RecoveredOut::default()
+        };
+        assert_eq!(resolved.take_recovered(), Some(listed));
+        assert_eq!(resolved.take(), BTreeMap::from([("main".to_owned(), head)]));
+
+        let again = Resolved::default();
+        let up_to_date = ops.recording(&again).git_export(export()).unwrap();
+        assert_eq!((up_to_date.exported, up_to_date.branch_moved), (0, false));
+        assert_eq!(again.take_recovered(), None);
     }
 }
