@@ -152,16 +152,34 @@ commits when its journal frame is durable, so the next write repairs whatever a 
 
 ### Install
 
-Rust 1.99 (`rust-toolchain.toml` pins it), on Linux:
+Each released version is on the [releases page](https://github.com/KeiaiLab/SwarmOps/releases):
+one archive per Linux target, `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` and
+`swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz`, each with `swarmops`, `so`, the license,
+this README and the changelog, beside a `SHA256SUMS` file to check them against
+([RELEASE.md](RELEASE.md) says how they are built). The binaries need glibc 2.34 or newer
+(Ubuntu 22.04, Debian 12 and RHEL 9 have it); the aarch64 ones are cross-compiled and
+smoke-tested under QEMU, not tested on aarch64 hardware. No version has been tagged yet: until
+the first one, build from source, below. While the repository is private, `gh` downloads a
+release with your GitHub login:
+
+```sh
+gh release download --repo KeiaiLab/SwarmOps \
+  --pattern 'swarmops-*-x86_64-unknown-linux-gnu.tar.gz' --pattern SHA256SUMS  # the latest release
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf swarmops-*-x86_64-unknown-linux-gnu.tar.gz
+cd swarmops-*-x86_64-unknown-linux-gnu && install -D -t ~/.local/bin swarmops so
+```
+
+From source, with Rust 1.99 (`rust-toolchain.toml` pins it), on Linux:
 
 ```sh
 cargo build --release                               # target/release/swarmops and target/release/so
 cargo install --path crates/swarmops-cli --locked   # both, into ~/.cargo/bin
 ```
 
-`so` is the short form of `swarmops`: the same program by a shorter name. `cargo install`
-installs every binary of the crate: both names (add `--bin swarmops` for the long name alone,
-if the name `so` is taken).
+`so` is the short form of `swarmops`: the same program by a shorter name. An archive holds both,
+and `cargo install` installs every binary of the crate: both names (add `--bin swarmops` for the
+long name alone, if the name `so` is taken).
 
 A store must live on a native Linux filesystem: a path under `/mnt/` (where WSL mounts Windows
 drives) is refused with `E_UNSUPPORTED_FS`.
