@@ -317,6 +317,72 @@ fn order_check_rules_hold_in_every_crash_sweep() {
     );
 }
 
+/// A land crashed at any filesystem call lands once or not at all (operations spec §3, §8),
+/// through the binary: on a store where main names `t0` and an agent's commit on it waits to
+/// land, the land, keyed, crashed at each call k of the N its dry run makes, leaves the store
+/// verifying clean; and the same command run again ends with main at the dry run's landed
+/// changeset, on `t0`, the only changeset on main past it: replayed where the crashed run had
+/// published it, landed anew (onto `t0`, so main had stayed there) otherwise. Every run signs at
+/// one fixed time, so every land makes the same changeset. Past N, the land finishes as the dry
+/// run did. Both sides of the commit point are reached.
+#[test]
+fn a_land_crashing_at_any_call_lands_once_through_the_binary() {
+    const KEY: &str = "crash-land-1";
+    let template = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
+    let t0 = template.commit(&agent(0), "base.txt", "the base\n", None);
+    let create = ["ref", "set", "main", t0.as_str(), "--create"];
+    template.run_as(&agent(0), &create, &[]).ok();
+    let head = template.commit(&agent(0), "change.txt", "the change\n", Some(&t0));
+    let land = ["land", head.as_str(), "--key", KEY];
+
+    let dry = Store::copy_of(&template);
+    let file = calls_file(&dry);
+    let result = dry.run_as(&agent(1), &land, &[(FS_CALLS_ENV, file.to_str().unwrap())]);
+    let result = result.ok();
+    assert_eq!(result["status"], "landed", "{result}");
+    let landed = result["landed"].as_str().unwrap().to_owned();
+    assert_eq!(dry.show(&landed)["land_key"], KEY);
+    let calls = reported_calls(&file);
+    assert!(calls > 20, "a land makes dozens of calls: {calls}");
+
+    let published = sweep(1..=calls + 1, |k| {
+        let store = Store::copy_of(&template);
+        let crash_at = k.to_string();
+        let run = store.run_as(&agent(1), &land, &[(CRASH_AT_ENV, &crash_at)]);
+        if k <= calls {
+            assert!(run.aborted(), "k={k} of {calls}: {run}");
+        } else {
+            assert_eq!(run.ok()["landed"], landed.as_str(), "k={k}");
+        }
+        store.assert_clean(&format!("k={k}: after the crash"));
+        let again = store.run_as(&agent(1), &land, &[]).ok();
+        assert_eq!(
+            (&again["landed"], &again["rebased_onto"]),
+            (&json!(landed), &json!(t0)),
+            "k={k}: {again}"
+        );
+        let log = store.read(&["log"]).ok();
+        let on_main: Vec<&str> = (log["entries"].as_array().unwrap().iter())
+            .map(|entry| entry["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(on_main, [landed.as_str(), t0.as_str()], "k={k}");
+        store.assert_clean(&format!("k={k}: after the same land again"));
+        match again["status"].as_str() {
+            Some("replayed") => true,
+            Some("landed") => false,
+            _ => panic!("k={k}: {again}"),
+        }
+    });
+    assert!(
+        published.iter().any(|&replayed| replayed),
+        "some crash came after the land's commit point: the same land again replayed it"
+    );
+    assert!(
+        published.iter().any(|&replayed| !replayed),
+        "some before it"
+    );
+}
+
 /// One run of the init sweep: `init` on a fresh path, its k-th filesystem call (of the
 /// `calls` a dry run counted) aborting it. Then either `info` says `E_NOT_A_REPO` and a second
 /// `init` succeeds, or `info` succeeds (and a second `init` says `E_EXISTS`); either way the

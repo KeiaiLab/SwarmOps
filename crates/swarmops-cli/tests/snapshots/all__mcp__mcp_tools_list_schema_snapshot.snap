@@ -767,6 +767,78 @@ expression: listed
     {
       "annotations": {
         "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Merges head (with its first-parent chain since base) three-way onto target, main by default, and publishes the result as one changeset in one transaction; on E_CONFLICT, details.report lists each conflict. Give idempotency_key to make a retry safe.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`land`: merge a change three-way onto a target ref and publish it there as one new\nchangeset, in one transaction (operations spec §3). The change is `head` with its\nfirst-parent chain after `base`, squashed: the landed changeset's parent is the target's\nhead, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in\n`details.report`; nothing is recorded then.",
+        "properties": {
+          "base": {
+            "anyOf": [
+              {
+                "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the change starts: a first-parent ancestor of `head`, whose own changes are not part\nof it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the\nmerge base of `head` and the target's head, along first parents."
+          },
+          "head": {
+            "description": "The changeset to land: the change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          },
+          "idempotency_key": {
+            "description": "Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land\nwith a key first looks down the target's first parents, to `base`, for a changeset that\nlanded with the same key: one squashed from this `head` is the replay, which writes\nnothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used\nfor another change.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_attempts": {
+            "default": 8,
+            "description": "How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32.",
+            "format": "uint32",
+            "maximum": 32,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_conflict_bytes": {
+            "default": 32768,
+            "description": "The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left\nout (`truncated`), and the line positions and blob ids stay.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "message": {
+            "description": "The landed changeset's message; `head`'s when omitted.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "target": {
+            "default": "main",
+            "description": "The ref to land on: `main` or `release/<name>`, which must exist.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "head"
+        ],
+        "title": "LandReq",
+        "type": "object"
+      },
+      "name": "land",
+      "title": "Land a change"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
