@@ -341,6 +341,35 @@ pub struct BlobHasResp {
     pub present: Vec<String>,
 }
 
+/// `resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ResolveRevReq {
+    /// The revision to resolve.
+    pub rev: Rev,
+}
+
+/// `resolve_rev` (CLI `resolve`): the changeset a revision names, and what kind of revision it is.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedRev {
+    /// The full id of the changeset the revision names.
+    pub id: String,
+    /// What the revision is: `ref` when it is exactly a ref's name, `changeset` otherwise.
+    pub kind: RevKind,
+}
+
+/// What kind of revision `resolve_rev` resolved. M5 adds `workspace`, for a workspace's head and
+/// the edits not committed yet (`ws:<name>`).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RevKind {
+    /// Exactly a ref's name (`main`, `release/<name>`): `id` is what the ref names now, and moves
+    /// when the ref does.
+    Ref,
+    /// Any other revision: a full changeset id, a unique prefix of one, or a revision followed by
+    /// `~N` suffixes, a ref's name among them.
+    Changeset,
+}
+
 /// `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or
 /// a range of its lines.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
@@ -1445,6 +1474,10 @@ pub trait StoreOps {
     /// caller names (M10 adds the client-side pass that turns it into bytes before a request
     /// leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
+
+    /// The changeset a revision names, and whether the revision is exactly a ref's name (CLI
+    /// `resolve`).
+    fn resolve_rev(&self, req: ResolveRevReq) -> Result<ResolvedRev, OpError>;
 
     /// Stores content as a blob, outside any commit, for a commit to name by its id (CLI `blob
     /// put`). A mutation, so it takes the caller's identity, which it records nowhere: a blob has

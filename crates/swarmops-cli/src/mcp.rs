@@ -56,8 +56,8 @@
 //! # The tools
 //!
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
-//! `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`,
-//! `ref_set`, `ref_delete`, `undo`, `commit`, `blob_put`, `blob_has` and `verify`, in
+//! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`,
+//! `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `blob_put`, `blob_has` and `verify`, in
 //! `tools/list`'s order. A tool's `inputSchema` is its request type's JSON Schema, as `swarmops
 //! schema <type>` prints it, with each `$ref` replaced by the definition it names so that the
 //! schema stands alone: a keyword beside the reference wins over the definition's, but for
@@ -132,6 +132,7 @@ use std::time::Instant;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
+use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     CommitReq, ContentInput, DiffReq, Envelope, ErrorCode, Identity, InfoReq, LogReq, OpError,
@@ -231,7 +232,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 16] = [
+static TOOLS: [Spec; 17] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -239,6 +240,19 @@ static TOOLS: [Spec; 16] = [
         title: "Describe the store",
         description: "What the store is and holds: its id and name, the changeset main points \
                       at, and how many changesets and refs it has.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::ResolveRev,
+        name: "resolve_rev",
+        request: "ResolveRevReq",
+        title: "Resolve a revision",
+        description: "The full id of the changeset a revision names (a ref name, a full id or a \
+                      unique prefix of 12 or more hex digits, then any ~N suffixes), resolved as \
+                      every tool resolves one, and its kind: ref when the revision is exactly a \
+                      ref's name, whose target moves with the ref, changeset otherwise. Its CLI \
+                      command is swarmops resolve.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -883,6 +897,7 @@ trait Operate {
 fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
     match tool {
         Tool::RepoInfo => how.read(|ops, req| ops.repo_info(req)),
+        Tool::ResolveRev => how.read(|ops, req| ops.resolve_rev(req)),
         Tool::ReadFile => how.read(|ops, req| ops.read_file(req)),
         Tool::ReadTree => how.read(|ops, req| ops.read_tree(req)),
         Tool::Show => how.read(|ops, req| ops.show(req)),
@@ -1014,6 +1029,7 @@ trait Refuse: DeserializeOwned {
 }
 
 impl Refuse for InfoReq {}
+impl Refuse for ResolveRevReq {}
 impl Refuse for ReadFileReq {}
 impl Refuse for ReadTreeReq {}
 impl Refuse for ShowReq {}
@@ -1433,6 +1449,7 @@ struct Spec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
     RepoInfo,
+    ResolveRev,
     ReadFile,
     ReadTree,
     Show,
@@ -1624,6 +1641,7 @@ mod tests {
     use std::ffi::OsString;
 
     use camino::Utf8Path;
+    use swarmops_api::ResolvedRev;
     use swarmops_api::{
         BlobHasResp, BlobPutResp, ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput,
         DeriveReq, DeriveResp, FileContent, LogPage, OpLogPage, PathHistoryPage, RefListResp,
@@ -1742,6 +1760,10 @@ mod tests {
     impl StoreOps for Recorder<'_> {
         fn repo_info(&self, _: InfoReq) -> Result<RepoInfo, OpError> {
             self.called("repo_info", "InfoReq")
+        }
+
+        fn resolve_rev(&self, _: ResolveRevReq) -> Result<ResolvedRev, OpError> {
+            self.called("resolve_rev", "ResolveRevReq")
         }
 
         fn commit(&self, _: &Identity, _: CommitReq) -> Result<CommitResp, OpError> {
