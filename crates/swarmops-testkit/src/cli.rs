@@ -267,9 +267,11 @@ impl Run {
         envelope["error"].take()
     }
 
-    /// Whether the run failed with `E_BUSY` (exit 4): the store's lock stayed taken for the whole
-    /// of its timeout. Its envelope is not checked against the contract here; [`Run::ok`] and
-    /// [`Run::err`] judge a run that ended otherwise.
+    /// Whether the run failed with `E_BUSY` (exit 4), of either of its causes: the store's lock
+    /// stayed taken for the whole of its timeout, or a read snapshot met a commit landing in each
+    /// of its rounds and gave up, which waits for no lock and so can come at any time (its
+    /// message names the snapshot). Its envelope is not checked against the contract here;
+    /// [`Run::ok`] and [`Run::err`] judge a run that ended otherwise.
     pub fn busy(&self) -> bool {
         self.status.code() == Some(4)
             && serde_json::from_str::<Value>(&self.stdout)

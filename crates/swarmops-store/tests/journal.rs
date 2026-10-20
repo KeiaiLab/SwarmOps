@@ -1092,6 +1092,41 @@ impl Watch for CutAfterEachMeasurement {
         }
     }
 }
+
+#[test]
+fn a_single_entry_cut_after_a_reader_measured_it_is_read_again() {
+    // With one entry listed there is no last entry for the reader to check before the rest (the
+    // check that meets a cut of two or more entries first), so a cut of journal.off to nothing
+    // is met where the reader reads the entries: frames_from's read of them, and
+    // tail_frames_from's search for the first frame at or after its start. Both measure
+    // journal.off again, as at any cut, before they measure journal.log.
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    let first = journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84, entry [0]
+    let cut_to_nothing = || -> Hook {
+        let off = layout.journal_off();
+        let cut = move || set_len(&off, 0);
+        (
+            "file_len journal.off".to_owned(),
+            When::After,
+            Box::new(cut),
+        )
+    };
+    let (off, log) = ("file_len journal.off", "file_len journal.log");
+
+    // Nothing is listed once the entry is cut, so frames_from returns nothing, before it ever
+    // measures journal.log.
+    let (reader, calls) = racing_journal(&layout, Some(cut_to_nothing()));
+    assert_eq!(reader.frames_from(0, 10).unwrap(), []);
+    assert_eq!(calls(), [off, off]);
+
+    // The frame is whole in journal.log, not listed any more: tail_frames_from reads it as such.
+    append_bytes(layout.journal_off(), &0_u64.to_le_bytes());
+    let (reader, calls) = racing_journal(&layout, Some(cut_to_nothing()));
+    assert_eq!(reader.tail_frames_from(0).unwrap(), [first]);
+    assert_eq!(calls(), [off, off, log]);
+}
+
 #[test]
 fn a_zeroed_entry_before_the_end_of_journal_off_is_journal_corrupt_for_readers_too() {
     // Zeroed entries at the end of journal.off are dropped, by readers and recovery alike
@@ -1560,6 +1595,42 @@ fn append_frame_checks_the_tail_before_writing() {
         reopen(&layout).tail_frames_from(0).unwrap(),
         [first, second, third, fourth]
     );
+}
+
+/// [`Record::encode`] refuses a length its `u8` field cannot hold before it writes anything:
+/// `out`, holding what was encoded before it, is left as it was, for a ref name, an actor and a
+/// parent count alike.
+#[test]
+fn a_refused_record_leaves_the_encoding_untouched() {
+    let too_long = "x".repeat(256);
+    let refused = [
+        Record::RefMove {
+            name: too_long.clone(),
+            old: None,
+            new: Some(id(1)),
+            actor: "claude/1".into(),
+            ts: 0,
+        },
+        Record::RefMove {
+            name: "main".into(),
+            old: None,
+            new: Some(id(1)),
+            actor: too_long,
+            ts: 0,
+        },
+        Record::Changeset {
+            id: id(2),
+            generation: 2,
+            delta_hash: [0; 32],
+            parents: vec![id(1); 256],
+        },
+    ];
+    for record in refused {
+        let mut out = vec![0xaa, 0xbb];
+        let got = record.encode(&mut out);
+        assert!(matches!(got, Err(StoreError::Limit { .. })), "{got:?}");
+        assert_eq!(out, [0xaa, 0xbb], "{record:?}");
+    }
 }
 
 #[test]
@@ -2349,6 +2420,89 @@ fn a_rewrite_that_lands_elsewhere_is_cut_back_and_reported_corrupt() {
         ),
         (first, listed),
         "cut back to where the frames started, and nothing listed"
+    );
+}
+
+/// Set only in the child of [`a_rewrite_that_lands_elsewhere_and_cannot_be_cut_back_aborts`]:
+/// the store root.
+#[cfg(feature = "test-hooks")]
+const LANDING_CHILD_ROOT: &str = "SWARMOPS_TEST_JOURNAL_LANDING_ROOT";
+
+/// [`Intrude`]'s bytes before the rewrite's append, once armed; then every cut of `journal.log`
+/// fails: the cut that would take the misplaced rewrite back.
+#[cfg(feature = "test-hooks")]
+struct IntrudeThenFailTheCut {
+    armed: std::sync::atomic::AtomicBool,
+    intruded: std::sync::atomic::AtomicBool,
+}
+
+#[cfg(feature = "test-hooks")]
+impl Watch for IntrudeThenFailTheCut {
+    fn before(&self, call: &Call<'_>) -> io::Result<()> {
+        let named = call.named();
+        if named == "append_durable journal.log" && self.armed.swap(false, Ordering::SeqCst) {
+            append_bytes(call.path(), &[0xab; 7]);
+            self.intruded.store(true, Ordering::SeqCst);
+        } else if named == "truncate journal.log" && self.intruded.load(Ordering::SeqCst) {
+            return Err(io::Error::other("injected: the cut back fails"));
+        }
+        Ok(())
+    }
+}
+
+/// The child of [`a_rewrite_that_lands_elsewhere_and_cannot_be_cut_back_aborts`]: the rewrite
+/// of an unlisted frame whose sync failed lands past another writer's bytes, and the cut that
+/// would take it back fails. It must not return.
+#[cfg(feature = "test-hooks")]
+fn landing_cut_fails_child(layout: &Layout) {
+    let watch = Arc::new(Watched(
+        IntrudeThenFailTheCut {
+            armed: std::sync::atomic::AtomicBool::new(false),
+            intruded: std::sync::atomic::AtomicBool::new(false),
+        },
+        RealFs,
+    ));
+    let log_syncs = AtomicU64::new(0);
+    let model_fs = Arc::new(FsyncModelFs::over(Arc::clone(&watch)).failing(move |call| {
+        call.method == FsMethod::SyncData
+            && call.path.file_name().and_then(|name| name.to_str()) == Some("journal.log")
+            && log_syncs.fetch_add(1, Ordering::SeqCst) == 0
+    }));
+    let (journal, _) =
+        crashed_with_unlisted_frames(layout, Arc::clone(&model_fs) as _, &*model_fs, 1, &[]);
+    watch.0.armed.store(true, Ordering::SeqCst);
+    let returned = journal.repair_tail();
+    println!("the tail check returned: {returned:?}");
+}
+
+/// A rewrite that lands anywhere but where the frames were
+/// ([`a_rewrite_that_lands_elsewhere_is_cut_back_and_reported_corrupt`]) whose cut back fails
+/// too aborts the process, saying why on stderr: entries at the offsets the check computed would
+/// point into other bytes, and nothing here can take those bytes back, so that no later write of
+/// the process may list them.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn a_rewrite_that_lands_elsewhere_and_cannot_be_cut_back_aborts() {
+    const TEST: &str = "a_rewrite_that_lands_elsewhere_and_cannot_be_cut_back_aborts";
+    if let Some(root) = std::env::var_os(LANDING_CHILD_ROOT) {
+        landing_cut_fails_child(&Layout::new(
+            Utf8PathBuf::from_path_buf(root.into()).unwrap(),
+        ));
+        return;
+    }
+    let (_root, layout) = new_root();
+    let child = run(this_test(&test_name!(TEST)).env(LANDING_CHILD_ROOT, layout.root()));
+    let stderr = String::from_utf8_lossy(&child.stderr);
+    assert_eq!(
+        child.status.signal(),
+        Some(SIGABRT),
+        "{:?}\n{stderr}\n{}",
+        child.status,
+        String::from_utf8_lossy(&child.stdout)
+    );
+    assert!(
+        stderr.contains("landed at") && stderr.contains("could not be cut back off it"),
+        "the abort says why: {stderr}"
     );
 }
 

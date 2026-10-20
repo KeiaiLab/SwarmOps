@@ -1,6 +1,6 @@
 # SwarmOps architecture
 
-An overview, in English, of how SwarmOps is built, as of M1.5. The design specs are the
+An overview, in English, of how SwarmOps is built, as of M1.6. The design specs are the
 authority, and they are in Korean:
 
 - [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md) ("umbrella" below),
@@ -22,11 +22,12 @@ general-purpose git replacement. Its main users are LLM agents, so every operati
 function and the command line is a thin shell that prints JSON. It is fully embedded: one
 program, no external database, no daemon.
 
-M0 (bootstrap), M1 (the single-agent core) and M1.5 (hardening and opening) are done. Since M1,
+M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening) and M1.6 (the
+code-review follow-ups, its quiet-window measurements aside) are done. Since M1,
 SwarmOps is usable by one agent: its store already takes commits from many processes at once, safely, but
 nothing merges yet. Merging and landing (M4), git import and export (M3, M8), workspaces (M5)
 and review (M7) come later, in the order of umbrella §13.
-[known-limitations.md](known-limitations.md) lists what M1 and M1.5 leave open.
+[known-limitations.md](known-limitations.md) lists what M1, M1.5 and M1.6 leave open.
 
 ## Crates and layering
 
@@ -40,7 +41,7 @@ and review (M7) come later, in the order of umbrella §13.
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. Beside them, `git import`, a client-side operation that no `StoreOps` has: it runs `swarmops-git`'s import on a repository of the caller's host. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
-| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, and builders of stores, repositories and runs of the binary. A dev-dependency of the store, the repository, the operations, the CLI and the git crate; no product build includes it. |
+| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, and builders of stores, repositories and runs of the binary. A dev-dependency of the store, the repository, the operations, the CLI and the git crate, and a dependency of the fuzz targets, which take it without its default features `cli`, `git` and `repo` (the runs of the binary, the git fixtures and the repository builders); no product build includes it. |
 
 Dependencies point one way, from the binary down to the codec, the test kit's dev edges aside:
 
@@ -53,7 +54,8 @@ swarmops-repo    core, merge, store
 swarmops-git     core, repo, store
 swarmops-ops     api, core, git, repo, store
 swarmops-cli     api, ops            (its tests also use core, repo, store and testkit)
-swarmops-testkit core, repo, store   (a dev-dependency of store, repo, ops, cli and git)
+swarmops-testkit core, store, repo   (repo behind its default feature `repo`; a dev-dependency
+                                      of store, repo, ops, cli and git, and fuzz/'s dependency)
 ```
 
 `fuzz/` is a cargo workspace of its own, with four cargo-fuzz targets over the codec and the
@@ -230,8 +232,9 @@ flowchart TD
   list --> mat["Materialize: append the index<br/>records, unsynced; replace<br/>each moved ref's file"]
   mat --> settle["Housekeeping: every 32 frames,<br/>sync the index, move journal.ckpt;<br/>once over 1,024 records sit past<br/>the sorted views, compact them in too"]
   settle --> done(["Release the lock"])
-  append -. "the append or<br/>its fdatasync fails" .-> cut["Cut the frame back:<br/>E_IO_TRANSIENT,<br/>committed: false<br/>(if the cut fails: abort)"]
+  append -. "the append or<br/>its fdatasync fails" .-> cut["Cut the frame back:<br/>E_IO_TRANSIENT (E_IO if<br/>refused for good),<br/>committed: false<br/>(if the cut fails: abort)"]
   list -. "any failure<br/>from here on" .-> warn["Committed and durable:<br/>a warning, and the next<br/>write repairs the rest"]
+  repair -. "listing a frame left<br/>unlisted, or writing<br/>it afresh, fails" .-> notyet["Cut back what the failed<br/>append wrote: E_IO_TRANSIENT<br/>(E_IO if refused for good),<br/>committed: false"]
 ```
 
 What a failure means depends on which side of the commit point it falls (storage §2 rule 3,
@@ -241,7 +244,11 @@ What a failure means depends on which side of the commit point it falls (storage
   writer, still holding the lock, cuts the journal back to where the frame began (`ftruncate`,
   then `fdatasync`; if nothing of the frame reached the file, there is nothing to cut) and
   returns the retryable `E_IO_TRANSIENT` with `details.committed = false`: the transaction
-  definitely did not commit, and running the same command again is safe. The frame is cut, not
+  definitely did not commit, and running the same command again is safe. (If the filesystem
+  refused the append for want of permission or because it is read-only, the error is `E_IO`,
+  not retryable, with the same `details.committed = false` and a hint that says what to fix
+  first: running the command again meets the same refusal until then. So it is for the second
+  and third ways below.) The frame is cut, not
   left for a later writer to sync and list, because Linux reports a failed writeback only once
   and may drop the unwritten pages: a later sync could succeed although the frame never reached
   the disk. If the cut itself fails, the process aborts rather than go on with a journal tail it
@@ -252,7 +259,10 @@ What a failure means depends on which side of the commit point it falls (storage
   either, so the writer writes the unlisted frames afresh from the bytes it read (it cuts them
   off, appends them again and syncs them) and lists them only then. Only if the rewrite fails
   too does the frame stay cut off; then that transaction did not commit, and neither did the
-  writer's own, whose write fails with `E_IO_TRANSIENT`: the second way that error arises.
+  writer's own, whose write fails with `E_IO_TRANSIENT`: the second way that error arises. The
+  third: that writer's listing of such a frame in `journal.off` fails. It cuts what reached
+  `journal.off` back off, and its own transaction, which never began, fails with
+  `E_IO_TRANSIENT`; the frame stays whole, and the next writer lists it.
 - **After it**: any failure once the `fdatasync` has returned (listing the frame in
   `journal.off`, materializing it, syncing the index, moving the checkpoint) leaves the
   transaction committed and durable. It is reported as a warning beside the result, and the
@@ -262,11 +272,12 @@ What a failure means depends on which side of the commit point it falls (storage
   sync and then its rewrite fail, or it crashes between its cut and its rewrite, the commit is
   lost. That takes three faults (storage §2 rule 3 lists the remaining double and triple faults).
 
-Three double faults abort the process (`std::process::abort`, saying why on stderr) rather
+Four double faults abort the process (`std::process::abort`, saying why on stderr) rather
 than let it go on with state it cannot vouch for: a failed frame whose cut fails too, a cut
-that fails while unlisted frames are written afresh, and an `init` that cannot take its
-`FORMAT` back. A long-lived process, such as `swarmops mcp`, ends with them, and its client
-sees it exit.
+that fails while unlisted frames are written afresh, frames written afresh that land anywhere
+but where they were (another writer's bytes came in between) and cannot be cut back, and an
+`init` that cannot take its `FORMAT` back. A long-lived process, such as `swarmops mcp`, ends
+with them, and its client sees it exit.
 
 `init` (storage §2) writes `FORMAT` last and then syncs the store's root. If that sync fails, it
 takes `FORMAT` back (removes it, and syncs the removal) and fails: the store is not complete,
@@ -492,7 +503,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 24 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
 kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 44 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 49 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what
@@ -500,7 +511,13 @@ it repaired, in offsets and counts; it is no warning (operations §0).
 
 An I/O failure (`E_IO`, `E_IO_TRANSIENT`, and the `E_STORE_CORRUPT` of a metadata file that does
 not parse) names the file operation that failed and the store file it was on (`details.fs_op`,
-`details.store_file`, relative to the store's root), never a host path.
+`details.store_file`, relative to the store's root), never a host path but in two `E_IO`s that
+operations §0 names: a symlink loop met while working out where the store's path leads
+(`fs_op: "resolve"`), whose message names that path, and tempfile's giving up after 65,536
+taken temp-file names, not met in practice. The errors that answer for the path a command was
+given name it too, most of them made absolute against the working directory: `E_NOT_A_REPO` (no
+store there, or a `FORMAT` or `REPO` this build does not read), `E_UNSUPPORTED_FS` (its message
+and `details.path`), and `init`'s `E_EXISTS`.
 
 A mutation needs an identity, `<family>/<instance>` (for example `agent/worker-17`), from
 `--as` or `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID` for the agent's run; without one it fails with
@@ -513,8 +530,11 @@ opaque cursor for the next one; and `show` lists at most `max_changes` changes (
 and says when it cut the list.
 
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
-stdio: one tool per `StoreOps` operation, whose input schema is the request type's JSON Schema
-and whose result is the envelope the CLI prints.
+stdio: one tool per `StoreOps` operation, whose input schema is the request type's JSON Schema,
+kept a plain object (a rule across fields that the type's schema states with a top-level `oneOf`
+goes into the description and the server's own check) and with the `expected_old` of `ref_set`
+and `ref_delete` narrowed to a full changeset id, and whose result is the envelope the CLI
+prints.
 
 ## Where to read more
 
