@@ -134,8 +134,7 @@
         <li><code>swarmops-store</code><span>object files and the metadata store</span></li>
         <li><code>swarmops-core</code><span>ids, paths and the canonical codec; no I/O</span></li>
       </ol>
-      <div class="disk" aria-label="A store on disk">
-<span class="d">store/</span>
+      <pre class="disk" aria-label="A store on disk"><span class="d">store/</span>
 ├─ FORMAT   <span class="m"># the layout version, written last by init</span>
 ├─ REPO     <span class="m"># the repository's id and name</span>
 ├─ <span class="d">objects/</span> <span class="m"># one self-verifying file per blob,</span>
@@ -144,10 +143,12 @@
 └─ <span class="d">meta/</span>
    ├─ journal.log  <span class="m"># append-only, CRC-framed: the truth</span>
    ├─ journal.off  <span class="m"># each frame's offset</span>
-   ├─ <span class="d">idx/</span> <span class="d">sorted/</span> <span class="m"># the changeset index</span>
+   ├─ journal.ckpt <span class="m"># how far it is materialized</span>
+   ├─ <span class="d">idx/</span>         <span class="m"># the changeset index: its columns,</span>
+   ├─ parents.log  <span class="m"># each changeset's parents,</span>
+   ├─ <span class="d">sorted/</span>      <span class="m"># and its sorted views</span>
    ├─ <span class="d">refs/</span>        <span class="m"># one file per ref, moved by CAS</span>
-   └─ lock         <span class="m"># one flock for every writer</span>
-      </div>
+   └─ lock         <span class="m"># one flock for every writer</span></pre>
     </div>
   </div>
 </section>

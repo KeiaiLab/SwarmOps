@@ -158,7 +158,7 @@ h3 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
 .stack li code { background: none; border: 0; padding: 0; color: var(--violet); font-weight: 600; }
 .stack li span { color: var(--muted); font-size: 14.5px; }
 @media (max-width: 520px) { .stack li { grid-template-columns: 1fr; gap: 2px; } }
-.disk { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 24px; font: 13.5px/1.75 var(--mono); }
+.disk { margin: 0; overflow-x: auto; background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 22px 24px; font: 13.5px/1.75 var(--mono); }
 .disk .d { color: var(--amber); }
 .disk .m { color: var(--muted); }
 
