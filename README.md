@@ -95,7 +95,8 @@ measurements are in [docs/perf.md](docs/perf.md).
   <sub>The store as a machine: writers queue for one lock and each commit becomes one CRC-framed
   frame of the journal, while objects need no lock.
   <a href="https://swarmops.cc/explainers/store.html">Interactive version</a>, drawn with
-  <a href="https://github.com/wheresryan22/anatomy">Anatomy</a>.</sub>
+  <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT,
+  <a href="site/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
 </p>
 
 ## How it works

@@ -1,12 +1,19 @@
 // Fig. 1 of swarmops.cc: the native store as a machine, drawn with Anatomy
 // (MIT, https://github.com/wheresryan22/anatomy), whose kit this script imports.
 //
-//   git clone --depth 1 https://github.com/wheresryan22/anatomy /tmp/anatomy
+//   git clone https://github.com/wheresryan22/anatomy /tmp/anatomy
+//   git -C /tmp/anatomy checkout 1482e8469b0a9e0d8cc18ea2740a01423d29ae80
 //   ANATOMY_DIR=/tmp/anatomy node scripts/site/explainers/store.mjs
 //
-// Writes site/explainers/store.html (interactive), site/explainers/store.svg and
-// store-light.svg (stills), and the same stills as docs/assets/store-dark.svg and
-// store-light.svg for the README.
+// Writes site/explainers/store.html and store-light.html (interactive, dark and light),
+// site/explainers/store.svg and store-light.svg (stills), the same stills as
+// docs/assets/store-dark.svg and store-light.svg for the README, and
+// site/THIRD-PARTY-NOTICES.txt.
+//
+// The pages inline the kit's script and stylesheet, and the stills its stylesheet, so each of
+// those files carries Anatomy's licence in a comment, copied from the checkout's LICENSE. The
+// build reads only the files pinned below, and refuses a checkout whose copies differ from the
+// pinned commit's, so every output reproduces byte for byte.
 //
 // The mapping, one part per idea of the storage spec:
 //   commit cartridges on the feed rail  - writers' metadata transactions, queued
@@ -14,7 +21,8 @@
 //   the press stamping the paper tape   - one CRC-framed frame appended to journal.log
 //   the tape folding into the tray      - the journal: append-only, never rewritten
 //   pellets dropping into 16 bins       - object files into fan-out directories, no lock
-import { writeFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -22,6 +30,37 @@ const ANATOMY = process.env.ANATOMY_DIR;
 if (!ANATOMY) {
   console.error("set ANATOMY_DIR to a checkout of https://github.com/wheresryan22/anatomy");
   process.exit(2);
+}
+// The Anatomy commit the outputs come from, and the sha256 of each of its files the build reads.
+const ANATOMY_COMMIT = "1482e8469b0a9e0d8cc18ea2740a01423d29ae80";
+const PINNED = {
+  "kit/iso-kit.mjs": "6d3ecc725d30c3b0346da309cf61dfa5a65017c23620bbd4093009d4fb104018",
+  "scripts/inline-kit.mjs": "01e08df7c2556ce52a7e8ed9009a332036b209ab7e42389874af2a65fda6e9db",
+  LICENSE: "87c078ab9d90a3044f359e6b563d4e6afea7aa060897cf4f21618687b3856796",
+};
+for (const [file, sum] of Object.entries(PINNED)) {
+  let bytes = null;
+  try {
+    bytes = readFileSync(join(ANATOMY, file));
+  } catch {}
+  if (!bytes || createHash("sha256").update(bytes).digest("hex") !== sum) {
+    console.error(`ANATOMY_DIR's ${file} is not the one of anatomy ${ANATOMY_COMMIT}: check that commit out`);
+    process.exit(2);
+  }
+}
+const LICENSE = readFileSync(join(ANATOMY, "LICENSE"), "utf8").trimEnd();
+const SOURCE = `Anatomy (https://github.com/wheresryan22/anatomy), commit ${ANATOMY_COMMIT}`;
+// The notice goes into scripts, stylesheets and SVG text: it may close no comment and hold no markup.
+if (/\*\/|[<&]/.test(LICENSE + SOURCE)) throw new Error("the licence cannot go into a comment as it is");
+const SCRIPT_NOTICE = `/*! This script starts with kit/iso-kit.mjs, the kit of ${SOURCE}, under the licence below; the figure's own code follows it.\n\n${LICENSE}\n*/\n`;
+const STYLE_NOTICE = `/*! This stylesheet comes from the kit of ${SOURCE}, under the licence below.\n\n${LICENSE}\n*/\n`;
+// Puts the stylesheet's notice at the start of the stylesheet the kit's builders write: the first
+// <style>, ahead of any script (the kit's script spells "<style>" too).
+function withStyleNotice(markup) {
+  const at = markup.indexOf("<style>") + "<style>".length;
+  const script = markup.indexOf("<script");
+  if (at < "<style>".length || (script >= 0 && script < at)) throw new Error("no stylesheet ahead of the script");
+  return markup.slice(0, at) + STYLE_NOTICE + markup.slice(at);
 }
 const k = await import(pathToFileURL(join(ANATOMY, "kit/iso-kit.mjs")).href);
 const { kitScript } = await import(pathToFileURL(join(ANATOMY, "scripts/inline-kit.mjs")).href);
@@ -260,9 +299,11 @@ const label = "The SwarmOps store drawn as a machine. Commit cartridges wait on 
 function stillSvg(theme) {
   const svg = k.figureSvg({ width: WIDTH, height: HEIGHT, label, body: body(), standalone: theme });
   // The stills show the machine at rest: no pellet in the air.
-  return svg
-    .replace(/<g data-part="pellet"[^>]*>(?:(?!<g data-part=).)*?<\/g><\/g>/g, "")
-    .replace(/<g data-part="landing"[^>]*>.*?<\/g>/g, "");
+  return withStyleNotice(
+    svg
+      .replace(/<g data-part="pellet"[^>]*>(?:(?!<g data-part=).)*?<\/g><\/g>/g, "")
+      .replace(/<g data-part="landing"[^>]*>.*?<\/g>/g, ""),
+  );
 }
 
 const live = `
@@ -362,9 +403,22 @@ function page(theme) {
       "Writers' metadata transactions queue for one lock and each becomes one CRC-framed frame appended to journal.log; objects are written before any frame names them, into 256 fan-out directories, without a lock (sixteen bins drawn). Measured on one busy host with 32 writer processes: about 110 durable transactions a second, a median lock wait of 0.08 ms back to back, and 14.5× faster object writes on 32 threads than on one (docs/perf.md).",
     body: `<div class="iso-stage" tabindex="0" role="img" aria-label="${label}">${svg}</div>`,
   });
-  const credit = `<p style="text-align:center;opacity:.7;font-size:12px">Drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT) · <a href="/">swarmops.cc</a></p>`;
-  return k.pageHtml({ title: "The SwarmOps store, as a machine", theme, body: plate + credit, script: kitScript() + live, width: 820 });
+  const credit = `<p style="text-align:center;opacity:.7;font-size:12px">Drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT, <a href="/THIRD-PARTY-NOTICES.txt">notice</a>) · <a href="/">swarmops.cc</a></p>`;
+  return withStyleNotice(k.pageHtml({ title: "The SwarmOps store, as a machine", theme, body: plate + credit, script: SCRIPT_NOTICE + kitScript() + live, width: 820 }));
 }
+
+const notices = `Third-party notices: swarmops.cc
+
+Fig. 1, the store as a machine, is drawn with Anatomy, https://github.com/wheresryan22/anatomy,
+at commit ${ANATOMY_COMMIT}. The interactive pages
+/explainers/store.html and /explainers/store-light.html inline its kit's script
+(kit/iso-kit.mjs) and stylesheet, and the stills /explainers/store.svg and
+/explainers/store-light.svg its stylesheet (the repository's docs/assets/store-dark.svg and
+store-light.svg are the same stills). Each of those files carries this licence in a comment too.
+scripts/site/explainers/store.mjs, in the SwarmOps repository, builds them.
+
+${LICENSE}
+`;
 
 const out = (rel, text) => {
   const p = join(ROOT, rel);
@@ -378,3 +432,4 @@ out("site/explainers/store.svg", stillSvg("dark"));
 out("site/explainers/store-light.svg", stillSvg("light"));
 out("docs/assets/store-dark.svg", stillSvg("dark"));
 out("docs/assets/store-light.svg", stillSvg("light"));
+out("site/THIRD-PARTY-NOTICES.txt", notices);
