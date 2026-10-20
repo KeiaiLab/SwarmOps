@@ -348,6 +348,141 @@ fn a_put_of_a_value_past_the_object_limit_is_refused() {
     assert!(!layout.derived_dir().exists(), "nothing written");
 }
 
+/// A check of the store lists a derivation's value files by their names (`list`, sorted by subject
+/// and key hash) and reads each with the key it records (`read_listed`): a whole file gives its
+/// key and its value, and a file that does not check out gives nothing and stays where it is: a
+/// damaged one, one whose recorded key does not hash to its name's end (another slot's file
+/// copied there), and a directory under a value file's name. A link to the slot's own file reads
+/// as that file, as `get` reads it. Names the layout gives no slot (another length, a capital
+/// digit, a suffix that is not 16 hex digits, a fan-out of one digit) are passed over, and so are
+/// another version's and another derivation's directories.
+#[test]
+fn a_check_lists_value_files_and_reads_them_without_removing_any() {
+    use std::os::unix::fs::symlink;
+
+    use swarmops_store::{ListedValue, StoredValue};
+
+    let (_dir, layout, store) = new_store();
+    let empty = slot("depth", 1, 1, b"");
+    let keyed = slot("depth", 1, 2, b"src/lib.rs");
+    let zstd = slot("depth", 1, 3, b"key");
+    let linked = slot("depth", 1, 4, b"");
+    let damaged = slot("depth", 1, 5, b"");
+    let copied = slot("depth", 1, 6, b"other");
+    let not_a_file = slot("depth", 1, 7, b"");
+    for (slot, len) in [(&empty, 10), (&keyed, 10), (&zstd, 5 << 10), (&linked, 10)] {
+        assert!(store.put(slot, &value(len, 1)).unwrap());
+    }
+    assert!(store.put(&damaged, &value(10, 1)).unwrap());
+    assert!(store.put(&slot("depth", 2, 1, b""), b"v2").unwrap());
+    assert!(store.put(&slot("width", 1, 1, b""), b"w").unwrap());
+    let path = |slot: &DerivedSlot<'_>| layout.derived_path(slot);
+    fs::write(path(&damaged), b"torn").unwrap();
+    fs::create_dir_all(path(&copied).parent().unwrap()).unwrap();
+    fs::copy(path(&keyed), path(&copied)).unwrap();
+    let elsewhere = layout.root().join("elsewhere");
+    fs::rename(path(&linked), &elsewhere).unwrap();
+    symlink(&elsewhere, path(&linked)).unwrap();
+    fs::create_dir_all(path(&not_a_file)).unwrap();
+    let dir = layout.derived_dir().join("depth/1");
+    let hex = subject(1).to_hex();
+    let fanout = dir.join(&hex[..2]);
+    for stray in [
+        fanout.join("abc"),
+        fanout.join(hex[2..].to_uppercase()),
+        fanout.join(format!("{}.0123", &hex[2..])),
+        fanout.join(format!("{}.0123456789abcdeg", &hex[2..])),
+        dir.join(&hex[..1]).join(&hex[1..]),
+    ] {
+        fs::create_dir_all(stray.parent().unwrap()).unwrap();
+        fs::write(&stray, b"stray").unwrap();
+    }
+
+    let hash = |key: &[u8]| -> Option<[u8; 8]> {
+        (!key.is_empty()).then(|| blake3::hash(key).as_bytes()[..8].try_into().unwrap())
+    };
+    let listed = |slot: &DerivedSlot<'_>| ListedValue {
+        subject: slot.subject,
+        key_hash: hash(slot.key),
+    };
+    let mut want: Vec<ListedValue> = [
+        &empty,
+        &keyed,
+        &zstd,
+        &linked,
+        &damaged,
+        &copied,
+        &not_a_file,
+    ]
+    .into_iter()
+    .map(listed)
+    .collect();
+    want.sort_unstable();
+    assert_eq!(store.list("depth", 1).unwrap(), want);
+
+    let read = |slot: &DerivedSlot<'_>| store.read_listed("depth", 1, &listed(slot)).unwrap();
+    let stored = |slot: &DerivedSlot<'_>, len| StoredValue {
+        key: slot.key.to_vec(),
+        value: value(len, 1),
+    };
+    for (slot, len) in [(&empty, 10), (&keyed, 10), (&zstd, 5 << 10), (&linked, 10)] {
+        assert_eq!(read(slot), Some(stored(slot, len)), "{slot:?}");
+    }
+    for (what, slot) in [
+        ("damaged", &damaged),
+        ("another slot's file", &copied),
+        ("a directory", &not_a_file),
+    ] {
+        assert_eq!(read(slot), None, "{what}");
+        assert!(path(slot).exists(), "{what}: left where it is");
+    }
+    assert_eq!(fs::read(path(&damaged)).unwrap(), b"torn");
+    assert_eq!(
+        store.list("depth", 3).unwrap(),
+        Vec::new(),
+        "no such version"
+    );
+    assert!(matches!(store.list("tmp", 1), Err(StoreError::BadCall(_))));
+    assert!(matches!(
+        store.list("depth", 0),
+        Err(StoreError::BadCall(_))
+    ));
+}
+
+/// A read of a listed value file that fails names the file, relative to the store's root, as
+/// every store failure does.
+#[test]
+fn a_failed_read_of_a_listed_value_names_its_file() {
+    use swarmops_store::ListedValue;
+
+    let (_dir, layout) = new_root();
+    let slot = slot("depth", 1, 1, b"key");
+    assert!(
+        DerivedStore::open(layout.clone(), Arc::new(RealFs))
+            .put(&slot, b"value")
+            .unwrap()
+    );
+    let fs = FailingFs::new(|method, _| method == FsMethod::Read);
+    let store = DerivedStore::open(layout.clone(), Arc::new(fs));
+    let [listed] = store.list("depth", 1).unwrap()[..] else {
+        panic!("one value file");
+    };
+    assert_eq!(
+        listed,
+        ListedValue {
+            subject: slot.subject,
+            key_hash: Some(blake3::hash(b"key").as_bytes()[..8].try_into().unwrap()),
+        }
+    );
+    match store.read_listed("depth", 1, &listed) {
+        Err(StoreError::Io(read)) => {
+            assert_eq!(read.op, FileOp::Fs(FsMethod::Read));
+            assert_eq!(read.file.as_ref(), Some(&slot_file(&slot)));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 /// The process's peak resident memory, in KiB: `VmHWM` of `/proc/self/status` on Linux; 0
 /// elsewhere, where the check that uses it checks nothing.
 fn peak_resident_kib() -> u64 {
