@@ -511,19 +511,24 @@ pub struct MetaRead<'a> {
 
 impl MetaRead<'_> {
     /// Changeset `id`: an index lookup (a search of the sorted view, then the tail), then the
-    /// frames past the checkpoint.
+    /// frames past the checkpoint. The record the index finds must hold `id`, and its parents
+    /// must start where the record before it leaves off in `parents.log`; else the index is
+    /// damaged, or crafted, and the lookup fails with [`StoreError::IndexCorrupt`] rather than
+    /// answer with another changeset's record or another record's parents. The parents are what
+    /// the index holds there all the same: only the changeset's object, which the store does not
+    /// read, names them for certain, by their hashes.
     pub fn changeset(&self, id: ChangesetId) -> Result<Option<ChangesetMeta>, StoreError> {
-        match self.index.find(id)? {
-            Some(rec) => self.index.get(rec).map(Some),
-            None => Ok(self.overlay.changeset(id).cloned()),
-        }
+        Ok(self
+            .index
+            .lookup(id)?
+            .or_else(|| self.overlay.changeset(id).cloned()))
     }
 
     /// The first parent of changeset `id`, as [`MetaRead::changeset`] gives it, without the
     /// rest of its record: `None` if the snapshot does not hold `id`, `Some(None)` for a root.
-    /// The same index lookup, then the record's `par.col` entry and its first parent in
-    /// `parents.log` ([`Index::first_parent`]); or the frames past the checkpoint. A step of a
-    /// first-parent walk.
+    /// The same index lookup, then the record's `par.col` entry, with the one before it, and its
+    /// first parent in `parents.log` ([`Index::first_parent`]), with the same checks and the same
+    /// [`StoreError::IndexCorrupt`]; or the frames past the checkpoint.
     pub fn first_parent(&self, id: ChangesetId) -> Result<Option<Option<ChangesetId>>, StoreError> {
         match self.index.find(id)? {
             Some(rec) => self.index.first_parent(rec).map(Some),
@@ -762,7 +767,8 @@ impl MetaWrite<'_> {
     /// ([`MetaWrite::insert_changeset`]), as the index will hold it once committed (at the seq
     /// the insert returned, with the generation, delta hash and parents queued); or else the
     /// index's record, every committed changeset replayed into the index by
-    /// [`MetaStore::write`]; `None` if neither holds it. Read under the lock.
+    /// [`MetaStore::write`], found and checked as [`MetaRead::changeset`] finds and checks it;
+    /// `None` if neither holds it. Read under the lock.
     pub fn changeset(&self, id: ChangesetId) -> Result<Option<ChangesetMeta>, StoreError> {
         if self.queued.contains_key(&id) {
             let queued = self.records.iter().filter_map(|record| match record {
@@ -787,10 +793,7 @@ impl MetaWrite<'_> {
                 }
             }
         }
-        match self.index.find(id)? {
-            Some(rec) => self.index.get(rec).map(Some),
-            None => Ok(None),
-        }
+        self.index.lookup(id)
     }
 
     /// Queues changeset `meta`, unless the store or this transaction holds it already

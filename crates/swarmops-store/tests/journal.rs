@@ -1337,6 +1337,129 @@ fn trailing_zeroed_entries_are_dropped_like_a_partial_entry() {
 }
 
 #[test]
+fn zeroed_entries_past_a_4_kib_block_at_the_end_of_journal_off_are_journal_corrupt() {
+    // A power loss leaves zeroed only the entry being written (storage spec §2 rule 3), so
+    // readers and recovery drop at most a 4 KiB block of zeroed entries at the end of
+    // journal.off, 512, as they drop a few in
+    // `zeroed_entries_at_the_end_of_journal_off_are_dropped_by_readers_too` and
+    // `trailing_zeroed_entries_are_dropped_like_a_partial_entry`. One more is no power loss's:
+    // damage, JournalCorrupt at 0 (the offset such an entry holds) for every reader and for
+    // recovery, which changes nothing. Part of an entry after them changes neither. Over two
+    // frames, and over frame 0 alone, whose own entry holds 0.
+    for (frames, zeroed) in [(2_u64, 512), (2, 513), (1, 512), (1, 513)] {
+        let what = format!("{frames} frames, then {zeroed} zeroed entries and part of another");
+        let (_root, layout) = new_root();
+        let journal = new_journal(&layout);
+        journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+        if frames == 2 {
+            journal
+                .append_frame(&[child_changeset(), main_created()])
+                .unwrap(); // bytes 84..257
+        }
+        append_bytes(layout.journal_off(), &vec![0; zeroed * 8 + 3]);
+        let (off_len, log_len) = (
+            file_len(layout.journal_off()),
+            file_len(layout.journal_log()),
+        );
+        let reader = reopen(&layout);
+        if zeroed == 512 {
+            let all = usize::try_from(frames).unwrap();
+            assert_eq!(reader.frame_count().unwrap(), frames, "{what}");
+            assert_eq!(reader.frames_from(0, 10).unwrap().len(), all, "{what}");
+            assert_eq!(reader.tail_frames_from(0).unwrap().len(), all, "{what}");
+            let repair = journal.repair_tail().unwrap();
+            assert_eq!(repair.off_bytes_dropped, off_len - frames * 8, "{what}");
+            assert_eq!(
+                (
+                    file_len(layout.journal_off()),
+                    file_len(layout.journal_log())
+                ),
+                (frames * 8, log_len),
+                "{what}: dropped, journal.log kept"
+            );
+        } else {
+            assert_corrupt_at(reader.frame_count(), 0, &what);
+            assert_corrupt_at(reader.frames_from(0, 10), 0, &what);
+            assert_corrupt_at(reader.frames_after(0, 10), 0, &what);
+            assert_corrupt_at(reader.tail_frames_from(0), 0, &what);
+            assert_corrupt_at(reader.tail_frames_from(84), 0, &what);
+            assert_corrupt_at(journal.repair_tail(), 0, &what);
+            assert_corrupt_at(journal.append_frame(&[compacted(1)]), 0, &what);
+            assert_eq!(
+                (
+                    file_len(layout.journal_off()),
+                    file_len(layout.journal_log())
+                ),
+                (off_len, log_len),
+                "{what}: nothing changed"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_journal_off_zero_filled_far_past_its_entries_is_refused_at_once() {
+    // A crafted or damaged journal.off of huge length (1 TiB here, a sparse file, which costs no
+    // disk), zero-filled past the entries of the frames journal.log holds. Readers and recovery
+    // look at no more than the last 4 KiB of journal.off to find where its zeroed entries
+    // start, however long it is, and refuse this one as damage (more zeroed entries than a
+    // power loss leaves: JournalCorrupt at 0) at once, changing nothing. Each call runs on a
+    // handle of its own, on a thread with a deadline, so that a regression fails the test
+    // instead of hanging it.
+    use std::sync::mpsc;
+
+    /// A call on a reader's or a writer's handle, its result dropped.
+    type Call = fn(&Journal) -> Result<(), StoreError>;
+
+    let (_root, layout) = new_root();
+    let journal = new_journal(&layout);
+    journal.append_frame(&[root_changeset()]).unwrap(); // bytes 0..84
+    journal
+        .append_frame(&[child_changeset(), main_created()])
+        .unwrap(); // bytes 84..257
+    drop(journal);
+    set_len(layout.journal_off(), 1 << 40);
+    let calls: [(&str, Call); 6] = [
+        ("frame_count", |journal| journal.frame_count().map(drop)),
+        ("frames_from", |journal| {
+            journal.frames_from(0, 10).map(drop)
+        }),
+        ("frames_after", |journal| {
+            journal.frames_after(1, 10).map(drop)
+        }),
+        ("tail_frames_from", |journal| {
+            journal.tail_frames_from(0).map(drop)
+        }),
+        ("repair_tail", |journal| journal.repair_tail().map(drop)),
+        ("append_frame", |journal| {
+            journal.append_frame(&[compacted(1)]).map(drop)
+        }),
+    ];
+    for (what, call) in calls {
+        let (tx, rx) = mpsc::channel();
+        let opened = layout.clone();
+        thread::spawn(move || {
+            let journal = Journal::open(&opened, real_fs()).unwrap();
+            let _ = tx.send(call(&journal));
+        });
+        match rx.recv_timeout(Duration::from_secs(30)) {
+            Ok(got) => assert_corrupt_at(got, 0, what),
+            Err(e) => {
+                panic!("{what} on a 1 TiB zero-filled journal.off did not return in 30 s: {e}")
+            }
+        }
+    }
+    assert_eq!(
+        (
+            file_len(layout.journal_off()),
+            file_len(layout.journal_log())
+        ),
+        (1 << 40, 257),
+        "nothing changed"
+    );
+}
+
+#[test]
 fn recovery_checks_every_listed_frame_before_it_writes() {
     // Recovery reads only the last listed frames to find the tail, but before it cuts
     // journal.log or lists a frame it walks journal.off whole: every listed frame must start

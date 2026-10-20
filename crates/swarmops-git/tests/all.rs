@@ -8,6 +8,7 @@
 mod convert;
 mod export;
 mod export_oid;
+mod git_dir;
 mod import;
 mod raw;
 mod round_trip;

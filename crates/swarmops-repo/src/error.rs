@@ -133,6 +133,25 @@ pub enum RepoError {
         /// What went wrong, as one line.
         why: String,
     },
+    /// A value the derived store holds (storage spec §5) that a reader's checks against the index
+    /// and the objects find wrong: its file is whole and its trailer right, but the value is not
+    /// one its derivation gives (a first-parent skip list whose entry 0 is not the first parent,
+    /// with more entries than the generation leaves room for, whose jump is not as many
+    /// generations down, disagrees with the list one level down, names a changeset the store does
+    /// not hold, or ends where the chain goes on; a last touch that names a changeset the store does
+    /// not hold, not below the one asked about, or whose delta does not touch the path). No crash
+    /// writes one: someone placed the file, or a faulty build wrote it. `verify --deep` names every
+    /// such value; removing its file, or all of `meta/derived/`, has the value derived again.
+    #[error("derivation {name}: its stored value for changeset {changeset} is wrong: {why}")]
+    DerivedCorrupt {
+        /// The derivation's name ([`crate::derive::Derivation::NAME`]).
+        name: String,
+        /// The changeset whose value was asked for: the value may have been read at another
+        /// changeset its derivation redirected to.
+        changeset: ChangesetId,
+        /// What is wrong with it, as one line.
+        why: String,
+    },
     /// `undo` of an operation the journal does not hold: past its last one.
     #[error(
         "there is no operation {op} (the last is {})",

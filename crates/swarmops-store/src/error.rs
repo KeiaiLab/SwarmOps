@@ -98,11 +98,12 @@ pub enum StoreError {
     /// - a sorted view file that ends in a partial entry;
     /// - sorted views out of order, out of step in a way the order compaction renames them in
     ///   cannot explain, or covering records the columns do not hold;
-    /// - a sorted-view entry that points at a record its view does not cover;
+    /// - a sorted-view entry that points at a record its view does not cover, or at a record
+    ///   that does not hold the entry's key, or a record a lookup finds named twice;
     /// - an id the index holds twice;
-    /// - a record whose parents lie off `parents.log`'s 32-byte boundaries or past its end, or,
-    ///   where the index counts its records by their lengths, do not start where the record
-    ///   before it leaves off;
+    /// - a record whose parents lie off `parents.log`'s 32-byte boundaries or past its end, or
+    ///   do not start where the record before it leaves off: found for every record a lookup by
+    ///   id reads, and for every record where the index counts its records by their lengths;
     /// - records a handle counted that are no longer whole in every index file;
     /// - an index file that changed during an append (a writer without `meta/lock`);
     /// - an index file that is missing (a store has them all from its creation, and nothing

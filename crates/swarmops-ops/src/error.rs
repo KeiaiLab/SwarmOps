@@ -130,6 +130,13 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
         // A derivation that fails on immutable inputs fails again on every call: a bug.
         RepoError::Derived { .. } => error(ErrorCode::Internal, message),
+        // A cache file someone placed, or a faulty build wrote: a deep verify names them all.
+        RepoError::DerivedCorrupt {
+            name, changeset, ..
+        } => corrupt(message, during, "swarmops verify --deep").with_details(details([
+            ("derivation", name.into()),
+            ("changeset", changeset.to_string().into()),
+        ])),
     }
 }
 
@@ -562,7 +569,9 @@ fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) 
 }
 
 /// `E_GIT_UNSUPPORTED`: the repository at `git_path` is one the git side does not read or write
-/// as it is, `why` (a SHA-256 repository, reftable refs, a shallow clone, which a hint deepens).
+/// as it is, `why` (a SHA-256 repository, reftable refs, a shallow clone, which a hint deepens, a
+/// FIFO, a socket or a device where it reads a file of the git directory, or a file it reads whole
+/// there that is too long, each of which it names).
 fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
     let found = match why {
         Unsupported::ObjectFormat(format) => details([
@@ -572,6 +581,15 @@ fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
         Unsupported::RefStorage(storage) => details([
             ("reason", "ref_storage".into()),
             ("ref_storage", storage.into()),
+        ]),
+        Unsupported::SpecialFile(file) => {
+            details([("reason", "special_file".into()), ("file", file.into())])
+        }
+        Unsupported::FileTooLong { file, len, max } => details([
+            ("reason", "file_too_long".into()),
+            ("file", file.into()),
+            ("size", len.into()),
+            ("max", max.into()),
         ]),
         Unsupported::Shallow => {
             return error(ErrorCode::GitUnsupported, message)
@@ -989,6 +1007,25 @@ mod tests {
             };
             maps(e, op, code);
         }
+    }
+
+    /// A derived value that a reader's checks find wrong is a store that fails its checks:
+    /// `E_STORE_CORRUPT`, naming the derivation and the changeset, its hint a deep verify, which
+    /// names every such value.
+    #[test]
+    fn a_derived_value_a_reader_refuses_is_store_corrupt() {
+        let wrong = || RepoError::DerivedCorrupt {
+            name: "last_modified".into(),
+            changeset: id(),
+            why: "it names a changeset whose delta does not touch the path".into(),
+        };
+        maps(wrong(), During::Op, ErrorCode::StoreCorrupt);
+        let refused = repo_error(wrong(), During::Op);
+        assert_eq!(refused.hint.as_deref(), Some("swarmops verify --deep"));
+        assert_eq!(
+            Value::Object(refused.details),
+            serde_json::json!({"derivation": "last_modified", "changeset": id().to_string()})
+        );
     }
 
     /// One of each error a land raises.
@@ -1653,6 +1690,18 @@ mod tests {
         let error = git_maps(shallow, ErrorCode::GitUnsupported, &want);
         let deepen = "git -C /nonexistent/swarmops-test/repo.git fetch --unshallow";
         assert_eq!(error.hint.as_deref(), Some(deepen));
+        let special = unsupported(Unsupported::SpecialFile("refs/heads/main".into()));
+        let want = json!({"reason": "special_file", "file": "refs/heads/main"});
+        let error = git_maps(special, ErrorCode::GitUnsupported, &want);
+        assert_eq!(error.hint, None);
+        let long = unsupported(Unsupported::FileTooLong {
+            file: "config".into(),
+            len: 1 << 40,
+            max: 16 << 20,
+        });
+        let want = json!({"reason": "file_too_long", "file": "config", "size": 1_u64 << 40,
+                          "max": 16 << 20});
+        git_maps(long, ErrorCode::GitUnsupported, &want);
 
         let object = OBJECT.to_string();
         let walked: fn(SourceError) -> ImportError = ImportError::Source;
@@ -2011,6 +2060,25 @@ mod tests {
         let want = json!({"reason": "object_format", "object_format": "sha256"});
         export_maps(
             sink(SinkError::Unsupported(sha256)),
+            ErrorCode::GitUnsupported,
+            &want,
+        );
+        let special = Unsupported::SpecialFile("config".into());
+        let want = json!({"reason": "special_file", "file": "config"});
+        export_maps(
+            sink(SinkError::Unsupported(special)),
+            ErrorCode::GitUnsupported,
+            &want,
+        );
+        let long = Unsupported::FileTooLong {
+            file: "HEAD".into(),
+            len: 1 << 40,
+            max: 16 << 20,
+        };
+        let want = json!({"reason": "file_too_long", "file": "HEAD", "size": 1_u64 << 40,
+                          "max": 16 << 20});
+        export_maps(
+            sink(SinkError::Unsupported(long)),
             ErrorCode::GitUnsupported,
             &want,
         );
