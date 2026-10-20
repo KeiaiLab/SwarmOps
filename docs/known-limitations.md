@@ -232,6 +232,15 @@ left).
 
 [SECURITY.md](../SECURITY.md) says which inputs are in scope.
 
+- **A git object is read whole, up to 512 MiB.** The git import reads each commit, tree and
+  annotated tag of the source whole to parse it, and each blob whole to store it, only once the
+  object's header says it is at most 512 MiB long, the most an object holds (`MAX_OBJECT_LEN`,
+  storage spec §7): a longer one is refused before a byte of it is read (`E_TOO_LARGE`, naming
+  it). Within that bound a small loose file of a crafted repository can still inflate to
+  512 MiB, and converting an object takes several times its length: about six to seven times
+  for a tree of many short entries and up to about four times for a commit (measured at 16 and
+  64 MiB), so one such tree near the bound takes some 3.5 GiB. *Unscheduled: parsing a tree in
+  pieces would bound it. Found: M3's fidelity review (issue #5 item 1).*
 - **A zstd bomb object is decoded whole.** An object file whose zstd frame really produces a
   large payload, a small file that decompresses to the size it records, is decompressed in full
   before its hash is checked: up to 512 MiB, the most an object holds (`MAX_OBJECT_LEN`, storage

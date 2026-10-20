@@ -557,6 +557,15 @@ fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) 
         SourceError::Unsupported(why) => unsupported(why, message, git_path),
         SourceError::Missing { oid } => unreadable(message, Some(oid), "missing", git_path),
         SourceError::Corrupt { oid, .. } => unreadable(message, Some(oid), "corrupt", git_path),
+        SourceError::TooLarge { oid, kind, size } => {
+            let found = details([
+                ("object", oid.to_string().into()),
+                ("kind", kind.as_str().into()),
+                ("size", size.into()),
+                ("max", MAX_OBJECT_LEN.into()),
+            ]);
+            error(ErrorCode::TooLarge, message).with_details(found)
+        }
         SourceError::Io { .. } => unreadable(message, None, "io", git_path),
     }
 }
@@ -1675,6 +1684,23 @@ mod tests {
             });
             let error = git_maps(failed, ErrorCode::GitRead, &json!({"reason": "io"}));
             assert_eq!(error.hint, None);
+            // A commit, a tree or a tag past the object limit, refused by its header unread: the
+            // request is valid, so it is the limit's code, never `E_INVALID_ARG`.
+            for kind in [RawKind::Commit, RawKind::Tree, RawKind::Tag] {
+                let large = read(SourceError::TooLarge {
+                    oid: OBJECT,
+                    kind,
+                    size: MAX_OBJECT_LEN + 1,
+                });
+                let want = json!({
+                    "object": object,
+                    "kind": kind.as_str(),
+                    "size": MAX_OBJECT_LEN + 1,
+                    "max": MAX_OBJECT_LEN,
+                });
+                let error = git_maps(large, ErrorCode::TooLarge, &want);
+                assert_eq!(error.hint, None);
+            }
         }
     }
 

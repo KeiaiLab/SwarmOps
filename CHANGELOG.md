@@ -931,4 +931,18 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   length (`E_NOT_A_REPO`), where it used to be read whole, at the cost of its length in memory
   (M1.5 final review, security-2).
 
+#### The security review's fixes (2026-10-20)
+
+- `git import` no longer reads a commit, a tree or an annotated tag of the source whole before it
+  knows how long it is: a crafted repository's object, a small loose file whose header claims a
+  huge length, made the import allocate that length, without bound, while it read it (over 500 MB
+  for a file of about a hundred bytes). The import now reads each commit, tree and annotated tag
+  it parses, as it already read each blob, only once the object's header says it is at most
+  512 MiB long (`MAX_OBJECT_LEN`, the most an object holds), and refuses a longer one before a
+  byte of it is read: `E_TOO_LARGE`, exit 1, with `details.object`, `details.kind` (the kind its
+  header gives), `details.size` and `details.max`; the import stops there, as at any commit it
+  refuses, before the frame that would hold the commit. Within the bound an object is still read
+  whole ([docs/known-limitations.md](docs/known-limitations.md), "A git object is read whole, up
+  to 512 MiB").
+
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable

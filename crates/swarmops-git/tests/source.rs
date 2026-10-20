@@ -145,6 +145,54 @@ fn resolve_peels_head_names_tags_and_ids() {
     );
 }
 
+/// An annotated tag whose header says it is longer than an object holds is refused as `resolve`
+/// peels it, before it is read: its loose file, a hundred bytes or so, claims more than 512 MiB
+/// once inflated.
+#[test]
+fn resolve_refuses_a_tag_past_the_object_limit_before_it_reads_it() {
+    use swarmops_store::MAX_OBJECT_LEN;
+
+    let repository = git::empty_repository();
+    let huge = "5a".repeat(20);
+    let mut file = format!("tag {}\0", MAX_OBJECT_LEN + 1).into_bytes();
+    file.extend_from_slice(
+        format!("object {}\ntype commit\ntag huge\n", "11".repeat(20)).as_bytes(),
+    );
+    git::write_loose_object(&repository.dir, &huge, &file);
+    fs::write(repository.dir.join("refs/tags/huge"), format!("{huge}\n")).unwrap();
+    let source = GixSource::open(&repository.dir).unwrap_or_else(|error| panic!("open: {error}"));
+    assert_eq!(
+        source.header(oid(&huge)),
+        Ok((RawKind::Tag, MAX_OBJECT_LEN + 1))
+    );
+    let refused = SourceError::TooLarge {
+        oid: oid(&huge),
+        kind: RawKind::Tag,
+        size: 536_870_913,
+    };
+    for name in ["huge", "refs/tags/huge", huge.as_str()] {
+        assert_eq!(source.resolve(name), Err(refused.clone()), "{name}");
+    }
+}
+
+/// A loose object file the test kit writes by hand, in stored zlib blocks, reads back through gix
+/// as git would have written it: one block or several, its Adler-32 and its id checked.
+#[test]
+fn a_loose_object_written_by_the_test_kit_reads_back() {
+    let repository = git::empty_repository();
+    let source = GixSource::open(&repository.dir).unwrap_or_else(|error| panic!("open: {error}"));
+    for len in [5, 65_535, 65_536, 200_000] {
+        let content: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap()).collect();
+        let id = swarmops_git::git_hash(RawKind::Blob, &content);
+        let mut file = format!("blob {len}\0").into_bytes();
+        file.extend_from_slice(&content);
+        git::write_loose_object(&repository.dir, &id.to_string(), &file);
+        let size = u64::try_from(len).unwrap();
+        assert_eq!(source.header(id), Ok((RawKind::Blob, size)), "{len}");
+        assert_eq!(source.read(id), Ok((RawKind::Blob, content)), "{len}");
+    }
+}
+
 #[test]
 fn gix_source_refuses_what_it_does_not_read() {
     // (the repository's `config`, what opening it gives)

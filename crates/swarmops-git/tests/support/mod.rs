@@ -1,7 +1,7 @@
 //! What the git crate's tests share: [`MemSource`], a [`GitSource`] held in memory, for the
-//! repositories no fixture holds (a tree 10,000 directories deep, a blob whose header claims more
-//! than an object holds, an object of the wrong kind). A module directory, so that Cargo does not
-//! take it for a test target of its own.
+//! repositories no fixture holds (a tree 10,000 directories deep, a blob, a tree or a commit whose
+//! header claims more than an object holds, an object of the wrong kind). A module directory, so
+//! that Cargo does not take it for a test target of its own.
 //!
 //! [`MemSink`] (`mem_sink.rs`) is a [`GitSink`](swarmops_git::GitSink) held in memory, for the
 //! export's tests: its log replays into the images a power loss could leave.
@@ -28,6 +28,8 @@ pub struct MemSource {
     objects: HashMap<GitOid, (RawKind, Vec<u8>)>,
     /// Objects only a header describes, which a read must never reach.
     claims: HashMap<GitOid, (RawKind, u64)>,
+    /// The lengths the headers of held objects say instead of their own.
+    stated: HashMap<GitOid, u64>,
 }
 
 impl MemSource {
@@ -86,6 +88,13 @@ impl MemSource {
         self.claims.insert(oid, (kind, size));
     }
 
+    /// The header of the object `oid`, which it holds, says it is `size` bytes long, whatever
+    /// its own length: a read still gives its bytes, so that a test sees what a header lets by.
+    pub fn state_length(&mut self, oid: GitOid, size: u64) {
+        assert!(self.objects.contains_key(&oid), "no object {oid} is held");
+        self.stated.insert(oid, size);
+    }
+
     /// The object `oid` read as `bytes` of `kind`, which hash to another id: what a source that
     /// breaks [`GitSource::read`]'s promise returns, for a test of what notices.
     pub fn forge(&mut self, oid: GitOid, kind: RawKind, bytes: Vec<u8>) {
@@ -111,7 +120,11 @@ impl GitSource for MemSource {
             return Ok(claim);
         }
         let (kind, bytes) = self.objects.get(&oid).ok_or(SourceError::Missing { oid })?;
-        Ok((*kind, u64::try_from(bytes.len()).unwrap()))
+        let size = self.stated.get(&oid).copied();
+        Ok((
+            *kind,
+            size.unwrap_or_else(|| u64::try_from(bytes.len()).unwrap()),
+        ))
     }
 
     fn read(&self, oid: GitOid) -> Result<(RawKind, Vec<u8>), SourceError> {

@@ -430,15 +430,17 @@ A store failure stops the import after the last frame that committed (a writer l
 whole wait is retried three times), and so does a frame whose step after its commit point
 failed: it never writes again after a failed sync. The same import run again resumes there,
 since each commit it recorded has its external id. A commit the conversion refuses stops it
-before the frame that would hold that commit.
+before the frame that would hold that commit. The import reads no object whole whose header says
+it is longer than an object holds (512 MiB): a commit, a tree or an annotated tag it would parse,
+or a blob it would store, is refused before a byte of it is read (`E_TOO_LARGE`, naming it).
 
 `swarmops git import <path>` runs it: `LocalOps::git_import` in `swarmops-ops`, a client-side
 operation like `init`, opens the repository at the path on the caller's host through
 `GixSource`, after it has checked the target's name, and imports into the store that `--repo`
 names, the ref move recorded for the caller's identity. It maps each failure to its code
 (`E_GIT_NOT_A_REPO`, `E_GIT_REF_NOT_FOUND`, `E_GIT_UNSUPPORTED`, `E_GIT_READ`,
-`E_GIT_IMPORT_LOSSY`, `E_GIT_IMPORT_DIVERGED`, or the store failure's own, with how far the import
-got), and reports what its writes repaired in `meta.recovered`, as a commit does.
+`E_GIT_IMPORT_LOSSY`, `E_GIT_IMPORT_DIVERGED`, `E_TOO_LARGE`, or the store failure's own, with how
+far the import got), and reports what its writes repaired in `meta.recovered`, as a commit does.
 
 ## Git export
 

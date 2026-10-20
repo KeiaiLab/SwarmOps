@@ -73,6 +73,7 @@ use swarmops_repo::{CasResult, LocalRepo, MAX_RAW_BATCH, RawChangeset, RepoError
 use swarmops_store::{ExternalEntry, Recovered, SYSTEM_GIT, check_ref_name};
 
 use crate::ancestry;
+use crate::source::read_bounded;
 use crate::{
     ConvertError, Converted, Converter, ExportOid, GIT_LOSSY, GIT_OID, GitOid, GitSource, LossySet,
     ObjectFormat, RawCommit, RawError, RawKind, RawTree, SourceError, Unsupported,
@@ -612,9 +613,10 @@ impl Walk {
     }
 }
 
-/// The commit `oid`'s fields, read from `source`.
+/// The commit `oid`'s fields, read from `source` once its header lets it through the size gate
+/// ([`read_bounded`]).
 fn read_commit(source: &dyn GitSource, oid: GitOid) -> Result<RawCommit, ImportError> {
-    let (kind, bytes) = source.read(oid)?;
+    let (kind, bytes) = read_bounded(source, oid)?;
     if kind != RawKind::Commit {
         let what = "named as a commit, but it is no commit";
         return Err(ConvertError::Malformed { oid, what }.into());
@@ -652,7 +654,7 @@ fn seed(
     // The git trees walked or about to be: a tree held at several paths is walked once.
     let mut walked = HashSet::from([git_root]);
     while let Some((dir, git)) = dirs.pop() {
-        let (kind, bytes) = source.read(git)?;
+        let (kind, bytes) = read_bounded(source, git)?;
         if kind != RawKind::Tree {
             let what = "named as a tree, but it is no tree";
             return Err(ConvertError::Malformed { oid: git, what }.into());

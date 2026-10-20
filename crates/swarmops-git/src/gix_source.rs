@@ -6,6 +6,7 @@
 use std::fmt;
 use std::path::Path;
 
+use crate::source::read_bounded;
 use crate::{GitOid, GitSource, ObjectFormat, RawKind, SourceError, Unsupported};
 
 /// A [`GitSource`] over a git repository on disk, read through gix (`=0.89.0`, its `sha1`
@@ -61,15 +62,16 @@ impl GixSource {
         }
     }
 
-    /// The commit `oid` peels to, through annotated tags: each tag read, its hash checked, and the
-    /// object of its first line followed. The walk ends: a tag's id hashes the bytes that name the
-    /// next object, so tags cannot name each other in a cycle.
+    /// The commit `oid` peels to, through annotated tags: each tag read once its header lets it
+    /// through the size gate ([`read_bounded`]), its hash checked, and the object of its first
+    /// line followed. The walk ends: a tag's id hashes the bytes that name the next object, so
+    /// tags cannot name each other in a cycle.
     fn peel(&self, name: &str, mut oid: GitOid) -> Result<GitOid, SourceError> {
         loop {
             match self.header(oid)?.0 {
                 RawKind::Commit => return Ok(oid),
                 RawKind::Tag => {
-                    let (_, tag) = self.read(oid)?;
+                    let (_, tag) = read_bounded(self, oid)?;
                     oid = tag_target(&tag).ok_or_else(|| SourceError::Corrupt {
                         oid,
                         reason: "an annotated tag whose first line names no object".to_owned(),

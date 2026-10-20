@@ -1,5 +1,8 @@
 //! What the git import reads from a repository: refs resolved to commits, and objects' raw bytes.
 
+use swarmops_core::bytes::to_u64;
+use swarmops_store::MAX_OBJECT_LEN;
+
 use crate::{GitOid, ObjectFormat, RawKind};
 
 /// A git repository as the import reads it: the one seam between SwarmOps and a git library
@@ -19,7 +22,8 @@ pub trait GitSource {
     /// `refs/remotes/<name>/HEAD`), or 40 hex digits of either case (an object's id, before any
     /// ref); annotated tags peeled. No revision syntax (`main~3`): such a name names no ref.
     /// [`SourceError::RefNotFound`] when nothing has that name, [`SourceError::NotACommit`] when
-    /// it peels to a tree or a blob.
+    /// it peels to a tree or a blob, and [`SourceError::TooLarge`] for an annotated tag on the way
+    /// whose header says it is longer than an object holds, which is not read.
     fn resolve(&self, name: &str) -> Result<GitOid, SourceError>;
 
     /// The kind and the length of the object `oid`, from its header, without reading it all:
@@ -29,10 +33,43 @@ pub trait GitSource {
     /// The kind and the bytes of the object `oid`, without git's `<kind> <len>\0` header; bytes
     /// whose [`git_hash`](crate::git_hash) is `oid`, or [`SourceError::Corrupt`].
     /// [`SourceError::Missing`] when the repository lacks the object.
+    ///
+    /// It reads the object whole, whatever its length: the import reads none whose
+    /// [`header`](GitSource::header) says it is longer than an object holds ([`MAX_OBJECT_LEN`]),
+    /// refusing a commit, a tree or an annotated tag as [`SourceError::TooLarge`], and a blob with
+    /// the conversion's own refusal, which names its path.
     fn read(&self, oid: GitOid) -> Result<(RawKind, Vec<u8>), SourceError>;
 }
 
-/// Why a [`GitSource`] could not open a repository or read from it.
+/// The kind and the bytes of the object `oid` of `source`, read with [`GitSource::read`] once its
+/// [`header`](GitSource::header) says it is at most [`MAX_OBJECT_LEN`] bytes long, the most an
+/// object holds: a longer one is [`SourceError::TooLarge`] before a byte of it is read, and so is
+/// one whose bytes come out longer all the same, from a source whose header said less.
+///
+/// The import reads every commit, tree and annotated tag it parses through this gate, as the
+/// conversion reads a blob through its own ([`ConvertError::TooLarge`], which names the blob's
+/// path), so that a crafted repository's object, a small file that its header says inflates to
+/// more than an object holds, is refused before it is read whole.
+///
+/// [`ConvertError::TooLarge`]: crate::ConvertError::TooLarge
+pub(crate) fn read_bounded(
+    source: &dyn GitSource,
+    oid: GitOid,
+) -> Result<(RawKind, Vec<u8>), SourceError> {
+    let (kind, size) = source.header(oid)?;
+    if size > MAX_OBJECT_LEN {
+        return Err(SourceError::TooLarge { oid, kind, size });
+    }
+    let (kind, bytes) = source.read(oid)?;
+    let size = to_u64(bytes.len());
+    if size > MAX_OBJECT_LEN {
+        return Err(SourceError::TooLarge { oid, kind, size });
+    }
+    Ok((kind, bytes))
+}
+
+/// Why a [`GitSource`] could not open a repository or read from it, or why the import does not
+/// read an object it holds ([`SourceError::TooLarge`]).
 ///
 /// A source runs on the caller's host (`git import` is a client-side operation), so its reasons
 /// may name the repository's own files.
@@ -75,6 +112,21 @@ pub enum SourceError {
         oid: GitOid,
         /// What is wrong with it.
         reason: String,
+    },
+    /// The object is longer than an object holds ([`MAX_OBJECT_LEN`]), as its header says, so it
+    /// is not read: the import reads each commit, tree and annotated tag it parses only once its
+    /// header says it is at most that long, and refuses a longer one before a byte of it is read.
+    #[error(
+        "git {kind} {oid} is {size} bytes, and an object holds at most {max}",
+        max = MAX_OBJECT_LEN
+    )]
+    TooLarge {
+        /// The object's id.
+        oid: GitOid,
+        /// Its kind, as its header says.
+        kind: RawKind,
+        /// Its length: as its header says, or as read from a source whose header said less.
+        size: u64,
     },
     /// The filesystem refused a read, or the git library failed otherwise.
     #[error("cannot read the repository: {reason}")]

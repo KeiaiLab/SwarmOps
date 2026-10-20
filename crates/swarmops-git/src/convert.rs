@@ -25,9 +25,10 @@
 //! leave empty is dropped with them, under their classes alone. Anything else is refused whatever
 //! is allowed: a mode of no file, directory, symlink or gitlink ([`ConvertError::Mode`]), more
 //! than 255 parents ([`ConvertError::Parents`]), a blob longer than an object holds
-//! ([`ConvertError::TooLarge`], before it is read), bytes that are no commit or tree, or an object
-//! of another kind than its name says ([`ConvertError::Malformed`]), and what the source cannot
-//! read ([`ConvertError::Source`]).
+//! ([`ConvertError::TooLarge`], before it is read), a commit or a tree longer than that
+//! ([`SourceError::TooLarge`], before it is read: each is read whole, to be parsed), bytes that
+//! are no commit or tree, or an object of another kind than its name says
+//! ([`ConvertError::Malformed`]), and what the source cannot read ([`ConvertError::Source`]).
 //!
 //! The fidelity check. Each commit converted is rendered back, every tree with [`tree_bytes`] and
 //! the commit with [`commit_bytes`], and hashed: the hash is the commit's own id exactly when
@@ -45,6 +46,7 @@ use swarmops_core::{
 use swarmops_store::MAX_OBJECT_LEN;
 
 use crate::render::{commit_bytes, git_order, tree_bytes};
+use crate::source::read_bounded;
 use crate::{
     GitOid, GitSource, LossyClass, LossySet, RawCommit, RawError, RawIdent, RawKind, RawTree,
     RawTreeEntry, SourceError, git_hash,
@@ -95,7 +97,8 @@ pub struct Converted {
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConvertError {
     /// The source could not read an object the commit needs: it lacks it, its bytes are damaged,
-    /// or reading failed.
+    /// or reading failed; or the commit, or a tree it needs, is longer than an object holds
+    /// ([`SourceError::TooLarge`]), and was not read.
     #[error(transparent)]
     Source(#[from] SourceError),
     /// An object is no commit or tree the conversion can read, or is of another kind than its
@@ -327,7 +330,7 @@ impl<'s> Converter<'s> {
     }
 
     fn convert(&self, pending: &mut Pending, oid: GitOid) -> Result<Converted, ConvertError> {
-        let (kind, raw) = self.source.read(oid)?;
+        let (kind, raw) = read_bounded(self.source, oid)?;
         if kind != RawKind::Commit {
             return Err(ConvertError::Malformed {
                 oid,
@@ -486,8 +489,9 @@ impl<'s> Converter<'s> {
         }
     }
 
-    /// The frame of the git tree `oid` at `path`, which `named` names in its parent: read,
-    /// parsed, and classed `tree_order` when it is not in git's order.
+    /// The frame of the git tree `oid` at `path`, which `named` names in its parent: read once
+    /// its header lets it through the size gate ([`read_bounded`]), parsed, and classed
+    /// `tree_order` when it is not in git's order.
     fn open(
         &self,
         commit: GitOid,
@@ -495,7 +499,7 @@ impl<'s> Converter<'s> {
         path: &[u8],
         named: Option<Named>,
     ) -> Result<Frame, ConvertError> {
-        let (kind, bytes) = self.source.read(oid)?;
+        let (kind, bytes) = read_bounded(self.source, oid)?;
         if kind != RawKind::Tree {
             return Err(ConvertError::Malformed {
                 oid,
