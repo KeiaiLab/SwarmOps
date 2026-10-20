@@ -158,7 +158,8 @@ commits when its journal frame is durable, so the next write repairs whatever a 
 Each released version is on the [releases page](https://github.com/KeiaiLab/SwarmOps/releases):
 one archive per Linux target, `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` and
 `swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz`, each with `swarmops`, `so`, the license,
-this README and the changelog, beside a `SHA256SUMS` file to check them against
+the licenses of the third-party crates compiled into them (`THIRD-PARTY-LICENSES`), this README
+and the changelog, beside a `SHA256SUMS` file to check them against
 ([RELEASE.md](RELEASE.md) says how they are built). The binaries need glibc 2.34 or newer
 (Ubuntu 22.04, Debian 12 and RHEL 9 have it); the aarch64 ones are cross-compiled and
 smoke-tested under QEMU, not tested on aarch64 hardware. No version has been tagged yet: until
@@ -579,4 +580,6 @@ The design specs are the authority, and they are in Korean;
   assistance is attributed. [AGENTS.md](AGENTS.md) holds the rules every coding agent here
   follows.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability privately, and what counts as one.
-- SwarmOps is released under the [MIT License](LICENSE).
+- SwarmOps is released under the [MIT License](LICENSE). Each release archive also carries
+  [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES): the third-party crates compiled into `swarmops`
+  and `so`, each with its license and the license texts.

@@ -28,8 +28,11 @@ On a pushed `v*` tag, with no secret but each job's own token:
    emulator: it must print the tag's version, need no glibc newer than 2.34, and `init`,
    `commit`, `show`, `cat` and `verify --deep` a store with every `SWARMOPS_TEST_*` hook set,
    which a release build ignores. Each target is packed into `swarmops-X.Y.Z-<target>.tar.gz`
-   (both binaries, `LICENSE`, `README.md` and `CHANGELOG.md`; entries sorted, owned by root and
-   dated at the tagged commit), with its SHA-256.
+   (both binaries, `LICENSE`, `THIRD-PARTY-LICENSES`, `README.md` and `CHANGELOG.md`; entries
+   sorted, owned by root and dated at the tagged commit), with its SHA-256, and the packing fails
+   unless the archive holds exactly these files. `THIRD-PARTY-LICENSES` gives each third-party
+   crate compiled into the binaries with its license and the license texts; it is committed, and
+   `just check`, which the release gate runs, fails when it no longer matches `Cargo.lock`.
 4. **Publishes** (job `publish the release`, the only one with a write permission,
    `contents: write`): checks each archive against the SHA-256 its build job wrote, writes
    `SHA256SUMS`, and creates the release `vX.Y.Z`, titled `SwarmOps X.Y.Z`, with the archives,
@@ -54,8 +57,6 @@ installs the same tool versions as `ci.yml`'s: move them together.
   cross-compiled and only smoke-tested, under QEMU; the test suite runs on x86_64
   ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)). There is no
   macOS, Windows or static (musl) build.
-- **The archives carry SwarmOps' license, not its dependencies'.** A notices file for the
-  crates compiled into the binaries is still to be generated and packed.
 - **No crates.io publishing.** Every crate is `publish = false` until a release policy has been
   exercised on binary releases. Publishing a crate needs a decision of its own, and its own
   version and MSRV policy.
@@ -83,7 +84,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
    - `FORMAT` was bumped if the store layout changed;
    - every change to `crates/swarmops-cli/tests/snapshots/` (the schema, the MCP tools, the CLI
      output) is intended and in the changelog;
-   - the envelope's `api` number went up if a response broke.
+   - the envelope's `api` number went up if a response broke;
+   - the crates and licenses that `THIRD-PARTY-LICENSES` adds are ones the archives may carry
+     (`scripts/third-party-licenses.py` writes it from `Cargo.lock`).
 4. **Write the changelog.** Move the entries under **Unreleased** in
    [CHANGELOG.md](CHANGELOG.md) to a new `## [X.Y.Z] - YYYY-MM-DD` section, mark breaking
    changes, and leave an empty **Unreleased** section. At the bottom, add the new section's link,
