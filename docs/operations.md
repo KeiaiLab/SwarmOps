@@ -2,9 +2,9 @@
 
 This guide is for whoever runs SwarmOps for a swarm of coding agents on one host. It installs the
 binary, creates a store, gives agents the store through MCP, runs the daily loop between the store
-and the git repository that CI and deployment watch, checks and backs up the store, and says what
-an upgrade means, where the limits are and what to watch. [pilot.md](pilot.md) runs the same loop
-once on this repository, as the first real use.
+and the git repository that CI and deployment watch, with a person's review before the trunk moves,
+checks, backs up and trims the store, and says what an upgrade means, where the limits are and what
+to watch. [pilot.md](pilot.md) runs the same loop once on this repository, as the first real use.
 
 Every command below was run with the binary built from this repository, and every output is
 copied from those runs, cut down where it is long: `…` marks a cut, and the store's path in
@@ -208,7 +208,73 @@ them, not the agents.
   every prompt.
 - Agents work without a checkout: they read files through `read_file` and `read_tree`, and write
   whole files through `commit`. There are no workspaces yet (M5), so an agent that must build or
-  test its change needs the files on disk some other way, such as a git checkout of an export.
+  test its change needs the files on disk some other way, such as a git worktree of the git side
+  ([Building and testing a change](#building-and-testing-a-change)).
+
+### Where the envelopes are
+
+Every tool result is an envelope, and the server keeps none of them: `swarmops mcp` writes its
+answers to the client and to nothing else, and `op log` lists the writes that succeeded, not the
+calls that failed or how long they took. What [What to monitor](#what-to-monitor) reads is therefore
+in the client's transcript of the session (Claude Code keeps one for each, as JSON lines under
+`~/.claude/projects/`), or in a file that you have the server's answers copied to. This wrapper does
+the second, one file per agent, named by its identity:
+
+```sh
+cat > ~/.local/bin/swarmops-mcp-log <<'EOF'
+#!/bin/bash
+# `swarmops` with a copy of every answer the server writes, in one file per agent.
+dir=~/.local/state/swarmops/envelopes
+install -d -m 0700 "$dir"
+agent=${SWARMOPS_AGENT:-no-identity}
+exec swarmops "$@" > >(tee -a "$dir/${agent//\//_}.jsonl")
+EOF
+chmod +x ~/.local/bin/swarmops-mcp-log
+```
+
+It takes the arguments of `swarmops` as they are, so a registration differs from the ones above in
+its command only:
+
+```json
+{
+  "mcpServers": {
+    "swarmops": {
+      "command": "/home/me/.local/bin/swarmops-mcp-log",
+      "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
+      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT:-}"}
+    }
+  }
+}
+```
+
+`claude mcp add` takes it in the same place:
+
+```sh
+claude mcp add swarmops -e SWARMOPS_AGENT=agent/worker-1 -- ~/.local/bin/swarmops-mcp-log mcp --repo ~/.local/state/swarmops/repos/acme
+claude mcp list
+```
+
+```text
+Added stdio MCP server swarmops with command: …/swarmops-mcp-log mcp --repo … to local config
+…
+swarmops: …/swarmops-mcp-log mcp --repo … - ✔ Connected
+```
+
+The wrapper `exec`s the server, so the client talks to the server itself and sees how it ends as it
+would without the wrapper, the SIGABRT of one of the store's aborts included. `tee` appends each
+answer to the agent's file as the server writes it: `agent/worker-1` writes
+`claude-code_worker-1.jsonl`. A line is one JSON-RPC response. A tool call's holds the call's
+envelope twice, as an object in `structuredContent` and as the text of the one content block, with
+`isError` true when the envelope's `ok` is false; the answers to `initialize` and `tools/list` are
+lines too, and hold no envelope. A failed `land`, cut down:
+
+```text
+{"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"{\"ok\":false,\"op\":\"land\",\"api\":1,\"error\":{\"code\":\"E_CONFLICT\",…}"}],"structuredContent":{"ok":false,"op":"land","api":1,"error":{"code":"E_CONFLICT",…},…},"isError":true}}
+```
+
+The files hold what the agents read and write, and a `read_file` line holds its page twice. They
+grow for as long as the agents work and nothing prunes them: the wrapper makes their directory
+`0700`, and old files are yours to move away between sessions.
 
 ## The daily loop
 
@@ -218,6 +284,12 @@ of that repository, the *git side*: imports read it, exports write it, and `git 
 `git push` move commits between it and the remote. The examples call the repository `acme`, its
 trunk `stable`, and its remote `git@github.com:acme/acme.git` (a stand-in: the runs behind this
 guide used a local bare repository as the remote).
+
+Until a review is part of SwarmOps (M7), a person reviews what agents landed before it reaches a
+trunk that deploys. Exports therefore go to a *review branch*, `review` in the examples, where CI
+and the reviewer see them, and the trunk moves to the reviewed commit by a fast-forward push
+([step 5](#5-review-then-move-the-trunk)). Nothing in SwarmOps stops an export to the trunk; the
+loop below never makes one.
 
 ### Once: bring the repository in
 
@@ -257,12 +329,16 @@ swarmops git import "$GIT_SIDE" --ref stable --into main
 ```
 
 With nothing new, the import writes nothing. Its walk stopped at once, at the commit `main` holds:
-that one commit is the `skipped` 1. Commits pushed to the trunk on top of the last export come in,
-and `main` moves to the last of them (`"imported":1` for one). The fetch moves the git
-side's `stable` only forward. When it refuses (`! [rejected] stable -> stable
-(non-fast-forward)`, exit 1), the git side holds commits the remote lacks: an export whose push
-did not happen (push it, then fetch again), or a trunk that moved on both sides
-([One writer per trunk](#one-writer-per-trunk)).
+that one commit is the `skipped` 1. Commits pushed to the trunk on top of the last promoted export
+come in, and `main` moves to the last of them (`"imported":1` for one). The fetch moves the git
+side's `stable` only forward, and nothing else moves it, since exports go to the review branch. When
+it refuses (`! [rejected] stable -> stable (non-fast-forward)`, exit 1), the git side's `stable`
+holds commits the remote lacks: an export went to it instead of the review branch, or the remote's
+trunk was rewritten.
+
+While an export waits for its review, the trunk is behind `main`, and the import fails with
+`E_GIT_IMPORT_DIVERGED` although nothing is wrong: take this step after step 5, once the trunk holds
+the last export ([One writer per trunk](#one-writer-per-trunk) tells this from a real divergence).
 
 ### 2. Agents commit and land
 
@@ -275,13 +351,13 @@ field() { python3 -I -c 'import functools, json, sys; print(functools.reduce(lam
 BASE=$(swarmops resolve main | field result.id)
 cat change.json
 swarmops --as agent/worker-1 commit -m "greet the swarm" --changes change.json --parent "$BASE"
-swarmops --as agent/worker-1 land c3828a37d7969df68d60dd152e953e0ffd249dd4b56862c8e9b81051b932d6fe --key "$(uuidgen)"
+swarmops --as agent/worker-1 land 8f22e3a1ee2ff15836609fdf359065ce00cccab04d858258e9b1d8cb50c40af1 --key "$(uuidgen)"
 ```
 
 ```text
 [{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn greet() -> &'static str {\n    \"hello, swarm\"\n}\n"}}]
-{"ok":true,"op":"commit","api":1,"result":{"changeset":"c3828a37d7969df68d60dd152e953e0ffd249dd4b56862c8e9b81051b932d6fe","parent":"c893148f…","root":"ff7ba3ee…","files_changed":1,"blobs_written":1,"replayed":false},"meta":{"repo":"…","elapsed_ms":23,…}}
-{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"9a3a41fc3248cffdd4240292ec6468bf117817dd5df0c57268ba811e8fd947c1","rebased_onto":"c893148f…","target":"main","base":"c893148f…","attempts":1,"relocated":false,"files_changed":1,"squashed_from":["c3828a37…"]},"meta":{"repo":"…","elapsed_ms":29,…}}
+{"ok":true,"op":"commit","api":1,"result":{"changeset":"8f22e3a1ee2ff15836609fdf359065ce00cccab04d858258e9b1d8cb50c40af1","parent":"c893148f…","root":"ff7ba3ee…","files_changed":1,"blobs_written":1,"replayed":false},"meta":{"repo":"…","elapsed_ms":146,…}}
+{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138","rebased_onto":"c893148f…","target":"main","base":"c893148f…","attempts":1,"relocated":false,"files_changed":1,"squashed_from":["8f22e3a1…"]},"meta":{"repo":"…","elapsed_ms":146,…}}
 ```
 
 The commit records the change without moving any ref; the land merges it onto `main`'s head
@@ -307,7 +383,7 @@ swarmops --as agent/worker-2 land "$C2" --key "$(uuidgen)" --pretty
   "api": 1,
   "error": {
     "code": "E_CONFLICT",
-    "message": "1 path(s) of the change conflict with the target's head 9a3a41fc3248cffdd4240292ec6468bf117817dd5df0c57268ba811e8fd947c1: nothing was recorded",
+    "message": "1 path(s) of the change conflict with the target's head 8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138: nothing was recorded",
     "retryable": false,
     "exit": 3,
     "details": {
@@ -341,18 +417,18 @@ swarmops --as agent/worker-2 land "$C2" --key "$(uuidgen)" --pretty
             "path": "src/lib.rs",
             "theirs_agent": "agent/worker-1",
             "theirs_blob": "5d417d12…",
-            "theirs_changeset": "9a3a41fc3248cffdd4240292ec6468bf117817dd5df0c57268ba811e8fd947c1"
+            "theirs_changeset": "8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138"
           }
         ],
         "kinds": [
           "content"
         ],
-        "ours": "b5c51808ba15fa85151e4dc355e03002cfda8ef2f166c0b0f193cd4365a7c77b",
-        "theirs": "9a3a41fc3248cffdd4240292ec6468bf117817dd5df0c57268ba811e8fd947c1",
+        "ours": "8070d2dd63f46a1157fb28ccc7025c7b6d3c39be621930bf6dbfee44075aef7f",
+        "theirs": "8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138",
         "truncated": false
       }
     },
-    "hint": "swarmops cat 9a3a41fc…:src/lib.rs, then swarmops land b5c51808… --resolve <file> with each path's resolution and against = 9a3a41fc…"
+    "hint": "swarmops cat 8fe1b0f9…:src/lib.rs, then swarmops land 8070d2dd… --resolve <file> with each path's resolution and against = 8fe1b0f9…"
   },
   …
 }
@@ -370,9 +446,9 @@ swarmops --as agent/worker-2 land "$C2" --resolve resolve.json --key "$(uuidgen)
 ```
 
 ```text
-{"against": "9a3a41fc3248cffdd4240292ec6468bf117817dd5df0c57268ba811e8fd947c1",
+{"against": "8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138",
  "files": {"src/lib.rs": {"content": {"inline": "pub fn greet() -> &'static str {\n    \"hi, swarm\"\n}\n"}}}}
-{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"3f7e703de718820bb6e7a620e201b6c0e5215ec097fc443f183b7184bc734689","rebased_onto":"9a3a41fc…","target":"main","base":"c893148f…","attempts":1,"relocated":false,"files_changed":2,"squashed_from":["b5c51808…"]},"meta":{"repo":"…","elapsed_ms":31,…}}
+{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b","rebased_onto":"8fe1b0f9…","target":"main","base":"c893148f…","attempts":1,"relocated":false,"files_changed":2,"squashed_from":["8070d2dd…"]},"meta":{"repo":"…","elapsed_ms":134,…}}
 ```
 
 Through MCP, the `land` tool takes the same resolutions as its `resolutions` argument.
@@ -386,14 +462,14 @@ swarmops op log -n 2 --human
 ```
 
 ```text
-entries[0].id: 3f7e703de718820bb6e7a620e201b6c0e5215ec097fc443f183b7184bc734689
-entries[0].parents[0]: 9a3a41fc3248cffdd4240292ec6468bf117817dd5df0c57268ba811e8fd947c1
+entries[0].id: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
+entries[0].parents[0]: 8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138
 entries[0].author_agent: agent/worker-2
-entries[0].created_at: 1792471124000
+entries[0].created_at: 1792484229000
 entries[0].title: a shorter greeting
 …
 from: c893148f550e68a1d0c0dfcf9bd10b4a738b8f60245ddcc94f4dbf0cb5d67755
-to: 3f7e703de718820bb6e7a620e201b6c0e5215ec097fc443f183b7184bc734689
+to: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
 files[0].path: README.md
 files[0].status: modified
 files[0].binary: false
@@ -403,12 +479,12 @@ files[1].path: src/lib.rs
 …
 ops[0].op: 5
 ops[0].kind: land
-ops[0].changesets[0].id: 3f7e703de718820bb6e7a620e201b6c0e5215ec097fc443f183b7184bc734689
+ops[0].changesets[0].id: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
 ops[0].changesets[0].agent: agent/worker-2
 …
 ops[0].ref_moves[0].name: main
-ops[0].ref_moves[0].old: 9a3a41fc3248cffdd4240292ec6468bf117817dd5df0c57268ba811e8fd947c1
-ops[0].ref_moves[0].new: 3f7e703de718820bb6e7a620e201b6c0e5215ec097fc443f183b7184bc734689
+ops[0].ref_moves[0].old: 8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138
+ops[0].ref_moves[0].new: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
 ops[0].ref_moves[0].actor: agent/worker-2
 …
 ```
@@ -416,40 +492,42 @@ ops[0].ref_moves[0].actor: agent/worker-2
 `op log` numbers every write transaction; `swarmops op undo <op>` moves the refs one of them moved
 back, by compare-and-swap, all or none ([README](../README.md#first-commands)).
 
-### 4. Send it back to git
+### 4. Send it to git for review
 
 ```sh
-swarmops git export "$GIT_SIDE" --ref main --branch stable
-git -C "$GIT_SIDE" push origin stable
+swarmops git export "$GIT_SIDE" --ref main --branch review
+git -C "$GIT_SIDE" push origin review
 ```
 
 ```text
-{"ok":true,"op":"git_export","api":1,"result":{"exported":2,"objects_written":9,"head_changeset":"3f7e703d…","head_sha":"514ab2b6e63ccfd51947b38d741ff60557e0996f","branch":"stable","old_sha":"84226f3190a555751039017a08ef8485fd9f514b","branch_moved":true,"incremental":true,"rewritten":0},"meta":{"repo":"…","elapsed_ms":29,…}}
+{"ok":true,"op":"git_export","api":1,"result":{"exported":2,"objects_written":9,"head_changeset":"1092352e…","head_sha":"0eb07c3f0140e815e6bc153043eebaf5672eb46b","branch":"review","branch_moved":true,"incremental":false,"rewritten":0},"meta":{"repo":"…","elapsed_ms":185,…}}
 To …
-   84226f3..514ab2b  stable -> stable
+ * [new branch]      review -> review
 ```
 
 The export writes every changeset the branch does not reach as a git commit, makes the objects
-durable, then moves the branch by compare-and-swap; run again, it writes nothing. The push is a
-fast-forward, and the remote's CI and deployment run on it as they run on any push. What they see:
+durable, then moves the branch by compare-and-swap; run again, it writes nothing. This one made the
+branch (`incremental` is false and there is no `old_sha`), and later ones move it forward. CI runs
+on the push as it runs on any branch push (point it at this branch if it runs only on the trunk or
+on pull requests), and the reviewer reads the branch. What they see:
 
 ```sh
-git -C "$GIT_SIDE" log --format="%h %an <%ae>%n    %s" -3 stable
-git -C "$GIT_SIDE" log -1 --format=%B stable
+git -C "$GIT_SIDE" log --format="%h %an <%ae>%n    %s" -3 review
+git -C "$GIT_SIDE" log -1 --format=%B review
 ```
 
 ```text
-514ab2b agent/worker-2 <worker-2@claude-code.swarmops.local>
+0eb07c3 agent/worker-2 <worker-2@claude-code.swarmops.local>
     a shorter greeting
-1a76c9e agent/worker-1 <worker-1@claude-code.swarmops.local>
+91ac021 agent/worker-1 <worker-1@claude-code.swarmops.local>
     greet the swarm
 84226f3 Ada Lovelace <ada@example.com>
     docs: say what acme does
 a shorter greeting
 
-SwarmOps-Changeset: 3f7e703de718820bb6e7a620e201b6c0e5215ec097fc443f183b7184bc734689
-SwarmOps-Land-Key: 370d9a8b-aa45-4ab7-b458-2bcc992ff0b9
-SwarmOps-Squashed-From: b5c51808ba15fa85151e4dc355e03002cfda8ef2f166c0b0f193cd4365a7c77b
+SwarmOps-Changeset: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
+SwarmOps-Land-Key: 23fc28da-8ee7-4ed6-ba30-b94291a54525
+SwarmOps-Squashed-From: 8070d2dd63f46a1157fb28ccc7025c7b6d3c39be621930bf6dbfee44075aef7f
 ```
 
 Commits imported from git come back as themselves, byte for byte. A changeset made in the store
@@ -459,13 +537,120 @@ signature: a pipeline or branch rule that requires signed commits or known autho
 message that already ends in a trailer block, such as `Co-Authored-By:`, keeps it, and the
 SwarmOps trailers join that block. Tags stay git's: tag an exported commit in git, as before.
 
+### 5. Review, then move the trunk
+
+A person reads what the review branch has that the trunk lacks (`git log` and
+`git diff stable...review` in the git side, or a pull request from `review` to `stable`), and CI
+runs on the branch. When the review approves and CI is green on the branch's tip, the trunk moves to
+that commit by a fast-forward push:
+
+```sh
+git -C "$GIT_SIDE" log --oneline stable..review
+git -C "$GIT_SIDE" push origin review:stable
+```
+
+```text
+0eb07c3 a shorter greeting
+91ac021 greet the swarm
+To …
+   84226f3..0eb07c3  review -> stable
+```
+
+The push makes no commit: the trunk now holds the commits that were reviewed and tested, and the CI
+run of the branch's tip is the run of the trunk's. The remote's deployment still runs on the trunk,
+and is to wait for green CI on that commit. When agents landed more and exported again while the
+review ran, push the commit that was reviewed (`git push origin <commit>:stable`), not the branch.
+The next step 1 finds the last export on the trunk, so the import continues from the exported head
+and takes in nothing:
+
+```sh
+git -C "$GIT_SIDE" fetch origin stable:stable
+swarmops git import "$GIT_SIDE" --ref stable --into main
+```
+
+```text
+From …
+   84226f3..0eb07c3  stable     -> stable
+{"ok":true,"op":"git_import","api":1,"result":{"imported":0,"skipped":1,"head_changeset":"1092352e…","git_head_sha":"0eb07c3f0140e815e6bc153043eebaf5672eb46b","target_ref":"main","ref_moved":false,"old_head":"1092352e…","lossy":[],"lossy_total":0},"meta":{"repo":"…","elapsed_ms":1,…}}
+```
+
+Move the trunk with this push, not with the host's merge button: a squash merge writes one commit
+that the store never exported, and the next import fails with `E_GIT_IMPORT_DIVERGED` (a merge
+commit works, and comes in as a merge changeset).
+
+### Building and testing a change
+
+There are no workspaces yet (M5), so an agent that must build or test its change before it lands
+does so in a git worktree of the git side, at the head it read, and commits the files it made there.
+The script that starts the agent exports first, so that the review branch holds `main`'s head, and
+takes the pair that the export prints: the commit to check out, and the changeset it is.
+
+```sh
+EXPORT=$(swarmops git export "$GIT_SIDE" --ref main --branch review)
+SHA=$(printf '%s\n' "$EXPORT" | field result.head_sha)
+PARENT=$(printf '%s\n' "$EXPORT" | field result.head_changeset)
+git -C "$GIT_SIDE" worktree add --detach ~/work/worker-1 "$SHA"
+```
+
+```text
+Preparing worktree (detached HEAD 0eb07c3)
+HEAD is now at 0eb07c3 a shorter greeting
+```
+
+The worktree is detached because git keeps `git fetch` from moving a branch that a worktree has
+checked out. The agent edits, builds and tests in it with whatever the project uses, here its
+`check.sh`:
+
+```sh
+(cd ~/work/worker-1 && ./check.sh)
+```
+
+```text
+check: ok
+```
+
+Then it commits the files as they are on disk: one `put` per changed file, each named by its
+absolute path, which the server reads itself (see above), with `parent` the changeset the worktree
+is. The `commit` tool takes these arguments, and `land` the changeset it returns as its `head`:
+
+```json
+{"message": "greet the world", "parent": "1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b", "changes": [{"path": "src/lib.rs", "op": "put", "content": {"file": "/home/me/work/worker-1/src/lib.rs"}}]}
+```
+
+The same requests at the command line, and the worktree's removal after the land:
+
+```sh
+cat > change.json <<EOF
+[{"path": "src/lib.rs", "op": "put", "content": {"file": "$HOME/work/worker-1/src/lib.rs"}}]
+EOF
+swarmops --as agent/worker-1 commit -m "greet the world" --changes change.json --parent "$PARENT"
+swarmops --as agent/worker-1 land eac1712c5c1223fc75a5a022f695f8d7838641426072452150bb26d684b8a3e9 --key "$(uuidgen)"
+git -C "$GIT_SIDE" worktree remove --force ~/work/worker-1
+```
+
+```text
+{"ok":true,"op":"commit","api":1,"result":{"changeset":"eac1712c5c1223fc75a5a022f695f8d7838641426072452150bb26d684b8a3e9","parent":"1092352e…","root":"24c30d20…","files_changed":1,"blobs_written":1,"replayed":false},"meta":{"repo":"…","elapsed_ms":30,…}}
+{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"380650cb0351378d43c98d50298949cbd63a4ad4f1dfdfdbc2dbfde1d960a379","rebased_onto":"1092352e…","target":"main","base":"1092352e…","attempts":1,"relocated":false,"files_changed":1,"squashed_from":["eac1712c…"]},"meta":{"repo":"…","elapsed_ms":20,…}}
+```
+
+- `parent` is the changeset the worktree stands for, which is `main`'s head only if nothing landed
+  since the export. `land` merges the change onto the head it finds, three-way, as it does for any
+  commit. What ran in the worktree is the base, not that merge: CI on the review branch tests the
+  merge.
+- A `put` writes a regular file unless it says `"mode": "exec"` (or `"symlink"`): name the mode of
+  every script, or the commit drops its executable bit.
+- `worktree remove` needs `--force` here, because git sees the agent's edits as uncommitted. A
+  killed agent leaves its worktree registered in the git side: `git -C "$GIT_SIDE" worktree list`
+  shows it, as `prunable` once its directory is gone, and `worktree prune` forgets it.
+
 ### One writer per trunk
 
-Between an import and the next export, only one side may change the trunk. People change it in
-one of three ways that keep to this:
+Between an import and the next move of the trunk (step 5), only one side may change the trunk, the
+store (through the review branch) or git. People change it in one of three ways that keep to this:
 
-- through SwarmOps, with an identity of their own, as an agent does;
-- on the trunk in git, after an export and before the next import, which step 1 then takes in;
+- through SwarmOps, with an identity of their own, as an agent does; the review covers their changes
+  too;
+- on the trunk in git, after step 5 and before an agent lands again, which step 1 then takes in;
 - on a branch, which you import into a ref of its own and land:
 
 ```sh
@@ -476,84 +661,115 @@ swarmops ref delete release/farewell --expect "$(swarmops resolve release/farewe
 ```
 
 The land squashes the branch's commits into one changeset on `main`, whose author is the author of
-the branch's last commit and whose committer is you; the next export and push take it to the trunk
-as a fast-forward:
+the branch's last commit and whose committer is you; the next export takes it to the review branch,
+and after the review the push of step 5 takes it to the trunk as a fast-forward:
 
 ```sh
-swarmops git export "$GIT_SIDE" --ref main --branch stable
-git -C "$GIT_SIDE" push origin stable
-git -C "$GIT_SIDE" log -1 --format="%an <%ae> / %cn <%ce>%n%B" stable
+swarmops git export "$GIT_SIDE" --ref main --branch review
+git -C "$GIT_SIDE" push origin review
+git -C "$GIT_SIDE" log -1 --format="%an <%ae> / %cn <%ce>%n%B" review
 ```
 
 ```text
-{"ok":true,"op":"git_export","api":1,"result":{"exported":1,"objects_written":1,"head_changeset":"212f45be…","head_sha":"5c7ca91acf8488b741ad5454e583eed962d684c1","branch":"stable","old_sha":"89013bf44846356cf0b8f7ac67dacf6f1073f6b5","branch_moved":true,"incremental":true,"rewritten":0},…}
+{"ok":true,"op":"git_export","api":1,"result":{"exported":1,"objects_written":1,"head_changeset":"813dcf7f…","head_sha":"c19cdeac0daf33835ee6c3d470724450e4229a30","branch":"review","old_sha":"7073a6601acef10a0091e2b7737916399735e721","branch_moved":true,"incremental":true,"rewritten":0},…}
 To …
-   89013bf..5c7ca91  stable -> stable
+   0eb07c3..c19cdea  review -> review
 Ada Lovelace <ada@example.com> / operator/ada <ada@operator.swarmops.local>
 farewell: say goodbye
 
-SwarmOps-Changeset: 212f45beae9f9bd0ae37ea7a46b47e533e0ae38f5a62caad42e518bf58163d0b
-SwarmOps-Land-Key: f247f8f7-e6d2-4151-b22b-90fb6bddcb17
-SwarmOps-Squashed-From: 6ec5686168ec918f06a8094ad0affedd9a447221e8e2e8c5fa9aee461ff01878
+SwarmOps-Changeset: 813dcf7f16416001a5d5ef4815cf9d4c073250d76403db6ed4add70b19bce83f
+SwarmOps-Land-Key: a3921b5a-d809-4003-ad53-b77894dcfb22
+SwarmOps-Squashed-From: c2ec3b59e9030b9a5c0ff8c0bea98f546e43d45e8a057c2568d9e5255eba469f
 ```
 
-When both sides moved anyway (here an agent landed a change while a person pushed one to the
-trunk), nothing is merged: step 1's import fails with `E_GIT_IMPORT_DIVERGED`, and the export
-with `E_GIT_EXPORT_DIVERGED`, reason `both_moved` (exit 3 for both), and neither writes anything:
+When both sides moved anyway (here an agent landed a change and exported it, and before the review
+ended a person pushed one to the trunk), nothing is merged: the push of step 5 is rejected as no
+fast-forward, and step 1's import fails with `E_GIT_IMPORT_DIVERGED` (exit 3) and writes nothing:
 
 ```sh
-swarmops git export "$GIT_SIDE" --ref main --branch stable --pretty
+git -C "$GIT_SIDE" push origin review:stable
+git -C "$GIT_SIDE" fetch origin stable:stable
+swarmops git import "$GIT_SIDE" --ref stable --into main --pretty
 ```
 
 ```text
+To …
+ ! [rejected]        review -> stable (fetch first)
+error: failed to push some refs to '…'
+hint: Updates were rejected because the remote contains work that you do not
+…
+From …
+   7073a66..9745112  stable     -> stable
 {
   "ok": false,
-  "op": "git_export",
+  "op": "git_import",
   "api": 1,
   "error": {
-    "code": "E_GIT_EXPORT_DIVERGED",
-    "message": "the branch stable has diverged from 60edce26a65510fe87d030a604b49475c949f50ebe84925f104f9bb3a47f7f56 (both_moved): it names 1b3a9f40cbcdb63ac3eaee57d962c93ecd35286f",
+    "code": "E_GIT_IMPORT_DIVERGED",
+    "message": "main has diverged from the git history: its head 3d264e8e03aa34acbb82049c1b6d906c418fe35839e22b33d359b56e8b326e4e stands for git commit d9d94398b96c722eb2afab2148198c0fd17a2d5b, which the tip 9745112402b9a55c434417c1d9228ba4d3f78985 does not reach",
     "retryable": false,
     "exit": 3,
     "details": {
-      "branch": "stable",
-      "exported_changeset": "212f45beae9f9bd0ae37ea7a46b47e533e0ae38f5a62caad42e518bf58163d0b",
-      "git_head": "1b3a9f40cbcdb63ac3eaee57d962c93ecd35286f",
-      "head_changeset": "60edce26a65510fe87d030a604b49475c949f50ebe84925f104f9bb3a47f7f56",
-      "reason": "both_moved"
+      "base": "d9d94398b96c722eb2afab2148198c0fd17a2d5b",
+      "git_head": "9745112402b9a55c434417c1d9228ba4d3f78985",
+      "target_head": "3d264e8e03aa34acbb82049c1b6d906c418fe35839e22b33d359b56e8b326e4e",
+      "target_ref": "main"
     },
-    "hint": "both git and main moved past 212f45beae9f9bd0ae37ea7a46b47e533e0ae38f5a62caad42e518bf58163d0b, and nothing is merged: git -C … log refs/heads/stable shows the git side, and --force replaces it"
+    "hint": "swarmops log main"
   },
   …
 }
 ```
 
-`details.exported_changeset` is the last changeset both sides share. To keep git's history as it
-is, with no forced push, put the store's new work on top of git's: import the trunk into a ref of
-its own, land `main`'s changes since the shared changeset onto it, move `main` there, export and
-push:
+The import fails the same way while an export merely waits for its review, so look at what the trunk
+has that the review branch lacks: nothing if the trunk only lags, and here the person's commit:
+
+```sh
+git -C "$GIT_SIDE" log --oneline review..stable
+```
+
+```text
+9745112 release: 1.0.2
+```
+
+To keep git's history as it is, with no forced push to the trunk, put the store's new work on top of
+git's: import the trunk into a ref of its own, land `main`'s changes onto it (`land` starts from the
+changeset both sides share, the merge base of the two), move `main` there, and export. The review
+branch still holds the export of the old line, and `main` no longer descends from it, so the export
+refuses (`E_GIT_EXPORT_DIVERGED`, reason `source_moved_back`) until it is forced, and the push is
+forced too: the branch is a proposal that nothing builds on, and the new line goes through the
+review again.
 
 ```sh
 swarmops git import "$GIT_SIDE" --ref stable --into release/git
 HEAD_WAS=$(swarmops resolve main | field result.id)
-LANDED=$(swarmops land main --base 212f45beae9f9bd0ae37ea7a46b47e533e0ae38f5a62caad42e518bf58163d0b --target release/git --key "$(uuidgen)" | field result.landed)
+LANDED=$(swarmops land main --target release/git --key "$(uuidgen)" | field result.landed)
 swarmops ref set main "$LANDED" --expect "$HEAD_WAS"
-swarmops git export "$GIT_SIDE" --ref main --branch stable
-git -C "$GIT_SIDE" push origin stable
+swarmops git export "$GIT_SIDE" --ref main --branch review --force
+git -C "$GIT_SIDE" push --force origin review
 swarmops ref delete release/git --expect "$LANDED"
 ```
 
-That land squashes all of `main`'s changes since the shared changeset into one changeset. The other
-way is `git export --force`, which replaces git's side with the store's: the push that follows is
-a forced one, and the commits made in git are gone from the trunk.
+```text
+{"ok":true,"op":"git_export","api":1,"result":{"exported":1,"objects_written":2,"head_changeset":"c250bd46…","head_sha":"6f4295e40f9f8db8449ff18cc036637abb4dac8d","branch":"review","old_sha":"d9d94398b96c722eb2afab2148198c0fd17a2d5b","branch_moved":true,"incremental":true,"rewritten":0,"warnings":["the branch review had diverged (source_moved_back), and the export moved it all the same"]},…}
+To …
+ + d9d9439...6f4295e review -> review (forced update)
+```
 
-The export's other reasons, each with its hint: `branch_ahead` (commits made in git on top of the
-export: step 1 takes them in), `branch_moved` (the branch names no export of this history),
-`source_moved_back` (`main` moved back, as `op log` shows), `lossy_history` (the branch holds the
-commits a lossy import was made of: export to another branch) and `moved_during_export` (run it
-again). An export that finds `refs/heads/<branch>.lock` in the git side, which a git process holds
-or a dead one left, fails with `E_GIT_WRITE` (`ref_locked`) until the file is removed, once no git
-process runs.
+That land squashes all of `main`'s changes since the shared changeset into one changeset. The other
+way is to give up the commits made in git: a forced push of the review branch to the trunk
+(`git push --force origin review:stable`, and `git fetch origin +stable:stable` after it) replaces
+the trunk with the store's work, and the commits made in git are gone from it.
+
+An export that cannot continue its branch fails with `E_GIT_EXPORT_DIVERGED` and a reason, each with
+its hint: `both_moved` (git and `main` both moved past the branch's last export, and nothing is
+merged), `branch_ahead` (commits made in git on top of the export: an import of the branch takes
+them in), `branch_moved` (the branch names no export of this history), `source_moved_back` (`main`
+moved back, as `op log` shows), `lossy_history` (the branch holds the commits a lossy import was
+made of: export to another branch) and `moved_during_export` (run it again). `--force` moves the
+branch all the same, with a warning. An export that finds `refs/heads/<branch>.lock` in the git
+side, which a git process holds or a dead one left, fails with `E_GIT_WRITE` (`ref_locked`) until
+the file is removed, once no git process runs.
 
 ## Checking a store
 
@@ -616,8 +832,9 @@ What a copy may rely on comes from the store's own guarantees (storage-core spec
 - **The journal is the truth.** `meta/journal.log` records every write transaction as one frame,
   and a write is committed once its frame is synced. The index, the ref files and the checkpoint
   are projections of the journal, which the next writer brings up to date.
-- **Every metadata write holds `meta/lock`**, an `flock`. Object writes take no lock, but no frame
-  names an object before the object is durable. Readers take no lock.
+- **Every journal, index and ref write holds `meta/lock`**, an `flock`. Object writes take no lock,
+  but no frame names an object before the object is durable; derived values and external id entries
+  take none either, and are caches that no frame names. Readers take no lock.
 - **A crash at any point leaves a store that the next writer repairs.**
 
 So:
@@ -665,20 +882,20 @@ A writer that meets the held lock waits, then gives up:
 
 To restore, stop every writer first (the agents' sessions and their MCP servers, and any script),
 put the damaged store aside, copy the backup into place and check it. Then take back from git
-what was exported after the backup:
+what was exported after the backup, from the review branch, which holds every export (the trunk
+holds those that were promoted):
 
 ```sh
 mv "$SWARMOPS_REPO" "$SWARMOPS_REPO.damaged"
 cp -a "$BACKUP" "$SWARMOPS_REPO"
 swarmops verify --deep
-git -C "$GIT_SIDE" fetch origin stable:stable
-swarmops git import "$GIT_SIDE" --ref stable --into main
-swarmops git export "$GIT_SIDE" --ref main --branch stable
+swarmops git import "$GIT_SIDE" --ref review --into main
+swarmops git export "$GIT_SIDE" --ref main --branch review
 ```
 
 ```text
 {"ok":true,"op":"verify","api":1,"result":{"objects_checked":42,"changesets_checked":14,"problems":[],"findings":[]},…}
-{"ok":true,"op":"git_import","api":1,"result":{"imported":1,"skipped":1,"head_changeset":"4a7add92…","git_head_sha":"fd35e482e2639549ce8558c0e811e909fa26eb7d","target_ref":"main","ref_moved":true,"old_head":"4b617abe…","lossy":[],"lossy_total":0},…}
+{"ok":true,"op":"git_import","api":1,"result":{"imported":1,"skipped":1,"head_changeset":"ebbd2134…","git_head_sha":"327bbc8898086c815a71e9ca1ab69bec147e5e36","target_ref":"main","ref_moved":true,"old_head":"c250bd46…","lossy":[],"lossy_total":0},…}
 {"ok":true,"op":"git_export","api":1,"result":{"exported":0,"objects_written":0,…,"branch_moved":false,"incremental":true,"rewritten":0},…}
 ```
 
@@ -690,6 +907,111 @@ unlanded commits, lands made since the last export), ref moves, and the operatio
 
 The git side is itself a copy of everything exported. Without any backup, a new store made from it
 (`swarmops init`, then `swarmops git import` of each branch) exports to the same commits.
+
+## Making room
+
+A store only grows ([Limits](#limits)): nothing is collected until M6's `swarmops gc`. Two kinds of
+file in it may go by hand meanwhile, with every writer stopped. This is what the storage spec gives
+for each, and no more:
+
+- **The leftovers of interrupted writes**, files in `objects/tmp/` and `meta/derived/tmp/`. A write
+  stages its file there and links it into place, and a writer that dies on the way leaves the file.
+  The spec has a crash before the frame that names an object leave only orphan objects and temp
+  files, and no frame names an object before it is linked and durable (§2, rules 1 and 2), so a
+  staging file is never the only name of an object that a changeset needs. `swarmops gc` is to clear
+  the files of `objects/tmp/` that are older than an hour (§2) and the temp files of `meta/derived/`
+  (§3). By hand, remove the files older than an hour, and not the directories: the spec lists them
+  as part of the layout, and does not say that a store makes them again.
+- **The derived values**, `meta/derived/`, which may go whole. They are a cache that neither the
+  journal nor any other file names (§3), and removing a value's file, or `meta/derived/`, makes the
+  value derived again (§5).
+
+The orphan objects stay: telling them from the objects a changeset names takes the mark and sweep
+from the journal that `gc` gets later. The objects, the journal, the index and the refs stay as they
+are.
+
+Both removals need the store to themselves. A writer is every process that can write it: the agents'
+sessions and their MCP servers (a server lives as long as its session), the loop's commands and
+`swarmops derive`, and also a read, which stores the values it derives. `flock` on `meta/lock` stops
+none of them, since objects and derived values are written without it. Check that no `swarmops` is
+left (`so` is the same program):
+
+```sh
+pgrep -ax 'swarmops|so'
+```
+
+```text
+1503 swarmops mcp --repo …
+```
+
+That is an MCP server that a client started for its session: end the session. With nothing left, the
+command prints nothing and exits 1. Then, from the store's directory (the `:?` refuses an empty
+variable, which `cd` would take for the current directory), the leftovers (on a store that never
+derived a value, `find` says that `meta/derived/tmp` does not exist, which is right):
+
+```sh
+cd "${SWARMOPS_REPO:?}"
+find objects/tmp meta/derived/tmp -type f -mmin +60
+```
+
+```text
+objects/tmp/.tmpUbSpKg
+meta/derived/tmp/3849408-0-ffc434ac1bd4cb92
+```
+
+This store had three leftovers of writers that were killed in the middle of a write; two were set
+back a day with `touch -d`, to have the hour pass, and the third is as young as it was. The removal
+leaves that one:
+
+```sh
+find objects/tmp meta/derived/tmp -type f -mmin +60 -delete
+find objects/tmp meta/derived/tmp -type f
+```
+
+```text
+objects/tmp/.tmpoyk2fg
+```
+
+The derived values come off whole, and `verify --deep` has no stored value left to check:
+
+```sh
+du -sh meta/derived; find meta/derived -type f | wc -l
+rm -rf meta/derived
+swarmops verify --deep
+```
+
+```text
+344K	meta/derived
+38
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":45,"changesets_checked":15,"problems":[],"findings":[]},"meta":{"repo":"…","elapsed_ms":2,…}}
+```
+
+A read derives the values it needs and stores them in a `meta/derived/` that it makes again,
+`swarmops derive` makes the eager ones for every changeset at once, and `verify --deep` then checks
+the stored values of the built-in derivations against the changesets (§5):
+
+```sh
+swarmops history main:src/lib.rs --limit 1 --human
+find meta/derived -type f | wc -l
+swarmops derive
+swarmops verify --deep
+```
+
+```text
+path: src/lib.rs
+entries[0].changeset: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
+…
+2
+{"ok":true,"op":"derive","api":1,"result":{"derived":15,"cached":0,"next":20},"meta":{"repo":"…","elapsed_ms":1,…}}
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":45,"changesets_checked":15,"problems":[],"findings":[]},"meta":{"repo":"…","elapsed_ms":2,…}}
+```
+
+At the size of the pilot's store, SwarmOps' own 470 commits with a change landed on top, removing
+`meta/derived/` took it from 92 MB in 17,230 files to 57 MB in 8,859 files (measured on 2026-10-20).
+An export into an empty git directory stored its 8,371 values again and wrote the same head; an
+export to the branch that already held everything wrote nothing and still stored 2,544 of them. So
+the values trade room for the time a later export spends deriving them, and the objects, most of a
+store, stay.
 
 ## Upgrades
 
@@ -719,23 +1041,23 @@ A binary opens only a store whose `FORMAT` it knows, and refuses any other as `E
   because nothing skips a record it does not know. Before 1.0 there is no migration tool
   ([versioning policy](policies/versioning-and-stability.md)): a store may have to be created
   again.
-- **Creating a store again** goes through git: export every ref you keep (`main` to the trunk,
-  each `release/<name>` to a branch of its own), make the new store with the new binary, and import
-  each branch into its ref. The new store exports to the same commits. What does not carry over:
-  changesets no ref reaches, the operation log (and so `undo`), and the changeset ids of the
+- **Creating a store again** goes through git: export every ref you keep (`main` to the review
+  branch, each `release/<name>` to a branch of its own), make the new store with the new binary, and
+  import each branch into its ref. The new store exports to the same commits. What does not carry
+  over: changesets no ref reaches, the operation log (and so `undo`), and the changeset ids of the
   changesets made in the store, which come back as imported changesets with ids of their own.
 
 ```sh
 NEW=~/.local/state/swarmops/repos/acme-next
 swarmops init "$NEW" --name acme
-swarmops --repo "$NEW" git import "$GIT_SIDE" --ref stable --into main
-swarmops --repo "$NEW" git export "$GIT_SIDE" --ref main --branch stable
+swarmops --repo "$NEW" git import "$GIT_SIDE" --ref review --into main
+swarmops --repo "$NEW" git export "$GIT_SIDE" --ref main --branch review
 ```
 
 ```text
-{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"967ad1e0bc69cbfaa9c648643de94032","name":"acme","store_version":1,"changesets":0,"refs":0},…}
-{"ok":true,"op":"git_import","api":1,"result":{"imported":10,"skipped":0,"head_changeset":"16c363e3…","git_head_sha":"fd35e482e2639549ce8558c0e811e909fa26eb7d","target_ref":"main","ref_moved":true,"lossy":[],"lossy_total":0},…}
-{"ok":true,"op":"git_export","api":1,"result":{"exported":0,"objects_written":0,…,"head_sha":"fd35e482e2639549ce8558c0e811e909fa26eb7d","branch":"stable",…,"branch_moved":false,…,"rewritten":0},…}
+{"ok":true,"op":"repo_init","api":1,"result":{"repo_id":"393244461d7a5f01f7d600c8612a93f0","name":"acme","store_version":1,"changesets":0,"refs":0},…}
+{"ok":true,"op":"git_import","api":1,"result":{"imported":10,"skipped":0,"head_changeset":"b9607b5d…","git_head_sha":"327bbc8898086c815a71e9ca1ab69bec147e5e36","target_ref":"main","ref_moved":true,"lossy":[],"lossy_total":0},…}
+{"ok":true,"op":"git_export","api":1,"result":{"exported":0,"objects_written":0,…,"head_sha":"327bbc8898086c815a71e9ca1ab69bec147e5e36","branch":"review",…,"branch_moved":false,…,"rewritten":0},…}
 ```
 
 The hash contract (the byte layouts of blobs, trees and changesets, and the hash recipe) never
@@ -748,9 +1070,14 @@ each with the milestone that takes it.
 
 - **One host, one writer per trunk.** No sync between hosts until M11; git carries history between
   them, with one host landing and exporting and the others importing.
-- **No workspaces** (M5): agents read and write through the tools, a whole file per change.
+- **No workspaces** (M5): agents read and write through the tools, a whole file per change. An agent
+  that must build first works in a git worktree
+  ([Building and testing a change](#building-and-testing-a-change)).
+- **No review** (M7): SwarmOps does not hold a landing for a person's approval. The loop puts the
+  review in git, between the review branch and the trunk ([step 5](#5-review-then-move-the-trunk)).
 - **Nothing is collected** (M6): `objects/tmp/` keeps the leftovers of interrupted writes, and
-  `meta/derived/` every derived value. A store only grows.
+  `meta/derived/` every derived value. A store only grows, but for what [Making room](#making-room)
+  removes by hand.
 - **No repair tool** (M6): `verify` reports damage, and a restore fixes it.
 - **Writers take turns.** Every write holds one store-wide lock across two journal syncs: about
   21 ms per uncontended commit on the maintainers' host. With 32 writers committing in a loop, a
@@ -768,8 +1095,39 @@ each with the milestone that takes it.
 
 ## What to monitor
 
-Every command and every tool result is an envelope, so a log of envelopes, one JSON line per run,
-is the monitoring data. What to read in them:
+Every command and every tool result is an envelope, so a log of envelopes is the monitoring data. A
+command prints its envelope; the MCP server keeps none of its answers, so what agents' calls did is
+read from the files that [the wrapper](#where-the-envelopes-are) keeps, one per agent, or from the
+client's transcripts. A line of those files holds its envelope twice, as an object and, escaped, as
+text; these commands read the object, which has no escaped quotes, and need no `jq`. In the
+wrapper's directory:
+
+```sh
+cd ~/.local/state/swarmops/envelopes
+for f in *.jsonl; do
+  printf '%-22s calls %s, failed %s, recovered %s, warnings %s\n' "${f%.jsonl}" \
+    "$(grep -c '"structuredContent"' "$f")" "$(grep -c '"isError":true' "$f")" \
+    "$(grep -c '"recovered"' "$f")" "$(grep -c '"warnings":' "$f")"
+done
+cat *.jsonl | grep -o '"code":"E_[A-Z_]*"' | sort | uniq -c | sort -rn
+cat *.jsonl | grep -o '"elapsed_ms":[0-9]*' | cut -d: -f2 | sort -n | tail -3
+```
+
+```text
+claude-code_worker-1   calls 7, failed 1, recovered 0, warnings 0
+claude-code_worker-2   calls 6, failed 2, recovered 0, warnings 0
+      1 "code":"E_PATH_NOT_FOUND"
+      1 "code":"E_CONFLICT"
+      1 "code":"E_CAS_MISMATCH"
+19
+23
+31
+```
+
+The first command counts, for each agent, the calls answered, the failed ones, the writes that
+repaired what a dead writer left (`meta.recovered`) and the results that carry `warnings`; the
+second counts the failures by code; the third lists the three slowest calls by `meta.elapsed_ms`.
+What to read in them:
 
 - **Errors by code.** Expected now and then, and handled by the agent: `E_CONFLICT` (exit 3),
   `E_CAS_MISMATCH` (re-read, then land). A rising count of `E_BUSY` or `E_CAS_RETRY_EXHAUSTED`
@@ -790,7 +1148,25 @@ is the monitoring data. What to read in them:
   `objects/` holds, each taking a whole filesystem block (4 KiB on ext4) for its 72 or 73 bytes. At
   470 commits the store took 57 MB in 8,854 files after the import, and 92 MB in 17,232 files after
   the first export.
+
+  The store keeps one file per object and one per derived value, so count its files and the
+  filesystem's inodes as well: ext4 fixes the number of inodes when the filesystem is made, and a
+  store of small files can use them up before it uses the space. [Making room](#making-room) says
+  what may go.
+
+  ```sh
+  find "$SWARMOPS_REPO" -type f | wc -l
+  df --output=iused,iavail,ipcent "$SWARMOPS_REPO"
+  ```
+
+  ```text
+  91
+    IUsed     IFree IUse%
+  3021323 241161717    2%
+  ```
 - **The git side**: each export's `exported`, `branch_moved` and `rewritten` (0 unless the history
-  was imported with a loss), any `E_GIT_EXPORT_DIVERGED` (someone wrote the trunk) or `E_GIT_WRITE`,
-  and the CI and deployment runs on each push, as before.
+  was imported with a loss), any `E_GIT_IMPORT_DIVERGED` or `E_GIT_EXPORT_DIVERGED` (someone wrote
+  the trunk, or an export waits for its review) or `E_GIT_WRITE`, how long the review branch has
+  been ahead of the trunk (`git -C "$GIT_SIDE" log --oneline stable..review` lists what waits), and
+  the CI runs on the review branch and the deployment runs on the trunk.
 - **`op log`**: who moved which ref, for moves no one expected.
