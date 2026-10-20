@@ -268,6 +268,12 @@ left).
 - **A zeroed `journal.off` entry deep in the chain** (three or more links before the end) is
   outside the crash model: recovery checks the last two links, and `verify` finds the rest.
   *Target: M6 (the next `FORMAT`'s checksums). Found: M1 fuzzing review.*
+- **A `journal.off` that ends in more than 512 zeroed entries is refused, not repaired.** A
+  power loss leaves zeroed only the entry being written, so readers and recovery drop at most a
+  4 KiB block of zeroed entries at the end of `journal.off`, found with one read, and refuse a
+  longer run as damage (`E_STORE_CORRUPT`, at offset 0; `verify` reports it): every read and
+  write fails until the file is cut back to its last entry that is not zero. *Target: M6
+  (fsck). Found: 2026-10-20 review.*
 - **A changeset written outside the repository library can hold both `x` and `x:b64`.** The
   library refuses a metadata key that ends in `:b64` for every writer
   (`swarmops_repo::check_metadata`, which `Repo::commit` runs), so only a store written by other
