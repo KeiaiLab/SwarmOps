@@ -545,6 +545,19 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   trailer block already (a `Co-Authored-By:`), else after a blank line. The rendering is a
   contract like the hash contract: a change to it is a new version, which every branch exported
   before it meets as divergence (`docs/policies/versioning-and-stability.md`).
+- The export engine, ahead of the command that runs it: `swarmops_git::export` writes the history
+  behind a store ref into a branch of a git repository through a `GitSink`, reading the ref's head
+  in a committed snapshot (`Repo::snapshot_committed`, over `MetaStore::read_committed`) so that
+  nothing it sends off the host can be taken back. A history imported faithfully comes back byte
+  for byte, and changesets made in the store come back as canonical commits; the same store gives
+  the same shas. A branch at the export of the head or of an ancestor of it is continued: only
+  what it does not reach is written, parents first, an object packed in the repository trusted
+  and a loose one read back and written again if damaged. The objects are made durable, then the
+  native commits' oids recorded in the external id index, then the branch moved by
+  compare-and-swap. Any other branch stops the export before it writes (`DivergedReason`:
+  `branch_ahead`, `both_moved`, `branch_moved`, `source_moved_back`, `lossy_history`, or
+  `moved_during_export` from the compare-and-swap) unless it is forced, and a branch a work tree
+  has checked out is refused.
 
 ### Changed
 

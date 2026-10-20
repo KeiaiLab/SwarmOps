@@ -283,6 +283,25 @@ left).
   the metadata flush before the ref move reports nothing either (`Repo::flush_metadata` returns no
   record), so an import that has no commit to write and finds the store in need of repair does the
   repair unreported. *Unscheduled. Found: M3 Task 12.*
+- **An export writes loose objects.** Each object an export writes is a loose file, fsynced on its
+  own, so the first export of a long history writes one file and one fsync per object until `git
+  gc` packs them (M8 Decision 5; one pack per export is the alternative, which M8 Task 11's
+  measurement of the service repositories weighs). *Documented (storage spec §7). Found: M8 Task
+  5.*
+- **A crash while an export moves its branch leaves the branch's lock.** An export that dies
+  between taking `refs/heads/<branch>.lock` and renaming it onto the branch leaves the lock file,
+  as git does: every later export of that branch, and git itself, refuses the branch
+  (`E_GIT_WRITE`, `details.reason` `ref_locked`) until the file is removed by hand, once no git
+  process runs. *Documented (storage spec §7). Found: M8 Task 5.*
+- **An export leaves no reflog entry.** The branch moves without a line in the repository's
+  `logs/`, so `git reflog` does not show an export's moves. *Documented (storage spec §7). Found:
+  M8 Task 5.*
+- **A history imported with a loss exports as new commits.** A commit the import took with a loss
+  (`git.lossy`: a dropped gitlink, say) renders to other bytes than the commit it came from, and so
+  does every commit above it, whose parent's oid changes with it: they export as new commits
+  (`rewritten`, and a warning), which a branch built on the originals does not take
+  (`lossy_history`), and the signature headers they keep verbatim (`gpgsig`) no longer verify.
+  *Documented (storage spec §7; M8 Decision 13). Found: M8 Task 5.*
 
 ## Platforms
 
