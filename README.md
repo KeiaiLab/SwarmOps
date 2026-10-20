@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://swarmops.cc">Website</a> ·
   <a href="#why-swarmops">Why</a> ·
   <a href="#swarmops-and-git">SwarmOps and git</a> ·
   <a href="#how-it-works">How it works</a> ·
@@ -85,6 +86,21 @@ own documentation and source, not from a benchmark. The first measured compariso
 M9: SwarmOps' 32-agent contention scenario, run side by side with git worktrees. SwarmOps' own
 measurements are in [docs/perf.md](docs/perf.md).
 
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/store-dark.svg">
+    <img src="docs/assets/store-light.svg" alt="An isometric drawing of the store as a machine: commit cartridges wait on a feed rail behind one gate, the metadata lock, which lets one through at a time in no strict order; a press stamps each one as a frame onto a paper tape, the append-only journal; beside it, object pellets drop into sixteen bins with no gate." width="760">
+  </picture>
+  <br>
+  <sub>The store as a machine: writers wait for one lock, which the kernel hands to one of them at
+  a time, in no strict order, and each commit becomes one CRC-framed frame of the journal, while
+  objects need no lock.
+  <a href="https://swarmops.cc/explainers/store.html">Interactive version</a>
+  (<a href="https://swarmops.cc/explainers/store-light.html">light</a>), drawn with
+  <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT,
+  <a href="site/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
+</p>
+
 ## How it works
 
 Every operation is a library function: `swarmops-repo` does the work, `swarmops-ops` exposes it
@@ -139,16 +155,34 @@ commits when its journal frame is durable, so the next write repairs whatever a 
 
 ### Install
 
-Rust 1.99 (`rust-toolchain.toml` pins it), on Linux:
+Each released version is on the [releases page](https://github.com/KeiaiLab/SwarmOps/releases):
+one archive per Linux target, `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` and
+`swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz`, each with `swarmops`, `so`, the license,
+this README and the changelog, beside a `SHA256SUMS` file to check them against
+([RELEASE.md](RELEASE.md) says how they are built). The binaries need glibc 2.34 or newer
+(Ubuntu 22.04, Debian 12 and RHEL 9 have it); the aarch64 ones are cross-compiled and
+smoke-tested under QEMU, not tested on aarch64 hardware. No version has been tagged yet: until
+the first one, build from source, below. While the repository is private, `gh` downloads a
+release with your GitHub login:
+
+```sh
+gh release download --repo KeiaiLab/SwarmOps \
+  --pattern 'swarmops-*-x86_64-unknown-linux-gnu.tar.gz' --pattern SHA256SUMS  # the latest release
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf swarmops-*-x86_64-unknown-linux-gnu.tar.gz
+cd swarmops-*-x86_64-unknown-linux-gnu && install -D -t ~/.local/bin swarmops so
+```
+
+From source, with Rust 1.99 (`rust-toolchain.toml` pins it), on Linux:
 
 ```sh
 cargo build --release                               # target/release/swarmops and target/release/so
 cargo install --path crates/swarmops-cli --locked   # both, into ~/.cargo/bin
 ```
 
-`so` is the short form of `swarmops`: the same program by a shorter name. `cargo install`
-installs every binary of the crate: both names (add `--bin swarmops` for the long name alone,
-if the name `so` is taken).
+`so` is the short form of `swarmops`: the same program by a shorter name. An archive holds both,
+and `cargo install` installs every binary of the crate: both names (add `--bin swarmops` for the
+long name alone, if the name `so` is taken).
 
 A store must live on a native Linux filesystem: a path under `/mnt/` (where WSL mounts Windows
 drives) is refused with `E_UNSUPPORTED_FS`.
