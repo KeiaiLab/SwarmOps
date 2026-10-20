@@ -242,7 +242,9 @@ fn below(triples: &[PathTriple], path: &RepoPath) -> Range<usize> {
 /// `outcome`: clean contents make a leaf of `kind`, put unless theirs holds it, and a new blob and
 /// an auto-merged path unless ours or theirs holds those contents; a conflict between texts is
 /// [`ConflictKind::Content`] (or [`ConflictKind::AddAdd`], over the empty base of a path the base
-/// lacks), and contents that are not all text [`ConflictKind::Binary`].
+/// lacks), and contents that `content` does not merge by lines [`ConflictKind::Binary`]: for
+/// diff3, contents that are not all text or not all within the line diff's bound
+/// ([`line_diff::MAX_DIFF_LINES`] lines, [`line_diff::MAX_DIFF_BYTES`] bytes).
 fn merge_contents<O: ObjectStore>(
     reads: &Reads<'_, O>,
     triple: &PathTriple,

@@ -672,3 +672,151 @@ fn agrees_with_the_git_merge_file_corpus() {
         }
     }
 }
+
+/// Contents too large for a line diff are not merged by lines: the histogram diff's time grows
+/// with the square of the lines where changed lines interleave with unchanged ones, so a merge
+/// past the line diff's bound is `Binary`, decided without one.
+mod past_the_line_diff_bound {
+    use std::time::{Duration, Instant};
+
+    use swarmops_merge::conflict::ContentMerge;
+    use swarmops_merge::diff3::merge_content;
+    use swarmops_merge::line_diff::{MAX_DIFF_BYTES, MAX_DIFF_LINES};
+
+    use super::{numbered, replaced, split_strings};
+
+    /// Far more than a merge decided without a line diff takes, even on a loaded host.
+    const AT_ONCE: Duration = Duration::from_secs(5);
+
+    /// What `merged` is, without its bytes, which a failure would print whole.
+    fn summary(merged: &ContentMerge) -> String {
+        match merged {
+            ContentMerge::Clean(bytes) => format!("Clean, {} bytes", bytes.len()),
+            ContentMerge::Conflicted(hunks) => format!("Conflicted, {} hunks", hunks.len()),
+            ContentMerge::Binary => "Binary".to_owned(),
+        }
+    }
+
+    /// `lines` with each line `edited` picks rewritten as `<side> <n>`.
+    fn rewritten(lines: &[String], side: &str, edited: fn(usize) -> bool) -> Vec<u8> {
+        let text: String = (lines.iter().enumerate())
+            .map(|(n, line)| {
+                if edited(n) {
+                    format!("{side} {n}\n")
+                } else {
+                    line.clone()
+                }
+            })
+            .collect();
+        text.into_bytes()
+    }
+
+    /// `count` lines merged, both sides' edits interleaved so that nearly every line differs on
+    /// each side; and how long the merge took.
+    fn interleaved(count: usize) -> (ContentMerge, Duration) {
+        let lines = numbered(count);
+        let ours = rewritten(&lines, "ours", |n| n % 3 == 0);
+        let theirs = rewritten(&lines, "theirs", |n| n % 3 == 1);
+        let base = lines.concat();
+        let started = Instant::now();
+        let merged = merge_content(base.as_bytes(), &ours, &theirs);
+        (merged, started.elapsed())
+    }
+
+    /// 200,000 lines of such edits (2.3 MB: past the bound by their lines alone) are a `Binary`
+    /// merge at once.
+    #[test]
+    fn interleaved_edits_merge_as_binary_at_once() {
+        let (merged, took) = interleaved(200_000);
+        assert_eq!(summary(&merged), "Binary");
+        assert!(took < AT_ONCE, "{took:?}");
+    }
+
+    /// A million lines of such edits (12 MB a side: past both bounds) are a `Binary` merge at
+    /// once.
+    #[test]
+    fn a_million_changed_lines_merge_as_binary_at_once() {
+        let (merged, took) = interleaved(1_000_000);
+        assert_eq!(summary(&merged), "Binary");
+        assert!(took < AT_ONCE, "{took:?}");
+    }
+
+    /// Past the bound a content is not merged by lines whatever its edits: two edits far apart in
+    /// a file of 200,000 lines, which a line merge would take both of, make a `Binary` merge.
+    #[test]
+    fn distant_edits_past_the_bound_merge_as_binary() {
+        let lines = numbered(200_000);
+        let ours = replaced(&lines, 10, "ours 10\n");
+        let theirs = replaced(&lines, 190_000, "theirs 190000\n");
+        let base = lines.concat();
+        let merged = merge_content(base.as_bytes(), ours.as_bytes(), theirs.as_bytes());
+        assert_eq!(summary(&merged), "Binary");
+    }
+
+    /// A MiB of source in `MAX_DIFF_LINES` lines, 21 and 22 bytes long, merges by lines: ours
+    /// edits its second line and theirs the last but one, and the merge takes both. With one line
+    /// more, past the bound, the same edits make a `Binary` merge.
+    #[test]
+    fn a_mib_of_source_at_the_line_bound_merges() {
+        // 20 or 21 digits and a `\n`: a third of the lines 22 bytes long, the rest 21.
+        let source = |count: usize| -> Vec<String> {
+            (0..count)
+                .map(|n| {
+                    let width = if n % 3 == 0 { 21 } else { 20 };
+                    format!("{n:0width$}\n")
+                })
+                .collect()
+        };
+        let lines = source(MAX_DIFF_LINES);
+        assert_eq!(lines.concat().len(), 1 << 20);
+        let last_but_one = MAX_DIFF_LINES - 2;
+        let ours = replaced(&lines, 1, "ours\n");
+        let theirs = replaced(&lines, last_but_one, "theirs\n");
+        let both = replaced(&split_strings(&ours), last_but_one, "theirs\n");
+        let base = lines.concat();
+        let merged = merge_content(base.as_bytes(), ours.as_bytes(), theirs.as_bytes());
+        assert_eq!(summary(&merged), format!("Clean, {} bytes", both.len()));
+        assert!(
+            merged == ContentMerge::Clean(both.into_bytes()),
+            "both edits"
+        );
+
+        let mut lines = lines;
+        lines.push("one more\n".to_owned());
+        let ours = replaced(&lines, 1, "ours\n");
+        let theirs = replaced(&lines, last_but_one, "theirs\n");
+        let base = lines.concat();
+        let merged = merge_content(base.as_bytes(), ours.as_bytes(), theirs.as_bytes());
+        assert_eq!(summary(&merged), "Binary");
+    }
+
+    /// Contents of `MAX_DIFF_BYTES` bytes merge by lines, here three long lines of which ours
+    /// edits the first and theirs the last; with one byte more on any side, past the bound, the
+    /// merge is `Binary`.
+    #[test]
+    fn contents_past_max_diff_bytes_merge_as_binary() {
+        let third = MAX_DIFF_BYTES / 3;
+        let rest = MAX_DIFF_BYTES - 2 * third;
+        let line = |byte: u8, len: usize| [vec![byte; len - 1], b"\n".to_vec()].concat();
+        let (first, middle, last) = (line(b'a', third), line(b'b', third), line(b'c', rest));
+        let (ours_first, theirs_last) = (line(b'x', third), line(b'y', rest));
+        let base = [&first[..], &middle, &last].concat();
+        let ours = [&ours_first[..], &middle, &last].concat();
+        let theirs = [&first[..], &middle, &theirs_last].concat();
+        let both = [&ours_first[..], &middle, &theirs_last].concat();
+        assert_eq!(base.len(), MAX_DIFF_BYTES);
+        let merged = merge_content(&base, &ours, &theirs);
+        assert_eq!(summary(&merged), format!("Clean, {} bytes", both.len()));
+        assert!(merged == ContentMerge::Clean(both), "both edits");
+
+        let longer = |content: &[u8]| [content, b"z"].concat();
+        let past = [
+            [longer(&base), ours.clone(), theirs.clone()],
+            [base.clone(), longer(&ours), theirs.clone()],
+            [base.clone(), ours.clone(), longer(&theirs)],
+        ];
+        for [base, ours, theirs] in past {
+            assert_eq!(summary(&merge_content(&base, &ours, &theirs)), "Binary");
+        }
+    }
+}

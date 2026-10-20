@@ -11,6 +11,11 @@
 //! 0-based, half-open line ranges of each side, in order, with at least one unchanged line
 //! between two of them. [`unified`] groups them into the hunks `git diff -U<context>` prints, and
 //! [`is_text`] is the rule for whether a file gets line hunks at all.
+//!
+//! A side past the line diff's bound, [`MAX_DIFF_LINES`] lines or [`MAX_DIFF_BYTES`] bytes, gets
+//! none either ([`TooLarge`]), as git treats a file past its size threshold as binary: the
+//! histogram diff can take a pass over the rest of both sides for each change it finds, a time
+//! that grows with the square of the lines.
 
 use std::ops::Range;
 
@@ -18,6 +23,20 @@ use imara_diff::{Algorithm, Diff, InternedInput};
 
 /// How many leading bytes [`is_text`] searches for a NUL: git's `FIRST_FEW_BYTES`.
 const TEXT_PROBE: usize = 8_000;
+
+/// The most lines a side may have for [`line_hunks`] to diff it: 48 Ki, a MiB of source in lines
+/// of 21⅓ bytes on average. The slowest line diff measured at this bound takes seconds.
+pub const MAX_DIFF_LINES: usize = 48 << 10;
+
+/// The most bytes a side may have for [`line_hunks`] to diff it: 8 MiB, so that a side within
+/// [`MAX_DIFF_LINES`] but of long lines is not read into lines, hunks and texts either (an object
+/// holds up to 512 MiB).
+pub const MAX_DIFF_BYTES: usize = 8 << 20;
+
+/// What [`line_hunks`] gives for a side past the line diff's bound, more than [`MAX_DIFF_LINES`]
+/// lines or [`MAX_DIFF_BYTES`] bytes: no hunks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooLarge;
 
 /// The lines of `bytes`: each ends after its `\n` and keeps it, a last line without one is a line,
 /// and an empty input has none.
@@ -43,23 +62,30 @@ pub struct Hunk {
 /// The changes that turn `before` into `after`, line by line ([`split_lines`]): the histogram
 /// diff, compacted as the module doc says. The hunks are in order, with at least one unchanged
 /// line between two of them, and the lines outside them pair up equal from both sides in order;
-/// identical inputs have none.
-///
-/// # Panics
-///
-/// If a side has `i32::MAX` lines or more, `imara-diff`'s bound (2 GiB of content at least).
-pub fn line_hunks(before: &[u8], after: &[u8]) -> Vec<Hunk> {
+/// identical inputs have none. [`TooLarge`] when a side is past the line diff's bound, found
+/// before any line is diffed.
+pub fn line_hunks(before: &[u8], after: &[u8]) -> Result<Vec<Hunk>, TooLarge> {
+    if !(diffable(before) && diffable(after)) {
+        return Err(TooLarge);
+    }
     let mut input = InternedInput::<&[u8]>::default();
     input.update_before(lines(before));
     input.update_after(lines(after));
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
     diff.postprocess_no_heuristic(&input);
-    diff.hunks()
+    Ok(diff
+        .hunks()
         .map(|hunk| Hunk {
             before: hunk.before,
             after: hunk.after,
         })
-        .collect()
+        .collect())
+}
+
+/// Whether `bytes` is within the line diff's bound: at most [`MAX_DIFF_BYTES`] bytes, in at most
+/// [`MAX_DIFF_LINES`] lines.
+pub(crate) fn diffable(bytes: &[u8]) -> bool {
+    bytes.len() <= MAX_DIFF_BYTES && lines(bytes).nth(MAX_DIFF_LINES).is_none()
 }
 
 /// Whether `bytes` is text: UTF-8, with no NUL in its first 8,000 bytes (git's probe). Only text
