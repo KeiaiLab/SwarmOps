@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://swarmops.cc">Website</a> ·
   <a href="#why-swarmops">Why</a> ·
   <a href="#swarmops-and-git">SwarmOps and git</a> ·
   <a href="#how-it-works">How it works</a> ·
@@ -71,7 +72,7 @@ planned, each with its milestone.
 | Offline, on one host | ✅ M1: no network code; every operation runs against the host's own store. | **Parity.** |
 | Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s. | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
 | Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
-| Breadth of reads | Today one file or one directory per call. 📋 M2: ranged reads, depths and sizes. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, recursive listings, `git grep <tree>` and sparse checkouts. |
+| Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, `git grep <tree>` and sparse checkouts. |
 | Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
 | Conflicts | Today the one signal is `E_CAS_MISMATCH`, with the ref's actual target. 📋 M4: three-way merge, conflicts reported per hunk as JSON and resolved without a checkout. | **Behind** today: git merges without a checkout (`git merge-tree`), with typed conflict records. M4 is **not yet comparable**. |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
@@ -84,6 +85,21 @@ No git baseline has been measured yet: these verdicts come from the design, the 
 own documentation and source, not from a benchmark. The first measured comparison is planned for
 M9: SwarmOps' 32-agent contention scenario, run side by side with git worktrees. SwarmOps' own
 measurements are in [docs/perf.md](docs/perf.md).
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/store-dark.svg">
+    <img src="docs/assets/store-light.svg" alt="An isometric drawing of the store as a machine: commit cartridges wait on a feed rail behind one gate, the metadata lock, which lets one through at a time in no strict order; a press stamps each one as a frame onto a paper tape, the append-only journal; beside it, object pellets drop into sixteen bins with no gate." width="760">
+  </picture>
+  <br>
+  <sub>The store as a machine: writers wait for one lock, which the kernel hands to one of them at
+  a time, in no strict order, and each commit becomes one CRC-framed frame of the journal, while
+  objects need no lock.
+  <a href="https://swarmops.cc/explainers/store.html">Interactive version</a>
+  (<a href="https://swarmops.cc/explainers/store-light.html">light</a>), drawn with
+  <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT,
+  <a href="site/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
+</p>
 
 ## How it works
 
@@ -190,16 +206,16 @@ Every command, its revisions and change lists, and its output are in [Commands](
 
 `swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
 agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
-as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `ref_list`, `ref_set`,
-`ref_delete`, `commit` and `verify`. A tool's arguments are the operation's request: its
-`inputSchema` is the request type's schema, as `swarmops schema <Type>` prints it, with the
-definitions it refers to written in place, and kept a plain object: a rule across fields that
-the type's schema states with a top-level `oneOf`, which the Claude API refuses in a tool, is
-left to the description and to the server's own check, and the `expected_old` of `ref_set` and
-`ref_delete` asks for a full changeset id. Its result is the envelope the CLI prints for that
-request, as `structuredContent` and as text, and a failed operation sets `isError`, with the
-envelope's `error` saying why. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
-to clients that open with `initialize`.
+as tools: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`,
+`diff`, `ref_list`, `ref_set`, `ref_delete`, `commit`, `blob_put`, `blob_has` and `verify`. A tool's
+arguments are the operation's request: its `inputSchema` is the request type's schema, as `swarmops
+schema <Type>` prints it, with the definitions it refers to written in place, and kept a plain
+object: a rule across fields that the type's schema states with a top-level `oneOf`, which the
+Claude API refuses in a tool, is left to the description and to the server's own check, and the
+`expected_old` of `ref_set` and `ref_delete` asks for a full changeset id. Its result is the
+envelope the CLI prints for that request, as `structuredContent` and as text, and a failed
+operation sets `isError`, with the envelope's `error` saying why. The server speaks MCP
+2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with `initialize`.
 
 ### Register the server
 
@@ -293,12 +309,17 @@ and starts no server either.
 | `info` | Describe the store: its id, name, `main`, and how many changesets and refs it holds. |
 | `whoami` | The identity this caller's changes carry. |
 | `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. |
-| `cat REV:PATH [--max-bytes N]` | One file at a revision: UTF-8 text, or base64. |
-| `ls REV[:PATH] [--limit N] [--cursor C]` | One directory at a revision, a page at a time. |
+| `blob put FILE\|-`, `blob has ID…` | Store a file's content (stdin's for `-`) as a blob, outside any commit, and print its id; or list which of the ids the store holds blobs under. A change names a stored blob by id. |
+| `resolve REV` | The full id of the changeset REV names, and its kind: `ref` when REV is exactly a ref's name, `changeset` otherwise. |
+| `cat REV:PATH [--offset N \| --lines A-B] [--max-bytes N]` | One file at a revision, or part of it, from byte N or lines A to B: UTF-8 text, or base64. A read cut short gives `next_offset`, where `--offset` reads on. |
+| `ls REV[:PATH] [--depth N] [--limit N] [--cursor C]` | One directory at a revision, a page at a time, each file with its size; with `--depth`, the directories below it too, each entry with its path. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
-| `log [REV] [-n N] [--cursor C]` | History along first parents, newest first (from `main` by default). |
+| `log [REV] [-n N] [--cursor C] [--path P]...` | History along first parents, newest first (from `main` by default); with `--path`, only the changesets that change those paths. |
+| `diff FROM TO [--path P]... [--format names\|stat\|unified] [--context N] [--limit N] [--cursor C] [--max-bytes N]` | The files that differ between two revisions, in path order, a page at a time: each one's path and status (`added`, `deleted`, `modified`, `type_changed`); with `stat` also whether it is binary and its inserted and deleted lines; with `unified` also its kinds, blobs and hunks, the page within `--max-bytes` (32 KiB) of JSON. `--path` keeps the files at or below some paths. |
+| `history REV:PATH [-n N] [--cursor C]` | The changesets that changed a file, or anything below a directory, newest first, each with what the path holds after it. |
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
+| `derive [--after N] [--follow] [--interval-ms N] [--from-start]` | Derive ahead of any reader the eager derived values (the first-parent skip list) of the changesets the journal records. Once: up to 1,000 journal frames, from the first or after `--after N`, its `next` saying where to go on. With `--follow`: as they are committed, from the journal's end (its start with `--from-start`), until killed, one envelope a line for each run that derived something. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
 | `git import PATH [--ref GIT_REF] [--into REF] [--lossy CLASS]... [--gitlinks refuse\|drop]` | Bring the history of the git repository at `PATH` in: every commit `--ref` (`HEAD`) reaches that the store does not hold, then move `--into` (`main`) to it ([Bring a git repository in](#bring-a-git-repository-in)). |
 | `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([MCP](#mcp)). |
@@ -309,8 +330,11 @@ A revision is `main`, `release/<name>`, a changeset id or a unique prefix of 12 
 hex digits, then any number of `~N` (the N-th first parent). A change list is a JSON array of
 `{"path", "op": "put" | "delete", "content", "mode"}`: a put's `content` is `{"inline": "<UTF-8
 text>"}`, `{"base64": "<bytes>"}` or `{"file": "<path>"}` (read by the CLI, on the client), at
-most 512 MiB, and its `mode` is `file` (the default), `exec` or `symlink`; directories follow
-from the paths. A ref moves only by compare-and-swap: when another agent moved it first,
+most 512 MiB, or `{"blob": "<id>"}`, a blob stored before (`blob put`), whose bytes the commit
+neither sends nor reads; its `mode` is `file` (the default), `exec` or `symlink`; directories
+follow from the paths. A commit's contents hold at most 1 GiB together (a blob named by id counts
+nothing) and a change list's text at most 64 MiB (`E_TOO_LARGE` past either), so a large file
+goes as `file` content, or through `blob put`. A ref moves only by compare-and-swap: when another agent moved it first,
 `ref set` and `commit --advance` fail with `E_CAS_MISMATCH` (exit 4) and the ref's target in
 `details.actual` (a `commit --advance` that fails so records nothing). Then read the files you
 changed at `<actual>`, re-apply your edits to them (M1 has no merge, so re-sending your old
@@ -409,7 +433,7 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | ✅ | M1 | The single-agent core: `init`, `commit`, `cat`, `ls`, `log` and ref compare-and-swap, over the native metadata store and object files; crash sweeps. |
 | ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, `--locked` everywhere; I/O-error injection, write-ordering checks and the fsync-failure policy; power-loss images; the project policies; the tests' shared support in one crate; benchmarks of the metadata store against embedded databases; the MCP server and `so`. |
 | ✅ | M1.6 | The code-review follow-ups, before M2: the error contract an agent sees (typed refusals, I/O failures that name the store file and no host path but in two rare `E_IO`s, a report of what a write's recovery repaired); a bound on the lock-free reader's retries; structured `verify` findings, and MCP tool schemas kept plain objects; object reads without a second copy or an allocation of the size a file claims; the test doubles M1.5 left, in one place; spec hygiene (the write-ordering rules W1–W7, §8 in step with the code); the harness for the measurements M2's sync decision needs, whose quiet-window runs are still to come; and `commit --advance`, the commit primitive M4's landing reuses. |
-| 📋 | M2 | Diff, history and the derived-data engine. |
+| ✅ | M2 | Diff, history and the derived-data engine. |
 | ✅ | M3 | git import. |
 | 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |
 | 📋 | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |

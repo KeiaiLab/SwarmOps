@@ -40,6 +40,19 @@ pub fn put_as(p: &str, kind: LeafKind, content: &[u8]) -> Change {
     }
 }
 
+/// A change that puts blob `id`, which the store must hold already, as a regular file at `p`:
+/// named by its id, so that the commit neither reads its content nor writes it again
+/// ([`ChangeOp::PutBlob`]).
+pub fn put_blob(p: &str, id: BlobId) -> Change {
+    Change {
+        path: path(p),
+        op: ChangeOp::PutBlob {
+            kind: LeafKind::File,
+            id,
+        },
+    }
+}
+
 /// A change that deletes `p`.
 pub fn delete(p: &str) -> Change {
     Change {

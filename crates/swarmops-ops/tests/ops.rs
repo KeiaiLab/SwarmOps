@@ -98,6 +98,8 @@ fn cat(rev: &str, path: &str) -> ReadFileReq {
     ReadFileReq {
         rev: rev.into(),
         path: path.to_owned(),
+        offset: 0,
+        lines: None,
         max_bytes: DEFAULT_MAX_BYTES,
     }
 }
@@ -106,6 +108,7 @@ fn ls(rev: &str, path: Option<&str>) -> ReadTreeReq {
     ReadTreeReq {
         rev: rev.into(),
         path: path.map(str::to_owned),
+        depth: 1,
         limit: DEFAULT_READ_TREE_LIMIT,
         cursor: None,
     }
@@ -123,6 +126,7 @@ fn log_req(rev: Option<&str>) -> LogReq {
         rev: rev.map(Rev::from),
         limit: DEFAULT_LOG_LIMIT,
         cursor: None,
+        paths: Vec::new(),
     }
 }
 
@@ -337,6 +341,9 @@ fn commit_from_inline_and_base64_contents_then_cat_ls_show_log() {
             encoding: ContentEncoding::Utf8,
             content: "# acme\n".to_owned(),
             truncated: false,
+            offset: None,
+            lines: None,
+            next_offset: None,
         }
     );
     let bin = ops.read_file(cat(c1, "bin/tool")).unwrap();
@@ -373,7 +380,9 @@ fn commit_from_inline_and_base64_contents_then_cat_ls_show_log() {
         ops.read_tree(ls(c1, Some("bin"))).unwrap().entries,
         [TreeEntryOut {
             name: "tool".to_owned(),
+            path: None,
             kind: EntryKindOut::Exec,
+            size: Some(7),
             id: blob(tool),
         }]
     );
@@ -754,6 +763,51 @@ fn puts_over_512_mib_are_refused_before_their_content_is_read() {
         (&json!(limit + 1), &json!(limit))
     );
     assert_eq!(err.details["file"], huge.as_str());
+    assert_eq!(err.details["scope"], "put", "one content's limit");
+    assert_eq!(
+        ops.repo_info(InfoReq {}).unwrap().changesets,
+        0,
+        "nothing was written"
+    );
+}
+
+/// A commit's contents together are held to 1 GiB, measured by the sizes they declare before
+/// any is read: three sparse client files of 512 MiB each, each within a put's limit, are
+/// refused at the third (`E_TOO_LARGE`, scope `commit`, its `size` theirs together with it),
+/// and nothing is written. The hint stores large contents first, to name them by id.
+#[test]
+fn a_commit_s_contents_past_1_gib_together_are_refused_before_any_is_read() {
+    let (dir, _root, ops) = new_store();
+    let limit: u64 = 512 * 1024 * 1024;
+    let files: Vec<Utf8PathBuf> = (0..3)
+        .map(|n| {
+            let file = utf8(dir.path().join(format!("{n}.bin")));
+            fs::File::create(&file).unwrap().set_len(limit).unwrap();
+            file
+        })
+        .collect();
+    let changes = (files.iter().enumerate())
+        .map(|(n, file)| {
+            put(
+                &format!("big/{n}.bin"),
+                ContentInput::File(file.to_string()),
+                None,
+            )
+        })
+        .collect();
+    let err = expect_err(
+        ops.commit(&agent(), commit_req(None, changes)),
+        ErrorCode::TooLarge,
+    );
+    let hint = err.hint.clone().unwrap_or_default();
+    assert_eq!(
+        Value::Object(err.details),
+        json!({
+            "index": 2, "path": "big/2.bin", "file": files[2].as_str(),
+            "size": 3 * limit, "limit": 2 * limit, "scope": "commit",
+        })
+    );
+    assert!(hint.contains("swarmops blob put"), "{hint}");
     assert_eq!(
         ops.repo_info(InfoReq {}).unwrap().changesets,
         0,
@@ -1892,4 +1946,2039 @@ fn verify_findings_stand_beside_their_problems_one_for_one() {
         assert_eq!(finding.changeset.as_deref(), changeset, "{problem}");
     }
     assert_ne!(report.findings[0].kind, report.findings[1].kind);
+}
+
+/// One snapshot per request (operations spec §4, storage spec §8): every revision and ref one
+/// request names is resolved in the same view, and that view is the request's alone.
+mod snapshot {
+    use super::*;
+
+    /// A request never reads in a snapshot taken before its own write, nor in another request's:
+    /// on one `LocalOps`, and through one request's record, a `show` of what a `commit` made, a
+    /// `ref_list` after the `ref_set` that created `main`, and a `cat`, a `log` and an `info` of
+    /// `main` after a `commit` that advanced it, each see what the write before it did.
+    #[test]
+    fn a_snapshot_is_not_reused_after_the_requests_own_write() {
+        let (_dir, _root, ops) = new_store();
+        let who = agent();
+        let resolved = Resolved::default();
+        let request = ops.recording(&resolved);
+
+        let c1 = (request.commit(&who, commit_req(None, vec![text("f", "1")])))
+            .unwrap()
+            .changeset;
+        assert_eq!(request.show(show(&c1)).unwrap().id, c1);
+        request.ref_set(&who, set("main", &c1, None, true)).unwrap();
+        let refs = request.ref_list(RefListReq {}).unwrap().refs;
+        let targets: Vec<(&str, &str)> = (refs.iter())
+            .map(|r| (r.name.as_str(), r.target.as_str()))
+            .collect();
+        assert_eq!(targets, [("main", c1.as_str())]);
+
+        let advancing = CommitReq {
+            advance: Some("main".to_owned()),
+            ..commit_req(Some(&c1), vec![text("f", "2")])
+        };
+        let c2 = request.commit(&who, advancing).unwrap().changeset;
+        assert_eq!(request.read_file(cat("main", "f")).unwrap().content, "2");
+        let log = request.log(log_req(None)).unwrap();
+        assert_eq!(ids(&log), [c2.as_str(), c1.as_str()]);
+        let main = request.repo_info(InfoReq {}).unwrap().main;
+        assert_eq!(main.as_deref(), Some(c2.as_str()));
+        assert_eq!(
+            resolved.take()["main"],
+            c2,
+            "main as the last read resolved it"
+        );
+    }
+}
+
+/// `log` with `paths` and `path_history` (operations spec §1; M2 Task 15): the changesets whose
+/// delta touches a path, by the chase of its last modifier, a page at a time.
+mod path_history {
+    use std::sync::Arc;
+
+    use swarmops_api::{
+        DEFAULT_PATH_HISTORY_LIMIT, Envelope, Meta, PathHistoryEntry, PathHistoryPage,
+        PathHistoryReq,
+    };
+    use swarmops_testkit::fs::NoSyncFs;
+
+    use super::*;
+
+    /// A `path_history` request for `path` from `rev` (main without one), a page of the default
+    /// size.
+    fn history(rev: Option<&str>, path: &str) -> PathHistoryReq {
+        PathHistoryReq {
+            rev: rev.map(Rev::from),
+            path: path.to_owned(),
+            limit: DEFAULT_PATH_HISTORY_LIMIT,
+            cursor: None,
+        }
+    }
+
+    /// The changesets of `page`.
+    fn changesets(page: &PathHistoryPage) -> Vec<&str> {
+        page.entries
+            .iter()
+            .map(|entry| entry.changeset.as_str())
+            .collect()
+    }
+
+    /// A first-parent chain of `ops`'s commits, one per step (`allow_empty`, so a step may change
+    /// nothing), and `main` created on its head: the ids, the root first.
+    fn chain(ops: &LocalOps, steps: Vec<Vec<ChangeInput>>) -> Vec<String> {
+        let mut ids: Vec<String> = Vec::new();
+        for changes in steps {
+            let req = CommitReq {
+                allow_empty: true,
+                ..commit_req(ids.last().map(String::as_str), changes)
+            };
+            ids.push(ops.commit(&agent(), req).unwrap().changeset);
+        }
+        let head = ids.last().unwrap();
+        ops.ref_set(&agent(), set("main", head, None, true))
+            .unwrap();
+        ids
+    }
+
+    /// `log` with `paths` lists only the changesets whose delta has an entry at one of the paths
+    /// or below it, newest first, each once: a file's, a directory's (with or without a trailing
+    /// `/`), several at once, and none (an empty page, not an error). A page is `truncated`
+    /// exactly when another such changeset follows, and its cursor resumes after it. A path that
+    /// is not one is `E_INVALID_ARG`.
+    #[test]
+    fn log_with_paths_lists_only_the_changesets_that_touch_them() {
+        let (_dir, _root, ops) = new_store();
+        let c = chain(
+            &ops,
+            vec![
+                vec![text("a", "1"), text("b", "1")],
+                vec![text("b", "2")],
+                vec![text("c/x", "1")],
+                vec![text("a", "2")],
+                vec![],
+                vec![text("c/y", "1")],
+                vec![delete("c/x"), delete("c/y")],
+            ],
+        );
+        let log = |paths: &[&str], limit: usize, cursor: Option<&str>| {
+            let req = LogReq {
+                limit,
+                cursor: cursor.map(str::to_owned),
+                paths: paths.iter().map(|&p| p.to_owned()).collect(),
+                ..log_req(None)
+            };
+            ops.log(req).unwrap()
+        };
+        let at =
+            |indices: &[usize]| -> Vec<&str> { indices.iter().map(|&i| c[i].as_str()).collect() };
+        assert_eq!(ids(&log(&["a"], 50, None)), at(&[3, 0]));
+        assert_eq!(ids(&log(&["c"], 50, None)), at(&[6, 5, 2]));
+        assert_eq!(ids(&log(&["c/"], 50, None)), at(&[6, 5, 2]));
+        assert_eq!(ids(&log(&["a", "c/x"], 50, None)), at(&[6, 3, 2, 0]));
+        assert_eq!(
+            ids(&log(&["a", "a/"], 50, None)),
+            at(&[3, 0]),
+            "each changeset once"
+        );
+        let none = log(&["zz"], 50, None);
+        assert_eq!(
+            (none.entries.len(), none.truncated, none.cursor),
+            (0, false, None)
+        );
+
+        let first = log(&["c"], 2, None);
+        assert_eq!((ids(&first), first.truncated), (at(&[6, 5]), true));
+        assert_eq!(first.cursor.as_deref(), Some(c[5].as_str()));
+        let rest = log(&["c"], 2, first.cursor.as_deref());
+        assert_eq!(
+            (ids(&rest), rest.truncated, rest.cursor.as_deref()),
+            (at(&[2]), false, None)
+        );
+        let exact = log(&["a"], 2, None);
+        assert_eq!(
+            (ids(&exact), exact.truncated),
+            (at(&[3, 0]), false),
+            "nothing older"
+        );
+        let after_root = log(&["a"], 2, Some(&c[0]));
+        assert_eq!((after_root.entries.len(), after_root.truncated), (0, false));
+
+        // From a revision, recorded as resolved.
+        let resolved = Resolved::default();
+        let from_c3 = LogReq {
+            paths: vec!["b".to_owned()],
+            ..log_req(Some(&c[3]))
+        };
+        let page = ops.recording(&resolved).log(from_c3).unwrap();
+        assert_eq!(ids(&page), at(&[1, 0]));
+        assert_eq!(
+            resolved.take(),
+            BTreeMap::from([(c[3].clone(), c[3].clone())])
+        );
+
+        for bad in ["a//b", "/", "", "./a"] {
+            let req = LogReq {
+                paths: vec!["a".to_owned(), bad.to_owned()],
+                ..log_req(None)
+            };
+            let err = expect_err(ops.log(req), ErrorCode::InvalidArg);
+            assert_eq!(err.details["path"], bad);
+        }
+    }
+
+    /// A path's history, a page at a time: each entry what the path holds after its changeset
+    /// (`put` with its kind and id, `delete` with neither) and who wrote it when; the cursor, the
+    /// last entry's id, resumes from that changeset's first parent, and the last page is not
+    /// `truncated`. A cursor at the root gives an empty page; one that is not a full id the store
+    /// holds is `E_INVALID_ARG`. A directory's entries name its tree.
+    #[test]
+    fn history_pages_resume_after_the_cursor() {
+        let (_dir, _root, ops) = new_store();
+        let c = chain(
+            &ops,
+            vec![
+                vec![text("p", "0"), text("q", "0")],
+                vec![text("q", "1")],
+                vec![text("p", "2")],
+                vec![text("q", "3")],
+                vec![delete("p")],
+                vec![text("q", "5")],
+                vec![put(
+                    "p",
+                    ContentInput::Inline("6".to_owned()),
+                    Some(ModeInput::Exec),
+                )],
+                vec![text("dir/x", "7")],
+            ],
+        );
+        let resolved = Resolved::default();
+        let page = |cursor: Option<&str>| {
+            let req = PathHistoryReq {
+                limit: 2,
+                cursor: cursor.map(str::to_owned),
+                ..history(None, "p")
+            };
+            ops.recording(&resolved).path_history(req).unwrap()
+        };
+        let first = page(None);
+        assert_eq!(first.path, "p");
+        assert_eq!(changesets(&first), [c[6].as_str(), c[4].as_str()]);
+        assert_eq!(
+            (first.truncated, first.cursor.as_deref()),
+            (true, Some(c[4].as_str()))
+        );
+        assert_eq!(
+            first.entries[0],
+            PathHistoryEntry {
+                changeset: c[6].clone(),
+                op: ChangeOp::Put,
+                kind: Some(EntryKindOut::Exec),
+                id: Some(blob(b"6")),
+                author_agent: "agent/worker-17".to_owned(),
+                created_at: first.entries[0].created_at,
+                title: "a test commit".to_owned(),
+            }
+        );
+        assert!(first.entries[0].created_at >= 1_760_000_000_000);
+        let deleted = &first.entries[1];
+        assert_eq!(
+            (deleted.op, &deleted.kind, &deleted.id),
+            (ChangeOp::Delete, &None, &None)
+        );
+        assert_eq!(
+            resolved.take(),
+            BTreeMap::from([("main".to_owned(), c[7].clone())])
+        );
+
+        let second = page(first.cursor.as_deref());
+        assert_eq!(changesets(&second), [c[2].as_str(), c[0].as_str()]);
+        assert_eq!((second.truncated, second.cursor), (false, None));
+        assert_eq!(second.entries[1].kind, Some(EntryKindOut::File));
+        assert_eq!(second.entries[1].id, Some(blob(b"0")));
+        assert!(resolved.take().is_empty(), "a cursor resolves no revision");
+        let after_root = page(Some(&c[0]));
+        assert_eq!((after_root.entries.len(), after_root.truncated), (0, false));
+
+        let dir = ops.path_history(history(None, "dir/")).unwrap();
+        assert_eq!(dir.path, "dir");
+        assert_eq!(changesets(&dir), [c[7].as_str()]);
+        let tree = ops.read_tree(ls("main", None)).unwrap();
+        let listed = tree
+            .entries
+            .iter()
+            .find(|entry| entry.name == "dir")
+            .unwrap();
+        assert_eq!(
+            (dir.entries[0].kind, dir.entries[0].id.as_deref()),
+            (Some(EntryKindOut::Dir), Some(listed.id.as_str()))
+        );
+
+        let unknown = "0".repeat(64);
+        for cursor in ["main", &c[0][..12], "zz", unknown.as_str()] {
+            let req = PathHistoryReq {
+                cursor: Some(cursor.to_owned()),
+                ..history(None, "p")
+            };
+            let err = expect_err(ops.path_history(req), ErrorCode::InvalidArg);
+            assert_eq!(err.details["cursor"], cursor);
+        }
+    }
+
+    /// A path that no changeset on the first-parent chain ever touched is `E_PATH_NOT_FOUND`
+    /// `{rev, path}`, its hint the listing of the directory it would be in, whether it never
+    /// existed or exists only after the revision asked about; a path deleted since still has its
+    /// history. A limit of 0 and a path that is not one are `E_INVALID_ARG`, an unknown revision
+    /// `E_REV_NOT_FOUND`.
+    #[test]
+    fn a_path_that_never_existed_is_path_not_found() {
+        let (_dir, _root, ops) = new_store();
+        let c = chain(
+            &ops,
+            vec![
+                vec![text("src/lib.rs", "1"), text("gone", "1")],
+                vec![delete("gone")],
+                vec![text("later", "1")],
+            ],
+        );
+        let nope = expect_err(
+            ops.path_history(history(None, "nope")),
+            ErrorCode::PathNotFound,
+        );
+        assert_eq!(nope.details["rev"], "main");
+        assert_eq!(nope.details["path"], "nope");
+        assert_eq!(nope.hint.as_deref(), Some("swarmops ls main"));
+        let below = expect_err(
+            ops.path_history(history(None, "src/nope")),
+            ErrorCode::PathNotFound,
+        );
+        assert_eq!(below.hint.as_deref(), Some("swarmops ls main:src"));
+        let not_yet = expect_err(
+            ops.path_history(history(Some(&c[1]), "later")),
+            ErrorCode::PathNotFound,
+        );
+        assert_eq!(not_yet.details["rev"], c[1].as_str());
+
+        let gone = ops.path_history(history(None, "gone")).unwrap();
+        assert_eq!(changesets(&gone), [c[1].as_str(), c[0].as_str()]);
+        assert_eq!(gone.entries[0].op, ChangeOp::Delete);
+
+        let zero = PathHistoryReq {
+            limit: 0,
+            ..history(None, "gone")
+        };
+        expect_err(ops.path_history(zero), ErrorCode::InvalidArg);
+        for bad in ["", "/", "a//b"] {
+            let err = expect_err(ops.path_history(history(None, bad)), ErrorCode::InvalidArg);
+            assert_eq!(err.details["path"], bad);
+        }
+        expect_err(
+            ops.path_history(history(Some("release/none"), "gone")),
+            ErrorCode::RevNotFound,
+        );
+    }
+
+    /// Every page an agent gets by default stays under the operations spec's 64 KiB target (§9):
+    /// over a path that 500 changesets changed, with 60-byte titles, the default `path_history`
+    /// page and the default `log` page with that path, each in its envelope.
+    #[test]
+    fn a_default_history_page_stays_under_64_kib() {
+        let (_dir, root, ops) = new_store();
+        // Committed below the API, without syncs: what the pages hold is the subject here.
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+        let signature = Signature {
+            name: b"agent/worker-17".to_vec(),
+            email: b"worker-17@claude-code.swarmops.local".to_vec(),
+            secs: 1_760_000_000,
+            offset_secs: 0,
+            negative_zero: false,
+        };
+        let mut head: Option<ChangesetId> = None;
+        for i in 0..500_u32 {
+            let content = i.to_string();
+            let title = format!("{:x<55}{i:05}", "change the path, a title of 60 bytes ");
+            assert_eq!(title.len(), 60);
+            let outcome = repo
+                .commit(CommitRequest {
+                    parents: head.into_iter().collect(),
+                    changes: vec![Change {
+                        path: RepoPath::new("src/p").unwrap(),
+                        op: swarmops_repo::ChangeOp::Put {
+                            kind: LeafKind::File,
+                            content: content.into_bytes(),
+                        },
+                    }],
+                    author: signature.clone(),
+                    committer: signature.clone(),
+                    message: format!("{title}\n\nthe body is not in the page").into_bytes(),
+                    metadata: vec![
+                        ("agent".to_owned(), b"agent/worker-17".to_vec()),
+                        ("run_id".to_owned(), b"run-17".to_vec()),
+                    ],
+                    allow_empty: false,
+                    advance: None,
+                })
+                .unwrap();
+            head = Some(outcome.id);
+        }
+        drop(repo);
+        let head = head.unwrap().to_string();
+        ops.ref_set(&agent(), set("main", &head, None, true))
+            .unwrap();
+        let meta = || Meta {
+            repo: Some(root.to_string()),
+            elapsed_ms: 1_000,
+            resolved: BTreeMap::from([("main".to_owned(), head.clone())]),
+            auth: "trust".to_owned(),
+            recovered: None,
+        };
+
+        let page = ops.path_history(history(None, "src/p")).unwrap();
+        assert_eq!(
+            (page.entries.len(), page.truncated),
+            (DEFAULT_PATH_HISTORY_LIMIT, true)
+        );
+        let bytes = serde_json::to_vec(&Envelope::ok("path_history", page, meta())).unwrap();
+        assert!(bytes.len() <= 65_536, "path_history: {} bytes", bytes.len());
+
+        let log = LogReq {
+            paths: vec!["src".to_owned()],
+            ..log_req(None)
+        };
+        let page = ops.log(log).unwrap();
+        assert_eq!(
+            (page.entries.len(), page.truncated),
+            (DEFAULT_LOG_LIMIT, true)
+        );
+        let bytes = serde_json::to_vec(&Envelope::ok("log", page, meta())).unwrap();
+        assert!(bytes.len() <= 65_536, "log --path: {} bytes", bytes.len());
+    }
+}
+
+/// Blobs by id (operations spec §1's `blob_put` and `blob_has`, §0's `{blob: id}` content):
+/// content stored first, outside any commit, then named by a commit's change list by its id.
+mod blob {
+    use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+
+    use super::*;
+
+    /// Stores `content` as [`agent`]: what `blob_put` returns.
+    #[track_caller]
+    fn blob_put(ops: &LocalOps, content: ContentInput) -> BlobPutResp {
+        ops.blob_put(&agent(), BlobPutReq { content })
+            .expect("blob_put")
+    }
+
+    /// A put of blob `id`, named by its id, as a regular file at `path`.
+    fn named(path: &str, id: &str) -> ChangeInput {
+        put(path, ContentInput::Blob(id.to_owned()), None)
+    }
+
+    /// `blob_put` stores content as a blob and says whether it placed it (`written`): from a
+    /// client file, then the same bytes in base64, stored already. A commit names the blob by
+    /// id, as a file and as an executable: it writes no blob, and reads back as the content.
+    /// The changes made with the content itself give the same root. `blob_put` takes inline,
+    /// base64 or file content, not `{"blob": id}`, which names content the store holds already.
+    #[test]
+    fn blob_put_then_commit_by_id() {
+        let (dir, _root, ops) = new_store();
+        let content = noise(4096);
+        let file = utf8(dir.path().join("payload.bin"));
+        fs::write(&file, &content).unwrap();
+        let first = blob_put(&ops, ContentInput::File(file.to_string()));
+        assert_eq!(
+            first,
+            BlobPutResp {
+                blob: blob(&content),
+                size: 4096,
+                written: true,
+            }
+        );
+        let again = blob_put(&ops, ContentInput::Base64(STANDARD.encode(&content)));
+        assert_eq!(
+            again,
+            BlobPutResp {
+                written: false,
+                ..first.clone()
+            }
+        );
+
+        let by_id = ops
+            .commit(
+                &agent(),
+                commit_req(
+                    None,
+                    vec![
+                        named("data/payload.bin", &first.blob),
+                        put(
+                            "tool",
+                            ContentInput::Blob(first.blob.to_uppercase()),
+                            Some(ModeInput::Exec),
+                        ),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!((by_id.files_changed, by_id.blobs_written), (2, 0));
+        let read = ops
+            .read_file(cat(&by_id.changeset, "data/payload.bin"))
+            .unwrap();
+        assert_eq!(
+            (read.blob.as_str(), read.size, read.kind),
+            (first.blob.as_str(), 4096, FileKind::File)
+        );
+        assert_eq!(STANDARD.decode(&read.content).unwrap(), content);
+        let tool = ops.read_file(cat(&by_id.changeset, "tool")).unwrap();
+        assert_eq!((tool.blob, tool.kind), (first.blob.clone(), FileKind::Exec));
+        let shown = ops.show(show(&by_id.changeset)).unwrap();
+        assert_eq!(
+            shown.changes[0],
+            ChangeOut {
+                path: "data/payload.bin".to_owned(),
+                op: ChangeOp::Put,
+                kind: Some(FileKind::File),
+                blob: Some(first.blob.clone()),
+            }
+        );
+
+        let by_content = ops
+            .commit(
+                &agent(),
+                commit_req(
+                    None,
+                    vec![
+                        put(
+                            "data/payload.bin",
+                            ContentInput::File(file.to_string()),
+                            None,
+                        ),
+                        put(
+                            "tool",
+                            ContentInput::Base64(STANDARD.encode(&content)),
+                            Some(ModeInput::Exec),
+                        ),
+                    ],
+                ),
+            )
+            .unwrap();
+        assert_eq!(by_content.root, by_id.root);
+
+        let err = expect_err(
+            ops.blob_put(
+                &agent(),
+                BlobPutReq {
+                    content: ContentInput::Blob(first.blob.clone()),
+                },
+            ),
+            ErrorCode::InvalidArg,
+        );
+        assert_eq!(err.details["blob"], first.blob.as_str(), "{err:?}");
+    }
+
+    /// A change that names by id a blob the store lacks, a tree or a changeset is
+    /// `E_INVALID_ARG` `{index, path, blob}`, whose hint stores the content first; one whose id
+    /// is not 64 hex digits is refused with the list's other malformed changes. Either way the
+    /// commit writes nothing, the put of new content beside it included.
+    #[test]
+    fn a_commit_naming_a_missing_blob_or_a_tree_is_an_invalid_argument() {
+        let (_dir, _root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("a.txt", "a")]);
+        let tree = ops.show(show(&c1)).unwrap().root;
+        let missing = blob(b"never stored");
+        for (id, what) in [
+            (missing.as_str(), "a blob the store lacks"),
+            (tree.as_str(), "a tree"),
+            (c1.as_str(), "a changeset"),
+        ] {
+            let changes = vec![text("new.txt", "new"), named("b/named.bin", id)];
+            let err = expect_err(
+                ops.commit(&agent(), commit_req(Some(&c1), changes)),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(
+                Value::Object(err.details),
+                json!({"index": 1, "path": "b/named.bin", "blob": id}),
+                "{what}"
+            );
+            assert!(
+                err.message.starts_with("change 1 (\"b/named.bin\"): "),
+                "{what}: {}",
+                err.message
+            );
+            assert_eq!(
+                err.hint.as_deref(),
+                Some("swarmops blob put <file>"),
+                "{what}"
+            );
+        }
+        let long = format!("{missing}0");
+        let not_hex = "g".repeat(64);
+        for bad in ["abc", long.as_str(), not_hex.as_str()] {
+            let changes = vec![text("new.txt", "new"), named("x", bad)];
+            let err = expect_err(
+                ops.commit(&agent(), commit_req(Some(&c1), changes)),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(
+                Value::Object(err.details),
+                json!({"index": 1, "path": "x", "blob": bad}),
+                "{bad}"
+            );
+        }
+        assert_eq!(ops.repo_info(InfoReq {}).unwrap().changesets, 1);
+        let unwritten = BlobHasReq {
+            ids: vec![blob(b"new")],
+        };
+        assert_eq!(
+            ops.blob_has(unwritten).unwrap().present,
+            Vec::<String>::new()
+        );
+    }
+
+    /// `blob_has` gives the ids of those asked for that the store holds as blobs, in lowercase
+    /// hex, in the order first given, each once: a tree, a changeset and an id the store lacks
+    /// are not among them. An id that is not 64 hex digits is `E_INVALID_ARG` `{index, blob}`.
+    #[test]
+    fn blob_has_reports_the_present_blobs() {
+        let (_dir, _root, ops) = new_store();
+        let stored = blob_put(&ops, ContentInput::Inline("stored\n".to_owned())).blob;
+        let c1 = commit(&ops, None, vec![text("a.txt", "a")]);
+        let tree = ops.show(show(&c1)).unwrap().root;
+        let committed = blob(b"a");
+        let unknown = blob(b"never stored");
+        let ask = |ids: &[&str]| {
+            ops.blob_has(BlobHasReq {
+                ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            })
+        };
+        let has = ask(&[
+            &unknown,
+            &stored.to_uppercase(),
+            &tree,
+            &c1,
+            &committed,
+            &stored,
+        ])
+        .unwrap();
+        assert_eq!(
+            has,
+            BlobHasResp {
+                present: vec![stored.clone(), committed],
+            }
+        );
+        assert_eq!(ask(&[]).unwrap().present, Vec::<String>::new());
+        let err = expect_err(ask(&[&stored, "not-an-id"]), ErrorCode::InvalidArg);
+        assert_eq!(
+            Value::Object(err.details),
+            json!({"index": 1, "blob": "not-an-id"})
+        );
+    }
+
+    /// `blob_put` is a mutation, as `commit` is (operations spec §5): it takes the caller's
+    /// identity, which the CLI and the MCP server refuse to go without (`E_IDENTITY_REQUIRED`,
+    /// their tests), and records nothing of it, a blob carrying no metadata. `blob_has` is a
+    /// read, and takes none.
+    #[test]
+    fn blob_put_needs_an_identity() {
+        let _: fn(&LocalOps, &Identity, BlobPutReq) -> Result<BlobPutResp, OpError> =
+            <LocalOps as StoreOps>::blob_put;
+        let _: fn(&LocalOps, BlobHasReq) -> Result<BlobHasResp, OpError> =
+            <LocalOps as StoreOps>::blob_has;
+        let err = expect_err(require_identity(None), ErrorCode::IdentityRequired);
+        assert_eq!(err.exit, 5);
+        // Two callers that store the same bytes store one blob: the first places it.
+        let (_dir, _root, ops) = new_store();
+        let content = || BlobPutReq {
+            content: ContentInput::Inline("shared\n".to_owned()),
+        };
+        let one = Identity::parse("agent/worker-1").unwrap();
+        let two = Identity::parse("agent/worker-2").unwrap();
+        let first = ops.blob_put(&one, content()).unwrap();
+        let second = ops.blob_put(&two, content()).unwrap();
+        assert_eq!((first.written, second.written), (true, false));
+        assert_eq!(first.blob, second.blob);
+    }
+
+    /// `blob_put`'s content is held to a put's limit, 512 MiB, measured before it is read: a
+    /// sparse file one byte over it is `E_TOO_LARGE`, and nothing is stored.
+    #[test]
+    fn blob_put_refuses_more_than_512_mib_before_reading() {
+        let (dir, _root, ops) = new_store();
+        let limit: u64 = 512 * 1024 * 1024;
+        let huge = utf8(dir.path().join("huge.bin"));
+        fs::File::create(&huge).unwrap().set_len(limit + 1).unwrap();
+        let err = expect_err(
+            ops.blob_put(
+                &agent(),
+                BlobPutReq {
+                    content: ContentInput::File(huge.to_string()),
+                },
+            ),
+            ErrorCode::TooLarge,
+        );
+        assert_eq!(
+            (
+                &err.details["size"],
+                &err.details["limit"],
+                &err.details["file"]
+            ),
+            (&json!(limit + 1), &json!(limit), &json!(huge.as_str()))
+        );
+        assert_eq!(err.details["scope"], "put", "one content's limit");
+    }
+}
+
+/// `read_file` from an offset or by lines, and `read_tree` to a depth with sizes (operations
+/// spec §1).
+mod spans {
+    use std::fmt::Write as _;
+
+    use swarmops_api::{Envelope, LineRange, MAX_TREE_DEPTH, Meta, TreeListing};
+
+    use super::*;
+
+    /// What a listing lists of each entry: its `path`, name, kind and size.
+    type Row = (Option<String>, String, EntryKindOut, Option<u64>);
+
+    /// `read_file` of `path` at `rev`, from byte `offset`, at most `max_bytes`.
+    fn at(rev: &str, path: &str, offset: u64, max_bytes: u64) -> ReadFileReq {
+        ReadFileReq {
+            offset,
+            max_bytes,
+            ..cat(rev, path)
+        }
+    }
+
+    /// `read_file` of lines `first` to `last` of `path` at `rev`, at most `max_bytes`.
+    fn lines(rev: &str, path: &str, (first, last): (u64, u64), max_bytes: u64) -> ReadFileReq {
+        ReadFileReq {
+            lines: Some(LineRange { first, last }),
+            max_bytes,
+            ..cat(rev, path)
+        }
+    }
+
+    /// The length of `text` in bytes.
+    fn len(text: &str) -> u64 {
+        u64::try_from(text.len()).unwrap()
+    }
+
+    /// The tree of the listing tests: `a/` (with `b.rs` and `c/d.md`), `a.txt`, `bin/run` (an
+    /// executable) and `link` (a symlink to `a.txt`). By bytes `a.txt` sorts before `a/b.rs`, but
+    /// in pre-order `a` and everything below it come first, as `a` sorts before `a.txt`. The
+    /// changeset's id.
+    fn listing_tree(ops: &LocalOps) -> String {
+        let inline = |text: &str| ContentInput::Inline(text.to_owned());
+        commit(
+            ops,
+            None,
+            vec![
+                text("a.txt", "12345"),
+                text("a/b.rs", "fn b() {}\n"),
+                text("a/c/d.md", "# d\n"),
+                put("bin/run", inline("#!/bin/sh\n"), Some(ModeInput::Exec)),
+                put("link", inline("a.txt"), Some(ModeInput::Symlink)),
+            ],
+        )
+    }
+
+    /// `listing`'s entries, each as a [`Row`].
+    fn rows(listing: &TreeListing) -> Vec<Row> {
+        (listing.entries.iter())
+            .map(|entry| {
+                (
+                    entry.path.clone(),
+                    entry.name.clone(),
+                    entry.kind,
+                    entry.size,
+                )
+            })
+            .collect()
+    }
+
+    fn row(path: Option<&str>, name: &str, kind: EntryKindOut, size: Option<u64>) -> Row {
+        (path.map(str::to_owned), name.to_owned(), kind, size)
+    }
+
+    /// Each entry's path below the listed directory: its `path`, or at depth 1 its name.
+    fn paths(listing: &TreeListing) -> Vec<String> {
+        (listing.entries.iter())
+            .map(|entry| entry.path.clone().unwrap_or_else(|| entry.name.clone()))
+            .collect()
+    }
+
+    /// 64 KiB of text read 16 KiB at a time, each page from the one before's `next_offset`: the
+    /// pages are the file, in order; each but the last is truncated, and each but the first says
+    /// where it starts.
+    #[test]
+    fn read_file_at_an_offset_pages_through_a_file() {
+        let (_dir, _root, ops) = new_store();
+        let mut file = String::new();
+        for n in 0..4096 {
+            writeln!(file, "line {n:010}").unwrap();
+        }
+        assert_eq!(file.len(), 64 << 10);
+        let c = commit(&ops, None, vec![text("big.txt", &file)]);
+        let mut pages = Vec::new();
+        let mut offset = 0;
+        loop {
+            let page = ops.read_file(at(&c, "big.txt", offset, 16 << 10)).unwrap();
+            assert_eq!(
+                (page.encoding, page.size, page.offset, page.lines),
+                (
+                    ContentEncoding::Utf8,
+                    64 << 10,
+                    (offset > 0).then_some(offset),
+                    None
+                ),
+                "offset {offset}"
+            );
+            pages.push(page.content.clone());
+            let Some(next) = page.next_offset else {
+                assert!(!page.truncated, "offset {offset}");
+                break;
+            };
+            assert!(page.truncated, "offset {offset}");
+            assert_eq!(next, offset + len(&page.content), "offset {offset}");
+            offset = next;
+        }
+        assert_eq!(pages.len(), 4);
+        assert!(pages.concat() == file, "the pages are the file");
+    }
+
+    /// Text of 1-, 2-, 3- and 4-byte characters paged by `next_offset` with caps of 4 bytes and
+    /// more, which fall inside characters: every page is text, at most 3 bytes short of its cap
+    /// until the last, and the pages are the file.
+    #[test]
+    fn paging_by_next_offset_keeps_text_as_text() {
+        let (_dir, _root, ops) = new_store();
+        let file = "aé東😀".repeat(100);
+        let c = commit(&ops, None, vec![text("chars.txt", &file)]);
+        for max_bytes in [4, 5, 6, 7, 64, 333] {
+            let mut pages = Vec::new();
+            let mut offset = 0;
+            loop {
+                let page = ops
+                    .read_file(at(&c, "chars.txt", offset, max_bytes))
+                    .unwrap();
+                let what = format!("cap {max_bytes} at {offset}");
+                assert_eq!(page.encoding, ContentEncoding::Utf8, "{what}");
+                let taken = len(&page.content);
+                assert!(taken <= max_bytes, "{what}: {taken} bytes");
+                pages.push(page.content);
+                let Some(next) = page.next_offset else {
+                    break;
+                };
+                assert!(taken + 3 >= max_bytes, "{what}: {taken} bytes");
+                assert_eq!(next, offset + taken, "{what}");
+                offset = next;
+            }
+            assert!(pages.concat() == file, "cap {max_bytes}");
+        }
+    }
+
+    /// An offset inside a character starts with bytes that are not text: base64 of exactly the
+    /// bytes from there, cut at exactly the cap. An offset at a character's start is text again.
+    #[test]
+    fn an_offset_inside_a_character_returns_base64() {
+        let (_dir, _root, ops) = new_store();
+        // The emoji is bytes 1 to 4.
+        let file = "a😀b";
+        let c = commit(&ops, None, vec![text("emoji.txt", file)]);
+        for offset in [2_u64, 3, 4] {
+            let read = (ops.read_file(at(&c, "emoji.txt", offset, DEFAULT_MAX_BYTES))).unwrap();
+            assert_eq!(read.encoding, ContentEncoding::Base64, "offset {offset}");
+            let from = usize::try_from(offset).unwrap();
+            assert_eq!(
+                STANDARD.decode(&read.content).unwrap(),
+                &file.as_bytes()[from..]
+            );
+            assert_eq!(
+                (read.offset, read.truncated, read.next_offset),
+                (Some(offset), false, None)
+            );
+        }
+        let read = |offset: u64, max_bytes: u64| {
+            let read = ops
+                .read_file(at(&c, "emoji.txt", offset, max_bytes))
+                .unwrap();
+            (read.encoding, read.content, read.next_offset)
+        };
+        let text = |content: &str| (ContentEncoding::Utf8, content.to_owned());
+        let (encoding, content, next) = read(1, DEFAULT_MAX_BYTES);
+        assert_eq!(((encoding, content), next), (text("😀b"), None));
+        let (encoding, content, next) = read(5, DEFAULT_MAX_BYTES);
+        assert_eq!(((encoding, content), next), (text("b"), None));
+        // A cut inside the emoji backs the text off to it, where the next page starts.
+        let (encoding, content, next) = read(0, 3);
+        assert_eq!(((encoding, content), next), (text("a"), Some(1)));
+        let (encoding, content, next) = read(2, 2);
+        assert_eq!((encoding, next), (ContentEncoding::Base64, Some(4)));
+        assert_eq!(STANDARD.decode(content).unwrap(), &file.as_bytes()[2..4]);
+    }
+
+    /// Lines 3 to 5 of ten, a range whose end is past the last line, a range past the end, a
+    /// range cut by `max_bytes`, a file whose last line has no newline, an empty file, and a line
+    /// of bytes that are not text: what exists of each range, where it starts, which lines it
+    /// holds, and whether it was cut.
+    #[test]
+    fn read_file_lines_returns_the_lines_that_exist() {
+        let (_dir, _root, ops) = new_store();
+        let mut ten = String::new();
+        for n in 1..=10 {
+            writeln!(ten, "line {n}").unwrap();
+        }
+        let binary: &[u8] = b"\xff\n\x00\xfe\n\x01";
+        let c = commit(
+            &ops,
+            None,
+            vec![
+                text("ten.txt", &ten),
+                text("open.txt", "a\nbb\nccc"),
+                put(
+                    "bin.dat",
+                    ContentInput::Base64(STANDARD.encode(binary)),
+                    None,
+                ),
+                text("empty.txt", ""),
+            ],
+        );
+        // A read of lines `range`: its content, offset, lines, truncated and next_offset.
+        let read = |path: &str, range: (u64, u64), max_bytes: u64| {
+            let read = ops.read_file(lines(&c, path, range, max_bytes)).unwrap();
+            let shape = (read.offset, read.lines, read.truncated, read.next_offset);
+            (read.content, shape)
+        };
+        let held = |first, last| Some(LineRange { first, last });
+        let all = DEFAULT_MAX_BYTES;
+        assert_eq!(
+            read("ten.txt", (3, 5), all),
+            (
+                "line 3\nline 4\nline 5\n".to_owned(),
+                (Some(14), held(3, 5), false, None)
+            )
+        );
+        assert_eq!(
+            read("ten.txt", (1, 1), all),
+            ("line 1\n".to_owned(), (None, held(1, 1), false, None))
+        );
+        assert_eq!(
+            read("ten.txt", (9, 12), all),
+            (
+                "line 9\nline 10\n".to_owned(),
+                (Some(56), held(9, 10), false, None)
+            )
+        );
+        assert_eq!(
+            read("ten.txt", (11, 12), all),
+            (String::new(), (Some(len(&ten)), None, false, None))
+        );
+        assert_eq!(
+            read("ten.txt", (3, 5), 10),
+            (
+                "line 3\nlin".to_owned(),
+                (Some(14), held(3, 5), true, Some(24))
+            )
+        );
+        assert_eq!(
+            read("open.txt", (2, 3), all),
+            ("bb\nccc".to_owned(), (Some(2), held(2, 3), false, None))
+        );
+        assert_eq!(
+            read("open.txt", (3, 3), all),
+            ("ccc".to_owned(), (Some(5), held(3, 3), false, None))
+        );
+        assert_eq!(
+            read("open.txt", (4, 9), all),
+            (String::new(), (Some(8), None, false, None))
+        );
+        assert_eq!(
+            read("empty.txt", (1, 1), all),
+            (String::new(), (None, None, false, None))
+        );
+        let second = ops.read_file(lines(&c, "bin.dat", (2, 2), all)).unwrap();
+        assert_eq!(
+            (second.encoding, second.offset, second.lines),
+            (ContentEncoding::Base64, Some(2), held(2, 2))
+        );
+        assert_eq!(STANDARD.decode(&second.content).unwrap(), b"\x00\xfe\n");
+    }
+
+    /// An offset at or past the end returns empty content, not truncated, saying where it
+    /// starts, whatever the cap; an empty file is empty from its start. Short of the end, a cap
+    /// of 0 cuts all the same: nothing returned, and more to read from there.
+    #[test]
+    fn an_offset_past_the_end_is_empty() {
+        let (_dir, _root, ops) = new_store();
+        let c = commit(
+            &ops,
+            None,
+            vec![text("f.txt", "hello\n"), text("empty.txt", "")],
+        );
+        for offset in [6, 7, 1 << 40, u64::MAX] {
+            for max_bytes in [0, 1, DEFAULT_MAX_BYTES] {
+                let read = ops.read_file(at(&c, "f.txt", offset, max_bytes)).unwrap();
+                let what = format!("offset {offset}, max_bytes {max_bytes}");
+                assert_eq!(
+                    (read.content.as_str(), read.encoding, read.truncated),
+                    ("", ContentEncoding::Utf8, false),
+                    "{what}"
+                );
+                assert_eq!(
+                    (read.offset, read.next_offset, read.size),
+                    (Some(offset), None, 6),
+                    "{what}"
+                );
+            }
+        }
+        let empty = ops.read_file(cat(&c, "empty.txt")).unwrap();
+        assert_eq!(
+            (
+                empty.content.as_str(),
+                empty.truncated,
+                empty.offset,
+                empty.size
+            ),
+            ("", false, None, 0)
+        );
+        let none = ops.read_file(at(&c, "f.txt", 5, 0)).unwrap();
+        assert_eq!(
+            (none.content.as_str(), none.truncated, none.next_offset),
+            ("", true, Some(5))
+        );
+    }
+
+    /// `offset` and `lines` together, lines from 0 or a range that ends before it starts, a
+    /// `depth` of 0 or past 64, and a cursor that is no repository path: `E_INVALID_ARG`, which
+    /// names what broke the rule, before the revision is resolved.
+    #[test]
+    fn spans_depths_and_cursors_that_break_their_rules_are_invalid_args() {
+        let (_dir, _root, ops) = new_store();
+        let c = commit(&ops, None, vec![text("dir/f", "1\n2\n")]);
+        let all = DEFAULT_MAX_BYTES;
+        let both = ReadFileReq {
+            offset: 1,
+            ..lines(&c, "dir/f", (1, 1), all)
+        };
+        let err = expect_err(ops.read_file(both), ErrorCode::InvalidArg);
+        assert_eq!(
+            (&err.details["offset"], &err.details["lines"]),
+            (&json!(1), &json!({"first": 1, "last": 1}))
+        );
+        for (first, last) in [(0, 1), (0, 0), (3, 2)] {
+            let bad = lines(&c, "dir/f", (first, last), all);
+            let err = expect_err(ops.read_file(bad), ErrorCode::InvalidArg);
+            assert_eq!(err.details["lines"], json!({"first": first, "last": last}));
+        }
+        // An offset of 0 is the default, not a choice: lines go with it.
+        let second = ops.read_file(lines(&c, "dir/f", (2, 2), all)).unwrap();
+        assert_eq!(second.content, "2\n");
+
+        for depth in [0, MAX_TREE_DEPTH + 1, u32::MAX] {
+            let req = ReadTreeReq {
+                depth,
+                ..ls(&c, None)
+            };
+            let err = expect_err(ops.read_tree(req), ErrorCode::InvalidArg);
+            assert_eq!(err.details["depth"], depth);
+        }
+        let deepest = ReadTreeReq {
+            depth: MAX_TREE_DEPTH,
+            ..ls(&c, None)
+        };
+        assert_eq!(paths(&ops.read_tree(deepest).unwrap()), ["dir", "dir/f"]);
+        for cursor in ["", "/dir", "dir/", "dir//f", "..", "a/./b"] {
+            let req = ReadTreeReq {
+                cursor: Some(cursor.to_owned()),
+                ..ls(&c, None)
+            };
+            let err = expect_err(ops.read_tree(req), ErrorCode::InvalidArg);
+            assert_eq!(err.details["cursor"], cursor);
+        }
+
+        // Before the revision: one the store does not hold changes nothing.
+        let unknown = "0".repeat(64);
+        let req = ReadTreeReq {
+            depth: 0,
+            ..ls(&unknown, None)
+        };
+        expect_err(ops.read_tree(req), ErrorCode::InvalidArg);
+        let req = ReadFileReq {
+            offset: 1,
+            ..lines(&unknown, "dir/f", (1, 1), all)
+        };
+        expect_err(ops.read_file(req), ErrorCode::InvalidArg);
+    }
+
+    /// `depth` lists the directories below the listed one too, in pre-order (a directory, then
+    /// its entries, each directory's by name bytes), each entry with its `path` below the listed
+    /// directory and each leaf with its size; depth 1 lists the directory's own entries as
+    /// before, with sizes and without `path`.
+    #[test]
+    fn read_tree_depth_lists_in_pre_order_with_sizes() {
+        use EntryKindOut::{Dir, Exec, File, Symlink};
+
+        let (_dir, _root, ops) = new_store();
+        let c = listing_tree(&ops);
+        let listed = |path: Option<&str>, depth: u32| {
+            let req = ReadTreeReq {
+                depth,
+                ..ls(&c, path)
+            };
+            rows(&ops.read_tree(req).unwrap())
+        };
+        let deep = [
+            row(Some("a"), "a", Dir, None),
+            row(Some("a/b.rs"), "b.rs", File, Some(10)),
+            row(Some("a/c"), "c", Dir, None),
+            row(Some("a/c/d.md"), "d.md", File, Some(4)),
+            row(Some("a.txt"), "a.txt", File, Some(5)),
+            row(Some("bin"), "bin", Dir, None),
+            row(Some("bin/run"), "run", Exec, Some(10)),
+            row(Some("link"), "link", Symlink, Some(5)),
+        ];
+        assert_eq!(listed(None, 3), deep);
+        assert_eq!(
+            listed(None, MAX_TREE_DEPTH),
+            deep,
+            "no deeper than the tree"
+        );
+        let two: Vec<Row> = (deep.iter())
+            .filter(|row| row.0.as_deref() != Some("a/c/d.md"))
+            .cloned()
+            .collect();
+        assert_eq!(listed(None, 2), two);
+        assert_eq!(
+            listed(None, 1),
+            [
+                row(None, "a", Dir, None),
+                row(None, "a.txt", File, Some(5)),
+                row(None, "bin", Dir, None),
+                row(None, "link", Symlink, Some(5)),
+            ]
+        );
+        assert_eq!(
+            listed(Some("a"), 2),
+            [
+                row(Some("b.rs"), "b.rs", File, Some(10)),
+                row(Some("c"), "c", Dir, None),
+                row(Some("c/d.md"), "d.md", File, Some(4)),
+            ]
+        );
+        // Each id is the entry's blob or tree, as depth 1 gives it.
+        let req = ReadTreeReq {
+            depth: 2,
+            ..ls(&c, Some("a"))
+        };
+        let page = ops.read_tree(req).unwrap();
+        let flat = ops.read_tree(ls(&c, Some("a"))).unwrap();
+        assert_eq!(page.entries[0].id, blob(b"fn b() {}\n"));
+        assert_eq!(page.entries[1].id, flat.entries[1].id);
+        assert_eq!((page.truncated, page.cursor), (false, None));
+    }
+
+    /// The tree above at depth 3, paged 1, 2 and 3 entries at a time from each page's cursor:
+    /// the pages are the listing, each cursor its page's last path. A cursor resumes after the
+    /// path it names in pre-order, whether or not an entry is there: below a directory it names;
+    /// at the next entry past a name that is not there; after a file, whatever it names below
+    /// it; and past the depth listed, at the next entry the listing holds.
+    #[test]
+    fn read_tree_depth_pages_resume_after_the_cursor() {
+        let (_dir, _root, ops) = new_store();
+        let c = listing_tree(&ops);
+        let page = |depth: u32, limit: usize, cursor: Option<&str>| {
+            let req = ReadTreeReq {
+                depth,
+                limit,
+                cursor: cursor.map(str::to_owned),
+                ..ls(&c, None)
+            };
+            ops.read_tree(req).unwrap()
+        };
+        let all = paths(&page(3, DEFAULT_READ_TREE_LIMIT, None));
+        assert_eq!(
+            all,
+            [
+                "a", "a/b.rs", "a/c", "a/c/d.md", "a.txt", "bin", "bin/run", "link"
+            ]
+        );
+        for limit in [1, 2, 3] {
+            let mut seen = Vec::new();
+            let mut cursor: Option<String> = None;
+            loop {
+                let got = page(3, limit, cursor.as_deref());
+                let names = paths(&got);
+                assert!(names.len() <= limit, "limit {limit}");
+                assert_eq!(
+                    got.cursor.as_ref(),
+                    got.truncated.then(|| names.last().unwrap()),
+                    "limit {limit}"
+                );
+                seen.extend(names);
+                if !got.truncated {
+                    break;
+                }
+                cursor = got.cursor;
+            }
+            assert_eq!(seen, all, "limit {limit}");
+        }
+        let after =
+            |depth: u32, cursor: &str| paths(&page(depth, DEFAULT_READ_TREE_LIMIT, Some(cursor)));
+        assert_eq!(after(3, "a"), all[1..]);
+        assert_eq!(after(3, "a/bb"), all[2..]);
+        assert_eq!(after(3, "a/zz"), all[4..]);
+        assert_eq!(after(3, "a.txt/x"), all[5..]);
+        assert_eq!(after(3, "zzz"), Vec::<String>::new());
+        assert_eq!(after(1, "a/c/d.md"), ["a.txt", "bin", "link"]);
+        assert_eq!(after(1, "a.txt"), ["bin", "link"]);
+        let last = page(3, DEFAULT_READ_TREE_LIMIT, Some("link"));
+        assert_eq!(
+            (last.entries.len(), last.truncated, last.cursor),
+            (0, false, None)
+        );
+    }
+
+    /// The default `read_tree` page as the CLI prints it, in its envelope: 2,000 entries of
+    /// 30-byte names, files of 12,345 bytes, listed at depth 1 (a directory of the files) and at
+    /// depth 3 (two directories down, where each file's `path` is three names long). At both
+    /// depths it stays within 64 KiB, and the default is the most entries, in fifties, that do:
+    /// 50 more pass 64 KiB at depth 3.
+    #[test]
+    fn a_default_ls_page_stays_under_64_kib() {
+        let (_dir, root, ops) = new_store();
+        let name = |n: usize| format!("{n:030}");
+        let body = "x".repeat(12_345);
+        let mut changes = Vec::new();
+        for n in 0..2000 {
+            changes.push(text(&format!("wide/{}", name(n)), &body));
+            let deep = format!("deep/{}/{}/{}", name(0), name(1), name(n));
+            changes.push(text(&deep, &body));
+        }
+        let c = commit(&ops, None, changes);
+        let printed = |dir: &str, depth: u32, limit: usize| {
+            let req = ReadTreeReq {
+                depth,
+                limit,
+                ..ls(&c, Some(dir))
+            };
+            let listing = ops.read_tree(req).unwrap();
+            assert!(listing.truncated, "{dir}: a page of {limit}");
+            let meta = Meta {
+                repo: Some(root.to_string()),
+                elapsed_ms: 12_345,
+                resolved: BTreeMap::from([("main".to_owned(), c.clone())]),
+                auth: "trust".to_owned(),
+                recovered: None,
+            };
+            // The CLI prints the envelope compact, then a newline.
+            serde_json::to_string(&Envelope::ok("read_tree", listing, meta))
+                .unwrap()
+                .len()
+                + 1
+        };
+        let flat = printed("wide", 1, DEFAULT_READ_TREE_LIMIT);
+        let deep = printed("deep", 3, DEFAULT_READ_TREE_LIMIT);
+        assert!(
+            flat <= 65_536 && deep <= 65_536,
+            "{DEFAULT_READ_TREE_LIMIT} entries: {flat} bytes at depth 1, {deep} at depth 3"
+        );
+        let more = DEFAULT_READ_TREE_LIMIT + 50;
+        let past = printed("deep", 3, more);
+        assert!(
+            past > 65_536,
+            "{more} entries at depth 3 print in {past} bytes: the default could be larger"
+        );
+    }
+}
+
+/// `derive` (operations spec §1): the eager derived values of the changesets the journal records
+/// after a frame, how many it derived and found stored, and where to go on.
+mod derive {
+    use swarmops_api::{DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp};
+
+    use super::*;
+
+    fn req(after: Option<u64>, limit: usize) -> DeriveReq {
+        DeriveReq { after, limit }
+    }
+
+    fn resp(derived: u64, cached: u64, next: Option<u64>) -> DeriveResp {
+        DeriveResp {
+            derived,
+            cached,
+            next,
+        }
+    }
+
+    /// Over three commits (frames 0 to 2), the first call derives their skip lists and says to
+    /// go on after frame 2; from there nothing is left and `next` is omitted; from the first
+    /// frame the three are found stored. `limit` bounds the frames a call reads, and a `limit`
+    /// of 0 reads none and gives the journal's last frame. It needs no identity and resolves no
+    /// revision. A request of `{}` reads 1,000 frames from the first, and a response without a
+    /// `next` omits it.
+    #[test]
+    fn derive_reports_what_it_derived() {
+        let (_dir, root, ops) = new_store();
+        assert_eq!(
+            ops.derive(req(None, DEFAULT_DERIVE_LIMIT)).unwrap(),
+            resp(0, 0, None)
+        );
+        let c1 = commit(&ops, None, vec![text("a.txt", "1")]);
+        let c2 = commit(&ops, Some(&c1), vec![text("a.txt", "2")]);
+        let c3 = commit(&ops, Some(&c2), vec![text("a.txt", "3")]);
+
+        let first = ops.derive(req(None, DEFAULT_DERIVE_LIMIT)).unwrap();
+        assert_eq!(first, resp(3, 0, Some(2)));
+        for id in [&c1, &c2, &c3] {
+            let list = format!(
+                "meta/derived/first_parent_skip_list/1/{}/{}",
+                &id[..2],
+                &id[2..]
+            );
+            assert!(root.join(&list).is_file(), "{list}");
+        }
+        assert_eq!(
+            ops.derive(req(Some(2), DEFAULT_DERIVE_LIMIT)).unwrap(),
+            resp(0, 0, None)
+        );
+        assert_eq!(
+            ops.derive(req(None, DEFAULT_DERIVE_LIMIT)).unwrap(),
+            resp(0, 3, Some(2))
+        );
+        assert_eq!(ops.derive(req(Some(0), 1)).unwrap(), resp(0, 1, Some(1)));
+        assert_eq!(ops.derive(req(None, 0)).unwrap(), resp(0, 0, Some(2)));
+
+        let resolved = Resolved::default();
+        let recorded = ops.recording(&resolved).derive(req(None, 1)).unwrap();
+        assert_eq!(recorded, resp(0, 1, Some(0)));
+        assert_eq!(resolved.take(), BTreeMap::new(), "no revision resolved");
+
+        let wire = serde_json::to_value(resp(0, 0, None)).unwrap();
+        assert_eq!(wire, json!({"derived": 0, "cached": 0}));
+        let wire = serde_json::to_value(first).unwrap();
+        assert_eq!(wire, json!({"derived": 3, "cached": 0, "next": 2}));
+        let defaults: DeriveReq = serde_json::from_value(json!({})).unwrap();
+        assert_eq!(defaults, req(None, 1000));
+    }
+}
+
+/// `diff` (operations spec §1): the files that differ between two revisions, a page at a time,
+/// by name, with line counts or with unified hunks.
+mod diff {
+    use std::fmt::Write as _;
+    use std::sync::Arc;
+
+    use swarmops_api::{
+        DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, Diff, DiffFormat,
+        DiffReq, Envelope, FileDiff, Meta,
+    };
+    use swarmops_testkit::fs::NoSyncFs;
+    use swarmops_testkit::repo::{put as repo_put, request};
+
+    use super::*;
+
+    /// A diff of `from` to `to` in `format`, every other field at its default.
+    fn diff_req(from: &str, to: &str, format: DiffFormat) -> DiffReq {
+        DiffReq {
+            from: from.into(),
+            to: to.into(),
+            paths: Vec::new(),
+            format,
+            context: DEFAULT_DIFF_CONTEXT,
+            limit: DEFAULT_DIFF_LIMIT,
+            cursor: None,
+            max_bytes: DEFAULT_DIFF_MAX_BYTES,
+        }
+    }
+
+    /// The paths of a page's files, in its order.
+    fn paths_of(page: &Diff) -> Vec<String> {
+        page.files.iter().map(|file| file.path.clone()).collect()
+    }
+
+    /// How many bytes `files` take as the JSON array they print as.
+    fn json_len(files: &[FileDiff]) -> usize {
+        serde_json::to_string(files).unwrap().len()
+    }
+
+    /// A symlink put at `path`, to `target`.
+    fn symlink(path: &str, target: &str) -> ChangeInput {
+        put(
+            path,
+            ContentInput::Inline(target.to_owned()),
+            Some(ModeInput::Symlink),
+        )
+    }
+
+    /// A pair of changesets with each status among the files between them: a text file
+    /// modified, an exec bit turned on, a symlink pointed elsewhere, a file deleted, one added,
+    /// and a file that became a symlink. Each format says exactly what it promises, in path
+    /// order: `names` the path and status; `stat` also whether the file is binary and the lines
+    /// inserted and deleted; `unified` also the kinds, the blobs and the hunks, with three lines
+    /// of context, git's header numbers and every line's break.
+    #[test]
+    fn diff_formats_names_stat_and_unified() {
+        let (_dir, _root, ops) = new_store();
+        let script = "#!/bin/sh\necho hi\n";
+        let c1 = commit(
+            &ops,
+            None,
+            vec![
+                text("README.md", "# acme\n\nline 3\nline 4\n"),
+                text("bin/run", script),
+                symlink("latest", "README.md"),
+                text("notes.txt", "kept\n"),
+                text("version", "1\n"),
+            ],
+        );
+        let c2 = commit(
+            &ops,
+            Some(&c1),
+            vec![
+                text("README.md", "# acme\n\nline three\nline 4\n"),
+                put(
+                    "bin/run",
+                    ContentInput::Inline(script.to_owned()),
+                    Some(ModeInput::Exec),
+                ),
+                symlink("latest", "src/lib.rs"),
+                delete("notes.txt"),
+                text("src/lib.rs", "pub fn f() {}\n"),
+                symlink("version", "README.md"),
+            ],
+        );
+        let diff = |format| serde_json::to_value(ops.diff(diff_req(&c1, &c2, format)).unwrap());
+        let status = |path: &str, status: &str| json!({"path": path, "status": status});
+        assert_eq!(
+            diff(DiffFormat::Names).unwrap(),
+            json!({
+                "from": c1,
+                "to": c2,
+                "files": [
+                    status("README.md", "modified"),
+                    status("bin/run", "modified"),
+                    status("latest", "modified"),
+                    status("notes.txt", "deleted"),
+                    status("src/lib.rs", "added"),
+                    status("version", "type_changed"),
+                ],
+                "truncated": false,
+            })
+        );
+        let counted = |path: &str, status: &str, insertions: u64, deletions: u64| {
+            json!({
+                "path": path, "status": status, "binary": false,
+                "insertions": insertions, "deletions": deletions,
+            })
+        };
+        assert_eq!(
+            diff(DiffFormat::Stat).unwrap()["files"],
+            json!([
+                counted("README.md", "modified", 1, 1),
+                counted("bin/run", "modified", 0, 0),
+                counted("latest", "modified", 1, 1),
+                counted("notes.txt", "deleted", 0, 1),
+                counted("src/lib.rs", "added", 1, 0),
+                counted("version", "type_changed", 1, 1),
+            ])
+        );
+        let unified = diff(DiffFormat::Unified).unwrap();
+        assert_eq!(
+            (&unified["from"], &unified["to"], &unified["truncated"]),
+            (&json!(c1), &json!(c2), &json!(false))
+        );
+        assert!(unified.get("cursor").is_none(), "{unified}");
+        assert_eq!(unified["files"], unified_files(script));
+    }
+
+    /// `diff_formats_names_stat_and_unified`'s files in `unified`.
+    fn unified_files(script: &str) -> Value {
+        let line = |op: &str, text: &str| json!({"op": op, "text": text});
+        let hunk = |old: [u64; 2], new: [u64; 2], lines: Vec<Value>| {
+            json!({
+                "old_start": old[0], "old_lines": old[1],
+                "new_start": new[0], "new_lines": new[1],
+                "lines": lines,
+            })
+        };
+        let replaced = |old: &str, new: &str| {
+            hunk([1, 1], [1, 1], vec![line("remove", old), line("add", new)])
+        };
+        json!([
+            {
+                "path": "README.md", "status": "modified",
+                "old_kind": "file", "new_kind": "file",
+                "old_blob": blob(b"# acme\n\nline 3\nline 4\n"),
+                "new_blob": blob(b"# acme\n\nline three\nline 4\n"),
+                "binary": false, "insertions": 1, "deletions": 1,
+                "hunks": [hunk([1, 4], [1, 4], vec![
+                    line("context", "# acme\n"),
+                    line("context", "\n"),
+                    line("remove", "line 3\n"),
+                    line("add", "line three\n"),
+                    line("context", "line 4\n"),
+                ])],
+            },
+            {
+                "path": "bin/run", "status": "modified",
+                "old_kind": "file", "new_kind": "exec",
+                "old_blob": blob(script.as_bytes()), "new_blob": blob(script.as_bytes()),
+                "binary": false, "insertions": 0, "deletions": 0, "hunks": [],
+            },
+            {
+                "path": "latest", "status": "modified",
+                "old_kind": "symlink", "new_kind": "symlink",
+                "old_blob": blob(b"README.md"), "new_blob": blob(b"src/lib.rs"),
+                "binary": false, "insertions": 1, "deletions": 1,
+                "hunks": [replaced("README.md", "src/lib.rs")],
+            },
+            {
+                "path": "notes.txt", "status": "deleted",
+                "old_kind": "file", "old_blob": blob(b"kept\n"),
+                "binary": false, "insertions": 0, "deletions": 1,
+                "hunks": [hunk([1, 1], [0, 0], vec![line("remove", "kept\n")])],
+            },
+            {
+                "path": "src/lib.rs", "status": "added",
+                "new_kind": "file", "new_blob": blob(b"pub fn f() {}\n"),
+                "binary": false, "insertions": 1, "deletions": 0,
+                "hunks": [hunk([0, 0], [1, 1], vec![line("add", "pub fn f() {}\n")])],
+            },
+            {
+                "path": "version", "status": "type_changed",
+                "old_kind": "file", "new_kind": "symlink",
+                "old_blob": blob(b"1\n"), "new_blob": blob(b"README.md"),
+                "binary": false, "insertions": 1, "deletions": 1,
+                "hunks": [replaced("1\n", "README.md")],
+            },
+        ])
+    }
+
+    /// A page holds at most `limit` files, in path order (by bytes: `b-x` before `b/c`), and the
+    /// next starts after the `cursor` the page before returned, in every format; the pages
+    /// together are the whole diff. A cursor need not be a path of the diff. `paths` keeps the
+    /// files at or below some paths (one trailing `/` taken, a file's path taking that file),
+    /// and pages within them.
+    #[test]
+    fn diff_pages_by_limit_and_resumes_after_the_cursor() {
+        let (_dir, _root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("keep", "k\n")]);
+        let added = ["z", "f/g/h", "e", "b/d", "b/c", "b-x", "a"];
+        let c2 = commit(
+            &ops,
+            Some(&c1),
+            added.iter().map(|path| text(path, path)).collect(),
+        );
+        let page = |format, limit: usize, cursor: Option<&str>, paths: &[&str]| {
+            let req = DiffReq {
+                limit,
+                cursor: cursor.map(str::to_owned),
+                paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+                ..diff_req(&c1, &c2, format)
+            };
+            ops.diff(req).unwrap()
+        };
+        let whole = page(DiffFormat::Names, 500, None, &[]);
+        assert_eq!(
+            paths_of(&whole),
+            ["a", "b-x", "b/c", "b/d", "e", "f/g/h", "z"]
+        );
+        assert!(!whole.truncated && whole.cursor.is_none(), "{whole:?}");
+        for format in [DiffFormat::Names, DiffFormat::Stat, DiffFormat::Unified] {
+            let (mut cursor, mut pages, mut files) = (None, Vec::new(), Vec::new());
+            // A page per file at most: a diff that pages on past its end fails, never hangs.
+            for _ in 0..added.len() {
+                let next = page(format, 3, cursor.as_deref(), &[]);
+                pages.push(paths_of(&next));
+                let last = next.files.last().map(|file| file.path.clone());
+                files.extend(next.files);
+                if !next.truncated {
+                    assert_eq!(next.cursor, None, "{format:?}");
+                    break;
+                }
+                assert_eq!(
+                    next.cursor, last,
+                    "{format:?}: the cursor is the page's last path"
+                );
+                cursor = next.cursor;
+            }
+            assert_eq!(
+                pages,
+                [
+                    vec!["a", "b-x", "b/c"],
+                    vec!["b/d", "e", "f/g/h"],
+                    vec!["z"]
+                ],
+                "{format:?}"
+            );
+            assert_eq!(
+                files,
+                page(format, 500, None, &[]).files,
+                "{format:?}: the pages make the whole diff"
+            );
+        }
+        let after = |cursor: &str| paths_of(&page(DiffFormat::Names, 500, Some(cursor), &[]));
+        assert_eq!(after("c"), ["e", "f/g/h", "z"]);
+        let past = page(DiffFormat::Names, 500, Some("zz"), &[]);
+        assert!(past.files.is_empty() && !past.truncated && past.cursor.is_none());
+
+        let within = |paths: &[&str]| paths_of(&page(DiffFormat::Names, 500, None, paths));
+        assert_eq!(within(&["b/"]), ["b/c", "b/d"]);
+        assert_eq!(within(&["z", "b"]), ["b/c", "b/d", "z"]);
+        assert_eq!(within(&["f/g/h"]), ["f/g/h"]);
+        assert_eq!(within(&["nope"]), Vec::<String>::new());
+        let first = page(DiffFormat::Names, 1, None, &["b", "z"]);
+        assert_eq!(paths_of(&first), ["b/c"]);
+        assert_eq!(first.cursor.as_deref(), Some("b/c"));
+        let rest = page(DiffFormat::Names, 2, Some("b/c"), &["b", "z"]);
+        assert_eq!(
+            (paths_of(&rest), rest.truncated),
+            (vec!["b/d".to_owned(), "z".to_owned()], false)
+        );
+    }
+
+    /// `big.txt` before (`long` false) or after: 16 blocks, each a line that changes (short,
+    /// then 4 KiB long) and ten that do not, so that each change is a hunk of its own.
+    fn big(long: bool) -> String {
+        let mut text = String::new();
+        for n in 0..16 {
+            if long {
+                writeln!(text, "{n:02}{}", "y".repeat(4_093)).unwrap();
+            } else {
+                writeln!(text, "short {n:02}").unwrap();
+            }
+            for k in 0..10 {
+                writeln!(text, "keep {n:02}.{k}").unwrap();
+            }
+        }
+        text
+    }
+
+    /// The 4 KiB of file `f<i>`: four lines of 1 KiB.
+    fn four_kib(i: usize) -> String {
+        let mut text = String::new();
+        for k in 0..4 {
+            writeln!(text, "{i:02}-{k}{}", "x".repeat(1_019)).unwrap();
+        }
+        text
+    }
+
+    /// A `unified` page's files take at most `max_bytes` bytes as JSON: of 20 added files of
+    /// 4 KiB each, a 10 KiB page holds 2 and is truncated, where a third would not have fitted.
+    /// A page's first file always comes: one with 64 KiB of changes keeps the hunks that fit, in
+    /// order, marked `hunks_truncated`, and still counts every line it changes; with 1 byte, the
+    /// first file comes with no hunk at all. `names` and `stat` pages are held by `limit` alone.
+    #[test]
+    fn a_unified_page_stops_at_max_bytes() {
+        let (_dir, _root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("big.txt", &big(false))]);
+        let mut changes = vec![text("big.txt", &big(true))];
+        changes.extend((0..20).map(|i| text(&format!("f{i:02}"), &four_kib(i))));
+        let c2 = commit(&ops, Some(&c1), changes);
+        let unified = |max_bytes: u64, cursor: Option<&str>| {
+            let req = DiffReq {
+                max_bytes,
+                cursor: cursor.map(str::to_owned),
+                ..diff_req(&c1, &c2, DiffFormat::Unified)
+            };
+            ops.diff(req).unwrap()
+        };
+        let whole = ops
+            .diff(DiffReq {
+                paths: vec!["big.txt".to_owned()],
+                max_bytes: u64::MAX,
+                ..diff_req(&c1, &c2, DiffFormat::Unified)
+            })
+            .unwrap();
+        let all_hunks = whole.files[0].hunks.clone().unwrap();
+        assert_eq!(
+            (all_hunks.len(), whole.files[0].hunks_truncated),
+            (16, None)
+        );
+
+        // big.txt alone passes 10 KiB: it keeps the first hunks that fit, and the page ends.
+        let first = unified(10_240, None);
+        let [cut] = &first.files[..] else {
+            panic!("one file: {:?}", paths_of(&first));
+        };
+        assert_eq!(
+            (
+                cut.path.as_str(),
+                cut.hunks_truncated,
+                cut.insertions,
+                cut.deletions
+            ),
+            ("big.txt", Some(true), Some(16), Some(16))
+        );
+        assert_eq!(cut.hunks.as_deref(), Some(&all_hunks[..2]));
+        assert!(json_len(&first.files) <= 10_240);
+        let mut one_more = cut.clone();
+        one_more.hunks.as_mut().unwrap().push(all_hunks[2].clone());
+        assert!(json_len(&[one_more]) > 10_240, "a third hunk would not fit");
+        assert_eq!(
+            (first.truncated, first.cursor.as_deref()),
+            (true, Some("big.txt"))
+        );
+
+        // Then two of the 4 KiB files to a page, each page within 10 KiB.
+        let mut cursor = first.cursor;
+        for i in (0..20).step_by(2) {
+            let page = unified(10_240, cursor.as_deref());
+            assert_eq!(
+                paths_of(&page),
+                [format!("f{i:02}"), format!("f{:02}", i + 1)]
+            );
+            assert!(page.files.iter().all(|file| file.hunks_truncated.is_none()));
+            assert!(json_len(&page.files) <= 10_240, "f{i:02}");
+            if i + 2 < 20 {
+                let next = unified(10_240, page.cursor.as_deref());
+                let three = [page.files.clone(), vec![next.files[0].clone()]].concat();
+                assert!(
+                    json_len(&three) > 10_240,
+                    "f{i:02}: a third file would not fit"
+                );
+            }
+            assert_eq!(page.truncated, i + 2 < 20);
+            cursor = page.cursor;
+        }
+        assert_eq!(cursor, None);
+
+        // With room for nothing, the first file still comes, without a hunk.
+        let tiny = unified(1, None);
+        let [only] = &tiny.files[..] else {
+            panic!("one file: {:?}", paths_of(&tiny));
+        };
+        assert_eq!(
+            (only.path.as_str(), only.hunks.clone(), only.hunks_truncated),
+            ("big.txt", Some(Vec::new()), Some(true))
+        );
+        assert!(tiny.truncated);
+        for format in [DiffFormat::Names, DiffFormat::Stat] {
+            let req = DiffReq {
+                max_bytes: 1,
+                ..diff_req(&c1, &c2, format)
+            };
+            assert_eq!(ops.diff(req).unwrap().files.len(), 21, "{format:?}");
+        }
+    }
+
+    /// A `unified` page counts its files' bytes exactly, as the JSON array they print as: two
+    /// files that fill it to the byte both come, and with a byte less the second waits for the
+    /// next page. It stops at the first file that does not fit, even where a later, smaller one
+    /// would: no file is passed over. A first file cut to fit keeps exactly the hunks that do.
+    #[test]
+    fn a_unified_page_counts_its_bytes_exactly() {
+        let (_dir, _root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("big.txt", &big(false))]);
+        let eight_kib = [four_kib(2), four_kib(3)].concat();
+        let changes = vec![
+            text("big.txt", &big(true)),
+            text("x1", &four_kib(1)),
+            text("x2", &eight_kib),
+            text("x3", "small\n"),
+        ];
+        let c2 = commit(&ops, Some(&c1), changes);
+        let page = |paths: &[&str], max_bytes: usize| {
+            let req = DiffReq {
+                paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+                max_bytes: u64::try_from(max_bytes).unwrap(),
+                ..diff_req(&c1, &c2, DiffFormat::Unified)
+            };
+            ops.diff(req).unwrap()
+        };
+        // A file's own length as JSON.
+        let len = |file: &FileDiff| json_len(std::slice::from_ref(file)) - 2;
+        let xs = ["x1", "x2", "x3"];
+        let whole = page(&xs, usize::MAX);
+        let [x1, x2, x3] = &whole.files[..] else {
+            panic!("three files: {:?}", paths_of(&whole));
+        };
+        assert!(len(x2) > len(x3));
+        let both = 2 + len(x1) + 1 + len(x2);
+        assert_eq!(paths_of(&page(&xs, both)), ["x1", "x2"]);
+        let one_short = page(&xs, both - 1);
+        assert_eq!(paths_of(&one_short), ["x1"]);
+        assert_eq!(one_short.cursor.as_deref(), Some("x1"));
+        let room_for_x3 = page(&xs, 2 + len(x1) + 1 + len(x3));
+        assert_eq!(paths_of(&room_for_x3), ["x1"], "x2 is not passed over");
+
+        let all_hunks = page(&["big.txt"], usize::MAX).files[0]
+            .hunks
+            .clone()
+            .unwrap();
+        let mut two = page(&["big.txt"], usize::MAX).files[0].clone();
+        two.hunks = Some(all_hunks[..2].to_vec());
+        two.hunks_truncated = Some(true);
+        let kept = |max_bytes| {
+            page(&["big.txt"], max_bytes).files[0]
+                .hunks
+                .clone()
+                .unwrap()
+        };
+        assert_eq!(kept(2 + len(&two)), all_hunks[..2]);
+        assert_eq!(kept(2 + len(&two) - 1), all_hunks[..1]);
+    }
+
+    /// Binary files get no line counts and no hunks (`binary: true`), in `stat` and in
+    /// `unified`, which still gives their kinds and blobs: a NUL in the first 8,000 bytes, or
+    /// bytes that are not UTF-8 (Latin-1 text among them), on either side (text that becomes
+    /// binary, and binary that becomes text), added or modified.
+    /// A NUL past the first 8,000 bytes of UTF-8 is text.
+    #[test]
+    fn binary_and_non_utf8_files_have_no_hunks() {
+        let (_dir, _root, ops) = new_store();
+        let bytes = |path: &str, content: &[u8]| {
+            put(path, ContentInput::Base64(STANDARD.encode(content)), None)
+        };
+        let late_nul = |tail: &[u8]| [&[b'x'; 8_000][..], b"\0\n", tail].concat();
+        let c1 = commit(
+            &ops,
+            None,
+            vec![
+                bytes("becomes_binary.txt", b"text\n"),
+                bytes("becomes_text.txt", b"\xff\n"),
+                bytes("late_nul.txt", &late_nul(b"one\n")),
+                bytes("latin1.txt", b"caf\xe9\n"),
+                bytes("nul.bin", b"a\0b\n"),
+            ],
+        );
+        let c2 = commit(
+            &ops,
+            Some(&c1),
+            vec![
+                bytes("added.bin", b"\0\x01"),
+                bytes("becomes_binary.txt", b"\xff\xfe\n"),
+                bytes("becomes_text.txt", b"text\n"),
+                bytes("late_nul.txt", &late_nul(b"two\n")),
+                bytes("latin1.txt", b"caf\xe9!\n"),
+                bytes("nul.bin", b"a\0c\n"),
+            ],
+        );
+        let stat = ops.diff(diff_req(&c1, &c2, DiffFormat::Stat)).unwrap();
+        let binary =
+            |path: &str, status: &str| json!({"path": path, "status": status, "binary": true});
+        assert_eq!(
+            serde_json::to_value(&stat.files).unwrap(),
+            json!([
+                binary("added.bin", "added"),
+                binary("becomes_binary.txt", "modified"),
+                binary("becomes_text.txt", "modified"),
+                {"path": "late_nul.txt", "status": "modified", "binary": false,
+                 "insertions": 1, "deletions": 1},
+                binary("latin1.txt", "modified"),
+                binary("nul.bin", "modified"),
+            ])
+        );
+        let unified = ops.diff(diff_req(&c1, &c2, DiffFormat::Unified)).unwrap();
+        assert_eq!(unified.files.len(), 6);
+        for file in &unified.files {
+            assert!(
+                file.new_kind.is_some() && file.new_blob.is_some(),
+                "{file:?}"
+            );
+            if file.path == "late_nul.txt" {
+                assert_eq!(file.hunks.as_ref().map(Vec::len), Some(1), "{file:?}");
+                continue;
+            }
+            assert_eq!(
+                (file.binary, file.insertions, file.deletions, &file.hunks),
+                (Some(true), None, None, &None),
+                "{file:?}"
+            );
+        }
+    }
+
+    /// A default page stays under the operations spec's 64 KiB target for a response (§9) in
+    /// every format: 5,000 changed files with 40-byte paths, each format's first page printed in
+    /// the envelope the CLI prints it in.
+    #[test]
+    fn a_default_diff_page_stays_under_64_kib() {
+        let (_dir, root, ops) = new_store();
+        drop(ops);
+        // Nothing here outlives the test, so the setup's 10,000 blobs skip their syncs.
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+        let paths: Vec<String> = (0..5_000)
+            .map(|i| format!("src/mod{:02}/{i:04}-{}.txt", i / 100, "a".repeat(21)))
+            .collect();
+        assert!(paths.iter().all(|path| path.len() == 40));
+        let all = |content: &[u8]| paths.iter().map(|path| repo_put(path, content)).collect();
+        let c1 = repo
+            .commit(request(&[], all(b"one\ntwo\nthree\n"), "c1"))
+            .unwrap()
+            .id;
+        let c2 = repo
+            .commit(request(&[c1], all(b"one\n2\nthree\n"), "c2"))
+            .unwrap()
+            .id;
+        drop(repo);
+        let ops = LocalOps::open(&root).unwrap();
+        let (c1, c2) = (c1.to_string(), c2.to_string());
+        for format in [DiffFormat::Names, DiffFormat::Stat, DiffFormat::Unified] {
+            let page = ops.diff(diff_req(&c1, &c2, format)).unwrap();
+            assert!(page.truncated, "{format:?}");
+            let meta = Meta {
+                repo: Some(root.to_string()),
+                elapsed_ms: 1_000,
+                resolved: BTreeMap::from([(c1.clone(), c1.clone()), (c2.clone(), c2.clone())]),
+                auth: "trust".to_owned(),
+                recovered: None,
+            };
+            let printed = serde_json::to_string(&Envelope::ok("diff", page, meta)).unwrap();
+            assert!(
+                printed.len() <= 65_536,
+                "{format:?}: {} bytes",
+                printed.len()
+            );
+        }
+    }
+
+    /// `diff`'s errors: a revision that names nothing, on either side, is `E_REV_NOT_FOUND`, a
+    /// prefix of two changesets `E_AMBIGUOUS_ID`, and a string that is no revision
+    /// `E_INVALID_ARG`, as for every operation; and `E_INVALID_ARG` for a `limit` or a
+    /// `max_bytes` of 0, a malformed path and a malformed cursor, each named in `details`,
+    /// checked before any revision is resolved.
+    #[test]
+    fn diff_errors_map_to_codes() {
+        let (_dir, root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        let unknown = "0".repeat(64);
+        for (from, to) in [
+            (unknown.as_str(), c1.as_str()),
+            (c1.as_str(), unknown.as_str()),
+        ] {
+            let err = expect_err(
+                ops.diff(diff_req(from, to, DiffFormat::Names)),
+                ErrorCode::RevNotFound,
+            );
+            assert_eq!(err.details["rev"], unknown.as_str());
+        }
+        let err = expect_err(
+            ops.diff(diff_req(&c1, "HEAD", DiffFormat::Names)),
+            ErrorCode::InvalidArg,
+        );
+        assert_eq!(err.details["rev"], "HEAD");
+        insert_prefix_twins(&root);
+        let err = expect_err(
+            ops.diff(diff_req("abababababab", &c1, DiffFormat::Names)),
+            ErrorCode::AmbiguousId,
+        );
+        assert_eq!(err.details["rev"], "abababababab");
+
+        // The request's own rules, checked first: with revisions that name nothing too.
+        for (from, to) in [
+            (c1.as_str(), c1.as_str()),
+            (unknown.as_str(), unknown.as_str()),
+        ] {
+            let req = || diff_req(from, to, DiffFormat::Unified);
+            let err = expect_err(
+                ops.diff(DiffReq { limit: 0, ..req() }),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(err.details["limit"], 0);
+            let err = expect_err(
+                ops.diff(DiffReq {
+                    max_bytes: 0,
+                    ..req()
+                }),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(err.details["max_bytes"], 0);
+            for path in ["", "/", "/f", "a//b", "a//"] {
+                let paths = vec!["f".to_owned(), path.to_owned()];
+                let err = expect_err(ops.diff(DiffReq { paths, ..req() }), ErrorCode::InvalidArg);
+                assert_eq!(err.details["path"], path);
+            }
+            for cursor in ["", "/f", "a//b", "f/"] {
+                let req = DiffReq {
+                    cursor: Some(cursor.to_owned()),
+                    ..req()
+                };
+                let err = expect_err(ops.diff(req), ErrorCode::InvalidArg);
+                assert_eq!(err.details["cursor"], cursor);
+            }
+        }
+    }
+}
+
+/// `resolve_rev` (M2 Task 14).
+mod resolve_rev {
+    use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
+
+    use super::*;
+
+    fn resolve(ops: &LocalOps, rev: &str) -> Result<ResolvedRev, OpError> {
+        ops.resolve_rev(ResolveRevReq { rev: rev.into() })
+    }
+
+    fn named(id: &str, kind: RevKind) -> ResolvedRev {
+        ResolvedRev {
+            id: id.to_owned(),
+            kind,
+        }
+    }
+
+    /// `resolve_rev` names the full id of the changeset a revision names, resolved as every
+    /// operation resolves one, and its kind: `ref` for exactly a ref's name, `changeset` for a
+    /// full id (of either case), a prefix, or a `~N` walk (a ref's name with `~0` too). A revision
+    /// that names nothing is `E_REV_NOT_FOUND`, a prefix of two changesets `E_AMBIGUOUS_ID`, and
+    /// a string that is no revision `E_INVALID_ARG`, each with the revision in `details.rev`.
+    /// Made through a request's `recording`, the revision is in that request's `Resolved`.
+    #[test]
+    fn resolve_rev_names_the_kind() {
+        let (_dir, root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+        let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+        ops.ref_set(&agent(), set("main", &c2, None, true)).unwrap();
+        ops.ref_set(&agent(), set("release/1.0", &c1, None, true))
+            .unwrap();
+
+        assert_eq!(resolve(&ops, "main").unwrap(), named(&c2, RevKind::Ref));
+        assert_eq!(
+            resolve(&ops, "release/1.0").unwrap(),
+            named(&c1, RevKind::Ref)
+        );
+        for (rev, id) in [
+            ("main~1", &c1),
+            ("main~0", &c2),
+            ("release/1.0~0", &c1),
+            (c1.as_str(), &c1),
+            (&c2.to_uppercase(), &c2),
+            (&c2[..12], &c2),
+            (&format!("{}~1", &c2[..20]), &c1),
+        ] {
+            assert_eq!(
+                resolve(&ops, rev).unwrap(),
+                named(id, RevKind::Changeset),
+                "{rev}"
+            );
+        }
+
+        let unknown = "0".repeat(64);
+        for rev in ["release/2.0", "main~2", unknown.as_str(), &unknown[..12]] {
+            let err = expect_err(resolve(&ops, rev), ErrorCode::RevNotFound);
+            assert_eq!(err.details["rev"], rev);
+        }
+        for rev in ["", "HEAD", "main^", "feature/x", &c1[..11]] {
+            let err = expect_err(resolve(&ops, rev), ErrorCode::InvalidArg);
+            assert_eq!(err.details["rev"], rev);
+        }
+        insert_prefix_twins(&root);
+        let err = expect_err(resolve(&ops, "abababababab"), ErrorCode::AmbiguousId);
+        assert_eq!(err.details["rev"], "abababababab");
+
+        let resolved = Resolved::default();
+        let request = ops.recording(&resolved);
+        let req = ResolveRevReq {
+            rev: "main~1".into(),
+        };
+        assert_eq!(
+            request.resolve_rev(req).unwrap(),
+            named(&c1, RevKind::Changeset)
+        );
+        assert_eq!(
+            resolved.take(),
+            BTreeMap::from([("main~1".to_owned(), c1.clone())])
+        );
+    }
 }

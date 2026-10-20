@@ -84,12 +84,25 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         RepoError::PathNotFound { path: at } => {
             error(ErrorCode::PathNotFound, message).with_details(path(&at))
         }
+        // A mistake in the request, not damage (Decision 12): the change list names content the
+        // store does not hold. `commit` adds the change's index.
+        RepoError::MissingBlob { path: at, id } => error(
+            ErrorCode::InvalidArg,
+            format!("the store holds no blob {id}"),
+        )
+        .with_details(details([
+            ("path", at.as_str().into()),
+            ("blob", id.to_string().into()),
+        ]))
+        .with_hint("swarmops blob put <file>"),
         RepoError::RefName(name) => ref_name_invalid(name, message),
         RepoError::RefMoved { name, actual, .. } => ref_moved(&name, actual),
         RepoError::MissingObject { id, .. } => {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
+        // A derivation that fails on immutable inputs fails again on every call: a bug.
+        RepoError::Derived { .. } => error(ErrorCode::Internal, message),
     }
 }
 
@@ -606,6 +619,11 @@ mod tests {
             op,
             ErrorCode::PathNotFound,
         );
+        let missing_blob = RepoError::MissingBlob {
+            path: path(),
+            id: swarmops_core::BlobId(id().0),
+        };
+        maps(missing_blob, op, ErrorCode::InvalidArg);
         maps(
             RepoError::RefName("x".into()),
             op,
@@ -627,6 +645,11 @@ mod tests {
             op,
             ErrorCode::StoreCorrupt,
         );
+        let derived = RepoError::Derived {
+            name: "depth".into(),
+            why: "a cycle".into(),
+        };
+        maps(derived, op, ErrorCode::Internal);
     }
 
     /// A commit with `advance` whose ref moved first recorded nothing: `E_CAS_MISMATCH` (exit 4,

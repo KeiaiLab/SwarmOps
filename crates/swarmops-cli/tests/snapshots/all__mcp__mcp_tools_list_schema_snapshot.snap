@@ -31,6 +31,32 @@ expression: listed
       "title": "Describe the store"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The full id of the changeset a revision names (a ref name, a full id or a unique prefix of 12 or more hex digits, then any ~N suffixes), resolved as every tool resolves one, and its kind: ref when the revision is exactly a ref's name, whose target moves with the ref, changeset otherwise. Its CLI command is swarmops resolve.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it.",
+        "properties": {
+          "rev": {
+            "description": "The revision to resolve. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rev"
+        ],
+        "title": "ResolveRevReq",
+        "type": "object"
+      },
+      "name": "resolve_rev",
+      "title": "Resolve a revision"
+    },
+    {
       "_meta": {
         "anthropic/maxResultSizeChars": 200000
       },
@@ -40,14 +66,51 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Reads one file at a revision, without a checkout, as UTF-8 text or base64; pass max_bytes of 32768 or less (less for a binary file), since clients limit long tool results and this one holds the content twice.",
+      "description": "Reads one file at a revision, without a checkout, as UTF-8 text or base64, from offset or the lines a range names; pass max_bytes of 32768 or less (less for a binary file), since clients limit long tool results and this one holds the content twice, and read on from next_offset while the result is truncated.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout.",
+        "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or\na range of its lines.",
         "properties": {
+          "lines": {
+            "anyOf": [
+              {
+                "description": "A range of a file's lines, numbered from 1: `first` to `last`, both included.",
+                "properties": {
+                  "first": {
+                    "description": "The range's first line: at least 1.",
+                    "format": "uint64",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "last": {
+                    "description": "The range's last line: at least `first`.",
+                    "format": "uint64",
+                    "minimum": 1,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "first",
+                  "last"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Read these lines instead, numbered from 1, both ends included: a line ends after its\nnewline, and a last line without one is a line too. The lines of the range that exist\ncome back, none past the file's last. Give this or `offset`, not both (`E_INVALID_ARG`)."
+          },
           "max_bytes": {
             "default": 1048576,
-            "description": "The most content bytes to return; a longer file comes back truncated.",
+            "description": "The most content bytes to return; more comes back truncated, with the `next_offset` to\nread on from.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Where to start reading, in bytes from the file's start: a truncated read's `next_offset`\nreads on from where it stopped. An offset past the end gives empty content. Give this or\n`lines`, not both (`E_INVALID_ARG`).",
             "format": "uint64",
             "minimum": 0,
             "type": "integer"
@@ -78,10 +141,10 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Lists one directory at a revision, without a checkout, a page of entries at a time; pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
+      "description": "Lists one directory at a revision, without a checkout, a page of entries at a time, each file with its size, and with depth the directories below it too; pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime.",
+        "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime; with `depth`, the directories below it too.",
         "properties": {
           "cursor": {
             "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
@@ -90,8 +153,16 @@ expression: listed
               "null"
             ]
           },
+          "depth": {
+            "default": 1,
+            "description": "How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so on, up\nto 64 (0 or more than 64 is `E_INVALID_ARG`).",
+            "format": "uint32",
+            "maximum": 64,
+            "minimum": 1,
+            "type": "integer"
+          },
           "limit": {
-            "default": 500,
+            "default": 250,
             "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
             "format": "uint",
             "minimum": 1,
@@ -177,6 +248,13 @@ expression: listed
             "minimum": 1,
             "type": "integer"
           },
+          "paths": {
+            "description": "Only the changesets that change one of these paths: a file (its content or kind, or\nwhether it is there), or a directory and anything below it; one trailing `/` is taken.\nOmitted or empty for every changeset.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
           "rev": {
             "anyOf": [
               {
@@ -195,6 +273,145 @@ expression: listed
       },
       "name": "log",
       "title": "List history"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The changesets that changed a file, or anything below a directory, newest first along first parents from main unless rev says otherwise, each with what the path holds after it (the CLI command is history); pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`path_history` (CLI `history`): the changesets that changed what a path holds, newest first,\nfollowing first parents, a page at a time.",
+        "properties": {
+          "cursor": {
+            "description": "Resume a history: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page continues from the first parent of the\nchangeset it names, and `rev` is not used.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 50,
+            "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+            "format": "uint",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "The repository path: a file, whose history is that of its content and kind, or a\ndirectory, whose history is that of everything below it. One trailing `/` is taken.",
+            "type": "string"
+          },
+          "rev": {
+            "anyOf": [
+              {
+                "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where to start; `main` when omitted."
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "PathHistoryReq",
+        "type": "object"
+      },
+      "name": "path_history",
+      "title": "List a path's history"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The files that differ between two revisions, in path order: with format names (the default) each one's path and status, with stat also its line counts, with unified also its hunks; pass a limit of 100 or less, keep max_bytes at 32768 or less for unified, and page on with the cursor, since clients limit long tool results.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`diff`: the files that differ between two revisions, in path order, a page at a time.",
+        "properties": {
+          "context": {
+            "default": 3,
+            "description": "The unchanged lines around each change in a `unified` hunk.",
+            "format": "uint32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "cursor": {
+            "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "format": {
+            "default": "names",
+            "description": "What to say of each file: `names` its path and status; `stat` also whether it is binary\nand, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and,\nfor text, its hunks. What `diff` says of each file.",
+            "oneOf": [
+              {
+                "const": "names",
+                "description": "Its path and status.",
+                "type": "string"
+              },
+              {
+                "const": "stat",
+                "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+                "type": "string"
+              },
+              {
+                "const": "unified",
+                "description": "Also its kinds, its blobs and, for text, its hunks.",
+                "type": "string"
+              }
+            ]
+          },
+          "from": {
+            "description": "The revision to diff from: the old side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          },
+          "limit": {
+            "default": 500,
+            "description": "The most files to return: at least 1 (0 is `E_INVALID_ARG`).",
+            "format": "uint",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_bytes": {
+            "default": 32768,
+            "description": "The most bytes a `unified` page's files take, as the JSON array `files` they print as: at\nleast 1 (0 is `E_INVALID_ARG`). The page stops before the first file that would take it\npast this, but always holds one file, whose hunks are cut to the first ones that fit\n(`hunks_truncated`) when they alone would pass it. A `names` or `stat` page is held by\n`limit` alone.",
+            "format": "uint64",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "paths": {
+            "description": "Only the files at or below these repository paths (a file's path takes that file; one\ntrailing `/` is taken); every file when empty or omitted.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "to": {
+            "description": "The revision to diff to: the new side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "title": "DiffReq",
+        "type": "object"
+      },
+      "name": "diff",
+      "title": "Diff two revisions"
     },
     {
       "annotations": {
@@ -318,7 +535,7 @@ expression: listed
             "type": "boolean"
           },
           "changes": {
-            "description": "What to change, relative to the parent.",
+            "description": "What to change, relative to the parent. The contents hold at most 1 GiB together, by the\nsizes they declare (inline text's length, the bytes base64 decodes to, a client file's\nlength; a `blob` named by id counts nothing): more is `E_TOO_LARGE` with `scope`\n`commit`, refused before any content is read. Store large contents with `blob_put` first,\nand name them by id.",
             "items": {
               "description": "One change of a commit.",
               "properties": {
@@ -355,6 +572,19 @@ expression: listed
                         },
                         {
                           "additionalProperties": false,
+                          "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                          "properties": {
+                            "blob": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "blob"
+                          ],
+                          "type": "object"
+                        },
+                        {
+                          "additionalProperties": false,
                           "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
                           "properties": {
                             "file": {
@@ -372,7 +602,7 @@ expression: listed
                       "type": "null"
                     }
                   ],
-                  "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE`); a `put` needs it, a `delete`\ntakes none."
+                  "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
                 },
                 "mode": {
                   "anyOf": [
@@ -456,6 +686,114 @@ expression: listed
       },
       "name": "commit",
       "title": "Commit a changeset"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Stores content as a blob, outside any commit, and gives its id: a commit's change then names it as {\"blob\": id} content instead of carrying its bytes, the way to commit a large file. A {\"file\": path} content is read by this server: give an absolute path. A hint's swarmops blob put is this tool.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's\nchange list can name it by its id (`{\"blob\": id}`) instead of carrying its bytes. The blob is\ndurable once the call returns; until a commit names it, nothing references it.",
+        "properties": {
+          "content": {
+            "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with\n`scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`\nhere. A `put`'s content, as an object with one key.",
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "description": "UTF-8 text, verbatim.",
+                "properties": {
+                  "inline": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "inline"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "Bytes in standard, padded base64.",
+                "properties": {
+                  "base64": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "base64"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                "properties": {
+                  "blob": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "blob"
+                ],
+                "type": "object"
+              },
+              {
+                "additionalProperties": false,
+                "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+                "properties": {
+                  "file": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
+              }
+            ]
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "BlobPutReq",
+        "type": "object"
+      },
+      "name": "blob_put",
+      "title": "Store a blob"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Of the blob ids given, the ones the store holds blobs under: the contents a commit can name by id without storing them again.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`blob_has` (CLI `blob has`): which of some blobs the store holds.",
+        "properties": {
+          "ids": {
+            "description": "The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "title": "BlobHasReq",
+        "type": "object"
+      },
+      "name": "blob_has",
+      "title": "Find stored blobs"
     },
     {
       "annotations": {

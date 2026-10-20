@@ -66,12 +66,14 @@ use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
-    CasResult, ExternalEntry, ExternalIds, ExternalPut, FileOp, FsObjectStore, FsOps, HookedFs,
-    IoFailure, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs, Recovered, RefState,
+    CasResult, DerivedStore, ExternalEntry, ExternalIds, ExternalPut, FileOp, FsObjectStore, FsOps,
+    HookedFs, IoFailure, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs, Recovered, RefState,
     StoreError, StoreFs, is_native_linux_fs,
 };
 
+use crate::derive::Registry;
 use crate::error::RepoError;
+use crate::read::RepoRead;
 
 /// What a store's `FORMAT` file holds: the store layout this build writes and reads.
 const FORMAT: &[u8] = b"swarmops-store 1\n";
@@ -95,6 +97,11 @@ pub struct Repo<O: ObjectStore> {
     pub(crate) layout: Layout,
     /// What both stores write through; verify's own handles on the metadata use it too.
     pub(crate) fs: Arc<dyn FsOps>,
+    /// The cache of derived values, `meta/derived/`, on the same filesystem ([`Repo::derived`]).
+    pub(crate) derived: DerivedStore,
+    /// The derivations whose values [`Repo::derived`] makes: the built-ins, and the ones
+    /// [`Repo::register`] adds.
+    pub(crate) derivations: Registry,
     /// The external id index (storage spec §7), on the same filesystem.
     pub(crate) external_ids: ExternalIds,
     identity: Identity,
@@ -194,17 +201,9 @@ impl LocalRepo {
         Self::open_on(store, fs, false)
     }
 
-    /// The repository's identity and counts, from a snapshot of its metadata.
+    /// The repository's identity and counts, in a snapshot of its own ([`RepoRead::info`]).
     pub fn info(&self) -> Result<RepoInfo, RepoError> {
-        let read = self.meta.read()?;
-        Ok(RepoInfo {
-            repo_id: self.identity.repo_id.clone(),
-            name: self.identity.name.clone(),
-            store_version: STORE_VERSION,
-            changesets: read.count_changesets()?,
-            refs: to_u64(read.list_refs()?.len()),
-            main: read.get_ref("main")?.map(|state| state.target),
-        })
+        self.snapshot()?.info()
     }
 
     fn create_on(
@@ -333,14 +332,45 @@ impl LocalRepo {
             meta.set_parallelism(1);
             external_ids.set_parallelism(1);
         }
+        let derived = DerivedStore::open(layout.clone(), Arc::clone(&fs));
         Repo {
             objects,
             meta,
             layout,
             fs,
+            derived,
+            derivations: Registry::builtins(),
             external_ids,
             identity,
         }
+    }
+}
+
+impl RepoRead<'_, FsObjectStore> {
+    /// The repository's identity, and its counts as the snapshot shows them.
+    pub fn info(&self) -> Result<RepoInfo, RepoError> {
+        let identity = &self.repo.identity;
+        Ok(RepoInfo {
+            repo_id: identity.repo_id.clone(),
+            name: identity.name.clone(),
+            store_version: STORE_VERSION,
+            changesets: self.meta.count_changesets()?,
+            refs: to_u64(self.meta.list_refs()?.len()),
+            main: self.meta.get_ref("main")?.map(|state| state.target),
+        })
+    }
+}
+
+impl<O: ObjectStore> RepoRead<'_, O> {
+    /// Ref `name`, as the snapshot shows it; `None` if it does not exist.
+    /// [`RepoError::RefName`] for a name that is not `main` or `release/<x>`.
+    pub fn get_ref(&self, name: &str) -> Result<Option<RefState>, RepoError> {
+        self.meta.get_ref(name).map_err(ref_error)
+    }
+
+    /// Every ref the snapshot shows, by name.
+    pub fn list_refs(&self) -> Result<Vec<(String, RefState)>, RepoError> {
+        Ok(self.meta.list_refs()?)
     }
 }
 
@@ -388,15 +418,14 @@ impl<O: ObjectStore> Repo<O> {
         Ok(self.meta.flush()?)
     }
 
-    /// Ref `name`, as a snapshot of the metadata shows it; `None` if it does not exist.
-    /// [`RepoError::RefName`] for a name that is not `main` or `release/<x>`.
+    /// Ref `name`, in a snapshot of its own ([`RepoRead::get_ref`]).
     pub fn get_ref(&self, name: &str) -> Result<Option<RefState>, RepoError> {
-        self.meta.read()?.get_ref(name).map_err(ref_error)
+        self.snapshot()?.get_ref(name)
     }
 
-    /// Every ref, by name.
+    /// Every ref, by name, in a snapshot of its own ([`RepoRead::list_refs`]).
     pub fn list_refs(&self) -> Result<Vec<(String, RefState)>, RepoError> {
-        Ok(self.meta.read()?.list_refs()?)
+        self.snapshot()?.list_refs()
     }
 
     /// Moves ref `name` from `expected` to `new` (`None` deletes it; `expected` `None` creates
@@ -495,7 +524,7 @@ pub(crate) fn post_commit_warning(what: &str, frame_seq: u64, source: &StoreErro
 
 /// The payload of `kind` object `id`, verified against its id. [`RepoError::MissingObject`] if
 /// `objects` lacks it, or holds an object of another kind under that id.
-pub(crate) fn object<O: ObjectStore>(
+pub(crate) fn object<O: ObjectStore + ?Sized>(
     objects: &O,
     id: ObjectId,
     kind: ObjectKind,
@@ -507,7 +536,7 @@ pub(crate) fn object<O: ObjectStore>(
 }
 
 /// Tree `id`, decoded.
-pub(crate) fn tree<O: ObjectStore>(objects: &O, id: TreeId) -> Result<Tree, RepoError> {
+pub(crate) fn tree<O: ObjectStore + ?Sized>(objects: &O, id: TreeId) -> Result<Tree, RepoError> {
     Ok(Tree::decode(&object(objects, id.0, ObjectKind::Tree)?)?)
 }
 

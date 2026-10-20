@@ -28,27 +28,41 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Write as _};
 use std::os::fd::AsFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::time::Instant;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use swarmops_api::ResolveRevReq;
+use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
-    ChangeInput, CommitReq, ContentInput, Envelope, ErrorCode, GitImportReq, InfoReq, LogReq, Meta,
-    OpError, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq, RepoInfo,
-    Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
+    DiffReq, Envelope, ErrorCode, GitImportReq, InfoReq, LineRange, LogReq, Meta, OpError,
+    PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq,
+    RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
+use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Recording, Resolved, shell_word};
 
-use crate::cli::{self, Command, GitCommand, Global, RefCommand};
+use crate::cli::{
+    self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, RefCommand,
+};
 use crate::context::{self, Env};
 use crate::mcp;
 use crate::output::{self, Format, Printed};
+
+/// The client file `blob put -` reads: this process's stdin, through the path it is open at.
+const STDIN: &str = "/dev/stdin";
+
+/// The hint of a change list past [`MAX_REQUEST_BYTES`]: what takes contents out of it.
+const REQUEST_HINT: &str = "send large contents as {\"file\": path} content, or store them first \
+                            with swarmops blob put and name them by id: {\"blob\": id}";
 
 /// The hint of a failed deep `verify`, which leaves nothing to re-check.
 const RESTORE_HINT: &str = "details.findings names each damaged object, record or ref by kind and \
@@ -140,20 +154,21 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             },
             |ops, (who, req)| ops.commit(&who, req),
         ),
-        Command::Cat { target, max_bytes } => ctx.on_store(
+        Command::Blob(command) => run_blob(ctx, op, command),
+        Command::Resolve { rev } => resolve_rev(ctx, op, rev),
+        Command::Cat {
+            target,
+            offset,
+            lines,
+            max_bytes,
+        } => ctx.on_store(
             op,
-            || {
-                let (rev, path) = file_target(&target)?;
-                Ok(ReadFileReq {
-                    rev: rev.into(),
-                    path: path.to_owned(),
-                    max_bytes,
-                })
-            },
+            || cat_request(&target, offset, lines, max_bytes),
             |ops, req| ops.read_file(req),
         ),
         Command::Ls {
             target,
+            depth,
             limit,
             cursor,
         } => ctx.on_store(
@@ -163,33 +178,32 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                 Ok(ReadTreeReq {
                     rev: rev.into(),
                     path: path.map(str::to_owned),
+                    depth,
                     limit,
                     cursor,
                 })
             },
             |ops, req| ops.read_tree(req),
         ),
-        Command::Show { rev, max_changes } => ctx.on_store(
-            op,
-            || {
-                Ok(ShowReq {
-                    rev: rev.into(),
-                    max_changes,
-                })
-            },
-            |ops, req| ops.show(req),
-        ),
-        Command::Log { rev, limit, cursor } => ctx.on_store(
-            op,
-            || {
-                Ok(LogReq {
-                    rev: rev.map(Rev::from),
-                    limit,
-                    cursor,
-                })
-            },
-            |ops, req| ops.log(req),
-        ),
+        Command::Show { rev, max_changes } => {
+            let req = ShowReq {
+                rev: rev.into(),
+                max_changes,
+            };
+            ctx.on_store(op, || Ok(req), |ops, req| ops.show(req))
+        }
+        Command::Log {
+            rev,
+            limit,
+            cursor,
+            paths,
+        } => log(ctx, op, rev, limit, cursor, paths),
+        Command::History {
+            target,
+            limit,
+            cursor,
+        } => history(ctx, op, &target, limit, cursor),
+        Command::Diff(args) => diff(ctx, op, args),
         Command::Ref(command) => run_ref(ctx, op, command),
         Command::Verify { deep } => ctx.on_store(
             op,
@@ -198,7 +212,210 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         ),
         Command::Git(command) => run_git(ctx, op, command),
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
+        derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
     }
+}
+
+/// Runs `log`, which names operation `op`: `limit` changesets from `rev` (`main` by default) or
+/// after `cursor`, only those that change `paths` if it names any.
+fn log(
+    ctx: &Ctx<'_>,
+    op: &'static str,
+    rev: Option<String>,
+    limit: usize,
+    cursor: Option<String>,
+    paths: Vec<String>,
+) -> Printed {
+    let req = LogReq {
+        rev: rev.map(Rev::from),
+        limit,
+        cursor,
+        paths,
+    };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.log(req))
+}
+
+/// Runs `history`, which names operation `op`: `limit` changesets of the history of `target`'s
+/// path (`<rev>:<path>`), from its revision or after `cursor`.
+fn history(
+    ctx: &Ctx<'_>,
+    op: &'static str,
+    target: &str,
+    limit: usize,
+    cursor: Option<String>,
+) -> Printed {
+    ctx.on_store(
+        op,
+        || {
+            let (rev, path) = history_target(target)?;
+            Ok(PathHistoryReq {
+                rev: Some(rev.into()),
+                path: path.to_owned(),
+                limit,
+                cursor,
+            })
+        },
+        |ops, req| ops.path_history(req),
+    )
+}
+
+/// Runs a `blob` subcommand, which names operation `op`.
+fn run_blob(ctx: &Ctx<'_>, op: &'static str, command: BlobCommand) -> Printed {
+    let agent = ctx.global.agent.as_deref();
+    match command {
+        BlobCommand::Put { file } => ctx.on_store(
+            op,
+            || {
+                let who = context::mutator(agent, ctx.env)?;
+                let file = if file == "-" { STDIN.to_owned() } else { file };
+                let req = BlobPutReq {
+                    content: ContentInput::File(file),
+                };
+                Ok((who, req))
+            },
+            |ops, (who, req)| ops.blob_put(&who, req),
+        ),
+        BlobCommand::Has { ids } => {
+            ctx.on_store(op, || Ok(BlobHasReq { ids }), |ops, req| ops.blob_has(req))
+        }
+    }
+}
+
+/// Runs `derive`, which names operation `op`: once, or with `--follow` until it is killed.
+fn run_derive(ctx: &Ctx<'_>, op: &'static str, command: &Command) -> Printed {
+    let &Command::Derive {
+        after,
+        follow,
+        interval_ms,
+        from_start,
+    } = command
+    else {
+        unreachable!("run passes derive its own command alone");
+    };
+    if follow {
+        let interval = Duration::from_millis(interval_ms);
+        return follow_journal(ctx, op, after, from_start, interval);
+    }
+    ctx.on_store(
+        op,
+        || {
+            Ok(DeriveReq {
+                after,
+                limit: DEFAULT_DERIVE_LIMIT,
+            })
+        },
+        |ops, req| ops.derive(req),
+    )
+}
+
+/// `derive --follow`: `derive` on the store, run after run, until the process is killed: from
+/// the journal's end, from its first frame with `from_start`, or after frame `after`. A run that
+/// read frames is followed by the next at once, one that read none after a wait of `interval`.
+/// Each run that derived something prints its envelope at once, so that a reader of the output
+/// has it as it comes. A run that fails, or a store that does not open, ends the command with its
+/// envelope, which [`crate::run`] prints last, and its exit code; output that cannot be written
+/// ends it with exit code 1, said on stderr.
+fn follow_journal(
+    ctx: &Ctx<'_>,
+    op: &str,
+    after: Option<u64>,
+    from_start: bool,
+    interval: Duration,
+) -> Printed {
+    let named = context::store_named(ctx.global.repo.as_deref(), ctx.env);
+    if let Ok(Some(store)) = &named {
+        ctx.used.repo.replace(Some(store.clone()));
+    }
+    let opened = named.and_then(|named| {
+        let store = named.ok_or_else(|| context::no_store_named(ctx.global.repo.as_deref()))?;
+        LocalOps::open(Utf8Path::new(&store))
+    });
+    let local = match opened {
+        Ok(local) => local,
+        Err(error) => return ctx.finish(op, ctx.used.meta(), Err::<DeriveResp, _>(error)),
+    };
+    let ops = local.recording(&ctx.used.resolved);
+    let failed = |error, started| {
+        let envelope = envelope::<DeriveResp>(op, ctx.used.meta(), Err(error), started);
+        output::render(&envelope, ctx.format)
+    };
+    let mut after = after;
+    if after.is_none() && !from_start {
+        // A run of no frame gives where the journal ends: what it holds is left to readers.
+        let started = Instant::now();
+        match ops.derive(DeriveReq { after, limit: 0 }) {
+            Ok(end) => after = end.next,
+            Err(error) => return failed(error, started),
+        }
+    }
+    loop {
+        let started = Instant::now();
+        let limit = DEFAULT_DERIVE_LIMIT;
+        let run = match ops.derive(DeriveReq { after, limit }) {
+            Ok(run) => run,
+            Err(error) => return failed(error, started),
+        };
+        let caught_up = run.next.is_none();
+        after = run.next.or(after);
+        if run.derived > 0 {
+            let envelope = envelope(op, ctx.used.meta(), Ok(run), started);
+            if let Err(e) = write_now(&output::render(&envelope, ctx.format).stdout) {
+                // The reader is gone, or stdout is broken: nobody gets what follows.
+                let _ = writeln!(io::stderr(), "swarmops: cannot write the envelope: {e}");
+                return Printed {
+                    stdout: String::new(),
+                    exit: 1,
+                };
+            }
+        }
+        if caught_up {
+            thread::sleep(interval);
+        }
+    }
+}
+
+/// Writes `text` to stdout and flushes it, so that a reader has it at once: one envelope of
+/// `derive --follow`'s output.
+fn write_now(text: &str) -> io::Result<()> {
+    let mut stdout = io::stdout().lock();
+    stdout.write_all(text.as_bytes())?;
+    stdout.flush()
+}
+
+/// Runs `diff`, which names operation `op`: the files that differ between `args`' two
+/// revisions, a page at a time.
+fn diff(ctx: &Ctx<'_>, op: &'static str, args: DiffArgs) -> Printed {
+    let DiffArgs {
+        from,
+        to,
+        paths,
+        format,
+        context,
+        limit,
+        cursor,
+        max_bytes,
+    } = args;
+    let req = DiffReq {
+        from: from.into(),
+        to: to.into(),
+        paths,
+        format: match format {
+            DiffFormatArg::Names => DiffFormat::Names,
+            DiffFormatArg::Stat => DiffFormat::Stat,
+            DiffFormatArg::Unified => DiffFormat::Unified,
+        },
+        context,
+        limit,
+        cursor,
+        max_bytes,
+    };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.diff(req))
+}
+
+/// Runs `resolve`, which names operation `op`: the changeset `rev` names, and its kind.
+fn resolve_rev(ctx: &Ctx<'_>, op: &'static str, rev: String) -> Printed {
+    let req = ResolveRevReq { rev: rev.into() };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.resolve_rev(req))
 }
 
 /// Runs a `ref` subcommand, which names operation `op`.
@@ -506,8 +723,16 @@ fn schema(name: Option<&str>) -> Result<Value, OpError> {
     )])))
 }
 
-/// A commit's change list: the JSON array of changes in file `source`, or on stdin for `-`.
+/// A commit's change list: the JSON array of changes in file `source`, or on stdin for `-`, of
+/// at most [`MAX_REQUEST_BYTES`]. A file's length is checked before it is read, and either is
+/// read no further than one byte past the limit, so that a list past it is refused
+/// (`E_TOO_LARGE`, scope `request`) before it is parsed.
 fn read_changes(source: &str) -> Result<Vec<ChangeInput>, OpError> {
+    read_changes_within(source, MAX_REQUEST_BYTES)
+}
+
+/// [`read_changes`], with at most `limit` bytes of text.
+fn read_changes_within(source: &str, limit: u64) -> Result<Vec<ChangeInput>, OpError> {
     let shown = if source == "-" {
         "stdin".to_owned()
     } else {
@@ -517,13 +742,28 @@ fn read_changes(source: &str) -> Result<Vec<ChangeInput>, OpError> {
         OpError::new(ErrorCode::InvalidArg, what)
             .with_details(details([("changes", source.into())]))
     };
-    let bytes = if source == "-" {
-        let mut bytes = Vec::new();
-        io::stdin().read_to_end(&mut bytes).map(|_| bytes)
+    let text = if source == "-" {
+        read_text(io::stdin().lock(), None, limit)
     } else {
-        fs::read(source)
+        fs::File::open(source).and_then(|file| {
+            let len = file.metadata()?.len();
+            read_text(file, Some(len), limit)
+        })
     }
     .map_err(|e| refuse(format!("cannot read the changes from {shown}: {e}")))?;
+    let bytes = text.map_err(|size| {
+        OpError::new(
+            ErrorCode::TooLarge,
+            format!("the changes in {shown} are more than the {limit} bytes a request may hold"),
+        )
+        .with_details(details([
+            ("size", size.into()),
+            ("limit", limit.into()),
+            ("scope", "request".into()),
+            ("changes", source.into()),
+        ]))
+        .with_hint(REQUEST_HINT)
+    })?;
     let changes: Vec<ChangeInput> = serde_json::from_slice(&bytes).map_err(|e| {
         refuse(format!("the changes in {shown} are not a JSON array of changes: {e}")).with_hint(
             r#"the changes are an array such as [{"path": "a.txt", "op": "put", "content": {"inline": "hi"}}]; swarmops schema ChangeInput gives the rest"#,
@@ -561,6 +801,25 @@ fn read_changes(source: &str) -> Result<Vec<ChangeInput>, OpError> {
     Ok(changes)
 }
 
+/// The text `reader` holds, whose length is `len` if it has one, unless it is more than `limit`
+/// bytes: then `Err` with its size, `len` itself, checked before a byte is read, or `limit + 1`,
+/// read no further.
+fn read_text(
+    reader: impl io::Read,
+    len: Option<u64>,
+    limit: u64,
+) -> io::Result<Result<Vec<u8>, u64>> {
+    if let Some(len) = len.filter(|&len| len > limit) {
+        return Ok(Err(len));
+    }
+    let mut bytes = Vec::new();
+    reader
+        .take(limit.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    let size = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    Ok(if size > limit { Err(size) } else { Ok(bytes) })
+}
+
 /// Whether `path` names this process's own stdin or stdout (the same device and inode), which
 /// `swarmops mcp` must never read: they carry the protocol, and a read would block on them.
 /// `stat`, not `open`, so that a FIFO at `path` cannot block here either; a path that cannot be
@@ -591,6 +850,24 @@ fn split_target(target: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// `cat`'s request: `target`'s revision and path ([`file_target`]), read from `offset` or by
+/// `lines`, `max_bytes` at most.
+fn cat_request(
+    target: &str,
+    offset: u64,
+    lines: Option<LineRange>,
+    max_bytes: u64,
+) -> Result<ReadFileReq, OpError> {
+    let (rev, path) = file_target(target)?;
+    Ok(ReadFileReq {
+        rev: rev.into(),
+        path: path.to_owned(),
+        offset,
+        lines,
+        max_bytes,
+    })
+}
+
 /// `cat`'s `<rev>:<path>`, as [`split_target`] splits it; a target without a path is
 /// `E_INVALID_ARG`.
 fn file_target(target: &str) -> Result<(&str, &str), OpError> {
@@ -599,6 +876,20 @@ fn file_target(target: &str) -> Result<(&str, &str), OpError> {
         OpError::new(
             ErrorCode::InvalidArg,
             format!("{target:?} names no file: cat takes <rev>:<path>"),
+        )
+        .with_details(details([("target", target.into())]))
+        .with_hint(format!("swarmops ls {}", quoted(target)))
+    })
+}
+
+/// `history`'s `<rev>:<path>`, as [`split_target`] splits it; a target without a path is
+/// `E_INVALID_ARG`.
+fn history_target(target: &str) -> Result<(&str, &str), OpError> {
+    let (rev, path) = split_target(target);
+    path.map(|path| (rev, path)).ok_or_else(|| {
+        OpError::new(
+            ErrorCode::InvalidArg,
+            format!("{target:?} names no path: history takes <rev>:<path>"),
         )
         .with_details(details([("target", target.into())]))
         .with_hint(format!("swarmops ls {}", quoted(target)))
@@ -663,6 +954,16 @@ mod tests {
     }
 
     #[test]
+    fn history_splits_its_target_at_the_first_colon() {
+        assert_eq!(history_target("main:src/").unwrap(), ("main", "src/"));
+        assert_eq!(history_target("main~1:a:b").unwrap(), ("main~1", "a:b"));
+        let refused = history_target("src/lib.rs").unwrap_err();
+        assert_eq!((refused.code.as_str(), refused.exit), ("E_INVALID_ARG", 2));
+        assert_eq!(refused.details["target"], "src/lib.rs");
+        assert_eq!(refused.hint.as_deref(), Some("swarmops ls src/lib.rs"));
+    }
+
+    #[test]
     fn init_names_the_repository_after_its_directory() {
         assert_eq!(default_name("/tmp/x/acme").unwrap(), "acme");
         assert_eq!(default_name("acme/").unwrap(), "acme");
@@ -699,6 +1000,30 @@ mod tests {
         let missing = read_changes("/nonexistent/changes.json").unwrap_err();
         assert_eq!(missing.code, "E_INVALID_ARG");
         assert!(!missing.message.contains('\n'));
+    }
+
+    /// A change list past its limit is refused by its length, before it is read or parsed
+    /// (`E_TOO_LARGE`, scope `request`), and one at the limit is read; text without a length
+    /// (stdin) is read no further than one byte past the limit, and a length past it refuses the
+    /// text unread.
+    #[test]
+    fn a_change_list_past_its_limit_is_refused_before_it_is_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("changes.json");
+        let path = path.to_str().unwrap();
+        fs::write(path, "[]").unwrap();
+        assert_eq!(read_changes_within(path, 2).unwrap(), Vec::new());
+        fs::write(path, "[ ]").unwrap();
+        let refused = read_changes_within(path, 2).unwrap_err();
+        assert_eq!((refused.code.as_str(), refused.exit), ("E_TOO_LARGE", 1));
+        assert_eq!(
+            Value::Object(refused.details),
+            serde_json::json!({"size": 3, "limit": 2, "scope": "request", "changes": path})
+        );
+        assert!(refused.hint.is_some_and(|hint| hint.contains("blob put")));
+        assert_eq!(read_text(io::repeat(b' '), None, 8).unwrap(), Err(9));
+        assert_eq!(read_text(io::repeat(b' '), Some(100), 8).unwrap(), Err(100));
+        assert_eq!(read_text(&b"[]"[..], None, 8).unwrap(), Ok(b"[]".to_vec()));
     }
 
     #[test]
