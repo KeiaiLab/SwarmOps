@@ -180,27 +180,32 @@
     <p class="eyebrow">Quick start</p>
     <h2>Build it, make a store, commit</h2>
     <p class="sub">Linux, Rust 1.99 (the repository pins it). A store must live on a native Linux filesystem. <code>so</code> is the short name of <code>swarmops</code>: the same program.</p>
-    <div class="steps">
+    <div class="steps one">
       <div class="code">
-        <div class="label">Install</div>
-<pre>cargo build --release
-<span class="c"># target/release/swarmops and target/release/so</span>
-cargo install --path crates/swarmops-cli --locked</pre>
+        <div class="label">Install, in a clone of the repository</div>
+<pre>cargo build --release                               <span class="c"># target/release/swarmops and target/release/so</span>
+cargo install --path crates/swarmops-cli --locked   <span class="c"># both, into ~/.cargo/bin</span></pre>
       </div>
       <div class="code">
         <div class="label">First commands</div>
-<pre>export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme
-export SWARMOPS_AGENT=agent/worker-1
+<pre>export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme   <span class="c"># or --repo &lt;store&gt; on each command</span>
+export SWARMOPS_AGENT=agent/worker-1                 <span class="c"># or --as &lt;family&gt;/&lt;instance&gt;</span>
 
 so init "$SWARMOPS_REPO" --name acme
-so commit -m "first" --changes changes.json
-so ref set main &lt;id&gt; --create   <span class="c"># later: --expect &lt;old&gt;</span>
+printf '#!/bin/sh\necho hello\n' &gt; run.sh                 <span class="c"># the client file the second change reads</span>
+cat &gt; changes.json &lt;&lt;'EOF'
+[{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() {}\n"}},
+ {"path": "run.sh", "op": "put", "content": {"file": "./run.sh"}, "mode": "exec"}]
+EOF
+so commit -m "first" --changes changes.json --advance main  <span class="c"># creates main at the new changeset</span>
 so cat main:src/lib.rs
+so ls main:src
+so show main
 so log -n 20
 so verify --deep</pre>
       </div>
     </div>
-    <p class="note">A change list is a JSON array of puts and deletes; every command, revision and exit code is in <a href="https://github.com/KeiaiLab/SwarmOps#commands">the README</a>.</p>
+    <p class="note">A change list is a JSON array of puts and deletes; a put's content is <code>{"inline": …}</code>, <code>{"base64": …}</code> or <code>{"file": …}</code>, a file the CLI reads. <code>--advance main</code> moves <code>main</code> to the new changeset in the commit's own transaction, only if <code>main</code> still names the commit's parent (for this first commit, only if <code>main</code> does not exist yet); otherwise the commit records nothing and fails with <code>E_CAS_MISMATCH</code>. Every command, revision and exit code is in <a href="https://github.com/KeiaiLab/SwarmOps#commands">the README</a>.</p>
   </div>
 </section>
 

@@ -177,6 +177,7 @@ h3 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
 .code .label { font: 600 12px/1 var(--mono); color: var(--muted); padding: 11px 18px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
 .code pre { margin: 0; padding: 18px 20px; overflow-x: auto; line-height: 1.7; font-size: 13.5px; }
 .steps { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+.steps.one { grid-template-columns: 1fr; }
 @media (max-width: 900px) { .steps { grid-template-columns: 1fr; } }
 .tools { display: flex; flex-wrap: wrap; gap: 8px; margin: 18px 0 0; padding: 0; list-style: none; }
 .tools li { font: 13px var(--mono); padding: 5px 10px; border-radius: 8px; background: var(--violet-soft); color: var(--violet); }
