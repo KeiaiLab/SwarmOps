@@ -1384,6 +1384,50 @@ fn a_client_file_that_is_not_a_regular_file_is_refused_without_blocking() {
     store.assert_clean("after the refused commits");
 }
 
+/// A commit whose client files declare more than 1 GiB together is refused by the sizes they
+/// declare, before a byte of them is read: sixteen puts of one sparse 512 MiB file are
+/// `E_TOO_LARGE` (scope `commit`) at the third, which names its change, its file and the
+/// contents' size with it; the server's peak resident memory grows by less than 64 MiB, nothing
+/// is written, and the server serves on.
+#[test]
+fn a_commit_past_1_gib_of_client_files_is_refused_before_a_byte_is_read() {
+    let store = Store::init();
+    let half = swarmops_ops::content::MAX_CONTENT_BYTES;
+    assert_eq!(2 * half, swarmops_ops::content::MAX_COMMIT_CONTENT_BYTES);
+    let file = store.tmp().join("half.bin");
+    fs::File::create(&file).unwrap().set_len(half).unwrap();
+    let file = file.to_str().unwrap();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let changes: Vec<Value> = (0..16)
+        .map(|n| json!({"path": format!("big/{n}.bin"), "op": "put", "content": {"file": file}}))
+        .collect();
+    let before = server.peak_resident_kib();
+    let refused = server.err(
+        "commit",
+        json!({"message": "m", "changes": changes}),
+        "E_TOO_LARGE",
+    );
+    assert_eq!(
+        refused["error"]["details"],
+        json!({
+            "index": 2, "path": "big/2.bin", "file": file,
+            "size": 3 * half, "limit": 2 * half, "scope": "commit",
+        }),
+        "{refused}"
+    );
+    let grown = server.peak_resident_kib().saturating_sub(before);
+    assert!(
+        grown < 64 * 1024,
+        "the server's peak resident memory grew by {grown} KiB"
+    );
+    assert_eq!(server.result("ping", json!({})), json!({}));
+    let info = server.ok("repo_info", json!({}));
+    assert_eq!(info["result"]["changesets"], 0, "{info}");
+    server.finish_clean();
+    store.assert_clean("after the refused commit");
+}
+
 /// A changeset committed through `server` on `parent`, putting a file named `name`; its id.
 fn commit_on(server: &mut Server, name: &str, parent: &str) -> String {
     let arguments = json!({
