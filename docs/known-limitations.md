@@ -257,12 +257,12 @@ left).
   before its hash is checked: up to 512 MiB, the most an object holds (`MAX_OBJECT_LEN`, storage
   spec §2 rule 1), since a header that records more is refused as corrupt before anything is
   allocated for it. A frame that only claims a size it does not produce is refused as corrupt
-  too (`E_STORE_CORRUPT`, which `verify --deep` lists), before more than 64 MiB is reserved for
-  its output, beside the decoder's window, which the frame's header sets up to zstd's default
-  limit of 128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store
-  can hold one. Since M2, streamed reads bound `cat` below 512 MiB (`read_chunks`); every other
-  read of the payload decodes it whole. *Unscheduled; M2 streamed `cat`, and M3 Task 4 set the
-  bound. Found: M1 Task 1; the 2026-10-16 code review.*
+  too (`E_STORE_CORRUPT`, which `verify --deep` lists), before more than 64 MiB is reserved for its
+  output, beside the decoder's window, which the frame's header sets up to zstd's default limit of
+  128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store can hold one.
+  Since M2, streamed reads bound `cat` below 512 MiB (`read_chunks`); every other read of the
+  payload decodes it whole. *Unscheduled; M2 streamed `cat`, and M3 Task 4 set the bound. Found:
+  M1 Task 1; the 2026-10-16 code review.*
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range
@@ -433,8 +433,8 @@ These do not change what SwarmOps does, only how well the tests can see it.
   review (D5).*
 - **Golden envelopes cover 27 of the 37 error codes.** `error_codes_reach_the_cli` pins the
   envelope of 27; the other ten are in its `NOT_RAISED` list, each with why the test cannot raise
-  it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6). Found: the
-  2026-10-16 comparison.*
+  it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6, the six `E_GIT_*`
+  codes in M3). Found: the 2026-10-16 comparison.*
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its
