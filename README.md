@@ -524,6 +524,8 @@ The design specs are the authority, and they are in Korean;
 | Document | What it holds |
 | --- | --- |
 | [docs/architecture.md](docs/architecture.md) | The design in English: crates, data model, the store on disk, the write and read paths, durability, concurrency, the contract. |
+| [docs/operations.md](docs/operations.md) | Running SwarmOps: install, a store, agents through MCP, the daily loop between the store and git, checks, backup and restore, upgrades, limits and what to monitor. |
+| [docs/pilot.md](docs/pilot.md) | The runbook of the first real use, on this repository: import, one agent session, export, CI, what to measure, the success criteria and the rollback. |
 | [docs/known-limitations.md](docs/known-limitations.md) | What is still open, and which milestone takes each item. |
 | [docs/perf.md](docs/perf.md) | Every measurement, and the decisions taken on them. |
 | [bench/compare/README.md](bench/compare/README.md) | The harness that measures the native metadata store against embedded databases. |

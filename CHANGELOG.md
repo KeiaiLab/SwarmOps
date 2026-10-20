@@ -658,6 +658,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `signatures`, `headers` and `many_parents`, git finds in the export exactly what it finds in the
   fixture. The `git-matrix` job of `scheduled.yml` runs it with each of its gits (2.39.5, 2.43.0,
   2.56.0).
+- Two documents for running SwarmOps, each command in them run and its output copied:
+  [docs/operations.md](docs/operations.md), the operations guide (install from a clone or a
+  release archive, a store, agents through `swarmops mcp`, the daily loop of import, commit, land
+  and export with one writer per trunk, `verify`, backup under the writers' lock and restore,
+  upgrades and `FORMAT`, limits, and what to monitor), and [docs/pilot.md](docs/pilot.md), the
+  runbook of the first real use, on this repository (its history imported, one agent session
+  through MCP, the export and its round trip, the repository's CI on it, what to measure, the
+  success criteria and the rollback).
 
 ### Changed
 
