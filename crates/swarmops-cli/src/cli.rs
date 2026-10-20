@@ -11,7 +11,7 @@ use clap::{
 use swarmops_api::{
     DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
     DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT,
-    LineRange,
+    LineRange, LossyClass,
 };
 
 use crate::output::printable;
@@ -68,6 +68,41 @@ After E_CAS_MISMATCH nothing was recorded, neither the changeset nor the move: r
 edits to the content at the error's `actual` and commit with --parent <actual> --advance REF. \
 Do not re-send your old whole-file puts: M1 has no merge, so they would revert the winner's \
 edits to shared files.";
+
+/// `git import`'s short help.
+const GIT_IMPORT_HELP: &str = "Bring a git repository's history in: every commit --ref reaches \
+that the store does not hold, then move --into to it";
+
+/// `git import`'s long help.
+const GIT_IMPORT_LONG_HELP: &str = "Bring a git repository's history in: every commit --ref \
+reaches that the store does not hold becomes a changeset, parents first, and --into moves to the \
+changeset of --ref's commit, created if it does not exist.
+
+The repository is read on this host, at PATH, relative to the working directory: a work tree, \
+which holds .git, or a bare repository. Each changeset keeps its git commit's id in its git.oid \
+metadata, and its author and committer in its signatures; it records no agent. Run again, it takes \
+only the commits after the one --into's head holds, and writes nothing when that is --ref's \
+commit. A head that holds no git commit, or one --ref does not reach, fails with \
+E_GIT_IMPORT_DIVERGED (exit 3), and nothing is written.
+
+Content a changeset cannot hold as git has it is refused by class (E_GIT_IMPORT_LOSSY, naming \
+the commit, the path and the class) unless --lossy allows that class: then it is dropped or \
+normalized, and the changeset names the class in its git.lossy metadata.";
+
+/// `git import --ref`'s help.
+const GIT_REF_HELP: &str =
+    "The commit to import, with every commit it reaches: HEAD, a ref's name or a commit id";
+
+/// `git import --into`'s help.
+const GIT_INTO_HELP: &str = "The ref to move to that commit's changeset: main or release/<name>";
+
+/// `git import --lossy`'s help.
+const GIT_LOSSY_HELP: &str =
+    "A class of content to drop or normalize instead of refusing it, or all; repeatable";
+
+/// `git import --gitlinks`'s help.
+const GIT_GITLINKS_HELP: &str = "What to do with a submodule's entry: refuse it, or drop it as \
+--lossy gitlinks does; given, it decides that class whatever --lossy says";
 
 /// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
 /// on stdout.
@@ -244,6 +279,9 @@ pub enum Command {
         #[arg(long)]
         deep: bool,
     },
+    /// Bring history in from git.
+    #[command(subcommand)]
+    Git(GitCommand),
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log,
@@ -371,6 +409,85 @@ pub enum RefCommand {
         #[arg(long, value_name = "REV", help = EXPECT_HELP, long_help = DELETE_EXPECT_LONG_HELP)]
         expect: String,
     },
+}
+
+/// `git`'s operations.
+#[derive(Subcommand, Debug)]
+pub enum GitCommand {
+    // Help given as `about` and the args' `help` rather than doc comments: rustdoc would take
+    // `<name>` for HTML.
+    #[command(about = GIT_IMPORT_HELP, long_about = GIT_IMPORT_LONG_HELP)]
+    Import {
+        /// The git repository's directory.
+        path: String,
+        #[arg(long = "ref", value_name = "GIT_REF", default_value = "HEAD", help = GIT_REF_HELP)]
+        git_ref: String,
+        #[arg(long, value_name = "REF", default_value = "main", help = GIT_INTO_HELP)]
+        into: String,
+        #[arg(long, value_name = "CLASS", help = GIT_LOSSY_HELP)]
+        lossy: Vec<LossyArg>,
+        #[arg(long, value_name = "WHAT", help = GIT_GITLINKS_HELP)]
+        gitlinks: Option<Gitlinks>,
+    },
+}
+
+/// A class of git content `git import --lossy` allows, or all of them (`swarmops_api::LossyClass`
+/// gives each class's meaning).
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+#[value(rename_all = "snake_case")]
+pub enum LossyArg {
+    /// A submodule's entry: dropped.
+    Gitlinks,
+    /// A name that is not UTF-8, or is . or ..: dropped.
+    Paths,
+    /// A mode git does not write, such as 100664: normalized.
+    Modes,
+    /// A tree out of git's order, or naming an entry twice: put in order.
+    TreeOrder,
+    /// An entry naming an empty tree: dropped.
+    EmptyTrees,
+    /// A commit whose bytes the changeset cannot keep: kept as its fields hold it.
+    Nonstandard,
+    /// Every class.
+    All,
+}
+
+/// What `git import --gitlinks` does with a submodule's entry.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gitlinks {
+    /// Refuse the commit that holds one (E_GIT_IMPORT_LOSSY).
+    Refuse,
+    /// Drop it, and name the class in the changeset's git.lossy metadata.
+    Drop,
+}
+
+impl LossyArg {
+    /// The class it names; `None` for `all`.
+    fn class(self) -> Option<LossyClass> {
+        Some(match self {
+            LossyArg::Gitlinks => LossyClass::Gitlinks,
+            LossyArg::Paths => LossyClass::Paths,
+            LossyArg::Modes => LossyClass::Modes,
+            LossyArg::TreeOrder => LossyClass::TreeOrder,
+            LossyArg::EmptyTrees => LossyClass::EmptyTrees,
+            LossyArg::Nonstandard => LossyClass::Nonstandard,
+            LossyArg::All => return None,
+        })
+    }
+}
+
+/// The classes a `git import` line allows, each once, in the order of [`LossyClass::ALL`]: those
+/// its `--lossy` names (`all`: every one), but for gitlinks when `--gitlinks` is given, which then
+/// decides that class alone.
+pub fn lossy_classes(lossy: &[LossyArg], gitlinks: Option<Gitlinks>) -> Vec<LossyClass> {
+    let named = |class: LossyClass| {
+        (lossy.iter()).any(|&arg| arg == LossyArg::All || arg.class() == Some(class))
+    };
+    let allowed = |&class: &LossyClass| match gitlinks {
+        Some(choice) if class == LossyClass::Gitlinks => choice == Gitlinks::Drop,
+        _ => named(class),
+    };
+    LossyClass::ALL.into_iter().filter(allowed).collect()
 }
 
 /// What a command line asks for.
@@ -505,6 +622,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
         ["verify"] => "verify",
+        ["git", "import"] => "git_import",
         ["mcp"] => "mcp",
         ["derive"] => "derive",
         _ => return None,
@@ -552,6 +670,7 @@ fn command() -> clap::Command {
         .arg_required_else_help(false)
         .mut_subcommand("ref", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("blob", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("git", |cmd| cmd.arg_required_else_help(false))
 }
 
 /// Of `--json` and `--human`, keeps the one given last: clap's `overrides_with` settles them
@@ -631,12 +750,13 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 20);
+        assert_eq!(ops.len(), 21);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 20, "two subcommands name one op");
+        assert_eq!(ops.len(), 21, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
+        assert_eq!(op_name(&["git"]), None);
     }
 
     #[test]
@@ -689,7 +809,7 @@ mod tests {
             panic!("a usage error");
         };
         assert_eq!(path, Vec::<String>::new());
-        for line in [&[][..], &["ref"], &["blob"]] {
+        for line in [&[][..], &["ref"], &["blob"], &["git"]] {
             let Parsed::Usage { error, .. } = parse(&args(line)) else {
                 panic!("{line:?}: a usage error, not a help screen");
             };
@@ -736,6 +856,92 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A `git import` line: its defaults, `--lossy` repeated, a class twice, or `all`, and
+    /// `--gitlinks`, which decides the gitlinks class when it is given, whatever `--lossy` says;
+    /// a class that is none is a usage error of `git import`.
+    #[test]
+    fn a_git_import_line_names_its_classes() {
+        let parsed = |line: &[&str]| {
+            let Parsed::Run(cli, op) = parse(&args(line)) else {
+                panic!("{line:?}: a valid line");
+            };
+            assert_eq!(op, "git_import", "{line:?}");
+            let Command::Git(GitCommand::Import {
+                path,
+                git_ref,
+                into,
+                lossy,
+                gitlinks,
+            }) = cli.command
+            else {
+                panic!("{line:?}: git import");
+            };
+            (path, git_ref, into, lossy_classes(&lossy, gitlinks))
+        };
+        let defaults = parsed(&["git", "import", "repo"]);
+        assert_eq!(
+            defaults,
+            ("repo".into(), "HEAD".into(), "main".into(), vec![])
+        );
+        let named = parsed(&[
+            "git",
+            "import",
+            "repo",
+            "--ref",
+            "stable",
+            "--into",
+            "release/x",
+            "--lossy",
+            "tree_order",
+            "--lossy",
+            "gitlinks",
+            "--lossy",
+            "tree_order",
+        ]);
+        let classes = vec![LossyClass::Gitlinks, LossyClass::TreeOrder];
+        assert_eq!(
+            named,
+            ("repo".into(), "stable".into(), "release/x".into(), classes)
+        );
+        let classes = |line: &[&str]| parsed(line).3;
+        let drop = classes(&["git", "import", "r", "--gitlinks", "drop"]);
+        assert_eq!(drop, [LossyClass::Gitlinks]);
+        assert_eq!(
+            classes(&["git", "import", "r", "--lossy", "all"]),
+            LossyClass::ALL
+        );
+        let all_but = classes(&[
+            "git",
+            "import",
+            "r",
+            "--gitlinks",
+            "refuse",
+            "--lossy",
+            "all",
+        ]);
+        let rest: Vec<LossyClass> = (LossyClass::ALL.into_iter())
+            .filter(|&class| class != LossyClass::Gitlinks)
+            .collect();
+        assert_eq!(all_but, rest);
+        let refused = classes(&[
+            "git",
+            "import",
+            "r",
+            "--lossy",
+            "gitlinks",
+            "--gitlinks",
+            "refuse",
+        ]);
+        assert_eq!(refused, Vec::<LossyClass>::new());
+        let Parsed::Usage { error, path, .. } =
+            parse(&args(&["git", "import", "r", "--lossy", "tree-order"]))
+        else {
+            panic!("a usage error");
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert_eq!(path, ["git", "import"]);
     }
 
     #[test]

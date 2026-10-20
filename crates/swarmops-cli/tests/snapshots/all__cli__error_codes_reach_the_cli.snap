@@ -511,6 +511,161 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 git import [tmp]/missing",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "git_import",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_NOT_A_REPO",
+        "message": "no git repository it can open there: \"[tmp]/missing\" does not appear to be a git repository: Could not retrieve metadata of \"[tmp]/missing\": No such file or directory (os error 2)",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "git_path": "[tmp]/missing"
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 git import [refs]/repo.git --ref no-such-branch",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "git_import",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_REF_NOT_FOUND",
+        "message": "no ref and no commit is named \"no-such-branch\"",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "git_ref": "no-such-branch"
+        },
+        "hint": "git -C [refs]/repo.git for-each-ref"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 git import [refs]/repo.git",
+    "exit": 3,
+    "stdout": {
+      "ok": false,
+      "op": "git_import",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_IMPORT_DIVERGED",
+        "message": "main has diverged from the git history: its head [c1] holds no git commit, which the tip [id3] does not reach",
+        "retryable": false,
+        "exit": 3,
+        "details": {
+          "git_head": "[id3]",
+          "target_head": "[c1]",
+          "target_ref": "main"
+        },
+        "hint": "swarmops log main"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 git import [gitlinks]/repo.git --into release/gitlinks",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "git_import",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_IMPORT_LOSSY",
+        "message": "commit [id4] holds gitlinks content at lib/sub: a gitlink, to commit [id5]; allowing the class drops or normalizes it",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "class": "gitlinks",
+          "commit": "[id4]",
+          "path": "lib/sub"
+        },
+        "hint": "run it again with --lossy gitlinks to drop or normalize it and mark the changeset (git.lossy)"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 git import [shallow]/repo.git",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "git_import",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_UNSUPPORTED",
+        "message": "the repository is not read as it is: it is a shallow clone, whose oldest commits lack their parents",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "reason": "shallow"
+        },
+        "hint": "git -C [shallow]/repo.git fetch --unshallow"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 git import [partial_clone]/repo.git --into release/partial",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "git_import",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_READ",
+        "message": "the repository lacks object [id6]",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "object": "[id6]",
+          "reason": "missing"
+        },
+        "hint": "git -C [partial_clone]/repo.git fsck"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store verify",
     "exit": 1,
     "stdout": {
@@ -519,7 +674,7 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_STORE_CORRUPT",
-        "message": "verify found a problem: object [id3] is missing; changeset [c1] references it",
+        "message": "verify found a problem: object [id7] is missing; changeset [c1] references it",
         "retryable": false,
         "exit": 1,
         "details": {
@@ -528,12 +683,12 @@ expression: s.transcript()
             {
               "changeset": "[c1]",
               "kind": "missing_object",
-              "object": "[id3]"
+              "object": "[id7]"
             }
           ],
           "objects_checked": 8,
           "problems": [
-            "object [id3] is missing; changeset [c1] references it"
+            "object [id7] is missing; changeset [c1] references it"
           ]
         },
         "hint": "swarmops verify --deep"

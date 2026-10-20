@@ -71,7 +71,7 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 /// [`LocalOps::recording`] record what their write repaired, when it repaired anything, in the
 /// request's [`Resolved`], which the CLI and the MCP server report as `meta.recovered`: on
 /// success and on `E_CAS_MISMATCH` alike, never as a warning, and not when the operation then
-/// fails otherwise.
+/// fails otherwise. `git_import` records what its writes repaired, added up, on success only.
 ///
 /// # Operations
 ///
@@ -167,6 +167,15 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   omitted when it read none; with a `limit` of 0 it reads no frame, derives nothing and gives
 ///   the journal's last frame. It writes only the store's cache of derived values, so it needs
 ///   no identity.
+/// - `git_import` is client-side, as `init` is, and so no [`StoreOps`] method
+///   ([`LocalOps::git_import`], [`Recording::git_import`]): it reads the git repository at
+///   `git_path` on this host (a relative path from the working directory) and brings every
+///   commit `git_ref` reaches that the store does not hold into it, parents first, then moves
+///   `target_ref` to the changeset of `git_ref`'s commit by compare-and-swap, recorded for the
+///   caller's agent (storage spec §7). The target is checked as a ref name before the
+///   repository is opened. An imported changeset has no `agent` metadata: its author is its git
+///   author, in `signatures`, and `show` attributes it to `unknown/unknown` (the M3 plan's
+///   decision 15).
 ///
 /// Limits of 0 (`limit`, `max_changes`, and `diff`'s `max_bytes`) are `E_INVALID_ARG`, but for
 /// `derive`'s `limit`.
@@ -250,8 +259,42 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 /// 512 MiB (`scope` `put`) or a commit's contents over 1 GiB together (`commit`, whose `size` is
 /// theirs up to and with the change's), measured before any is read; and `E_INVALID_ARG` for
 /// limits, cursors and requests that break their own rules.
+///
+/// `git_import`'s failures map as follows, the source repository named by the path the request
+/// gave and its objects by their git ids:
+///
+/// - `E_GIT_NOT_A_REPO` `{git_path}`: no git repository gix can open at that path.
+/// - `E_GIT_REF_NOT_FOUND` `{git_ref, kind?}`: `git_ref` names nothing in it, or (`kind`) an
+///   object that is no commit; the hint lists its refs (`git -C <path> for-each-ref`).
+/// - `E_GIT_UNSUPPORTED` `{reason, …}`: a repository the import does not read as it is, refused
+///   before anything past its configuration is read: `reason` `object_format`
+///   `{object_format}`, `ref_storage` `{ref_storage}`, or `shallow`, whose hint deepens it
+///   (`git -C <path> fetch --unshallow`); or a commit no lossy class covers: `parents`
+///   `{commit, parents, max}`, more than 255 of them, or `mode` `{commit, path, mode}`.
+/// - `E_GIT_READ` `{reason, object?}`: an object the repository lacks (`missing`, as a partial
+///   clone lacks blobs), whose bytes are not its id's (`corrupt`) or do not parse (`malformed`),
+///   each with the hint `git -C <path> fsck`; or a read that failed (`io`).
+/// - `E_GIT_IMPORT_LOSSY` `{commit, class, path, path_base64?}`: content of a lossy class the
+///   request does not allow; `path` is empty for `nonstandard`, and a path that is not UTF-8 is
+///   given in base64 too. The hint names `--lossy <class>`.
+/// - `E_TOO_LARGE` `{commit, path, size, max}`: a blob longer than an object holds, refused by
+///   its header before it is read.
+/// - `E_GIT_IMPORT_DIVERGED` (exit 3) `{target_ref, target_head, git_head, base?}`: the
+///   target's head holds no git commit (no `base`: a native changeset is on it), or one that
+///   `git_ref`'s commit does not reach; nothing was written. The hint is the target's log.
+/// - `E_CAS_MISMATCH` (retryable) `{name, actual}`: the target moved during the import, with
+///   every commit recorded; the same import run again moves it if what it names leads to the
+///   tip. The hint only reads, as for a ref move.
+/// - `E_REF_NAME_INVALID` `{name}`: a target that is no ref name.
+/// - A store failure is the code its repository error has above (`E_BUSY` after three retries,
+///   `E_IO_TRANSIENT`, `E_IO`, `E_STORE_CORRUPT`, …), and a frame that committed but failed
+///   after its commit point is `E_IO` `{committed: true, warnings}`; either way the import
+///   stopped there, and `{imported, last_commit}` say how many commits the frames that
+///   committed recorded and the last of them (null for none). The hint is to run the same import
+///   again, which continues after them, unless the store is damaged (`swarmops verify`).
+/// - `E_INTERNAL` `{commit}`: a commit whose conversion disagrees with its own check, a bug.
 pub struct LocalOps {
-    repo: LocalRepo,
+    pub(crate) repo: LocalRepo,
     /// The store's path as the caller gave it, for hints and display.
     store_path: Utf8PathBuf,
 }
@@ -694,7 +737,7 @@ impl Resolved {
     }
 
     /// Records `recovered`, what the request's write repaired, unless it repaired nothing.
-    fn record_recovered(&self, recovered: Recovered) {
+    pub(crate) fn record_recovered(&self, recovered: Recovered) {
         if !recovered.is_empty() {
             self.recovered.set(Some(recovered));
         }
@@ -729,8 +772,8 @@ fn recovered_out(recovered: Recovered) -> RecoveredOut {
 /// in the request's [`Resolved`] ([`LocalOps::recording`]).
 #[derive(Debug, Clone, Copy)]
 pub struct Recording<'a> {
-    ops: &'a LocalOps,
-    resolved: &'a Resolved,
+    pub(crate) ops: &'a LocalOps,
+    pub(crate) resolved: &'a Resolved,
 }
 
 impl<'a> Recording<'a> {
@@ -2450,5 +2493,46 @@ mod tests {
             );
             assert_eq!((page.from, page.to, page.files.len()), (c1, c2, 1));
         }
+    }
+
+    /// `git_import` made through a request's record records what its writes repaired first, as
+    /// `commit` does: after a ref move whose listing in `journal.off` failed, the import's first
+    /// frame lists that frame and writes the ref file, and the request's record says so, which
+    /// the CLI reports as `meta.recovered`; `LocalOps::git_import` itself records nothing.
+    #[test]
+    fn a_git_import_records_what_its_writes_repaired() {
+        use swarmops_api::GitImportReq;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+        let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+        let who = Identity::parse("agent/worker-17").unwrap();
+        let refs = swarmops_testkit::git::fixture("refs");
+        let git_path = refs.repo.as_deref().and_then(std::path::Path::to_str);
+        let git_path = git_path.expect("a repository at a UTF-8 path").to_owned();
+        let import = |git_ref: &str| GitImportReq {
+            git_path: git_path.clone(),
+            git_ref: git_ref.to_owned(),
+            target_ref: "main".to_owned(),
+            lossy: Vec::new(),
+        };
+        let older = ops.git_import(&who, import("older")).unwrap();
+        let head = ObjectId::from_hex(&older.head_changeset).map(ChangesetId);
+        let moved = ops_on(&root, failing("append_durable", "journal.off"))
+            .repo
+            .cas_ref("release/older", None, Some(head.unwrap()), who.agent())
+            .unwrap();
+        one_injected(&moved.warnings);
+
+        let resolved = Resolved::default();
+        let newer = ops.recording(&resolved).git_import(&who, import("newer"));
+        let newer = newer.unwrap();
+        assert_eq!((newer.imported, newer.skipped), (3, 1), "{newer:?}");
+        let listed_and_written = RecoveredOut {
+            frames_listed: 1,
+            refs_replayed: 1,
+            ..RecoveredOut::default()
+        };
+        assert_eq!(resolved.take_recovered(), Some(listed_and_written));
     }
 }

@@ -1,0 +1,973 @@
+//! The git import (storage spec §7, umbrella §12): every commit a git ref reaches that the store
+//! does not hold becomes a changeset, parents first, many to a journal frame; then a target ref
+//! moves to the changeset of the ref's commit. Run again, it takes only what is new.
+//!
+//! [`import()`] goes in six steps.
+//!
+//! 1. The source ref is resolved to a commit, the tip ([`GitSource::resolve`]), and the target
+//!    ref read. A target that exists has a base: the git commit its head changeset holds in its
+//!    `git.oid` metadata. A head without one, a native changeset, is [`ImportError::Diverged`]
+//!    with no base, and nothing is written.
+//! 2. The walk: from the tip over parents, first parents first, on a stack of its own, never by
+//!    recursion. A commit is known when it is the base, or when the external id index names a
+//!    changeset the store holds for it; the walk stops there. An entry that is damaged, or names
+//!    a changeset the store lacks, is a miss and a warning: its commit is converted again. The
+//!    commits it does not know come out parents first; how many known ones it stopped at is
+//!    [`ImportReport::skipped`].
+//! 3. The base must be the tip, and then nothing is written, or an ancestor of it: met by the
+//!    walk, or reached from a known commit it stopped at by a walk down the store's parents,
+//!    pruned to the generations above the base's (a base reached only through a merge's second
+//!    parent is no divergence). Otherwise [`ImportError::Diverged`], and nothing is written.
+//! 4. A faithful base (no `git.lossy`) seeds the conversion: its root and the base commit's git
+//!    tree are walked together, entries matched by name and kind, so that the trees and blobs
+//!    the new commits share with the base are neither read nor converted again.
+//! 5. The frames: each run of [`ImportRequest::frame_changesets`] commits is converted, its new
+//!    trees and blobs stored ([`Repo::put_objects`]) whenever
+//!    [`ImportRequest::object_batch_bytes`] of them accumulate and at its end, then recorded as
+//!    one journal frame ([`Repo::raw_batch`]; a parent is a changeset of this run, the base or
+//!    the index's), then its commits' external ids are recorded ([`Repo::record_external_ids`]),
+//!    after the frame is durable (storage spec §2 rule 4, W8). A compaction runs at most once a
+//!    frame, so about ⌈m/N⌉ times for m commits in frames of N.
+//! 6. The metadata is flushed ([`Repo::flush_metadata`]: the checkpoint moves to the journal's
+//!    end, so that no reader parses the import's frames again), and the target moved from its
+//!    head to the tip's changeset by compare-and-swap ([`Repo::cas_ref`]). A swap that finds the
+//!    target at the tip's changeset already succeeds without moving it; one that finds anything
+//!    else is [`ImportError::CasMismatch`]. A move is then flushed too, so that its frame does
+//!    not stay past the checkpoint either; that flush failing is a warning.
+//!
+//! A store failure stops the import (M3 plan decision 6): [`StoreError::Busy`] is retried three
+//! times, and any other failure, or a frame whose commit reports a failure after its commit
+//! point, ends it after the last frame that committed ([`ImportError::Store`],
+//! [`ImportError::PostCommit`]), saying how far it got. It never writes again after such a
+//! failure: storage spec §2 rule 5's fail-stop assumption goes unchecked until M6. The same
+//! import run again continues after the frames that committed. A commit the conversion refuses
+//! ([`ImportError::Convert`]) ends the import before the frame that would hold it.
+//!
+//! [`Repo::put_objects`]: swarmops_repo::Repo::put_objects
+//! [`Repo::raw_batch`]: swarmops_repo::Repo::raw_batch
+//! [`Repo::record_external_ids`]: swarmops_repo::Repo::record_external_ids
+//! [`Repo::flush_metadata`]: swarmops_repo::Repo::flush_metadata
+//! [`Repo::cas_ref`]: swarmops_repo::Repo::cas_ref
+
+use std::collections::{HashMap, HashSet};
+
+use swarmops_core::bytes::to_u64;
+use swarmops_core::{ChangesetId, EntryTarget, LeafKind, ObjectKind, RepoPath, TreeEntry, TreeId};
+use swarmops_repo::{CasResult, LocalRepo, MAX_RAW_BATCH, RawChangeset, RepoError, StoreError};
+use swarmops_store::{ExternalEntry, Recovered, SYSTEM_GIT, check_ref_name};
+
+use crate::{
+    ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID, GitOid, GitSource, LossySet,
+    ObjectFormat, RawCommit, RawError, RawKind, RawTree, SourceError, Unsupported,
+};
+
+/// How many changesets a frame of the import holds unless asked otherwise: issue 6 Stage 1's
+/// N, past the index's compaction threshold, so that a compaction runs once a frame at most.
+pub const DEFAULT_FRAME_CHANGESETS: usize = 8_192;
+
+/// How many bytes of new trees and blobs the import gathers before it stores them, unless asked
+/// otherwise: 64 MiB.
+pub const DEFAULT_OBJECT_BATCH_BYTES: usize = 64 << 20;
+
+/// How many lossy commits an [`ImportReport`] lists ([`ImportReport::lossy`]); it counts them
+/// all ([`ImportReport::lossy_total`]).
+pub const MAX_LOSSY_LISTED: usize = 100;
+
+/// What to import, and into which ref ([`import()`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportRequest {
+    /// The source ref: `HEAD`, a ref's name, or 40 hex digits ([`GitSource::resolve`]).
+    pub git_ref: String,
+    /// The target ref, `main` or `release/<x>`: created at the tip's changeset, or moved there
+    /// from the changeset of an earlier import.
+    pub target_ref: String,
+    /// The classes of content the import may drop or normalize; it refuses the others
+    /// ([`ConvertError::Lossy`]).
+    pub lossy: LossySet,
+    /// Who moves the target ref, as the reflog records it.
+    pub actor: String,
+    /// How many changesets a journal frame holds: 1 to 65,535
+    /// ([`swarmops_repo::MAX_RAW_BATCH`]), a number outside taken as the nearer bound.
+    pub frame_changesets: usize,
+    /// How many bytes of new trees and blobs the import gathers before it stores them.
+    pub object_batch_bytes: usize,
+}
+
+impl ImportRequest {
+    /// A request to import `git_ref` into `target_ref` for `actor`, allowing no lossy class,
+    /// [`DEFAULT_FRAME_CHANGESETS`] to a frame, objects stored every
+    /// [`DEFAULT_OBJECT_BATCH_BYTES`].
+    pub fn new(
+        git_ref: impl Into<String>,
+        target_ref: impl Into<String>,
+        actor: impl Into<String>,
+    ) -> ImportRequest {
+        ImportRequest {
+            git_ref: git_ref.into(),
+            target_ref: target_ref.into(),
+            lossy: LossySet::empty(),
+            actor: actor.into(),
+            frame_changesets: DEFAULT_FRAME_CHANGESETS,
+            object_batch_bytes: DEFAULT_OBJECT_BATCH_BYTES,
+        }
+    }
+}
+
+/// What an import did ([`import()`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportReport {
+    /// The commits it recorded: each one the walk did not know, its changeset made (or found in
+    /// the store already, as after a crash before its external id was written) and its external
+    /// id written.
+    pub imported: u64,
+    /// The known commits the walk stopped at: the base, and commits the external id index
+    /// names.
+    pub skipped: u64,
+    /// The changeset of the tip, which the target names.
+    pub head: ChangesetId,
+    /// The tip: the commit the source ref names.
+    pub git_head: GitOid,
+    /// The target ref.
+    pub target_ref: String,
+    /// What the target named before; `None` if it did not exist.
+    pub old_head: Option<ChangesetId>,
+    /// Whether this import moved the target (or created it); `false` when it named the tip's
+    /// changeset already.
+    pub ref_moved: bool,
+    /// The first [`MAX_LOSSY_LISTED`] commits recorded with a loss, in the order recorded.
+    pub lossy: Vec<LossyCommit>,
+    /// How many commits were recorded with a loss.
+    pub lossy_total: u64,
+    /// What went wrong without stopping the import, one line each: an external id entry found
+    /// damaged or naming a changeset the store lacks, one the index kept with other bytes, a
+    /// step after the target's move that failed.
+    pub warnings: Vec<String>,
+    /// What the import's write transactions repaired before their own work, of what earlier
+    /// writers left ([`swarmops_store::MetaWrite::recovered`]), added up.
+    pub recovered: Recovered,
+}
+
+/// A commit an import recorded with a loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LossyCommit {
+    /// The commit.
+    pub commit: GitOid,
+    /// Its changeset, whose `git.lossy` metadata names the classes.
+    pub changeset: ChangesetId,
+    /// The classes of what it lost.
+    pub classes: LossySet,
+}
+
+/// Why an import failed. Each says how far it got where it wrote anything.
+#[derive(Debug, thiserror::Error)]
+pub enum ImportError {
+    /// The source could not open, resolve or read what the import needs: the ref names nothing,
+    /// the repository is one the import does not read, an object is missing or damaged.
+    #[error(transparent)]
+    Source(#[from] SourceError),
+    /// The conversion refused a commit: content of a class the request does not allow, or
+    /// content no class covers. The frames before the one that would hold it are recorded.
+    #[error(transparent)]
+    Convert(#[from] ConvertError),
+    /// The target is no ref name: refs are `main` and `release/<x>`. Nothing was read or
+    /// written.
+    #[error("invalid target ref name {0:?}: a ref is main or release/<name>")]
+    RefName(String),
+    /// The target does not lead to the tip: its head holds no git commit (a native changeset is
+    /// on it), or holds one that is not an ancestor of the tip (the source was rewritten, or is
+    /// behind). Nothing was written.
+    #[error(
+        "{target_ref} has diverged from the git history: its head {target_head} {}, which the \
+         tip {git_head} does not reach",
+        holding(*.base)
+    )]
+    Diverged {
+        /// The target ref.
+        target_ref: String,
+        /// The changeset it names.
+        target_head: ChangesetId,
+        /// The git commit that changeset holds; `None` for a native changeset.
+        base: Option<GitOid>,
+        /// The tip.
+        git_head: GitOid,
+    },
+    /// The target moved while the import ran: the compare-and-swap found it naming another
+    /// changeset. Every changeset and external id is recorded; the same import run again moves
+    /// the target if the move leaves it a descendant.
+    #[error(
+        "{target_ref} moved during the import: it names {}",
+        .actual.map_or_else(|| "nothing".to_owned(), |id| id.to_string())
+    )]
+    CasMismatch {
+        /// The target ref.
+        target_ref: String,
+        /// What it names; `None` if it does not exist.
+        actual: Option<ChangesetId>,
+    },
+    /// The store failed, and the import stopped: the frames before the failure are recorded,
+    /// and the same import run again continues after them.
+    #[error(
+        "the store failed after {imported} commits were recorded{}: {source}",
+        .last.map_or_else(String::new, |last| format!(", the last {last}"))
+    )]
+    Store {
+        /// The failure.
+        source: RepoError,
+        /// How many commits the frames that committed recorded.
+        imported: u64,
+        /// The last commit of the last frame that committed; `None` if none did.
+        last: Option<GitOid>,
+    },
+    /// A frame committed, but a step after its commit point failed (its warnings say which,
+    /// and the frame), and the import stopped after it, before its external ids: it never
+    /// writes again after a failed sync. The next write repairs the store, and the same import
+    /// run again continues.
+    #[error(
+        "the import stopped after {imported} commits were recorded{}: {}",
+        .last.map_or_else(String::new, |last| format!(", the last {last}")),
+        .warnings.join("; ")
+    )]
+    PostCommit {
+        /// The steps that failed, one line each, each naming the frame.
+        warnings: Vec<String>,
+        /// How many commits the frames that committed recorded, that frame's included.
+        imported: u64,
+        /// The last commit of that frame.
+        last: Option<GitOid>,
+    },
+}
+
+/// What [`ImportError::Diverged`] says the target's head holds.
+fn holding(base: Option<GitOid>) -> String {
+    base.map_or_else(
+        || "holds no git commit".to_owned(),
+        |base| format!("is git commit {base}"),
+    )
+}
+
+/// How many times a store call that found the writer lock held for its whole wait
+/// ([`StoreError::Busy`]) is made again.
+const BUSY_RETRIES: usize = 3;
+
+/// The mode git writes for a directory.
+const DIR_MODE: &[u8] = b"40000";
+
+/// Imports into `repo` every commit `source`'s `req.git_ref` reaches that `repo` does not hold,
+/// and moves `req.target_ref` to the tip's changeset: see [the module documentation](self) for
+/// the steps and their errors.
+pub fn import(
+    repo: &LocalRepo,
+    source: &dyn GitSource,
+    req: &ImportRequest,
+) -> Result<ImportReport, ImportError> {
+    if check_ref_name(&req.target_ref).is_err() {
+        return Err(ImportError::RefName(req.target_ref.clone()));
+    }
+    let format = source.object_format();
+    if format != ObjectFormat::Sha1 {
+        let format = Unsupported::ObjectFormat(format.as_str().to_owned());
+        return Err(SourceError::Unsupported(format).into());
+    }
+    let tip = source.resolve(&req.git_ref)?;
+    let base = Base::of(repo, req, tip)?;
+    let walk = Walk::from_tip(repo, source, tip, base.as_ref())?;
+    let old_head = base.as_ref().map(|base| base.head);
+    if let Some(base) = &base {
+        if base.commit == tip {
+            return Ok(ImportReport {
+                imported: 0,
+                skipped: to_u64(walk.known.len()),
+                head: base.head,
+                git_head: tip,
+                target_ref: req.target_ref.clone(),
+                old_head,
+                ref_moved: false,
+                lossy: Vec::new(),
+                lossy_total: 0,
+                warnings: walk.warnings,
+                recovered: Recovered::default(),
+            });
+        }
+        let met = walk.known.contains_key(&base.commit);
+        let stops = walk.known.values().copied();
+        let reached = || ancestry::reaches(repo, stops, base.head, base.generation);
+        if !met && !reached().map_err(|source| stopped(source, 0, None))? {
+            return Err(ImportError::Diverged {
+                target_ref: req.target_ref.clone(),
+                target_head: base.head,
+                base: Some(base.commit),
+                git_head: tip,
+            });
+        }
+    }
+    let mut run = Run::new(repo, source, req, walk.known);
+    run.skipped = to_u64(run.ids.len());
+    run.warnings = walk.warnings;
+    run.flagged = walk.flagged;
+    if let Some(base) = &base
+        && let Some(root) = base.faithful_root
+    {
+        seed(repo, source, &mut run.converter, base, root)?;
+    }
+    for commits in walk
+        .unknown
+        .chunks(req.frame_changesets.clamp(1, MAX_RAW_BATCH))
+    {
+        run.frame(commits)?;
+    }
+    run.finish(tip, old_head)
+}
+
+/// The target's head when the import starts, and the git commit it holds: what the import
+/// goes on from.
+struct Base {
+    /// The changeset the target names.
+    head: ChangesetId,
+    /// Its generation: no changeset of a generation as low or lower has it as an ancestor.
+    generation: u64,
+    /// The git commit it holds: its `git.oid`.
+    commit: GitOid,
+    /// Its root, when it holds the commit without loss (no `git.lossy`): what seeds the
+    /// conversion.
+    faithful_root: Option<TreeId>,
+}
+
+impl Base {
+    /// The base of `req.target_ref` in `repo`; `None` when the target does not exist.
+    /// [`ImportError::Diverged`] without a base when its head holds no git commit.
+    fn of(repo: &LocalRepo, req: &ImportRequest, tip: GitOid) -> Result<Option<Base>, ImportError> {
+        let at_start = |source| stopped(source, 0, None);
+        let Some(state) = repo.get_ref(&req.target_ref).map_err(at_start)? else {
+            return Ok(None);
+        };
+        let head = state.target;
+        let Some(stored) = repo.changeset(head).map_err(at_start)? else {
+            return Err(at_start(RepoError::NotFound(head.to_string())));
+        };
+        let metadata = &stored.changeset.metadata;
+        let Some(commit) = value(metadata, GIT_OID).and_then(GitOid::from_hex) else {
+            return Err(ImportError::Diverged {
+                target_ref: req.target_ref.clone(),
+                target_head: head,
+                base: None,
+                git_head: tip,
+            });
+        };
+        let faithful = value(metadata, GIT_LOSSY).is_none();
+        Ok(Some(Base {
+            head,
+            generation: stored.generation,
+            commit,
+            faithful_root: faithful.then_some(stored.changeset.root),
+        }))
+    }
+}
+
+/// The value of metadata key `key`.
+fn value<'m>(metadata: &'m [(String, Vec<u8>)], key: &str) -> Option<&'m [u8]> {
+    (metadata.iter())
+        .find(|(name, _)| name == key)
+        .map(|(_, value)| value.as_slice())
+}
+
+/// What the walk from the tip found (step 2 of [the module documentation](self)).
+struct Walk {
+    /// The commits it did not know, parents first.
+    unknown: Vec<GitOid>,
+    /// The known commits it stopped at, with their changesets.
+    known: HashMap<GitOid, ChangesetId>,
+    /// One line for each external id entry it found damaged, or naming a changeset the store
+    /// lacks.
+    warnings: Vec<String>,
+    /// The commits of those entries.
+    flagged: HashSet<GitOid>,
+}
+
+/// A commit on the walk's stack: the parents it has not looked at yet, first parents first.
+struct Visit {
+    oid: GitOid,
+    parents: std::vec::IntoIter<GitOid>,
+}
+
+impl Walk {
+    /// Walks from `tip` over parents, on a stack of its own, stopping at each known commit.
+    fn from_tip(
+        repo: &LocalRepo,
+        source: &dyn GitSource,
+        tip: GitOid,
+        base: Option<&Base>,
+    ) -> Result<Walk, ImportError> {
+        let mut walk = Walk {
+            unknown: Vec::new(),
+            known: HashMap::new(),
+            warnings: Vec::new(),
+            flagged: HashSet::new(),
+        };
+        let mut seen = HashSet::from([tip]);
+        let mut stack = Vec::new();
+        walk.reach(repo, source, base, tip, &mut stack)?;
+        while let Some(top) = stack.last_mut() {
+            if let Some(parent) = top.parents.next() {
+                if seen.insert(parent) {
+                    walk.reach(repo, source, base, parent, &mut stack)?;
+                }
+            } else if let Some(done) = stack.pop() {
+                // Every parent of it is known or out already: it comes out after them.
+                walk.unknown.push(done.oid);
+            }
+        }
+        Ok(walk)
+    }
+
+    /// Commit `oid`, met for the first time: a stop when it is known, and otherwise on the
+    /// stack, its parents to be walked next.
+    fn reach(
+        &mut self,
+        repo: &LocalRepo,
+        source: &dyn GitSource,
+        base: Option<&Base>,
+        oid: GitOid,
+        stack: &mut Vec<Visit>,
+    ) -> Result<(), ImportError> {
+        if let Some(changeset) = self.known_as(repo, base, oid)? {
+            self.known.insert(oid, changeset);
+        } else {
+            let parents = read_commit(source, oid)?.parents.into_iter();
+            stack.push(Visit { oid, parents });
+        }
+        Ok(())
+    }
+
+    /// The changeset commit `oid` is known as: the base's, or the one its external id entry
+    /// names if the store holds it. An entry that is damaged, or names a changeset the store
+    /// lacks, is a miss and a warning.
+    fn known_as(
+        &mut self,
+        repo: &LocalRepo,
+        base: Option<&Base>,
+        oid: GitOid,
+    ) -> Result<Option<ChangesetId>, ImportError> {
+        if let Some(base) = base
+            && base.commit == oid
+        {
+            return Ok(Some(base.head));
+        }
+        let entry = match repo.external_id(SYSTEM_GIT, &oid.0) {
+            Ok(entry) => entry,
+            Err(RepoError::Store(damaged @ StoreError::ExternalIdCorrupt { .. })) => {
+                self.flag(oid, &damaged.to_string());
+                return Ok(None);
+            }
+            Err(source) => return Err(stopped(source, 0, None)),
+        };
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let held = repo.changeset_meta(entry.changeset);
+        if held.map_err(|source| stopped(source, 0, None))?.is_some() {
+            return Ok(Some(entry.changeset));
+        }
+        let why = format!(
+            "it names changeset {}, which the store does not hold",
+            entry.changeset
+        );
+        self.flag(oid, &why);
+        Ok(None)
+    }
+
+    /// Warns that the external id entry of commit `oid` is no use, for the reason `why`.
+    fn flag(&mut self, oid: GitOid, why: &str) {
+        self.flagged.insert(oid);
+        self.warnings.push(format!(
+            "the external id entry of git commit {oid} is left as it is and the commit imported \
+             again: {why}"
+        ));
+    }
+}
+
+/// The commit `oid`'s fields, read from `source`.
+fn read_commit(source: &dyn GitSource, oid: GitOid) -> Result<RawCommit, ImportError> {
+    let (kind, bytes) = source.read(oid)?;
+    if kind != RawKind::Commit {
+        let what = "named as a commit, but it is no commit";
+        return Err(ConvertError::Malformed { oid, what }.into());
+    }
+    RawCommit::parse(&bytes).map_err(|error| malformed(oid, &error))
+}
+
+/// The object `oid`, whose bytes do not parse, as `error` says.
+fn malformed(oid: GitOid, error: &RawError) -> ImportError {
+    match *error {
+        RawError::Malformed { what } => ConvertError::Malformed { oid, what }.into(),
+    }
+}
+
+/// The ancestry of the store's changesets, as the import checks a base against it.
+mod ancestry {
+    use std::collections::HashSet;
+
+    use swarmops_core::ChangesetId;
+    use swarmops_repo::{LocalRepo, RepoError};
+
+    /// Whether `base`, of generation `generation`, is one of `from` or an ancestor of one, over
+    /// every parent: a walk down the store's records ([`swarmops_repo::Repo::changeset_meta`]),
+    /// pruned where the generation is no higher than the base's, since generations grow from
+    /// parent to child.
+    pub(super) fn reaches(
+        repo: &LocalRepo,
+        from: impl IntoIterator<Item = ChangesetId>,
+        base: ChangesetId,
+        generation: u64,
+    ) -> Result<bool, RepoError> {
+        let mut stack: Vec<ChangesetId> = from.into_iter().collect();
+        let mut seen = HashSet::new();
+        while let Some(at) = stack.pop() {
+            if at == base {
+                return Ok(true);
+            }
+            if !seen.insert(at) {
+                continue;
+            }
+            if let Some(meta) = repo.changeset_meta(at)?
+                && meta.generation > generation
+            {
+                stack.extend(meta.parents);
+            }
+        }
+        Ok(false)
+    }
+}
+
+/// Step 4 of [the module documentation](self): the trees and blobs of the faithful `base`,
+/// whose root is `root`, taken by `converter` as converted already, by walking the base commit's
+/// git tree and the root together, entries matched by name and kind.
+fn seed(
+    repo: &LocalRepo,
+    source: &dyn GitSource,
+    converter: &mut Converter<'_>,
+    base: &Base,
+    root: TreeId,
+) -> Result<(), ImportError> {
+    let git_root = read_commit(source, base.commit)?.tree;
+    converter.remember_tree(git_root, root);
+    // Each directory to walk: its path in the base's tree (`None` for the root) and its git tree.
+    let mut dirs: Vec<(Option<RepoPath>, GitOid)> = vec![(None, git_root)];
+    // The git trees walked or about to be: a tree held at several paths is walked once.
+    let mut walked = HashSet::from([git_root]);
+    while let Some((dir, git)) = dirs.pop() {
+        let (kind, bytes) = source.read(git)?;
+        if kind != RawKind::Tree {
+            let what = "named as a tree, but it is no tree";
+            return Err(ConvertError::Malformed { oid: git, what }.into());
+        }
+        let tree = RawTree::parse(&bytes).map_err(|error| malformed(git, &error))?;
+        let listed = repo.list_tree(base.head, dir.as_ref());
+        let Some(held) = listed.map_err(|source| stopped(source, 0, None))? else {
+            continue;
+        };
+        for entry in tree.entries {
+            let Some(target) = held_target(&held, &entry.name) else {
+                continue;
+            };
+            match (entry.mode.as_slice(), target) {
+                (b"100644", EntryTarget::Leaf(LeafKind::File, blob))
+                | (b"100755", EntryTarget::Leaf(LeafKind::Exec, blob))
+                | (b"120000", EntryTarget::Leaf(LeafKind::Symlink, blob)) => {
+                    converter.remember_blob(entry.oid, blob);
+                }
+                (DIR_MODE, EntryTarget::Dir(tree)) => {
+                    converter.remember_tree(entry.oid, tree);
+                    if walked.insert(entry.oid)
+                        && let Some(path) = child_path(dir.as_ref(), &entry.name)
+                    {
+                        dirs.push((Some(path), entry.oid));
+                    }
+                }
+                // Not as the conversion would have made it: left for it to convert.
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// What the entry named `name` of `entries`, a tree's in its order, names.
+fn held_target(entries: &[TreeEntry], name: &[u8]) -> Option<EntryTarget> {
+    let at = entries.binary_search_by(|entry| entry.name.as_bytes().cmp(name));
+    at.ok().map(|at| entries[at].target)
+}
+
+/// The path of the entry `name` of directory `dir` (the root for `None`); `None` when it is no
+/// path.
+fn child_path(dir: Option<&RepoPath>, name: &[u8]) -> Option<RepoPath> {
+    let name = std::str::from_utf8(name).ok()?;
+    let path = match dir {
+        Some(dir) => format!("{}/{name}", dir.as_str()),
+        None => name.to_owned(),
+    };
+    RepoPath::new(path).ok()
+}
+
+/// An import as it runs, from the frames on (steps 5 and 6 of [the module
+/// documentation](self)).
+struct Run<'a, 's> {
+    repo: &'a LocalRepo,
+    req: &'a ImportRequest,
+    converter: Converter<'s>,
+    /// The changeset of each commit the import knows: the walk's known ones, then each one the
+    /// frames record.
+    ids: HashMap<GitOid, ChangesetId>,
+    /// The commits whose external id entries the walk warned of.
+    flagged: HashSet<GitOid>,
+    skipped: u64,
+    imported: u64,
+    /// The last commit of the last frame that committed.
+    last: Option<GitOid>,
+    lossy: Vec<LossyCommit>,
+    lossy_total: u64,
+    warnings: Vec<String>,
+    recovered: Recovered,
+}
+
+impl<'a, 's> Run<'a, 's> {
+    fn new(
+        repo: &'a LocalRepo,
+        source: &'s dyn GitSource,
+        req: &'a ImportRequest,
+        known: HashMap<GitOid, ChangesetId>,
+    ) -> Run<'a, 's> {
+        Run {
+            repo,
+            req,
+            converter: Converter::new(source, req.lossy),
+            ids: known,
+            flagged: HashSet::new(),
+            skipped: 0,
+            imported: 0,
+            last: None,
+            lossy: Vec::new(),
+            lossy_total: 0,
+            warnings: Vec::new(),
+            recovered: Recovered::default(),
+        }
+    }
+
+    /// The import's failure `source`, which stops it after the frames that committed.
+    fn stopped(&self, source: RepoError) -> ImportError {
+        stopped(source, self.imported, self.last)
+    }
+
+    /// One frame: `commits` converted, their objects stored, their changesets recorded in one
+    /// journal frame, then their external ids.
+    fn frame(&mut self, commits: &[GitOid]) -> Result<(), ImportError> {
+        let converted = self.convert(commits)?;
+        let repo = self.repo;
+        let mut batch = repo.raw_batch();
+        let mut raws = Vec::with_capacity(converted.len());
+        let mut entries = Vec::with_capacity(converted.len());
+        for commit in converted {
+            let Converted {
+                oid,
+                parents,
+                root,
+                author,
+                committer,
+                message,
+                extra_headers,
+                lossy,
+                metadata,
+            } = commit;
+            let raw = RawChangeset {
+                parents: self.changesets(oid, &parents)?,
+                root,
+                author,
+                committer,
+                message,
+                extra_headers,
+                metadata,
+            };
+            let id = batch
+                .push(raw.clone())
+                .map_err(|source| self.stopped(source))?;
+            self.ids.insert(oid, id);
+            self.note_lossy(oid, id, lossy);
+            let faithful = lossy.is_empty();
+            let entry = ExternalEntry {
+                changeset: id,
+                faithful,
+            };
+            entries.push((oid.0.to_vec(), entry));
+            raws.push(raw);
+        }
+        // A batch is gone once it commits: a retry records the same raws again.
+        let mut batch = Some(batch);
+        let outcome = retry_busy(|| match batch.take() {
+            Some(batch) => batch.commit(),
+            None => repo.commit_raw_batch(raws.clone()),
+        })
+        .map_err(|source| self.stopped(source))?;
+        absorb(&mut self.recovered, outcome.recovered);
+        self.imported += to_u64(commits.len());
+        self.last = commits.last().copied();
+        if !outcome.warnings.is_empty() {
+            return Err(ImportError::PostCommit {
+                warnings: outcome.warnings,
+                imported: self.imported,
+                last: self.last,
+            });
+        }
+        let put = repo.record_external_ids(SYSTEM_GIT, &entries);
+        let put = put.map_err(|source| self.stopped(source))?;
+        for key in put.conflicts {
+            self.conflict(&key);
+        }
+        Ok(())
+    }
+
+    /// `commits` converted, in order; their new trees and blobs stored whenever
+    /// [`ImportRequest::object_batch_bytes`] of them gather, and at the end.
+    fn convert(&mut self, commits: &[GitOid]) -> Result<Vec<Converted>, ImportError> {
+        let mut converted = Vec::with_capacity(commits.len());
+        let mut objects: Vec<(ObjectKind, Vec<u8>)> = Vec::new();
+        let mut gathered = 0;
+        for &oid in commits {
+            let made = objects.len();
+            converted.push(self.converter.commit(oid, &mut objects)?);
+            gathered += objects[made..]
+                .iter()
+                .map(|(_, bytes)| bytes.len())
+                .sum::<usize>();
+            if gathered >= self.req.object_batch_bytes {
+                self.put(std::mem::take(&mut objects))?;
+                gathered = 0;
+            }
+        }
+        self.put(objects)?;
+        Ok(converted)
+    }
+
+    /// Stores `objects`, if any.
+    fn put(&self, objects: Vec<(ObjectKind, Vec<u8>)>) -> Result<(), ImportError> {
+        if objects.is_empty() {
+            return Ok(());
+        }
+        let put = self.repo.put_objects(objects);
+        put.map(drop).map_err(|source| self.stopped(source))
+    }
+
+    /// The changesets of `parents`, the parents of commit `oid`: each recorded by this import
+    /// or known to it, as the walk put parents first. One that is neither would be a commit
+    /// whose bytes the source gave the walk otherwise than the conversion: a bug.
+    fn changesets(&self, oid: GitOid, parents: &[GitOid]) -> Result<Vec<ChangesetId>, ImportError> {
+        (parents.iter())
+            .map(|parent| self.ids.get(parent).copied())
+            .collect::<Option<Vec<ChangesetId>>>()
+            .ok_or(ImportError::Convert(ConvertError::Bug { commit: oid }))
+    }
+
+    /// Counts commit `commit`, recorded as `changeset`, among the lossy ones if `classes` holds
+    /// any, and lists it while the list is short.
+    fn note_lossy(&mut self, commit: GitOid, changeset: ChangesetId, classes: LossySet) {
+        if classes.is_empty() {
+            return;
+        }
+        self.lossy_total += 1;
+        if self.lossy.len() < MAX_LOSSY_LISTED {
+            self.lossy.push(LossyCommit {
+                commit,
+                changeset,
+                classes,
+            });
+        }
+    }
+
+    /// Warns of the entry `key` that the index kept with other bytes, unless the walk warned of
+    /// it already.
+    fn conflict(&mut self, key: &[u8]) {
+        let Ok(oid) = <[u8; 20]>::try_from(key).map(GitOid) else {
+            return;
+        };
+        if self.flagged.contains(&oid) {
+            return;
+        }
+        if let Some(changeset) = self.ids.get(&oid) {
+            self.warnings.push(format!(
+                "the external id index holds another entry for git commit {oid} than its \
+                 changeset {changeset}: the entry is left as it is"
+            ));
+        }
+    }
+
+    /// Step 6 of [the module documentation](self): the metadata flushed, the target moved from
+    /// `old_head` to the changeset of `tip`, and the move flushed; the report.
+    fn finish(
+        mut self,
+        tip: GitOid,
+        old_head: Option<ChangesetId>,
+    ) -> Result<ImportReport, ImportError> {
+        let repo = self.repo;
+        let req = self.req;
+        // The tip is known, or recorded by a frame: every commit the walk did not know is.
+        let head = self.changesets(tip, &[tip])?[0];
+        retry_busy(|| repo.flush_metadata()).map_err(|source| self.stopped(source))?;
+        let moved = retry_busy(|| repo.cas_ref(&req.target_ref, old_head, Some(head), &req.actor));
+        let moved = moved.map_err(|source| self.stopped(source))?;
+        absorb(&mut self.recovered, moved.recovered);
+        let ref_moved = match moved.result {
+            CasResult::Applied { .. } => true,
+            // Another import of the same history moved it first.
+            CasResult::Mismatch { actual } if actual == Some(head) => false,
+            CasResult::Mismatch { actual } => {
+                let target_ref = req.target_ref.clone();
+                return Err(ImportError::CasMismatch { target_ref, actual });
+            }
+        };
+        // A move whose step after its commit point failed is not followed by another write.
+        let flush_again = ref_moved && moved.warnings.is_empty();
+        self.warnings.extend(moved.warnings);
+        if flush_again && let Err(error) = retry_busy(|| repo.flush_metadata()) {
+            self.warnings.push(format!(
+                "the target moved, but the flush after its move failed: {error}; its frame stays \
+                 past the checkpoint until a later one"
+            ));
+        }
+        Ok(ImportReport {
+            imported: self.imported,
+            skipped: self.skipped,
+            head,
+            git_head: tip,
+            target_ref: req.target_ref.clone(),
+            old_head,
+            ref_moved,
+            lossy: self.lossy,
+            lossy_total: self.lossy_total,
+            warnings: self.warnings,
+            recovered: self.recovered,
+        })
+    }
+}
+
+/// The import's failure `source`, after `imported` commits, the last of them `last`.
+fn stopped(source: RepoError, imported: u64, last: Option<GitOid>) -> ImportError {
+    ImportError::Store {
+        source,
+        imported,
+        last,
+    }
+}
+
+/// `call`, made again while it fails with [`StoreError::Busy`], [`BUSY_RETRIES`] times at most.
+fn retry_busy<T>(mut call: impl FnMut() -> Result<T, RepoError>) -> Result<T, RepoError> {
+    let mut retries = 0;
+    loop {
+        match call() {
+            Err(RepoError::Store(StoreError::Busy)) if retries < BUSY_RETRIES => retries += 1,
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Adds `more`, what one more write transaction repaired, to `total`: the counts summed, the
+/// views rebuilt if either rebuilt them, the first journal cut kept.
+fn absorb(total: &mut Recovered, more: Recovered) {
+    let Recovered {
+        log_cut,
+        frames_listed,
+        frames_rewritten,
+        off_bytes_dropped,
+        index_records_dropped,
+        views_rebuilt,
+        records_replayed,
+        refs_replayed,
+    } = more;
+    total.log_cut = total.log_cut.or(log_cut);
+    total.frames_listed += frames_listed;
+    total.frames_rewritten += frames_rewritten;
+    total.off_bytes_dropped += off_bytes_dropped;
+    total.index_records_dropped += index_records_dropped;
+    total.views_rebuilt |= views_rebuilt;
+    total.records_replayed += records_replayed;
+    total.refs_replayed += refs_replayed;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use swarmops_store::LogCut;
+
+    use super::*;
+
+    /// A call that finds the writer lock held is made again three times, then its `Busy` is the
+    /// outcome; one that succeeds on a retry is through; any other failure is not retried.
+    #[test]
+    fn busy_is_retried_three_times() {
+        let calls = Cell::new(0);
+        let busy = retry_busy(|| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(RepoError::Store(StoreError::Busy))
+        });
+        assert!(matches!(busy, Err(RepoError::Store(StoreError::Busy))));
+        assert_eq!(calls.get(), 1 + BUSY_RETRIES);
+
+        let calls = Cell::new(0);
+        let through = retry_busy(|| {
+            calls.set(calls.get() + 1);
+            if calls.get() <= BUSY_RETRIES {
+                Err(RepoError::Store(StoreError::Busy))
+            } else {
+                Ok(calls.get())
+            }
+        });
+        assert_eq!(through.unwrap(), 1 + BUSY_RETRIES);
+
+        let calls = Cell::new(0);
+        let other = retry_busy(|| {
+            calls.set(calls.get() + 1);
+            Err::<(), _>(RepoError::NotFound("x".to_owned()))
+        });
+        assert!(matches!(other, Err(RepoError::NotFound(_))));
+        assert_eq!(calls.get(), 1);
+    }
+
+    /// What several write transactions repaired adds up: counts summed, the views rebuilt if
+    /// any rebuilt them, the first journal cut kept.
+    #[test]
+    fn what_the_transactions_repaired_adds_up() {
+        let first = LogCut { at: 10, bytes: 3 };
+        let mut total = Recovered::default();
+        absorb(
+            &mut total,
+            Recovered {
+                log_cut: Some(first),
+                frames_listed: 1,
+                records_replayed: 2,
+                ..Recovered::default()
+            },
+        );
+        absorb(
+            &mut total,
+            Recovered {
+                log_cut: Some(LogCut { at: 20, bytes: 1 }),
+                frames_listed: 2,
+                frames_rewritten: 1,
+                off_bytes_dropped: 8,
+                index_records_dropped: 4,
+                views_rebuilt: true,
+                refs_replayed: 1,
+                ..Recovered::default()
+            },
+        );
+        let expected = Recovered {
+            log_cut: Some(first),
+            frames_listed: 3,
+            frames_rewritten: 1,
+            off_bytes_dropped: 8,
+            index_records_dropped: 4,
+            views_rebuilt: true,
+            records_replayed: 2,
+            refs_replayed: 1,
+        };
+        assert_eq!(total, expected);
+    }
+}

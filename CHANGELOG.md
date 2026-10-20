@@ -454,6 +454,49 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   when it is dropped or normalized and named in `git.lossy`; a mode of no file, directory,
   symlink or gitlink, more than 255 parents and a blob longer than an object holds are refused
   whatever is allowed, the blob before it is read.
+- The git import (`swarmops_git::import`, storage spec §7): every commit a git ref reaches that the
+  store does not hold becomes a changeset, parents first with all its parents in their order (a
+  merge's other side included), 8,192 to a journal frame, and each frame's external ids are
+  written once it is durable; then the metadata is flushed, so that no reader parses the import's
+  frames again, and the target ref (`main` by default) moves to the tip's changeset by
+  compare-and-swap. Run again, it takes only the commits after the one the target's head holds
+  (`git.oid`), even one the tip reaches through a merge's second parent, and writes nothing when
+  that is the tip; a target whose head holds no git commit, or one the tip does not reach, is
+  diverged, and nothing is written. A store failure, or a frame that fails after its commit point,
+  stops it after its last committed frame (a busy writer lock is retried three times), and the
+  same import run again continues there; a commit the conversion refuses stops it before the
+  frame that would hold it. The report counts the commits imported and the known ones the walk
+  stopped at, lists the first 100 recorded with a loss, and carries what the import's writes
+  repaired. An incremental run converts with the base's trees and blobs taken as made, so it
+  reads only what the new commits changed.
+- `swarmops git import PATH`, the git import as a command, with `--ref GIT_REF` (`HEAD` by
+  default), `--into REF` (`main`), `--lossy CLASS` and `--gitlinks refuse|drop`. It reads the git
+  repository at `PATH` on the caller's host, and reports `GitImportResp`, and what its writes
+  repaired in `meta.recovered`. `--lossy` names a class to drop or normalize instead of refusing
+  it, repeatable, or `all`; `--gitlinks drop` is `--lossy gitlinks`, and `--gitlinks`, given,
+  decides that class whatever `--lossy` says. It needs an identity, checks the target's name
+  before it opens the repository, and raises the six `E_GIT_*` codes: `E_GIT_NOT_A_REPO`
+  (`git_path`), `E_GIT_REF_NOT_FOUND` (`git_ref`, `kind`), `E_GIT_UNSUPPORTED` (`reason`:
+  `object_format`, `ref_storage`, `shallow`, `parents` or `mode`), `E_GIT_READ` (`reason`:
+  `missing`, `corrupt`, `malformed` or `io`; `object`), `E_GIT_IMPORT_LOSSY` (`commit`, `class`,
+  `path`, and `path_base64` for a path that is not UTF-8) and `E_GIT_IMPORT_DIVERGED` (exit 3),
+  besides `E_TOO_LARGE` for a blob past the object limit, `E_CAS_MISMATCH` for a target moved
+  meanwhile and a store failure's own code, each of an import that stopped after it committed
+  frames saying how far it got (`imported`, `last_commit`) and hinting to run it again. Like
+  `init`, it is a client-side operation (`LocalOps::git_import`): no `StoreOps` method and no MCP
+  tool.
+- The git import's crash and fault sweeps (`swarmops-git`'s `tests/sweeps.rs`, behind the crate's
+  new `test-hooks` feature, which the gates turn on): `refs`' `newer`, two changesets to a frame,
+  imported onto a fresh store and onto one that holds `older`, each run a child process under the
+  order checker, is crashed (`SWARMOPS_TEST_CRASH_AT`) or failed (`SWARMOPS_TEST_FAIL_AT`: once
+  with `EIO`, persistently with `ENOSPC`) at its filesystem calls. A failed import stops with a
+  store failure that names no host path, its committed frames recorded and nothing after them,
+  or succeeds with every commit recorded and a warning that says what failed. The store it leaves
+  verifies clean, and the same import run again ends with the changesets, the external ids and
+  the target an uninterrupted import leaves; after a crash it takes exactly the commits whose
+  external ids the crash left out. The default gate takes every fifth call (and fails them onto
+  the fresh store alone); `just check-slow` takes every call, and imports 100,000 synthetic
+  commits: 13 frames, at most 14 compactions, a peak resident memory under 1 GiB.
 
 #### M8: git export (2026-10-19)
 

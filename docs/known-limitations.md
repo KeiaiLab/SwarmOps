@@ -137,10 +137,6 @@ left).
   a validated lazy read, a per-handle map of refs or a packed refs file (a FORMAT change), and
   the `read_snapshot` bench measures 0, 16 and 256 refs to tell. *Unscheduled: when refs grow
   past dozens. Found: M1 Tasks 2c, 3 and 4b.*
-- **A large frame past the checkpoint is parsed by every read.** After a bulk write, such as a
-  git import, every `read()` parses the big frame again until the next checkpoint; the import
-  should flush, or the store checkpoint once the frames past it grow large. *Target: M3. Found:
-  M1 Task 2c.*
 
 ## Commits, refs and history
 
@@ -281,6 +277,12 @@ left).
 - **No test reads a real repository yet.** M1 had none, so the final review had nothing to judge
   (question 14). The first come with the git import, behind `SWARMOPS_HOST_REPOS=1`. *Target:
   M3.*
+- **A git import reports what its writes repaired only when it succeeds.** Its `meta.recovered`
+  adds up what its frames' and its ref move's write transactions repaired of what earlier writers
+  left. An import that fails reports none of it (the import's error carries no such record), and
+  the metadata flush before the ref move reports nothing either (`Repo::flush_metadata` returns no
+  record), so an import that has no commit to write and finds the store in need of repair does the
+  repair unreported. *Unscheduled. Found: M3 Task 12.*
 
 ## Platforms
 

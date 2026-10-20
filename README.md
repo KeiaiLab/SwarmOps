@@ -304,6 +304,7 @@ and starts no server either.
 | `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
 | `derive [--after N] [--follow] [--interval-ms N] [--from-start]` | Derive ahead of any reader the eager derived values (the first-parent skip list) of the changesets the journal records. Once: up to 1,000 journal frames, from the first or after `--after N`, its `next` saying where to go on. With `--follow`: as they are committed, from the journal's end (its start with `--from-start`), until killed, one envelope a line for each run that derived something. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
+| `git import PATH [--ref GIT_REF] [--into REF] [--lossy CLASS]... [--gitlinks refuse\|drop]` | Bring the history of the git repository at `PATH` in: every commit `--ref` (`HEAD`) reaches that the store does not hold, then move `--into` (`main`) to it ([Bring a git repository in](#bring-a-git-repository-in)). |
 | `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([MCP](#mcp)). |
 
 ### Revisions and change lists
@@ -326,10 +327,47 @@ whole-file puts would revert the winner's edits to shared files), and publish wi
 
 ### The store and the identity
 
-`--repo <store>` names the store, else `SWARMOPS_REPO`. Reads need no identity. A commit or a
-ref move needs one: `--as <family>/<instance>`, else `SWARMOPS_AGENT`, and `SWARMOPS_RUN_ID`
+`--repo <store>` names the store, else `SWARMOPS_REPO`. Reads need no identity. A commit, a ref
+move or a git import needs one: `--as <family>/<instance>`, else `SWARMOPS_AGENT`, and `SWARMOPS_RUN_ID`
 naming the agent's run if it has one. The changeset records it (and the journal records who
 moved each ref); without one, a mutation fails with `E_IDENTITY_REQUIRED` (exit 5).
+
+### Bring a git repository in
+
+`git import PATH` brings the history of the git repository at `PATH` into the store: a work tree
+or a bare repository, read on this host (a relative path from the working directory), never by a
+server. Every commit `--ref` reaches (`HEAD` by default) that the store does not hold becomes a
+changeset, parents first, a merge with all of its parents in their order, and `--into` (`main`
+by default) moves to the changeset of `--ref`'s commit, created if it does not exist.
+
+```sh
+so git import ~/src/acme --ref stable     # creates main, or moves it on from an earlier import
+so git import ~/src/acme --ref stable     # again: imports 0, skips 1, writes nothing
+```
+
+An imported changeset is its git commit: its author and committer are the commit's, with their
+exact times and offsets, in `show`'s `signatures`, and its `git.oid` metadata holds the commit's
+id, which the changeset renders back to when nothing was lost. It records no agent, so `show` and
+`log` attribute it to `unknown/unknown`, and the same git commit is the same changeset in every
+store.
+
+Run again, `git import` takes only the commits after the one the target's head holds, and writes
+nothing when that is `--ref`'s commit. A target whose head is not the import of an ancestor of
+`--ref`'s commit, because the git history was rewritten or a changeset was committed on the
+target, fails with `E_GIT_IMPORT_DIVERGED` (exit 3), and nothing is written. An import cut short
+says how many commits it recorded (`details.imported`), and the same command run again continues
+after them.
+
+Content a changeset cannot hold as git has it is refused with `E_GIT_IMPORT_LOSSY`, naming the
+commit, the path and the class: a submodule's entry (`gitlinks`), a name that is not UTF-8 or is
+`.` or `..` (`paths`), a mode git does not write (`modes`), a tree out of git's order
+(`tree_order`), an empty directory (`empty_trees`), or a commit whose bytes its fields cannot give
+back (`nonstandard`). `--lossy CLASS` (repeatable, or `all`) drops or normalizes that class
+instead, and the changeset names it in its `git.lossy` metadata; `--gitlinks drop` is
+`--lossy gitlinks`, and `--gitlinks`, given, decides that class whatever `--lossy` says. A
+SHA-256 repository, reftable refs and a shallow clone are refused (`E_GIT_UNSUPPORTED`), and so
+is an object the repository lacks, as a partial clone lacks blobs (`E_GIT_READ`). `git import`
+is not an MCP tool: an agent runs it as a command.
 
 ### Output and exit codes
 
@@ -355,7 +393,7 @@ the next command to run. The exit code is
 | 0 | Success. | |
 | 1 | The operation failed. | `E_EMPTY_COMMIT`, `E_STORE_CORRUPT`, `E_IO` |
 | 2 | A malformed request or command line. | `E_INVALID_ARG` |
-| 3 | Reserved for conflicts (M4); no M1 code exits with it. | |
+| 3 | A conflict with what the change lands on: resolve it, then run it again. | `E_GIT_IMPORT_DIVERGED` |
 | 4 | Retryable: the operation can succeed if run again (after a CAS mismatch, on top of `details.actual`, with your edits re-applied there). | `E_CAS_MISMATCH`, `E_BUSY`, `E_IO_TRANSIENT` |
 | 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED` |
 | 6 | Something it names does not exist. | `E_NOT_A_REPO`, `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND` |

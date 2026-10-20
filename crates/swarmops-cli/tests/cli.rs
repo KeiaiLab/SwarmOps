@@ -1386,14 +1386,7 @@ fn error_codes_reach_the_cli() {
             "E_MAINTENANCE_BUSY",
             "the maintenance lease arrives after M1",
         ),
-        // `git import`'s codes, in the schema before the command that raises them.
-        ("E_GIT_NOT_A_REPO", "no command imports from git yet"),
-        ("E_GIT_REF_NOT_FOUND", "no command imports from git yet"),
-        ("E_GIT_IMPORT_DIVERGED", "no command imports from git yet"),
-        ("E_GIT_IMPORT_LOSSY", "no command imports from git yet"),
-        ("E_GIT_UNSUPPORTED", "no command imports from git yet"),
-        ("E_GIT_READ", "no command imports from git yet"),
-        // `git export`'s codes, likewise.
+        // `git export`'s codes, in the schema before the command that raises them.
         ("E_GIT_EXPORT_DIVERGED", "no command exports to git yet"),
         ("E_GIT_WRITE", "no command exports to git yet"),
     ];
@@ -1410,6 +1403,27 @@ fn error_codes_reach_the_cli() {
 
     let mut raised = Vec::new();
     for (code, args) in error_cases(&s, &store, &c2) {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let failed = s.run(&args);
+        assert_eq!(failed.code(), code, "{args:?}");
+        raised.push(code);
+    }
+    // `git import`'s, from git fixtures, each named after its fixture in the transcript.
+    let fixtures = ["refs", "gitlinks", "shallow", "partial_clone"].map(|name| {
+        let fixture = swarmops_testkit::git::fixture(name);
+        s.name(fixture.dir.to_str().expect("UTF-8 temp paths"), name);
+        (name, fixture)
+    });
+    let repo = |name: &str| {
+        let (_, fixture) = (fixtures.iter().find(|(named, _)| *named == name))
+            .unwrap_or_else(|| panic!("no fixture {name}"));
+        let repo = fixture
+            .repo
+            .as_deref()
+            .expect("the fixture holds a repository");
+        repo.to_str().expect("UTF-8 temp paths").to_owned()
+    };
+    for (code, args) in git_error_cases(&s, &store, &repo) {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let failed = s.run(&args);
         assert_eq!(failed.code(), code, "{args:?}");
@@ -1540,6 +1554,44 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
         (
             "E_UNSUPPORTED_FS",
             vec!["init".to_owned(), MNT_STORE.to_owned()],
+        ),
+    ]
+}
+
+/// The failing `git import`s of [`error_codes_reach_the_cli`], each with the code it must raise,
+/// against `store`, whose main holds a native changeset; `repo` gives the repository of a git
+/// fixture by the fixture's name.
+fn git_error_cases(
+    s: &Session,
+    store: &str,
+    repo: &dyn Fn(&str) -> String,
+) -> Vec<(&'static str, Vec<String>)> {
+    let import = |args: &[&str]| -> Vec<String> {
+        ["--repo", store, "--as", AGENT, "git", "import"]
+            .iter()
+            .chain(args)
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    };
+    let missing = format!("{}/missing", s.tmp());
+    let (refs, gitlinks) = (repo("refs"), repo("gitlinks"));
+    vec![
+        ("E_GIT_NOT_A_REPO", import(&[&missing])),
+        (
+            "E_GIT_REF_NOT_FOUND",
+            import(&[&refs, "--ref", "no-such-branch"]),
+        ),
+        // main holds a changeset of no import.
+        ("E_GIT_IMPORT_DIVERGED", import(&[&refs])),
+        (
+            "E_GIT_IMPORT_LOSSY",
+            import(&[&gitlinks, "--into", "release/gitlinks"]),
+        ),
+        ("E_GIT_UNSUPPORTED", import(&[&repo("shallow")])),
+        // A partial clone lacks every blob.
+        (
+            "E_GIT_READ",
+            import(&[&repo("partial_clone"), "--into", "release/partial"]),
         ),
     ]
 }
