@@ -106,6 +106,21 @@ error_codes! {
     Busy => "E_BUSY", EXIT_RETRYABLE, true;
     /// A bug in SwarmOps, such as a caught panic.
     Internal => "E_INTERNAL", EXIT_ERROR, false;
+    // M4's merge and landing: `land` raises the first three, `undo` the other two.
+    /// The change conflicts with the target: `details.report` lists each conflicting file with
+    /// its kind, its hunks and who changed it on the target. Nothing was recorded; resolve the
+    /// conflicts, then land again (the `hint` says how).
+    Conflict => "E_CONFLICT", EXIT_CONFLICT, false;
+    /// The target moved before every one of the land's attempts could publish; nothing was
+    /// recorded, and running the land again can succeed.
+    CasRetryExhausted => "E_CAS_RETRY_EXHAUSTED", EXIT_RETRYABLE, true;
+    /// The land has nothing to add to the target: its head is on the target already, or its
+    /// change is (`details.reason` says which).
+    NothingToLand => "E_NOTHING_TO_LAND", EXIT_ERROR, false;
+    /// The operation moved no ref, so there is nothing to restore.
+    NothingToUndo => "E_NOTHING_TO_UNDO", EXIT_ERROR, false;
+    /// The store has no operation by that number.
+    OpNotFound => "E_OP_NOT_FOUND", EXIT_NOT_FOUND, false;
     // Not raised in M1: token checks, `policy.toml` and the maintenance lease arrive later.
     /// The caller's token failed verification.
     Auth => "E_AUTH", EXIT_AUTH, false;

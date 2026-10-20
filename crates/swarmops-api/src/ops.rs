@@ -20,9 +20,8 @@
 //!
 //! Not in M1 yet:
 //! - M2: `LogReq.first_parent`;
-//! - M4 (with land): `idempotency_key` and `replayed` on `commit`;
-//! - M4/M7: `lander`, `land_key`, `cr` and `annotations` on `ChangesetDetail` (`show`);
-//! - M5: `RepoInfo.workspaces`.
+//! - M5: `RepoInfo.workspaces`;
+//! - M7: `cr` and `annotations` on `ChangesetDetail` (`show`).
 
 use std::collections::BTreeMap;
 
@@ -189,6 +188,14 @@ pub struct CommitReq {
     /// `advanced`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub advance: Option<String>,
+    /// Makes a retry of this commit safe: a uuid v7 (anything else is `E_INVALID_ARG`). The
+    /// commit takes the key's time, to the second, as its signature time and records the key as
+    /// `commit_key` metadata, so the same request on the same parent makes the same changeset,
+    /// which the store holds already: the response says `replayed`, and nothing is written.
+    /// With `advance`, a ref whose head carries the key is a replay too. Give `parent` by its full
+    /// id: without it, a retry after the head moved commits again, on the new head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
     /// Record the changeset even if it changes nothing.
     #[serde(default)]
     pub allow_empty: bool,
@@ -275,6 +282,11 @@ pub struct CommitResp {
     /// itself succeeded. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+    /// The store held the changeset already, from an identical request before (a retry with the
+    /// same `idempotency_key`), so nothing was written. Always written; a response from a store
+    /// that does not know the field reads as `false`.
+    #[serde(default)]
+    pub replayed: bool,
 }
 
 /// `commit` with `advance`: the ref's move, made in the commit's own transaction.
@@ -549,10 +561,22 @@ pub struct ChangesetDetail {
     pub root: String,
     /// Who wrote the change.
     pub author: Attribution,
+    /// Who landed it, for a changeset a `land` made: its `lander` and `lander_run_id` metadata.
+    /// Omitted for any other changeset.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lander: Option<Attribution>,
     /// When it was recorded: the committer signature's time, in Unix milliseconds.
     pub created_at: u64,
     /// The message.
     pub message: String,
+    /// The idempotency key of the land that made it (its `land_key` metadata), when it had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub land_key: Option<String>,
+    /// The changesets a land squashed into it, oldest first: the landed head's first-parent chain
+    /// after the land's base, ending at that head (its `squashed_from` metadata). Omitted for a
+    /// changeset no land made.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub squashed_from: Vec<String>,
     /// What changed relative to the first parent, ordered by path: at most `max_changes`
     /// entries.
     pub changes: Vec<ChangeOut>,
@@ -1239,6 +1263,403 @@ pub struct DeriveResp {
     pub next: Option<u64>,
 }
 
+/// The default [`LandReq::max_attempts`]: 8 (operations spec §3).
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 8;
+
+/// The most [`LandReq::max_attempts`] a land takes: 32.
+pub const MAX_LAND_ATTEMPTS: u32 = 32;
+
+/// The default [`LandReq::max_conflict_bytes`]: 32 KiB of hunk text, half the operations spec's
+/// 64 KiB target for a default response (§9).
+pub const DEFAULT_MAX_CONFLICT_BYTES: u64 = 32 * 1024;
+
+/// The default [`OpLogReq::limit`]: 50 operations.
+pub const DEFAULT_OP_LOG_LIMIT: usize = 50;
+
+/// The default [`OpLogReq::max_changesets`]: 20 changesets listed for each operation.
+pub const DEFAULT_MAX_CHANGESETS: usize = 20;
+
+fn default_target() -> String {
+    "main".to_owned()
+}
+
+fn default_max_attempts() -> u32 {
+    DEFAULT_MAX_ATTEMPTS
+}
+
+fn default_max_conflict_bytes() -> u64 {
+    DEFAULT_MAX_CONFLICT_BYTES
+}
+
+fn default_op_log_limit() -> usize {
+    DEFAULT_OP_LOG_LIMIT
+}
+
+fn default_max_changesets() -> usize {
+    DEFAULT_MAX_CHANGESETS
+}
+
+/// `land`: merge a change three-way onto a target ref and publish it there as one new
+/// changeset, in one transaction (operations spec §3). The change is `head` with its
+/// first-parent chain after `base`, squashed: the landed changeset's parent is the target's
+/// head, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in
+/// `details.report`; nothing is recorded then.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct LandReq {
+    /// The changeset to land: the change's head.
+    pub head: Rev,
+    /// Where the change starts: a first-parent ancestor of `head`, whose own changes are not part
+    /// of it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the
+    /// merge base of `head` and the target's head, along first parents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<Rev>,
+    /// The ref to land on: `main` or `release/<name>`, which must exist.
+    #[serde(default = "default_target")]
+    pub target: String,
+    /// The landed changeset's message; `head`'s when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land
+    /// with a key first looks down the target's first parents, to `base`, for a changeset that
+    /// landed with the same key: one squashed from this `head` is the replay, which writes
+    /// nothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used
+    /// for another change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32.
+    #[serde(default = "default_max_attempts")]
+    #[schemars(range(min = 1, max = MAX_LAND_ATTEMPTS))]
+    pub max_attempts: u32,
+    /// The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left
+    /// out (`truncated`), and the line positions and blob ids stay.
+    #[serde(default = "default_max_conflict_bytes")]
+    pub max_conflict_bytes: u64,
+    /// What to make of the paths an `E_CONFLICT` report named, decided without a checkout
+    /// (operations spec §3, resolution path (b)). Each resolution applies to its path while the
+    /// target holds there what `against` held, whether the path conflicts or not; a path the
+    /// target changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report
+    /// that names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses
+    /// an `against` that is not a full 64-hex id (`E_INVALID_ARG`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolutions: Option<ResolutionsInput>,
+}
+
+/// A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change
+/// onto the target, decided against one of the target's heads.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionsInput {
+    /// The target's head the resolutions were decided against: the conflict report's `theirs`,
+    /// by its full 64-hex id. A resolution applies while the target holds its path as this
+    /// changeset does (the same file, the same directory, or nothing).
+    pub against: Rev,
+    /// What to make of each path, by its repository path.
+    pub files: BTreeMap<String, ResolutionInput>,
+}
+
+/// What a land makes of one path, and of every path below it: exactly one of `take`, `content`
+/// and `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the
+/// merge as it merged.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionInput {
+    /// What one side holds there: `ours`, the change's head, or `theirs`, the target's head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub take: Option<Side>,
+    /// One file of new content, given as a commit's change gives it (inline, base64, a client
+    /// file, or a stored blob by id), within a commit's limits; nothing below it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInput>,
+    /// The kind of the file `content` makes, only beside it; when omitted, the kind of the file
+    /// ours holds there, else theirs', else a regular file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ModeInput>,
+    /// Nothing there: no file at the path, nor below it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete: bool,
+}
+
+/// One side of a land's merge.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    /// The change: its head.
+    Ours,
+    /// The target: its head when the land merges.
+    Theirs,
+}
+
+/// `land`: where the change landed. Ids are full.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct LandResp {
+    /// `landed`, or `replayed` when a land with the same `idempotency_key` had landed the change
+    /// already.
+    pub status: LandStatus,
+    /// The landed changeset: the change squashed into one changeset on the target.
+    pub landed: String,
+    /// The target's head the change landed on: `landed`'s parent.
+    pub rebased_onto: String,
+    /// The ref it landed on.
+    pub target: String,
+    /// The changeset the change was taken from: what `head`'s first-parent chain added after it
+    /// is what landed.
+    pub base: String,
+    /// How many times the land tried to publish.
+    pub attempts: u32,
+    /// The target moved after the land read it, and the publish put the change on the new head
+    /// itself, without another attempt.
+    pub relocated: bool,
+    /// How many paths the landed changeset changes.
+    pub files_changed: u64,
+    /// The changesets the land squashed, oldest first: `head`'s first-parent chain after `base`,
+    /// ending at `head`.
+    pub squashed_from: Vec<String>,
+    /// The paths both sides changed that merged cleanly. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_merged: Vec<String>,
+    /// Problems found after the land became durable, such as failed housekeeping; the land
+    /// itself succeeded. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
+/// How a land ended.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LandStatus {
+    /// This request landed the change.
+    Landed,
+    /// A land with the same `idempotency_key` had landed it already; nothing was written.
+    Replayed,
+}
+
+/// Why a land could not merge its change onto the target, file by file, or could not apply its
+/// resolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.
+/// `ours` is the change, `theirs` the target. Ids are full.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ConflictReport {
+    /// The merge base: the changeset the change starts from.
+    pub base: String,
+    /// The change's head.
+    pub ours: String,
+    /// The target's head the change was merged with.
+    pub theirs: String,
+    /// The files that conflict, by path.
+    pub files: Vec<FileConflictOut>,
+    /// The kinds of conflict in `files`, each once.
+    pub kinds: Vec<ConflictKindOut>,
+    /// The paths both sides changed that merged cleanly. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_merged: Vec<String>,
+    /// The paths whose resolutions did not apply, since the target holds there what their
+    /// `against` did not: the target changed them after the report the resolutions answered.
+    /// Read them at `theirs` and resolve them again, against it. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale: Vec<String>,
+    /// Whether hunk texts were left out to keep the report within the request's
+    /// `max_conflict_bytes`; the line positions and blob ids are always there.
+    pub truncated: bool,
+}
+
+/// One conflicting file. Its blobs are the file's content on each side, which `read_file` reads
+/// at that side's changeset; a side without a file at the path (deleted, never added, or a
+/// directory there) has none.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct FileConflictOut {
+    /// The file's repository path.
+    pub path: String,
+    /// What kind of conflict it is.
+    pub kind: ConflictKindOut,
+    /// Its blob at the merge base.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_blob: Option<String>,
+    /// Its blob in the change.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ours_blob: Option<String>,
+    /// Its blob on the target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theirs_blob: Option<String>,
+    /// The places where the two sides' edits of its lines meet, in file order: for a text file
+    /// both sides edited (`content`, and `add_add` of two texts). Omitted when there are none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hunks: Vec<HunkOut>,
+    /// The newest changeset on the target since the merge base that changed this path: what to
+    /// read for the other side's edit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theirs_changeset: Option<String>,
+    /// The agent that wrote `theirs_changeset`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theirs_agent: Option<String>,
+}
+
+/// What kind of conflict a file has. `ours` is the change, `theirs` the target.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum ConflictKindOut {
+    /// Both sides edited the same lines of a text file, or lines next to each other.
+    Content,
+    /// Both sides changed the content of a file that is not text, or of a symlink, differently.
+    Binary,
+    /// The change deleted the file, and the target changed it.
+    DeleteModify,
+    /// The change changed the file, and the target deleted it.
+    ModifyDelete,
+    /// Both sides added the file, with contents that do not merge.
+    AddAdd,
+    /// Both sides changed the file's kind (file, executable or symlink), differently.
+    Mode,
+    /// One side has a file where the other has a directory.
+    TypeChange,
+}
+
+/// One place where the two sides' edits of a text file meet: each side's lines there. The lines
+/// are numbered from 1, and each side's range includes both ends, as `read_file` takes a range
+/// of lines.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct HunkOut {
+    /// Its number in the file, from 0.
+    pub id: u32,
+    /// The lines at the merge base.
+    pub base: LinesOut,
+    /// The change's lines.
+    pub ours: LinesOut,
+    /// The target's lines.
+    pub theirs: LinesOut,
+}
+
+/// One side's lines of a hunk: `first` to `last`, numbered from 1, both included. A side without
+/// lines there has `last` one less than `first`: its place is before line `first`.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct LinesOut {
+    /// The first line.
+    pub first: u64,
+    /// The last line; `first` minus one when the side has none.
+    pub last: u64,
+    /// The lines' text; omitted when the report would pass its `max_conflict_bytes`
+    /// (`truncated`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// `op_log` (CLI `op log`): the store's operations, newest first, a page at a time. An operation
+/// is one write transaction: a frame of the journal, numbered from 0 in commit order.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct OpLogReq {
+    /// Start below this operation: the page holds the ones numbered less than it, so the last
+    /// `op` of a page reads on from there. When omitted, from the newest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub before: Option<u64>,
+    /// The most operations to return: at least 1 (0 is `E_INVALID_ARG`).
+    #[serde(default = "default_op_log_limit")]
+    #[schemars(range(min = 1))]
+    pub limit: usize,
+    /// The most changesets to list for each operation; `changesets_total` counts them all.
+    #[serde(default = "default_max_changesets")]
+    pub max_changesets: usize,
+}
+
+/// `op_log` (CLI `op log`): a page of operations, newest first.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct OpLogPage {
+    /// The operations.
+    pub ops: Vec<OperationOut>,
+    /// Whether older operations follow this page: give the last one's `op` as `before` to read
+    /// them.
+    pub truncated: bool,
+}
+
+/// One operation: a write transaction, as the journal recorded it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct OperationOut {
+    /// Its number: its journal frame's, from 0 in commit order. `undo` takes it.
+    pub op: u64,
+    /// What it did, read from what it recorded.
+    pub kind: OperationKind,
+    /// The changesets it recorded, in its order: at most the request's `max_changesets`.
+    pub changesets: Vec<OpChangesetOut>,
+    /// How many changesets it recorded in all, also past `max_changesets`.
+    pub changesets_total: u64,
+    /// The ref moves it made, in its order.
+    pub ref_moves: Vec<RefMoveOut>,
+}
+
+/// What an operation did, read from what it recorded.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationKind {
+    /// It recorded changesets and moved no ref (`commit`).
+    Commit,
+    /// It recorded one changeset and moved a ref to it (`commit` with `advance`).
+    Publish,
+    /// It recorded one changeset that names a lander and moved a ref to it (`land`).
+    Land,
+    /// It moved refs and recorded no changeset (`ref set`, `ref delete`, `undo`).
+    RefMove,
+    /// It recorded a compaction of the changeset index, and nothing else.
+    Compaction,
+    /// Any other mix of changesets, ref moves and compactions.
+    Mixed,
+}
+
+/// A changeset an operation recorded.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct OpChangesetOut {
+    /// Its id.
+    pub id: String,
+    /// The agent that wrote it, as `show` gives `author.agent`.
+    pub agent: String,
+    /// When it was recorded: the committer signature's time, in Unix milliseconds.
+    pub created_at: u64,
+    /// The message's first line.
+    pub title: String,
+    /// The idempotency key of the land that made it, when it had one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub land_key: Option<String>,
+}
+
+/// A move of a ref, as the journal recorded it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct RefMoveOut {
+    /// The ref.
+    pub name: String,
+    /// What it named before; omitted for the move that created it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old: Option<String>,
+    /// What it names after; omitted for the move that deleted it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new: Option<String>,
+    /// Who moved it.
+    pub actor: String,
+    /// When it moved, in Unix seconds, as its writer recorded it.
+    pub at: i64,
+}
+
+/// `undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by
+/// compare-and-swap, in one transaction: all of them or none. Changesets are never removed.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct UndoReq {
+    /// The operation to undo: its `op` in the operation log.
+    pub op: u64,
+}
+
+/// `undo` (CLI `op undo`): the moves that restored the refs.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct UndoResp {
+    /// The operation undone.
+    pub undone: u64,
+    /// The operation this undo recorded, which another undo can take; omitted when it wrote
+    /// nothing (`already_applied`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub op: Option<u64>,
+    /// The moves it made: each ref from what the operation set back to what it named before.
+    pub ref_moves: Vec<RefMoveOut>,
+    /// Every ref the operation moved already names what it named before, so nothing was written:
+    /// an undo run again is a replay, and safe.
+    pub already_applied: bool,
+    /// Problems found after the undo became durable, such as failed housekeeping; the undo
+    /// itself succeeded. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
 /// One store's operations, implemented over a local store now and by a remote client later
 /// (operations spec §7).
 ///
@@ -1257,6 +1678,12 @@ pub trait StoreOps {
     /// caller names (M10 adds the client-side pass that turns it into bytes before a request
     /// leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
+
+    /// Merges a change three-way onto a ref, `main` by default, and publishes the result there as
+    /// one new changeset, with the ref's move, in one transaction (CLI `land`). A change that
+    /// conflicts is `E_CONFLICT`, with the conflict report in `details.report`, and records
+    /// nothing.
+    fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError>;
 
     /// The changeset a revision names, and whether the revision is exactly a ref's name (CLI
     /// `resolve`).
@@ -1298,6 +1725,13 @@ pub trait StoreOps {
 
     /// Removes a ref by compare-and-swap (CLI `ref delete`).
     fn ref_delete(&self, who: &Identity, req: RefDeleteReq) -> Result<RefSetResp, OpError>;
+
+    /// The store's operations, newest first, a page at a time (CLI `op log`).
+    fn op_log(&self, req: OpLogReq) -> Result<OpLogPage, OpError>;
+
+    /// Restores every ref an operation moved to what it named before, by compare-and-swap in one
+    /// transaction, all of them or none (CLI `op undo`).
+    fn undo(&self, who: &Identity, req: UndoReq) -> Result<UndoResp, OpError>;
 
     /// Checks the whole store's consistency (CLI `verify`).
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError>;

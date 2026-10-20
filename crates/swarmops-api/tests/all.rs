@@ -4,6 +4,7 @@
 //! here.
 
 mod identity;
+mod m4;
 mod schema;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file

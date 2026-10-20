@@ -12,7 +12,9 @@
 //! and the ref files. [`MetaWrite::recovered`] says what that repair did ([`Recovered`]: all
 //! zero when those writers finished cleanly). The [`MetaWrite`] holds the lock until
 //! [`MetaWrite::commit`] returns, or until it is dropped, which discards what it queued. It
-//! checks each record it queues against the index, the ref files and its queue;
+//! checks each record it queues against the index, the ref files and its queue, and reads a ref
+//! ([`MetaWrite::get_ref`]) or a changeset ([`MetaWrite::changeset`]) as it sees them: what it
+//! queued first, then those files.
 //! [`MetaWrite::commit`] appends them as one frame ([`Journal::append_frame`]: the commit
 //! point), materializes the frame (its changesets with one [`Index::append_batch`], a ref file per
 //! moved ref), and, in §3's batches or on [`MetaStore::flush`], syncs the index and moves the
@@ -73,7 +75,8 @@ const DEFAULT_PARALLELISM: usize = 5;
 /// the checkpoint.
 const CHECKPOINT_EVERY: u64 = 32;
 
-/// How many frames [`MetaRead::reflog`] reads with one call as it walks back.
+/// How many frames [`MetaRead::reflog`] and [`MetaRead::frames_before`] read with one call as
+/// they walk back.
 const REFLOG_BATCH: u64 = 256;
 
 /// The most bytes a ref move's actor may take: its length is one byte of the record.
@@ -603,6 +606,65 @@ impl MetaRead<'_> {
         Ok(frames.iter().flat_map(entries).collect())
     }
 
+    /// Up to `limit` of the snapshot's frames whose seq is below `before` (from its newest for
+    /// `None`), newest first, each whole: the operation log (storage spec §3). The frames past
+    /// the checkpoint come from the snapshot itself, then those before it from `journal.off`,
+    /// 256 at a time, as [`MetaRead::reflog`] reads them. The snapshot ends at its own newest
+    /// frame: a frame committed after it was taken is never among them.
+    pub fn frames_before(
+        &self,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Vec<Frame>, StoreError> {
+        let below = before.unwrap_or(u64::MAX);
+        let mut frames: Vec<Frame> = self
+            .frames
+            .iter()
+            .rev()
+            .filter(|frame| frame.seq < below)
+            .take(limit)
+            .cloned()
+            .collect();
+        if frames.len() == limit {
+            return Ok(frames);
+        }
+        // Then the frames before the checkpoint, a batch at a time; with no frames past the
+        // checkpoint, frames listed since the snapshot was taken are skipped.
+        let mut end = match self.frames.first() {
+            Some(frame) => frame.seq,
+            None => self.store.journal.frame_count()?,
+        }
+        .min(below);
+        while frames.len() < limit && end > 0 {
+            let start = end.saturating_sub(REFLOG_BATCH);
+            let batch = self
+                .store
+                .journal
+                .frames_from(start, to_usize(end - start))?;
+            let room = limit - frames.len();
+            let before_ckpt = batch
+                .into_iter()
+                .rev()
+                .filter(|frame| frame.offset < self.ckpt);
+            frames.extend(before_ckpt.take(room));
+            end = start;
+        }
+        Ok(frames)
+    }
+
+    /// Frame `seq` of the snapshot, whole: from the snapshot itself past the checkpoint, from
+    /// `journal.off` before it. `None` past the snapshot's newest frame, also once later frames
+    /// are committed.
+    pub fn frame(&self, seq: u64) -> Result<Option<Frame>, StoreError> {
+        if let Some(first) = self.frames.first()
+            && seq >= first.seq
+        {
+            return Ok(self.frames.iter().find(|frame| frame.seq == seq).cloned());
+        }
+        let listed = self.store.journal.frames_from(seq, 1)?;
+        Ok(listed.into_iter().find(|frame| frame.offset < self.ckpt))
+    }
+
     /// How many changesets the store holds.
     pub fn count_changesets(&self) -> Result<u64, StoreError> {
         Ok(self.index.len() + to_u64(self.overlay.extras().len()))
@@ -652,6 +714,52 @@ impl MetaWrite<'_> {
     /// when they finished cleanly. It reads nothing.
     pub fn recovered(&self) -> Recovered {
         self.recovered
+    }
+
+    /// Ref `name` as this transaction compares against it ([`MetaWrite::cas_ref`]): the target
+    /// this transaction's last queued move of it leaves, or else what its file says, every
+    /// committed frame replayed into it by [`MetaStore::write`]; `None` if the ref does not
+    /// exist. Read under the lock, so no other writer moves the ref before this transaction is
+    /// committed or dropped. [`StoreError::RefName`] for a name that is not `main` or
+    /// `release/<x>`.
+    pub fn get_ref(&self, name: &str) -> Result<Option<ChangesetId>, StoreError> {
+        refs::check_ref_name(name)?;
+        self.current(name)
+    }
+
+    /// Changeset `id` as this transaction sees it: one it queued
+    /// ([`MetaWrite::insert_changeset`]), as the index will hold it once committed (at the seq
+    /// the insert returned, with the generation, delta hash and parents queued); or else the
+    /// index's record, every committed changeset replayed into the index by
+    /// [`MetaStore::write`]; `None` if neither holds it. Read under the lock.
+    pub fn changeset(&self, id: ChangesetId) -> Result<Option<ChangesetMeta>, StoreError> {
+        if self.queued.contains_key(&id) {
+            let queued = self.records.iter().filter_map(|record| match record {
+                Record::Changeset {
+                    id,
+                    generation,
+                    delta_hash,
+                    parents,
+                } => Some((id, generation, delta_hash, parents)),
+                Record::RefMove { .. } | Record::Compacted { .. } => None,
+            });
+            // The queued changesets take the seqs after the index's, in the queue's order.
+            for (at, (queued_id, generation, delta_hash, parents)) in queued.enumerate() {
+                if *queued_id == id {
+                    return Ok(Some(ChangesetMeta {
+                        id,
+                        seq: self.index.len() + to_u64(at),
+                        generation: *generation,
+                        delta_hash: *delta_hash,
+                        parents: parents.clone(),
+                    }));
+                }
+            }
+        }
+        match self.index.find(id)? {
+            Some(rec) => self.index.get(rec).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Queues changeset `meta`, unless the store or this transaction holds it already
@@ -779,10 +887,7 @@ impl MetaWrite<'_> {
         {
             return Err(StoreError::UnknownRefTarget(target));
         }
-        let current = match self.moved.get(name) {
-            Some(&target) => target,
-            None => refs::read(&self.store.layout, &self.store.fs, name)?.map(|state| state.target),
-        };
+        let current = self.current(name)?;
         if current != expected {
             return Ok(CasResult::Mismatch { actual: current });
         }
@@ -796,6 +901,13 @@ impl MetaWrite<'_> {
         });
         self.moved.insert(name.to_owned(), new);
         Ok(CasResult::Applied { old: current })
+    }
+
+    /// The records this transaction has queued, in order: the frame [`MetaWrite::commit`]
+    /// appends, each ref move with the time it records. A refused move queued none. It reads
+    /// nothing.
+    pub fn queued(&self) -> &[Record] {
+        &self.records
     }
 
     /// Commits what is queued as one journal frame, materializes it, and unlocks: see the
@@ -918,6 +1030,17 @@ impl MetaWrite<'_> {
             return Ok(Some(generation));
         }
         self.generation(id)
+    }
+
+    /// What ref `name` (a valid name) names for this transaction: the target its last queued
+    /// move leaves, or else what the ref's file says.
+    fn current(&self, name: &str) -> Result<Option<ChangesetId>, StoreError> {
+        match self.moved.get(name) {
+            Some(&target) => Ok(target),
+            None => {
+                Ok(refs::read(&self.store.layout, &self.store.fs, name)?.map(|state| state.target))
+            }
+        }
     }
 
     /// The generation of changeset `id` if this transaction queued it or the store holds

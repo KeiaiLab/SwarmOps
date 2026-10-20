@@ -24,6 +24,8 @@ test-hooks = ["swarmops-store/test-hooks", "swarmops-testkit/test-hooks"]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 swarmops-merge = { path = "../swarmops-merge", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+# A land's backoff draws its jitter from a hash of its key and attempt, not from an RNG.
+blake3.workspace = true
 camino.workspace = true
 postcard.workspace = true
 serde.workspace = true
@@ -31,6 +33,8 @@ thiserror.workspace = true
 
 [dev-dependencies]
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
+criterion.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
 
 # One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
@@ -38,3 +42,8 @@ tempfile.workspace = true
 # (`autotests = false`), so a new test file is a `mod` line there.
 [[test]]
 name = "all"
+
+# A land's incremental re-merge against a whole merge from its base (operations spec §9 item 1).
+[[bench]]
+name = "remerge"
+harness = false

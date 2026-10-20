@@ -429,6 +429,157 @@ mod advance {
     }
 }
 
+/// The failure sweep of a land, `land --key` of a commit onto main: its changeset and main's move
+/// are one journal frame, so whatever a run with an injected failure ends with, main names the
+/// landed changeset or what it named before, and the same land made again ends with main at the
+/// landed changeset.
+mod land {
+    use serde_json::json;
+    use swarmops_store::FS_CALLS_ENV;
+
+    use super::*;
+    use crate::support::sweep::{calls_file, reported_calls};
+
+    /// The land's idempotency key.
+    const KEY: &str = "fault-land-1";
+
+    /// What the land the sweep fails does with nothing failing it, on a copy of the commit
+    /// template.
+    struct DryLand {
+        /// How many filesystem calls it makes.
+        calls: u64,
+        /// The changeset it lands: the template's newest commit, a child of main's head.
+        head: String,
+        /// What main names before it.
+        base: String,
+        /// The changeset it makes on main.
+        landed: String,
+    }
+
+    /// The land of `head` the sweep fails, keyed [`KEY`], as `agent(1)` with `env` set.
+    fn swept_land(store: &Store, head: &str, env: &[(&str, &str)]) -> Run {
+        store.run_as(&agent(1), &["land", head, "--key", KEY], env)
+    }
+
+    /// What main names in `store`.
+    fn main_of(store: &Store) -> String {
+        let resolved = store.read(&["resolve", "main"]).ok();
+        resolved["id"].as_str().unwrap().to_owned()
+    }
+
+    /// [`swept_land`] of the template's newest commit on a copy of `template`, with nothing
+    /// failing it, counting its calls. Its frame is the 32nd past the checkpoint, so it lands the
+    /// commit on main in the transaction that syncs the index and moves the checkpoint, and a
+    /// sweep of its calls reaches the publish, the index sync and the checkpoint's move.
+    fn dry_land(template: &Store) -> DryLand {
+        let store = Store::copy_of(template);
+        let newest = store.read(&["op", "log", "-n", "1"]).ok();
+        let head = newest["ops"][0]["changesets"][0]["id"].as_str().unwrap();
+        let head = head.to_owned();
+        let base = main_of(&store);
+        let file = calls_file(&store);
+        let env = [(FS_CALLS_ENV, file.to_str().unwrap())];
+        let result = swept_land(&store, &head, &env).ok();
+        assert_eq!(
+            store.checkpoint(),
+            store.journal_len(),
+            "the 32nd frame past the checkpoint moves it to the journal's end"
+        );
+        assert_eq!(
+            (&result["status"], &result["rebased_onto"]),
+            (&json!("landed"), &json!(base)),
+            "{result}"
+        );
+        let landed = result["landed"].as_str().unwrap().to_owned();
+        assert_eq!(main_of(&store), landed);
+        let dry = DryLand {
+            calls: reported_calls(&file),
+            head,
+            base,
+            landed,
+        };
+        assert!(
+            dry.calls > 30,
+            "a land makes dozens of calls: {}",
+            dry.calls
+        );
+        dry
+    }
+
+    /// One run of the land sweep: [`swept_land`] on a copy of `template`, failing as `failure`
+    /// says from call `k`. Then, the fault cleared: the store verifies clean, and main names the
+    /// landed changeset (the dry run's) or what it named before: the first when the run
+    /// succeeded, a warning or not, the second when it failed (either, after the documented
+    /// abort); and the same land made again ends with main at the landed changeset, replayed
+    /// where it had landed. Returns how the run ended.
+    fn land_failing_at(template: &Store, k: u64, failure: &str, dry: &DryLand) -> Ended {
+        let store = Store::copy_of(template);
+        let what = format!("land, call {k} failing {failure}");
+        let fail_at = format!("{k}:{failure}");
+        let run = swept_land(&store, &dry.head, &[(FAIL_AT_ENV, fail_at.as_str())]);
+        let ended = ended(&run, store.path());
+        if let Ended::Succeeded(result) = &ended {
+            assert_eq!(result["landed"], dry.landed.as_str(), "{what}: {run}");
+        }
+        store.assert_clean(&format!("{what}: after the failed run"));
+        let main = main_of(&store);
+        let landed = main == dry.landed;
+        assert!(
+            landed || main == dry.base,
+            "{what}: main names {main}: {run}"
+        );
+        match ended {
+            Ended::Succeeded(_) => assert!(landed, "{what}: a success has landed: {run}"),
+            Ended::Failed(_) => assert!(!landed, "{what}: a failure has not: {run}"),
+            Ended::Aborted => {}
+        }
+        let again = swept_land(&store, &dry.head, &[]).ok();
+        let status = if landed { "replayed" } else { "landed" };
+        assert_eq!(
+            (&again["status"], &again["landed"]),
+            (&json!(status), &json!(dry.landed)),
+            "{what}"
+        );
+        assert_eq!(main_of(&store), dry.landed, "{what}");
+        store.assert_clean(&format!("{what}: after the same land again"));
+        ended
+    }
+
+    /// An injected I/O error at any filesystem call of a `land` leaves main at the landed
+    /// changeset or where it was (operations spec §3; Review Focus 1): each call of the dry run
+    /// fails in turn, once and persistently, with `EIO` and with `ENOSPC` ([`FAILURES`]). A
+    /// success has landed, a warning or not; `E_IO_TRANSIENT` with `committed: false`, as every
+    /// other failure, has not; the documented aborts either. The same land again always ends
+    /// landed. No run panics, and the sweep reaches each outcome the commit sweep exists for
+    /// ([`COMMIT_OUTCOMES`]).
+    #[test]
+    #[ignore = "slow, ~10 s: ~200 failed runs of land, each checked twice; just check-slow runs it"]
+    fn fail_at_every_call_of_a_land_reports_honestly() {
+        let template = commit_template();
+        let dry = dry_land(&template);
+        let mut ended = Vec::new();
+        for failure in FAILURES {
+            let runs = sweep(1..=dry.calls, |k| {
+                land_failing_at(&template, k, failure, &dry)
+            });
+            ended.extend(runs.into_iter().map(|run| (failure, run)));
+        }
+        let missing = unreached(&ended);
+        assert!(
+            missing.is_empty(),
+            "no run of the land sweep ended so: {missing:?}"
+        );
+    }
+
+    /// The land sweep's dry run, in the default gate ([`dry_land`] asserts what it does): a
+    /// change to the land, the template or the checkpoint's batching that would take the publish,
+    /// the index sync or the checkpoint out of the slow sweep fails here at once.
+    #[test]
+    fn the_land_sweep_reaches_the_publish_and_the_checkpoint() {
+        dry_land(&commit_template());
+    }
+}
+
 /// The documented abort of a commit (a failed journal append whose cut back off the journal
 /// fails too, [`ABORTS`]) ends the process by `std::process::abort` even when its reason cannot
 /// be written: here the run's stderr is a pipe nobody reads (its read end dropped before the

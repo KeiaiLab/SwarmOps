@@ -10,9 +10,10 @@ use clap::{
 };
 use swarmops_api::{
     DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
-    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT,
-    LineRange, LossyClass,
+    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS, DEFAULT_OP_LOG_LIMIT,
+    DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, LineRange, LossyClass,
 };
+use swarmops_api::{DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_CONFLICT_BYTES};
 
 use crate::output::printable;
 
@@ -34,9 +35,10 @@ instead of pinning the id you read: the ref's own name always matches (a deleted
 instead), so the compare-and-swap protects nothing, and main~1 on main never matches. An id \
 prefix pins the id you read only until another changeset shares it; then it is E_AMBIGUOUS_ID.
 
-After E_CAS_MISMATCH, re-apply your edits to the content at the error's `actual` and commit \
-with --parent <actual>, then retry with --expect <actual>. Do not re-send your old whole-file \
-puts: M1 has no merge, so they would revert the winner's edits to shared files.";
+After E_CAS_MISMATCH, land your change instead (swarmops land merges it onto the ref's head), or \
+re-apply your edits to the content at the error's `actual`, commit with --parent <actual>, then \
+retry with --expect <actual>. Do not re-send your old whole-file puts: they would revert the \
+winner's edits to shared files.";
 
 /// `ref delete --expect`'s long help.
 const DELETE_EXPECT_LONG_HELP: &str = "The changeset the ref holds now.
@@ -64,10 +66,67 @@ REF at (from ref list, show, log or a commit's result): a ref name resolves when
 runs, and without --parent the commit builds on REF's head as it is then, so the move catches \
 only a race from that moment on.
 
-After E_CAS_MISMATCH nothing was recorded, neither the changeset nor the move: re-apply your \
-edits to the content at the error's `actual` and commit with --parent <actual> --advance REF. \
-Do not re-send your old whole-file puts: M1 has no merge, so they would revert the winner's \
-edits to shared files.";
+After E_CAS_MISMATCH nothing was recorded, neither the changeset nor the move: commit your \
+change without --advance and land it (swarmops land merges it onto REF's head), or re-apply your \
+edits to the content at the error's `actual` and commit with --parent <actual> --advance REF. Do \
+not re-send your old whole-file puts: they would revert the winner's edits to shared files.";
+
+/// `commit --key`'s short help.
+const KEY_HELP: &str =
+    "A uuid v7 that makes a retry safe: the same commit run again replays (replayed: true)";
+
+/// `commit --key`'s long help.
+const KEY_LONG_HELP: &str = "A uuid v7 (RFC 9562) that makes a retry of this commit safe: make a \
+new one for each commit, and give it again only to retry that commit.
+
+The commit signs at the key's time, to the second, and records the key as its commit_key \
+metadata, so the same command run again on the same parent makes the same changeset, which the \
+store holds already: the result says replayed: true, with the first run's changeset, and \
+nothing is written. A commit whose parent is the changeset its key made (without --parent, \
+main's head, or REF's with --advance) replays that changeset instead of committing it again on \
+top of itself.
+
+Give --parent as the full changeset id you read: without it the commit builds on main's head \
+(REF's, with --advance) as it is when the command runs, so a retry after that head moved to \
+another changeset commits again, on the new head.";
+
+/// `land --target`'s help.
+const TARGET_HELP: &str = "The ref to land on: main or release/<name>";
+
+/// `land --key`'s short help.
+const LAND_KEY_HELP: &str =
+    "Makes a retry safe: the same land run again replays it (status: replayed)";
+
+/// `land --key`'s long help.
+const LAND_KEY_LONG_HELP: &str = "Makes a retry of this land safe: 1 to 64 letters, digits and \
+'-', such as a uuid v7. Make a new one for each change you land, and give it again only to retry \
+that land.
+
+A land with a key first looks down the ref's first parents, to the change's base, for a \
+changeset landed with the same key: one squashed from this HEAD is the land made before, which \
+the land replays (status: replayed) without writing anything; one from another head is \
+E_INVALID_ARG. Without a key, the same land run again finds its change on the ref already: \
+E_NOTHING_TO_LAND.";
+
+/// `land --resolve`'s short help.
+const RESOLVE_HELP: &str =
+    "Resolve the conflicts a report named: resolutions as JSON in FILE, or - for stdin";
+
+/// `land --resolve`'s long help.
+const RESOLVE_LONG_HELP: &str = "Resolve the conflicts an E_CONFLICT report named, without a \
+checkout: resolutions as a JSON object in FILE, or - for stdin, at most 64 MiB (swarmops schema \
+ResolutionsInput).
+
+{\"against\": THEIRS, \"files\": {PATH: RESOLUTION, ...}}: THEIRS is the report's theirs, by its \
+full id, and each RESOLUTION one of {\"take\": \"ours\"}, {\"take\": \"theirs\"}, {\"content\": \
+CONTENT} with an optional \"mode\" (CONTENT as a commit's change gives it: inline, base64, a \
+file, or a stored blob by id) and {\"delete\": true}. A resolution decides its path and every \
+path below it; the rest of the merge stands.
+
+A resolution applies while the ref holds its path as THEIRS did, whether the path conflicts or \
+not. A path the ref changed since is stale: the land fails with E_CONFLICT again, its report \
+naming the path in stale, as it does for each conflict left unresolved. Read the report's \
+theirs, and resolve against it.";
 
 /// `git import`'s short help.
 const GIT_IMPORT_HELP: &str = "Bring a git repository's history in: every commit --ref reaches \
@@ -187,6 +246,42 @@ pub enum Command {
         allow_empty: bool,
         #[arg(long, value_name = "REF", help = ADVANCE_HELP, long_help = ADVANCE_LONG_HELP)]
         advance: Option<String>,
+        #[arg(long, value_name = "UUID", help = KEY_HELP, long_help = KEY_LONG_HELP)]
+        key: Option<String>,
+    },
+    /// Merge a change three-way onto a ref and publish it there as one new changeset.
+    ///
+    /// The change is HEAD with its first-parent chain since the base, squashed: the new
+    /// changeset's parent is the ref's head, it holds what the chain changed merged with what the
+    /// ref gained since the base, and the ref moves to it in the same transaction. A ref that
+    /// moves meanwhile makes the land merge again onto its new head and retry, up to
+    /// --max-attempts times. A conflict is E_CONFLICT (exit 3), with each conflicting file in
+    /// details.report, and nothing is recorded; land again with --resolve to resolve it without
+    /// a checkout.
+    Land {
+        /// The changeset to land: the change's head, such as the changeset a commit made.
+        #[arg(value_name = "HEAD")]
+        head: String,
+        /// Where the change starts: a first-parent ancestor of HEAD, whose own changes are not
+        /// landed (default: the merge base of HEAD and the ref's head, along first parents).
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
+        #[arg(long, value_name = "REF", default_value = "main", help = TARGET_HELP)]
+        target: String,
+        /// The new changeset's message (default: HEAD's).
+        #[arg(short, long, value_name = "MSG")]
+        message: Option<String>,
+        #[arg(long, value_name = "KEY", help = LAND_KEY_HELP, long_help = LAND_KEY_LONG_HELP)]
+        key: Option<String>,
+        /// How many times to try to publish before E_CAS_RETRY_EXHAUSTED: 1 to 32.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_ATTEMPTS)]
+        max_attempts: u32,
+        /// The most bytes of hunk text an E_CONFLICT report carries; past them it leaves the
+        /// texts out (truncated) and keeps every line position and blob id.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
+        max_conflict_bytes: u64,
+        #[arg(long, value_name = "FILE", help = RESOLVE_HELP, long_help = RESOLVE_LONG_HELP)]
+        resolve: Option<String>,
     },
     /// Store content as a blob for a commit to name by its id, or ask which blobs the store
     /// holds.
@@ -273,6 +368,9 @@ pub enum Command {
     /// List refs, or move one by compare-and-swap.
     #[command(subcommand)]
     Ref(RefCommand),
+    /// List the store's operations, or undo one.
+    #[command(subcommand)]
+    Op(OpCommand),
     /// Check the store's consistency.
     Verify {
         /// Re-hash every object too.
@@ -285,13 +383,13 @@ pub enum Command {
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log,
-    /// path_history, diff, ref_list, ref_set, ref_delete, commit, blob_put, blob_has, verify), each
-    /// taking the operation's request as its arguments and returning the envelope the other
-    /// commands print. The store and the identity are the server's, --repo and --as or their
-    /// variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients
-    /// that open with initialize. Prints no envelope: stdout carries the protocol until stdin ends,
-    /// and a command line it refuses has its envelope on stderr. The derive command has no tool: it
-    /// is maintenance, no agent's work.
+    /// path_history, diff, op_log, ref_list, ref_set, ref_delete, undo, commit, land, blob_put,
+    /// blob_has, verify), each taking the operation's request as its arguments and returning the
+    /// envelope the other commands print. The store and the identity are the server's, --repo and
+    /// --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
+    /// 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the
+    /// protocol until stdin ends, and a command line it refuses has its envelope on stderr. The
+    /// derive command has no tool: it is maintenance, no agent's work.
     Mcp,
     /// Derive the eager derived values of new changesets, ahead of any reader.
     ///
@@ -490,6 +588,34 @@ pub fn lossy_classes(lossy: &[LossyArg], gitlinks: Option<Gitlinks>) -> Vec<Loss
     LossyClass::ALL.into_iter().filter(allowed).collect()
 }
 
+/// `op`'s operations: the operation log, and undo.
+#[derive(Subcommand, Debug, Clone, Copy)]
+pub enum OpCommand {
+    /// List the store's operations, newest first: each write transaction, its changesets and
+    /// its ref moves.
+    Log {
+        /// List the operations numbered below OP: the last op of a page reads on from there.
+        #[arg(long, value_name = "OP")]
+        before: Option<u64>,
+        /// The most operations to list.
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_OP_LOG_LIMIT)]
+        limit: usize,
+        /// The most changesets to list for each operation.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CHANGESETS)]
+        max_changesets: usize,
+    },
+    /// Move every ref operation OP moved back to what it named before, all or none.
+    ///
+    /// Each ref must still name what the operation set it to (or what it named before, which
+    /// is skipped): one that was moved since stops the undo with E_CAS_MISMATCH, and nothing is
+    /// written. An undo run again is a replay (already_applied). Changesets are never removed.
+    Undo {
+        /// The operation, as op log numbers it.
+        #[arg(value_name = "OP")]
+        op: u64,
+    },
+}
+
 /// What a command line asks for.
 #[derive(Debug)]
 pub enum Parsed {
@@ -609,6 +735,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["whoami"] => "whoami",
         ["schema"] => "schema",
         ["commit"] => "commit",
+        ["land"] => "land",
         ["resolve"] => "resolve_rev",
         ["blob", "put"] => "blob_put",
         ["blob", "has"] => "blob_has",
@@ -621,6 +748,8 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "list"] => "ref_list",
         ["ref", "set"] => "ref_set",
         ["ref", "delete"] => "ref_delete",
+        ["op", "log"] => "op_log",
+        ["op", "undo"] => "undo",
         ["verify"] => "verify",
         ["git", "import"] => "git_import",
         ["mcp"] => "mcp",
@@ -671,6 +800,7 @@ fn command() -> clap::Command {
         .mut_subcommand("ref", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("blob", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("git", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("op", |cmd| cmd.arg_required_else_help(false))
 }
 
 /// Of `--json` and `--human`, keeps the one given last: clap's `overrides_with` settles them
@@ -750,13 +880,14 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 21);
+        assert_eq!(ops.len(), 24);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 21, "two subcommands name one op");
+        assert_eq!(ops.len(), 24, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["git"]), None);
+        assert_eq!(op_name(&["op"]), None);
     }
 
     #[test]
@@ -809,7 +940,7 @@ mod tests {
             panic!("a usage error");
         };
         assert_eq!(path, Vec::<String>::new());
-        for line in [&[][..], &["ref"], &["blob"], &["git"]] {
+        for line in [&[][..], &["ref"], &["blob"], &["git"], &["op"]] {
             let Parsed::Usage { error, .. } = parse(&args(line)) else {
                 panic!("{line:?}: a usage error, not a help screen");
             };

@@ -5,4 +5,4 @@ contact_links:
     about: Never in a public issue. SECURITY.md says how to report one privately.
   - name: The design and its known limitations
     url: https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md
-    about: What M1, M1.5, M1.6, M2 and M3 leave open, and the milestone that takes each item.
+    about: What M1, M1.5, M1.6, M2, M3 and M4 leave open, and the milestone that takes each item.

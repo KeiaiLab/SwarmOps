@@ -9,10 +9,10 @@ use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use camino::Utf8Path;
 use serde_json::{Map, Value};
-use swarmops_api::{ErrorCode, OpError};
+use swarmops_api::{DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, OpError};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
 use swarmops_git::{ConvertError, GitOid, ImportError, SourceError, Unsupported};
-use swarmops_repo::{RepoError, StoreError};
+use swarmops_repo::{MergeConflicts, RepoError, StoreError};
 use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN};
 
 use crate::local::cas_mismatch;
@@ -97,6 +97,30 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         .with_hint("swarmops blob put <file>"),
         RepoError::RefName(name) => ref_name_invalid(name, message),
         RepoError::RefMoved { name, actual, .. } => ref_moved(&name, actual),
+        RepoError::OpNotFound { op: number, last } => {
+            let last = last.map_or(Value::Null, Value::from);
+            error(ErrorCode::OpNotFound, message)
+                .with_details(details([("op", number.into()), ("last", last)]))
+                .with_hint("swarmops op log")
+        }
+        RepoError::NothingToUndo(number) => error(ErrorCode::NothingToUndo, message)
+            .with_details(details([("op", number.into())]))
+            .with_hint("swarmops op log"),
+        RepoError::UndoBlocked {
+            op: number,
+            name,
+            expected,
+            actual,
+            ..
+        } => undo_blocked(number, &name, expected, actual),
+        // A land's (M4).
+        e @ (RepoError::Conflict(_)
+        | RepoError::NothingToLand(_)
+        | RepoError::RetryExhausted { .. }
+        | RepoError::KeyReused { .. }
+        | RepoError::MergeChangeset(_)
+        | RepoError::BaseNotAncestor { .. }
+        | RepoError::NoMergeBase { .. }) => land_error(e, message),
         RepoError::MissingObject { id, .. } => {
             corrupt(message, during, "swarmops verify").with_details(object(id))
         }
@@ -104,6 +128,69 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         // A derivation that fails on immutable inputs fails again on every call: a bug.
         RepoError::Derived { .. } => error(ErrorCode::Internal, message),
     }
+}
+
+/// The operations-spec error for a land's error `e`, whose message is `message`: [`repo_error`]'s
+/// table, a land's rows (M4). E_CONFLICT's report holds hunk texts within the default
+/// `max_conflict_bytes` here; `land` gives it its request's ([`conflict`]). Any other error is
+/// [`repo_error`]'s.
+fn land_error(e: RepoError, message: String) -> OpError {
+    match e {
+        RepoError::Conflict(conflicts) => conflict(&conflicts, message, DEFAULT_MAX_CONFLICT_BYTES),
+        RepoError::NothingToLand(reason) => error(ErrorCode::NothingToLand, message)
+            .with_details(details([("reason", reason.as_str().into())])),
+        RepoError::RetryExhausted { attempts, actual } => {
+            error(ErrorCode::CasRetryExhausted, message)
+                .with_details(details([
+                    ("attempts", attempts.into()),
+                    ("actual", actual.to_string().into()),
+                ]))
+                .with_hint("run the land again: nothing of this one was recorded")
+        }
+        RepoError::KeyReused { key, landed } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("key", key.into()),
+                ("landed", landed.to_string().into()),
+            ]))
+            .with_hint(hint(format!("swarmops show {landed}"))),
+        RepoError::MergeChangeset(id) => error(ErrorCode::InvalidArg, message)
+            .with_details(details([("changeset", id.to_string().into())])),
+        RepoError::BaseNotAncestor { base, head } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("base", base.to_string().into()),
+                ("head", head.to_string().into()),
+            ]))
+            .with_hint(hint(format!("swarmops log {head}"))),
+        RepoError::NoMergeBase { head, theirs } => error(ErrorCode::InvalidArg, message)
+            .with_details(details([
+                ("head", head.to_string().into()),
+                ("theirs", theirs.to_string().into()),
+            ]))
+            .with_hint(hint(format!("swarmops log {head}"))),
+        other => repo_error(other, During::Op),
+    }
+}
+
+/// `E_CONFLICT` for a land whose change conflicts with its target as `conflicts` say, whose
+/// message is `message`: `details.report` is the conflict report, its hunk texts within
+/// `max_bytes` ([`crate::conflict::report`]), and the hint reads the target's side of the first
+/// conflicting path, then names the land again with its resolutions, against the target's head
+/// the report names (`land --resolve`).
+pub(crate) fn conflict(conflicts: &MergeConflicts, message: String, max_bytes: u64) -> OpError {
+    let report = crate::conflict::report(conflicts, max_bytes);
+    let side = match report.files.first() {
+        Some(file) => shell_word(&format!("{}:{}", report.theirs, file.path)),
+        None => format!("{}:<path>", report.theirs),
+    };
+    let next = hint(format!(
+        "swarmops cat {side}, then swarmops land {} --resolve <file> with each path's resolution \
+         and against = {}",
+        report.ours, report.theirs
+    ));
+    let report = serde_json::to_value(&report).expect("a conflict report serializes");
+    error(ErrorCode::Conflict, message)
+        .with_details(details([("report", report)]))
+        .with_hint(next)
 }
 
 /// The operations-spec error for store error `e`, whose message is `message`, raised while
@@ -310,6 +397,32 @@ fn ref_moved(name: &str, actual: Option<ChangesetId>) -> OpError {
     error
 }
 
+/// An `undo` of operation `op` that found ref `name` at `actual` (`None`: it does not exist), not
+/// at `expected`, what the operation set it to, so that the undo wrote nothing: `E_CAS_MISMATCH`
+/// `{name, actual, op}`, whose message says to undo the operations that moved the ref since
+/// first, or to land a change that reverses this one, and whose hint only reads: the operation
+/// log.
+fn undo_blocked(
+    op: u64,
+    name: &str,
+    expected: Option<ChangesetId>,
+    actual: Option<ChangesetId>,
+) -> OpError {
+    let shown = |target: Option<ChangesetId>| {
+        target.map_or_else(|| "nothing".to_owned(), |id| id.to_string())
+    };
+    let message = format!(
+        "ref {name} has moved since operation {op} set it to {}: it names {} now, so this undo \
+         wrote nothing; undo the operations that moved it since, newest first, then this one \
+         again, or land a change that reverses operation {op}",
+        shown(expected),
+        shown(actual)
+    );
+    let mut error = cas_mismatch(name, actual, message).with_hint("swarmops op log");
+    error.details.insert("op".to_owned(), op.into());
+    error
+}
+
 fn ref_name_invalid(name: String, message: String) -> OpError {
     error(ErrorCode::RefNameInvalid, message)
         .with_details(details([("name", name.into())]))
@@ -395,7 +508,7 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
         } => {
             let stopped = OpError {
                 message: one_line(message),
-                ..op(source)
+                ..op(*source)
             };
             progress(stopped, imported, last)
         }
@@ -635,6 +748,20 @@ mod tests {
             recovered: Box::default(),
         };
         maps(moved, op, ErrorCode::CasMismatch);
+        let not_found = RepoError::OpNotFound {
+            op: 7,
+            last: Some(3),
+        };
+        maps(not_found, op, ErrorCode::OpNotFound);
+        maps(RepoError::NothingToUndo(2), op, ErrorCode::NothingToUndo);
+        let blocked = RepoError::UndoBlocked {
+            op: 2,
+            name: "main".into(),
+            expected: Some(id()),
+            actual: None,
+            recovered: Box::default(),
+        };
+        maps(blocked, op, ErrorCode::CasMismatch);
         let missing = RepoError::MissingObject {
             id: id().0,
             kind: ObjectKind::Blob,
@@ -650,6 +777,124 @@ mod tests {
             why: "a cycle".into(),
         };
         maps(derived, op, ErrorCode::Internal);
+        for e in land_errors() {
+            let code = match e {
+                RepoError::Conflict(_) => ErrorCode::Conflict,
+                RepoError::NothingToLand(_) => ErrorCode::NothingToLand,
+                RepoError::RetryExhausted { .. } => ErrorCode::CasRetryExhausted,
+                _ => ErrorCode::InvalidArg,
+            };
+            maps(e, op, code);
+        }
+    }
+
+    /// One of each error a land raises.
+    fn land_errors() -> [RepoError; 8] {
+        use swarmops_repo::{MergeConflicts, NothingToLandReason};
+        let conflicts = MergeConflicts {
+            base: id(),
+            ours: id(),
+            theirs: id(),
+            conflicts: Vec::new(),
+            auto_merged: Vec::new(),
+            last_touched: std::collections::BTreeMap::new(),
+            stale: Vec::new(),
+        };
+        [
+            RepoError::Conflict(Box::new(conflicts)),
+            RepoError::NothingToLand(NothingToLandReason::OnTarget),
+            RepoError::NothingToLand(NothingToLandReason::NoChanges),
+            RepoError::RetryExhausted {
+                attempts: 8,
+                actual: id(),
+            },
+            RepoError::KeyReused {
+                key: "k-1".into(),
+                landed: id(),
+            },
+            RepoError::MergeChangeset(id()),
+            RepoError::BaseNotAncestor {
+                base: id(),
+                head: id(),
+            },
+            RepoError::NoMergeBase {
+                head: id(),
+                theirs: id(),
+            },
+        ]
+    }
+
+    /// A land's errors carry what they are about: the conflict report (exit 3, not retryable,
+    /// with a hint that reads the target's side and names the land with its resolutions), the
+    /// reason there is nothing to land, the attempts made and what the target names after the last
+    /// (retryable, exit 4, with a hint to land again), the key and the changeset it landed, the
+    /// merge changeset, the base and the head.
+    #[test]
+    fn land_errors_carry_their_details() {
+        let full = id().to_string();
+        let report = serde_json::json!({"base": full, "ours": full, "theirs": full, "files": [],
+                                        "kinds": [], "truncated": false});
+        let want = [
+            ("E_CONFLICT", serde_json::json!({ "report": report })),
+            (
+                "E_NOTHING_TO_LAND",
+                serde_json::json!({"reason": "on_target"}),
+            ),
+            (
+                "E_NOTHING_TO_LAND",
+                serde_json::json!({"reason": "no_changes"}),
+            ),
+            (
+                "E_CAS_RETRY_EXHAUSTED",
+                serde_json::json!({"attempts": 8, "actual": full}),
+            ),
+            (
+                "E_INVALID_ARG",
+                serde_json::json!({"key": "k-1", "landed": full}),
+            ),
+            ("E_INVALID_ARG", serde_json::json!({"changeset": full})),
+            (
+                "E_INVALID_ARG",
+                serde_json::json!({"base": full, "head": full}),
+            ),
+            (
+                "E_INVALID_ARG",
+                serde_json::json!({"head": full, "theirs": full}),
+            ),
+        ];
+        for (e, (code, details)) in land_errors().into_iter().zip(want) {
+            let error = repo_error(e, During::Op);
+            assert_eq!(error.code.as_str(), code, "{error:?}");
+            assert_eq!(Value::Object(error.details), details, "{code}");
+        }
+        let [conflict, ..] = land_errors();
+        let conflict = repo_error(conflict, During::Op);
+        assert_eq!((conflict.exit, conflict.retryable), (3, false));
+        assert_eq!(
+            conflict.hint,
+            Some(format!(
+                "swarmops cat {full}:<path>, then swarmops land {full} --resolve <file> with each \
+                 path's resolution and against = {full}"
+            ))
+        );
+        let exhausted = repo_error(
+            RepoError::RetryExhausted {
+                attempts: 3,
+                actual: id(),
+            },
+            During::Op,
+        );
+        assert_eq!((exhausted.exit, exhausted.retryable), (4, true));
+        let hint = exhausted.hint.unwrap_or_default();
+        assert!(hint.contains("land again"), "{hint}");
+        let reused = repo_error(
+            RepoError::KeyReused {
+                key: "k-1".into(),
+                landed: id(),
+            },
+            During::Op,
+        );
+        assert_eq!(reused.hint, Some(format!("swarmops show {full}")));
     }
 
     /// A commit with `advance` whose ref moved first recorded nothing: `E_CAS_MISMATCH` (exit 4,
@@ -692,6 +937,59 @@ mod tests {
         let said = "ref main does not exist, so it does not name this commit's parent";
         assert!(gone.message.starts_with(said), "{gone:?}");
         assert!(gone.message.contains("recorded nothing"), "{gone:?}");
+    }
+
+    /// An `undo` that found a ref moved since its operation wrote nothing: `E_CAS_MISMATCH` (exit
+    /// 4) with the ref, what it names and the operation, a message that says to undo the later
+    /// operations first or land a change that reverses this one, and the operation log as its
+    /// read-only hint. An undo of an operation past the last, or of one that moved no ref, names
+    /// the operation too.
+    #[test]
+    fn an_undo_whose_ref_moved_since_is_a_cas_mismatch_that_names_the_operation() {
+        let blocked = repo_error(
+            RepoError::UndoBlocked {
+                op: 4,
+                name: "release/r".into(),
+                expected: Some(id()),
+                actual: None,
+                recovered: Box::default(),
+            },
+            During::Op,
+        );
+        assert_eq!(blocked.code, ErrorCode::CasMismatch.as_str());
+        assert_eq!((blocked.exit, blocked.retryable), (4, true));
+        let want = details([
+            ("name", "release/r".into()),
+            ("actual", Value::Null),
+            ("op", 4.into()),
+        ]);
+        assert_eq!(blocked.details, want);
+        for advice in [
+            format!("since operation 4 set it to {}", id()),
+            "it names nothing now".to_owned(),
+            "undo the operations that moved it since, newest first, then this one again".to_owned(),
+            "land a change that reverses operation 4".to_owned(),
+        ] {
+            assert!(blocked.message.contains(&advice), "{advice}: {blocked:?}");
+        }
+        assert_eq!(blocked.hint.as_deref(), Some("swarmops op log"));
+
+        let not_found = repo_error(RepoError::OpNotFound { op: 9, last: None }, During::Op);
+        assert_eq!(
+            (not_found.code.as_str(), not_found.exit),
+            ("E_OP_NOT_FOUND", 6)
+        );
+        assert_eq!(
+            not_found.details,
+            details([("op", 9.into()), ("last", Value::Null)])
+        );
+        assert_eq!(not_found.hint.as_deref(), Some("swarmops op log"));
+        let nothing = repo_error(RepoError::NothingToUndo(3), During::Op);
+        assert_eq!(
+            (nothing.code.as_str(), nothing.exit),
+            ("E_NOTHING_TO_UNDO", 1)
+        );
+        assert_eq!(nothing.details, details([("op", 3.into())]));
     }
 
     #[test]
@@ -1302,7 +1600,7 @@ mod tests {
 
         let commit = COMMIT.to_string();
         let stopped = |e: StoreError, imported, last| ImportError::Store {
-            source: RepoError::Store(e),
+            source: Box::new(RepoError::Store(e)),
             imported,
             last,
         };

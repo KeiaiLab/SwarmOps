@@ -1,6 +1,6 @@
 # SwarmOps architecture
 
-An overview, in English, of how SwarmOps is built, as of M3. The design specs are the
+An overview, in English, of how SwarmOps is built, as of M4. The design specs are the
 authority, and they are in Korean:
 
 - [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md) ("umbrella" below),
@@ -22,13 +22,14 @@ general-purpose git replacement. Its main users are LLM agents, so every operati
 function and the command line is a thin shell that prints JSON. It is fully embedded: one
 program, no external database, no daemon.
 
-M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening), M1.6 (the
-code-review follow-ups), M2 (diff, history and the derived-data engine) and M3 (git import) are
-done, but for work of M1.6, M2 and M3 that waits until after the pilot. Since M1,
-SwarmOps is usable by one agent: its store already takes commits from many processes at once, safely, but
-nothing merges yet. Merging and landing (M4), git export (M8), workspaces (M5)
-and review (M7) come later, in the order of umbrella §13.
-[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2 and M3 leave open.
+M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening), M1.6 (the code-review
+follow-ups), M2 (diff, history and the derived-data engine), M3 (git import) and M4 (merge and
+landing, and the operation log with undo) are done, but for work of M1.6, M2, M3 and M4 that waits
+until after the pilot. Since M1, SwarmOps is usable by one agent: its store takes commits from many
+processes at once, safely. Since M4, `land` merges an agent's change three-way onto a ref and
+publishes it, not yet measured under a swarm's load. Git export (M8), workspaces (M5) and review
+(M7) come later, in the order of umbrella §13.
+[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2, M3 and M4 leave open.
 
 ## Crates and layering
 
@@ -538,18 +539,31 @@ What an agent sees (operations §4):
   is checked against the store as it is, and fails rather than build on what was taken back.
   The first readers whose results leave the host (M8's git export, M11's `serve`) will read a
   committed snapshot taken under the lock instead.
-- M1 has no merge: an agent that loses a ref race and commits its change again on top of the
-  winner's can overwrite the winner's edits to the same files. Merging and landing arrive in
-  M4.
+- `op undo` is a compare-and-swap too: it moves every ref the operation moved back to what it
+  named before, in one transaction, only while each still names what the operation set (or
+  what it named before, which is skipped); a ref moved since by another operation refuses it
+  with `E_CAS_MISMATCH`, and nothing is written. It reads the operation's frame under its own
+  write's lock, so it never undoes a frame that a failed sync took back.
+- `land` publishes a change made on an older head: it merges the change three-way onto the
+  target's head (`main` or a `release/*` ref), and inserts the result, one squashed changeset whose
+  parent is that head, with the target's compare-and-swap to it in one transaction, the frame a
+  `commit --advance` writes. A land that loses its race merges again onto what the target gained,
+  over its own paths, and tries again, waiting from its fourth attempt; a conflict is
+  `E_CONFLICT`, with a report of each conflicting file, and records nothing. A keyed land run
+  again finds its changeset on the target and replays it, decided under the store's lock. So an
+  agent that loses a ref race lands its change rather than re-sending whole files, which would
+  overwrite the winner's edits.
 
 ## The contract
 
-Every operation is a function from a request type to a response type or an `OpError`, and
-every type is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore
-fields they do not know, so versions can differ (operations §0). `StoreOps` has sixteen operations:
-`repo_info`, `commit`, `resolve_rev`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`,
-`log`, `path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `verify` and `derive`; `init`,
-`whoami` and `schema` live in the CLI.
+Every operation is a function from a request type to a response type or an `OpError`, and every type
+is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore fields they do
+not know, so versions can differ (operations §0). `StoreOps` has nineteen operations: `repo_info`,
+`commit`, `land`, `resolve_rev`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`, `log`,
+`path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `op_log`, `undo`, `verify` and
+`derive`; `init`, `whoami` and `schema` live in the CLI. `op_log` shows the journal as the store's
+operations, a frame each (storage §3), and `undo` moves an operation's refs back by
+compare-and-swap.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
 plain text, and `mcp`, below, speaks MCP there instead):
@@ -558,10 +572,10 @@ plain text, and `mcp`, below, speaks MCP there instead):
 {"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth, recovered}}
 ```
 
-A failure's `code` is one of 30 stable `E_*` codes, from one table that also fixes each code's
+A failure's `code` is one of 35 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
 found) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 70 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 89 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

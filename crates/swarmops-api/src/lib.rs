@@ -18,36 +18,42 @@ pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
-    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_DERIVE_LIMIT,
-    DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
-    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT,
-    DeriveReq, DeriveResp, Diff, DiffFormat, DiffHunk, DiffLineOut, DiffReq, DiffStatus,
-    EntryKindOut, FileContent, FileDiff, FileKind, GitImportReq, GitImportResp, IdentityInfo,
-    InfoReq, InitReq, LineOp, LineRange, LogPage, LogReq, LossyClass, LossyCommitOut,
-    MAX_TREE_DEPTH, ModeInput, PathHistoryEntry, PathHistoryPage, PathHistoryReq, ReadFileReq,
-    ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp, RepoInfo,
-    ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing, VerifyFinding,
-    VerifyReport, VerifyReq,
+    CommitReq, CommitResp, ConflictKindOut, ConflictReport, ContentEncoding, ContentInput,
+    DEFAULT_DERIVE_LIMIT, DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES,
+    DEFAULT_LOG_LIMIT, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES,
+    DEFAULT_MAX_CHANGESETS, DEFAULT_MAX_CONFLICT_BYTES, DEFAULT_OP_LOG_LIMIT,
+    DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, DeriveReq, DeriveResp, Diff, DiffFormat,
+    DiffHunk, DiffLineOut, DiffReq, DiffStatus, EntryKindOut, FileConflictOut, FileContent,
+    FileDiff, FileKind, GitImportReq, GitImportResp, HunkOut, IdentityInfo, InfoReq, InitReq,
+    LandReq, LandResp, LandStatus, LineOp, LineRange, LinesOut, LogPage, LogReq, LossyClass,
+    LossyCommitOut, MAX_LAND_ATTEMPTS, MAX_TREE_DEPTH, ModeInput, OpChangesetOut, OpLogPage,
+    OpLogReq, OperationKind, OperationOut, PathHistoryEntry, PathHistoryPage, PathHistoryReq,
+    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefMoveOut, RefOut, RefSetReq,
+    RefSetResp, RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
+    UndoReq, UndoResp, VerifyFinding, VerifyReport, VerifyReq,
 };
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
 pub use rev::Rev;
+
+/// The object [`schema_for_all`] returns: each listed type's JSON Schema under the type's name.
+macro_rules! schemas {
+    ($($ty:ident $(<$arg:ty>)?),+ $(,)?) => {
+        serde_json::Value::Object(serde_json::Map::from_iter([
+            $((
+                stringify!($ty).to_owned(),
+                schemars::schema_for!($ty $(<$arg>)?).to_value(),
+            ),)+
+        ]))
+    };
+}
 
 /// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
 ///
 /// [`Envelope`] is listed as `Envelope<serde_json::Value>`: its `result` is an operation's
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
-    macro_rules! schemas {
-        ($($ty:ident $(<$arg:ty>)?),+ $(,)?) => {
-            serde_json::Value::Object(serde_json::Map::from_iter([
-                $((
-                    stringify!($ty).to_owned(),
-                    schemars::schema_for!($ty $(<$arg>)?).to_value(),
-                ),)+
-            ]))
-        };
-    }
     schemas![
         // Shared by every operation.
         Envelope<serde_json::Value>,
@@ -131,5 +137,25 @@ pub fn schema_for_all() -> serde_json::Value {
         LossyClass,
         GitImportResp,
         LossyCommitOut,
+        // land, op log, undo (M4).
+        LandReq,
+        ResolutionsInput,
+        ResolutionInput,
+        Side,
+        LandResp,
+        LandStatus,
+        ConflictReport,
+        FileConflictOut,
+        ConflictKindOut,
+        HunkOut,
+        LinesOut,
+        OpLogReq,
+        OpLogPage,
+        OperationOut,
+        OperationKind,
+        OpChangesetOut,
+        RefMoveOut,
+        UndoReq,
+        UndoResp,
     ]
 }
