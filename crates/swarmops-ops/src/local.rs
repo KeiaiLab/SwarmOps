@@ -150,7 +150,13 @@ const UNKNOWN_AGENT: &str = "unknown/unknown";
 /// - `E_IO` `{fs_op, store_file}`: any other `Io` error, whatever its kind (an OS `EINVAL` among
 ///   them). `fs_op` names the file operation that failed; `store_file` the file of the store it
 ///   was on, relative to the store's root (`.` for the root itself), and is absent for a path
-///   outside it; no error carries a host path.
+///   outside it; no such error carries a host path but the two operations spec §0 names: a
+///   symlink loop met while working out where the store's path leads (`fs_op` `resolve`, no
+///   `store_file`), whose message names that path, and tempfile's giving up after 65,536 taken
+///   temp-file names. Also the store's `NotCommitted` (below) whose
+///   append the filesystem refused for want of permission or as a read-only filesystem
+///   (`PermissionDenied`, `ReadOnlyFilesystem`), `{committed, fs_op, store_file}`: running the
+///   same command again meets the same refusal until its cause is fixed, which the hint names.
 /// - `E_IO_TRANSIENT` (retryable) `{committed, fs_op, store_file}`, `committed` always `false`:
 ///   the store's `NotCommitted`, a journal append that failed and that the store cut back off
 ///   the journal, so the write committed nothing; `fs_op` and `store_file` name the append. The
@@ -1192,6 +1198,145 @@ mod tests {
         let info = fresh.repo_info(InfoReq {}).unwrap();
         assert_eq!(info.main.as_deref(), Some(committed.changeset.as_str()));
         assert_eq!(info.changesets, 1);
+    }
+
+    /// A journal append that the filesystem refuses in a way that running the same command again
+    /// meets again, for want of permission (`EACCES`) or as a read-only filesystem (`EROFS`), in
+    /// each of the store's three ways to `NotCommitted` (storage spec §2 rule 3 (a)-(c)): the
+    /// non-retryable `E_IO`, `committed: false`, naming the append, with a hint that says what to
+    /// fix; nothing of the request was committed, and once the cause is gone it commits (ruling
+    /// M16-R8). Any other failure there is the retryable `E_IO_TRANSIENT`, as the tests beside
+    /// this module show.
+    mod refused_for_good {
+        use std::io;
+
+        use swarmops_store::RealFs;
+        use swarmops_testkit::fs::{Call, Watch, Watched};
+
+        use super::*;
+
+        /// Refuses each call whose method and path's end it lists before the call runs, with the
+        /// operating system's error it gives: `EACCES` (13) as a file without write permission
+        /// does, `EROFS` (30) as a read-only filesystem does, `EIO` (5) as a failed writeback.
+        struct Refuses(Vec<(&'static str, &'static str, i32)>);
+
+        impl Watch for Refuses {
+            fn before(&self, call: &Call<'_>) -> io::Result<()> {
+                let refused = self.0.iter().find(|(method, suffix, _)| {
+                    call.method == *method && call.path().ends_with(suffix)
+                });
+                match refused {
+                    Some(&(_, _, errno)) => Err(io::Error::from_raw_os_error(errno)),
+                    None => Ok(()),
+                }
+            }
+        }
+
+        /// The real filesystem, but that it refuses the calls `refused` lists ([`Refuses`]).
+        fn refusing(refused: &[(&'static str, &'static str, i32)]) -> Watched<Refuses> {
+            Watched(Refuses(refused.to_vec()), RealFs)
+        }
+
+        /// A store at `<dir>/store`, made, and the identity that commits to it.
+        fn new_store(dir: &tempfile::TempDir) -> (Utf8PathBuf, Identity) {
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            drop(LocalOps::init(&root, "acme").unwrap());
+            (root, Identity::parse("agent/worker-17").unwrap())
+        }
+
+        /// A request that puts `path` on main's head.
+        fn put(path: &str) -> CommitReq {
+            CommitReq {
+                parent: None,
+                changes: vec![ChangeInput {
+                    path: path.to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline("x".to_owned())),
+                    mode: None,
+                }],
+                message: "m".to_owned(),
+                allow_empty: false,
+                advance: None,
+            }
+        }
+
+        /// `error` is the non-retryable `E_IO` of a journal append to `store_file` that
+        /// committed nothing, its hint saying to do `fix` first.
+        #[track_caller]
+        fn refused(error: &OpError, store_file: &str, fix: &str) {
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                ("E_IO", 1, false),
+                "{error:?}"
+            );
+            assert_eq!(
+                Value::Object(error.details.clone()),
+                json!({"committed": false, "fs_op": "append_durable", "store_file": store_file}),
+                "{error:?}"
+            );
+            let hint = error.hint.as_deref().unwrap_or_default();
+            assert!(hint.contains(fix), "{error:?}");
+        }
+
+        /// (a) `journal.log` refuses the commit's own frame (`EACCES`).
+        #[test]
+        fn a_frame_append_refused_for_want_of_permission_is_e_io() {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, who) = new_store(&dir);
+            let ops = ops_on(&root, refusing(&[("append_durable", "journal.log", 13)]));
+            let error = ops.commit(&who, put("f")).unwrap_err();
+            refused(&error, "meta/journal.log", "writable");
+            drop(ops);
+
+            let fresh = LocalOps::open(&root).unwrap();
+            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 0);
+            fresh.commit(&who, put("f")).unwrap();
+        }
+
+        /// (b) `journal.off` refuses the tail check's listing of a frame an earlier commit left
+        /// whole and unlisted (that commit's own listing failed: committed, with a warning), on a
+        /// read-only filesystem (`EROFS`).
+        #[test]
+        fn a_listing_refused_by_a_read_only_filesystem_is_e_io() {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, who) = new_store(&dir);
+            let ops = ops_on(&root, failing("append_durable", "journal.off"));
+            one_injected(&ops.commit(&who, put("f")).unwrap().warnings);
+            drop(ops);
+            let ops = ops_on(&root, refusing(&[("append_durable", "journal.off", 30)]));
+            let error = ops.commit(&who, put("g")).unwrap_err();
+            refused(&error, "meta/journal.off", "read-write");
+            drop(ops);
+
+            let fresh = LocalOps::open(&root).unwrap();
+            fresh.commit(&who, put("g")).unwrap();
+            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 2);
+        }
+
+        /// (c) The tail check's sync of such a frame fails (`EIO`), and `journal.log` refuses
+        /// the rewrite of the frame (`EACCES`): cut back off, the frame is lost (a double fault,
+        /// storage spec §2 rule 3), and the request committed nothing.
+        #[test]
+        fn a_rewrite_refused_for_want_of_permission_is_e_io() {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, who) = new_store(&dir);
+            let ops = ops_on(&root, failing("append_durable", "journal.off"));
+            one_injected(&ops.commit(&who, put("f")).unwrap().warnings);
+            drop(ops);
+            let refusals = [
+                ("sync_data", "journal.log", 5),
+                ("append_durable", "journal.log", 13),
+            ];
+            let ops = ops_on(&root, refusing(&refusals));
+            let error = ops.commit(&who, put("g")).unwrap_err();
+            refused(&error, "meta/journal.log", "writable");
+            assert!(error.message.contains("writing afresh"), "{error:?}");
+            drop(ops);
+
+            let fresh = LocalOps::open(&root).unwrap();
+            fresh.commit(&who, put("g")).unwrap();
+            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 1);
+        }
     }
 
     /// A commit whose journal frame cannot be appended (journal.log refuses it) committed

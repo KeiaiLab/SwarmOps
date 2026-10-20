@@ -1455,6 +1455,31 @@ mod tests {
         assert_eq!(counter.calls(), 7, "locating makes no call");
         assert_eq!(store_fs.root(), root);
     }
+
+    /// `StoreFs::exists`, which the test above runs only where it succeeds, names its failure as
+    /// every forwarded call does: the method, and the path relative to the store's root.
+    #[test]
+    fn store_fs_names_a_failed_exists() {
+        use crate::error::FileOp;
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = Utf8Path::from_path(dir.path()).unwrap();
+        let fail = FailAt {
+            at: 1,
+            mode: FailMode::Once,
+            error: InjectedError::Eio,
+        };
+        let store_fs = StoreFs::new(Arc::new(FailAtFs::new(RealFs, fail)), root);
+        let failure = store_fs.exists(root.join("meta/journal.off")).unwrap_err();
+        assert_eq!(
+            (failure.op, failure.file.as_deref(), failure.raw_os_error()),
+            (
+                FileOp::Fs(FsMethod::Exists),
+                Some(Utf8Path::new("meta/journal.off")),
+                Some(5)
+            )
+        );
+    }
 }
 
 #[cfg(test)]

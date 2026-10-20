@@ -331,8 +331,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   name the file operation that failed and the store file it was on: `details.fs_op` (one of 22
   names, such as `"open"` or `"append_durable"`) and `details.store_file` (relative to the
   store's root, such as `meta/journal.off`; absent for a path outside it). Their messages say
-  the same before the operating system's text, no error carries the store's host path, and the
-  schema's descriptions of the three codes say so. A missing index file's `E_STORE_CORRUPT`
+  the same before the operating system's text, none of them carries the store's host path but
+  two `E_IO`s that operations spec §0 names (a symlink loop met while working out where that
+  path leads, and tempfile's giving up after 65,536 taken temp-file names), and the schema's
+  descriptions of the three codes say so. A missing index file's `E_STORE_CORRUPT`
   names it (`meta/idx/ids.col is missing`). In the Rust API, `StoreError::Io` and
   `NotCommitted` carry an `IoFailure` (`op`, `file`, `source`, `also`) in place of an
   `io::Error`, the new `StoreFs` locates the failure of every filesystem call the stores make,
@@ -350,6 +352,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   get a hint that the tool's `inputSchema` gives them, where `swarmops schema` gives the
   request type without the rules the server adds. In the schema, `VerifyFinding.object` says
   that `missing_object` also names an object the store holds as another kind.
+- A journal append that the filesystem refuses for want of permission (`EACCES`, `EPERM`) or
+  because it is read-only (`EROFS`), and that the store cut back, is `E_IO` (exit 1, not
+  retryable) with `details.committed: false` and a hint that says what to fix first, where it
+  was the retryable `E_IO_TRANSIENT`: nothing was committed, but running the same command again
+  meets the same refusal until its cause is fixed. So it is for the write's own frame, for the
+  tail check's listing of a frame left unlisted and for its rewrite of frames whose sync failed
+  (storage spec §2 rule 3 (a)-(c)); any other failure there stays `E_IO_TRANSIENT`. The
+  schema's description of `E_IO` says so.
 
 ### Fixed
 
@@ -366,7 +376,12 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (`IndexCorrupt`) on every lookup that reads it. Before, a lookup by id, prefix or delta hash
   answered with another changeset's record where the entry pointed into the unsorted tail, and
   failed with `E_IO` past the index's end.
-- No error from the store carries the store's absolute path any more. A malformed
+- No failure of the store's filesystem calls carries the store's absolute path any more, but
+  tempfile's giving up after 65,536 taken temp-file names, which is not met in practice
+  ([docs/known-limitations.md](docs/known-limitations.md), "One temp-file error names a host
+  path"); the errors that answer for the path a command was given still name it, most of them
+  made absolute (`E_NOT_A_REPO`, `E_UNSUPPORTED_FS`, a symlink loop met while working out where
+  it leads; operations spec §0). A malformed
   `journal.ckpt` or ref file, and a ref file over its size cap, are named by their place in the
   store (`meta/journal.ckpt`, `meta/refs/<name>`), and a store file that is not a regular file
   by its name. A temp file that the store cannot create or write (an object write, or the
@@ -394,6 +409,10 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   frames were (another writer's bytes in between) is cut back and refused as damage
   (`JournalCorrupt` at the frames' offset, `E_STORE_CORRUPT`) before anything is listed, where it
   used to list entries that pointed into other bytes.
+- A `FORMAT` or `REPO` that is not a regular file, such as a directory, is refused by its read
+  as not a regular file (`E_STORE_CORRUPT`, `read REPO: REPO is not a regular file`, with
+  `details.fs_op` and `details.store_file`), no longer as one too long by the size a directory
+  reports (`E_NOT_A_REPO`, `<store>/REPO is 4096 bytes long, …`).
 
 ### Security
 

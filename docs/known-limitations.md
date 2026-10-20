@@ -56,7 +56,11 @@ left).
   cut failed stays listed though it may be lost. A crash between the cut and the rewrite of
   unlisted frames, or a rewrite that fails (its error names them by seq), loses those frames,
   and one of them may be a commit acknowledged with a warning, or one whose `journal.off` entry
-  a power loss zeroed. A crash inside a frame's append, between the write and its `fdatasync`,
+  a power loss zeroed. A rewrite that lands anywhere but where the frames were (another writer's
+  bytes came in between: one that writes without the lock) is cut back there and refused as
+  damage, which loses the rewritten frames, one of which may be a commit acknowledged with a
+  warning, and the intruding bytes, with no trace but that one error. A crash inside a frame's
+  append, between the write and its `fdatasync`,
   may leave no one to receive the frame's writeback error. *Target: M6 (the next `FORMAT`'s
   frame header, with the frame's sequence number and the previous frame's CRC, and fsck).
   Found: M1.5 Task 2.*
@@ -268,6 +272,13 @@ left).
   name), `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` (tokens, `policy.toml` and gc's
   maintenance lease come later) are in the schema, so that an agent can match them before any
   operation raises them. *Documented. Found: the 2026-10-16 comparison; M1.5 Task 9 review.*
+- **One temp-file error names a host path.** When 65,536 temp-file names in a row are taken in
+  a directory of the store, the `tempfile` crate gives up with `too many temporary files exist`
+  and the directory's absolute path, which an `E_IO` then carries; the names are random, so it
+  is not met in practice. The other errors that name the store's own path answer for the path a
+  command was given (operations spec §0). A server that takes requests from another host must
+  not pass either on as it is. *Target: M11 (`serve`), M10. Found: the M1.6 consolidated review
+  (error contract).*
 
 ## Git import and export
 
