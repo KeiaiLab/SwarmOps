@@ -1711,3 +1711,88 @@ mod read_chunks {
         }
     }
 }
+
+/// zstd's legacy formats (v0.1 to v0.7, from before zstd 1.0) are no object's encoding: this
+/// store writes frames of the current format only, and builds zstd without the legacy decoders
+/// (`default-features = false`; storage spec §2 rule 1), some 25,000 lines of C that a crafted
+/// object file would otherwise reach before its payload is hashed. A zstd built with them
+/// (its default `legacy` feature) reads both object files below back as valid: they hold the very
+/// payload their id names.
+mod legacy_zstd {
+    use swarmops_core::bytes::to_u64;
+    use swarmops_store::ObjectStat;
+    use swarmops_testkit::store::{zstd_object, zstd_v07_frame};
+
+    use super::*;
+
+    /// What every object file here holds, whatever its frames: the payload of the object's id.
+    const PAYLOAD: &[u8] = b"an object whose zstd body holds a frame of the legacy v0.7 format\n";
+
+    /// The bytes of [`PAYLOAD`] that the two-frame body holds in a frame of the current format.
+    const HEAD: usize = 24;
+
+    /// The object file of [`PAYLOAD`] with one frame of the v0.7 format for its zstd body.
+    fn one_legacy_frame(file: &mut Vec<u8>) {
+        zstd_object(file, to_u64(PAYLOAD.len()), &zstd_v07_frame(PAYLOAD));
+    }
+
+    /// The object file of [`PAYLOAD`] with a frame of the current format, as zstd writes one, then
+    /// a frame of the v0.7 format for its zstd body: zstd decodes a body frame by frame, so a
+    /// check of the first frame's magic alone would not refuse it.
+    fn a_legacy_frame_second(file: &mut Vec<u8>) {
+        let (head, tail) = PAYLOAD.split_at(HEAD);
+        let mut body = zstd::bulk::compress(head, 3).unwrap();
+        body.extend(zstd_v07_frame(tail));
+        zstd_object(file, to_u64(PAYLOAD.len()), &body);
+    }
+
+    /// Applies `damage` to the file of `id`, reads `id` in pieces, and restores the file.
+    fn read_chunks_damaged(
+        store: &FsObjectStore,
+        layout: &Layout,
+        id: ObjectId,
+        damage: fn(&mut Vec<u8>),
+    ) -> Result<Option<ObjectStat>, StoreError> {
+        let path = layout.object_path(id);
+        let pristine = fs::read(&path).unwrap();
+        let mut damaged = pristine.clone();
+        damage(&mut damaged);
+        fs::write(&path, &damaged).unwrap();
+        let got = store.read_chunks(id, &mut |_| {});
+        fs::write(&path, &pristine).unwrap();
+        got
+    }
+
+    /// A legacy frame anywhere in an object's body makes the object `Corrupt`, for `get` and for
+    /// `read_chunks` alike, although the frame holds the payload the object's id names: zstd no
+    /// longer finds the frame's size, so the read stops before decoding anything.
+    #[test]
+    fn an_object_in_a_legacy_zstd_frame_is_corrupt() {
+        let (_root, layout) = new_root();
+        let store = real_store(&layout);
+        let id = store.put(ObjectKind::Blob, PAYLOAD).unwrap();
+        let cases: [Damage; 2] = [
+            ("one v0.7 frame", id, one_legacy_frame),
+            (
+                "a frame of the current format, then a v0.7 frame",
+                id,
+                a_legacy_frame_second,
+            ),
+        ];
+        for (what, id, damage) in cases {
+            let got = get_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+                "get, {what}: {got:?}"
+            );
+            let got = read_chunks_damaged(&store, &layout, id, damage);
+            assert!(
+                matches!(got, Err(StoreError::Corrupt { id: bad }) if bad == id),
+                "read_chunks, {what}: {got:?}"
+            );
+        }
+        // Each read put the object's own file back.
+        let stored = store.get(id).unwrap();
+        assert_eq!(stored, Some((ObjectKind::Blob, PAYLOAD.to_vec())));
+    }
+}

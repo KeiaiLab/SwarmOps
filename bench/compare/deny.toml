@@ -1,0 +1,51 @@
+# The cargo-deny policy of bench/compare, a workspace and lockfile of its own: every line of the
+# workspace's policy (../../deny.toml; a test of swarmops-core holds them here), and the few
+# entries this harness alone needs, each with its reason. `just bench-compare` and the weekly
+# scheduled run check this lockfile with it before they build anything of it; `just check`,
+# which does not build this workspace, does not.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+# sled 0.34.7, the last stable sled (README.md), brings in two crates that their authors no
+# longer maintain, with no release that changes that. The harness runs sled on data it generates
+# itself, and nothing of it is part of what SwarmOps builds or ships.
+ignore = [
+  { id = "RUSTSEC-2025-0057", reason = "fxhash 0.2.1, unmaintained, only through sled 0.34.7: bench-only, not shipped, local data" },
+  { id = "RUSTSEC-2024-0384", reason = "instant 0.1.13, unmaintained, only through sled 0.34.7 and its parking_lot 0.11: bench-only, not shipped, local data" },
+]
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "CC0-1.0",
+  "MPL-2.0",
+]
+
+# Two crates of fjall's (lsm-tree's) graph, each with a permissive, OSI-approved license that no
+# crate of the product uses: allowed for that crate only.
+[[licenses.exceptions]]
+crate = "varint-rs"
+allow = ["0BSD"]
+
+[[licenses.exceptions]]
+crate = "xxhash-rust"
+allow = ["BSL-1.0"]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

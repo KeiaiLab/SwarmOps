@@ -17,6 +17,10 @@ default: check
 # first run leaves out. A doc of the default build cannot link to that code, or the first run
 # fails. Every step that resolves dependencies runs `--locked`: a Cargo.lock (either
 # workspace's) that the manifests no longer match fails the gate instead of being rewritten.
+# `cargo deny` checks both lockfiles the recipe builds, with deny.toml: the fuzz crate's too,
+# whose build scripts the fuzz clippy step runs (its one license exception is in
+# fuzz/deny.exceptions.toml). swarmops-core's `supply_chain` tests fail a recipe, script or
+# workflow job that builds a workspace no `cargo deny` checks.
 # CI (.github/workflows/ci.yml) runs this recipe with `NEXTEST_PROFILE=ci`; the release run
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
@@ -32,6 +36,7 @@ check:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
     cargo deny --locked check
+    cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,
@@ -101,9 +106,13 @@ perf:
 # 2 minutes once built. The full run (the plan's sizes) waits on the disk: 3 h 18 min measured
 # (2026-10-17), with W2 at about 7 ms per fdatasync, so give it a quiet host;
 # `--w1-txns N --w2-txns N` scale it down. The report goes to stdout, every raw value to
-# bench/compare/target/results/; docs/perf.md records it.
+# bench/compare/target/results/; docs/perf.md records it. Before it builds anything, the recipe
+# checks the harness's lockfile with `cargo deny` and the harness's own policy
+# (bench/compare/deny.toml), which fetches the advisory database; the run itself needs no
+# network.
 # The native metadata store against SQLite, redb, fjall and sled; `--quick` is a smoke run.
 bench-compare *args:
+    cargo deny --locked --manifest-path bench/compare/Cargo.toml --config bench/compare/deny.toml check
     cargo run --release --locked --manifest-path bench/compare/Cargo.toml -- {{args}}
 
 # cargo-fuzz takes no `--locked`; `just check` lints the fuzz workspace with it, so a

@@ -346,6 +346,29 @@ fn verify_deep_lists_an_object_file_of_huge_length_without_reading_it() {
     assert!(!calls().contains(&read), "the blob's file is never read");
 }
 
+/// A blob rewritten as a zstd object whose frame is of zstd's legacy v0.7 format, holding the
+/// very content the blob's id names: the store writes no such frame and its zstd has no decoder
+/// for one (storage spec §2 rule 1), so the deep check lists the blob as corrupt, where a zstd
+/// built with the legacy decoders passed it as clean.
+#[test]
+fn verify_deep_lists_an_object_held_in_a_legacy_zstd_frame() {
+    use swarmops_core::bytes::to_u64;
+    use swarmops_testkit::store::{zstd_object, zstd_v07_frame};
+
+    let (_dir, root, repo) = new_repo();
+    let content = b"a blob that a frame of zstd's legacy v0.7 format holds in full\n";
+    commit(&repo, &[], vec![put("legacy.txt", content)]);
+    let legacy = blob(content).0;
+    let file = object_file(&root, legacy);
+    let mut bytes = fs::read(&file).unwrap();
+    zstd_object(&mut bytes, to_u64(content.len()), &zstd_v07_frame(content));
+    fs::write(&file, bytes).unwrap();
+
+    assert_problems_when(&repo, true, vec![VerifyProblem::CorruptObject(legacy)]);
+    // A shallow check reads no blob.
+    assert_problems_when(&repo, false, Vec::new());
+}
+
 #[test]
 fn verify_detects_dangling_ref() {
     let (_dir, root, repo) = new_repo();
