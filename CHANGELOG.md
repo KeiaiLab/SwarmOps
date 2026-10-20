@@ -503,7 +503,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   the fresh store alone); `just check-slow` takes every call, and imports 100,000 synthetic
   commits: 13 frames, at most 14 compactions, a peak resident memory under 1 GiB.
 
-#### M4: merge and landing (2026-10-19)
+#### M4: merge and landing (2026-10-20)
 
 - The contract of merging and landing, in `swarmops schema`, which `land`, `op log`, `op undo`
   and `commit --key` serve: `LandReq` and `LandResp` (`status` `landed` or `replayed`);
