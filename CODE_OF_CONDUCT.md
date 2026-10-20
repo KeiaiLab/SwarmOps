@@ -22,8 +22,29 @@ discussions and every other project space, and to people and agents alike.
 
 ## Reporting and enforcement
 
-Report a problem privately, never in a public issue: write to a maintainer of the
-[KeiaiLab organization](https://github.com/KeiaiLab) on GitHub. A security problem goes through
-[SECURITY.md](SECURITY.md) instead. Maintainers keep reports confidential, review each one, and
-may remove, edit or reject contributions and restrict or ban participants, following the
-Covenant's [enforcement guidelines](https://www.contributor-covenant.org/version/2/1/code_of_conduct/#enforcement-guidelines).
+Report a problem privately, never in a public issue, pull request or discussion. The channel is
+GitHub's reported content: in the **⋯** menu of the issue, pull request, discussion or comment,
+choose **Report content**, pick a reason, then **Report to repository admins**. Only the
+repository's maintainers see the report. GitHub offers this for public repositories only, and
+SwarmOps' repository is private while SwarmOps is pre-release: it will be turned on when the
+repository goes public. Until then, the people who can see the repository report to a
+maintainer directly, outside the issue tracker. A security problem goes through
+[SECURITY.md](SECURITY.md) instead.
+
+Maintainers keep reports confidential, review each one, and may remove, edit or reject
+contributions and restrict or ban participants, following the Covenant's
+[enforcement guidelines](https://www.contributor-covenant.org/version/2/1/code_of_conduct/#enforcement-guidelines).
+
+## Attribution
+
+This Code of Conduct is adapted from the [Contributor Covenant][homepage], version 2.1,
+available at [https://www.contributor-covenant.org/version/2/1/code_of_conduct.html][v2.1].
+What this page does not say, the Covenant's text says, and its enforcement guidelines decide the
+consequences.
+
+The Covenant's enforcement guidelines were inspired by
+[Mozilla's code of conduct enforcement ladder][Mozilla CoC].
+
+[homepage]: https://www.contributor-covenant.org
+[v2.1]: https://www.contributor-covenant.org/version/2/1/code_of_conduct.html
+[Mozilla CoC]: https://github.com/mozilla/diversity
