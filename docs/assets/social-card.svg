@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-labelledby="t d">
   <title id="t">SwarmOps</title>
-  <desc id="d">The SwarmOps logo beside its name and tagline: source control for swarms of coding agents.</desc>
+  <desc id="d">The SwarmOps logo beside its name and tagline: a git replacement for coding-agent swarms.</desc>
   <!-- The social preview (GitHub's 1280x640, and the website's og:image). Rendered to
        docs/assets/social-card.png and site/og-image.png by scripts/site/render-images.cjs. -->
   <defs>
@@ -32,8 +32,8 @@
   </g>
   <g font-family="DejaVu Sans" fill="#f0f6fc">
     <text x="470" y="262" font-size="104" font-weight="bold" letter-spacing="-2">SwarmOps</text>
-    <text x="474" y="336" font-size="42" fill="#c9d1d9">Source control for swarms</text>
-    <text x="474" y="388" font-size="42" fill="#c9d1d9">of coding agents</text>
+    <text x="474" y="336" font-size="42" fill="#c9d1d9">A git replacement for</text>
+    <text x="474" y="388" font-size="42" fill="#c9d1d9">coding-agent swarms</text>
     <text x="476" y="452" font-size="25" fill="#8b949e">Many writers · one store · one JSON envelope per command</text>
   </g>
   <rect x="0" y="560" width="1280" height="80" fill="#010409" fill-opacity=".55"/>
