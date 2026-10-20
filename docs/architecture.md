@@ -392,7 +392,10 @@ Every object read checks the object's header and hash.
 A lookup checks what the index says where it can do so cheaply: the record a sorted view names
 must hold the key looked up (one more `read_at`), and a record read by id must have its parents
 start where the record before it leaves off; a lookup that finds either broken fails with
-`E_STORE_CORRUPT` rather than answer with another changeset.
+`E_STORE_CORRUPT` rather than answer with another changeset. A first-parent walk (`log`, a
+revision's `~N`, ancestry and merge bases, path history, a land's squash) takes each parent from
+the changeset's object, which its hash binds, not from the index, and a read that returns a
+record with its object checks that the two name the same parents.
 
 A request reads in one snapshot (storage §8, operations §4). `Repo::snapshot()` returns a
 `RepoRead`; `LocalOps` takes one when an operation starts and resolves every revision and ref

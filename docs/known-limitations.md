@@ -268,6 +268,18 @@ left).
 - **A zeroed `journal.off` entry deep in the chain** (three or more links before the end) is
   outside the crash model: recovery checks the last two links, and `verify` finds the rest.
   *Target: M6 (the next `FORMAT`'s checksums). Found: M1 fuzzing review.*
+- **A crafted index's generations steer history queries.** A read checks what the changeset
+  index says where it can do so cheaply: a sorted view's entry must name a record that holds its
+  key, and a record's parents must start where the record before it leaves off, or the read
+  fails with `E_STORE_CORRUPT`; and every first-parent walk takes its parents from the changeset
+  objects, which their hashes bind to their ids, so that no walk drops a committed changeset or
+  loops. A record's generation below the checkpoint or under the sorted views is taken as it is,
+  as is its delta hash: a damaged or crafted `meta/idx/gen.col` can make a revision's `~N` name
+  nothing where a changeset is, a land take an older common ancestor than the newest for its
+  merge base, and `log --path` list its changesets out of order. Every changeset such a walk
+  reaches is on the objects' first-parent chain, and `verify` reports the damage. Checking a
+  generation takes the journal, or every generation down to a root. *Target: M6 (fsck). Found:
+  2026-10-20, when the read path came to check the index.*
 - **A changeset written outside the repository library can hold both `x` and `x:b64`.** The
   library refuses a metadata key that ends in `:b64` for every writer
   (`swarmops_repo::check_metadata`, which `Repo::commit` runs), so only a store written by other
