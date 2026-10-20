@@ -71,7 +71,7 @@ planned, each with its milestone.
 | One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. ✅ M1.6: `commit --advance` moves a ref to the new changeset in the commit's own transaction, or records nothing. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
 | Reading a path at a revision | ✅ M1: `cat REV:PATH` and `ls REV[:PATH]`, without a checkout. | **Parity** with `git show REV:PATH` and `git ls-tree`. |
 | Offline, on one host | ✅ M1: no network code; every operation runs against the host's own store. | **Parity.** |
-| Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s. | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
+| Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s, and two `fsync`s more when it moves a ref (`--advance`). | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
 | Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
 | Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, `git grep <tree>` and sparse checkouts. |
 | Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
@@ -79,13 +79,13 @@ planned, each with its milestone.
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | ✅ M8: through a git remote, one writing host at a time: the writer exports, then pushes with git, and the others fetch with git, then import; two hosts that both write stop on `E_GIT_EXPORT_DIVERGED` or `E_GIT_IMPORT_DIVERGED` rather than merge. 📋 M11: offline-first sync, a full store on every host, `fetch` and `push` against one upstream. | **Behind**: git clones, fetches and pushes over any transport, and bundles without one. |
 | Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. ✅ M3: git import. ✅ M8: git export. No user hooks, signing, submodules or LFS. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
-| Maturity | Pre-release: no tag yet, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
+| Maturity | Pre-release: v0.1.0 is the first tag, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
 | Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4, after the pilot: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load. |
 
-No git baseline has been measured yet: these verdicts come from the design, the code, and git's
-own documentation and source, not from a benchmark. The first measured comparison is planned for
-M9: SwarmOps' 32-agent contention scenario, run side by side with git worktrees. SwarmOps' own
-measurements are in [docs/perf.md](docs/perf.md).
+No git baseline has been measured: these verdicts come from the design, the code, and git's own
+documentation and source, not from a benchmark, and a side-by-side benchmark against git
+worktrees is not on the roadmap (umbrella spec §17). SwarmOps' own measurements are in
+[docs/perf.md](docs/perf.md).
 
 <p align="center">
   <picture>
@@ -96,8 +96,8 @@ measurements are in [docs/perf.md](docs/perf.md).
   <sub>The store as a machine: writers wait for one lock, which the kernel hands to one of them at
   a time, in no strict order, and each commit becomes one CRC-framed frame of the journal, while
   objects need no lock.
-  <a href="https://swarmops.cc/explainers/store.html">Interactive version</a>
-  (<a href="https://swarmops.cc/explainers/store-light.html">light</a>), drawn with
+  <a href="https://swarmops.cc/explainers/store">Interactive version</a>
+  (<a href="https://swarmops.cc/explainers/store-light">light</a>), drawn with
   <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT,
   <a href="site/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
 </p>
@@ -105,10 +105,11 @@ measurements are in [docs/perf.md](docs/perf.md).
 ## How it works
 
 Every operation is a library function: `swarmops-repo` does the work, `swarmops-ops` exposes it
-as the `StoreOps` operations, and the binary parses a command line, calls one operation and
-prints its envelope. An arrow between two crates points from a crate to one it depends on; the
-diagram leaves out the shortcuts (`swarmops-ops` also uses `swarmops-core` and `swarmops-store`
-directly, and `swarmops-repo` uses `swarmops-core`).
+as the `StoreOps` operations, and beside them `git import` and `git export`, which run through
+`swarmops-git`; the binary parses a command line, calls one operation and prints its envelope.
+An arrow between two crates points from a crate to one it depends on; the diagram leaves out the
+shortcuts (`swarmops-ops` also uses `swarmops-core` and `swarmops-store` directly, `swarmops-git`
+uses `swarmops-core` and `swarmops-store`, and `swarmops-repo` uses `swarmops-core`).
 [docs/architecture.md](docs/architecture.md) lists every dependency and draws the write and read
 paths.
 
@@ -118,9 +119,10 @@ flowchart TB
   cli["swarmops-cli<br/>swarmops and so: the commands,<br/>and swarmops mcp for MCP"]
   api["swarmops-api<br/>the contract: request and<br/>response types, E_* codes,<br/>the envelope, StoreOps"]
   ops["swarmops-ops<br/>LocalOps: StoreOps<br/>over a local store"]
+  git["swarmops-git<br/>git import and export:<br/>git's bytes, through gix"]
   repo["swarmops-repo<br/>the repository engine"]
   store["swarmops-store<br/>object files and<br/>the metadata store"]
-  merge["swarmops-merge<br/>tree and line diffs;<br/>no I/O"]
+  merge["swarmops-merge<br/>tree and line diffs and the<br/>three-way merge; no I/O"]
   core["swarmops-core<br/>ids, paths and the<br/>canonical codec; no I/O"]
   subgraph disk["A store: one directory"]
     direction LR
@@ -132,6 +134,8 @@ flowchart TB
   cli --> api
   ops --> api
   ops --> repo
+  ops --> git
+  git --> repo
   repo --> store
   repo --> merge
   store --> core
@@ -148,9 +152,11 @@ self-verifying, content-addressed file per blob, tree and changeset, in 256 fan-
 (`objects/<2 hex>/<62 hex>`), staged through `objects/tmp/`. `meta/` holds the metadata: an
 append-only, CRC-framed journal (`journal.log`, with each frame's offset in `journal.off` and
 how far it is materialized in `journal.ckpt`) that is its source of truth, the changeset index
-built from it (`idx/`, `parents.log`, `sorted/`), one file per ref (`refs/`), and the lock that
-serializes writers (`lock`). Every object is durable before any metadata names it, and a write
-commits when its journal frame is durable, so the next write repairs whatever a crash cut short.
+built from it (`idx/`, `parents.log`, `sorted/`), one file per ref (`refs/`), the lock that
+serializes writers (`lock`), the values derived from the history, a cache that is never synced
+(`derived/`), and from M3 the git commit ids of imported and exported changesets (`external_ids/`).
+Every object is durable before any metadata names it, and a write commits when its journal frame
+is durable, so the next write repairs whatever a crash cut short.
 
 ## Quick start
 
@@ -163,9 +169,11 @@ the licenses of the third-party crates compiled into them (`THIRD-PARTY-LICENSES
 and the changelog, beside a `SHA256SUMS` file to check them against
 ([RELEASE.md](RELEASE.md) says how they are built). The binaries need glibc 2.34 or newer
 (Ubuntu 22.04, Debian 12 and RHEL 9 have it); the aarch64 ones are cross-compiled and
-smoke-tested under QEMU, not tested on aarch64 hardware. No version has been tagged yet: until
-the first one, build from source, below. While the repository is private, `gh` downloads a
-release with your GitHub login:
+smoke-tested under QEMU, not tested on aarch64 hardware. On glibc 2.34 to 2.38 hosts, every start
+of `swarmops` and `so` prints one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found
+(required by …)`; exit codes, stdout envelopes and the MCP protocol are unaffected, and glibc
+2.39 prints nothing. The first release is v0.1.0; to build from source instead, see below. While
+the repository is private, `gh` downloads a release with your GitHub login:
 
 ```sh
 gh release download --repo KeiaiLab/SwarmOps \
@@ -186,8 +194,10 @@ cargo install --path crates/swarmops-cli --locked   # both, into ~/.cargo/bin
 and `cargo install` installs every binary of the crate: both names (add `--bin swarmops` for the
 long name alone, if the name `so` is taken).
 
-A store must live on a native Linux filesystem: a path under `/mnt/` (where WSL mounts Windows
-drives) is refused with `E_UNSUPPORTED_FS`.
+A store must live on a local filesystem that the store supports (ext4 with a journal, XFS or btrfs):
+a path under `/mnt/` (where WSL mounts Windows drives) is refused with `E_UNSUPPORTED_FS`, and NFS,
+SMB and FUSE mounts, Docker Desktop's and virtiofs bind mounts among them, are neither detected nor
+supported.
 
 ### First commands
 
@@ -250,7 +260,9 @@ and kept a plain object: a rule across fields that the type's schema states with
 check, and the `expected_old` of `ref_set` and `ref_delete` asks for a full changeset id. Its result
 is the envelope the CLI prints for that request, as `structuredContent` and as text, and a failed
 operation sets `isError`, with the envelope's `error` saying why. The server speaks MCP 2026-07-28,
-and 2025-11-25 and 2025-06-18 to clients that open with `initialize`.
+and 2025-11-25 and 2025-06-18 to clients that open with `initialize`. Until M5's workspaces, an
+agent cannot build or test a change on disk before it lands it;
+[docs/operations.md](docs/operations.md) gives the stopgap.
 
 ### Register the server
 
@@ -412,8 +424,10 @@ store.
 
 Run again, `git import` takes only the commits after the one the target's head holds, and writes
 nothing when that is `--ref`'s commit. A target whose head is not the import of an ancestor of
-`--ref`'s commit, because the git history was rewritten or a changeset was committed on the
-target, fails with `E_GIT_IMPORT_DIVERGED` (exit 3), and nothing is written. An import cut short
+`--ref`'s commit, because the git history was rewritten, or a changeset was committed on the
+target that `git export` did not write, fails with `E_GIT_IMPORT_DIVERGED` (exit 3), and nothing
+is written. A head that `git export` wrote is continued: commits made in git on top of that export
+import linearly. An import cut short
 says how many commits it recorded (`details.imported`), and the same command run again continues
 after them.
 
@@ -461,8 +475,9 @@ runs it as a command.
 
 ### Output and exit codes
 
-Every command prints exactly one JSON envelope on stdout (only `--help`, `--version` and the
-`help` subcommand print plain text, and `mcp` speaks MCP there instead): pretty on a terminal,
+Every command prints exactly one JSON envelope on stdout, but `derive --follow`, which prints one
+envelope a line for each run that derived something (only `--help`, `--version` and the `help`
+subcommand print plain text, and `mcp` speaks MCP there instead): pretty on a terminal,
 compact otherwise (`--pretty[=BOOL]` decides), or a short text rendering with `--human` or
 `SWARMOPS_FORMAT=human`. A run that meets one of the store's four documented aborts (storage
 spec §2) prints no envelope: the process aborts, saying why on stderr.
@@ -508,17 +523,30 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | ✅ | M1.6 | The code-review follow-ups, before M2: the error contract an agent sees (typed refusals, I/O failures that name the store file and no host path but in two rare `E_IO`s, a report of what a write's recovery repaired); a bound on the lock-free reader's retries; structured `verify` findings, and MCP tool schemas kept plain objects; object reads without a second copy or an allocation of the size a file claims; the test doubles M1.5 left, in one place; spec hygiene (the write-ordering rules W1–W7, §8 in step with the code); the harness for the measurements M2's sync decision needs, whose quiet-window runs are still to come; and `commit --advance`, the commit primitive M4's landing reuses. |
 | ✅ | M2 | Diff, history and the derived-data engine. |
 | ✅ | M3 | git import. |
-| ✅ | M4 | Merge and landing, and the journal shown as an operation log with undo; the landing model chosen by measurement, and landing under contention through the binary, come after the pilot. |
-| ✅ | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running; the round trip of this host's service repositories, and the export's measurements, come after the pilot. |
-| 📋 | M5 | Workspaces, with an adapter for Claude Code's worktree hooks. |
-| 📋 | M6 | Verify, crash safety and fuzzing: fsck, gc, a TLA+/Quint model of the journal protocol, and the next store `FORMAT`. |
+| ✅ | M4 | Merge and landing, and the journal shown as an operation log with undo. Landing is a compare-and-swap loop that merges again, incrementally, when the target moves; its measurement under a swarm's load, and the landing model that measurement chooses, come next. |
+| ✅ | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |
+| 📋 | M12 | Portability: macOS and Windows builds, tests and releases. |
+| 📋 | M5 | Workspaces, with an adapter for Claude Code's worktree hooks, so that an agent builds and tests a change on disk before it lands it. |
+| 📋 | M6 | Verify, crash safety and fuzzing: fsck and repair, gc, detection of unsupported filesystems, bounded reads of store files, a capped `verify` report, and the next store `FORMAT`. |
 | 📋 | M7 | Blame and review. |
-| 📋 | M9 | Simulation and benchmarks, a contention benchmark against git worktrees among them. |
+| 📋 | M9 | Simulation and a benchmark gate: the store's own code under a deterministic simulator and in real processes killed at random, and benchmarks that fail on a regression. |
 | 📋 | M11 | Remote sync, offline-first: a full store on every host, `fetch`, `push` and `sync status` against one upstream, over ssh. |
-| 📋 | M10 | The RPC server, after v1. |
 
-When it is usable (umbrella spec §1): by one agent from M1; by a swarm, with landing, from M4;
-as the complete v1, with review, at M9; across hosts, offline-first, from M11.
+M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0, together with the security
+fixes in its [changelog](CHANGELOG.md), an [operations guide](docs/operations.md) and a
+[pilot runbook](docs/pilot.md). The pilot runs SwarmOps' own repository through the round trip:
+its history imported from git, changes committed and landed by agents through `swarmops mcp`,
+and the result exported back to git for its CI to run. Next come the measurements that need a
+quiet host: landing by 32 and 50 processes through the binary against umbrella §15's targets,
+and the landing model those numbers choose; whether a transaction can sync the journal once
+instead of twice; the import's and the export's timings on larger repositories. The order of
+the milestones from M5 on is settled once the pilot has run; until then the table is the plan.
+
+When it is usable (umbrella spec §1): by one agent from M1; by a swarm, landing through MCP,
+from M4; on an existing git repository, its history imported and its landed work exported back
+so that its CI and deployments run as before, from M8, in the first release; by agents that
+build and test their changes in a workspace before they land them, from M5; with review from
+M7; as the complete v1 at M9; across hosts, offline-first, from M11.
 [docs/known-limitations.md](docs/known-limitations.md) lists what is still open, and which
 milestone takes each item.
 
@@ -546,8 +574,9 @@ I/O error (and with `persistent` every mutating call after it), `SWARMOPS_TEST_O
 checks every write against the store's write-ordering rules and panics at one that breaks a rule,
 and `SWARMOPS_TEST_NOW=<unix seconds>` fixes the time it signs changesets at.
 They act only in a build with the cargo feature `test-hooks` (on `swarmops-store`,
-`swarmops-repo`, `swarmops-ops`, `swarmops-cli` and `swarmops-testkit`, the tests' support;
-`swarmops-cli/test-hooks` turns on the rest). The gates build the tests with `--all-features`; a
+`swarmops-repo`, `swarmops-git`, `swarmops-ops`, `swarmops-cli` and `swarmops-testkit`, the tests'
+support; `swarmops-cli/test-hooks` turns on all of them but `swarmops-git`'s). The gates build the
+tests with `--all-features`; a
 plain `cargo test` skips the tests that
 need the hooks. Every other build, `cargo build --release` included, ignores the variables, and
 `just check` runs a release build to show it.
@@ -567,7 +596,7 @@ The design specs are the authority, and they are in Korean;
 | [bench/compare/README.md](bench/compare/README.md) | The harness that measures the native metadata store against embedded databases. |
 | [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md) | What stays compatible, and how a breaking change is made. |
 | [docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md) | The Rust version and the platforms SwarmOps supports. |
-| [CHANGELOG.md](CHANGELOG.md) | What has changed; nothing is released yet. |
+| [CHANGELOG.md](CHANGELOG.md) | What has changed, release by release. |
 | [RELEASE.md](RELEASE.md) | The release checklist. |
 | [The umbrella spec](docs/superpowers/specs/2026-10-15-swarmops-design.md) | The design, which the specs below refine. |
 | [Storage core](docs/superpowers/specs/2026-10-15-swarmops-storage-core-design.md) | Objects, the journal, refs, crash safety, and the canonical byte layouts and hash recipe (the hash contract). |

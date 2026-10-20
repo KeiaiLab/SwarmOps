@@ -412,6 +412,40 @@ stage.addEventListener("keydown", (event) => {
 pose(0.5);
 `;
 
+// What the kit's page leaves out: a description, a canonical, social tags and icons for a search
+// engine, a heading, and muted text that reads against its background.
+const ORIGIN = "https://swarmops.cc";
+const PAGE_TITLE = "The SwarmOps store, as a machine";
+const PAGE_DESC = "Fig. 1 of SwarmOps: commits wait for one metadata lock and become frames of one journal, while object writes take no lock. An interactive drawing of the store, with the numbers measured on one host.";
+const CANONICAL = `${ORIGIN}/explainers/store`; // the dark page stands for both themes
+const HEAD_TAGS = [
+  `<meta name="description" content="${PAGE_DESC}">`,
+  `<link rel="canonical" href="${CANONICAL}">`,
+  `<link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" href="/favicon.svg" type="image/svg+xml">`,
+  `<link rel="apple-touch-icon" href="/apple-touch-icon.png">`,
+  `<meta property="og:type" content="website"><meta property="og:site_name" content="SwarmOps">`,
+  `<meta property="og:title" content="${PAGE_TITLE}"><meta property="og:description" content="${PAGE_DESC}">`,
+  `<meta property="og:url" content="${CANONICAL}">`,
+  `<meta property="og:image" content="${ORIGIN}/og-image.png"><meta property="og:image:width" content="1280"><meta property="og:image:height" content="640">`,
+  `<meta name="twitter:card" content="summary_large_image">`,
+].join("");
+// Muted text at 4.5:1 or better on both pages' backgrounds (the kit's #6e6e6e and #8c8c90 reach 3.0 to 3.9).
+const HEAD_CSS = [
+  `.iso{--anatomy-muted:#8c8c8c}`,
+  `.iso[data-theme="light"]{--anatomy-muted:#666666}`,
+  `.iso-title{margin:0 0 12px;font:600 15px/1.4 ui-sans-serif,system-ui,sans-serif;color:var(--anatomy-strong);text-align:center}`,
+  `.iso-credit{text-align:center;font-size:12px;color:var(--anatomy-muted)}`,
+  `.iso-credit a{color:var(--anatomy-text)}`,
+].join("");
+// Adds the head tags and a second stylesheet after the kit's. The kit's script spells "</style></head>"
+// too, so only the first match, ahead of the script, is the page's.
+function withHead(markup) {
+  const at = markup.indexOf("</style></head>");
+  const script = markup.indexOf("<script");
+  if (at < 0 || (script >= 0 && script < at)) throw new Error("no head ahead of the script");
+  return markup.slice(0, at) + "</style><style>" + HEAD_CSS + "</style>" + HEAD_TAGS + markup.slice(at + "</style>".length);
+}
+
 function page(theme) {
   const svg = k.figureSvg({ width: WIDTH, height: HEIGHT, label, body: body() });
   const plate = k.plateHtml({
@@ -427,9 +461,11 @@ function page(theme) {
       "Writers' metadata transactions wait for one lock, an flock: at each release the kernel wakes every waiter and the first to run takes it, so the order is not strict and a later writer can go first. Each transaction becomes one CRC-framed frame appended to journal.log; objects are made durable before any frame names them, into 256 fan-out directories, without a lock (sixteen bins drawn). Measured on one busy host (docs/perf.md, 2026-10-16, with the writer lock that ships): with 32 processes committing through the binary at once, 72.7 commits a second and a median commit of 427 ms (p99 656 ms), about 406 ms of it the wait for the lock; the metadata transactions alone, at store level, 120.9 a second; and object writes on 32 threads in one process 13.8× as fast as on one thread, as the disk and ext4's journal commit concurrent fsyncs together.",
     body: `<div class="iso-stage" tabindex="0" role="img" aria-label="${label}">${svg}</div>`,
   });
-  const other = theme === "light" ? `<a href="/explainers/store.html">Dark version</a>` : `<a href="/explainers/store-light.html">Light version</a>`;
-  const credit = `<p style="text-align:center;opacity:.7;font-size:12px">Drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT, <a href="/THIRD-PARTY-NOTICES.txt">notice</a>) · ${other} · <a href="/">swarmops.cc</a></p>`;
-  return withStyleNotice(k.pageHtml({ title: "The SwarmOps store, as a machine", theme, body: plate + credit, script: SCRIPT_NOTICE + kitScript() + live, width: 820 }));
+  const other = theme === "light" ? `<a href="/explainers/store">Dark version</a>` : `<a href="/explainers/store-light">Light version</a>`;
+  const credit = `<p class="iso-credit">Drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT, <a href="/THIRD-PARTY-NOTICES.txt">notice</a>) · ${other} · <a href="/">swarmops.cc</a></p>`;
+  const title = theme === "light" ? `${PAGE_TITLE} (light version)` : PAGE_TITLE;
+  const heading = `<h1 class="iso-title">${PAGE_TITLE}</h1>`;
+  return withHead(withStyleNotice(k.pageHtml({ title, theme, body: heading + plate + credit, script: SCRIPT_NOTICE + kitScript() + live, width: 820 })));
 }
 
 const notices = `Third-party notices: swarmops.cc

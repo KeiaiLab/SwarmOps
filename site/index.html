@@ -24,7 +24,7 @@
   <meta property="og:image:alt" content="The SwarmOps logo beside its name and tagline: source control for swarms of coding agents.">
   <meta name="twitter:card" content="summary_large_image">
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"SwarmOps","description":"Source control for swarms of coding agents: many writers, one fully embedded store, one JSON envelope per command.","url":"https://swarmops.cc/","codeRepository":"https://github.com/KeiaiLab/SwarmOps","programmingLanguage":"Rust","license":"https://opensource.org/licenses/MIT","runtimePlatform":"Linux"}
+  {"@context":"https://schema.org","@graph":[{"@type":"WebSite","@id":"https://swarmops.cc/#website","name":"SwarmOps","url":"https://swarmops.cc/","description":"Source control for swarms of coding agents.","inLanguage":"en"},{"@type":"Organization","@id":"https://swarmops.cc/#org","name":"KeiaiLab","sameAs":["https://github.com/KeiaiLab"]},{"@type":"SoftwareSourceCode","@id":"https://swarmops.cc/#source","name":"SwarmOps","description":"Source control for swarms of coding agents: many writers, one fully embedded store, one JSON envelope per command.","url":"https://swarmops.cc/","codeRepository":"https://github.com/KeiaiLab/SwarmOps","programmingLanguage":"Rust","license":"https://spdx.org/licenses/MIT.html","runtimePlatform":"Linux","author":{"@id":"https://swarmops.cc/#org"}}]}
   </script>
 </head>
 <body>
@@ -70,13 +70,13 @@
  <span class="k">"result"</span>:{"blob":"f5f5…","size":14,
    "kind":"file","encoding":"utf8",
    "content":"pub fn f() {}\n","truncated":false},
- <span class="k">"meta"</span>:{"resolved":{"main":"014c…"}}<span class="c">}</span>
+ <span class="k">"meta"</span>:{…,"resolved":{"main":"014c…"},…}<span class="c">}</span>
 
 <span class="p">$</span> so commit -m "fix" --changes changes.json
 <span class="c">{</span><span class="k">"ok"</span>:<span class="err">false</span>,<span class="k">"op"</span>:"commit",<span class="k">"api"</span>:1,
- <span class="k">"error"</span>:{"code":<span class="err">"E_IDENTITY_REQUIRED"</span>,
+ <span class="k">"error"</span>:{"code":<span class="err">"E_IDENTITY_REQUIRED"</span>,"message":"…",
    "retryable":false,"exit":5,"details":{},
-   "hint":"pass --as &lt;family&gt;/&lt;instance&gt; …"}<span class="c">}</span></pre>
+   "hint":"pass --as &lt;family&gt;/&lt;instance&gt; …"},"meta":{…}<span class="c">}</span></pre>
     </div>
   </div>
 </div>
@@ -109,7 +109,7 @@
       <div class="stat" role="listitem"><b>427 ms</b><span>median commit through the binary with 32 processes committing at once, about 406 ms of it the wait for the lock (p99 656 ms, longest 918 ms); a commit alone takes 21 ms</span></div>
       <div class="stat" role="listitem"><b>13.8×</b><span>object writes on 32 threads against one, in one process (15.5× beside a busy writer), as the disk and ext4's journal commit concurrent fsyncs together</span></div>
     </div>
-    <p class="note">From <code>just perf</code> after M1's last merge (2026-10-16), with the writer lock that ships, on one busy development host (WSL2, ext4 on a virtual disk, 32 threads; load 14.6–16.4). <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/perf.md">docs/perf.md</a> has every run, with its spread and load. No git baseline has been measured yet; the first side-by-side benchmark is planned for M9.</p>
+    <p class="note">From <code>just perf</code> after M1's last merge (2026-10-16), with the writer lock that ships, on one busy development host (WSL2, ext4 on a virtual disk, 32 threads; load 14.6–16.4). <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/perf.md">docs/perf.md</a> has every run, with its spread and load. No git baseline has been measured, and a side-by-side benchmark against git worktrees is not on the roadmap.</p>
   </div>
 </section>
 
@@ -123,14 +123,16 @@
         <source srcset="/explainers/store-light.svg" media="(prefers-color-scheme: light)">
         <img src="/explainers/store.svg" alt="An isometric drawing of the store as a machine: commit cartridges wait on a feed rail behind one gate, the metadata lock, which lets one through at a time in no strict order; a press stamps each one as a frame onto a paper tape, the append-only journal; beside it, object pellets drop into sixteen bins with no gate." width="760" height="470" loading="lazy">
       </picture>
-      <figcaption>Fig. 1, the native store as a machine: writers wait for one lock, which the kernel hands to one of them at a time, in no strict order, and each commit becomes one CRC-framed frame appended to the journal; objects need no lock. <a class="on-dark" href="/explainers/store.html">Open the interactive version</a><a class="on-light" href="/explainers/store-light.html">Open the interactive version</a>, drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT, <a href="/THIRD-PARTY-NOTICES.txt">notice</a>).</figcaption>
+      <figcaption>Fig. 1, the native store as a machine: writers wait for one lock, which the kernel hands to one of them at a time, in no strict order, and each commit becomes one CRC-framed frame appended to the journal; objects need no lock. <a class="on-dark" href="/explainers/store">Open the interactive version</a><a class="on-light" href="/explainers/store-light">Open the interactive version</a>, drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT, <a href="/THIRD-PARTY-NOTICES.txt">notice</a>).</figcaption>
     </figure>
     <div class="arch spaced">
       <ol class="stack" aria-label="The crates, from the command line to the disk">
         <li><code>swarmops-cli</code><span><code>swarmops</code> and <code>so</code>: the commands, and <code>swarmops mcp</code></span></li>
         <li><code>swarmops-api</code><span>the contract: request and response types, <code>E_*</code> codes, the envelope</span></li>
         <li><code>swarmops-ops</code><span><code>LocalOps</code>: the operations over a local store</span></li>
+        <li><code>swarmops-git</code><span>git import and export: git's bytes, through gix</span></li>
         <li><code>swarmops-repo</code><span>the repository engine</span></li>
+        <li><code>swarmops-merge</code><span>tree and line diffs and the three-way merge; no I/O</span></li>
         <li><code>swarmops-store</code><span>object files and the metadata store</span></li>
         <li><code>swarmops-core</code><span>ids, paths and the canonical codec; no I/O</span></li>
       </ol>
@@ -147,6 +149,8 @@
    ├─ <span class="d">idx/</span>         <span class="m"># the changeset index: its columns,</span>
    ├─ parents.log  <span class="m"># each changeset's parents,</span>
    ├─ <span class="d">sorted/</span>      <span class="m"># and its sorted views</span>
+   ├─ <span class="d">derived/</span>     <span class="m"># derived values: a cache, never synced</span>
+   ├─ <span class="d">external_ids/</span> <span class="m"># git commit ids, imported and exported</span>
    ├─ <span class="d">refs/</span>        <span class="m"># one file per ref, moved by CAS</span>
    └─ lock         <span class="m"># one flock for every writer</span></pre>
     </div>
@@ -170,7 +174,7 @@
         <tr><td>One ref by compare-and-swap</td><td><code>ref set --expect</code> or <code>--create</code>, <code>ref delete --expect</code>; setting a ref to the target it holds is a replay. Since M1.6, <code>commit --advance</code> moves a ref in the commit's own transaction, or records nothing.</td><td><span class="v parity">Parity</span> with <code>git update-ref</code>, plus the replay.</td></tr>
         <tr><td>Reading a path at a revision</td><td><code>cat REV:PATH</code> and <code>ls REV[:PATH]</code>, without a checkout.</td><td><span class="v parity">Parity</span> with <code>git show</code> and <code>git ls-tree</code>.</td></tr>
         <tr><td>Offline, on one host</td><td>No network code: every operation runs against the host's own store.</td><td><span class="v parity">Parity</span></td></tr>
-        <tr><td>Throughput of many writers</td><td>Writers take turns, each commit holding the store-wide lock across two journal <code>fdatasync</code>s.</td><td><span class="v behind">Behind by design</span> Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files.</td></tr>
+        <tr><td>Throughput of many writers</td><td>Writers take turns, each commit holding the store-wide lock across two journal <code>fdatasync</code>s, and two <code>fsync</code>s more when it moves a ref.</td><td><span class="v behind">Behind by design</span> Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files.</td></tr>
         <tr><td>Refs beyond one compare-and-swap</td><td><code>main</code> and <code>release/&lt;name&gt;</code> only, moved one per call.</td><td><span class="v behind">Behind</span> No multi-ref transactions, tags, free-form branch names or symbolic refs.</td></tr>
         <tr><td>Breadth of reads</td><td>One file or one directory per call; since M2, a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size; sparse workspaces come in M5.</td><td><span class="v behind">Behind</span> Git has batch reads, <code>git grep &lt;tree&gt;</code> and sparse checkouts.</td></tr>
         <tr><td>Storage on disk</td><td>One file per object, zstd-compressed when that makes it smaller; no packs, no delta compression.</td><td><span class="v behind">Behind by design</span> in bytes and in files, against git's packs.</td></tr>
@@ -178,7 +182,7 @@
         <tr><td>Review</td><td>Nothing today; change requests, approvals and a landing gate come in M7.</td><td><span class="v behind">Behind today</span> Git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is <span class="v later">not yet comparable</span></td></tr>
         <tr><td>Sync between hosts</td><td>Since M8, through a git remote, one writing host at a time: the writer exports, then pushes with git, and the others fetch with git, then import; two hosts that both write stop rather than merge. Offline-first <code>fetch</code> and <code>push</code> against one upstream come in M11.</td><td><span class="v behind">Behind</span> Git clones, fetches and pushes over any transport, and bundles without one.</td></tr>
         <tr><td>Ecosystem</td><td>The CLI, <code>swarmops schema</code>, an MCP server, git import since M3 and git export since M8. No hooks, signing, submodules or LFS.</td><td><span class="v behind">Behind</span> after v1 too: git parity is not a v1 goal, and git has MCP servers as well.</td></tr>
-        <tr><td>Maturity</td><td>Pre-release: no tag yet, and the first spec dates from 2026-10-15.</td><td><span class="v behind">Behind</span> Git has hosted itself since 2005.</td></tr>
+        <tr><td>Maturity</td><td>Pre-release: v0.1.0 is the first tag, and the first spec dates from 2026-10-15.</td><td><span class="v behind">Behind</span> Git has hosted itself since 2005.</td></tr>
         <tr><td>Landing</td><td><code>land</code> merges an agent's change onto <code>main</code> and publishes it as one changeset in one transaction, merging again and retrying by itself when <code>main</code> moves; a retry with the same key replays it. The landing model chosen by measurement comes after the pilot.</td><td><span class="v ahead">Ahead by design</span> of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load.</td></tr>
       </tbody>
     </table>
@@ -216,7 +220,7 @@ so log -n 20
 so verify --deep</pre>
       </div>
     </div>
-    <p class="note">A change list is a JSON array of puts and deletes; a put's content is <code>{"inline": …}</code>, <code>{"base64": …}</code> or <code>{"file": …}</code>, a file the CLI reads. <code>--advance main</code> moves <code>main</code> to the new changeset in the commit's own transaction, only if <code>main</code> still names the commit's parent (for this first commit, only if <code>main</code> does not exist yet); otherwise the commit records nothing and fails with <code>E_CAS_MISMATCH</code>. Every command, revision and exit code is in <a href="https://github.com/KeiaiLab/SwarmOps#commands">the README</a>.</p>
+    <p class="note">A change list is a JSON array of puts and deletes; a put's content is <code>{"inline": …}</code>, <code>{"base64": …}</code>, <code>{"file": …}</code>, a file the CLI reads, or <code>{"blob": …}</code>, a blob stored before with <code>so blob put</code>. <code>--advance main</code> moves <code>main</code> to the new changeset in the commit's own transaction, only if <code>main</code> still names the commit's parent (for this first commit, only if <code>main</code> does not exist yet); otherwise the commit records nothing and fails with <code>E_CAS_MISMATCH</code>. Every command, revision and exit code is in <a href="https://github.com/KeiaiLab/SwarmOps#commands">the README</a>.</p>
   </div>
 </section>
 
@@ -249,7 +253,7 @@ so verify --deep</pre>
   <div class="wrap">
     <p class="eyebrow">Roadmap</p>
     <h2>Built in the open, milestone by milestone</h2>
-    <p class="sub">Nothing is released or published yet: there are no tags, and every crate is at 0.1.0. The milestones follow the design specs.</p>
+    <p class="sub">Pre-release: v0.1.0 is the first tag; no crate is published, and every crate of the workspace is at 0.1.0. The milestones follow the design specs.</p>
     <div class="road">
       <div class="done">
         <h3><span class="dot" aria-hidden="true"></span>Delivered</h3>
@@ -264,19 +268,25 @@ so verify --deep</pre>
           <li><b>M8</b><span>git export, so work lands back in git</span></li>
         </ol>
       </div>
+      <div class="now">
+        <h3><span class="dot" aria-hidden="true"></span>In development</h3>
+        <ol>
+          <li><b>Pilot</b><span>SwarmOps' own repository through the round trip: imported, changed and landed by agents, exported back to git</span></li>
+        </ol>
+      </div>
       <div class="next">
         <h3><span class="dot" aria-hidden="true"></span>Planned</h3>
         <ol>
+          <li><b>M12</b><span>portability: macOS and Windows builds, tests and releases</span></li>
           <li><b>M5</b><span>workspaces, with Claude Code worktree hooks</span></li>
-          <li><b>M6</b><span>fsck, gc, a model of the journal protocol</span></li>
+          <li><b>M6</b><span>fsck, gc, unsupported-filesystem detection, the next store format</span></li>
           <li><b>M7</b><span>blame and review</span></li>
-          <li><b>M9</b><span>simulation and benchmarks: v1</span></li>
+          <li><b>M9</b><span>simulation and a benchmark gate: v1</span></li>
           <li><b>M11</b><span>offline-first sync between hosts</span></li>
-          <li><b>M10</b><span>the RPC server, after v1</span></li>
         </ol>
       </div>
     </div>
-    <p class="usable">Usable by one agent from M1; by a swarm, with landing, from M4; as the complete v1, with review, at M9; across hosts, offline-first, from M11.</p>
+    <p class="usable">Usable by one agent from M1; by a swarm, landing through MCP, from M4; on a git repository and back, from M8, in the first release; with workspaces from M5; with review from M7; as the complete v1 at M9; across hosts, offline-first, from M11.</p>
   </div>
 </section>
 </main>
