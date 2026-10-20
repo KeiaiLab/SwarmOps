@@ -170,6 +170,10 @@ h3 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
 .v.ahead { color: var(--ahead); }
 .v.parity { color: var(--parity); }
 .v.behind { color: var(--behind); }
+.v.later { color: var(--muted); border-style: dashed; }
+.cmp td:last-child { color: var(--muted); font-size: 14px; }
+.cmp td:last-child .v { margin-right: 4px; }
+.cmp code { white-space: nowrap; }
 @media (max-width: 720px) { .cmp td:nth-child(2) { display: none; } .cmp th:nth-child(2) { display: none; } }
 
 /* Code blocks */
