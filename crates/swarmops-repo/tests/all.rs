@@ -8,6 +8,7 @@ mod derive;
 mod diff;
 #[cfg(feature = "test-hooks")]
 mod landing_models;
+mod merge;
 mod oplog;
 mod path_history;
 mod read;
