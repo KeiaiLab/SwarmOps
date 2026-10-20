@@ -503,6 +503,40 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   the fresh store alone); `just check-slow` takes every call, and imports 100,000 synthetic
   commits: 13 frames, at most 14 compactions, a peak resident memory under 1 GiB.
 
+#### M4: merge and landing (2026-10-19)
+
+- The contract of merging and landing, in `swarmops schema`, which `land`, `op log`, `op undo`
+  and `commit --key` serve: `LandReq` and `LandResp` (`status` `landed` or `replayed`);
+  `ConflictReport`, with `FileConflictOut`, `ConflictKindOut`, `HunkOut` and `LinesOut`, the
+  report a land that conflicts returns in `details.report` (each file with its kind of conflict,
+  one of seven, its hunks, whose lines count from 1 with both ends included, their texts within
+  `max_conflict_bytes`, and the target's changeset and agent that last changed it); `OpLogReq`,
+  `OpLogPage`, `OperationOut`, `OperationKind`, `OpChangesetOut` and `RefMoveOut` for the
+  operation log; and `UndoReq` and `UndoResp`. `CommitReq` gains `idempotency_key`, and
+  `CommitResp` gains `replayed`, written in every commit response (one without it, from a store
+  that predates it, reads as `false`); `show`'s `ChangesetDetail` gains `lander`, `land_key` and
+  `squashed_from`, omitted for a changeset no land made. Five error codes join the table:
+  `E_CONFLICT` (exit 3, which no code had), `E_CAS_RETRY_EXHAUSTED` (exit 4, retryable),
+  `E_NOTHING_TO_LAND` and `E_NOTHING_TO_UNDO` (exit 1) and `E_OP_NOT_FOUND` (exit 6).
+- `commit --key UUID` (`idempotency_key` in the API and over MCP) makes a retried commit replay.
+  The key, a uuid v7, signs the commit at the key's time, to the second, and is recorded as
+  `commit_key` metadata, so the same request on the same parent makes the same changeset, which
+  the store holds already: the retry answers `replayed: true` with the first attempt's changeset,
+  and writes nothing. A keyed commit whose parent (given, or the head of `main` or of the ref it
+  advances) is the changeset its key made replays that one too, decided under the store's lock;
+  with `--advance`, as `advanced.already_applied`. A key that is not a uuid v7 is
+  `E_INVALID_ARG`. `replayed` is `true` for any commit that found its changeset in the store and
+  wrote nothing.
+- `swarmops op log` and `swarmops op undo`, and the MCP tools `op_log` and `undo`: the journal
+  as the store's operation log, newest first (each write transaction with its number, its kind,
+  its changesets and its ref moves, a page at a time below `--before`), and an undo that moves
+  every ref an operation moved back to what it named before, by compare-and-swap in one
+  transaction of its own, all of them or none. A ref moved since refuses the undo with
+  `E_CAS_MISMATCH` (`details.op` names the operation) and nothing is written; an undo run again
+  is a replay (`already_applied`); changesets are never removed. They raise `E_OP_NOT_FOUND` and
+  `E_NOTHING_TO_UNDO`. The MCP server's instructions name the two tools, and leave the sizes of
+  small reads to each tool's description.
+
 #### M8: git export (2026-10-19)
 
 - `MetaStore::read_committed`, a snapshot of the committed metadata only, for the readers whose

@@ -54,7 +54,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 
 /// The tools, one per `StoreOps` operation, in the order `tools/list` gives them, each with
 /// the request type its arguments are.
-const TOOLS: [(&str, &str); 15] = [
+const TOOLS: [(&str, &str); 17] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -63,9 +63,11 @@ const TOOLS: [(&str, &str); 15] = [
     ("log", "LogReq"),
     ("path_history", "PathHistoryReq"),
     ("diff", "DiffReq"),
+    ("op_log", "OpLogReq"),
     ("ref_list", "RefListReq"),
     ("ref_set", "RefSetReq"),
     ("ref_delete", "RefDeleteReq"),
+    ("undo", "UndoReq"),
     ("commit", "CommitReq"),
     ("blob_put", "BlobPutReq"),
     ("blob_has", "BlobHasReq"),
@@ -86,7 +88,7 @@ const UNSUPPORTED_PROTOCOL_VERSION: i64 = -32022;
 // The tests.
 // ---------------------------------------------------------------------------------------------
 
-/// Every revision lists the same fifteen tools: `initialize` negotiates 2025-11-25 or 2025-06-18
+/// Every revision lists the same seventeen tools: `initialize` negotiates 2025-11-25 or 2025-06-18
 /// (2025-11-25 for a client that asks for a version it does not serve), `server/discover`
 /// advertises all three, and each tool's schema is its request type's, standing alone.
 #[test]
@@ -523,6 +525,7 @@ fn mcp_mutation_without_identity_is_e_identity_required() {
             "ref_delete",
             json!({"name": "main", "expected_old": "0".repeat(64)}),
         ),
+        ("undo", json!({"op": 0})),
     ];
     // Each call is well formed, so the missing identity is what refuses it.
     for (tool, arguments) in mutations {
@@ -846,6 +849,89 @@ fn mcp_compare_and_swap_needs_a_concrete_expected_id() {
         &[],
     );
     assert_eq!(deleted.ok()["old"], c1.as_str());
+}
+
+/// `undo` through the server: it lists as a mutation that moves refs by compare-and-swap, and
+/// `op_log` as a read. It restores what an operation moved, in an operation of its own that
+/// `op_log` lists, for the server's agent; again, it is a replay; once a later move has moved the
+/// ref, it is refused with `E_CAS_MISMATCH` naming the ref, what it names and the operation, with
+/// nothing written, and its hint, `swarmops op log`, is the `op_log` tool's.
+#[test]
+fn mcp_undo_is_compare_and_swap_guarded() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let listed = server.result("tools/list", json!({}));
+    let tool = |name: &str| {
+        listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == name)
+            .unwrap_or_else(|| panic!("a {name} tool: {listed}"))
+            .clone()
+    };
+    assert_eq!(tool("undo")["annotations"]["destructiveHint"], true);
+    assert_eq!(tool("undo")["annotations"]["idempotentHint"], true);
+    assert_eq!(tool("op_log")["annotations"]["readOnlyHint"], true);
+
+    let first = json!({"message": "c1", "changes": [{"path": "c1", "op": "put",
+                                                    "content": {"inline": "c1"}}]});
+    let c1 = server.ok("commit", first)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": c1, "create": true}),
+    );
+    let c2 = commit_on(&mut server, "c2", &c1);
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": c2, "expected_old": c1}),
+    );
+    let newest = server.ok("op_log", json!({"limit": 1}));
+    let moved = &newest["result"]["ops"][0];
+    assert_eq!(moved["kind"], "ref_move", "{newest}");
+    assert_eq!(newest["result"]["truncated"], true, "{newest}");
+    let op = moved["op"].as_u64().unwrap();
+
+    let undone = server.ok("undo", json!({"op": op}));
+    assert_eq!(undone["result"]["undone"], op);
+    assert_eq!(undone["result"]["op"], op + 1);
+    assert_eq!(undone["result"]["ref_moves"][0]["actor"], AGENT, "{undone}");
+    assert_eq!(
+        refs_of(&mut server),
+        json!([{"name": "main", "target": c1, "version": 3}])
+    );
+    let again = server.ok("undo", json!({"op": op}));
+    assert_eq!(again["result"]["already_applied"], true, "{again}");
+
+    // A later move: main from c1 to c3. The undo of the move to c2 expects c2 there.
+    let c3 = commit_on(&mut server, "c3", &c1);
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": c3, "expected_old": c1}),
+    );
+    let refused = server.err("undo", json!({"op": op}), "E_CAS_MISMATCH");
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"name": "main", "actual": c3, "op": op})
+    );
+    assert_eq!(refused["error"]["hint"], "swarmops op log", "{refused}");
+    assert_eq!(refused["error"]["exit"], 4, "{refused}");
+    assert_eq!(
+        refs_of(&mut server),
+        json!([{"name": "main", "target": c3, "version": 4}])
+    );
+    let after = server.ok("op_log", json!({"limit": 1}));
+    assert_eq!(
+        after["result"]["ops"][0]["op"],
+        op + 3,
+        "the refused undo wrote nothing: {after}"
+    );
+    server.err("undo", json!({"op": op + 99}), "E_OP_NOT_FOUND");
+    server.finish_clean();
 }
 
 /// `commit` with `advance` compares and swaps on its `parent`, so the server refuses it without a
@@ -1831,7 +1917,7 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     assert_no_references(name, schema);
     let (read_only, destructive, idempotent) = match name {
         "commit" | "blob_put" => (false, false, false),
-        "ref_set" | "ref_delete" => (false, true, true),
+        "ref_set" | "ref_delete" | "undo" => (false, true, true),
         _ => (true, false, true),
     };
     assert_eq!(

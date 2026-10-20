@@ -653,10 +653,10 @@ fn an_import_onto_a_native_head_needs_export_oids_registered() {
         matches!(
             &error,
             ImportError::Store {
-                source: RepoError::Derived { name, .. },
+                source,
                 imported: 0,
                 last: None,
-            } if name == "git_oid"
+            } if matches!(&**source, RepoError::Derived { name, .. } if name == "git_oid")
         ),
         "{error:?}"
     );
@@ -1006,12 +1006,13 @@ fn a_crashed_import_resumes_past_its_committed_frames() {
     let second = first_parents(manifest, &tip(manifest, "newer"))[4];
     assert!(
         matches!(
-            error,
+            &error,
             ImportError::Store {
-                source: RepoError::Store(StoreError::NotCommitted { .. }),
+                source,
                 imported: 2,
                 last: Some(last),
-            } if last == second
+            } if matches!(**source, RepoError::Store(StoreError::NotCommitted { .. }))
+                && *last == second
         ),
         "{error:?}"
     );

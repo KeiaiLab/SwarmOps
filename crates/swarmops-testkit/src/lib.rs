@@ -25,14 +25,16 @@
 //! - [`git`]: the git fixtures: repositories real git made from the scripts in
 //!   `git-fixtures/scripts/`, committed as archives with their manifests, extracted for a test
 //!   ([`git::fixture`]) and rebuilt only on purpose (`just git-fixtures`).
+//! - [`landing`]: what the landing measurements share: workloads, the record of a land, the
+//!   invariants every run keeps, and a run's statistics.
 //!
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
 //! dependency on `swarmops-ops` would build a second copy of the crate under test there. No
 //! store unit test uses it, for the same reason. Its `test-hooks` feature (not a default: see
 //! `Cargo.toml`) turns on the store's. Its default features, `cli`, `git` and `repo`, hold
 //! [`cli`] (and its `serde_json`), [`git`] (and `tar`, `base64`, `serde` and `serde_json`) and
-//! [`repo`] (and `swarmops-repo`): without them, as the fuzz crate takes it, the rest depends on
-//! nothing above `swarmops-store`.
+//! [`repo`] and [`landing`] (and `swarmops-repo`): without them, as the fuzz crate takes it, the
+//! rest depends on nothing above `swarmops-store`.
 
 pub mod child;
 #[cfg(feature = "cli")]
@@ -41,6 +43,8 @@ pub mod faults;
 pub mod fs;
 #[cfg(feature = "git")]
 pub mod git;
+#[cfg(feature = "repo")]
+pub mod landing;
 pub mod measure;
 pub mod power;
 #[cfg(feature = "repo")]

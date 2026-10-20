@@ -36,7 +36,8 @@ expression: s.transcript()
         "changeset": "[c1]",
         "root": "[id2]",
         "files_changed": 1,
-        "blobs_written": 1
+        "blobs_written": 1,
+        "replayed": false
       },
       "meta": {
         "repo": "[tmp]/store",
@@ -58,7 +59,8 @@ expression: s.transcript()
         "parent": "[c1]",
         "root": "[id3]",
         "files_changed": 1,
-        "blobs_written": 1
+        "blobs_written": 1,
+        "replayed": false
       },
       "meta": {
         "repo": "[tmp]/store",

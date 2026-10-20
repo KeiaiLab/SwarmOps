@@ -43,15 +43,16 @@ use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
     DiffReq, Envelope, ErrorCode, GitExportReq, GitImportReq, InfoReq, LineRange, LogReq, Meta,
-    OpError, PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq,
-    RefSetReq, RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    OpError, OpLogReq, PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq,
+    RefListReq, RefSetReq, RepoInfo, Rev, ShowReq, StoreOps, UndoReq, VerifyReport, VerifyReq,
+    schema_for_all,
 };
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Recording, Resolved, shell_word};
 
 use crate::cli::{
-    self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, RefCommand,
+    self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
 };
 use crate::context::{self, Env};
 use crate::mcp;
@@ -139,6 +140,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             parent,
             allow_empty,
             advance,
+            key,
         } => ctx.on_store(
             op,
             || {
@@ -148,6 +150,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                     changes: read_changes(&changes)?,
                     message,
                     advance,
+                    idempotency_key: key,
                     allow_empty,
                 };
                 Ok((who, req))
@@ -185,13 +188,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             },
             |ops, req| ops.read_tree(req),
         ),
-        Command::Show { rev, max_changes } => {
-            let req = ShowReq {
-                rev: rev.into(),
-                max_changes,
-            };
-            ctx.on_store(op, || Ok(req), |ops, req| ops.show(req))
-        }
+        Command::Show { rev, max_changes } => show(ctx, op, rev, max_changes),
         Command::Log {
             rev,
             limit,
@@ -205,6 +202,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         } => history(ctx, op, &target, limit, cursor),
         Command::Diff(args) => diff(ctx, op, args),
         Command::Ref(command) => run_ref(ctx, op, command),
+        Command::Op(command) => run_op(ctx, op, command),
         Command::Verify { deep } => ctx.on_store(
             op,
             || Ok(VerifyReq { deep }),
@@ -214,6 +212,16 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
         derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
     }
+}
+
+/// Runs `show`, which names operation `op`: the changeset `rev` names, with at most
+/// `max_changes` of its changes.
+fn show(ctx: &Ctx<'_>, op: &'static str, rev: String, max_changes: usize) -> Printed {
+    let req = ShowReq {
+        rev: rev.into(),
+        max_changes,
+    };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.show(req))
 }
 
 /// Runs `log`, which names operation `op`: `limit` changesets from `rev` (`main` by default) or
@@ -451,6 +459,35 @@ fn run_ref(ctx: &Ctx<'_>, op: &'static str, command: RefCommand) -> Printed {
                 Ok((context::mutator(agent, ctx.env)?, req))
             },
             |ops, (who, req)| ops.ref_delete(&who, req),
+        ),
+    }
+}
+
+/// Runs an `op` subcommand, which names operation `op`.
+fn run_op(ctx: &Ctx<'_>, op: &'static str, command: OpCommand) -> Printed {
+    match command {
+        OpCommand::Log {
+            before,
+            limit,
+            max_changesets,
+        } => ctx.on_store(
+            op,
+            || {
+                Ok(OpLogReq {
+                    before,
+                    limit,
+                    max_changesets,
+                })
+            },
+            |ops, req| ops.op_log(req),
+        ),
+        OpCommand::Undo { op: number } => ctx.on_store(
+            op,
+            || {
+                let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
+                Ok((who, UndoReq { op: number }))
+            },
+            |ops, (who, req)| ops.undo(&who, req),
         ),
     }
 }
@@ -1180,6 +1217,7 @@ mod tests {
             }],
             message: "m".to_owned(),
             advance: None,
+            idempotency_key: None,
             allow_empty: false,
         };
         let c1 = ops.commit(&who, commit("1")).unwrap().changeset;

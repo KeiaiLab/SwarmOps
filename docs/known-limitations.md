@@ -153,14 +153,21 @@ left).
   can a `commit --advance` without `--parent`: it builds on the ref's head when it runs, and its
   move catches only a race from then on, not edits that landed since the agent read the files
   it puts whole. *Target: M4 (merge and landing). Found: M1 Task 4b.*
-- **A retried commit can record a second changeset.** A commit signs at its own time, so when
-  a commit's outcome is unknown (its process died before it answered) and it is run again, a first
-  attempt that did commit stays as an unreferenced changeset beside the second. A `commit --advance`
-  retried a second or more after a first attempt that published records nothing instead: the ref
-  names that attempt, so the retry fails with `E_CAS_MISMATCH`, whose `actual` may be the agent's
-  own change; `swarmops show <actual>` gives its `agent` and `run_id` metadata, to check before
-  applying the edits again on top of it. An idempotency key (`commit --key`) closes both. *Target:
-  M4. Found: M1 final fix pass; the `--advance` case, the M1.6 review.*
+- **A retried commit that omits its parent can record a second changeset.** `commit --key` (a
+  uuid v7) makes a retry of the same request replay the first attempt: the commit signs at the
+  key's time and records the key as `commit_key`, so on the same parent it is the same
+  changeset (`replayed`), and on the changeset the key made it replays that one. A keyed commit
+  without `--parent` builds on `main`'s head (the advanced ref's, with `--advance`) as it is
+  when it runs, so a retry after that head moved to another changeset commits again, on the new
+  head. Given `--parent` by its full id, the retry records the changeset once; with `--advance`
+  too, a ref that moved on past it makes the retry `E_CAS_MISMATCH`, and `swarmops log` shows
+  whether the ref's history holds it. A commit without a key still signs at its own time, so
+  its retry records a second changeset, or, as a `commit --advance` retried a second or more after a
+  first attempt that published, nothing: the ref names that attempt, so the retry fails with
+  `E_CAS_MISMATCH`, whose `actual` may be the agent's own change; `swarmops show <actual>` gives its
+  `agent` and `run_id` metadata, to check before applying the edits again on top of it. *Target: M9
+  (an index of commit keys, if measurements ask for one). Found: M1 final fix pass; the `--advance`
+  case, the M1.6 review; narrowed by M4 Task 8.*
 - **History follows first parents only.** `log`, `log --path` and `history` walk first parents,
   and a changeset's changes are those against its first parent: what a merge brought in from its
   other parents shows as the merge's own change, and the changesets on those parents are never
@@ -423,6 +430,14 @@ These do not change what SwarmOps does, only how well the tests can see it.
   up to its damage" message is not pinned; the CLI tests assume a temporary directory without
   spaces; and one end-to-end test skips when run as root. *Unscheduled. Found: M1 Tasks 1, 2a,
   3, 5 and 8, and the final fix pass; narrowed by M1.5 Task 2.*
+- **The `git merge-file` oracle pairs lines with Myers.** git 2.43, the declared oracle
+  version, has no `--diff-algorithm` for `merge-file` (git 2.44 added it), so the corpus in
+  `crates/swarmops-merge/tests/fixtures/merge_file/` records git's merges over its Myers diff,
+  while the three-way merge pairs lines with the histogram diff. The cases are built from
+  distinct lines, which the two diffs pair alike, and diffy, the other oracle, uses Myers too: a
+  merge that only the histogram diff pairs differently is checked by no oracle. *Unscheduled:
+  when the declared git moves to 2.44 or later, `generate.sh` adds
+  `--diff-algorithm=histogram`. Found: M2 Task 8; M4 Task 3b.*
 - **The specs are in Korean.** They are the authority; [architecture.md](architecture.md) is an
   English overview, not a translation. *Unscheduled.*
 

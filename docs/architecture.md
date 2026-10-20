@@ -574,6 +574,11 @@ What an agent sees (operations §4):
   The readers whose results leave the host (M8's git export, M11's `serve`) take a committed
   snapshot instead (`MetaStore::read_committed`): under the lock, after the journal's tail check,
   so that neither can take back what it returns, at the cost of a wait behind the current writer.
+- `op undo` is a compare-and-swap too: it moves every ref the operation moved back to what it
+  named before, in one transaction, only while each still names what the operation set (or
+  what it named before, which is skipped); a ref moved since by another operation refuses it
+  with `E_CAS_MISMATCH`, and nothing is written. It reads the operation's frame under its own
+  write's lock, so it never undoes a frame that a failed sync took back.
 - M1 has no merge: an agent that loses a ref race and commits its change again on top of the
   winner's can overwrite the winner's edits to the same files. Merging and landing arrive in
   M4.
@@ -582,10 +587,12 @@ What an agent sees (operations §4):
 
 Every operation is a function from a request type to a response type or an `OpError`, and
 every type is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore
-fields they do not know, so versions can differ (operations §0). `StoreOps` has sixteen operations:
+fields they do not know, so versions can differ (operations §0). `StoreOps` has eighteen operations:
 `repo_info`, `commit`, `resolve_rev`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`,
-`log`, `path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `verify` and `derive`; `init`,
-`whoami` and `schema` live in the CLI.
+`log`, `path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `op_log`, `undo`, `verify` and
+`derive`; `init`, `whoami` and `schema` live in the CLI. `op_log` shows the journal as the store's
+operations, a frame each (storage §3), and `undo` moves an operation's refs back by
+compare-and-swap.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
 plain text, and `mcp`, below, speaks MCP there instead):
@@ -594,10 +601,10 @@ plain text, and `mcp`, below, speaks MCP there instead):
 {"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth, recovered}}
 ```
 
-A failure's `code` is one of 32 stable `E_*` codes, from one table that also fixes each code's
-exit code (0 success, 1 error, 2 usage, 4 retryable, 5 identity or policy, 6 not found; 3 is
-kept for conflicts, M4) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 72 types, and its snapshot test is where contract
+A failure's `code` is one of 37 stable `E_*` codes, from one table that also fixes each code's
+exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
+found) and whether retrying can help. `hint` is often the next command to run.
+`swarmops schema` prints the JSON Schema of 88 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

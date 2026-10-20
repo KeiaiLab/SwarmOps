@@ -1,0 +1,3 @@
+# The cases are bytes: CRLF lines and a missing final newline are what some of them test, so git
+# never converts their line endings, whatever core.autocrlf says.
+* -text

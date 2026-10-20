@@ -845,3 +845,21 @@ SWARMOPS_TEST_CLI_CONTENTION_ADVANCE=1 cargo nextest run --locked --release -p s
 ```
 
 with `=1`, and again with `=0`.
+
+## M4 — a land's incremental re-merge (not measured yet)
+
+A land that loses its race re-merges incrementally (operations spec §3 (g)): what it merged
+before, `L`, onto what the target gained since, over `L`'s delta paths alone
+(`Repo::merge_trees`), where the naive retry merges the whole change again from its base
+(`Repo::merge`); operations spec §9 item 1 asks for the two side by side. `benches/remerge.rs` of
+`swarmops-repo` times both, `incremental/<files>x<gained>` and `full/<files>x<gained>`, for a
+change of 1, 10 and 100 files out of a base of 1,000, against a target that gained 1, 10 and 100
+changesets elsewhere since the land's first attempt (a store built without syncs, the objects in
+the page cache).
+
+Not measured yet: M4 runs its measurements once, at its end, in a quiet window under the host's
+heavy-run lock (the M4 plan's execution policy), with
+
+```sh
+cargo bench --locked -p swarmops-repo --bench remerge
+```

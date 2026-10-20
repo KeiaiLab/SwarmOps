@@ -778,6 +778,107 @@ fn commit_advance_publishes_the_changeset_and_moves_the_ref() {
     }
 }
 
+/// `commit --key UUID` through the binary: the same command run again replays the first run's
+/// changeset (`replayed: true`, nothing written, `info` counting one changeset), also with
+/// `SWARMOPS_TEST_NOW` moving the clock in between, since the key's time signs the commit
+/// (`show`'s `created_at` is the key's, to the second, and its `commit_key` the key); with
+/// `--advance`, the run again finds the ref's head carrying the key (`already_applied`); and a
+/// key that is not a uuid v7 is `E_INVALID_ARG`, exit 2, naming it, and records nothing.
+#[test]
+fn commit_with_a_key_twice_through_the_binary() {
+    use swarmops_ops::NOW_ENV;
+
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let list = |content: &str| {
+        json!([{"path": "f.txt", "op": "put", "content": {"inline": content}}]).to_string()
+    };
+    let (first_changes, second_changes) =
+        (s.file("1.json", &list("1")), s.file("2.json", &list("2")));
+    // uuid v7s whose time is 2001-09-09T01:46:40.999Z.
+    let (key, advance_key) = (
+        "00e8d4a5-13e7-7a1c-9b2d-3e4f5a6b7c8d",
+        "00e8d4a5-13e7-7a1c-9b2d-3e4f5a6b7c8e",
+    );
+    let keyed = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "keyed",
+        "--changes",
+        &first_changes,
+        "--key",
+        key,
+    ];
+
+    let first = s.run(&keyed);
+    assert_eq!(first.exit, 0, "{}", first.json);
+    assert_eq!(first["result"]["replayed"], false);
+    let c1 = s.name_at(&first, "/result/changeset", "c1");
+    let again = s.run_env(&[(NOW_ENV, "2000000000")], &keyed);
+    assert_eq!(again.exit, 0, "{}", again.json);
+    assert_eq!(again["result"]["changeset"], c1.as_str());
+    assert_eq!(again["result"]["replayed"], true);
+    assert_eq!(again["result"]["blobs_written"], 0);
+    let info = s.run(&["--repo", &store, "info"]);
+    assert_eq!(info["result"]["changesets"], 1);
+    let shown = s.run(&["--repo", &store, "show", &c1]);
+    assert_eq!(shown["result"]["created_at"], 1_000_000_000_000_u64);
+    assert_eq!(shown["result"]["metadata"]["commit_key"], key);
+
+    s.run(&[
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c1, "--create",
+    ]);
+    let advancing = [
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "advancing",
+        "--changes",
+        &second_changes,
+        "--key",
+        advance_key,
+        "--advance",
+        "main",
+    ];
+    let published = s.run(&advancing);
+    let c2 = s.name_at(&published, "/result/changeset", "c2");
+    assert_eq!(published["result"]["advanced"]["already_applied"], false);
+    let replayed = s.run(&advancing);
+    assert_eq!(replayed.exit, 0, "{}", replayed.json);
+    assert_eq!(
+        replayed["result"]["advanced"],
+        json!({"name": "main", "old": c1, "new": c2, "already_applied": true})
+    );
+    assert_eq!(replayed["result"]["replayed"], true);
+    assert_eq!(replayed["meta"]["resolved"], json!({"main": c2}));
+
+    let refused = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "x",
+        "--changes",
+        &first_changes,
+        "--key",
+        "retry-1",
+    ]);
+    assert_eq!((refused.exit, refused.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(refused["error"]["details"]["idempotency_key"], "retry-1");
+    let info = s.run(&["--repo", &store, "info"]);
+    assert_eq!(info["result"]["changesets"], 2);
+}
+
 #[test]
 fn missing_identity_exits_5() {
     let mut s = Session::new();
@@ -1406,6 +1507,9 @@ fn error_codes_reach_the_cli() {
         ),
         ("E_BUSY", "needs the store's lock held for its 10 s wait"),
         ("E_INTERNAL", "a caught panic: the binary's unit tests"),
+        ("E_CONFLICT", "`land` arrives later in M4"),
+        ("E_CAS_RETRY_EXHAUSTED", "`land` arrives later in M4"),
+        ("E_NOTHING_TO_LAND", "`land` arrives later in M4"),
         ("E_AUTH", "tokens arrive after M1"),
         ("E_POLICY_DENIED", "policies arrive after M1"),
         (
@@ -1433,20 +1537,8 @@ fn error_codes_reach_the_cli() {
     }
     // `git import`'s, from git fixtures, each named after its fixture in the transcript; then
     // `git export`'s, into `refs`' repository and into an empty one whose branch is locked.
-    let fixtures = ["refs", "gitlinks", "shallow", "partial_clone"].map(|name| {
-        let fixture = swarmops_testkit::git::fixture(name);
-        s.name(fixture.dir.to_str().expect("UTF-8 temp paths"), name);
-        (name, fixture)
-    });
-    let repo = |name: &str| {
-        let (_, fixture) = (fixtures.iter().find(|(named, _)| *named == name))
-            .unwrap_or_else(|| panic!("no fixture {name}"));
-        let repo = fixture
-            .repo
-            .as_deref()
-            .expect("the fixture holds a repository");
-        repo.to_str().expect("UTF-8 temp paths").to_owned()
-    };
+    let fixtures = git_fixtures(&mut s);
+    let repo = |name: &str| fixture_repo(&fixtures, name);
     let locked = swarmops_testkit::git::empty_repository();
     let exports = git_export_error_cases(&mut s, &store, &repo("refs"), &locked);
     for (code, args) in git_error_cases(&s, &store, &repo)
@@ -1584,6 +1676,9 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
             "E_UNSUPPORTED_FS",
             vec!["init".to_owned(), MNT_STORE.to_owned()],
         ),
+        // Operation 0 is the first commit, which moved no ref; the store has three.
+        ("E_NOTHING_TO_UNDO", on(&["op", "undo", "0"])),
+        ("E_OP_NOT_FOUND", on(&["op", "undo", "99"])),
     ]
 }
 
@@ -1652,6 +1747,234 @@ fn git_export_error_cases(
         // The objects are written and made durable, and the lock stops the branch's move.
         ("E_GIT_WRITE", export(&[locked_path])),
     ]
+}
+
+/// The git fixtures that the failing `git import`s and `git export`s of
+/// [`error_codes_reach_the_cli`] read, each named after itself in `s`'s transcript.
+fn git_fixtures(s: &mut Session) -> [(&'static str, swarmops_testkit::git::GitFixture); 4] {
+    ["refs", "gitlinks", "shallow", "partial_clone"].map(|name| {
+        let fixture = swarmops_testkit::git::fixture(name);
+        s.name(fixture.dir.to_str().expect("UTF-8 temp paths"), name);
+        (name, fixture)
+    })
+}
+
+/// The path of the repository of fixture `name`, one of `fixtures`.
+fn fixture_repo(fixtures: &[(&str, swarmops_testkit::git::GitFixture)], name: &str) -> String {
+    let (_, fixture) = (fixtures.iter().find(|(named, _)| *named == name))
+        .unwrap_or_else(|| panic!("no fixture {name}"));
+    let repo = fixture
+        .repo
+        .as_deref()
+        .expect("the fixture holds a repository");
+    repo.to_str().expect("UTF-8 temp paths").to_owned()
+}
+
+/// `op log` lists the store's operations newest first, each with its kind, the changesets it
+/// recorded and the refs it moved: here a commit, a ref's creation, a publish (`commit
+/// --advance`) and an undo. A page holds at most `-n` operations below `--before`, and says when
+/// older ones follow; `--max-changesets` caps the changesets listed, and `changesets_total`
+/// counts them all.
+#[test]
+fn op_log_pages_with_before() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "a\n", "c1"); // op 0
+    let on = |args: &[&'static str]| -> Vec<String> {
+        ["--repo", store.as_str(), "--as", AGENT]
+            .iter()
+            .copied()
+            .chain(args.iter().copied())
+            .map(str::to_owned)
+            .collect()
+    };
+    let run = |s: &mut Session, args: Vec<String>| {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        let reply = s.run(&args);
+        assert_eq!(reply.exit, 0, "{args:?}: {}", reply.json);
+        reply
+    };
+    let mut create = on(&["ref", "set", "main"]);
+    create.extend([c1.clone(), "--create".to_owned()]);
+    run(&mut s, create); // op 1
+    let list = json!([{"path": "b.txt", "op": "put", "content": {"inline": "b\n"}}]);
+    let changes = s.file("c2.json", &list.to_string());
+    let mut publish = on(&["commit", "-m", "c2\n\nthe body"]);
+    publish
+        .extend(["--changes", &changes, "--parent", &c1, "--advance", "main"].map(str::to_owned));
+    let published = run(&mut s, publish); // op 2
+    let c2 = s.name_at(&published, "/result/changeset", "c2");
+    run(&mut s, on(&["op", "undo", "2"])); // op 3
+
+    let all = run(&mut s, on(&["op", "log"]));
+    assert_eq!(all["op"], "op_log");
+    assert_eq!(all["result"]["truncated"], false);
+    let ops = all["result"]["ops"].as_array().unwrap();
+    let field = |key: &str| -> Vec<Value> { ops.iter().map(|op| op[key].clone()).collect() };
+    assert_eq!(field("op"), [3, 2, 1, 0].map(Value::from));
+    let kinds = ["ref_move", "publish", "ref_move", "commit"];
+    assert_eq!(field("kind"), kinds.map(Value::from));
+    assert_eq!(field("changesets_total"), [0, 1, 0, 1].map(Value::from));
+    let at = ops[1]["ref_moves"][0]["at"].as_i64().unwrap();
+    assert!(at > 1_700_000_000, "a time of the clock's: {at}");
+    let created_at = &ops[1]["changesets"][0]["created_at"];
+    assert_eq!(
+        ops[1],
+        json!({
+            "op": 2,
+            "kind": "publish",
+            "changesets": [{"id": c2, "agent": AGENT, "created_at": created_at, "title": "c2"}],
+            "changesets_total": 1,
+            "ref_moves": [{"name": "main", "old": c1, "new": c2, "actor": AGENT, "at": at}],
+        })
+    );
+    let undo_move = &ops[0]["ref_moves"][0];
+    assert_eq!(
+        (&undo_move["old"], &undo_move["new"]),
+        (&json!(c2), &json!(c1))
+    );
+    assert!(ops[2]["ref_moves"][0].get("old").is_none(), "a creation");
+    assert_eq!(ops[3]["changesets"][0]["id"], c1.as_str());
+
+    // A page at a time, below --before.
+    let page = |s: &mut Session, args: &[&'static str]| -> (Vec<u64>, bool) {
+        let mut line = on(&["op", "log"]);
+        line.extend(args.iter().map(|arg| (*arg).to_owned()));
+        let reply = run(s, line);
+        let ops = reply["result"]["ops"].as_array().unwrap();
+        let seqs = ops.iter().map(|op| op["op"].as_u64().unwrap()).collect();
+        (seqs, reply["result"]["truncated"] == true)
+    };
+    assert_eq!(page(&mut s, &["-n", "2"]), (vec![3, 2], true));
+    assert_eq!(page(&mut s, &["--before", "2", "-n", "1"]), (vec![1], true));
+    assert_eq!(page(&mut s, &["--before", "2"]), (vec![1, 0], false));
+    assert_eq!(page(&mut s, &["--before", "0"]), (vec![], false));
+    assert_eq!(page(&mut s, &["--before", "99"]), (vec![3, 2, 1, 0], false));
+
+    // --max-changesets 0 lists none, counts them, and still tells a publish.
+    let mut capped = on(&["op", "log", "--before", "3", "-n", "1"]);
+    capped.extend(["--max-changesets", "0"].map(str::to_owned));
+    let capped = run(&mut s, capped);
+    let only = &capped["result"]["ops"][0];
+    assert_eq!(only["changesets"], json!([]));
+    assert_eq!(
+        (&only["changesets_total"], &only["kind"]),
+        (&json!(1), &json!("publish"))
+    );
+
+    // A page of no operations is refused, as log's is.
+    let args = ["--repo", store.as_str(), "op", "log", "-n", "0"];
+    let zero = s.run(&args);
+    assert_eq!((zero.exit, zero.code()), (2, "E_INVALID_ARG"));
+}
+
+/// `op undo` through the binary moves the refs an operation moved back, in an operation of its
+/// own for the caller's agent, which `op log` lists and another undo takes back; run again, it is
+/// a replay that writes nothing. An operation whose ref was moved since is `E_CAS_MISMATCH` (exit
+/// 4) naming the ref, what it names and the operation, with nothing written; one past the last is
+/// `E_OP_NOT_FOUND` (exit 6), one that moved no ref `E_NOTHING_TO_UNDO`; without an identity, an
+/// undo is refused as every mutation is.
+#[test]
+fn op_undo_end_to_end() {
+    const UNDOER: &str = "agent/worker-18";
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let c1 = s.commit(&store, None, "a.txt", "1\n", "c1"); // op 0
+    let c2 = s.commit(&store, Some(&c1), "a.txt", "2\n", "c2"); // op 1
+    let set = |s: &mut Session, new: &str, from: &[&str]| {
+        let mut args = vec![
+            "--repo",
+            store.as_str(),
+            "--as",
+            AGENT,
+            "ref",
+            "set",
+            "main",
+            new,
+        ];
+        args.extend(from);
+        assert_eq!(s.run(&args).exit, 0);
+    };
+    set(&mut s, &c1, &["--create"]); // op 2
+    set(&mut s, &c2, &["--expect", &c1]); // op 3
+    let undo = |s: &mut Session, op: &str| {
+        s.run(&["--repo", store.as_str(), "--as", UNDOER, "op", "undo", op])
+    };
+    let main = |s: &mut Session| {
+        let refs = s.run(&["--repo", store.as_str(), "ref", "list"]);
+        refs["result"]["refs"][0]["target"].clone()
+    };
+
+    let undone = undo(&mut s, "3");
+    assert_eq!(
+        (undone.exit, &undone["op"]),
+        (0, &json!("undo")),
+        "{}",
+        undone.json
+    );
+    let at = undone["result"]["ref_moves"][0]["at"].clone();
+    assert_eq!(
+        undone["result"],
+        json!({
+            "undone": 3,
+            "op": 4,
+            "ref_moves": [{"name": "main", "old": c2, "new": c1, "actor": UNDOER, "at": at}],
+            "already_applied": false,
+        })
+    );
+    assert!(undone["meta"].get("recovered").is_none(), "{}", undone.json);
+    assert_eq!(main(&mut s), c1.as_str());
+    let again = undo(&mut s, "3");
+    assert_eq!(
+        again["result"],
+        json!({"undone": 3, "ref_moves": [], "already_applied": true})
+    );
+    let listed = s.run(&["--repo", store.as_str(), "op", "log", "-n", "1"]);
+    let newest = &listed["result"]["ops"][0];
+    assert_eq!(
+        (&newest["op"], &newest["kind"]),
+        (&json!(4), &json!("ref_move"))
+    );
+    assert_eq!(newest["ref_moves"], undone["result"]["ref_moves"]);
+    // The undo is an operation of its own, and undoing it moves main forward again.
+    let redone = undo(&mut s, "4");
+    assert_eq!(redone["result"]["op"], 5);
+    assert_eq!(main(&mut s), c2.as_str());
+
+    // Moved since: main names c3 now, neither what operation 3 set nor what it found.
+    let c3 = s.commit(&store, Some(&c2), "a.txt", "3\n", "c3"); // op 6
+    set(&mut s, &c3, &["--expect", &c2]); // op 7
+    let blocked = undo(&mut s, "3");
+    assert_eq!((blocked.exit, blocked.code()), (4, "E_CAS_MISMATCH"));
+    assert_eq!(
+        blocked["error"]["details"],
+        json!({"name": "main", "actual": c3, "op": 3})
+    );
+    let message = blocked["error"]["message"].as_str().unwrap();
+    assert!(message.contains("newest first"), "{message}");
+    assert_eq!(blocked["error"]["hint"], "swarmops op log");
+    assert_eq!(main(&mut s), c3.as_str());
+    let listed = s.run(&["--repo", store.as_str(), "op", "log", "-n", "1"]);
+    assert_eq!(listed["result"]["ops"][0]["op"], 7, "nothing written");
+
+    let missing = undo(&mut s, "99");
+    assert_eq!((missing.exit, missing.code()), (6, "E_OP_NOT_FOUND"));
+    assert_eq!(missing["error"]["details"], json!({"op": 99, "last": 7}));
+    let nothing = undo(&mut s, "6");
+    assert_eq!((nothing.exit, nothing.code()), (1, "E_NOTHING_TO_UNDO"));
+    assert_eq!(nothing["error"]["details"], json!({"op": 6}));
+    let anonymous = s.run(&["--repo", store.as_str(), "op", "undo", "7"]);
+    assert_eq!(
+        (anonymous.exit, anonymous.code()),
+        (5, "E_IDENTITY_REQUIRED")
+    );
+    assert_eq!(main(&mut s), c3.as_str());
+    assert_eq!(
+        s.run(&["--repo", store.as_str(), "verify", "--deep"]).exit,
+        0
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

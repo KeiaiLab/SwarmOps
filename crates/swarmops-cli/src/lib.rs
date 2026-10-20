@@ -239,6 +239,7 @@ mod tests {
             message: "m".to_owned(),
             allow_empty: false,
             advance: None,
+            idempotency_key: None,
         };
         let id = ops.commit(&who, req).unwrap().changeset;
         drop(ops);
