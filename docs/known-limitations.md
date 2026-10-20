@@ -299,6 +299,14 @@ left).
   command was given (operations spec §0). A server that takes requests from another host must
   not pass either on as it is. *Target: M11 (`serve`), M10. Found: the M1.6 consolidated review
   (error contract).*
+- **A request takes the memory its type holds.** The MCP server reads of a message line, at
+  most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
+  so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A
+  request type's own fields are built in full, though: a long list of short strings (`blob_has`
+  ids) or a map of small entries (`land` resolutions) takes up to about 15 times its text, near
+  1 GiB for a line at the cap, before the operation refuses what is not an id or a resolution;
+  the CLI reads `--changes` and `--resolve` the same way. *Unscheduled. Found: the 2026-10-20
+  security audit.*
 
 ## Git import and export
 
