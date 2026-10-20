@@ -2391,7 +2391,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_GIT_UNSUPPORTED",
-          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a commit of more than 255 parents, or an entry whose mode is no kind of entry;\n`details.reason` says which (`object_format`, `ref_storage`, `shallow`, `parents`,\n`mode`), and `details.commit` names the commit of the last two.",
+          "description": "`git import` does not read the source: a SHA-256 repository, reftable refs, a shallow\nclone, a FIFO, a socket or a device where it reads a file of the git directory, a commit\nof more than 255 parents, or an entry whose mode is no kind of entry; `details.reason`\nsays which (`object_format`, `ref_storage`, `shallow`, `special_file`, `parents`,\n`mode`), `details.file` names the file of `special_file` by its path in the git\ndirectory, and `details.commit` names the commit of the last two.",
           "type": "string"
         },
         {

@@ -562,7 +562,8 @@ fn source_error(e: SourceError, message: String, git_path: &str, git_ref: &str) 
 }
 
 /// `E_GIT_UNSUPPORTED`: the repository at `git_path` is one the git side does not read or write
-/// as it is, `why` (a SHA-256 repository, reftable refs, a shallow clone, which a hint deepens).
+/// as it is, `why` (a SHA-256 repository, reftable refs, a shallow clone, which a hint deepens, a
+/// FIFO, a socket or a device where it reads a file of the git directory, which it names).
 fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
     let found = match why {
         Unsupported::ObjectFormat(format) => details([
@@ -573,6 +574,9 @@ fn unsupported(why: Unsupported, message: String, git_path: &str) -> OpError {
             ("reason", "ref_storage".into()),
             ("ref_storage", storage.into()),
         ]),
+        Unsupported::SpecialFile(file) => {
+            details([("reason", "special_file".into()), ("file", file.into())])
+        }
         Unsupported::Shallow => {
             return error(ErrorCode::GitUnsupported, message)
                 .with_details(details([("reason", "shallow".into())]))
@@ -1653,6 +1657,10 @@ mod tests {
         let error = git_maps(shallow, ErrorCode::GitUnsupported, &want);
         let deepen = "git -C /nonexistent/swarmops-test/repo.git fetch --unshallow";
         assert_eq!(error.hint.as_deref(), Some(deepen));
+        let special = unsupported(Unsupported::SpecialFile("refs/heads/main".into()));
+        let want = json!({"reason": "special_file", "file": "refs/heads/main"});
+        let error = git_maps(special, ErrorCode::GitUnsupported, &want);
+        assert_eq!(error.hint, None);
 
         let object = OBJECT.to_string();
         let walked: fn(SourceError) -> ImportError = ImportError::Source;
@@ -2011,6 +2019,13 @@ mod tests {
         let want = json!({"reason": "object_format", "object_format": "sha256"});
         export_maps(
             sink(SinkError::Unsupported(sha256)),
+            ErrorCode::GitUnsupported,
+            &want,
+        );
+        let special = Unsupported::SpecialFile("config".into());
+        let want = json!({"reason": "special_file", "file": "config"});
+        export_maps(
+            sink(SinkError::Unsupported(special)),
             ErrorCode::GitUnsupported,
             &want,
         );

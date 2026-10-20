@@ -146,9 +146,11 @@ error_codes! {
     /// commit, and the target ref does not move.
     GitImportLossy => "E_GIT_IMPORT_LOSSY", EXIT_ERROR, false;
     /// `git import` does not read the source: a SHA-256 repository, reftable refs, a shallow
-    /// clone, a commit of more than 255 parents, or an entry whose mode is no kind of entry;
-    /// `details.reason` says which (`object_format`, `ref_storage`, `shallow`, `parents`,
-    /// `mode`), and `details.commit` names the commit of the last two.
+    /// clone, a FIFO, a socket or a device where it reads a file of the git directory, a commit
+    /// of more than 255 parents, or an entry whose mode is no kind of entry; `details.reason`
+    /// says which (`object_format`, `ref_storage`, `shallow`, `special_file`, `parents`,
+    /// `mode`), `details.file` names the file of `special_file` by its path in the git
+    /// directory, and `details.commit` names the commit of the last two.
     GitUnsupported => "E_GIT_UNSUPPORTED", EXIT_ERROR, false;
     /// `git import` could not read the source: an object is missing (as in a partial clone),
     /// does not hash to its id or does not parse, or the filesystem refused a read
