@@ -1158,6 +1158,22 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   import onto a target reads the head's whole tree, and onto a native head the whole history below
   it ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
+- A `git import` took an external id entry (`meta/external_ids/git/`) as the truth about which
+  changeset a commit is, once the store held the changeset it named: an entry placed there whole
+  and with its checksum right could make the import take a commit of the source for the target's
+  head, or for any other changeset, and record the commits made on it on that changeset, a history
+  git does not have, and move the target, with exit 0, no warning and nothing for `verify` to
+  report. The import now takes an entry only where its changeset stands for the commit: its
+  `git.oid` is that commit, or its export oid, derived from the store's own objects as the export
+  derives it, is. Any other entry is passed over with a warning, as a damaged one is, and its
+  commit converted again; an import whose base check then fails is `E_GIT_IMPORT_DIVERGED` and
+  names the first such entry (`details.external_id`, with `commit` and `changeset`; hint
+  `swarmops verify --deep`), with nothing written. `verify --deep` now also checks the entry of
+  each changeset made in the store against the commit that changeset exports to, and reports one
+  that names another (`external_id_mismatch`). An import whose walk meets an entry an export wrote
+  derives that export oid with the history below it
+  ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
+  head's whole tree, and onto a native head the whole history below it").
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.1.0...stable
 [0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0

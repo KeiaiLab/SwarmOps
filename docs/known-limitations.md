@@ -285,11 +285,14 @@ left).
   a derivation's older versions, and those about objects nothing names any more. A damaged value
   file that the store fails to remove reads as missing, and is derived again, on every read.
   *Target: M6 (`gc`). Found: M2 Task 5.*
-- **A damaged external id entry stays until it is removed by hand.** `verify` reports it
-  (`external_id_corrupt`), but nothing removes it, and a put never replaces a file, so its id
-  stays unmapped while it is there. The index is a cache: what that costs is the work its writer
-  does again (the git import converts that commit again, and finds its changeset in the store).
-  *Target: M6 (fsck). Found: M3 Task 6.*
+- **A damaged or wrong external id entry stays until it is removed by hand.** `verify` reports a
+  damaged one (`external_id_corrupt`), and one whose changeset does not stand for its commit
+  (`external_id_mismatch`; `verify --deep` finds it where the changeset was made in the store),
+  but nothing removes either, and a put never replaces a file, so its id stays unmapped while it
+  is there. The index is a cache: what that costs is the work its writer does again (the git
+  import passes over the entry with a warning and converts that commit again, into the changeset
+  the store holds for it if there is one). *Target: M6 (fsck). Found: M3 Task 6; the wrong entry,
+  the 2026-10-20 security review's re-verification of the git import.*
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
   and checks each sorted-view entry with its own reads (about 9 million reads at a million
   changesets, about 9 per changeset: each index record, and each entry of both sorted views, is
@@ -528,10 +531,14 @@ left).
   In a release build on NVMe, at a load of about 20, an import of one commit onto an imported head
   of 2,000 small files takes 0.08 s (0.07 s before), and onto one of 2,000 files of 64 KiB 0.18 s
   (0.07 s); onto a native head above 12,000 imported commits it takes 0.31 to 0.36 s, about 25 µs
-  a changeset, where trusting the memo took 0.05 s. A fresh import costs what it did. An object
+  a changeset, where trusting the memo took 0.05 s. A fresh import costs what it did. An import
+  whose walk meets the external id entry of a changeset made in the store, which an export wrote,
+  derives that changeset's export oid the same way, once a run, to check the entry: at a load of
+  about 30, one commit made on the export of a changeset with 14,000 below it, imported into a
+  target of its own, takes 0.36 to 0.46 s, where trusting the entry took 0.06 s. An object
   missing or damaged in that tree or history fails the import (`E_STORE_CORRUPT`, which `verify`
   lists) until it is restored. *Unscheduled: an authenticated cache. Found: the 2026-10-20
-  security review's re-verification of the git export.*
+  security review's re-verification of the git export, and of the git import.*
 - **A crash while an export moves its branch leaves the branch's lock.** An export that dies
   between taking `refs/heads/<branch>.lock` and renaming it onto the branch leaves the lock file,
   as git does: every later export of that branch, and git itself, refuses the branch
