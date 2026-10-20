@@ -451,27 +451,45 @@ fn bulk_chain(root: &Utf8Path, n: usize, files: &[(&str, &[u8])]) -> Vec<Changes
     ids
 }
 
-/// The calls of `calls` that read a skip list, and whether every call it made is one: a walk that
-/// derives nothing makes no other filesystem call (the index is read through its own handles).
-fn skip_list_reads(calls: &[String]) -> usize {
+/// The calls of `calls` that read a skip list, and whether every other call it made reads the
+/// object of one of `objects`, in their order, in the store at `root`: a walk that derives nothing
+/// makes no other filesystem call (the index is read through its own handles) but the read of the
+/// changeset a lift of `is_ancestor` or `merge_base` stops at, for its first parent.
+fn skip_list_reads(calls: &[String], root: &Utf8Path, objects: &[ChangesetId]) -> usize {
     let prefix = format!(
         "read meta/derived/{}/{}/",
         FirstParentSkipList::NAME,
         FirstParentSkipList::VERSION
     );
-    assert!(
-        calls.iter().all(|call| call.starts_with(&prefix)),
-        "only skip-list reads: {calls:?}"
+    let (lists, others): (Vec<&String>, Vec<&String>) =
+        calls.iter().partition(|call| call.starts_with(&prefix));
+    let layout = Layout::new(root);
+    let objects: Vec<String> = objects
+        .iter()
+        .map(|cs| {
+            format!(
+                "read {}",
+                layout.object_path(cs.0).strip_prefix(root).unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(
+        others,
+        objects.iter().collect::<Vec<_>>(),
+        "only skip-list reads besides those objects: {calls:?}"
     );
-    calls.len()
+    lists.len()
 }
 
 /// On a chain of 3,000 changesets, a gap of `SKIP_AFTER` generations is walked one first parent
 /// at a time, a changeset object read each (no walk takes the parents an index record names),
 /// and touches no derived value; `is_ancestor(root, head)`, across 2,999, lifts along the skip
 /// list: on a cold store it derives the list of every changeset of the chain (one file each),
-/// and answers `true`; asked again in a new snapshot, it derives nothing and reads at most
-/// ⌊log2 2,999⌋ + 1 = 12 lists, as do `ancestor(head, 2,999)` and `merge_base(head, root)`.
+/// and answers `true`; asked again in a new snapshot, it derives nothing and reads at most two
+/// lists for each of its ⌊log2 2,999⌋ + 1 = 12 jumps at most (the list of where it lands, and the
+/// list one level down that vouches for the jump), as do `ancestor(head, 2,999)` and
+/// `merge_base(head, root)`. A lift of `is_ancestor` or `merge_base` also reads the object of the
+/// changeset it stops at, whose first parent shows that the lift went as far as it could.
 #[test]
 fn a_long_gap_lifts_along_the_skip_list() {
     const N: usize = 3_000;
@@ -515,22 +533,22 @@ fn a_long_gap_lifts_along_the_skip_list() {
     let read = repo.snapshot().unwrap();
     calls();
     assert!(read.is_ancestor(c[0], head).unwrap());
-    let reads = skip_list_reads(&calls());
-    assert!((1..=12).contains(&reads), "{reads} lists read");
+    let reads = skip_list_reads(&calls(), &root, &[c[0]]);
+    assert!((1..=2 * 12).contains(&reads), "{reads} lists read");
     assert!(!read.is_ancestor(c[1], c[0]).unwrap());
     assert!(read.is_ancestor(c[1], head).unwrap());
-    assert!(skip_list_reads(&calls()) <= 2 * 12);
+    assert!(skip_list_reads(&calls(), &root, &[c[1]]) <= 2 * 2 * 12);
     assert_eq!(read.ancestor(head, gap).unwrap(), Some(c[0]));
     assert_eq!(read.ancestor(head, gap + 1).unwrap(), None);
     assert_eq!(read.ancestor(head, gap - 1).unwrap(), Some(c[1]));
     assert_eq!(read.ancestor(head, 2_000).unwrap(), Some(c[N - 1 - 2_000]));
-    assert!(skip_list_reads(&calls()) <= 4 * 12);
+    assert!(skip_list_reads(&calls(), &root, &[]) <= 4 * 2 * 12);
     assert_eq!(read.merge_base(head, c[0]).unwrap(), Some(c[0]));
     assert_eq!(read.merge_base(c[1_500], head).unwrap(), Some(c[1_500]));
-    assert!(skip_list_reads(&calls()) <= 2 * 12);
+    assert!(skip_list_reads(&calls(), &root, &[c[0], c[1_500]]) <= 2 * 2 * 12);
     assert_eq!(read.resolve("main~2999").unwrap(), c[0]);
     assert_eq!(read.resolve("main~1999~1000").unwrap(), c[0]);
-    assert!(skip_list_reads(&calls()) <= 2 * 12);
+    assert!(skip_list_reads(&calls(), &root, &[]) <= 2 * 2 * 12);
     assert_eq!(skip_lists(&root).len(), N, "nothing derived since");
 }
 
@@ -577,4 +595,190 @@ fn p50(mut f: impl FnMut()) -> Duration {
         .collect();
     times.sort_unstable();
     measure::percentile(&times, 50)
+}
+
+/// Skip lists placed in a store (whole, their trailers right), and the walks that read them,
+/// lifting past 0 generations (the `test-hooks` threshold): see
+/// [`a_crafted_skip_list_is_refused_not_walked`].
+#[cfg(feature = "test-hooks")]
+mod crafted_skip_lists {
+    use swarmops_repo::{RepoError, VerifyProblem};
+    use swarmops_store::{DerivedSlot, Layout};
+
+    use super::*;
+
+    /// A chain `c` of 41 changesets and a side branch `s` of 3 off `c[3]`, every list derived.
+    struct Lists {
+        _dir: TempDir,
+        root: Utf8PathBuf,
+        repo: LocalRepo,
+        c: Vec<ChangesetId>,
+        s: Vec<ChangesetId>,
+    }
+
+    impl Lists {
+        fn derived() -> Lists {
+            let (dir, root, repo) = unsynced_repo();
+            let c = chain_on(&repo, None, 41, "c");
+            let s = chain_on(&repo, Some(c[3]), 3, "s");
+            for &cs in c.iter().chain(&s) {
+                repo.derived::<FirstParentSkipList>(cs, &()).unwrap();
+            }
+            Lists {
+                _dir: dir,
+                root,
+                repo,
+                c,
+                s,
+            }
+        }
+
+        /// The file of `cs`'s list.
+        fn file(&self, cs: ChangesetId) -> Utf8PathBuf {
+            let slot = DerivedSlot {
+                name: FirstParentSkipList::NAME,
+                version: FirstParentSkipList::VERSION,
+                subject: cs.0,
+                key: &[],
+            };
+            Layout::new(&self.root).derived_path(&slot)
+        }
+
+        /// Places a list of `ids` for `cs` in place of its file, as a put writes it; the bytes
+        /// of the file it replaced.
+        fn place(&self, cs: ChangesetId, ids: &[ChangesetId]) -> Vec<u8> {
+            let mut value = vec![u8::try_from(ids.len()).unwrap()];
+            for id in ids {
+                value.extend(id.0.0);
+            }
+            let file = self.file(cs);
+            let kept = fs::read(&file).unwrap();
+            fs::remove_file(&file).unwrap();
+            let slot = DerivedSlot {
+                name: FirstParentSkipList::NAME,
+                version: FirstParentSkipList::VERSION,
+                subject: cs.0,
+                key: &[],
+            };
+            assert!(self.repo.derived_store().put(&slot, &value).unwrap());
+            kept
+        }
+
+        /// The true list of `c[i]`: `c[i - 1]`, `c[i - 2]`, `c[i - 4]`, … while the chain lasts.
+        fn list_of(&self, i: usize) -> Vec<ChangesetId> {
+            let ups = (0..).map(|level| 1 << level).take_while(|&up| up <= i);
+            ups.map(|up| self.c[i - up]).collect()
+        }
+
+        /// `c[40]`'s true list with entry 3 (8 steps back) `id`.
+        fn entry_3(&self, id: ChangesetId) -> Vec<ChangesetId> {
+            let list = self.list_of(40);
+            [&list[..3], &[id], &list[4..]].concat()
+        }
+    }
+
+    /// Asserts that `got` is `DerivedCorrupt` for `cs`'s skip list.
+    #[track_caller]
+    fn refused(got: Result<(), RepoError>, cs: ChangesetId, what: &str) {
+        match got {
+            Err(RepoError::DerivedCorrupt {
+                name, changeset, ..
+            }) => {
+                let found = (name.as_str(), changeset);
+                assert_eq!(found, ("first_parent_skip_list", cs), "{what}");
+            }
+            other => panic!("{what}: expected DerivedCorrupt, got {other:?}"),
+        }
+    }
+
+    /// A list placed for `c[40]` (or `c[2]`) that a walk's checks find wrong is `DerivedCorrupt`,
+    /// naming the derivation and the changeset whose list it is, never a walk off the chain:
+    /// entry 0 not the first parent; more entries than the generation leaves room for; an entry
+    /// the store does not hold; a jump of 8 steps to a changeset 6 generations down, which entry
+    /// 2 of the list of its (wrong) entry 2 agrees with; a jump to a side-branch changeset low
+    /// enough for it, which entry 2 of the list of entry 2 contradicts; and a list cut short,
+    /// which a jump past its end, and a lift (of `is_ancestor` and of `merge_base`) that stops
+    /// short, find out. With the true list back, the walks agree with the chain.
+    #[test]
+    fn a_crafted_skip_list_is_refused_not_walked() {
+        let lists = Lists::derived();
+        let (c, s) = (&lists.c, &lists.s);
+        let unknown = unknown_id();
+        let cases: [(ChangesetId, Vec<ChangesetId>, u64, &str); 6] = [
+            (
+                c[40],
+                [&[c[38]][..], &lists.list_of(40)[1..]].concat(),
+                8,
+                "entry 0 not the parent",
+            ),
+            (c[2], vec![c[1], c[0], c[0]], 1, "too many for generation 3"),
+            (c[40], lists.entry_3(unknown), 8, "no such entry"),
+            (
+                c[40],
+                vec![c[39], c[38], c[38], c[34], c[24], c[8]],
+                8,
+                "8 steps, 6 generations down, as the list of its entry 2 says",
+            ),
+            (c[40], lists.entry_3(s[1]), 8, "on a side branch"),
+            (c[40], lists.list_of(40)[..3].to_vec(), 8, "cut short"),
+        ];
+        for (cs, list, n, what) in cases {
+            let kept = lists.place(cs, &list);
+            let read = lists.repo.snapshot().unwrap();
+            refused(read.ancestor_with_skip_after(cs, n, 0).map(drop), cs, what);
+            if what == "cut short" {
+                let lift = read.is_ancestor_with_skip_after(c[0], cs, 0).map(drop);
+                refused(lift, cs, "a lift that stops short");
+                let base = read.merge_base_with_skip_after(cs, c[0], 0).map(drop);
+                refused(base, cs, "a merge base's lift that stops short");
+            }
+            fs::write(lists.file(cs), kept).unwrap();
+        }
+        let read = lists.repo.snapshot().unwrap();
+        assert_eq!(
+            read.ancestor_with_skip_after(c[40], 8, 0).unwrap(),
+            Some(c[32])
+        );
+        assert!(read.is_ancestor_with_skip_after(c[0], c[40], 0).unwrap());
+        let base = read.merge_base_with_skip_after(c[40], s[2], 0).unwrap();
+        assert_eq!(base, Some(c[3]));
+    }
+
+    /// Two lists made to agree with each other, `c[40]`'s entry 3 on the side branch and entry 2
+    /// of the list of its entry 2, which vouches for it, pass a walk's checks, and the walk names
+    /// the side branch's changeset: what the checks one level down cannot tell. A deep verify
+    /// reports both lists; without them, the walk is right again.
+    #[test]
+    fn skip_lists_made_to_agree_pass_a_walk_and_fail_verify() {
+        let lists = Lists::derived();
+        let (c, s) = (&lists.c, &lists.s);
+        let head_list = lists.place(c[40], &lists.entry_3(s[1]));
+        let thirty_six = lists.list_of(36);
+        lists.place(
+            c[36],
+            &[&thirty_six[..2], &[s[1]], &thirty_six[3..]].concat(),
+        );
+        let read = lists.repo.snapshot().unwrap();
+        assert_eq!(
+            read.ancestor_with_skip_after(c[40], 8, 0).unwrap(),
+            Some(s[1])
+        );
+        let mut agreeing = [c[36], c[40]];
+        agreeing.sort_unstable();
+        let want = agreeing.map(|cs| VerifyProblem::DerivedMismatch {
+            name: "first_parent_skip_list".to_owned(),
+            changeset: cs,
+            key: Vec::new(),
+        });
+        assert_eq!(lists.repo.verify(true).unwrap().problems, want);
+
+        fs::write(lists.file(c[40]), head_list).unwrap();
+        fs::remove_file(lists.file(c[36])).unwrap();
+        let read = lists.repo.snapshot().unwrap();
+        assert_eq!(
+            read.ancestor_with_skip_after(c[40], 8, 0).unwrap(),
+            Some(c[32])
+        );
+        assert_eq!(lists.repo.verify(true).unwrap().problems, Vec::new());
+    }
 }

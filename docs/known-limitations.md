@@ -216,7 +216,9 @@ left).
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
   and checks each sorted-view entry with its own reads (about 9 million reads at a million
   changesets, about 9 per changeset: each index record, and each entry of both sorted views, is
-  read on its own). *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
+  read on its own). A deep check of a store with derived values also holds the first-parent
+  forest (a few words per changeset) and every `last_modified` value the store holds.
+  *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
 - **`verify`'s report has no cap.** `problems` and `findings` list every problem found, a line
   and a finding each, and a failed verify's `E_STORE_CORRUPT` carries the whole report in
   `details`, so a store damaged in many places gives a response as long as its damage, twice
@@ -240,8 +242,12 @@ left).
   too (`E_STORE_CORRUPT`, which `verify --deep` lists), before more than 64 MiB is reserved for
   its output, beside the decoder's window, which the frame's header sets up to zstd's default
   limit of 128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store
-  can hold one. Streamed reads would bound `cat` below 512 MiB. *Target: M2 (streamed reads); M3
-  Task 4 set the bound. Found: M1 Task 1; the 2026-10-16 code review.*
+  can hold one. A derived value's file (`meta/derived/`) over 4 KiB is a zstd frame too, decoded
+  whole before its trailer is checked, within the same bound: a header that records a value
+  longer than 512 MiB fails the file's checks before anything is decoded or allocated for it, and
+  the file reads as missing. Streamed reads would bound `cat` below 512 MiB. *Target: M2
+  (streamed reads); M3 Task 4 set the bound. Found: M1 Task 1; the 2026-10-16 code review; for
+  derived values, the 2026-10-20 security review.*
 - **A huge `journal.log`, `journal.off`, index column or sorted view aborts a read.** The journal
   past the checkpoint and the `journal.off` entries from there (`read_upto`, `Journal::entries`;
   every read and write, and recovery's tail check and listed-chain walk), a column range
@@ -291,6 +297,21 @@ left).
   (`swarmops_repo::check_metadata`, which `Repo::commit` runs), so only a store written by other
   means, such as a crafted one, can hold such a pair; `show` then gives one of the two entries,
   and `verify` does not report it. *Unscheduled. Found: M1 Task 4b.*
+- **Crafted derived values that agree with each other are read as valid.** A file under
+  `meta/derived/` carries a checksum over its slot and value, not a signature, so anyone who can
+  write the store's files can place a whole file with any value. The readers check what they use
+  where they can without the walk the value saves: a skip list's first entry against the index,
+  its length against the generation, each jump against the generations and against the list one
+  level down, and where a lift or a list ends; a last touch's changeset against the snapshot, its
+  generation and its delta. One that fails is `E_STORE_CORRUPT`. Lists crafted to agree with each
+  other, and a last touch that names an older changeset that touched the path, pass those checks
+  and are read as valid, and the engine derives new values from them; `verify --deep` checks
+  every value of the built-in derivations against the objects and reports each one
+  (`derived_mismatch`), and removing `meta/derived/` has every value derived again. The values the
+  git export memoizes (`git_oid`, `git_tree_oid`, `git_blob_oid`) are checked by nothing yet. A
+  keyed trailer whose key lives outside the store would make a placed file fail its checks, at
+  the cost of a new layout version. *Target: M6 (`fsck --git` for the export's values; an
+  authenticated cache is unscheduled). Found: the 2026-10-20 security review.*
 
 ## Serving requests
 

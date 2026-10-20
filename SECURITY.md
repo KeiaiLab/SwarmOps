@@ -39,8 +39,9 @@ filesystem permissions are the access boundary. Within that model, these are vul
   without bound or return wrong data as valid. That covers object files
   (`objects/<2hex>/<62hex>`: the header, the zstd frame and the payload, which is checked against
   its id on every read), the journal (`meta/journal.log`, `journal.off`, `journal.ckpt`), the
-  changeset index (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/*`) and ref files
-  (`meta/refs/*`). These cases are known and tracked
+  changeset index (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/*`), ref files
+  (`meta/refs/*`) and derived values (`meta/derived/*`, a cache whose files carry a checksum
+  over their slot and value, not a signature). These cases are known and tracked
   ([docs/known-limitations.md](docs/known-limitations.md), "Hostile input"): an object whose
   zstd frame really decompresses to a large size (a compression bomb) is decompressed in full
   before its hash is checked, so reading it takes up to 512 MiB, the most an object holds (a
@@ -55,7 +56,14 @@ filesystem permissions are the access boundary. Within that model, these are vul
   `verify` reports the damage; and a
   `journal.log`, `journal.off`, index column or sorted view whose length is huge (sparse or
   crafted) is read into one buffer of that length, so a read allocates without bound and aborts
-  when the allocation fails instead of returning an error. `FORMAT`, `REPO` (an id and a name of
+  when the allocation fails instead of returning an error; and a derived value file crafted with
+  a value its derivation does not give, whole and with its trailer right, is refused by a reader
+  only where the reader's checks against the index and the objects tell (a skip list's first
+  entry, length and each jump against the list one level down; a last touch's changeset against
+  the path), and is otherwise read as valid until `verify --deep`, which checks every value of the
+  built-in derivations against the objects, reports it (removing `meta/derived/` has every value
+  derived again). A derived value's zstd frame is decoded whole within the object bound, 512
+  MiB. `FORMAT`, `REPO` (an id and a name of
   at most 255 bytes), `journal.ckpt` and the ref files are capped at their sizes, and a store
   file that is not a regular file is refused before it is opened.
 - **Requests.** Change lists, revisions and paths that get past their checks: a repository
@@ -97,8 +105,8 @@ filesystem permissions are the access boundary. Within that model, these are vul
   (`E_AUTH` is reserved for them).
 - **Anything a local user with write access to the store can do directly**: delete, rewrite or
   corrupt its files, hold its lock, fill its disk. Filesystem permissions are the boundary.
-  SwarmOps detecting such damage is in scope (`swarmops verify --deep` re-hashes every object);
-  preventing it is not.
+  SwarmOps detecting such damage is in scope (`swarmops verify --deep` re-hashes every object
+  and checks the derived values against them); preventing it is not.
 - **Reading files the caller can read.** A change list's `{"file": "<path>"}` content is read
   on the client, with the caller's own permissions, as any program the caller runs could read
   it; the stdio MCP server runs as its caller and reads it the same way. A server that takes

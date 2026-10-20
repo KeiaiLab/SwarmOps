@@ -36,8 +36,9 @@ pub use layout::{Layout, is_native_linux_fs};
 pub use meta::refs::check_ref_name;
 pub use meta::{
     BadRecord, CasResult, ChangesetMeta, CommitInfo, DerivedSlot, DerivedStore, Frame, Index,
-    InsertOutcome, Journal, JournalEntry, LogCut, MetaLock, MetaRead, MetaStore, MetaWrite, Record,
-    Recovered, RefFile, RefMoveEntry, RefState, SortedView, TailRepair,
+    InsertOutcome, Journal, JournalEntry, ListedValue, LogCut, MetaLock, MetaRead, MetaStore,
+    MetaWrite, Record, Recovered, RefFile, RefMoveEntry, RefState, SortedView, StoredValue,
+    TailRepair,
 };
 #[cfg(feature = "test-hooks")]
 pub use order_check::OrderCheckFs;

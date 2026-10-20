@@ -1021,8 +1021,10 @@ pub struct RefDeleteReq {
 /// `verify`: check the whole store's consistency.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct VerifyReq {
-    /// Re-hash every object. When `false`, verify checks structure only: parents, that
-    /// referenced objects exist, the index against the journal, and refs.
+    /// Re-hash every object, and check every derived value of the built-in derivations (the
+    /// first-parent skip lists, the last touches of paths) against the objects. When `false`,
+    /// verify checks structure only: parents, that referenced objects exist, the index against
+    /// the journal, and refs.
     #[serde(default)]
     pub deep: bool,
 }
@@ -1051,8 +1053,9 @@ pub struct VerifyReport {
 pub struct VerifyFinding {
     /// What is damaged: `corrupt_object`, `missing_object`, `missing_parent`, `root_mismatch`,
     /// `dangling_ref`, `corrupt_ref`, `index_mismatch`, `journal_corrupt`, `meta_corrupt`,
-    /// `external_id_corrupt`, `external_id_dangling` or `external_id_mismatch`. A string, as
-    /// `OpError.code` is, so that a client can read kinds newer than its own list.
+    /// `external_id_corrupt`, `external_id_dangling`, `external_id_mismatch` or
+    /// `derived_mismatch`. A string, as `OpError.code` is, so that a client can read kinds newer
+    /// than its own list.
     pub kind: String,
     /// The object: one whose content does not hash to its id or does not decode
     /// (`corrupt_object`), or one a changeset references that the store lacks, or holds as
@@ -1061,9 +1064,10 @@ pub struct VerifyFinding {
     pub object: Option<String>,
     /// The changeset: the first, in seq order, that references the missing object
     /// (`missing_object`), the one that names a missing parent (`missing_parent`), the one whose
-    /// root is not its first parent's root with its delta applied (`root_mismatch`), or the one
+    /// root is not its first parent's root with its delta applied (`root_mismatch`), the one
     /// an external id's entry names: not in the store (`external_id_dangling`), or with a
-    /// `git.oid` that is another oid than the entry's key (`external_id_mismatch`).
+    /// `git.oid` that is another oid than the entry's key (`external_id_mismatch`), or the one a
+    /// derived value is about (`derived_mismatch`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changeset: Option<String>,
     /// The parent the changeset names, which the store does not hold (`missing_parent`).
@@ -1089,10 +1093,17 @@ pub struct VerifyFinding {
     /// oids, or another (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
-    /// The external id whose entry it is, in lowercase hex: a git commit's oid for system `git`
-    /// (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`).
+    /// The key, in lowercase hex: the external id whose entry it is, a git commit's oid for
+    /// system `git` (`external_id_corrupt`, `external_id_dangling`, `external_id_mismatch`); or a
+    /// derived value's key, its postcard bytes, omitted for a derivation whose key is `()`
+    /// (`derived_mismatch`: a path's for `last_modified`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
+    /// The derivation whose stored value is not the one the objects give: `first_parent_skip_list`
+    /// or `last_modified` (`derived_mismatch`, which a deep verify finds). Removing the value's
+    /// file under `meta/derived/<derivation>/`, or all of `meta/derived/`, has it derived again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derivation: Option<String>,
 }
 
 fn default_git_ref() -> String {
