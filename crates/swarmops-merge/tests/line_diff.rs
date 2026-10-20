@@ -131,14 +131,14 @@ fn apply(before: &[u8], after: &[u8], hunks: &[Hunk]) -> Vec<u8> {
 proptest! {
     #[test]
     fn applying_the_hunks_to_before_gives_after((before, after) in sides()) {
-        let hunks = line_hunks(&before, &after);
+        let hunks = line_hunks(&before, &after).unwrap();
         prop_assert_eq!(apply(&before, &after, &hunks), after.clone());
         let stats = line_stats(&hunks);
         prop_assert_eq!(
             split_lines(&before).len() as u64 + stats.insertions,
             split_lines(&after).len() as u64 + stats.deletions
         );
-        prop_assert!(line_hunks(&before, &before).is_empty());
+        prop_assert!(line_hunks(&before, &before).unwrap().is_empty());
     }
 
     #[test]
@@ -146,7 +146,7 @@ proptest! {
         (before, after) in sides(),
         context in 0_u32..5,
     ) {
-        let hunks = line_hunks(&before, &after);
+        let hunks = line_hunks(&before, &after).unwrap();
         let shown = unified(&before, &after, &hunks, context);
         prop_assert_eq!(shown.is_empty(), hunks.is_empty());
         let (removed, added) = check_unified(&before, &after, &shown, context);
@@ -266,7 +266,9 @@ fn identical_inputs_have_no_hunks() {
         long.as_str(),
     ] {
         assert!(
-            line_hunks(text.as_bytes(), text.as_bytes()).is_empty(),
+            line_hunks(text.as_bytes(), text.as_bytes())
+                .unwrap()
+                .is_empty(),
             "{text:?}"
         );
         assert!(
@@ -287,7 +289,7 @@ fn a_last_line_without_a_newline_is_a_line() {
     let none: [&[u8]; 0] = [];
     assert_eq!(split_lines(b""), none);
     assert_eq!(
-        line_hunks(b"a\nb", b"a\nb\n"),
+        line_hunks(b"a\nb", b"a\nb\n").unwrap(),
         [Hunk {
             before: 1..2,
             after: 1..2
@@ -301,7 +303,7 @@ fn hunks_sit_where_git_places_them() {
     // that into one run of two inserted lines and a deleted last line (git 2.43.0, `git diff
     // --histogram -U0`, with its indent heuristic or without), and so does `line_hunks`.
     assert_eq!(
-        line_hunks(b"a\na", b"x\na\na\n"),
+        line_hunks(b"a\na", b"x\na\na\n").unwrap(),
         [
             Hunk {
                 before: 0..0,
@@ -318,7 +320,7 @@ fn hunks_sit_where_git_places_them() {
     let before = b"    x += 1;\nb\n}\n}\n    x += 1;\nif x {\n";
     let after = b"    x += 1;\nb\n}\n    x += 1;\nif x {\n";
     assert_eq!(
-        line_hunks(before, after),
+        line_hunks(before, after).unwrap(),
         [Hunk {
             before: 3..4,
             after: 3..3
@@ -343,7 +345,12 @@ fn headers(hunks: &[UnifiedHunk<'_>]) -> Vec<Header> {
 /// The unified hunks' headers of `before` against `after` with `context` lines.
 fn unified_headers(before: &str, after: &str, context: u32) -> Vec<Header> {
     let (before, after) = (before.as_bytes(), after.as_bytes());
-    headers(&unified(before, after, &line_hunks(before, after), context))
+    headers(&unified(
+        before,
+        after,
+        &line_hunks(before, after).unwrap(),
+        context,
+    ))
 }
 
 /// Lines `1\n` to `last\n`, the numbers in `changed` written `x<n>`.
@@ -371,7 +378,12 @@ fn unified_context_joins_close_hunks() {
     ];
     for (apart, expected) in cases {
         let after = numbered(20, &[6, 6 + apart]);
-        assert_eq!(line_hunks(before.as_bytes(), after.as_bytes()).len(), 2);
+        assert_eq!(
+            line_hunks(before.as_bytes(), after.as_bytes())
+                .unwrap()
+                .len(),
+            2
+        );
         assert_eq!(
             unified_headers(&before, &after, 3),
             expected,
@@ -403,7 +415,7 @@ fn unified_headers_match_git() {
     }
     // A hunk's lines as git prints them: each change's removed lines before its added lines.
     let (before, after) = (b"a\nb\nc", b"a\nb\nc\nd\n");
-    let shown = unified(before, after, &line_hunks(before, after), 3);
+    let shown = unified(before, after, &line_hunks(before, after).unwrap(), 3);
     assert_eq!(
         shown[0].lines,
         [
@@ -484,7 +496,7 @@ fn line_stats_count_removed_and_added_lines() {
         }
     );
     // b and c become x, y and z; e goes.
-    let hunks = line_hunks(b"a\nb\nc\nd\ne\n", b"a\nx\ny\nz\nd\n");
+    let hunks = line_hunks(b"a\nb\nc\nd\ne\n", b"a\nx\ny\nz\nd\n").unwrap();
     assert_eq!(
         line_stats(&hunks),
         LineStats {
@@ -492,4 +504,64 @@ fn line_stats_count_removed_and_added_lines() {
             deletions: 3
         }
     );
+}
+
+/// The line diff's bound: a side of more than `MAX_DIFF_LINES` lines or `MAX_DIFF_BYTES` bytes
+/// gets no hunks (`TooLarge`), whatever the other side holds, an empty one too; a side at the
+/// bound still gets them.
+mod bound {
+    use swarmops_merge::line_diff::{Hunk, MAX_DIFF_BYTES, MAX_DIFF_LINES, TooLarge, line_hunks};
+
+    /// `count` lines `<n>\n`, line `edited` written `edited\n`.
+    fn lines(count: usize, edited: usize) -> Vec<u8> {
+        let text: String = (0..count)
+            .map(|n| {
+                if n == edited {
+                    "edited\n".to_owned()
+                } else {
+                    format!("{n}\n")
+                }
+            })
+            .collect();
+        text.into_bytes()
+    }
+
+    /// The one hunk of an edit of line `at`.
+    fn edit_of(at: u32) -> Vec<Hunk> {
+        vec![Hunk {
+            before: at..at + 1,
+            after: at..at + 1,
+        }]
+    }
+
+    /// `MAX_DIFF_LINES` lines a side get their hunks; one line more, on either side, gets none,
+    /// with or without its last `\n`.
+    #[test]
+    fn a_side_past_max_diff_lines_gets_no_hunks() {
+        let at = lines(MAX_DIFF_LINES, usize::MAX);
+        let edited = lines(MAX_DIFF_LINES, 7);
+        assert_eq!(line_hunks(&at, &edited), Ok(edit_of(7)));
+        let past = lines(MAX_DIFF_LINES + 1, usize::MAX);
+        let unended = &past[..past.len() - 1];
+        for side in [&past[..], unended] {
+            assert_eq!(line_hunks(side, &edited), Err(TooLarge));
+            assert_eq!(line_hunks(&edited, side), Err(TooLarge));
+            assert_eq!(line_hunks(b"", side), Err(TooLarge));
+            assert_eq!(line_hunks(side, b""), Err(TooLarge));
+        }
+    }
+
+    /// `MAX_DIFF_BYTES` bytes a side, here in two lines, get their hunks; one byte more, on either
+    /// side, gets none.
+    #[test]
+    fn a_side_past_max_diff_bytes_gets_no_hunks() {
+        let line = |byte: u8| [vec![byte; MAX_DIFF_BYTES / 2 - 1], b"\n".to_vec()].concat();
+        let at = [line(b'a'), line(b'b')].concat();
+        let edited = [line(b'a'), line(b'c')].concat();
+        assert_eq!(at.len(), MAX_DIFF_BYTES);
+        assert_eq!(line_hunks(&at, &edited), Ok(edit_of(1)));
+        let past = [&at[..], b"d"].concat();
+        assert_eq!(line_hunks(&past, &edited), Err(TooLarge));
+        assert_eq!(line_hunks(&edited, &past), Err(TooLarge));
+    }
 }

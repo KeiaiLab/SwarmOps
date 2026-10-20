@@ -212,7 +212,8 @@ const MAX_LAND_KEY: usize = 64;
 ///   lines around each change. A `unified` page stops before the first file that would take
 ///   its files, as the JSON array they print as, past `max_bytes`; its first file comes all
 ///   the same, its hunks cut to the first ones that fit (`hunks_truncated`) when they alone
-///   would pass it.
+///   would pass it. Text with a side past the line diff's bound (more than 49,152 lines or
+///   8 MiB) gets no line diff: no line counts, and `hunks_truncated`, `unified` with no hunk.
 /// - `ref_set` and `ref_delete` move a ref by compare-and-swap, recorded for the caller's agent,
 ///   and decide every move under the store's lock, after the write's tail check, never from a
 ///   reader's snapshot. A move that finds the ref as it asks already (at `new` for `ref_set`,
@@ -717,7 +718,8 @@ fn diff_page(
 /// What a `diff` page says of `change` in `format`: its path and status; for `stat` and
 /// `unified`, read from the blobs of its two sides (a blob both share read once), whether it is
 /// binary and, for text, the lines it inserts and deletes; for `unified`, also its kinds, its
-/// blobs and, for text, its hunks with `context` unchanged lines around each change.
+/// blobs and, for text, its hunks with `context` unchanged lines around each change. Text past
+/// the line diff's bound gets neither line counts nor hunks: they are cut (`hunks_truncated`).
 fn file_diff(
     read: &Snapshot<'_>,
     change: &TreeChange,
@@ -773,8 +775,13 @@ fn file_diff(
     }
     let hunks = if shared {
         Vec::new()
+    } else if let Ok(hunks) = line_hunks(old, new) {
+        hunks
     } else {
-        line_hunks(old, new)
+        // A side past the line diff's bound (`TooLarge`): no line counts, and no hunk, cut.
+        file.hunks_truncated = Some(true);
+        file.hunks = (format == DiffFormat::Unified).then(Vec::new);
+        return Ok(file);
     };
     let stats = line_stats(&hunks);
     file.insertions = Some(stats.insertions);
@@ -824,7 +831,8 @@ fn diff_hunk(hunk: &UnifiedHunk<'_>) -> DiffHunk {
 
 /// Cuts `file`'s hunks to the first ones that fit with it in `room` bytes of JSON, and marks it
 /// cut (`hunks_truncated`); with room for none, it keeps none. A file without hunks to cut (a
-/// binary one, or one whose content did not change) stays as it is.
+/// binary one, one past the line diff's bound, or one whose content did not change) stays as it
+/// is.
 fn cut_hunks(file: &mut FileDiff, room: u64) {
     let hunks = match file.hunks.take() {
         Some(hunks) if !hunks.is_empty() => hunks,

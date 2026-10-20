@@ -4919,6 +4919,123 @@ mod diff {
         }
     }
 
+    /// A text file past the line diff's bound gets no line diff: `stat` and `unified` say it is
+    /// not binary, give no line counts and mark its hunks cut (`hunks_truncated`), `unified` with
+    /// no hunk, and still give its kinds and blobs. Here two files of 200,000 lines (past the
+    /// bound by their lines alone): one with a single line changed, one with every third line.
+    #[test]
+    fn a_text_file_past_the_line_diff_bound_has_no_hunks() {
+        let (_dir, _root, ops) = new_store();
+        let numbered = |edited: fn(usize) -> bool| -> String {
+            (0..200_000)
+                .map(|n| {
+                    if edited(n) {
+                        format!("edited {n}\n")
+                    } else {
+                        format!("line {n}\n")
+                    }
+                })
+                .collect()
+        };
+        let base = numbered(|_| false);
+        let c1 = commit(
+            &ops,
+            None,
+            vec![text("every_third.txt", &base), text("one.txt", &base)],
+        );
+        let c2 = commit(
+            &ops,
+            Some(&c1),
+            vec![
+                text("every_third.txt", &numbered(|n| n % 3 == 0)),
+                text("one.txt", &numbered(|n| n == 100_000)),
+            ],
+        );
+        let stat = |paths: &[&str]| {
+            let req = DiffReq {
+                paths: paths.iter().map(|&path| path.to_owned()).collect(),
+                ..diff_req(&c1, &c2, DiffFormat::Stat)
+            };
+            serde_json::to_value(ops.diff(req).unwrap().files).unwrap()
+        };
+        let cut = |path: &str| {
+            json!({
+                "path": path, "status": "modified", "binary": false, "hunks_truncated": true,
+            })
+        };
+        assert_eq!(stat(&["one.txt"]), json!([cut("one.txt")]));
+        assert_eq!(stat(&[]), json!([cut("every_third.txt"), cut("one.txt")]));
+        let unified = ops.diff(diff_req(&c1, &c2, DiffFormat::Unified)).unwrap();
+        assert_eq!(paths_of(&unified), ["every_third.txt", "one.txt"]);
+        for file in &unified.files {
+            assert_eq!(
+                (file.binary, file.insertions, file.deletions),
+                (Some(false), None, None),
+                "{}",
+                file.path
+            );
+            // Lengths, not hunks, which a failure would print whole.
+            assert_eq!(
+                (file.hunks.as_ref().map(Vec::len), file.hunks_truncated),
+                (Some(0), Some(true)),
+                "{}",
+                file.path
+            );
+            assert!(
+                file.new_kind.is_some() && file.new_blob.is_some() && file.old_blob.is_some(),
+                "{}",
+                file.path
+            );
+        }
+    }
+
+    /// The line diff's bound is `MAX_DIFF_LINES` lines a side: a text file of that many gets its
+    /// line counts, and with one line more, none (`hunks_truncated`).
+    #[test]
+    fn a_text_file_at_the_line_diff_bound_has_its_line_counts() {
+        use swarmops_repo::merge::line_diff::MAX_DIFF_LINES;
+
+        let (_dir, _root, ops) = new_store();
+        let numbered = |count: usize, edited: usize| -> String {
+            (0..count)
+                .map(|n| {
+                    if n == edited {
+                        "edited\n".to_owned()
+                    } else {
+                        format!("{n}\n")
+                    }
+                })
+                .collect()
+        };
+        let (at, past) = (MAX_DIFF_LINES, MAX_DIFF_LINES + 1);
+        let c1 = commit(
+            &ops,
+            None,
+            vec![
+                text("at.txt", &numbered(at, usize::MAX)),
+                text("past.txt", &numbered(past, usize::MAX)),
+            ],
+        );
+        let c2 = commit(
+            &ops,
+            Some(&c1),
+            vec![
+                text("at.txt", &numbered(at, 7)),
+                text("past.txt", &numbered(past, 7)),
+            ],
+        );
+        let stat = ops.diff(diff_req(&c1, &c2, DiffFormat::Stat)).unwrap();
+        assert_eq!(
+            serde_json::to_value(&stat.files).unwrap(),
+            json!([
+                {"path": "at.txt", "status": "modified", "binary": false,
+                 "insertions": 1, "deletions": 1},
+                {"path": "past.txt", "status": "modified", "binary": false,
+                 "hunks_truncated": true},
+            ])
+        );
+    }
+
     /// A default page stays under the operations spec's 64 KiB target for a response (§9) in
     /// every format: 5,000 changed files with 40-byte paths, each format's first page printed in
     /// the envelope the CLI prints it in.

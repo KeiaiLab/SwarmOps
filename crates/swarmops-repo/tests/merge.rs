@@ -654,6 +654,50 @@ fn a_symlink_changed_on_both_sides_is_binary() {
     );
 }
 
+/// A text file past the line diff's bound, which both sides changed, is a `binary` conflict with
+/// diff3 as the content merger, whatever its edits: here 200,000 lines (past the bound by their
+/// lines alone) with two edits far apart, which a line merge would take both of.
+#[test]
+fn a_text_file_past_the_line_diff_bound_is_binary() {
+    let (_dir, _root, repo) = unsynced_repo();
+    let numbered = |edited: usize, side: &str| -> Vec<u8> {
+        let text: String = (0..200_000)
+            .map(|n| {
+                if n == edited {
+                    format!("{side} {n}\n")
+                } else {
+                    format!("line {n}\n")
+                }
+            })
+            .collect();
+        text.into_bytes()
+    };
+    let (b, o, t) = (
+        numbered(usize::MAX, "base"),
+        numbered(10, "ours"),
+        numbered(190_000, "theirs"),
+    );
+    let [base, ours, theirs] = three(
+        &repo,
+        vec![put("big.txt", &b)],
+        vec![put("big.txt", &o)],
+        vec![put("big.txt", &t)],
+    );
+    let sides = (Some(file(&b)), Some(file(&o)), Some(file(&t)));
+    let outcome = repo.merge(base, ours, theirs).unwrap();
+    // Compared without the merged content, which a failure would print whole.
+    let merged = (
+        outcome.delta.len(),
+        outcome.new_blobs.len(),
+        outcome.auto_merged,
+    );
+    assert_eq!(merged, (0, 0, Vec::new()));
+    assert_eq!(
+        outcome.conflicts,
+        [conflict("big.txt", ConflictKind::Binary, sides)]
+    );
+}
+
 /// Ours deleted the only file of the directory `d`, theirs added another file to it: no conflict,
 /// the delta deletes ours' file, and `d` keeps theirs' file.
 #[test]
