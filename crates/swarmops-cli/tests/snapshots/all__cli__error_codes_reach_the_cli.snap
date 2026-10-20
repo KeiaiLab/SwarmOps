@@ -776,6 +776,172 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m ours --changes [tmp]/ours.json --parent [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[ours]",
+        "parent": "[c1]",
+        "root": "[id8]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m theirs --changes [tmp]/theirs.json --parent [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[theirs]",
+        "parent": "[c1]",
+        "root": "[id9]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set release/conflict [theirs] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "release/conflict",
+        "new": "[theirs]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[theirs]": "[theirs]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land main",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "land",
+      "api": 1,
+      "error": {
+        "code": "E_NOTHING_TO_LAND",
+        "message": "nothing to land: the head is on the target",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "reason": "on_target"
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land [ours] --target release/conflict",
+    "exit": 3,
+    "stdout": {
+      "ok": false,
+      "op": "land",
+      "api": 1,
+      "error": {
+        "code": "E_CONFLICT",
+        "message": "1 path(s) of the change conflict with the target's head [theirs]: nothing was recorded",
+        "retryable": false,
+        "exit": 3,
+        "details": {
+          "report": {
+            "base": "[c1]",
+            "files": [
+              {
+                "base_blob": "[id10]",
+                "hunks": [
+                  {
+                    "base": {
+                      "first": 1,
+                      "last": 1,
+                      "text": "pub fn f() {}\n"
+                    },
+                    "id": 0,
+                    "ours": {
+                      "first": 1,
+                      "last": 1,
+                      "text": "pub fn ours() {}\n"
+                    },
+                    "theirs": {
+                      "first": 1,
+                      "last": 1,
+                      "text": "pub fn theirs() {}\n"
+                    }
+                  }
+                ],
+                "kind": "content",
+                "ours_blob": "[id11]",
+                "path": "src/lib.rs",
+                "theirs_agent": "agent/worker-17",
+                "theirs_blob": "[id12]",
+                "theirs_changeset": "[theirs]"
+              }
+            ],
+            "kinds": [
+              "content"
+            ],
+            "ours": "[ours]",
+            "theirs": "[theirs]",
+            "truncated": false
+          }
+        },
+        "hint": "swarmops cat [theirs]:src/lib.rs, then swarmops land [ours] --resolve <file> with each path's resolution and against = [theirs]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[ours]": "[ours]",
+          "release/conflict": "[theirs]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store verify",
     "exit": 1,
     "stdout": {
@@ -784,21 +950,21 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_STORE_CORRUPT",
-        "message": "verify found a problem: object [id8] is missing; changeset [c1] references it",
+        "message": "verify found a problem: object [id10] is missing; changeset [c1] references it",
         "retryable": false,
         "exit": 1,
         "details": {
-          "changesets_checked": 2,
+          "changesets_checked": 4,
           "findings": [
             {
               "changeset": "[c1]",
               "kind": "missing_object",
-              "object": "[id8]"
+              "object": "[id10]"
             }
           ],
-          "objects_checked": 8,
+          "objects_checked": 16,
           "problems": [
-            "object [id8] is missing; changeset [c1] references it"
+            "object [id10] is missing; changeset [c1] references it"
           ]
         },
         "hint": "swarmops verify --deep"

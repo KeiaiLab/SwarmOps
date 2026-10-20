@@ -172,14 +172,12 @@ pub enum RepoError {
         /// made. Boxed, as for [`RepoError::RefMoved`].
         recovered: Box<Recovered>,
     },
-    /// A land's change conflicts with the target's head: the merge's conflicts, with what the
-    /// report of them needs ([`MergeConflicts`]). Nothing was recorded; resolve them, then land
-    /// again. Boxed, as the conflicts would otherwise make every result this large.
-    #[error(
-        "{} path(s) of the change conflict with the target's head {}: nothing was recorded",
-        .0.conflicts.len(),
-        .0.theirs
-    )]
+    /// A land's change conflicts with the target's head, or some of its resolutions did not
+    /// apply, since the target's head holds their paths otherwise than their `against`: the
+    /// merge's conflicts and the stale paths, with what the report of them needs
+    /// ([`MergeConflicts`]). Nothing was recorded; resolve them, then land again. Boxed, as the
+    /// conflicts would otherwise make every result this large.
+    #[error("{}", conflict_message(.0))]
     Conflict(Box<MergeConflicts>),
     /// A land has nothing to add to the target: its head is on the target's first-parent chain,
     /// or the target holds its change already ([`NothingToLandReason`]). Nothing was recorded.
@@ -230,6 +228,27 @@ pub enum RepoError {
         /// The target's head.
         theirs: ChangesetId,
     },
+}
+
+/// [`RepoError::Conflict`]'s message: how many paths conflict with the target's head, and how
+/// many resolutions are stale.
+fn conflict_message(conflicts: &MergeConflicts) -> String {
+    let theirs = conflicts.theirs;
+    match (conflicts.conflicts.len(), conflicts.stale.len()) {
+        (n, 0) => format!(
+            "{n} path(s) of the change conflict with the target's head {theirs}: nothing was \
+             recorded"
+        ),
+        (0, stale) => format!(
+            "{stale} resolution(s) are stale, as the target's head {theirs} holds their path(s) \
+             otherwise than their against: nothing was recorded"
+        ),
+        (n, stale) => format!(
+            "{n} path(s) of the change conflict with the target's head {theirs}, and {stale} \
+             resolution(s) are stale, as it holds their path(s) otherwise than their against: \
+             nothing was recorded"
+        ),
+    }
 }
 
 /// A filesystem failure of the store's, located ([`StoreError::Io`]).

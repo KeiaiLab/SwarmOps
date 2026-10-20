@@ -1416,6 +1416,57 @@ pub struct LandReq {
     /// out (`truncated`), and the line positions and blob ids stay.
     #[serde(default = "default_max_conflict_bytes")]
     pub max_conflict_bytes: u64,
+    /// What to make of the paths an `E_CONFLICT` report named, decided without a checkout
+    /// (operations spec §3, resolution path (b)). Each resolution applies to its path while the
+    /// target holds there what `against` held, whether the path conflicts or not; a path the
+    /// target changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report
+    /// that names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses
+    /// an `against` that is not a full 64-hex id (`E_INVALID_ARG`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolutions: Option<ResolutionsInput>,
+}
+
+/// A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change
+/// onto the target, decided against one of the target's heads.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionsInput {
+    /// The target's head the resolutions were decided against: the conflict report's `theirs`,
+    /// by its full 64-hex id. A resolution applies while the target holds its path as this
+    /// changeset does (the same file, the same directory, or nothing).
+    pub against: Rev,
+    /// What to make of each path, by its repository path.
+    pub files: BTreeMap<String, ResolutionInput>,
+}
+
+/// What a land makes of one path, and of every path below it: exactly one of `take`, `content`
+/// and `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the
+/// merge as it merged.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct ResolutionInput {
+    /// What one side holds there: `ours`, the change's head, or `theirs`, the target's head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub take: Option<Side>,
+    /// One file of new content, given as a commit's change gives it (inline, base64, a client
+    /// file, or a stored blob by id), within a commit's limits; nothing below it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<ContentInput>,
+    /// The kind of the file `content` makes, only beside it; when omitted, the kind of the file
+    /// ours holds there, else theirs', else a regular file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<ModeInput>,
+    /// Nothing there: no file at the path, nor below it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete: bool,
+}
+
+/// One side of a land's merge.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum Side {
+    /// The change: its head.
+    Ours,
+    /// The target: its head when the land merges.
+    Theirs,
 }
 
 /// `land`: where the change landed. Ids are full.
@@ -1462,9 +1513,9 @@ pub enum LandStatus {
     Replayed,
 }
 
-/// Why a land could not merge its change onto the target, file by file (operations spec §3): the
-/// report `E_CONFLICT` carries in `details.report`. `ours` is the change, `theirs` the target.
-/// Ids are full.
+/// Why a land could not merge its change onto the target, file by file, or could not apply its
+/// resolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.
+/// `ours` is the change, `theirs` the target. Ids are full.
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 pub struct ConflictReport {
     /// The merge base: the changeset the change starts from.
@@ -1480,6 +1531,11 @@ pub struct ConflictReport {
     /// The paths both sides changed that merged cleanly. Omitted when empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub auto_merged: Vec<String>,
+    /// The paths whose resolutions did not apply, since the target holds there what their
+    /// `against` did not: the target changed them after the report the resolutions answered.
+    /// Read them at `theirs` and resolve them again, against it. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stale: Vec<String>,
     /// Whether hunk texts were left out to keep the report within the request's
     /// `max_conflict_bytes`; the line positions and blob ids are always there.
     pub truncated: bool,
@@ -1704,6 +1760,12 @@ pub trait StoreOps {
     /// caller names (M10 adds the client-side pass that turns it into bytes before a request
     /// leaves the client).
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError>;
+
+    /// Merges a change three-way onto a ref, `main` by default, and publishes the result there as
+    /// one new changeset, with the ref's move, in one transaction (CLI `land`). A change that
+    /// conflicts is `E_CONFLICT`, with the conflict report in `details.report`, and records
+    /// nothing.
+    fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError>;
 
     /// The changeset a revision names, and whether the revision is exactly a ref's name (CLI
     /// `resolve`).

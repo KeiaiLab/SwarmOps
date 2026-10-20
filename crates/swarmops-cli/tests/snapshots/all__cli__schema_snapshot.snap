@@ -1223,7 +1223,7 @@ expression: s.redact(&all)
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "description": "Why a land could not merge its change onto the target, file by file (operations spec §3): the\nreport `E_CONFLICT` carries in `details.report`. `ours` is the change, `theirs` the target.\nIds are full.",
+      "description": "Why a land could not merge its change onto the target, file by file, or could not apply its\nresolutions to it (operations spec §3): the report `E_CONFLICT` carries in `details.report`.\n`ours` is the change, `theirs` the target. Ids are full.",
       "properties": {
         "auto_merged": {
           "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
@@ -1253,6 +1253,13 @@ expression: s.redact(&all)
         "ours": {
           "description": "The change's head.",
           "type": "string"
+        },
+        "stale": {
+          "description": "The paths whose resolutions did not apply, since the target holds there what their\n`against` did not: the target changed them after the report the resolutions answered.\nRead them at `theirs` and resolve them again, against it. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "theirs": {
           "description": "The target's head the change was merged with.",
@@ -3397,9 +3404,165 @@ expression: s.redact(&all)
     },
     "LandReq": {
       "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "ResolutionInput": {
+          "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+            },
+            "delete": {
+              "description": "Nothing there: no file at the path, nor below it.",
+              "type": "boolean"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModeInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+            },
+            "take": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Side"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+            }
+          },
+          "type": "object"
+        },
+        "ResolutionsInput": {
+          "description": "A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change\nonto the target, decided against one of the target's heads.",
+          "properties": {
+            "against": {
+              "$ref": "#/$defs/Rev",
+              "description": "The target's head the resolutions were decided against: the conflict report's `theirs`,\nby its full 64-hex id. A resolution applies while the target holds its path as this\nchangeset does (the same file, the same directory, or nothing)."
+            },
+            "files": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ResolutionInput"
+              },
+              "description": "What to make of each path, by its repository path.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "against",
+            "files"
+          ],
+          "type": "object"
+        },
         "Rev": {
           "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
           "type": "string"
+        },
+        "Side": {
+          "description": "One side of a land's merge.",
+          "oneOf": [
+            {
+              "const": "ours",
+              "description": "The change: its head.",
+              "type": "string"
+            },
+            {
+              "const": "theirs",
+              "description": "The target: its head when the land merges.",
+              "type": "string"
+            }
+          ]
         }
       },
       "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -3448,6 +3611,17 @@ expression: s.redact(&all)
             "string",
             "null"
           ]
+        },
+        "resolutions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolutionsInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to make of the paths an `E_CONFLICT` report named, decided without a checkout\n(operations spec §3, resolution path (b)). Each resolution applies to its path while the\ntarget holds there what `against` held, whether the path conflicts or not; a path the\ntarget changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report\nthat names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses\nan `against` that is not a full 64-hex id (`E_INVALID_ARG`)."
         },
         "target": {
           "default": "main",
@@ -5329,6 +5503,309 @@ expression: s.redact(&all)
       "title": "RepoInfo",
       "type": "object"
     },
+    "ResolutionInput": {
+      "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "Side": {
+          "description": "One side of a land's merge.",
+          "oneOf": [
+            {
+              "const": "ours",
+              "description": "The change: its head.",
+              "type": "string"
+            },
+            {
+              "const": "theirs",
+              "description": "The target: its head when the land merges.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+      "properties": {
+        "content": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContentInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+        },
+        "delete": {
+          "description": "Nothing there: no file at the path, nor below it.",
+          "type": "boolean"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModeInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+        },
+        "take": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Side"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+        }
+      },
+      "title": "ResolutionInput",
+      "type": "object"
+    },
+    "ResolutionsInput": {
+      "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "ResolutionInput": {
+          "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+            },
+            "delete": {
+              "description": "Nothing there: no file at the path, nor below it.",
+              "type": "boolean"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModeInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+            },
+            "take": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Side"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+            }
+          },
+          "type": "object"
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        },
+        "Side": {
+          "description": "One side of a land's merge.",
+          "oneOf": [
+            {
+              "const": "ours",
+              "description": "The change: its head.",
+              "type": "string"
+            },
+            {
+              "const": "theirs",
+              "description": "The target: its head when the land merges.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change\nonto the target, decided against one of the target's heads.",
+      "properties": {
+        "against": {
+          "$ref": "#/$defs/Rev",
+          "description": "The target's head the resolutions were decided against: the conflict report's `theirs`,\nby its full 64-hex id. A resolution applies while the target holds its path as this\nchangeset does (the same file, the same directory, or nothing)."
+        },
+        "files": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ResolutionInput"
+          },
+          "description": "What to make of each path, by its repository path.",
+          "type": "object"
+        }
+      },
+      "required": [
+        "against",
+        "files"
+      ],
+      "title": "ResolutionsInput",
+      "type": "object"
+    },
     "ResolveRevReq": {
       "$defs": {
         "Rev": {
@@ -5437,6 +5914,23 @@ expression: s.redact(&all)
       ],
       "title": "ShowReq",
       "type": "object"
+    },
+    "Side": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One side of a land's merge.",
+      "oneOf": [
+        {
+          "const": "ours",
+          "description": "The change: its head.",
+          "type": "string"
+        },
+        {
+          "const": "theirs",
+          "description": "The target: its head when the land merges.",
+          "type": "string"
+        }
+      ],
+      "title": "Side"
     },
     "SignatureOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
