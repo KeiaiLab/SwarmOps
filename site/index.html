@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SwarmOps: source control for swarms of coding agents</title>
-  <meta name="description" content="SwarmOps is source control built for swarms of coding agents: many writers, one fully embedded store in Rust, and one JSON envelope per command. Pre-release.">
+  <title>SwarmOps: a git replacement for coding-agent swarms</title>
+  <meta name="description" content="A git replacement for swarms of coding agents: many agents commit into one embedded store at once, every command answers in JSON, and the work moves back to git. Pre-release.">
   <link rel="canonical" href="https://swarmops.cc/">
   <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0e14">
   <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
@@ -15,16 +15,16 @@
   <link rel="stylesheet" href="/styles.css">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="SwarmOps">
-  <meta property="og:title" content="SwarmOps: source control for swarms of coding agents">
-  <meta property="og:description" content="Many writers, one store, one JSON envelope per command. Fully embedded, written in Rust, pre-release.">
+  <meta property="og:title" content="SwarmOps: a git replacement for coding-agent swarms">
+  <meta property="og:description" content="A git replacement for coding-agent swarms. Many writers, one store, one JSON envelope per command. Fully embedded, written in Rust, pre-release.">
   <meta property="og:url" content="https://swarmops.cc/">
   <meta property="og:image" content="https://swarmops.cc/og-image.png">
   <meta property="og:image:width" content="1280">
   <meta property="og:image:height" content="640">
-  <meta property="og:image:alt" content="The SwarmOps logo beside its name and tagline: source control for swarms of coding agents.">
+  <meta property="og:image:alt" content="The SwarmOps logo beside its name and tagline.">
   <meta name="twitter:card" content="summary_large_image">
   <script type="application/ld+json">
-  {"@context":"https://schema.org","@graph":[{"@type":"WebSite","@id":"https://swarmops.cc/#website","name":"SwarmOps","url":"https://swarmops.cc/","description":"Source control for swarms of coding agents.","inLanguage":"en"},{"@type":"Organization","@id":"https://swarmops.cc/#org","name":"KeiaiLab","sameAs":["https://github.com/KeiaiLab"]},{"@type":"SoftwareSourceCode","@id":"https://swarmops.cc/#source","name":"SwarmOps","description":"Source control for swarms of coding agents: many writers, one fully embedded store, one JSON envelope per command.","url":"https://swarmops.cc/","codeRepository":"https://github.com/KeiaiLab/SwarmOps","programmingLanguage":"Rust","license":"https://spdx.org/licenses/MIT.html","runtimePlatform":"Linux","author":{"@id":"https://swarmops.cc/#org"}}]}
+  {"@context":"https://schema.org","@graph":[{"@type":"WebSite","@id":"https://swarmops.cc/#website","name":"SwarmOps","url":"https://swarmops.cc/","description":"A git replacement for coding-agent swarms.","inLanguage":"en"},{"@type":"Organization","@id":"https://swarmops.cc/#org","name":"KeiaiLab","sameAs":["https://github.com/KeiaiLab"]},{"@type":"SoftwareSourceCode","@id":"https://swarmops.cc/#source","name":"SwarmOps","description":"A git replacement for swarms of coding agents: many agents commit into one embedded store at once, every command answers in JSON, and the work moves back to git.","url":"https://swarmops.cc/","codeRepository":"https://github.com/KeiaiLab/SwarmOps","programmingLanguage":"Rust","license":"https://spdx.org/licenses/MIT.html","runtimePlatform":"Linux","author":{"@id":"https://swarmops.cc/#org"}}]}
   </script>
 </head>
 <body>
@@ -49,7 +49,7 @@
   <div class="wrap">
     <div>
       <span class="pill"><b>Pre-release</b> · milestone M8 · MIT licence</span>
-      <h1>Source control for <em>swarms of coding agents</em></h1>
+      <h1>A git replacement for <em>coding-agent swarms</em></h1>
       <p class="lead">Many writers, one store, one JSON envelope per command. SwarmOps is
         <strong>fully embedded</strong>, written in Rust: one program, no daemon, no external
         database, for 10 to 50 agent processes committing to one repository on one host.</p>
