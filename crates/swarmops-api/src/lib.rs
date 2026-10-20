@@ -18,16 +18,20 @@ pub use error::{ErrorCode, OpError};
 pub use identity::Identity;
 pub use ops::{
     Advanced, Attribution, ChangeInput, ChangeOp, ChangeOut, ChangesetDetail, ChangesetSummary,
-    CommitReq, CommitResp, ContentEncoding, ContentInput, DEFAULT_DERIVE_LIMIT,
-    DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
-    DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT,
-    DeriveReq, DeriveResp, Diff, DiffFormat, DiffHunk, DiffLineOut, DiffReq, DiffStatus,
-    EntryKindOut, FileContent, FileDiff, FileKind, GitExportReq, GitExportResp, GitImportReq,
-    GitImportResp, IdentityInfo, InfoReq, InitReq, LineOp, LineRange, LogPage, LogReq, LossyClass,
-    LossyCommitOut, MAX_TREE_DEPTH, ModeInput, PathHistoryEntry, PathHistoryPage, PathHistoryReq,
-    ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefListResp, RefOut, RefSetReq, RefSetResp,
-    RepoInfo, ShowReq, SignatureOut, Signatures, StoreOps, TreeEntryOut, TreeListing,
-    VerifyFinding, VerifyReport, VerifyReq,
+    CommitReq, CommitResp, ConflictKindOut, ConflictReport, ContentEncoding, ContentInput,
+    DEFAULT_DERIVE_LIMIT, DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES,
+    DEFAULT_LOG_LIMIT, DEFAULT_MAX_ATTEMPTS, DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES,
+    DEFAULT_MAX_CHANGESETS, DEFAULT_MAX_CONFLICT_BYTES, DEFAULT_OP_LOG_LIMIT,
+    DEFAULT_PATH_HISTORY_LIMIT, DEFAULT_READ_TREE_LIMIT, DeriveReq, DeriveResp, Diff, DiffFormat,
+    DiffHunk, DiffLineOut, DiffReq, DiffStatus, EntryKindOut, FileConflictOut, FileContent,
+    FileDiff, FileKind, GitExportReq, GitExportResp, GitImportReq, GitImportResp, HunkOut,
+    IdentityInfo, InfoReq, InitReq, LandReq, LandResp, LandStatus, LineOp, LineRange, LinesOut,
+    LogPage, LogReq, LossyClass, LossyCommitOut, MAX_LAND_ATTEMPTS, MAX_TREE_DEPTH, ModeInput,
+    OpChangesetOut, OpLogPage, OpLogReq, OperationKind, OperationOut, PathHistoryEntry,
+    PathHistoryPage, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq,
+    RefListResp, RefMoveOut, RefOut, RefSetReq, RefSetResp, RepoInfo, ShowReq, SignatureOut,
+    Signatures, StoreOps, TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding,
+    VerifyReport, VerifyReq,
 };
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
@@ -134,5 +138,22 @@ pub fn schema_for_all() -> serde_json::Value {
         // git export, which runs on the client too.
         GitExportReq,
         GitExportResp,
+        // land, op log, undo (M4).
+        LandReq,
+        LandResp,
+        LandStatus,
+        ConflictReport,
+        FileConflictOut,
+        ConflictKindOut,
+        HunkOut,
+        LinesOut,
+        OpLogReq,
+        OpLogPage,
+        OperationOut,
+        OperationKind,
+        OpChangesetOut,
+        RefMoveOut,
+        UndoReq,
+        UndoResp,
     ]
 }

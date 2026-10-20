@@ -233,8 +233,9 @@ pub enum ImportError {
         .last.map_or_else(String::new, |last| format!(", the last {last}"))
     )]
     Store {
-        /// The failure.
-        source: RepoError,
+        /// The failure, boxed: a [`RepoError`] beside the import's progress would make every
+        /// result of the import as large as both.
+        source: Box<RepoError>,
         /// How many commits the frames that committed recorded.
         imported: u64,
         /// The last commit of the last frame that committed; `None` if none did.
@@ -946,7 +947,7 @@ impl<'a, 's> Run<'a, 's> {
 /// The import's failure `source`, after `imported` commits, the last of them `last`.
 fn stopped(source: RepoError, imported: u64, last: Option<GitOid>) -> ImportError {
     ImportError::Store {
-        source,
+        source: Box::new(source),
         imported,
         last,
     }

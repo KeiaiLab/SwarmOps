@@ -279,9 +279,9 @@ fn sweep_checked(template: &Store, what: &str, args: impl Fn(&Store) -> Vec<Stri
 /// and the repository's sweeps wrap their crashing child's filesystem in it, and the one their
 /// parent recovers on, so a write that breaks a rule panics in the run crashed at any call, in a
 /// dry run, or in what recovers from the crash. This sweep, in the default gate, crashes a root
-/// commit on a fresh store and a ref move on top of it at each of their calls; the slow sweeps
-/// (`kill9_during_*`) do the same for `init` and for a commit that syncs the index and moves the
-/// checkpoint.
+/// commit on a fresh store, a ref move on top of it and an `op undo` of that move at each of
+/// their calls; the slow sweeps (`kill9_during_*`) do the same for `init` and for a commit that
+/// syncs the index and moves the checkpoint.
 #[test]
 fn order_check_rules_hold_in_every_crash_sweep() {
     let template = Store::init().with_env(&[(NOW_ENV, &NOW.to_string())]);
@@ -304,6 +304,16 @@ fn order_check_rules_hold_in_every_crash_sweep() {
     assert!(
         calls > 5,
         "a ref move writes its frame and its file: {calls}"
+    );
+
+    // The move made on the template, operation 1, and its undo swept: it deletes main again.
+    let args = ["ref", "set", "main", id.as_str(), "--create"];
+    template.run_as(&agent(0), &args, &[]).ok();
+    let undo = |_: &Store| ["op", "undo", "1"].map(str::to_owned).to_vec();
+    let calls = sweep_checked(&template, "an undo", undo);
+    assert!(
+        calls > 5,
+        "an undo writes its frame and removes the ref's file: {calls}"
     );
 }
 

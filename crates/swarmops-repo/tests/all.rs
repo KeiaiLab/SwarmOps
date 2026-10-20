@@ -7,6 +7,11 @@ mod commit;
 mod derive;
 mod diff;
 mod history;
+mod land;
+#[cfg(feature = "test-hooks")]
+mod landing_models;
+mod merge;
+mod oplog;
 mod path_history;
 mod raw;
 mod read;

@@ -420,6 +420,48 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
+      "description": "The store's operations, newest first: each write transaction, numbered as undo takes it, with its kind, the changesets it recorded and the refs it moved; pass a limit of 20 or less and page on with before, since clients limit long tool results.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`op_log` (CLI `op log`): the store's operations, newest first, a page at a time. An operation\nis one write transaction: a frame of the journal, numbered from 0 in commit order.",
+        "properties": {
+          "before": {
+            "description": "Start below this operation: the page holds the ones numbered less than it, so the last\n`op` of a page reads on from there. When omitted, from the newest.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "limit": {
+            "default": 50,
+            "description": "The most operations to return: at least 1 (0 is `E_INVALID_ARG`).",
+            "format": "uint",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_changesets": {
+            "default": 20,
+            "description": "The most changesets to list for each operation; `changesets_total` counts them all.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "title": "OpLogReq",
+        "type": "object"
+      },
+      "name": "op_log",
+      "title": "List operations"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
       "description": "Every ref, the changeset it points at, and how many moves it has had.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -512,12 +554,40 @@ expression: listed
     },
     {
       "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Moves every ref an operation of op_log moved back to what it named before, by compare-and-swap in one transaction: all of them or none. A ref moved since stops it (E_CAS_MISMATCH, nothing written: undo the later operations first); an undo run again is a replay (already_applied). Changesets are never removed.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by\ncompare-and-swap, in one transaction: all of them or none. Changesets are never removed.",
+        "properties": {
+          "op": {
+            "description": "The operation to undo: its `op` in the operation log.",
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "op"
+        ],
+        "title": "UndoReq",
+        "type": "object"
+      },
+      "name": "undo",
+      "title": "Undo an operation"
+    },
+    {
+      "annotations": {
         "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Records a changeset from an explicit change list, on parent or else on main's head. With advance it also moves that ref to the changeset in the same transaction, only if the ref still names parent, which must then be the full 64-hex id you read; otherwise it records nothing (E_CAS_MISMATCH, details.committed false). Check result.advanced: a server that does not know advance moves no ref. A {\"file\": path} content is read by this server: give an absolute path.",
+      "description": "Records a changeset from an explicit change list, on parent or else on main's head. With advance it also moves that ref to the changeset in the same transaction, only if the ref still names parent, which must then be the full 64-hex id you read; otherwise it records nothing (E_CAS_MISMATCH, details.committed false). Check result.advanced: a server that does not know advance moves no ref. An idempotency_key, a uuid v7 new for each commit, makes a retry safe: the same call again replays it (result.replayed) instead of recording it twice. A {\"file\": path} content is read by this server: give an absolute path.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`commit`: record a changeset from an explicit change list. It moves no ref, unless\n`advance` names one.",
@@ -659,6 +729,13 @@ expression: listed
               "type": "object"
             },
             "type": "array"
+          },
+          "idempotency_key": {
+            "description": "Makes a retry of this commit safe: a uuid v7 (anything else is `E_INVALID_ARG`). The\ncommit takes the key's time, to the second, as its signature time and records the key as\n`commit_key` metadata, so the same request on the same parent makes the same changeset,\nwhich the store holds already: the response says `replayed`, and nothing is written.\nWith `advance`, a ref whose head carries the key is a replay too. Give `parent` by its full\nid: without it, a retry after the head moved commits again, on the new head.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "message": {
             "description": "The commit message.",
