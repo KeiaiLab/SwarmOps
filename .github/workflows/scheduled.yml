@@ -2,8 +2,9 @@
 # at 2,000 proptest cases plus the ignored slow tests, crash sweeps included, without the
 # 32-process contention measurements), a 60-second fuzz smoke of every fuzz target on nightly,
 # the formatting, lints and tests of bench/compare, a workspace of its own that `just check`
-# does not build, and the git version matrix, which rebuilds the git fixtures with three gits and
-# runs the git import's tests on what each made. Hardened and pinned to ubuntu-24.04 as ci.yml is.
+# does not build, and the git version matrix, which rebuilds the git fixtures with three gits,
+# runs the git import's tests on what each made and has each check the git export's repositories
+# with `git fsck`. Hardened and pinned to ubuntu-24.04 as ci.yml is.
 name: Scheduled
 
 on:
@@ -144,6 +145,8 @@ jobs:
   # fixture into $RUNNER_TEMP/fx and names each difference from the archives' manifests (a script
   # that git is too old for, `# needs git X.Y`, is skipped and said to be); the tests of the
   # testkit's fixtures and of the git import then run on those fixtures instead of the archives.
+  # Last, this git checks the git export's repositories: the committed archives, imported, landed
+  # on and exported into an empty repository, pass its `git fsck --strict` (M8 Task 9).
   git-matrix:
     name: git matrix (${{ matrix.git }})
     runs-on: ubuntu-24.04
@@ -219,3 +222,14 @@ jobs:
           SWARMOPS_GIT_FIXTURES_DIR="$RUNNER_TEMP/fx" \
             cargo nextest run --locked --all-features -p swarmops-testkit -p swarmops-git \
             -E 'test(/^git::/) | test(/^(raw|source|convert|import)::/)' --no-capture
+      # The round trip's exports in this git's own words: `exported_repositories_pass_git_fsck`
+      # runs git (so it is ignored in the default gate) on the committed archives, not on the
+      # fixtures this git made, so that every git checks the same repositories. It refuses a git
+      # other than the declared one (git-fixtures/GIT_VERSION) unless
+      # SWARMOPS_GIT_FIXTURES_ANY_GIT=1, which the matrix's other gits need, as `just git-fixtures`
+      # does.
+      - name: The exports checked by git ${{ matrix.git }}'s fsck
+        run: |
+          SWARMOPS_GIT="$RUNNER_TEMP/git/bin/git" SWARMOPS_GIT_FIXTURES_ANY_GIT=1 \
+            cargo nextest run --locked --all-features -p swarmops-git \
+            --run-ignored ignored-only -E 'test(exported_repositories_pass_git_fsck)' --no-capture

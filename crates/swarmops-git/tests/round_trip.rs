@@ -10,7 +10,9 @@
 //! Every test owns fresh stores, with `ExportOid` registered as every `LocalOps` registers it, on
 //! a filesystem that never flushes: the subject is what crosses to git and back, not what a store
 //! keeps through a power loss. Destinations are a fixture's own `repo.git` or
-//! `git::empty_repository()`, read back through the import's reader (`GixSource`).
+//! `git::empty_repository()`, read back through the import's reader (`GixSource`). Only
+//! `exported_repositories_pass_git_fsck` runs git itself, to have git check what an export
+//! writes; it is ignored, and runs in the weekly version matrix and at the end of the milestone.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -779,4 +781,276 @@ fn two_writers_stop() {
     assert_eq!(main_head(a), on_a.landed);
     assert_eq!(main_head(b), on_b.landed);
     assert_eq!(branch(remote), Some(b_base));
+}
+
+/// The fixtures git made whose export `git fsck --strict` accepts (the round trip's last
+/// acceptance, [`exported_repositories_pass_git_fsck`]): objects git wrote, and two lands on them
+/// that render as canonical commits.
+const FSCK_CLEAN: [&str; 6] = [
+    "linear",
+    "loose_and_packed",
+    "merges",
+    "modes",
+    "refs",
+    "roots",
+];
+
+/// The fixtures crafted past what git writes, on which `git fsck --strict` may have findings of
+/// its own (`signatures` holds a commit whose time is before 1970): the export reproduces their
+/// bytes, so the same git says the same of the export as of the fixture.
+const FSCK_CRAFTED: [&str; 3] = ["headers", "many_parents", "signatures"];
+
+/// The git the `git fsck` test runs, in the environment of the test kit's fixtures: no system or
+/// global configuration, an empty `HOME`, `TZ=UTC`, `LC_ALL=C`, and its own directory first on
+/// `PATH`.
+struct Git {
+    /// The binary.
+    program: PathBuf,
+    /// An empty directory, its `HOME`.
+    home: TempDir,
+}
+
+impl Git {
+    /// The git `SWARMOPS_GIT` names, else the first `git` on `PATH`; `None` where there is none.
+    /// A version other than the one `git-fixtures/GIT_VERSION` declares is refused (the test
+    /// fails, saying so) unless `SWARMOPS_GIT_FIXTURES_ANY_GIT` is `1`: the weekly matrix checks
+    /// the exports with other gits on purpose.
+    fn from_env() -> Option<Git> {
+        let program = if let Some(program) = std::env::var_os(git::GIT_ENV) {
+            PathBuf::from(program)
+        } else {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut candidates = std::env::split_paths(&path).map(|dir| dir.join("git"));
+            candidates.find(|candidate| candidate.is_file())?
+        };
+        let git = Git {
+            program,
+            home: tempfile::tempdir().expect("a temp dir"),
+        };
+        let declared = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../swarmops-testkit/git-fixtures/GIT_VERSION");
+        let declared = fs::read_to_string(&declared)
+            .unwrap_or_else(|error| panic!("read {}: {error}", declared.display()));
+        let (version, declared) = (git.version(), declared.trim_end());
+        let any_git = std::env::var_os(git::ANY_GIT_ENV).is_some_and(|value| value == "1");
+        assert!(
+            version == declared || any_git,
+            "{} prints {version:?}, but the git fixtures are made by {declared:?} \
+             (git-fixtures/GIT_VERSION): set {} to that git, or {}=1 to check the exports \
+             with this one all the same",
+            git.program.display(),
+            git::GIT_ENV,
+            git::ANY_GIT_ENV,
+        );
+        Some(git)
+    }
+
+    /// What `git --version` prints, without its line feed.
+    fn version(&self) -> String {
+        let output = swarmops_testkit::child::run(self.command().arg("--version"));
+        assert!(output.status.success(), "git --version: {}", said(&output));
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_owned()
+    }
+
+    /// A command that runs the git in its environment.
+    fn command(&self) -> std::process::Command {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let first = (self.program.parent()).map(Path::to_path_buf);
+        let dirs = first.into_iter().chain(std::env::split_paths(&inherited));
+        let mut command = std::process::Command::new(&self.program);
+        command
+            .env_clear()
+            .env("PATH", std::env::join_paths(dirs).expect("join PATH"))
+            .env("HOME", self.home.path())
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("TZ", "UTC")
+            .env("LC_ALL", "C");
+        if let Some(tmpdir) = std::env::var_os("TMPDIR") {
+            command.env("TMPDIR", tmpdir);
+        }
+        command
+    }
+
+    /// `git --git-dir=<git_dir> [--work-tree=<work_tree>] <args>`, run to its end.
+    fn run(&self, git_dir: &Path, work_tree: Option<&Path>, args: &[&str]) -> std::process::Output {
+        let mut command = self.command();
+        let mut dir = std::ffi::OsString::from("--git-dir=");
+        dir.push(git_dir);
+        command.arg(dir);
+        if let Some(work_tree) = work_tree {
+            let mut tree = std::ffi::OsString::from("--work-tree=");
+            tree.push(work_tree);
+            command.arg(tree);
+        }
+        swarmops_testkit::child::run(command.args(args))
+    }
+
+    /// `git fsck --strict --no-dangling` on the repository at `git_dir`.
+    fn fsck(&self, git_dir: &Path) -> std::process::Output {
+        self.run(git_dir, None, &["fsck", "--strict", "--no-dangling"])
+    }
+}
+
+/// How a run ended and what it printed, for a failure's message.
+fn said(output: &std::process::Output) -> String {
+    format!(
+        "{}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout).trim_end(),
+        String::from_utf8_lossy(&output.stderr).trim_end(),
+    )
+}
+
+/// What a `git fsck` said: whether it found fault (its exit status is not 0), and the lines it
+/// printed on stdout and stderr, sorted, since the findings do not depend on the order git walked
+/// the objects in. Not the exit status itself: git numbers an error found in a pack and one found
+/// in a loose object differently (4 and 1), and the fixtures are packed and the exports loose.
+fn findings(output: &std::process::Output) -> (bool, Vec<String>) {
+    let mut lines: Vec<String> = [&output.stdout, &output.stderr]
+        .into_iter()
+        .flat_map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    lines.sort();
+    (!output.status.success(), lines)
+}
+
+/// Every file and symlink of the work tree at `dir`, by path, as [`store_files`] gives the store's:
+/// git's mode for what is there (`120000` for a symlink, `100755` for a file its owner can
+/// execute, else `100644`) and its bytes, a symlink's being its target.
+fn checked_out(dir: &Path) -> BTreeMap<String, (Vec<u8>, Vec<u8>)> {
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut files = BTreeMap::new();
+    let mut dirs = vec![PathBuf::new()];
+    while let Some(at) = dirs.pop() {
+        for entry in fs::read_dir(dir.join(&at)).unwrap() {
+            let entry = entry.unwrap();
+            let path = at.join(entry.file_name());
+            // Neither of these follows a symlink.
+            let kind = entry.file_type().unwrap();
+            let (mode, bytes): (&[u8], Vec<u8>) = if kind.is_dir() {
+                dirs.push(path);
+                continue;
+            } else if kind.is_symlink() {
+                let target = fs::read_link(entry.path()).unwrap();
+                (b"120000", target.as_os_str().as_bytes().to_vec())
+            } else {
+                let executable = entry.metadata().unwrap().permissions().mode() & 0o100 != 0;
+                let mode: &[u8] = if executable { b"100755" } else { b"100644" };
+                (mode, fs::read(entry.path()).unwrap())
+            };
+            let name = path.to_str().expect("a UTF-8 path").to_owned();
+            files.insert(name, (mode.to_vec(), bytes));
+        }
+    }
+    files
+}
+
+/// `files` as a failure's message shows them: the modes as text, the contents lossily.
+fn readable(files: &BTreeMap<String, (Vec<u8>, Vec<u8>)>) -> BTreeMap<&str, (String, String)> {
+    let text = |bytes: &[u8]| String::from_utf8_lossy(bytes).into_owned();
+    (files.iter())
+        .map(|(path, (mode, bytes))| (path.as_str(), (text(mode), text(bytes))))
+        .collect()
+}
+
+/// What the export's repository passes in git itself, the round trip's last acceptance and the
+/// weekly version matrix's: the fixtures imported, two changes landed on each and the history
+/// exported into an empty repository, which the git `SWARMOPS_GIT` names (else `git` on `PATH`;
+/// none, and the test says so and returns) checks.
+///
+/// - For the fixtures git made ([`FSCK_CLEAN`]), `git fsck --strict --no-dangling` exits 0, and
+///   `git checkout -f main` into an empty work tree gives the files the store holds at the head:
+///   their bytes, their executable bits and their symlinks' targets.
+/// - For the crafted ones ([`FSCK_CRAFTED`]), whatever `git fsck --strict` finds in the fixture
+///   (whether it finds fault, and every line it prints) it finds in the export, no more and no
+///   less: the export reproduces their bytes, findings and all.
+///
+/// Another version than the declared git's (`git-fixtures/GIT_VERSION`) is refused unless
+/// `SWARMOPS_GIT_FIXTURES_ANY_GIT=1`. The weekly matrix runs it with each of its gits; it is run
+/// by name, so the default gate skips it.
+#[test]
+#[ignore = "runs git: the version matrix and the end-of-milestone run (SWARMOPS_GIT)"]
+fn exported_repositories_pass_git_fsck() {
+    let Some(git) = Git::from_env() else {
+        println!(
+            "exported_repositories_pass_git_fsck: no git to run: set {} to one, or put git on PATH",
+            git::GIT_ENV
+        );
+        return;
+    };
+    println!("exported_repositories_pass_git_fsck: {}", git.version());
+
+    // A fixture imported, two changes landed on it, exported into an empty repository.
+    let exported_fixture = |name: &str| {
+        let fixture = git::fixture(name);
+        let store = store();
+        imported(&store.repo, repo_dir(&fixture), "HEAD");
+        let lands = two_lands(&store.repo);
+        let empty = git::empty_repository();
+        exported(&store.repo, &mut gix(&empty.dir), &main_branch());
+        (fixture, store, lands, empty)
+    };
+
+    for name in FSCK_CLEAN {
+        let (_fixture, store, lands, empty) = exported_fixture(name);
+        let fsck = git.fsck(&empty.dir);
+        assert!(fsck.status.success(), "{name}: git fsck: {}", said(&fsck));
+
+        // The checkout is the store's files: bytes, modes and symlink targets.
+        let work = tempfile::tempdir().expect("a temp dir");
+        let checkout = git.run(&empty.dir, Some(work.path()), &["checkout", "-f", "main"]);
+        assert!(
+            checkout.status.success(),
+            "{name}: git checkout: {}",
+            said(&checkout)
+        );
+        let (files, expected) = (
+            checked_out(work.path()),
+            store_files(&store.repo, lands[1].landed),
+        );
+        assert!(
+            files == expected,
+            "{name}: the checkout is not the store's files\ncheckout: {:#?}\nstore: {:#?}",
+            readable(&files),
+            readable(&expected)
+        );
+        let (executables, links) =
+            (files.values()).fold((0, 0), |(x, l), (mode, _)| match &mode[..] {
+                b"100755" => (x + 1, l),
+                b"120000" => (x, l + 1),
+                _ => (x, l),
+            });
+        println!(
+            "{name}: git fsck --strict --no-dangling: exit 0; checkout: {} files, {executables} \
+             executable, {links} symlinks, all as the store has them",
+            files.len()
+        );
+    }
+
+    for name in FSCK_CRAFTED {
+        let (fixture, _store, _lands, empty) = exported_fixture(name);
+        let (of_fixture, of_export) = (git.fsck(repo_dir(&fixture)), git.fsck(&empty.dir));
+        let (before, after) = (findings(&of_fixture), findings(&of_export));
+        assert_eq!(
+            after, before,
+            "{name}: git fsck says the same of the export as of the fixture"
+        );
+        println!(
+            "{name}: git fsck --strict --no-dangling: exit {:?} for the fixture, {:?} for the \
+             export; the same findings: {:?}",
+            of_fixture.status.code(),
+            of_export.status.code(),
+            before.1
+        );
+    }
 }
