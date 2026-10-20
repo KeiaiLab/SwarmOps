@@ -149,9 +149,13 @@ left).
   move catches only a race from then on, not edits that landed since the agent read the files
   it puts whole. *Target: M4 (merge and landing). Found: M1 Task 4b.*
 - **A retried commit can record a second changeset.** A commit signs at its own time, so when
-  a commit's outcome is unknown (its process died before it answered) and it is run again, a
-  first attempt that did commit stays as an unreferenced changeset beside the second. An
-  idempotency key (`commit --key`) closes this. *Target: M4. Found: M1 final fix pass.*
+  a commit's outcome is unknown (its process died before it answered) and it is run again, a first
+  attempt that did commit stays as an unreferenced changeset beside the second. A `commit --advance`
+  retried a second or more after a first attempt that published records nothing instead: the ref
+  names that attempt, so the retry fails with `E_CAS_MISMATCH`, whose `actual` may be the agent's
+  own change; `swarmops show <actual>` gives its `agent` and `run_id` metadata, to check before
+  applying the edits again on top of it. An idempotency key (`commit --key`) closes both. *Target:
+  M4. Found: M1 final fix pass; the `--advance` case, the M1.6 review.*
 - **No second root commit.** Once `main` exists, an omitted parent means `main`'s head (the
   advanced ref's, for a `commit --advance`), so the API makes a root commit only with `advance`
   naming a ref that does not exist yet. *Target: M3 (`commit_raw`, which git import needs).

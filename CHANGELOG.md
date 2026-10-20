@@ -235,12 +235,15 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   transaction moves REF to it, so one journal frame holds both and they are recorded together or
   not at all, and only as a one-step fast-forward from the commit's parent (for a root commit,
   only if REF does not exist yet). When REF names anything else, the commit records nothing and
-  fails with `E_CAS_MISMATCH` (exit 4, `details {name, actual, committed: false}`); the same
-  request made again is a replay (`advanced.already_applied`). Without `--parent` it builds on
-  REF's head. A publish takes one lock pass and four syncs, where a commit and then `ref set`
-  take two and six. `swarmops mcp` refuses `advance` without a full 64-hex `parent`
-  (`E_INVALID_ARG`), `swarmops schema` lists `Advanced`, and `swarmops_store::check_ref_name`
-  checks a ref name as every ref operation does.
+  fails with `E_CAS_MISMATCH` (exit 4, `details {name, actual, committed: false}`); the same request
+  made again in the same second (a commit signs in whole seconds) is the same changeset, so a replay
+  (`advanced.already_applied`), but made a second or more later it is another changeset, which gets
+  `E_CAS_MISMATCH` when the first attempt published, its `actual` being that attempt
+  (`commit --key`, M4, makes any retry a replay). Without `--parent` it builds on REF's head. A
+  publish takes one lock pass and four syncs, where a commit and then `ref set` take two and six.
+  `swarmops mcp` refuses `advance` without a full 64-hex `parent` (`E_INVALID_ARG`),
+  `swarmops schema` lists `Advanced`, and `swarmops_store::check_ref_name` checks a ref name as
+  every ref operation does.
 - The CLI-level 32-process contention measurement (`crates/swarmops-cli/tests/contention.rs`)
   can publish: with `SWARMOPS_TEST_CLI_CONTENTION_ADVANCE=1` each child publishes every commit
   on a ref of its own in one transaction (`commit --advance`), with `=0` in two (`commit`, then

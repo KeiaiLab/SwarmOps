@@ -393,7 +393,7 @@ mod advance {
     /// failure, neither; the documented aborts either. No run panics, and the sweep reaches each
     /// outcome the commit sweep exists for ([`COMMIT_OUTCOMES`]).
     #[test]
-    #[ignore = "slow, ~2 min: ~500 failed runs of commit --advance; just check-slow runs it"]
+    #[ignore = "slow, ~15 s: ~500 failed runs of commit --advance; just check-slow runs it"]
     fn fail_at_every_call_of_an_advancing_commit_reports_honestly() {
         let template = commit_template();
         let dry = dry_advance(&template);

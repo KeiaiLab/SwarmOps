@@ -392,8 +392,9 @@ mod tests {
 
     /// A commit with `advance` whose ref moved first recorded nothing: `E_CAS_MISMATCH` (exit 4,
     /// retryable) with what the ref names and `committed: false`, a message that says to commit
-    /// again on top of it, and a hint that only reads; `actual` is null, and the hint the refs,
-    /// for a ref that is gone.
+    /// again on top of it, and a hint that only reads. For a ref that is gone, `actual` is null,
+    /// the message says the ref does not exist and the commit recorded nothing, and the hint
+    /// lists the refs.
     #[test]
     fn a_commit_whose_ref_moved_is_a_cas_mismatch_that_committed_nothing() {
         let moved = |actual| {
@@ -426,6 +427,9 @@ mod tests {
         ]);
         assert_eq!(gone.details, want);
         assert_eq!(gone.hint.as_deref(), Some("swarmops ref list"));
+        let said = "ref main does not exist, so it does not name this commit's parent";
+        assert!(gone.message.starts_with(said), "{gone:?}");
+        assert!(gone.message.contains("recorded nothing"), "{gone:?}");
     }
 
     #[test]
