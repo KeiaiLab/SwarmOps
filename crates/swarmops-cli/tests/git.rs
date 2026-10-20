@@ -781,3 +781,563 @@ fn git_export_is_not_an_mcp_tool() {
     assert_eq!(called["id"], 2, "{called}");
     assert_eq!(called["error"]["code"], -32602, "{called}");
 }
+
+/// `swarmops git export` cut short at each of the store's filesystem calls, through the binary
+/// (the M8 plan's Review Focus 3): an export crashed (`SWARMOPS_TEST_CRASH_AT`) or failed
+/// (`SWARMOPS_TEST_FAIL_AT`) at any store call leaves the branch where it was and a store that
+/// verifies clean, and the same export run again ends with the branch, the objects and the
+/// external id entries an uninterrupted export leaves. The sweeps drive the test hooks, so this
+/// module is here only with the `test-hooks` feature, which the workspace's gates turn on
+/// (`--all-features`); `swarmops-git`'s `tests/sweeps.rs` crashes and fails the export at its
+/// git-side calls.
+///
+/// - The store imported `linear`, then took two changesets on `main`: one through the binary,
+///   and one whose listing in `journal.off` failed, its frame whole in `journal.log` and unlisted,
+///   as a commit crashed before its listing leaves it ([`Template`]). The export writes the two
+///   commits onto `linear`'s tip, in `linear`'s own repository (a copy for each run): its
+///   committed read's tail check lists that frame first, then it derives the export oids and the
+///   git oids of the trees and blobs (the store's derived values), writes the objects, and
+///   records the native commits' external id entries (W8) before the branch moves.
+/// - A dry run counts the export's store calls (`SWARMOPS_TEST_FS_CALLS`). Each run then exports
+///   on copies of the store and the repository, its k-th store call crashing it, or failing once
+///   with `EIO`, or failing from there on with `ENOSPC`. Every run is checked against the store's
+///   write-ordering rules (`SWARMOPS_TEST_ORDER_CHECK=1`, which the test support sets).
+/// - The default gate takes every fifth call, with the last two; the ignored variants take every
+///   call. A failure sweep also fails every fifth call persistently, with `ENOSPC`.
+#[cfg(feature = "test-hooks")]
+mod sweeps {
+    use std::collections::BTreeSet;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+
+    use camino::Utf8Path;
+    use serde_json::Value;
+    use swarmops_repo::{Advance, LocalRepo};
+    use swarmops_store::external_ids::lower_hex;
+    use swarmops_store::{
+        CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, FileOp, FsMethod,
+        Journal, RealFs, SYSTEM_GIT,
+    };
+    use swarmops_testkit::fs::{FailingFs, copy_dir};
+    use swarmops_testkit::repo::{put, request};
+
+    use super::{AGENT, Source, branch_at, import};
+    use crate::support::sweep::{calls_file, reported_calls, sweep};
+    use crate::support::{Run, Store, run};
+
+    /// The default gate's share of a sweep's calls: every fifth.
+    const SAMPLED: u64 = 5;
+
+    /// Which of every [`SAMPLED`] calls a failure sweep fails persistently: those two after the
+    /// ones the default gate fails once.
+    const PERSISTENT_AT: u64 = 2;
+
+    /// What the documented aborts say on stderr: the committed read's tail check, whose sync of
+    /// the frame it lists failed, could not cut the frame back off `journal.log` to write it
+    /// afresh, nor could a failed append be cut back.
+    const ABORTS: [&str; 1] = ["could not be cut back off it"];
+
+    /// How many commits the export writes onto `linear`'s tip.
+    const EXPORTED: u64 = 2;
+
+    /// A class of a sweep's runs: its name, and whether a run's outcome is in it.
+    type Class<'a, T> = (&'static str, &'a dyn Fn(&T) -> bool);
+
+    /// The export the sweeps cut short, of the store `store` into the repository at `destination`,
+    /// with `env` set: `git export <destination>`, no identity (it needs none).
+    fn export_into(store: &Store, destination: &Path, env: &[(&str, &str)]) -> Run {
+        let destination = destination.to_str().expect("UTF-8 temp paths");
+        run(&["--repo", store.path(), "git", "export", destination], env)
+    }
+
+    /// A copy of `linear`'s repository in the temp dir of `store`: the destination of an export
+    /// run on that store.
+    fn destination(store: &Store, linear: &Source) -> PathBuf {
+        let copied = store.tmp().join("repo.git");
+        copy_dir(Path::new(&linear.path), &copied);
+        copied
+    }
+
+    /// The loose object files of the repository at `dir`, by their paths under `objects/`:
+    /// `linear`'s are all in a pack, so these are what exports wrote.
+    fn loose_files(dir: &Path) -> BTreeSet<PathBuf> {
+        let objects = dir.join("objects");
+        let mut files = BTreeSet::new();
+        for fan_out in std::fs::read_dir(&objects).expect("objects/") {
+            let fan_out = fan_out.expect("an entry of objects/");
+            if fan_out.file_name().len() != 2 {
+                continue;
+            }
+            for file in std::fs::read_dir(fan_out.path()).expect("a fan-out directory") {
+                let path = file.expect("a loose object").path();
+                let name = path.strip_prefix(&objects).expect("under objects/");
+                files.insert(name.to_owned());
+            }
+        }
+        files
+    }
+
+    /// Every git entry of `store`'s external id index, by its key's hex, the commit's id.
+    fn entries(store: &Store) -> Vec<(String, ExternalEntry)> {
+        let ids = ExternalIds::new(store.layout(), Arc::new(RealFs));
+        let listed = ids.list(SYSTEM_GIT).expect("list the git external ids");
+        let mut entries: Vec<(String, ExternalEntry)> = (listed.into_iter())
+            .map(|(key, entry)| (lower_hex(&key), entry.expect("a whole entry")))
+            .collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    /// How many whole frames `store`'s `journal.log` holds that its `journal.off` does not list.
+    fn unlisted_frames(store: &Store) -> u64 {
+        let journal = Journal::open(&store.layout(), Arc::new(RealFs)).expect("the journal");
+        let whole = journal.tail_frames_from(0).expect("read the journal").len();
+        let whole = u64::try_from(whole).expect("fits");
+        whole - journal.frame_count().expect("journal.off")
+    }
+
+    /// How many frames the run's committed read listed (`meta.recovered.frames_listed`; none
+    /// when it reports no repair).
+    fn frames_listed(run: &Run) -> u64 {
+        let recovered = &run.envelope()["meta"]["recovered"];
+        recovered["frames_listed"].as_u64().unwrap_or(0)
+    }
+
+    /// Commits a change on `main`'s head, `main` moved to it in the same frame, through a handle of
+    /// `store` whose listings in `journal.off` fail: the commit is committed, with a warning, its
+    /// frame whole and durable in `journal.log` and unlisted, as a crash between its sync and its
+    /// listing leaves it, and its move not materialized.
+    fn commit_unlisted(store: &Store) {
+        let fails = |method: FsMethod, path: &Path| {
+            method == FsMethod::AppendDurable && path.ends_with("journal.off")
+        };
+        let root = Utf8Path::new(store.path());
+        let repo =
+            LocalRepo::open_with_fs(root, Arc::new(FailingFs::new(fails))).expect("open the store");
+        let head = repo
+            .get_ref("main")
+            .expect("read main")
+            .map(|state| state.target);
+        let mut req = request(
+            head.as_slice(),
+            vec![put("notes/two.txt", b"two\n")],
+            "Add notes/two.txt\n",
+        );
+        req.advance = Some(Advance {
+            name: "main".to_owned(),
+            actor: AGENT.to_owned(),
+        });
+        let outcome = repo.commit(req).expect("committed, its listing failed");
+        assert_eq!(outcome.warnings.len(), 1, "{outcome:?}");
+    }
+
+    /// What the sweeps stand on: the store every run copies, the repository every run's copy is
+    /// made of, and what the uninterrupted export does to copies of them.
+    struct Template {
+        /// The store: `linear` imported, then two changesets on `main`, the second's frame
+        /// unlisted.
+        store: Store,
+        /// `linear`, whose repository every run's destination copies.
+        linear: Source,
+        /// `linear`'s tip: what the branch names before the export.
+        tip: String,
+        /// How many store calls the uninterrupted export makes, the store's opening included.
+        calls: u64,
+        /// What the uninterrupted export answered.
+        result: Value,
+        /// The destination's loose object files after it.
+        files: BTreeSet<PathBuf>,
+        /// The store's git external id entries after it: `linear`'s five, and the two native
+        /// commits'.
+        entries: Vec<(String, ExternalEntry)>,
+    }
+
+    impl Template {
+        /// The store, and the dry run: the export on copies of the store and of `linear`'s
+        /// repository, counting its store calls. It must list the unlisted frame, write the two
+        /// commits onto `linear`'s tip, and record their external id entries.
+        fn new() -> Template {
+            let store = Store::init();
+            let linear = Source::new("linear");
+            let tip = linear.commit("refs/heads/main");
+            import(&store, &linear.path, &[]).ok();
+            let changes = store.changes("one", "notes/one.txt", "one\n");
+            let first = ["commit", "-m", "Add notes/one.txt", "--changes", &changes];
+            let first = [&first[..], &["--advance", "main"]].concat();
+            store.run_as(AGENT, &first, &[]).ok();
+            commit_unlisted(&store);
+            assert_eq!(unlisted_frames(&store), 1, "the second commit's frame");
+
+            let dry = Store::copy_of(&store);
+            let copied = destination(&dry, &linear);
+            let file = calls_file(&dry);
+            let counted = [(FS_CALLS_ENV, file.to_str().expect("UTF-8 temp paths"))];
+            let run = export_into(&dry, &copied, &counted);
+            let result = run.ok();
+            assert_eq!(result["exported"], EXPORTED, "{run}");
+            assert_eq!(result["incremental"], true, "{run}");
+            assert_eq!(result["old_sha"], tip.as_str(), "{run}");
+            assert_eq!(
+                frames_listed(&run),
+                1,
+                "the committed read lists the frame: {run}"
+            );
+            assert_eq!(unlisted_frames(&dry), 0);
+            let calls = reported_calls(&file);
+            let entries = entries(&dry);
+            assert_eq!(
+                entries.len(),
+                7,
+                "linear's five, and the two native commits'"
+            );
+            dry.assert_clean("after the dry run");
+            assert!(
+                calls > 100,
+                "an export makes a hundred store calls and more: {calls}"
+            );
+            Template {
+                files: loose_files(&copied),
+                store,
+                linear,
+                tip,
+                calls,
+                result,
+                entries,
+            }
+        }
+
+        /// The commit the uninterrupted export moved the branch to.
+        fn head_sha(&self) -> &str {
+            self.result["head_sha"].as_str().expect("a commit id")
+        }
+
+        /// How many objects the uninterrupted export wrote.
+        fn objects_written(&self) -> usize {
+            let written = self.result["objects_written"].as_u64().expect("a count");
+            usize::try_from(written).expect("fits")
+        }
+
+        /// The export run again on `store`, as a run left it with the repository at
+        /// `destination`, `what` naming the run: it must succeed, writing what the run left out
+        /// (`left` the loose objects that run wrote) and listing the frame if it is still
+        /// unlisted (`unlisted`), and end with the branch, the objects and the external id
+        /// entries of the uninterrupted export, the store verifying clean.
+        fn resume(
+            &self,
+            store: &Store,
+            destination: &Path,
+            left: usize,
+            unlisted: u64,
+            what: &str,
+        ) {
+            let moved = branch_at(destination, "main") == self.head_sha();
+            let again = export_into(store, destination, &[]);
+            let result = again.ok();
+            assert_eq!(result["head_sha"], self.head_sha(), "{what}: {again}");
+            assert_eq!(result["branch_moved"], !moved, "{what}: {again}");
+            let written = if moved {
+                0
+            } else {
+                self.objects_written() - left
+            };
+            assert_eq!(result["objects_written"], written, "{what}: {again}");
+            assert_eq!(frames_listed(&again), unlisted, "{what}: {again}");
+            assert_eq!(branch_at(destination, "main"), self.head_sha(), "{what}");
+            assert_eq!(loose_files(destination), self.files, "{what}");
+            assert_eq!(entries(store), self.entries, "{what}");
+            store.assert_clean(&format!("{what}: after the export again"));
+        }
+    }
+
+    /// The calls of `1..=last` a sweep takes: every `every`-th, and the last two.
+    fn calls_taken(last: u64, every: u64) -> Vec<u64> {
+        (1..=last)
+            .filter(|&k| k % every == 0 || k + 1 >= last)
+            .collect()
+    }
+
+    /// What one run of the crash sweep left, before the export ran again.
+    #[derive(Clone, Copy, Debug)]
+    struct Crashed {
+        /// Whether the export ran to its end: the crash was past its last call.
+        finished: bool,
+        /// Whether the frame the committed read lists was still unlisted.
+        unlisted: bool,
+        /// How many loose objects it wrote into the repository.
+        objects: usize,
+        /// How many of the native commits' external id entries the store held.
+        recorded: usize,
+        /// Whether the branch named the head's export.
+        moved: bool,
+    }
+
+    /// One run of the crash sweep: the export on copies of the template's store and repository,
+    /// its k-th store call aborting it (one past the last, it finishes). The branch must be where
+    /// it was, or (finished) at the head's export; the store must verify clean; and the export
+    /// again must end where the uninterrupted one ends ([`Template::resume`]).
+    fn crash_export_at(template: &Template, k: u64) -> Crashed {
+        let store = Store::copy_of(&template.store);
+        let copied = destination(&store, &template.linear);
+        let at = k.to_string();
+        let crashed = export_into(&store, &copied, &[(CRASH_AT_ENV, at.as_str())]);
+        let what = format!("crashed at store call {k} of {}", template.calls);
+        let finished = k > template.calls;
+        if finished {
+            let result = crashed.ok();
+            assert_eq!(result["head_sha"], template.head_sha(), "{what}: {crashed}");
+        } else {
+            assert!(crashed.aborted(), "{what}: {crashed}");
+        }
+        let branch = branch_at(&copied, "main");
+        let moved = branch == template.head_sha();
+        assert!(
+            moved || branch == template.tip,
+            "{what}: the branch names {branch}"
+        );
+        let objects = loose_files(&copied).len();
+        let unlisted = unlisted_frames(&store);
+        let recorded = entries(&store).len() - (template.entries.len() - 2);
+        store.assert_clean(&format!("{what}: as the crash left it"));
+        template.resume(&store, &copied, objects, unlisted, &what);
+        Crashed {
+            finished,
+            unlisted: unlisted > 0,
+            objects,
+            recorded,
+            moved,
+        }
+    }
+
+    /// The crash sweep at every `every`-th store call of the export and its last two, and past
+    /// them. What the crashes left must hold a crash before the committed read listed the frame,
+    /// one after it and before the export wrote an object, one among the object writes, one with
+    /// every entry recorded and the branch not moved, and the branch moved: else the sweep missed
+    /// what it is for. Prints how many runs it made, and how many crashes fell in each window.
+    fn crash_sweep(every: u64) {
+        let template = Template::new();
+        let ks = calls_taken(template.calls + 1, every);
+        let crashes = sweep_of(&ks, |&k| crash_export_at(&template, k));
+        let written = template.files.len();
+        let windows: [Class<'_, Crashed>; 5] = [
+            ("before the committed read listed the frame", &|c| {
+                c.unlisted
+            }),
+            ("after the listing, before an object was written", &|c| {
+                !c.unlisted && c.objects == 0
+            }),
+            ("among the object writes", &|c| {
+                0 < c.objects && c.objects < written
+            }),
+            ("with the entries recorded and the branch not moved", &|c| {
+                c.recorded == 2 && !c.moved
+            }),
+            ("past the move", &|c| c.finished && c.moved),
+        ];
+        let counts: Vec<String> = (windows.iter())
+            .map(|(what, inside)| {
+                let count = crashes.iter().filter(|c| inside(c)).count();
+                assert!(count > 0, "no crash {what}: {crashes:?}");
+                format!("{count} {what}")
+            })
+            .collect();
+        println!(
+            "git export crash sweep: {} runs over {} store calls; {}",
+            ks.len(),
+            template.calls,
+            counts.join(", ")
+        );
+    }
+
+    /// Runs `run` on each of `items` with the test kit's sweep runner ([`sweep`], [`AT_ONCE`] at
+    /// a time): the outcomes, in the order of `items`.
+    ///
+    /// [`AT_ONCE`]: swarmops_testkit::cli::sweep::AT_ONCE
+    fn sweep_of<K: Sync, T: Send>(items: &[K], run: impl Fn(&K) -> T + Sync) -> Vec<T> {
+        let last = u64::try_from(items.len()).expect("fits");
+        sweep(1..=last, |at| {
+            run(&items[usize::try_from(at - 1).expect("fits")])
+        })
+    }
+
+    /// `git export` crashed at any store call (every fifth here; every one in the ignored variant
+    /// below) leaves the branch where it was and a store that verifies clean, and the same export
+    /// run again ends where an uninterrupted one ends: the branch, the objects and the external id
+    /// entries. The crashes reach the committed read's tail check, the derived values, the object
+    /// writes between them and the entries.
+    #[test]
+    fn git_export_crashing_at_any_store_call_resumes() {
+        crash_sweep(SAMPLED);
+    }
+
+    /// [`git_export_crashing_at_any_store_call_resumes`] at every call.
+    #[test]
+    #[ignore = "slow, ~20 s: git export crashed at each of its 225 store calls"]
+    fn git_export_crashing_at_every_store_call_resumes() {
+        crash_sweep(1);
+    }
+
+    /// How a run with an injected failure ended.
+    #[derive(Debug)]
+    enum Ended {
+        /// It exported, with this result.
+        Exported(Value),
+        /// It failed, with this error: never `E_INTERNAL`, a panic (the order checker's included).
+        Failed(Value),
+        /// It aborted, as documented ([`ABORTS`]).
+        Aborted,
+    }
+
+    /// How `run`, an export from the store at `store`, ended, checked: an envelope, or the
+    /// documented abort. A filesystem failure (`E_IO`, `E_IO_TRANSIENT`) names the file operation
+    /// that failed (`details.fs_op`, one of the store's) and, where it was on a file of the store,
+    /// that file relative to the store's root (`details.store_file`: never absolute, never with
+    /// `..`). No error, and no warning of a run that exported, carries the store's path.
+    fn ended(run: &Run, store: &str) -> Ended {
+        if run.aborted() {
+            assert!(
+                ABORTS.iter().any(|abort| run.stderr.contains(abort)),
+                "an abort not documented: {run}"
+            );
+            return Ended::Aborted;
+        }
+        if run.exit() == 0 {
+            let result = run.ok();
+            assert!(
+                !result["warnings"].to_string().contains(store),
+                "a host path in a warning: {run}"
+            );
+            return Ended::Exported(result);
+        }
+        let mut envelope = run.envelope();
+        let error = envelope["error"].take();
+        assert_ne!(error["code"], "E_INTERNAL", "a panic: {run}");
+        if error["code"] == "E_IO_TRANSIENT" {
+            assert_eq!(error["details"]["committed"], false, "{run}");
+            assert_eq!(error["retryable"], true, "{run}");
+        }
+        if error["code"] == "E_IO" || error["code"] == "E_IO_TRANSIENT" {
+            let op = error["details"]["fs_op"].as_str();
+            let ops = FileOp::ALL.map(FileOp::as_str);
+            assert!(op.is_some_and(|op| ops.contains(&op)), "{run}");
+            if let Some(file) = error["details"].get("store_file") {
+                let file = Utf8Path::new(file.as_str().unwrap_or("/"));
+                let parent = camino::Utf8Component::ParentDir;
+                assert!(
+                    file.is_relative() && !file.components().any(|part| part == parent),
+                    "{run}"
+                );
+            }
+        }
+        assert!(
+            !error.to_string().contains(store),
+            "a host path in the error: {run}"
+        );
+        Ended::Failed(error)
+    }
+
+    /// One run of the failure sweep: the export on copies of the template's store and repository,
+    /// failing as `failure` says (`<mode>:<errno>`) from store call `k`. It must end with an
+    /// envelope or the documented abort ([`ended`]); a run that exported is the uninterrupted
+    /// export, its entries recorded and the branch moved, and any other leaves the branch where it
+    /// was: every store call precedes the move. The store must then verify clean, and the export
+    /// again end where the uninterrupted one ends ([`Template::resume`]).
+    fn fail_export_at(template: &Template, k: u64, failure: &str) -> Ended {
+        let store = Store::copy_of(&template.store);
+        let copied = destination(&store, &template.linear);
+        let spec = format!("{k}:{failure}");
+        let failed = export_into(&store, &copied, &[(FAIL_AT_ENV, spec.as_str())]);
+        let what = format!("store call {k} of {} failing {failure}", template.calls);
+        let ended = ended(&failed, store.path());
+        let branch = branch_at(&copied, "main");
+        if let Ended::Exported(result) = &ended {
+            assert_eq!(result["head_sha"], template.head_sha(), "{what}: {failed}");
+            assert_eq!(branch, template.head_sha(), "{what}");
+            assert_eq!(entries(&store), template.entries, "{what}: {failed}");
+        } else {
+            assert_eq!(branch, template.tip, "{what}: the branch moved: {failed}");
+        }
+        let objects = loose_files(&copied).len();
+        let unlisted = unlisted_frames(&store);
+        store.assert_clean(&format!("{what}: after the failed run"));
+        template.resume(&store, &copied, objects, unlisted, &what);
+        ended
+    }
+
+    /// The failure sweep: every `every`-th store call of the export and its last two failed once
+    /// with `EIO`, and every fifth ([`PERSISTENT_AT`]) failed persistently with `ENOSPC`. Among
+    /// what they ended in must be an export that went on past a failed call (a derived value's
+    /// write, which the store drops: the derived values are a cache), and a failure in each part
+    /// of the store the export reads or writes: the committed read, a derived value, an object,
+    /// the external id entries. Else the sweep missed what it is for. Prints how many runs it
+    /// made, and how they ended.
+    fn failure_sweep(every: u64) {
+        let template = Template::new();
+        let once = calls_taken(template.calls, every).into_iter();
+        let once = once.map(|k| (k, "once:eio"));
+        let persistent = (1..=template.calls)
+            .filter(|k| k % SAMPLED == PERSISTENT_AT)
+            .map(|k| (k, "persistent:enospc"));
+        let failures: Vec<(u64, &str)> = once.chain(persistent).collect();
+        let ended = sweep_of(&failures, |&(k, failure)| {
+            fail_export_at(&template, k, failure)
+        });
+        let parts: [Class<'_, Ended>; 5] = [
+            ("exported past a failed call", &|e| {
+                matches!(e, Ended::Exported(_))
+            }),
+            ("failed in the committed read", &|e| {
+                failed_in(e, "meta/journal.")
+            }),
+            ("failed at a derived value", &|e| {
+                failed_in(e, "meta/derived/")
+            }),
+            ("failed at an object of the store", &|e| {
+                failed_in(e, "objects/")
+            }),
+            ("failed at the external id entries", &|e| {
+                failed_in(e, "meta/external_ids/")
+            }),
+        ];
+        let counts: Vec<String> = (parts.iter())
+            .map(|(what, inside)| {
+                let count = ended.iter().filter(|e| inside(e)).count();
+                assert!(count > 0, "no run {what}: {ended:?}");
+                format!("{count} {what}")
+            })
+            .collect();
+        let aborted = ended.iter().filter(|e| matches!(e, Ended::Aborted)).count();
+        println!(
+            "git export failure sweep: {} runs over {} store calls; {}, {aborted} aborted as \
+             documented",
+            failures.len(),
+            template.calls,
+            counts.join(", ")
+        );
+    }
+
+    /// Whether a run that `ended` so failed at a file of the store whose path in the store
+    /// starts with `prefix` (`details.store_file`).
+    fn failed_in(ended: &Ended, prefix: &str) -> bool {
+        let Ended::Failed(error) = ended else {
+            return false;
+        };
+        let file = error["details"]["store_file"].as_str();
+        file.is_some_and(|file| file.starts_with(prefix))
+    }
+
+    /// `git export` whose store call fails (every fifth here, once and persistently; every one in
+    /// the ignored variant below) ends with an envelope that names the failure, or with the
+    /// documented abort, never a panic, and leaves the branch where it was unless it exported
+    /// whole; the same export run again ends where an uninterrupted one ends.
+    #[test]
+    fn git_export_failing_at_any_store_call_stops_and_resumes() {
+        failure_sweep(SAMPLED);
+    }
+
+    /// [`git_export_failing_at_any_store_call_stops_and_resumes`] at every call.
+    #[test]
+    #[ignore = "slow, ~10 s: git export failed at each of its 225 store calls, 270 runs"]
+    fn git_export_failing_at_every_store_call_stops_and_resumes() {
+        failure_sweep(1);
+    }
+}
