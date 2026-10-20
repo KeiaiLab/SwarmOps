@@ -249,7 +249,13 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 /// - `E_IO` `{fs_op, store_file}`: any other `Io` error, whatever its kind (an OS `EINVAL` among
 ///   them). `fs_op` names the file operation that failed; `store_file` the file of the store it
 ///   was on, relative to the store's root (`.` for the root itself), and is absent for a path
-///   outside it; no error carries a host path.
+///   outside it; no such error carries a host path but the two operations spec §0 names: a
+///   symlink loop met while working out where the store's path leads (`fs_op` `resolve`, no
+///   `store_file`), whose message names that path, and tempfile's giving up after 65,536 taken
+///   temp-file names. Also the store's `NotCommitted` (below) whose
+///   append the filesystem refused for want of permission or as a read-only filesystem
+///   (`PermissionDenied`, `ReadOnlyFilesystem`), `{committed, fs_op, store_file}`: running the
+///   same command again meets the same refusal until its cause is fixed, which the hint names.
 /// - `E_IO_TRANSIENT` (retryable) `{committed, fs_op, store_file}`, `committed` always `false`:
 ///   the store's `NotCommitted`, a journal append that failed and that the store cut back off
 ///   the journal, so the write committed nothing; `fs_op` and `store_file` name the append. The
@@ -261,18 +267,21 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   needs, a key or a value that does not encode or decode, a derivation not registered),
 ///   which only a bug of the derivation makes, as its inputs are immutable.
 ///
-/// The operations raise their own errors besides: `E_IS_DIR` and `E_PATH_NOT_FOUND`
-/// `{rev, path}` for reads; `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does
-/// not exist), whose message says what to do next — to a `ref_set` that finds the ref moved, or
-/// created by another, to commit its change again on top of `actual` (`--parent <actual>`),
-/// re-applying its edits to the content there rather than re-sending its old files, then retry
-/// with `--expect <actual>`; to a `ref_delete`, to re-check before deleting; to a move of a ref
-/// that is gone, that it is gone — and whose hint only reads, `swarmops show <actual>` or
-/// `swarmops ref list`, so that an agent that runs it cannot undo the move that won; `E_TOO_LARGE`
-/// `{index, path, size, limit, scope}` (and the client `file` for file content) for a put over
-/// 512 MiB (`scope` `put`) or a commit's contents over 1 GiB together (`commit`, whose `size` is
-/// theirs up to and with the change's), measured before any is read; and `E_INVALID_ARG` for
-/// limits, cursors and requests that break their own rules.
+/// The operations raise their own errors besides:
+///
+/// - `E_IS_DIR` and `E_PATH_NOT_FOUND` `{rev, path}` for reads;
+/// - `E_CAS_MISMATCH` `{name, actual}` (`actual` null when the ref does not exist), whose hint
+///   only reads, `swarmops show <actual>` or `swarmops ref list`, so that an agent that runs it
+///   cannot undo the move that won, and whose message says what to do next:
+///   - to a `ref_set` that finds the ref moved, or created by another: commit its change again
+///     on top of `actual` (`--parent <actual>`), re-applying its edits to the content there
+///     rather than re-sending its old files, then retry with `--expect <actual>`;
+///   - to a `ref_delete`: re-check before deleting;
+///   - to a move of a ref that is gone: that it is gone;
+/// - `E_TOO_LARGE` `{index, path, size, limit, scope}` (and the client `file` for file content) for
+///   a put over 512 MiB (`scope` `put`) or a commit's contents over 1 GiB together (`commit`, whose
+///   `size` is theirs up to and with the change's), measured before any is read;
+/// - `E_INVALID_ARG` for limits, cursors and requests that break their own rules.
 ///
 /// `git_import`'s failures map as follows, the source repository named by the path the request
 /// gave and its objects by their git ids:
@@ -305,7 +314,9 @@ type Snapshot<'a> = RepoRead<'a, FsObjectStore>;
 ///   after its commit point is `E_IO` `{committed: true, warnings}`; either way the import
 ///   stopped there, and `{imported, last_commit}` say how many commits the frames that
 ///   committed recorded and the last of them (null for none). The hint is to run the same import
-///   again, which continues after them, unless the store is damaged (`swarmops verify`).
+///   again, which continues after them, unless the store is damaged (`swarmops verify`), and it
+///   names first what to fix where the filesystem refused a journal append for good (`E_IO`
+///   `{committed: false}`, as above).
 /// - `E_INTERNAL` `{commit}`: a commit whose conversion disagrees with its own check, a bug.
 ///
 /// `git_export`'s failures map as follows, the repository named by the path the request gave,
@@ -1847,106 +1858,100 @@ mod tests {
         assert!(warning.contains("committed"), "{warning}");
     }
 
-    /// The external id index's problems, the changeset `child` (whose hex is `hex`) named where
-    /// the problem names one, each with the finding it is: the entry named by `system` and `key`.
-    fn external_id_cases(hex: &str, child: ChangesetId) -> [(VerifyProblem, Value); 3] {
-        let (system, key) = ("git".to_owned(), "12".repeat(20));
+    /// The external id index's problems, about the entry named by `system` `git` and `key`, the
+    /// changeset `child` named where the problem names one.
+    fn external_id_cases(child: ChangesetId, key: &str) -> [VerifyProblem; 3] {
+        let system = "git".to_owned();
         [
-            (
-                VerifyProblem::ExternalIdCorrupt {
-                    system: system.clone(),
-                    key: key.clone(),
-                },
-                json!({"kind": "external_id_corrupt", "system": "git", "key": key}),
-            ),
-            (
-                VerifyProblem::ExternalIdDangling {
-                    system: system.clone(),
-                    key: key.clone(),
-                    changeset: child,
-                },
-                json!({"kind": "external_id_dangling", "changeset": hex, "system": "git", "key": key}),
-            ),
-            (
-                VerifyProblem::ExternalIdMismatch {
-                    system,
-                    key: key.clone(),
-                    changeset: child,
-                },
-                json!({"kind": "external_id_mismatch", "changeset": hex, "system": "git", "key": key}),
-            ),
+            VerifyProblem::ExternalIdCorrupt {
+                system: system.clone(),
+                key: key.to_owned(),
+            },
+            VerifyProblem::ExternalIdDangling {
+                system: system.clone(),
+                key: key.to_owned(),
+                changeset: child,
+            },
+            VerifyProblem::ExternalIdMismatch {
+                system,
+                key: key.to_owned(),
+                changeset: child,
+            },
         ]
     }
 
     /// Each problem `verify` can find, `IndexMismatch` once for each cause, is a finding of its
     /// own kind with exactly the keys that kind names, its ids in lowercase hex, so that a
     /// program reads what is damaged without parsing the line. No two problems share a kind but
-    /// `IndexMismatch`'s causes, which `cause` tells apart.
+    /// `IndexMismatch`'s causes, which `cause` tells apart. The finding each problem should be
+    /// comes from an exhaustive match, as `finding` does its own: a new problem, or a new
+    /// cause, does not compile here until it is given its kind and keys, and with them a case.
     #[test]
     fn every_verify_problem_is_a_finding_with_its_keys() {
         let (object, child, parent) = ("ab".repeat(32), "cd".repeat(32), "ef".repeat(32));
+        let key = "12".repeat(20);
         let id = |hex: &str| ObjectId::from_hex(&hex.to_uppercase()).unwrap();
         let changeset = |hex: &str| ChangesetId(id(hex));
         let mismatch = |cause| VerifyProblem::IndexMismatch { seq: 7, cause };
+        let expected = |problem: &VerifyProblem| match problem {
+            VerifyProblem::CorruptObject(_) => json!({"kind": "corrupt_object", "object": object}),
+            VerifyProblem::MissingObject { .. } => {
+                json!({"kind": "missing_object", "object": object, "changeset": child})
+            }
+            VerifyProblem::MissingParent { .. } => {
+                json!({"kind": "missing_parent", "changeset": child, "parent": parent})
+            }
+            VerifyProblem::RootMismatch(_) => json!({"kind": "root_mismatch", "changeset": child}),
+            VerifyProblem::DanglingRef(_) => json!({"kind": "dangling_ref", "ref": "main"}),
+            VerifyProblem::CorruptRef(_) => json!({"kind": "corrupt_ref", "ref": "release/1.0"}),
+            VerifyProblem::IndexMismatch { cause, .. } => {
+                let cause = match cause {
+                    MismatchCause::Journal => "journal",
+                    MismatchCause::SortedView => "sorted_view",
+                    MismatchCause::Object => "object",
+                };
+                json!({"kind": "index_mismatch", "seq": 7, "cause": cause})
+            }
+            VerifyProblem::JournalCorrupt { .. } => {
+                json!({"kind": "journal_corrupt", "offset": 4096})
+            }
+            VerifyProblem::MetaCorrupt(_) => json!({"kind": "meta_corrupt"}),
+            VerifyProblem::ExternalIdCorrupt { .. } => {
+                json!({"kind": "external_id_corrupt", "system": "git", "key": key})
+            }
+            VerifyProblem::ExternalIdDangling { .. } => json!({
+                "kind": "external_id_dangling", "changeset": child, "system": "git", "key": key
+            }),
+            VerifyProblem::ExternalIdMismatch { .. } => json!({
+                "kind": "external_id_mismatch", "changeset": child, "system": "git", "key": key
+            }),
+        };
         let cases = [
-            (
-                VerifyProblem::CorruptObject(id(&object)),
-                json!({"kind": "corrupt_object", "object": object}),
-            ),
-            (
-                VerifyProblem::MissingObject {
-                    referenced_by: changeset(&child),
-                    id: id(&object),
-                },
-                json!({"kind": "missing_object", "object": object, "changeset": child}),
-            ),
-            (
-                VerifyProblem::MissingParent {
-                    child: changeset(&child),
-                    parent: changeset(&parent),
-                },
-                json!({"kind": "missing_parent", "changeset": child, "parent": parent}),
-            ),
-            (
-                VerifyProblem::RootMismatch(changeset(&child)),
-                json!({"kind": "root_mismatch", "changeset": child}),
-            ),
-            (
-                VerifyProblem::DanglingRef("main".to_owned()),
-                json!({"kind": "dangling_ref", "ref": "main"}),
-            ),
-            (
-                VerifyProblem::CorruptRef("release/1.0".to_owned()),
-                json!({"kind": "corrupt_ref", "ref": "release/1.0"}),
-            ),
-            (
-                mismatch(MismatchCause::Journal),
-                json!({"kind": "index_mismatch", "seq": 7, "cause": "journal"}),
-            ),
-            (
-                mismatch(MismatchCause::SortedView),
-                json!({"kind": "index_mismatch", "seq": 7, "cause": "sorted_view"}),
-            ),
-            (
-                mismatch(MismatchCause::Object),
-                json!({"kind": "index_mismatch", "seq": 7, "cause": "object"}),
-            ),
-            (
-                VerifyProblem::JournalCorrupt { offset: 4096 },
-                json!({"kind": "journal_corrupt", "offset": 4096}),
-            ),
-            (
-                VerifyProblem::MetaCorrupt("journal.off is missing".to_owned()),
-                json!({"kind": "meta_corrupt"}),
-            ),
+            VerifyProblem::CorruptObject(id(&object)),
+            VerifyProblem::MissingObject {
+                referenced_by: changeset(&child),
+                id: id(&object),
+            },
+            VerifyProblem::MissingParent {
+                child: changeset(&child),
+                parent: changeset(&parent),
+            },
+            VerifyProblem::RootMismatch(changeset(&child)),
+            VerifyProblem::DanglingRef("main".to_owned()),
+            VerifyProblem::CorruptRef("release/1.0".to_owned()),
+            mismatch(MismatchCause::Journal),
+            mismatch(MismatchCause::SortedView),
+            mismatch(MismatchCause::Object),
+            VerifyProblem::JournalCorrupt { offset: 4096 },
+            VerifyProblem::MetaCorrupt("journal.off is missing".to_owned()),
         ];
-        let external = external_id_cases(&child, changeset(&child));
+        let external = external_id_cases(changeset(&child), &key);
         let mut kinds: BTreeMap<String, Vec<&VerifyProblem>> = BTreeMap::new();
-        for (problem, expected) in cases.iter().chain(&external) {
+        for problem in cases.iter().chain(&external) {
             let found = finding(problem);
             assert_eq!(
                 serde_json::to_value(&found).unwrap(),
-                *expected,
+                expected(problem),
                 "{problem:?}"
             );
             kinds.entry(found.kind).or_default().push(problem);
@@ -2004,6 +2009,145 @@ mod tests {
         let info = fresh.repo_info(InfoReq {}).unwrap();
         assert_eq!(info.main.as_deref(), Some(committed.changeset.as_str()));
         assert_eq!(info.changesets, 1);
+    }
+
+    /// A journal append that the filesystem refuses in a way that running the same command again
+    /// meets again, for want of permission (`EACCES`) or as a read-only filesystem (`EROFS`), in
+    /// each of the store's three ways to `NotCommitted` (storage spec §2 rule 3 (a)-(c)): the
+    /// non-retryable `E_IO`, `committed: false`, naming the append, with a hint that says what to
+    /// fix; nothing of the request was committed, and once the cause is gone it commits (ruling
+    /// M16-R8). Any other failure there is the retryable `E_IO_TRANSIENT`, as the tests beside
+    /// this module show.
+    mod refused_for_good {
+        use std::io;
+
+        use swarmops_store::RealFs;
+        use swarmops_testkit::fs::{Call, Watch, Watched};
+
+        use super::*;
+
+        /// Refuses each call whose method and path's end it lists before the call runs, with the
+        /// operating system's error it gives: `EACCES` (13) as a file without write permission
+        /// does, `EROFS` (30) as a read-only filesystem does, `EIO` (5) as a failed writeback.
+        struct Refuses(Vec<(&'static str, &'static str, i32)>);
+
+        impl Watch for Refuses {
+            fn before(&self, call: &Call<'_>) -> io::Result<()> {
+                let refused = self.0.iter().find(|(method, suffix, _)| {
+                    call.method == *method && call.path().ends_with(suffix)
+                });
+                match refused {
+                    Some(&(_, _, errno)) => Err(io::Error::from_raw_os_error(errno)),
+                    None => Ok(()),
+                }
+            }
+        }
+
+        /// The real filesystem, but that it refuses the calls `refused` lists ([`Refuses`]).
+        fn refusing(refused: &[(&'static str, &'static str, i32)]) -> Watched<Refuses> {
+            Watched(Refuses(refused.to_vec()), RealFs)
+        }
+
+        /// A store at `<dir>/store`, made, and the identity that commits to it.
+        fn new_store(dir: &tempfile::TempDir) -> (Utf8PathBuf, Identity) {
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            drop(LocalOps::init(&root, "acme").unwrap());
+            (root, Identity::parse("agent/worker-17").unwrap())
+        }
+
+        /// A request that puts `path` on main's head.
+        fn put(path: &str) -> CommitReq {
+            CommitReq {
+                parent: None,
+                changes: vec![ChangeInput {
+                    path: path.to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline("x".to_owned())),
+                    mode: None,
+                }],
+                message: "m".to_owned(),
+                allow_empty: false,
+                advance: None,
+            }
+        }
+
+        /// `error` is the non-retryable `E_IO` of a journal append to `store_file` that
+        /// committed nothing, its hint saying to do `fix` first.
+        #[track_caller]
+        fn refused(error: &OpError, store_file: &str, fix: &str) {
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                ("E_IO", 1, false),
+                "{error:?}"
+            );
+            assert_eq!(
+                Value::Object(error.details.clone()),
+                json!({"committed": false, "fs_op": "append_durable", "store_file": store_file}),
+                "{error:?}"
+            );
+            let hint = error.hint.as_deref().unwrap_or_default();
+            assert!(hint.contains(fix), "{error:?}");
+        }
+
+        /// (a) `journal.log` refuses the commit's own frame (`EACCES`).
+        #[test]
+        fn a_frame_append_refused_for_want_of_permission_is_e_io() {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, who) = new_store(&dir);
+            let ops = ops_on(&root, refusing(&[("append_durable", "journal.log", 13)]));
+            let error = ops.commit(&who, put("f")).unwrap_err();
+            refused(&error, "meta/journal.log", "writable");
+            drop(ops);
+
+            let fresh = LocalOps::open(&root).unwrap();
+            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 0);
+            fresh.commit(&who, put("f")).unwrap();
+        }
+
+        /// (b) `journal.off` refuses the tail check's listing of a frame an earlier commit left
+        /// whole and unlisted (that commit's own listing failed: committed, with a warning), on a
+        /// read-only filesystem (`EROFS`).
+        #[test]
+        fn a_listing_refused_by_a_read_only_filesystem_is_e_io() {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, who) = new_store(&dir);
+            let ops = ops_on(&root, failing("append_durable", "journal.off"));
+            one_injected(&ops.commit(&who, put("f")).unwrap().warnings);
+            drop(ops);
+            let ops = ops_on(&root, refusing(&[("append_durable", "journal.off", 30)]));
+            let error = ops.commit(&who, put("g")).unwrap_err();
+            refused(&error, "meta/journal.off", "read-write");
+            drop(ops);
+
+            let fresh = LocalOps::open(&root).unwrap();
+            fresh.commit(&who, put("g")).unwrap();
+            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 2);
+        }
+
+        /// (c) The tail check's sync of such a frame fails (`EIO`), and `journal.log` refuses
+        /// the rewrite of the frame (`EACCES`): cut back off, the frame is lost (a double fault,
+        /// storage spec §2 rule 3), and the request committed nothing.
+        #[test]
+        fn a_rewrite_refused_for_want_of_permission_is_e_io() {
+            let dir = tempfile::tempdir().unwrap();
+            let (root, who) = new_store(&dir);
+            let ops = ops_on(&root, failing("append_durable", "journal.off"));
+            one_injected(&ops.commit(&who, put("f")).unwrap().warnings);
+            drop(ops);
+            let refusals = [
+                ("sync_data", "journal.log", 5),
+                ("append_durable", "journal.log", 13),
+            ];
+            let ops = ops_on(&root, refusing(&refusals));
+            let error = ops.commit(&who, put("g")).unwrap_err();
+            refused(&error, "meta/journal.log", "writable");
+            assert!(error.message.contains("writing afresh"), "{error:?}");
+            drop(ops);
+
+            let fresh = LocalOps::open(&root).unwrap();
+            fresh.commit(&who, put("g")).unwrap();
+            assert_eq!(fresh.repo_info(InfoReq {}).unwrap().changesets, 1);
+        }
     }
 
     /// A commit whose journal frame cannot be appended (journal.log refuses it) committed
@@ -2140,6 +2284,93 @@ mod tests {
         let replay = ops.recording(&second).ref_set(&who, set(&c1, Some(&c1)));
         assert!(replay.unwrap().already_applied);
         assert_eq!(second.take_recovered(), None, "its write repaired nothing");
+    }
+
+    /// A `ref_delete` records what its write repaired first too, whether it deletes the ref or
+    /// finds it at another target (`E_CAS_MISMATCH`): after a ref move whose listing in
+    /// `journal.off` failed, the delete's write lists the frame and writes the ref file before it
+    /// compares.
+    #[test]
+    fn a_ref_delete_records_what_its_own_write_repaired() {
+        let who = Identity::parse("agent/worker-17").unwrap();
+        for deletes in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let commit = |content: &str| {
+                let put = ChangeInput {
+                    path: "f".to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline(content.to_owned())),
+                    mode: None,
+                };
+                let req = CommitReq {
+                    parent: None,
+                    changes: vec![put],
+                    message: "m".to_owned(),
+                    allow_empty: false,
+                    advance: None,
+                };
+                ops.commit(&who, req).unwrap().changeset
+            };
+            let (c1, c2) = (commit("1"), commit("2"));
+            let main = RefSetReq {
+                name: "main".to_owned(),
+                new: c1.as_str().into(),
+                expected_old: None,
+                create: true,
+            };
+            let created = ops_on(&root, failing("append_durable", "journal.off"))
+                .ref_set(&who, main)
+                .unwrap();
+            one_injected(&created.warnings);
+
+            let resolved = Resolved::default();
+            // main holds c1: the delete expects it, or c2.
+            let expected = if deletes { &c1 } else { &c2 };
+            let delete = RefDeleteReq {
+                name: "main".to_owned(),
+                expected_old: expected.as_str().into(),
+            };
+            match ops.recording(&resolved).ref_delete(&who, delete) {
+                Ok(deleted) => assert!(deletes && !deleted.already_applied, "{deleted:?}"),
+                Err(e) => assert!(!deletes && e.code == "E_CAS_MISMATCH", "{e:?}"),
+            }
+            let listed_and_written = RecoveredOut {
+                frames_listed: 1,
+                refs_replayed: 1,
+                ..RecoveredOut::default()
+            };
+            let recovered = resolved.take_recovered();
+            assert_eq!(recovered, Some(listed_and_written), "deletes: {deletes}");
+        }
+    }
+
+    /// `meta.recovered` gives each count of the store's report in its own field: eight distinct
+    /// values, the cut's two among them, each come back where they were.
+    #[test]
+    fn recovered_out_keeps_each_count_in_its_own_field() {
+        let recovered = Recovered {
+            log_cut: Some(LogCut { at: 1, bytes: 2 }),
+            frames_listed: 3,
+            frames_rewritten: 4,
+            off_bytes_dropped: 5,
+            index_records_dropped: 6,
+            views_rebuilt: true,
+            records_replayed: 7,
+            refs_replayed: 8,
+        };
+        let out = RecoveredOut {
+            log_cut: Some(LogCutOut { at: 1, bytes: 2 }),
+            frames_listed: 3,
+            frames_rewritten: 4,
+            off_bytes_dropped: 5,
+            index_records_dropped: 6,
+            views_rebuilt: true,
+            records_replayed: 7,
+            refs_replayed: 8,
+        };
+        assert_eq!(recovered_out(recovered), out);
     }
 
     /// A commit with `advance` whose ref moved first is `E_CAS_MISMATCH`, which records what its

@@ -176,10 +176,31 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         StoreError::NotCommitted { source } => {
             let mut details = located(&source);
             details.insert("committed".to_owned(), false.into());
-            error(ErrorCode::IoTransient, message)
-                .with_details(details)
-                .with_hint("run the same command again: nothing of this one was committed")
+            match lasting_refusal(&source) {
+                Some(fix) => error(ErrorCode::Io, message)
+                    .with_details(details)
+                    .with_hint(format!(
+                        "{fix}, then run the same command again: nothing of this one was \
+                         committed"
+                    )),
+                None => error(ErrorCode::IoTransient, message)
+                    .with_details(details)
+                    .with_hint("run the same command again: nothing of this one was committed"),
+            }
         }
+    }
+}
+
+/// What to fix first when the filesystem refused a journal append in a way that running the
+/// same command again meets again: for want of permission (`EACCES`, `EPERM`), or as a
+/// read-only filesystem (`EROFS`). The store's `NotCommitted` is then the non-retryable
+/// `E_IO`, `committed: false` all the same (ruling M16-R8: retryable means that running the
+/// operation again can succeed). `None` for any other failure, which a run again can get past.
+fn lasting_refusal(failure: &IoFailure) -> Option<&'static str> {
+    match failure.kind() {
+        io::ErrorKind::PermissionDenied => Some("make the store's files writable for this user"),
+        io::ErrorKind::ReadOnlyFilesystem => Some("remount the store's filesystem read-write"),
+        _ => None,
     }
 }
 
@@ -375,11 +396,21 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
             imported,
             last,
         } => {
+            // A journal append the filesystem refused for good (ruling M16-R8) is mended by its
+            // fix, which the hint names before the run again that resumes.
+            let fix = match &source {
+                RepoError::Store(StoreError::NotCommitted { source }) => lasting_refusal(source),
+                _ => None,
+            };
             let stopped = OpError {
                 message: one_line(message),
                 ..op(source)
             };
-            progress(stopped, imported, last)
+            let mut stopped = progress(stopped, imported, last);
+            if let Some(fix) = fix {
+                stopped.hint = Some(format!("{fix}, then {RESUME_HINT}"));
+            }
+            stopped
         }
         ImportError::PostCommit {
             warnings,
@@ -826,8 +857,9 @@ mod tests {
 
     /// A commit with `advance` whose ref moved first recorded nothing: `E_CAS_MISMATCH` (exit 4,
     /// retryable) with what the ref names and `committed: false`, a message that says to commit
-    /// again on top of it, and a hint that only reads; `actual` is null, and the hint the refs,
-    /// for a ref that is gone.
+    /// again on top of it, and a hint that only reads. For a ref that is gone, `actual` is null,
+    /// the message says the ref does not exist and the commit recorded nothing, and the hint
+    /// lists the refs.
     #[test]
     fn a_commit_whose_ref_moved_is_a_cas_mismatch_that_committed_nothing() {
         let moved = |actual| {
@@ -860,6 +892,9 @@ mod tests {
         ]);
         assert_eq!(gone.details, want);
         assert_eq!(gone.hint.as_deref(), Some("swarmops ref list"));
+        let said = "ref main does not exist, so it does not name this commit's parent";
+        assert!(gone.message.starts_with(said), "{gone:?}");
+        assert!(gone.message.contains("recorded nothing"), "{gone:?}");
     }
 
     #[test]
@@ -1030,6 +1065,63 @@ mod tests {
         );
         let hint = error.hint.unwrap_or_default();
         assert!(hint.contains("same command"), "{hint}");
+    }
+
+    /// A journal append that the filesystem refused in a way that running the same command again
+    /// meets again, for want of permission (`EACCES`, `EPERM`) or as a read-only filesystem
+    /// (`EROFS`), and that the store cut back, committed nothing all the same: `E_IO`, exit 1,
+    /// not retryable, `committed: false`, naming the append, with a hint that says what to fix
+    /// before running it again (ruling M16-R8). Any other failure there, `EIO` or `ENOSPC`, stays
+    /// the retryable `E_IO_TRANSIENT`.
+    #[test]
+    fn a_journal_append_refused_for_good_is_e_io_and_not_committed() {
+        let not_committed = |errno| {
+            let source = IoFailure::new(
+                FileOp::Fs(FsMethod::AppendDurable),
+                Some("meta/journal.off".into()),
+                io::Error::from_raw_os_error(errno),
+            );
+            repo_error(
+                RepoError::Store(StoreError::NotCommitted { source }),
+                During::Op,
+            )
+        };
+        for (errno, fix) in [(13, "writable"), (1, "writable"), (30, "read-write")] {
+            let error = not_committed(errno);
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                ("E_IO", 1, false),
+                "errno {errno}"
+            );
+            assert_eq!(
+                Value::Object(error.details),
+                serde_json::json!({
+                    "committed": false,
+                    "fs_op": "append_durable",
+                    "store_file": "meta/journal.off"
+                }),
+                "errno {errno}"
+            );
+            assert!(
+                error.message.contains("did not commit"),
+                "{}",
+                error.message
+            );
+            let hint = error.hint.unwrap_or_default();
+            assert!(
+                hint.contains(fix) && hint.contains("same command"),
+                "errno {errno}: {hint}"
+            );
+        }
+        for errno in [5, 28] {
+            let error = not_committed(errno);
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                ("E_IO_TRANSIENT", 4, true),
+                "errno {errno}"
+            );
+            assert_eq!(error.details["committed"], false, "errno {errno}");
+        }
     }
 
     /// A filesystem failure names the file operation that failed (`details.fs_op`) and, where it
@@ -1404,8 +1496,9 @@ mod tests {
 
     /// A store failure stops an import with the code the operations give it, saying how far the
     /// import got (`imported`, `last_commit`, null when no frame committed) beside its own
-    /// details, and hinting to run it again, but where it found the store damaged; a frame that
-    /// committed and failed after its commit point is `E_IO` with `committed: true` and its
+    /// details, and hinting to run it again, but where it found the store damaged, and only after
+    /// what to fix where the filesystem refused a journal append for good (ruling M16-R8); a frame
+    /// that committed and failed after its commit point is `E_IO` with `committed: true` and its
     /// warnings.
     #[test]
     fn git_import_store_failures_say_how_far_it_got() {
@@ -1438,6 +1531,17 @@ mod tests {
         });
         let error = git_maps(stopped(cut, 0, None), ErrorCode::IoTransient, &want);
         assert_eq!(error.hint.as_deref(), Some(RESUME_HINT));
+        let refused = StoreError::NotCommitted {
+            source: IoFailure::new(
+                FileOp::Fs(FsMethod::AppendDurable),
+                Some("meta/journal.log".into()),
+                io::Error::from_raw_os_error(13),
+            ),
+        };
+        let error = git_maps(stopped(refused, 0, None), ErrorCode::Io, &want);
+        let fix_first =
+            format!("make the store's files writable for this user, then {RESUME_HINT}");
+        assert_eq!(error.hint.as_deref(), Some(fix_first.as_str()));
         let damaged = StoreError::Corrupt {
             id: ObjectId([9; 32]),
         };

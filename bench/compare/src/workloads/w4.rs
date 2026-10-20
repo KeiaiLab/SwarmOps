@@ -77,6 +77,15 @@ pub fn first_open(engine: &dyn Engine, seed: &Seed, exe: &Path) -> Result<Values
 }
 
 pub fn open(engine: &dyn Engine, seed: &Seed, trials: usize, exe: &Path) -> Result<Values> {
+    open_with(seed, trials, |dir| open_once(engine, dir, seed.n, exe))
+}
+
+/// [`open`], each trial's open made by `open_one` on the directory it is given.
+fn open_with(
+    seed: &Seed,
+    trials: usize,
+    mut open_one: impl FnMut(&Path) -> Result<(Opened, Duration)>,
+) -> Result<Values> {
     let (mut opens, mut firsts, mut processes) = (vec![], vec![], vec![]);
     for _ in 0..trials {
         // A fresh copy of the store as its load left it, made and synced untimed, for an
@@ -87,7 +96,7 @@ pub fn open(engine: &dyn Engine, seed: &Seed, trials: usize, exe: &Path) -> Resu
             .map(|as_loaded| copy_store(as_loaded.path()))
             .transpose()?;
         let dir = copy.as_ref().map_or(seed.dir.as_path(), TempDir::path);
-        let (opened, process) = open_once(engine, dir, seed.n, exe)?;
+        let (opened, process) = open_one(dir)?;
         opens.push(opened.open_us as f64 / 1e3);
         firsts.push(opened.first_us as f64 / 1e3);
         processes.push(ms(process));
@@ -196,4 +205,115 @@ pub fn recover(
         ("killed_after_ms".into(), after),
         ("trials".into(), trials as f64),
     ]))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use super::{Opened, open_with};
+    use crate::workloads::Seed;
+
+    /// The files directly in `dir`, by name, with their bytes.
+    fn files(dir: &Path) -> BTreeMap<String, Vec<u8>> {
+        fs::read_dir(dir)
+            .expect("a directory")
+            .map(|entry| {
+                let entry = entry.expect("an entry");
+                let name = entry.file_name().to_string_lossy().into_owned();
+                (name, fs::read(entry.path()).expect("a file"))
+            })
+            .collect()
+    }
+
+    /// A seeded store in a fresh directory in `work`, as its load left it: a journal.
+    fn loaded(work: &Path) -> Seed {
+        let keep = tempfile::tempdir_in(work).expect("a store dir");
+        let dir = keep.path().to_path_buf();
+        fs::write(dir.join("0.jnl"), b"what the load left").expect("write a journal");
+        Seed {
+            n: 1_000,
+            dir,
+            load_secs: 0.0,
+            as_loaded: None,
+            _keep: keep,
+        }
+    }
+
+    /// What an open of an unflushed fjall store does to it: it replays the journal into a table
+    /// and deletes the journal.
+    fn settle(dir: &Path) {
+        let _ = fs::remove_file(dir.join("0.jnl"));
+        fs::write(dir.join("table"), b"settled").expect("write a table");
+    }
+
+    /// What `__open` prints, and its process's time.
+    fn timed() -> (Opened, Duration) {
+        let opened = Opened {
+            open_us: 1_000,
+            first_us: 10,
+        };
+        (opened, Duration::from_millis(5))
+    }
+
+    #[test]
+    fn each_w4_open_of_a_store_kept_as_loaded_is_of_a_fresh_copy_of_it() {
+        let work = tempfile::tempdir().expect("a work dir");
+        let mut seed = loaded(work.path());
+        seed.keep_as_loaded()
+            .expect("copy the store as its load left it");
+        let kept = seed
+            .as_loaded
+            .as_ref()
+            .expect("the copy")
+            .path()
+            .to_path_buf();
+        let as_loaded = files(&kept);
+        // The store's first open, timed at seeding, has settled it since.
+        settle(&seed.dir);
+        let mut opened: Vec<(PathBuf, BTreeMap<String, Vec<u8>>)> = Vec::new();
+        open_with(&seed, 3, |dir| {
+            opened.push((dir.to_path_buf(), files(dir)));
+            settle(dir);
+            Ok(timed())
+        })
+        .expect("three opens");
+        assert_eq!(opened.len(), 3);
+        for (dir, held) in &opened {
+            assert!(
+                *dir != seed.dir && *dir != kept,
+                "{}: opened in place",
+                dir.display()
+            );
+            assert_eq!(
+                *held,
+                as_loaded,
+                "{}: not the store as its load left it",
+                dir.display()
+            );
+            assert!(
+                !dir.exists(),
+                "{}: the copy outlived its open",
+                dir.display()
+            );
+        }
+        assert_eq!(
+            files(&kept),
+            as_loaded,
+            "the copy kept at seeding was opened"
+        );
+
+        // A store not kept as loaded is opened in place, every time.
+        let settled = loaded(work.path());
+        let mut dirs = Vec::new();
+        open_with(&settled, 2, |dir| {
+            dirs.push(dir.to_path_buf());
+            Ok(timed())
+        })
+        .expect("two opens");
+        assert_eq!(dirs, [settled.dir.clone(), settled.dir.clone()]);
+    }
 }

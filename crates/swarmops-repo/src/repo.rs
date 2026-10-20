@@ -284,8 +284,11 @@ impl LocalRepo {
         let layout = Layout::new(root.clone());
         // A FORMAT longer than the layout's names no layout this build reads, however long it
         // is: measured before it is read (through `std::fs`, no `FsOps` call), so that a
-        // crafted file of huge length is never read into memory. A missing one reaches the read.
+        // crafted file of huge length is never read into memory. A missing one, and one that is
+        // no regular file (whose size says nothing of its content), reach the read, which
+        // refuses the latter as such.
         if let Ok(meta) = std::fs::metadata(layout.format_file().as_std_path())
+            && meta.is_file()
             && meta.len() > to_u64(FORMAT.len())
         {
             return Err(StoreError::Format(format!(
@@ -653,8 +656,8 @@ fn resolving(e: io::Error) -> IoFailure {
 /// first. One component at a time: `..` takes back the one before it (resolved already, so no
 /// symlink); a symlink gives way to its target, whether that exists or not (a directory made
 /// through it lands where it points); a name that does not exist is kept as it is. A failure is
-/// [`FileOp::Resolve`]'s, with no file; a symlink loop names `path` in its text, the path the
-/// caller gave.
+/// [`FileOp::Resolve`]'s, with no file; a symlink loop names `path` in its text: the store's path
+/// made absolute (against the working directory, if the caller gave it relative).
 fn resolve(path: &Utf8Path) -> Result<(Utf8PathBuf, Vec<Utf8PathBuf>), IoFailure> {
     // Linux's MAXSYMLINKS: more symlinks than that on one path is a loop.
     const MAX_LINKS: usize = 40;
@@ -716,8 +719,10 @@ fn read_identity(layout: &Layout, fs: &StoreFs) -> Result<Identity, RepoError> {
     // A REPO longer than an id line and the longest name create writes holds no identity this
     // build reads, however long it is: measured before it is read (through `std::fs`, no
     // `FsOps` call), so that a crafted file of huge length is never read into memory. A missing
-    // one reaches the read.
+    // one, and one that is no regular file (whose size says nothing of its content), reach the
+    // read, which refuses the latter as such.
     if let Ok(meta) = std::fs::metadata(path.as_std_path())
+        && meta.is_file()
         && meta.len() > MAX_REPO_LEN
     {
         return Err(bad(&format!(
