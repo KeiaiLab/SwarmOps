@@ -1,7 +1,7 @@
 {
   "name": "SwarmOps",
   "short_name": "SwarmOps",
-  "description": "Source control for swarms of coding agents.",
+  "description": "A git replacement for coding-agent swarms.",
   "start_url": "/",
   "display": "minimal-ui",
   "background_color": "#0b0e14",
