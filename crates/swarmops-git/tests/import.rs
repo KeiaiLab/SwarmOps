@@ -1206,6 +1206,66 @@ fn a_refused_commit_stops_the_import_before_its_frame() {
     );
 }
 
+/// A commit or a tree whose header says it is longer than an object holds stops the import before
+/// a byte of it is read, naming it (reading one panics): a commit the walk meets, and a tree a
+/// commit's conversion reads, each before anything is written; and a tree of the base, which an
+/// incremental import seeds from, before that import writes anything.
+#[test]
+fn a_commit_or_a_tree_past_the_object_limit_stops_the_import_before_it_is_read() {
+    use swarmops_store::MAX_OBJECT_LEN;
+
+    let refused = |error: &ImportError, oid: GitOid, kind: RawKind| {
+        let too_large = SourceError::TooLarge {
+            oid,
+            kind,
+            size: MAX_OBJECT_LEN + 1,
+        };
+        match error {
+            ImportError::Source(source) | ImportError::Convert(ConvertError::Source(source)) => {
+                *source == too_large
+            }
+            _ => false,
+        }
+    };
+    let mut source = MemSource::default();
+    let file = source.blob(b"file\n");
+    let tree = source.tree(&[("100644", b"file.txt", file)]);
+    let huge_commit = GitOid([0x5c; 20]);
+    let huge_tree = GitOid([0x5d; 20]);
+    source.claim(huge_commit, RawKind::Commit, MAX_OBJECT_LEN + 1);
+    source.claim(huge_tree, RawKind::Tree, MAX_OBJECT_LEN + 1);
+    let first = source.commit(tree, &[], "first\n");
+    let on_huge_commit = source.commit(tree, &[huge_commit], "on a huge commit\n");
+    let huge_tree_commit = source.commit(huge_tree, &[first], "a huge tree\n");
+    for (tip, oid, kind) in [
+        (on_huge_commit, huge_commit, RawKind::Commit),
+        (huge_tree_commit, huge_tree, RawKind::Tree),
+    ] {
+        let (_dir, root, repo) = new_repo();
+        let before = files(&root);
+        let error = import(&repo, &source, &request(&tip.to_string())).unwrap_err();
+        assert!(refused(&error, oid, kind), "{kind}: {error:?}");
+        assert_eq!(files(&root), before, "{kind}: the store as init left it");
+    }
+
+    // The base's tree, which the next import walks to seed its conversion, now claims more.
+    let (_dir, root, repo) = new_repo();
+    let base = import(&repo, &source, &request(&first.to_string())).unwrap();
+    let other = source.blob(b"other\n");
+    let next_tree = source.tree(&[("100644", b"other.txt", other)]);
+    let next = source.commit(next_tree, &[first], "next\n");
+    source.claim(tree, RawKind::Tree, MAX_OBJECT_LEN + 1);
+    let before = files(&root);
+    let error = import(&repo, &source, &request(&next.to_string())).unwrap_err();
+    assert!(refused(&error, tree, RawKind::Tree), "{error:?}");
+    assert_eq!(
+        files(&root),
+        before,
+        "the store as the first import left it"
+    );
+    assert_eq!(main_head(&repo), base.head);
+}
+
 /// Two imports of one source into one store at once, each on a handle of its own, both succeed
 /// and leave the target at the tip's changeset; one of them moved it.
 #[test]
