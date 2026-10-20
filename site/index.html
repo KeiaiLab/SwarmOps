@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SwarmOps: source control for swarms of coding agents</title>
+  <meta name="description" content="SwarmOps is source control built for swarms of coding agents: many writers, one fully embedded store in Rust, and one JSON envelope per command. Pre-release.">
+  <link rel="canonical" href="https://swarmops.cc/">
+  <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0b0e14">
+  <meta name="theme-color" media="(prefers-color-scheme: light)" content="#ffffff">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
+  <link rel="manifest" href="/site.webmanifest">
+  <link rel="stylesheet" href="/styles.css">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="SwarmOps">
+  <meta property="og:title" content="SwarmOps: source control for swarms of coding agents">
+  <meta property="og:description" content="Many writers, one store, one JSON envelope per command. Fully embedded, written in Rust, pre-release.">
+  <meta property="og:url" content="https://swarmops.cc/">
+  <meta property="og:image" content="https://swarmops.cc/og-image.png">
+  <meta property="og:image:width" content="1280">
+  <meta property="og:image:height" content="640">
+  <meta property="og:image:alt" content="The SwarmOps logo beside its name and tagline: source control for swarms of coding agents.">
+  <meta name="twitter:card" content="summary_large_image">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"SoftwareSourceCode","name":"SwarmOps","description":"Source control for swarms of coding agents: many writers, one fully embedded store, one JSON envelope per command.","url":"https://swarmops.cc/","codeRepository":"https://github.com/KeiaiLab/SwarmOps","programmingLanguage":"Rust","license":"https://opensource.org/licenses/MIT","runtimePlatform":"Linux"}
+  </script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/logo.svg" alt="" width="30" height="30">SwarmOps</a>
+    <nav class="nav" aria-label="Sections">
+      <a href="#why">Why</a>
+      <a href="#inside">Inside</a>
+      <a href="#git">vs git</a>
+      <a href="#start">Quick start</a>
+      <a href="#mcp">MCP</a>
+      <a href="#roadmap">Roadmap</a>
+      <a class="gh" href="https://github.com/KeiaiLab/SwarmOps">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="main">
+<div class="hero">
+  <div class="wrap">
+    <div>
+      <span class="pill"><b>Pre-release</b> · milestone M1.5 · MIT licence</span>
+      <h1>Source control for <em>swarms of coding agents</em></h1>
+      <p class="lead">Many writers, one store, one JSON envelope per command. SwarmOps is
+        <strong>fully embedded</strong>, written in Rust: one program, no daemon, no external
+        database, for 10 to 50 agent processes committing to one repository on one host.</p>
+      <div class="ctas">
+        <a class="btn primary" href="#start">Quick start</a>
+        <a class="btn" href="https://github.com/KeiaiLab/SwarmOps">View on GitHub</a>
+      </div>
+      <ul class="facts">
+        <li>Full fsync, no fast mode</li>
+        <li>Refs move by compare-and-swap</li>
+        <li>MCP server built in</li>
+      </ul>
+    </div>
+    <div class="term" role="img" aria-label="A terminal: one command prints a success envelope, another an error envelope with a stable code, an exit code and a hint.">
+      <div class="bar"><i></i><i></i><i></i><span>agent worker-1</span></div>
+<pre><span class="p">$</span> so cat main:src/lib.rs
+<span class="c">{</span><span class="k">"ok"</span>:<span class="ok">true</span>,<span class="k">"op"</span>:"read_file",<span class="k">"api"</span>:1,
+ <span class="k">"result"</span>:{"blob":"f5f5…","size":14,
+   "kind":"file","encoding":"utf8",
+   "content":"pub fn f() {}\n","truncated":false},
+ <span class="k">"meta"</span>:{"resolved":{"main":"014c…"}}<span class="c">}</span>
+
+<span class="p">$</span> so commit -m "fix" --changes changes.json
+<span class="c">{</span><span class="k">"ok"</span>:<span class="err">false</span>,<span class="k">"op"</span>:"commit",<span class="k">"api"</span>:1,
+ <span class="k">"error"</span>:{"code":<span class="err">"E_IDENTITY_REQUIRED"</span>,
+   "retryable":false,"exit":5,"details":{},
+   "hint":"pass --as &lt;family&gt;/&lt;instance&gt; …"}<span class="c">}</span></pre>
+    </div>
+  </div>
+</div>
+
+<section id="why">
+  <div class="wrap">
+    <p class="eyebrow">Why SwarmOps</p>
+    <h2>A swarm of agents is not a team of people</h2>
+    <p class="sub">It needs other things from source control. SwarmOps is built around three of them.</p>
+    <div class="cards">
+      <article class="card">
+        <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h10M4 12h16M4 17h7"/><circle cx="18" cy="7" r="2"/><circle cx="15" cy="17" r="2"/></svg></div>
+        <h3>Many agents write at once</h3>
+        <p>Tens of agent processes commit into one repository on one host. Object writes take no lock, metadata writes queue in the kernel for one lock, and refs move only by compare-and-swap.</p>
+      </article>
+      <article class="card">
+        <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 4H6a2 2 0 0 0-2 2v4l-2 2 2 2v4a2 2 0 0 0 2 2h2M16 4h2a2 2 0 0 1 2 2v4l2 2-2 2v4a2 2 0 0 1-2 2h-2"/></svg></div>
+        <h3>Agents read answers, not prose</h3>
+        <p>Every command prints one JSON envelope: a stable <code>E_*</code> code, a fixed exit code, whether retrying can help, machine-readable <code>details</code> and a <code>hint</code>, often the next command to run.</p>
+      </article>
+      <article class="card">
+        <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3 4 6v6c0 5 3.4 8 8 9 4.6-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg></div>
+        <h3>Agents get killed mid-write</h3>
+        <p>A commit returns only once its journal frame is on disk, a crash leaves no stale lock, and the next writer repairs what a crash cut short. Crash sweeps, injected I/O errors and simulated power losses test it through the real binary.</p>
+      </article>
+    </div>
+    <div class="stats" role="list">
+      <div class="stat" role="listitem"><b>32 writers</b><span>processes committing to one store at once, 1,000 transactions each, in the contention test</span></div>
+      <div class="stat" role="listitem"><b>~110 / s</b><span>durable transactions through the one metadata lock, with full fsync</span></div>
+      <div class="stat" role="listitem"><b>0.08 ms</b><span>median wait for the lock when writers commit back to back</span></div>
+      <div class="stat" role="listitem"><b>14.5×</b><span>object writes on 32 threads against one: they take no lock</span></div>
+    </div>
+    <p class="note">Measured on one busy development host (WSL2, ext4 on a virtual disk, 32 threads), with every number's spread and load in <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/perf.md">docs/perf.md</a>. No git baseline has been measured yet; the first side-by-side benchmark is planned for M9.</p>
+  </div>
+</section>
+
+<section id="inside" class="alt">
+  <div class="wrap">
+    <p class="eyebrow">Inside the store</p>
+    <h2>One lock for metadata, none for objects</h2>
+    <p class="sub">Every operation is a library function: <code>swarmops-repo</code> does the work, <code>swarmops-ops</code> exposes it as the <code>StoreOps</code> operations, and the binary parses one command line, calls one operation and prints its envelope.</p>
+    <figure class="figure">
+      <picture>
+        <source srcset="/explainers/store-light.svg" media="(prefers-color-scheme: light)">
+        <img src="/explainers/store.svg" alt="An isometric drawing of the store as a machine: commit cartridges wait on a feed rail behind one gate, the metadata lock; a press stamps each one as a frame onto a paper tape, the append-only journal; beside it, object pellets drop into sixteen bins with no gate." width="760" height="470" loading="lazy">
+      </picture>
+      <figcaption>Fig. 1, the native store as a machine: writers queue for one lock, and each commit becomes one CRC-framed frame appended to the journal; objects need no lock. <a href="/explainers/store.html">Open the interactive version</a>, drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a>.</figcaption>
+    </figure>
+    <div class="arch spaced">
+      <ol class="stack" aria-label="The crates, from the command line to the disk">
+        <li><code>swarmops-cli</code><span><code>swarmops</code> and <code>so</code>: the commands, and <code>swarmops mcp</code></span></li>
+        <li><code>swarmops-api</code><span>the contract: request and response types, <code>E_*</code> codes, the envelope</span></li>
+        <li><code>swarmops-ops</code><span><code>LocalOps</code>: the operations over a local store</span></li>
+        <li><code>swarmops-repo</code><span>the repository engine</span></li>
+        <li><code>swarmops-store</code><span>object files and the metadata store</span></li>
+        <li><code>swarmops-core</code><span>ids, paths and the canonical codec; no I/O</span></li>
+      </ol>
+      <div class="disk" aria-label="A store on disk">
+<span class="d">store/</span>
+├─ FORMAT   <span class="m"># the layout version, written last by init</span>
+├─ REPO     <span class="m"># the repository's id and name</span>
+├─ <span class="d">objects/</span> <span class="m"># one self-verifying file per blob,</span>
+│  ├─ <span class="d">00/</span> … <span class="d">ff/</span>  <span class="m"># tree and changeset: 256 fan-outs</span>
+│  └─ <span class="d">tmp/</span>       <span class="m"># staged, synced, then linked</span>
+└─ <span class="d">meta/</span>
+   ├─ journal.log  <span class="m"># append-only, CRC-framed: the truth</span>
+   ├─ journal.off  <span class="m"># each frame's offset</span>
+   ├─ <span class="d">idx/</span> <span class="d">sorted/</span> <span class="m"># the changeset index</span>
+   ├─ <span class="d">refs/</span>        <span class="m"># one file per ref, moved by CAS</span>
+   └─ lock         <span class="m"># one flock for every writer</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="git">
+  <div class="wrap">
+    <p class="eyebrow">SwarmOps and git</p>
+    <h2>Judged strictly, ahead and behind</h2>
+    <p class="sub">SwarmOps is not a general-purpose git replacement: it will import from git (M3) and export to it (M8), so today's pipelines keep running. Where the two compare, this is where it stands.</p>
+    <table class="cmp">
+      <thead><tr><th scope="col">Dimension</th><th scope="col">SwarmOps today</th><th scope="col">Against git</th></tr></thead>
+      <tbody>
+        <tr><td>Hash</td><td>BLAKE3-256 ids with the object's kind and layout version hashed in; every read re-hashes.</td><td><span class="v ahead">Ahead</span> of SHA-1</td></tr>
+        <tr><td>Order of writes</td><td>Every commit and ref move is one frame of one journal, under one lock: a single global order.</td><td><span class="v ahead">Ahead by design</span></td></tr>
+        <tr><td>Stale locks</td><td>The writer lock is an <code>flock</code>, released by the kernel when its holder dies.</td><td><span class="v ahead">Ahead by design</span></td></tr>
+        <tr><td>Durability</td><td>Full fsync is the only mode: objects synced before a frame names them.</td><td><span class="v ahead">Ahead by design</span></td></tr>
+        <tr><td>Machine-readable contract</td><td>One JSON envelope per command and a JSON Schema for every request and response.</td><td><span class="v ahead">Ahead by design</span></td></tr>
+        <tr><td>Commits from many writers</td><td>Concurrent commits all succeed, short of a lock wait past 10 s (the retryable <code>E_BUSY</code>).</td><td><span class="v parity">Parity</span></td></tr>
+        <tr><td>Throughput of many writers</td><td>Writers take turns, each commit holding the store-wide lock across its journal syncs.</td><td><span class="v behind">Behind by design</span></td></tr>
+        <tr><td>Conflicts and landing</td><td>Today one signal, <code>E_CAS_MISMATCH</code>. Three-way merge and <code>land</code> come in M4.</td><td><span class="v behind">Behind today</span></td></tr>
+        <tr><td>Sync between hosts</td><td>Nothing yet; offline-first <code>fetch</code> and <code>push</code> come in M11.</td><td><span class="v behind">Behind</span></td></tr>
+      </tbody>
+    </table>
+    <p class="note">Verdicts come from the design, the code and git's own documentation and source, not from a benchmark. <a href="https://github.com/KeiaiLab/SwarmOps#swarmops-and-git">The full comparison</a> has every dimension and its evidence.</p>
+  </div>
+</section>
+
+<section id="start" class="alt">
+  <div class="wrap">
+    <p class="eyebrow">Quick start</p>
+    <h2>Build it, make a store, commit</h2>
+    <p class="sub">Linux, Rust 1.99 (the repository pins it). A store must live on a native Linux filesystem. <code>so</code> is the short name of <code>swarmops</code>: the same program.</p>
+    <div class="steps">
+      <div class="code">
+        <div class="label">Install</div>
+<pre>cargo build --release
+<span class="c"># target/release/swarmops and target/release/so</span>
+cargo install --path crates/swarmops-cli --locked</pre>
+      </div>
+      <div class="code">
+        <div class="label">First commands</div>
+<pre>export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme
+export SWARMOPS_AGENT=agent/worker-1
+
+so init "$SWARMOPS_REPO" --name acme
+so commit -m "first" --changes changes.json
+so ref set main &lt;id&gt; --create   <span class="c"># later: --expect &lt;old&gt;</span>
+so cat main:src/lib.rs
+so log -n 20
+so verify --deep</pre>
+      </div>
+    </div>
+    <p class="note">A change list is a JSON array of puts and deletes; every command, revision and exit code is in <a href="https://github.com/KeiaiLab/SwarmOps#commands">the README</a>.</p>
+  </div>
+</section>
+
+<section id="mcp">
+  <div class="wrap">
+    <p class="eyebrow">MCP</p>
+    <h2>The operations, as tools</h2>
+    <p class="sub"><code>swarmops mcp</code> serves the store to an agent on stdin and stdout. Each tool's arguments are the operation's request, and its result is the envelope the CLI prints. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with <code>initialize</code>.</p>
+    <div class="steps">
+      <div class="code">
+        <div class="label">Claude Code</div>
+<pre>claude mcp add swarmops -- \
+  so mcp --repo &lt;store&gt; --as &lt;agent&gt;</pre>
+      </div>
+      <div class="code">
+        <div class="label">.mcp.json</div>
+<pre>{"mcpServers": {"swarmops": {
+  "command": "swarmops",
+  "args": ["mcp", "--repo", "/path/to/store"],
+  "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT:-}"}}}}</pre>
+      </div>
+    </div>
+    <ul class="tools" aria-label="The MCP tools">
+      <li>repo_info</li><li>read_file</li><li>read_tree</li><li>show</li><li>log</li><li>ref_list</li><li>ref_set</li><li>ref_delete</li><li>commit</li><li>verify</li>
+    </ul>
+  </div>
+</section>
+
+<section id="roadmap" class="alt">
+  <div class="wrap">
+    <p class="eyebrow">Roadmap</p>
+    <h2>Built in the open, milestone by milestone</h2>
+    <p class="sub">Nothing is released or published yet: there are no tags, and every crate is at 0.1.0. The milestones follow the design specs.</p>
+    <div class="road">
+      <div class="done">
+        <h3><span class="dot" aria-hidden="true"></span>Delivered</h3>
+        <ol>
+          <li><b>M0</b><span>the workspace and its gates, the canonical codec and its golden vectors</span></li>
+          <li><b>M1</b><span>the single-agent core: commit, read, log and ref compare-and-swap; crash sweeps</span></li>
+          <li><b>M1.5</b><span>hardening: CI, fault injection, power-loss images, the MCP server</span></li>
+        </ol>
+      </div>
+      <div class="now">
+        <h3><span class="dot" aria-hidden="true"></span>In development</h3>
+        <ol>
+          <li><b>M1.6</b><span>the review follow-ups</span></li>
+          <li><b>M2</b><span>diff, history and the derived-data engine</span></li>
+          <li><b>M3</b><span>git import</span></li>
+          <li><b>M4</b><span>merge and landing, and the operation log with undo</span></li>
+          <li><b>M8</b><span>git export, so work lands back in git</span></li>
+        </ol>
+      </div>
+      <div class="next">
+        <h3><span class="dot" aria-hidden="true"></span>Planned</h3>
+        <ol>
+          <li><b>M5</b><span>workspaces, with Claude Code worktree hooks</span></li>
+          <li><b>M6</b><span>fsck, gc, a model of the journal protocol</span></li>
+          <li><b>M7</b><span>blame and review</span></li>
+          <li><b>M9</b><span>simulation and benchmarks: v1</span></li>
+          <li><b>M11</b><span>offline-first sync between hosts</span></li>
+        </ol>
+      </div>
+    </div>
+    <p class="usable">Usable by one agent from M1; by a swarm, with landing, from M4; as the complete v1, with review, at M9; across hosts from M11.</p>
+  </div>
+</section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="/"><img src="/logo.svg" alt="" width="26" height="26">SwarmOps</a>
+    <nav aria-label="Project">
+      <a href="https://github.com/KeiaiLab/SwarmOps">GitHub</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md">Architecture</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/CHANGELOG.md">Changelog</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md">Known limitations</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/CONTRIBUTING.md">Contributing</a>
+      <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md">Security</a>
+    </nav>
+    <span>MIT licence · © 2026 KeiaiLab</span>
+  </div>
+</footer>
+</body>
+</html>
