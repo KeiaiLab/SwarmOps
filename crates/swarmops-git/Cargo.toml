@@ -1,6 +1,6 @@
 [package]
 name = "swarmops-git"
-description = "SwarmOps' git side: git's commit and tree bytes parsed and rendered exactly, the repositories the import reads through gix behind one trait, and those the export writes behind another"
+description = "SwarmOps' git side: git's commit and tree bytes parsed and rendered exactly, the repositories the import reads through gix behind one trait and those the export writes behind another, and the import that brings history into a store"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,19 +14,29 @@ autotests = false
 workspace = true
 
 [features]
-# The test hooks of `GixSink`: `GixSink::open_recording_syncs`, which records each path it
+# The test hooks. `GixSink`'s: `GixSink::open_recording_syncs`, which records each path it
 # fsyncs, and `GixSink::on_lock_retry`, which the ref lock's retry loop runs between two
-# attempts. Off unless asked for, so that every other build (a release build included) holds
-# neither; the workspace's gates turn it on with `--all-features`.
-test-hooks = []
+# attempts. And the store's, which `LocalRepo::open` honors (`swarmops-repo/test-hooks`): for the
+# import's crash and fault sweeps (`tests/sweeps.rs`), which require them, so that `tests/all.rs`
+# holds that module only with the feature; it turns on the test kit's too, so that what the
+# sweeps' runs left is opened and imported again under the order checker
+# (`swarmops_testkit::faults::checked`). Off unless asked for, so that every other build (a
+# release build included) holds none of them; the workspace's gates turn it on with
+# `--all-features`.
+test-hooks = [
+    "swarmops-repo/test-hooks",
+    "swarmops-store/test-hooks",
+    "swarmops-testkit/test-hooks",
+]
 
 # gix is seen by `src/gix_source.rs` and `src/gix_sink.rs` alone (umbrella decision 3): git2
 # 0.21.0 would be a second `GitSource` and a second `GitSink` there. rayon syncs the objects an
 # export writes in parallel.
 [dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
-# The repository export oids are derived in: its derivation framework, and the derived store that
-# memoizes the git oids of its trees and blobs.
+# The repository the import writes into (objects, raw changesets, external ids and refs) and
+# export oids are derived in (its derivation framework, and the derived store that memoizes the
+# git oids of its trees and blobs).
 swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 # The object length limit (`MAX_OBJECT_LEN`), which the conversion refuses a longer blob against.
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
@@ -38,6 +48,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
+camino.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 

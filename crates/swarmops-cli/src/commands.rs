@@ -1,5 +1,7 @@
 //! Running a command (operations spec §1): its request built from the command line, the
-//! operation called through `dyn StoreOps` (spec §7), and its envelope rendered.
+//! operation called through `dyn StoreOps` (spec §7), or, for `git import`, a client-side
+//! operation that no `StoreOps` has, on the store's `LocalOps` ([`Ctx::on_local`]), and its
+//! envelope rendered.
 //!
 //! A command first checks what it can without the store: the store the user named (only
 //! whether the variable is readable), a mutation's identity, its own arguments and a commit's
@@ -40,15 +42,17 @@ use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
-    DiffReq, Envelope, ErrorCode, InfoReq, LineRange, LogReq, Meta, OpError, PathHistoryReq,
-    ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq, RepoInfo, Rev,
-    ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    DiffReq, Envelope, ErrorCode, GitImportReq, InfoReq, LineRange, LogReq, Meta, OpError,
+    PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq,
+    RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
-use swarmops_ops::{LocalOps, Resolved, shell_word};
+use swarmops_ops::{LocalOps, Recording, Resolved, shell_word};
 
-use crate::cli::{self, BlobCommand, Command, DiffArgs, DiffFormatArg, Global, RefCommand};
+use crate::cli::{
+    self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, RefCommand,
+};
 use crate::context::{self, Env};
 use crate::mcp;
 use crate::output::{self, Format, Printed};
@@ -206,6 +210,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             || Ok(VerifyReq { deep }),
             |ops, req| ops.verify(req).and_then(|report| clean(report, deep)),
         ),
+        Command::Git(command) => run_git(ctx, op, command),
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
         derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
     }
@@ -470,6 +475,29 @@ impl Ctx<'_> {
         prepare: impl FnOnce() -> Result<P, OpError>,
         call: impl FnOnce(&dyn StoreOps, P) -> Result<T, OpError>,
     ) -> Envelope<T> {
+        self.envelope_on_local(op, prepare, |ops, input| call(&ops, input))
+    }
+
+    /// Runs operation `op`, a client-side one that no [`StoreOps`] has (`git import`), on the
+    /// store the user named, as [`Ctx::on_store`] runs one: `prepare` builds its input without
+    /// the store, then `call` runs it on the store, opened, handed the concrete operations of
+    /// this one request, which record what the request resolves and repairs in [`Ctx::used`].
+    pub fn on_local<P, T: Serialize>(
+        &self,
+        op: &str,
+        prepare: impl FnOnce() -> Result<P, OpError>,
+        call: impl FnOnce(Recording<'_>, P) -> Result<T, OpError>,
+    ) -> Printed {
+        output::render(&self.envelope_on_local(op, prepare, call), self.format)
+    }
+
+    /// [`Ctx::on_local`]'s envelope, before it is printed, and [`Ctx::envelope_on_store`]'s.
+    fn envelope_on_local<P, T>(
+        &self,
+        op: &str,
+        prepare: impl FnOnce() -> Result<P, OpError>,
+        call: impl FnOnce(Recording<'_>, P) -> Result<T, OpError>,
+    ) -> Envelope<T> {
         let named = context::store_named(self.global.repo.as_deref(), self.env);
         if let Ok(Some(store)) = &named {
             self.used.repo.replace(Some(store.clone()));
@@ -479,7 +507,7 @@ impl Ctx<'_> {
             let store =
                 named.ok_or_else(|| context::no_store_named(self.global.repo.as_deref()))?;
             let ops = LocalOps::open(Utf8Path::new(&store))?;
-            call(&ops.recording(&self.used.resolved), input)
+            call(ops.recording(&self.used.resolved), input)
         });
         envelope(op, self.used.meta(), result, self.started)
     }
@@ -602,6 +630,33 @@ fn envelope<T>(
     match result {
         Ok(result) => Envelope::ok(op, result, meta),
         Err(error) => Envelope::err(op, error, meta),
+    }
+}
+
+/// Runs a `git` subcommand, which names operation `op`: client-side operations, which read a git
+/// repository on this host and no [`StoreOps`] has.
+fn run_git(ctx: &Ctx<'_>, op: &'static str, command: GitCommand) -> Printed {
+    let agent = ctx.global.agent.as_deref();
+    match command {
+        GitCommand::Import {
+            path,
+            git_ref,
+            into,
+            lossy,
+            gitlinks,
+        } => ctx.on_local(
+            op,
+            || {
+                let req = GitImportReq {
+                    git_path: path,
+                    git_ref,
+                    target_ref: into,
+                    lossy: cli::lossy_classes(&lossy, gitlinks),
+                };
+                Ok((context::mutator(agent, ctx.env)?, req))
+            },
+            |ops, (who, req)| ops.git_import(&who, req),
+        ),
     }
 }
 

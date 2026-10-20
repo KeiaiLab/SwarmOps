@@ -1,5 +1,6 @@
 //! SwarmOps' git side: the repositories `git import` takes history from and `git export` writes
-//! it to, and the exact bytes of git's commits and trees.
+//! it to, the exact bytes of git's commits and trees, and the import that brings that history
+//! into a store.
 //!
 //! - [`oid`]: git's object ids ([`GitOid`]), its object kinds ([`RawKind`]) and formats
 //!   ([`ObjectFormat`]), and [`git_hash`], the id git gives an object's bytes.
@@ -21,6 +22,10 @@
 //!   fields ([`Converted`]), trees and blobs, refusing what the classes it allows do not cover
 //!   ([`ConvertError`]); a commit is converted without loss only if it renders back to its own
 //!   id.
+//! - [`import`](mod@import): [`import()`], which brings every commit a git ref reaches that the
+//!   store does not hold into a store, parents first and many to a journal frame, then moves a
+//!   target ref to the tip's changeset ([`ImportRequest`], [`ImportReport`]); run again, it takes
+//!   only what is new, and it refuses a target that diverged ([`ImportError`]).
 //! - [`sink`]: [`GitSink`], what the export writes to a repository: objects, made durable before a
 //!   branch moves, and the branch, moved by compare-and-swap.
 //! - [`gix_sink`]: [`GixSink`], the [`GitSink`] of a repository on disk.
@@ -36,6 +41,7 @@ pub mod convert;
 pub mod export_oid;
 pub mod gix_sink;
 pub mod gix_source;
+pub mod import;
 pub mod lossy;
 pub mod native;
 pub mod oid;
@@ -50,6 +56,7 @@ pub use export_oid::{
 };
 pub use gix_sink::GixSink;
 pub use gix_source::GixSource;
+pub use import::{ImportError, ImportReport, ImportRequest, LossyCommit, import};
 pub use lossy::{LossyClass, LossySet};
 pub use native::{TRAILERS, export_message, render_commit};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};

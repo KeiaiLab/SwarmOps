@@ -10,12 +10,16 @@
 //!   mutation without an identity.
 //! - [`content`] checks a commit's change list and turns its contents into bytes, reading
 //!   `file` contents from the client's filesystem; and turns stored bytes back into JSON text.
+//! - `git import` ([`LocalOps::git_import`], [`Recording::git_import`]) brings a git
+//!   repository's history into the store, reading the repository on the client's host: a
+//!   client-side operation, as `init` is, and so no `StoreOps` method.
 //!
 //! The CLI calls these and prints each result in one envelope. A remote client will implement
 //! `StoreOps` over the same types later, resolving identities and file contents the same way.
 
 pub mod content;
 mod error;
+mod git;
 pub mod identity;
 mod local;
 
