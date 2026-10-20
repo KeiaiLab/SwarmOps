@@ -666,6 +666,24 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   runbook of the first real use, on this repository (its history imported, one agent session
   through MCP, the export and its round trip, the repository's CI on it, what to measure, the
   success criteria and the rollback).
+- [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES), in every release archive: each third-party crate
+  that the release build of `swarmops` and `so` compiles, with the license expression it declares,
+  the license it is used under (one that `deny.toml` allows) and the license texts from its
+  package, zstd's C library and the libdivsufsort-lite it includes among them.
+  `scripts/third-party-licenses.py` writes it from `Cargo.lock`; `just check` fails when the file
+  no longer matches (so it now needs `python3`, 3.11 or newer), and the release's packing fails
+  without it.
+
+#### The v0.1.0 release batch (2026-10-20)
+
+- Landing from many processes at once is tested through the binary, in the default gate
+  (`landing::eight_processes_land_concurrently_none_lost`, `crates/swarmops-cli/tests/landing.rs`):
+  eight agents, each running one `swarmops` process at a time, make four keyed lands each on one
+  `main`, each land a file of its own and every other one also the agent's line of a file they all
+  share, and a land that ends `E_BUSY` or `E_CAS_RETRY_EXHAUSTED` runs again with the same key.
+  Afterwards `main`'s first-parent chain holds every landed changeset exactly once and nothing
+  else, each move of `main` a one-step fast-forward, `main` holds every land's file and line, and
+  the store verifies clean. The test kit's `landing::CliLander` is the lander it runs.
 
 ### Changed
 
@@ -1044,6 +1062,25 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   a comparison engine, brings in, and that no shipped binary holds). A test of `swarmops-core` fails
   the gate when a recipe, a script or a workflow job builds a lockfile that no `cargo deny` checks
   there.
+- `git import` no longer reads a commit, a tree or an annotated tag of the source whole before it
+  knows how long it is: a crafted repository's object, a small loose file whose header claims a
+  huge length, made the import allocate that length, without bound, while it read it (over 500 MB
+  for a file of about a hundred bytes). The import now reads each commit, tree and annotated tag
+  it parses, as it already read each blob, only once the object's header says it is at most
+  512 MiB long (`MAX_OBJECT_LEN`, the most an object holds), and refuses a longer one before a
+  byte of it is read: `E_TOO_LARGE`, exit 1, with `details.object`, `details.kind` (the kind its
+  header gives), `details.size` and `details.max`; the import stops there, as at any commit it
+  refuses, before the frame that would hold the commit. Within the bound an object is still read
+  whole ([docs/known-limitations.md](docs/known-limitations.md), "A git object is read whole, up
+  to 512 MiB").
+- An external id entry's file (`meta/external_ids/`, 44 bytes) is read no further than a byte
+  past an entry, so a longer one is a damaged entry, however long: `verify` lists it as an
+  `external_id_corrupt` finding (`E_STORE_CORRUPT`) and goes on, the git import and export pass
+  over it with a warning, as over any damaged entry, and a put names its id as a conflict and
+  leaves the file as it is. Such a file, sparse or crafted, used to be read whole, so `verify`,
+  and any import, export or put that reached it, took its whole length in memory, enough for
+  the system to kill the process (`swarmops mcp` with it), or failed with `E_IO` where the
+  allocation was refused.
 - A `git export` trusted the git oids it had memoized in the derived store
   (`meta/derived/git_blob_oid`, `git_tree_oid`, `git_oid`) as the truth about an object's content:
   a memo placed there whole and with its checksum right, naming an object the destination already

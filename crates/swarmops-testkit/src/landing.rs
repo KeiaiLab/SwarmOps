@@ -1,10 +1,10 @@
-//! What the landing measurements share: M4 Task 1's measurement of the four landing models
-//! (`swarmops-repo`'s `tests/landing_models.rs`) and, later, M4 Task 11's landing through the
-//! binary.
+//! What the landing tests and measurements share: M4 Task 1's measurement of the four landing
+//! models (`swarmops-repo`'s `tests/landing_models.rs`) and M4 Task 11's landing through the
+//! binary (`swarmops-cli`'s `tests/landing.rs`).
 //!
 //! - [`Workload`], [`base_files`] and [`change_for`]: what the store starts with and what each
 //!   lander lands, drawn from a seed with [`mix`], so that every run of a cell lands the same
-//!   changes.
+//!   changes; [`own_line`]: the line of the shared file each lander replaces.
 //! - [`LandRecord`]: one land as its lander saw it; [`SyncTimer`] times the journal's and the
 //!   ref files' syncs a land made, its shares of the lock hold (the M4 plan's Decision 14).
 //! - [`check_invariants`]: the gate every run passes (the M4 plan's Decision 1): every landed
@@ -21,6 +21,10 @@
 //!   matrix's runs ([`Verdict`], [`Decision`]); [`tables`]: each cell's medians and ranges, as
 //!   `docs/perf.md` gives them.
 //! - [`load1`] and [`fdatasync_probe`]: the host, as `docs/perf.md`'s tables record it.
+//! - [`CliLander`], with the `cli` feature: a lander through the `swarmops` binary, as an agent
+//!   lands, which commits each change on the head it read, lands it with `land --key`
+//!   ([`land_key`]), runs a land that ended retryable again with the same key, and reads each
+//!   envelope into a [`LandRecord`].
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
@@ -187,17 +191,23 @@ pub fn change_for(seed: u64, lander: usize, land: usize, workload: Workload) -> 
             )
         })
         .collect();
-    let own_line = (3 * lander + 1) % REGISTRY_LINES;
     let shares = draw(seed, lander, land, REGISTRY_DRAW).is_multiple_of(5);
     let registry_line = match workload {
         Workload::Disjoint | Workload::Large => None,
         Workload::Conflict if draw(seed, lander, land, CONFLICT_DRAW).is_multiple_of(20) => Some(0),
-        Workload::Shared | Workload::Conflict => shares.then_some(own_line),
+        Workload::Shared | Workload::Conflict => shares.then(|| own_line(lander)),
     };
     Change {
         puts,
         registry_line,
     }
+}
+
+/// The line of [`REGISTRY`] (from 0) that lander `lander` (from 0) replaces in the workloads that
+/// share the file: `3n + 1`. Two unchanged lines lie between any two landers' lines, so a
+/// three-way merge of their lands, which conflicts on changed lines that touch, keeps both.
+pub fn own_line(lander: usize) -> usize {
+    (3 * lander + 1) % REGISTRY_LINES
 }
 
 /// The [`REGISTRY`] line lander `lander`'s land `land` writes: `lander <n> land <i>`, without
@@ -1421,4 +1431,209 @@ pub fn tagged<'t>(text: &'t str, prefix: &'t str) -> impl Iterator<Item = &'t st
 /// split [`Stats::parse`] and [`LandRecord::parse`] use.
 pub fn line_fields(line: &str) -> BTreeMap<String, String> {
     fields(line).into_iter().collect()
+}
+
+// ---------------------------------------------------------------------------------------------
+// A lander through the binary, with the `cli` feature.
+// ---------------------------------------------------------------------------------------------
+
+#[cfg(feature = "cli")]
+use crate::cli::{Program, Store, agent, retry_busy};
+
+/// How many times at most a [`CliLander`] runs a land again that ended retryable, each time with
+/// the same key: `E_BUSY`, or `E_CAS_RETRY_EXHAUSTED` after its attempts. A land whose last run
+/// still ended so ends without landing.
+#[cfg(feature = "cli")]
+pub const LAND_RERUNS: u32 = 8;
+
+/// The idempotency key lander `lander`'s land `land` lands with through the binary (`land
+/// --key`): `lander-<lander>-land-<land>`, the same for every run of that land.
+pub fn land_key(lander: usize, land: usize) -> String {
+    format!("lander-{lander}-land-{land}")
+}
+
+/// A lander through the `swarmops` binary, as an agent lands a change: lander `n` of a run, as
+/// [`agent`]`(n)`, on ref `target` of a [`Store`]. Each land ([`CliLander::land`]) runs one
+/// process of the binary at a time:
+///
+/// 1. `cat <target>:REGISTRY`, whose `meta.resolved` names the target's head, and whose result is
+///    [`REGISTRY`] as that head holds it;
+/// 2. `commit --parent <head>` of the change: its files, and [`REGISTRY`] with the change's line
+///    replaced by the land's [`registry_text`] when it has one ([`with_line`]);
+/// 3. `land <commit> --key <key>` ([`land_key`]): a land that ends retryable, `E_BUSY` or
+///    `E_CAS_RETRY_EXHAUSTED`, runs again with the same key, as an agent would, at most
+///    [`LAND_RERUNS`] times.
+///
+/// A read or a commit that meets `E_BUSY` runs again too ([`retry_busy`]). Each land's envelope
+/// is read into its [`LandRecord`]: the changeset a run that landed or replayed names, the
+/// attempts of every run summed, whether it was relocated, conflicted (`E_CONFLICT`) or ended
+/// exhausted, the `E_BUSY`s it met, and its latency from the read to the end of its last run.
+/// The lock hold and sync times are the store's own, which a process of the binary does not
+/// report: they stay empty. A land that ends in any other way fails the test with its run.
+#[cfg(feature = "cli")]
+pub struct CliLander<'s, P> {
+    /// The store it lands on.
+    store: &'s Store<P>,
+    /// Its number in the run, from 0.
+    lander: usize,
+    /// The agent it runs the binary as.
+    agent: String,
+    /// The ref it lands on.
+    target: String,
+}
+
+/// How one run of `land` ended, as its envelope says.
+#[cfg(feature = "cli")]
+enum LandEnd {
+    /// It landed the change, or found the land of it its key had made (`replayed`).
+    Landed {
+        /// The landed changeset, in full hex.
+        id: String,
+        /// How many times it tried to publish.
+        attempts: u32,
+        /// Whether the publish put the change on a head the target had moved to.
+        relocated: bool,
+    },
+    /// `E_BUSY`: it recorded nothing.
+    Busy,
+    /// `E_CAS_RETRY_EXHAUSTED`: the target moved before each of its attempts could publish, and
+    /// it recorded nothing.
+    Exhausted {
+        /// How many times it tried.
+        attempts: u32,
+    },
+    /// `E_CONFLICT`: the change conflicts with the target's head, and it recorded nothing.
+    Conflicted,
+}
+
+#[cfg(feature = "cli")]
+impl<'s, P: Program> CliLander<'s, P> {
+    /// Lander `lander` (from 0) of a run on ref `target` of `store`, as [`agent`]`(lander)`.
+    pub fn new(store: &'s Store<P>, lander: usize, target: &str) -> CliLander<'s, P> {
+        CliLander {
+            store,
+            lander,
+            agent: agent(lander),
+            target: target.to_owned(),
+        }
+    }
+
+    /// Lands `change` as this lander's land `land` (from 0), by the steps the type's
+    /// documentation gives: the land's record.
+    pub fn land(&self, land: usize, change: &Change) -> LandRecord {
+        let started = Instant::now();
+        let (head, registry) = self.read_target();
+        let mut puts = change.puts.clone();
+        if let Some(line) = change.registry_line {
+            let text = registry_text(self.lander, land);
+            puts.push((REGISTRY.to_owned(), with_line(&registry, line, &text)));
+        }
+        let commit = self.commit(land, &puts, &head);
+        let key = land_key(self.lander, land);
+        let args = ["land", commit.as_str(), "--key", key.as_str()];
+        let mut record = LandRecord::default();
+        let mut reruns = 0;
+        let end = loop {
+            let end = land_end(&self.store.run_as(&self.agent, &args, &[]));
+            match &end {
+                LandEnd::Landed { attempts, .. } | LandEnd::Exhausted { attempts } => {
+                    record.attempts += attempts;
+                }
+                LandEnd::Busy => record.busy += 1,
+                LandEnd::Conflicted => record.attempts += 1,
+            }
+            let retryable = matches!(end, LandEnd::Busy | LandEnd::Exhausted { .. });
+            if !retryable || reruns == LAND_RERUNS {
+                break end;
+            }
+            reruns += 1;
+        };
+        match end {
+            LandEnd::Landed { id, relocated, .. } => {
+                record.id = Some(id);
+                record.relocated = relocated;
+            }
+            LandEnd::Exhausted { .. } => record.exhausted = true,
+            LandEnd::Conflicted => record.conflicted = true,
+            LandEnd::Busy => {}
+        }
+        record.latency_us = u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX);
+        record
+    }
+
+    /// The target's head and [`REGISTRY`] as it holds it, read in one run of `cat`.
+    fn read_target(&self) -> (String, Vec<u8>) {
+        let file = format!("{}:{REGISTRY}", self.target);
+        let args = ["cat", file.as_str()];
+        let run = retry_busy(self.store.read(&args), || self.store.read(&args));
+        assert_eq!(run.exit(), 0, "{run}");
+        let envelope = run.envelope();
+        let head = envelope["meta"]["resolved"][self.target.as_str()].as_str();
+        let result = &envelope["result"];
+        assert_eq!(result["truncated"], false, "{run}");
+        let content = result["content"].as_str();
+        match (head, content) {
+            (Some(head), Some(content)) => (head.to_owned(), content.as_bytes().to_vec()),
+            _ => panic!("the target's head and REGISTRY's text: {run}"),
+        }
+    }
+
+    /// Commits `puts`, the files of this lander's land `land`, on `head`: the changeset's id.
+    fn commit(&self, land: usize, puts: &[(String, Vec<u8>)], head: &str) -> String {
+        let texts: Vec<(&str, &str)> = puts
+            .iter()
+            .map(|(path, content)| {
+                let text = std::str::from_utf8(content).expect("a land's files are text");
+                (path.as_str(), text)
+            })
+            .collect();
+        let changes = (self.store).changes_of(&land_key(self.lander, land), &texts);
+        let message = format!("lander {} land {land}", self.lander);
+        let args = [
+            "commit",
+            "-m",
+            &message,
+            "--changes",
+            &changes,
+            "--parent",
+            head,
+        ];
+        let commit = || self.store.run_as(&self.agent, &args, &[]);
+        let run = retry_busy(commit(), commit);
+        let result = run.ok();
+        let id = result["changeset"].as_str();
+        id.unwrap_or_else(|| panic!("a changeset id: {run}"))
+            .to_owned()
+    }
+}
+
+/// How `run`, a run of `land`, ended ([`LandEnd`]); one that ended in any other way fails the
+/// test with the run.
+#[cfg(feature = "cli")]
+fn land_end(run: &crate::cli::Run) -> LandEnd {
+    if run.busy() {
+        return LandEnd::Busy;
+    }
+    let envelope = run.envelope();
+    let attempts = |value: &serde_json::Value| {
+        let attempts = value.as_u64().and_then(|n| u32::try_from(n).ok());
+        attempts.unwrap_or_else(|| panic!("a land's attempts: {run}"))
+    };
+    match envelope["error"]["code"].as_str() {
+        None => {
+            let result = &envelope["result"];
+            let id = result["landed"].as_str();
+            let id = id.unwrap_or_else(|| panic!("the landed changeset: {run}"));
+            LandEnd::Landed {
+                id: id.to_owned(),
+                attempts: attempts(&result["attempts"]),
+                relocated: result["relocated"] == true,
+            }
+        }
+        Some("E_CAS_RETRY_EXHAUSTED") => LandEnd::Exhausted {
+            attempts: attempts(&envelope["error"]["details"]["attempts"]),
+        },
+        Some("E_CONFLICT") => LandEnd::Conflicted,
+        Some(_) => panic!("a land ended neither landed nor retryable nor conflicted: {run}"),
+    }
 }

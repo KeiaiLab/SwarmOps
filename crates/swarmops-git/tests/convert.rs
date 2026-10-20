@@ -410,6 +410,60 @@ fn a_blob_past_the_object_limit_is_too_large_before_it_is_read() {
     }
 }
 
+/// The commit itself, its tree and a tree under it pass the blob's gate too, as their headers say,
+/// before they are read: whole, since they are parsed. A header that says the most an object
+/// holds lets the read go ahead; one byte more is refused, naming the object, whatever is allowed,
+/// and the conversion appends nothing.
+#[test]
+fn a_commit_or_a_tree_past_the_object_limit_is_too_large_before_it_is_read() {
+    let mut source = MemSource::default();
+    let file = source.blob(b"file\n");
+    let data = source.tree(&[("100644", b"file.txt", file)]);
+    let root = source.tree(&[("40000", b"data", data)]);
+    let commit = source.commit(root, &[], "a commit and trees at the object limit\n");
+    for held in [commit, root, data] {
+        source.state_length(held, MAX_OBJECT_LEN);
+    }
+    let mut out = Vec::new();
+    let converted = Converter::new(&source, LossySet::empty()).commit(commit, &mut out);
+    assert!(converted.expect("at the limit").lossy.is_empty());
+    assert_eq!(out.len(), 3, "a blob and two trees");
+
+    // Headers that claim one byte more; reading any of them panics.
+    let (huge_commit, huge_root, huge_dir) =
+        (GitOid([0x5c; 20]), GitOid([0x5d; 20]), GitOid([0x5e; 20]));
+    source.claim(huge_commit, RawKind::Commit, MAX_OBJECT_LEN + 1);
+    source.claim(huge_root, RawKind::Tree, MAX_OBJECT_LEN + 1);
+    source.claim(huge_dir, RawKind::Tree, MAX_OBJECT_LEN + 1);
+    let on_huge_root = source.commit(huge_root, &[], "a root tree past the object limit\n");
+    let holding = source.tree(&[("40000", b"huge", huge_dir), ("100644", b"small.txt", file)]);
+    let under_it = source.commit(
+        holding,
+        &[],
+        "a tree past the object limit under the root\n",
+    );
+    for (converted, oid, kind) in [
+        (huge_commit, huge_commit, RawKind::Commit),
+        (on_huge_root, huge_root, RawKind::Tree),
+        (under_it, huge_dir, RawKind::Tree),
+    ] {
+        for allowed in [LossySet::empty(), LossySet::all()] {
+            let mut out = Vec::new();
+            let refused = SourceError::TooLarge {
+                oid,
+                kind,
+                size: 536_870_913,
+            };
+            assert_eq!(
+                Converter::new(&source, allowed).commit(converted, &mut out),
+                Err(ConvertError::Source(refused)),
+                "{kind} {oid}"
+            );
+            assert!(out.is_empty(), "a refused commit appends nothing");
+        }
+    }
+}
+
 #[test]
 fn a_deep_tree_converts_without_recursion() {
     const DEPTH: usize = 10_000;

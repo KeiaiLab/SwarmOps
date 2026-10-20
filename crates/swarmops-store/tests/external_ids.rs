@@ -350,6 +350,115 @@ fn a_damaged_entry_is_external_id_corrupt() {
     assert_eq!(fs::metadata(path(cut)).unwrap().len(), 43);
 }
 
+/// An entry's file longer than an entry (44 bytes), however long, is no entry, and is read no
+/// further than a byte past one (45 bytes, storage spec §7): `get` and `list` call it
+/// `ExternalIdCorrupt`, and a put of its key names it as a conflict and leaves it as it is. Each
+/// file here is the entry it was, then a byte too many, or a hole (no disk) to 64 MiB, or to
+/// 1 TiB, more than a host holds in memory. What a call read is what this thread's `read` calls
+/// returned meanwhile, by its `rchar` count (`/proc/thread-self/io`); the entry itself reads back
+/// in 44 bytes.
+#[test]
+fn an_entry_file_longer_than_an_entry_is_corrupt_and_read_no_further() {
+    use std::fs::{File, OpenOptions};
+    use std::io::Read as _;
+
+    use swarmops_core::bytes::to_u64;
+
+    /// The bytes the `read` calls of this thread have returned so far, and the length of the
+    /// text that says so, which reading it adds.
+    fn rchar() -> (u64, u64) {
+        let text = fs::read_to_string("/proc/thread-self/io").expect("read /proc/thread-self/io");
+        let count = (text.lines())
+            .find_map(|line| line.strip_prefix("rchar:"))
+            .and_then(|count| count.trim().parse().ok())
+            .expect("an rchar line in /proc/thread-self/io");
+        (count, to_u64(text.len()))
+    }
+    /// What `call` returns, with the bytes the `read` calls of this thread returned during it.
+    fn reading<T>(call: impl FnOnce() -> T) -> (T, u64) {
+        let (before, own) = rchar();
+        let value = call();
+        let (after, _) = rchar();
+        (value, after - before - own)
+    }
+
+    let (_dir, layout) = store_root();
+    let mut index = index_of(&layout);
+    index.set_parallelism(1);
+    let (id, named) = (key(0xaa, 1), entry(1, true));
+    index.put_batch(SYSTEM_GIT, &[(id.clone(), named)]).unwrap();
+    let path = layout.external_id_path(SYSTEM_GIT, &id);
+    let whole = fs::read(&path).unwrap();
+    let (got, read) = reading(|| index.get(SYSTEM_GIT, &id));
+    assert_eq!((got.unwrap(), read), (Some(named), 44));
+
+    let longer = [
+        ("a byte too many", 45),
+        ("a hole to 64 MiB", 64 << 20),
+        ("a hole to 1 TiB", 1 << 40),
+    ];
+    for (what, len) in longer {
+        let file = OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(len).unwrap();
+        let (got, read) = reading(|| index.get(SYSTEM_GIT, &id));
+        assert!(corrupt(&got, &id), "get, {what}: {got:?}");
+        assert!(read <= 45, "get read {read} bytes of the file, {what}");
+        let (listed, read) = reading(|| index.list(SYSTEM_GIT).unwrap());
+        let [(listed_key, listed_entry)] = &listed[..] else {
+            panic!("list, {what}: one entry, not {listed:?}");
+        };
+        assert_eq!(*listed_key, id, "list, {what}");
+        assert!(corrupt(listed_entry, &id), "list, {what}: {listed_entry:?}");
+        assert!(read <= 45, "list read {read} bytes of the file, {what}");
+        let (put, read) = reading(|| index.put_batch(SYSTEM_GIT, &[(id.clone(), named)]));
+        assert_eq!(
+            put.unwrap(),
+            ExternalPut {
+                written: 0,
+                existing: 0,
+                conflicts: vec![id.clone()],
+            },
+            "put, {what}"
+        );
+        assert!(read <= 45, "put read {read} bytes of the file, {what}");
+        // The file as it was: its length, and the entry it begins with.
+        assert_eq!(fs::metadata(&path).unwrap().len(), len, "{what}");
+        let mut head = [0; 44];
+        File::open(&path).unwrap().read_exact(&mut head).unwrap();
+        assert_eq!(head[..], whole[..], "{what}");
+    }
+}
+
+/// An entry's read that fails is located as a failed `read` of the entry's file, named by its
+/// place in the store and never by the store's root, a host path: here a directory in an
+/// entry's place, which `get` refuses before it opens it (no store file is one).
+#[test]
+fn a_failed_entry_read_names_the_file_by_its_place_in_the_store() {
+    use std::io;
+
+    use swarmops_store::{FileOp, FsMethod};
+
+    let (_dir, layout) = store_root();
+    let index = index_of(&layout);
+    let id = key(0xaa, 1);
+    fs::create_dir_all(layout.external_id_path(SYSTEM_GIT, &id)).unwrap();
+    let got = index.get(SYSTEM_GIT, &id);
+    let Err(StoreError::Io(failed)) = &got else {
+        panic!("a directory in an entry's place: {got:?}");
+    };
+    let file = format!("meta/external_ids/git/aa/{}", hex(&id[1..]));
+    assert_eq!(
+        (failed.op, failed.file.as_deref()),
+        (
+            FileOp::Fs(FsMethod::Read),
+            Some(camino::Utf8Path::new(&file))
+        )
+    );
+    assert_eq!(failed.kind(), io::ErrorKind::InvalidData, "{failed}");
+    let message = failed.to_string();
+    assert!(!message.contains(layout.root().as_str()), "{message}");
+}
+
 /// The listing passes over what is no entry's name, as the object store's passes over strays:
 /// a fan-out directory not named by two lowercase hex digits, a file not named by an even
 /// count of them (2 to 126), a file in place of a fan-out directory, and a directory of the

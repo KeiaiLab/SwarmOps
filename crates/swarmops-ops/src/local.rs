@@ -402,7 +402,9 @@ const MAX_LAND_KEY: usize = 64;
 ///   request does not allow; `path` is empty for `nonstandard`, and a path that is not UTF-8 is
 ///   given in base64 too. The hint names `--lossy <class>`.
 /// - `E_TOO_LARGE` `{commit, path, size, max}`: a blob longer than an object holds, refused by
-///   its header before it is read.
+///   its header before it is read; `{object, kind, size, max}`: a commit, a tree or an annotated
+///   tag (`kind`) longer than that, refused by its header the same way, before a byte of it is
+///   read whole to be parsed.
 /// - `E_GIT_IMPORT_DIVERGED` (exit 3) `{target_ref, target_head, git_head, base?}`: the
 ///   target's head holds no git commit (no `base`: a native changeset is on it), or one that
 ///   `git_ref`'s commit does not reach; nothing was written. The hint is the target's log.

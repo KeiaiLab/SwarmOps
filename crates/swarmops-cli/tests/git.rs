@@ -276,6 +276,90 @@ fn git_import_of_an_unknown_ref_is_e_git_ref_not_found_exit_6() {
     assert_eq!(error["details"], details, "{failed}");
 }
 
+/// A crafted repository's object whose loose file, a hundred bytes or so, says it is longer than
+/// an object holds is refused by its header before it is read: `E_TOO_LARGE`, exit 1, naming the
+/// object, its kind, its length and the limit, and nothing is written. The conversion refuses a
+/// commit's tree, the walk a commit's parent, and the lookup of `--ref` an annotated tag.
+#[test]
+fn git_import_of_an_object_past_the_object_limit_is_e_too_large() {
+    use swarmops_git::{GitOid, RawCommit, RawIdent, RawKind, git_hash};
+    use swarmops_store::MAX_OBJECT_LEN;
+    use swarmops_testkit::git::{empty_repository, write_loose_object};
+
+    let source = empty_repository();
+    let dir = source.dir.as_path();
+    // A loose file under `oid` whose header claims one byte more than an object holds.
+    let huge = |oid: GitOid, kind: RawKind| {
+        let mut bytes = format!("{kind} {}\0", MAX_OBJECT_LEN + 1).into_bytes();
+        bytes.extend_from_slice(&[b'x'; 100]);
+        write_loose_object(dir, &oid.to_string(), &bytes);
+        oid
+    };
+    // An object as git writes it, under its own id.
+    let object = |kind: RawKind, raw: &[u8]| {
+        let oid = git_hash(kind, raw);
+        let mut bytes = format!("{kind} {}\0", raw.len()).into_bytes();
+        bytes.extend_from_slice(raw);
+        write_loose_object(dir, &oid.to_string(), &bytes);
+        oid
+    };
+    let commit = |tree: GitOid, parents: &[GitOid]| {
+        let ident = RawIdent {
+            name: b"Crafted".to_vec(),
+            email: b"crafted@example.invalid".to_vec(),
+            secs: 1_700_000_000,
+            offset_secs: 0,
+            negative_zero: false,
+        };
+        let raw = RawCommit {
+            tree,
+            parents: parents.to_vec(),
+            author: ident.clone(),
+            committer: ident,
+            extra_headers: Vec::new(),
+            message: b"crafted\n".to_vec(),
+        };
+        object(RawKind::Commit, &raw.render())
+    };
+    let huge_tree = huge(GitOid([0x5d; 20]), RawKind::Tree);
+    let huge_commit = huge(GitOid([0x5c; 20]), RawKind::Commit);
+    let huge_tag = huge(GitOid([0x5a; 20]), RawKind::Tag);
+    let empty_tree = object(RawKind::Tree, b"");
+    let refs = [
+        ("refs/heads/main", commit(huge_tree, &[])),
+        ("refs/heads/on-huge", commit(empty_tree, &[huge_commit])),
+        ("refs/tags/huge", huge_tag),
+    ];
+    for (name, oid) in refs {
+        std::fs::write(dir.join(name), format!("{oid}\n")).expect("write a ref");
+    }
+
+    let store = Store::init();
+    let journal = store.journal_len();
+    let path = utf8(dir);
+    for (git_ref, oid, kind) in [
+        ("main", huge_tree, "tree"),
+        ("on-huge", huge_commit, "commit"),
+        ("huge", huge_tag, "tag"),
+    ] {
+        let failed = import(&store, &path, &["--ref", git_ref]);
+        assert_eq!(failed.exit(), 1, "{failed}");
+        let error = failed.err("E_TOO_LARGE");
+        let details = json!({
+            "object": oid.to_string(),
+            "kind": kind,
+            "size": MAX_OBJECT_LEN + 1,
+            "max": MAX_OBJECT_LEN,
+        });
+        assert_eq!(error["details"], details, "{failed}");
+        let message = error["message"].as_str().unwrap_or_default();
+        assert!(message.contains(&oid.to_string()), "{message}");
+    }
+    let refs = store.read(&["ref", "list"]).ok();
+    assert_eq!(refs["refs"], json!([]), "{refs}");
+    assert_eq!(store.journal_len(), journal, "nothing is written");
+}
+
 /// A repository the import does not read as it is fails before anything is read past its
 /// configuration: a shallow clone is `E_GIT_UNSUPPORTED` with `details.reason` `shallow` and a
 /// hint to deepen it; a SHA-256 repository, with `reason` `object_format` and the format.

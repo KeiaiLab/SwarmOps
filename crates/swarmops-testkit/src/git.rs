@@ -1048,6 +1048,45 @@ pub fn empty_repository() -> EmptyRepository {
     EmptyRepository { dir, _temp: temp }
 }
 
+/// Writes `bytes` into the git directory `repo` (an [`empty_repository`]'s, say) as the loose
+/// object file of `oid` (40 lowercase hex digits), `objects/<2 hex>/<38 hex>`, wrapped in zlib as
+/// git keeps a loose object but left uncompressed (stored deflate blocks): a file made without
+/// running git. `bytes` are the object as git hashes it, its `<kind> <len>\0` header and its
+/// content, or what a crafted file holds instead, such as a header that claims another length than
+/// what follows; nothing checks that `oid` is their hash. The path of the file written.
+pub fn write_loose_object(repo: &Path, oid: &str, bytes: &[u8]) -> PathBuf {
+    assert!(
+        oid.len() == 40 && oid.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')),
+        "{oid} is no SHA-1 object id"
+    );
+    // zlib (RFC 1950): a header for deflate with a 32 KiB window and no dictionary, then deflate's
+    // stored blocks (RFC 1951 §3.2.4), each its final flag, its length and that length's
+    // complement, then its bytes, and last the Adler-32 of `bytes`, most significant byte first.
+    let mut file = vec![0x78, 0x01];
+    let mut blocks = bytes.chunks(usize::from(u16::MAX)).peekable();
+    if blocks.peek().is_none() {
+        file.extend_from_slice(&[0x01, 0x00, 0x00, 0xff, 0xff]);
+    }
+    while let Some(block) = blocks.next() {
+        let len = u16::try_from(block.len()).expect("a block holds at most 65,535 bytes");
+        file.push(u8::from(blocks.peek().is_none()));
+        file.extend_from_slice(&len.to_le_bytes());
+        file.extend_from_slice(&(!len).to_le_bytes());
+        file.extend_from_slice(block);
+    }
+    let (mut a, mut b) = (1_u32, 0_u32);
+    for &byte in bytes {
+        a = (a + u32::from(byte)) % 65_521;
+        b = (b + a) % 65_521;
+    }
+    file.extend_from_slice(&((b << 16) | a).to_be_bytes());
+    let dir = repo.join("objects").join(&oid[..2]);
+    fs::create_dir_all(&dir).unwrap_or_else(|error| panic!("create {}: {error}", dir.display()));
+    let path = dir.join(&oid[2..]);
+    fs::write(&path, file).unwrap_or_else(|error| panic!("write {}: {error}", path.display()));
+    path
+}
+
 /// `Vec<u8>` as standard padded base64.
 mod base64_bytes {
     use base64::Engine as _;

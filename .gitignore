@@ -5,3 +5,6 @@
 
 # task worktrees (controller-managed)
 .worktrees/
+
+# the host's local brief (.claude/agents/README.md, "Global cards used as is")
+/.claude/agents/local-brief.md
