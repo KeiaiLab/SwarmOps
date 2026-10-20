@@ -2,8 +2,9 @@
 //!
 //! An object file is `"SOB1" | kind u8 {0 blob, 1 tree, 2 changeset} | enc u8 {0 raw,
 //! 1 zstd} | u16le 0 | u64le ulen | payload`; the id is always the hash of the decoded
-//! payload, so every read of an object is verified. [`ObjectStore::stat`] reads the header
-//! alone, for the kind and the length it records, and verifies nothing.
+//! payload, so every read of an object is verified; a read measures the object's file first, and
+//! refuses one longer than any object file without reading it. [`ObjectStore::stat`] reads the
+//! header alone, for the kind and the length it records, and verifies nothing.
 //! [`ObjectStore::read_chunks`] verifies as [`ObjectStore::get`] does, but hands the payload over
 //! in pieces, a zstd one as its stream decodes, for a caller that keeps only part of it.
 //!
@@ -52,8 +53,9 @@ const PIECE_LEN: usize = 64 << 10;
 /// and the operations' bound on a put's content (storage spec §2 rule 1, §10 item 6).
 /// [`ObjectStore::put`] and [`ObjectStore::put_batch`] refuse a longer payload before anything is
 /// hashed or written ([`StoreError::Limit`], [`LimitKind::ObjectBytes`]), and
-/// [`ObjectStore::get`] refuses an object file whose header records more as
-/// [`StoreError::BadHeader`] before it allocates anything for the payload.
+/// [`ObjectStore::get`] refuses as [`StoreError::BadHeader`] an object file whose header records
+/// more, before it allocates anything for the payload, and one longer than its 16-byte header and
+/// this many bytes, before it reads the file.
 pub const MAX_OBJECT_LEN: u64 = 512 << 20;
 
 /// Content-addressed storage of blobs, trees and changesets (storage spec §8).
@@ -80,7 +82,9 @@ pub trait ObjectStore: Send + Sync {
 
     /// Reads one object, verified against `id`; `None` if it is not stored. An object file whose
     /// header records a payload longer than [`MAX_OBJECT_LEN`] is [`StoreError::BadHeader`],
-    /// refused before anything is allocated for the payload.
+    /// refused before anything is allocated for the payload; so is a file longer than any object
+    /// file (its 16-byte header and [`MAX_OBJECT_LEN`] bytes), refused by its length before it is
+    /// read.
     fn get(&self, id: ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, StoreError>;
 
     /// Reads one object as [`ObjectStore::get`] does, but hands its payload to `visit` in pieces,
@@ -184,8 +188,9 @@ impl TmpOnce {
 /// store while another flush waited, the two would deadlock.
 pub struct FsObjectStore {
     layout: Layout,
-    /// Every filesystem call but those of `list` and `stat` goes through it, its failure located
-    /// in the store; theirs are located through it too.
+    /// Every filesystem call goes through it, its failure located in the store, but those of
+    /// `list` and `stat`, located through it all the same, and the measure `read_file` takes of an
+    /// object file before it reads it, which leaves a failure to the read to report.
     fs: StoreFs,
     /// Directories `flush` must fsync: the fan-out directory of every object put or retained
     /// since the last flush, and `objects/` if one of those fan-out directories was created.
@@ -333,6 +338,22 @@ impl FsObjectStore {
         }
     }
 
+    /// The file of object `id`, read whole through [`FsOps::read`]; `None` if it is not stored. A
+    /// regular file longer than any object file this store writes, its header and a raw payload of
+    /// [`MAX_OBJECT_LEN`] bytes (a zstd body is always shorter than its payload: [`encode`] stores
+    /// raw one that does not compress smaller), is [`StoreError::BadHeader`] by its length,
+    /// measured before it is read (through `std::fs`, with no [`FsOps`] call, as a ref file's is),
+    /// so that a crafted file of huge length, which costs no disk if it is sparse, is never read
+    /// into memory. Anything else, a missing file among it, reaches the read, which reports it.
+    fn read_file(&self, id: ObjectId) -> Result<Option<Vec<u8>>, StoreError> {
+        let path = self.layout.object_path(id);
+        let longest = to_u64(HEADER_LEN) + MAX_OBJECT_LEN;
+        if std::fs::metadata(&path).is_ok_and(|meta| meta.is_file() && meta.len() > longest) {
+            return Err(StoreError::BadHeader { id });
+        }
+        Ok(self.fs.read(path.as_std_path())?)
+    }
+
     /// Creates fan-out directory `fanout` if it is missing. A new directory's own entry
     /// lives in `objects/`, so `objects/` then joins the touched set as well.
     ///
@@ -378,20 +399,20 @@ impl ObjectStore for FsObjectStore {
     }
 
     fn get(&self, id: ObjectId) -> Result<Option<(ObjectKind, Vec<u8>)>, StoreError> {
-        match self.fs.read(self.layout.object_path(id).as_std_path())? {
+        match self.read_file(id)? {
             Some(file) => decode(id, file).map(Some),
             None => Ok(None),
         }
     }
 
-    /// Reads the object's file whole through [`FsOps::read`], as [`ObjectStore::get`] does, and
-    /// hands its payload over piece by piece (`visit_payload`).
+    /// Reads the object's file as [`ObjectStore::get`] does (measured, then read whole through
+    /// [`FsOps::read`]), and hands its payload over piece by piece (`visit_payload`).
     fn read_chunks(
         &self,
         id: ObjectId,
         visit: &mut dyn FnMut(&[u8]),
     ) -> Result<Option<ObjectStat>, StoreError> {
-        match self.fs.read(self.layout.object_path(id).as_std_path())? {
+        match self.read_file(id)? {
             Some(file) => visit_payload(id, &file, visit).map(Some),
             None => Ok(None),
         }
