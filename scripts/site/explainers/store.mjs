@@ -400,7 +400,7 @@ function page(theme) {
       { mark: "raised", label: "Queued commits, and objects dropping into fan-out bins with no lock" },
     ],
     caption:
-      "Writers' metadata transactions queue for one lock and each becomes one CRC-framed frame appended to journal.log; objects are written before any frame names them, into 256 fan-out directories, without a lock (sixteen bins drawn). Measured on one busy host with 32 writer processes: about 110 durable transactions a second, a median lock wait of 0.08 ms back to back, and 14.5× faster object writes on 32 threads than on one (docs/perf.md).",
+      "Writers' metadata transactions queue for one lock and each becomes one CRC-framed frame appended to journal.log; objects are written before any frame names them, into 256 fan-out directories, without a lock (sixteen bins drawn). Measured on one busy host (docs/perf.md, 2026-10-16, with the writer lock that ships): with 32 processes committing through the binary at once, 72.7 commits a second and a median commit of 427 ms (p99 656 ms), about 406 ms of it the wait for the lock; the metadata transactions alone, at store level, 120.9 a second; and object writes on 32 threads in one process 13.8× as fast as on one thread, as the disk and ext4's journal commit concurrent fsyncs together.",
     body: `<div class="iso-stage" tabindex="0" role="img" aria-label="${label}">${svg}</div>`,
   });
   const credit = `<p style="text-align:center;opacity:.7;font-size:12px">Drawn with <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT, <a href="/THIRD-PARTY-NOTICES.txt">notice</a>) · <a href="/">swarmops.cc</a></p>`;

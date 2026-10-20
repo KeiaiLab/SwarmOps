@@ -104,12 +104,12 @@
       </article>
     </div>
     <div class="stats" role="list">
-      <div class="stat" role="listitem"><b>32 writers</b><span>processes committing to one store at once, 1,000 transactions each, in the contention test</span></div>
-      <div class="stat" role="listitem"><b>~110 / s</b><span>durable transactions through the one metadata lock, with full fsync</span></div>
-      <div class="stat" role="listitem"><b>0.08 ms</b><span>median wait for the lock when writers commit back to back</span></div>
-      <div class="stat" role="listitem"><b>14.5×</b><span>object writes on 32 threads against one: they take no lock</span></div>
+      <div class="stat" role="listitem"><b>32 writers</b><span>processes writing to one store at once, 1,000 transactions each, in the two contention tests: at store level, and as commits through the binary</span></div>
+      <div class="stat" role="listitem"><b>120.9 / s</b><span>metadata transactions through the one lock, with full fsync, at store level: a changeset record each, no objects, no ref move. Whole commits through the binary: 72.7 / s</span></div>
+      <div class="stat" role="listitem"><b>427 ms</b><span>median commit through the binary with 32 processes committing at once, about 406 ms of it the wait for the lock (p99 656 ms, longest 918 ms); a commit alone takes 21 ms</span></div>
+      <div class="stat" role="listitem"><b>13.8×</b><span>object writes on 32 threads against one, in one process (15.5× beside a busy writer), as the disk and ext4's journal commit concurrent fsyncs together</span></div>
     </div>
-    <p class="note">Measured on one busy development host (WSL2, ext4 on a virtual disk, 32 threads), with every number's spread and load in <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/perf.md">docs/perf.md</a>. No git baseline has been measured yet; the first side-by-side benchmark is planned for M9.</p>
+    <p class="note">From <code>just perf</code> after M1's last merge (2026-10-16), with the writer lock that ships, on one busy development host (WSL2, ext4 on a virtual disk, 32 threads; load 14.6–16.4). <a href="https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/perf.md">docs/perf.md</a> has every run, with its spread and load. No git baseline has been measured yet; the first side-by-side benchmark is planned for M9.</p>
   </div>
 </section>
 
