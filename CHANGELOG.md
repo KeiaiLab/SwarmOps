@@ -667,6 +667,17 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   through MCP, the export and its round trip, the repository's CI on it, what to measure, the
   success criteria and the rollback).
 
+#### The v0.1.0 release batch (2026-10-20)
+
+- Landing from many processes at once is tested through the binary, in the default gate
+  (`landing::eight_processes_land_concurrently_none_lost`, `crates/swarmops-cli/tests/landing.rs`):
+  eight agents, each running one `swarmops` process at a time, make four keyed lands each on one
+  `main`, each land a file of its own and every other one also the agent's line of a file they all
+  share, and a land that ends `E_BUSY` or `E_CAS_RETRY_EXHAUSTED` runs again with the same key.
+  Afterwards `main`'s first-parent chain holds every landed changeset exactly once and nothing
+  else, each move of `main` a one-step fast-forward, `main` holds every land's file and line, and
+  the store verifies clean. The test kit's `landing::CliLander` is the lander it runs.
+
 ### Changed
 
 #### M1.6: the code-review follow-ups (2026-10-19)
