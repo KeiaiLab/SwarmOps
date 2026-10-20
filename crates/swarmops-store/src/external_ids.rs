@@ -9,6 +9,10 @@
 //!        | changeset id [32] | u32le crc32 of the 40 bytes before it
 //! ```
 //!
+//! An entry's file is read no further than a byte past an entry, 45 bytes, on a handle of the
+//! index's own (`std::fs`, with no [`FsOps`] call: [`FsOps::read`] takes a whole file): a longer
+//! file is no entry, however long, sparse or crafted, and costs no more to read than that.
+//!
 //! An entry never changes once written. [`ExternalIds::put_batch`] writes one as the object store
 //! writes an object (storage spec §2 rule 1, through the same sequence): a temp file in
 //! `objects/tmp/`, synced, linked into place without replacing anything; then it fsyncs, once
@@ -34,11 +38,12 @@ use std::sync::Arc;
 use camino::{Utf8Path, Utf8PathBuf};
 use rayon::ThreadPool;
 use rayon::prelude::*;
+use swarmops_core::bytes::to_u64;
 use swarmops_core::{ChangesetId, ObjectId};
 
 use crate::error::{FileOp, StoreError};
 use crate::fs_objects::{fsync_dirs, link_new_file};
-use crate::fs_ops::{FsOps, LinkOutcome, StoreFs};
+use crate::fs_ops::{FsMethod, FsOps, LinkOutcome, StoreFs, open_regular};
 use crate::layout::Layout;
 
 /// The system of git commits: its keys are their SHA-1 oids, 20 bytes.
@@ -102,7 +107,9 @@ pub struct ExternalPut {
 /// it makes a filesystem call.
 pub struct ExternalIds {
     layout: Layout,
-    /// Every filesystem call goes through it, its failure located in the store.
+    /// Every filesystem call goes through it, its failure located in the store, but the reads of
+    /// entries (`read_entry`) and the listings of directories (`read_dir`), located through it
+    /// all the same.
     fs: StoreFs,
     /// The pool of [`ExternalIds::put_batch`]'s writes and fsyncs once
     /// [`ExternalIds::set_parallelism`] is called; until then, rayon's global pool.
@@ -160,13 +167,15 @@ impl ExternalIds {
         self.pool = Some(pool);
     }
 
-    /// The entry of external id `key` of `system`; `None` if there is none. One
-    /// [`FsOps::read`]. A file there that is not an entry is [`StoreError::ExternalIdCorrupt`].
+    /// The entry of external id `key` of `system`; `None` if there is none. Reads at most 45
+    /// bytes of its file, a byte past an entry, and makes no [`FsOps`] call (see
+    /// [the module documentation](self)). A file there that is not an entry, a longer one among
+    /// them, is [`StoreError::ExternalIdCorrupt`].
     pub fn get(&self, system: &str, key: &[u8]) -> Result<Option<ExternalEntry>, StoreError> {
         check_system(system)?;
         check_key(key)?;
         let path = self.layout.external_id_path(system, key);
-        match self.fs.read(path.as_std_path())? {
+        match self.read_entry(&path)? {
             Some(bytes) => decode(&bytes).map(Some).ok_or_else(|| corrupt(system, key)),
             None => Ok(None),
         }
@@ -259,7 +268,8 @@ impl ExternalIds {
     /// directory named by other than two lowercase hex digits, a file in it named by other than
     /// an even count of 2 to 126 of them) is passed over, as the object store's listing passes
     /// over strays. Lists the directories with `std::fs` (an [`FsOps`] has no listing) and reads
-    /// each entry with [`FsOps::read`]; a listing or a read that fails fails the call.
+    /// each entry as [`ExternalIds::get`] does, no further than a byte past an entry; a listing
+    /// or a read that fails fails the call.
     pub fn list(&self, system: &str) -> Result<Vec<ListedEntry>, StoreError> {
         check_system(system)?;
         let system_dir = self.layout.external_ids_dir().join(system);
@@ -280,7 +290,7 @@ impl ExternalIds {
                 };
                 let key = [first.as_slice(), &rest].concat();
                 let entry = if kind.is_file() {
-                    match self.fs.read(dir.join(&name).as_std_path())? {
+                    match self.read_entry(&dir.join(&name))? {
                         Some(bytes) => decode(&bytes).ok_or_else(|| corrupt(system, &key)),
                         // Gone since the listing: nothing removes an entry but a person.
                         None => continue,
@@ -322,14 +332,15 @@ impl ExternalIds {
         Ok(changed)
     }
 
-    /// Places the entry `bytes` at `path`, unless a file is there: then what is there decides.
+    /// Places the entry `bytes` at `path`, unless a file is there: then what is there decides,
+    /// read as [`ExternalIds::get`] reads it (a file longer than an entry is other bytes).
     fn place(
         &self,
         tmp_dir: &Utf8Path,
         path: &Utf8Path,
         bytes: &[u8],
     ) -> Result<Placed, StoreError> {
-        if let Some(there) = self.fs.read(path.as_std_path())? {
+        if let Some(there) = self.read_entry(path)? {
             return Ok(Placed::found(Some(there.as_slice()), bytes));
         }
         self.fs.create_dir_all(tmp_dir.as_std_path())?;
@@ -337,10 +348,29 @@ impl ExternalIds {
             LinkOutcome::Placed => Ok(Placed::Written),
             // Another writer linked the name since the read: what it linked decides.
             LinkOutcome::AlreadyExists => {
-                let there = self.fs.read(path.as_std_path())?;
+                let there = self.read_entry(path)?;
                 Ok(Placed::found(there.as_deref(), bytes))
             }
         }
+    }
+
+    /// The bytes of the entry file at `path`, no more than a byte past an entry
+    /// (`ENTRY_LEN + 1`), or `None` if there is none: a file that holds more is no entry, and the
+    /// rest of it is never read, however long it is. The file is read on a handle of its own
+    /// (`std::fs`, no [`FsOps`] call, as `journal.ckpt` is), and a path that is no regular file
+    /// is refused before it is opened (`open_regular`, as [`FsOps::read`] refuses it); a failure
+    /// is that of a `read` of the file, named by its place in the store, as [`FsOps::read`]'s is.
+    fn read_entry(&self, path: &Utf8Path) -> Result<Option<Vec<u8>>, StoreError> {
+        let failed = |e| self.fs.locate(FileOp::Fs(FsMethod::Read), path, e);
+        let file = match open_regular(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(failed(e).into()),
+        };
+        let mut bytes = Vec::with_capacity(ENTRY_LEN + 1);
+        let mut capped = io::Read::take(file, to_u64(ENTRY_LEN + 1));
+        io::Read::read_to_end(&mut capped, &mut bytes).map_err(failed)?;
+        Ok(Some(bytes))
     }
 
     /// The names in `dir` and their types, `dir` read with `std::fs`; none if `dir` does not

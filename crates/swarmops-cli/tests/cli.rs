@@ -1429,6 +1429,40 @@ fn verify_problems_exit_1_with_the_report() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
+/// A file of 1 TiB (a hole: no disk) placed where an external id entry of 44 bytes would be is a
+/// damaged entry, read no further than a byte past an entry: `verify` exits 1 with
+/// `E_STORE_CORRUPT`, the entry an `external_id_corrupt` finding by its system and key, and its
+/// message names the entry, not the store's path (storage spec §7).
+#[test]
+fn verify_reports_an_external_id_entry_of_huge_length_as_corrupt() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let key = "ab".repeat(20);
+    let entry = Layout::new(Utf8PathBuf::from(&store)).external_id_path("git", &[0xab; 20]);
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::File::create(&entry).unwrap().set_len(1 << 40).unwrap();
+
+    let damaged = s.run(&["--repo", &store, "verify"]);
+    assert_eq!(
+        (damaged.exit, damaged.code()),
+        (1, "E_STORE_CORRUPT"),
+        "{}",
+        damaged.json
+    );
+    let details = &damaged["error"]["details"];
+    let problem = format!("the entry of external id {key} of system git is corrupt");
+    assert_eq!(details["problems"], json!([problem]), "{details}");
+    assert_eq!(
+        details["findings"],
+        json!([{"kind": "external_id_corrupt", "system": "git", "key": key}]),
+        "{details}"
+    );
+    let message = damaged["error"]["message"].as_str().unwrap();
+    assert_eq!(message, format!("verify found a problem: {problem}"));
+    assert!(!message.contains(&store), "{message}");
+}
+
 /// A read of a big file never prints more than `--max-bytes` of it (plan review focus 4).
 #[test]
 fn cat_truncates_to_max_bytes() {
