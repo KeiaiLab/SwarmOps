@@ -27,10 +27,13 @@
 //!    touches); a later one what it merged before, `L`, onto what the target gained since, over
 //!    `L`'s delta paths alone ([`Repo::merge_trees`] of the head `L` was made on, `L` and the head
 //!    now: the incremental re-merge), and, if that conflicts, the whole merge again, whose result
-//!    stands. Conflicts end the land, recording nothing ([`RepoError::Conflict`], with who last
-//!    touched each conflicting path on the target since the base, found on the same walk). A
-//!    merge that leaves `theirs`' tree as it is has nothing to land
-//!    ([`NothingToLandReason::NoChanges`]).
+//!    stands. The request's resolutions apply to the merge before its conflicts are counted
+//!    ([`Resolutions`]): each, while `theirs` holds its path as the resolutions' `against` does,
+//!    replaces what the merge made at and below its path, conflicts included; a path `theirs`
+//!    holds otherwise is stale. Conflicts left, or a stale path, end the land, recording nothing
+//!    ([`RepoError::Conflict`], with who last touched each conflicting path on the target since
+//!    the base, found on the same walk, and the stale paths). A merge that leaves `theirs`' tree
+//!    as it is has nothing to land ([`NothingToLandReason::NoChanges`]).
 //! 5. It writes `L` outside the lock: its one parent `theirs`, its delta the merge's, its message
 //!    the request's or the head's, its author the head's, its committer the lander; its metadata
 //!    the head's `agent` and `run_id`, the key as `land_key`, the lander's name as `lander`, the
@@ -56,6 +59,7 @@
 
 mod key;
 mod publish;
+mod resolve;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -77,6 +81,8 @@ use crate::repo::{Repo, ref_error};
 
 use key::{KeyFound, TargetWalk};
 pub use publish::{Publication, Published};
+use resolve::Resolving;
+pub use resolve::{Resolution, Resolutions, Side};
 
 /// The metadata key of a landed changeset's idempotency key.
 const LAND_KEY: &str = "land_key";
@@ -122,11 +128,15 @@ pub struct LandRequest {
     /// How many attempts the land makes at most before [`RepoError::RetryExhausted`]; 0 counts as
     /// 1. The operations layer takes 1 to 32.
     pub max_attempts: u32,
+    /// What to make of some paths of the merge, decided against a head of the target, which
+    /// each attempt applies to its merge before its conflict check ([`Resolutions`]); `None`:
+    /// none.
+    pub resolutions: Option<Resolutions>,
 }
 
 impl LandRequest {
     /// A land of `head` onto `target` by `lander`: its base the merge base, no key, the head's
-    /// message, no metadata of the lander's, and 8 attempts at most.
+    /// message, no metadata of the lander's, 8 attempts at most, and no resolutions.
     pub fn new(head: ChangesetId, target: &str, lander: Signature) -> LandRequest {
         LandRequest {
             head,
@@ -137,6 +147,7 @@ impl LandRequest {
             lander,
             lander_metadata: Vec::new(),
             max_attempts: MAX_ATTEMPTS,
+            resolutions: None,
         }
     }
 }
@@ -228,6 +239,9 @@ pub struct MergeConflicts {
     /// changeset's `agent` metadata (empty when it names none). A path none of them touched has
     /// none: a base off the target can leave theirs' change below the walk.
     pub last_touched: BTreeMap<RepoPath, (ChangesetId, String)>,
+    /// The paths whose resolutions did not apply, sorted: the target's head holds there what the
+    /// resolutions' `against` does not ([`Resolutions`]). Empty for a land without resolutions.
+    pub stale: Vec<RepoPath>,
 }
 
 /// How long a land waits before its attempt `attempt`, counted from 1 (operations spec §3 step
@@ -253,7 +267,10 @@ impl<O: ObjectStore> Repo<O> {
     /// Lands `req`: merges its change three-way onto the target's head and publishes the result
     /// as one changeset in one write transaction, by the steps [the module documentation](self)
     /// gives, with their errors. Nothing is recorded unless it lands; a replay writes nothing.
-    pub fn land(&self, req: LandRequest) -> Result<LandOutcome, RepoError> {
+    /// Its resolutions are read before the first attempt: [`RepoError::NotFound`] for an
+    /// `against` the store does not hold, [`RepoError::MissingBlob`] for a blob one names by id
+    /// that it does not hold.
+    pub fn land(&self, mut req: LandRequest) -> Result<LandOutcome, RepoError> {
         swarmops_store::check_ref_name(&req.target).map_err(ref_error)?;
         let read = self.snapshot()?;
         let theirs = target_head(&read, &req.target)?;
@@ -274,6 +291,9 @@ impl<O: ObjectStore> Repo<O> {
                 })?,
         };
         let base = stored(&read, base)?;
+        let resolving = (req.resolutions.take())
+            .map(|resolutions| Resolving::new(self, &read, resolutions, head.changeset.root))
+            .transpose()?;
         let seed = match &req.key {
             Some(key) => key.as_bytes().to_vec(),
             None => req.head.0.0.to_vec(),
@@ -288,6 +308,7 @@ impl<O: ObjectStore> Repo<O> {
             squashed: None,
             prior: None,
             auto_merged: BTreeSet::new(),
+            resolving,
         };
         let (mut read, mut theirs) = (Some(read), theirs);
         for attempt in 1..=max_attempts {
@@ -376,6 +397,8 @@ struct Landing<'r, O: ObjectStore> {
     prior: Option<Prior>,
     /// The paths the attempts merged into new content.
     auto_merged: BTreeSet<RepoPath>,
+    /// The request's resolutions, read before the first attempt; `None` without any.
+    resolving: Option<Resolving>,
 }
 
 impl<O: ObjectStore> Landing<'_, O> {
@@ -419,9 +442,13 @@ impl<O: ObjectStore> Landing<'_, O> {
                 None => {}
             }
         }
-        let merged = self.merge(&theirs)?;
-        if !merged.conflicts.is_empty() {
-            return Err(self.conflict(&read, &theirs, merged)?);
+        let mut merged = self.merge(&theirs)?;
+        let stale = match &self.resolving {
+            Some(resolving) => resolving.apply(&read, theirs.changeset.root, &mut merged)?,
+            None => Vec::new(),
+        };
+        if !merged.conflicts.is_empty() || !stale.is_empty() {
+            return Err(self.conflict(&read, &theirs, merged, stale)?);
         }
         if merged.delta.is_empty() {
             let no_changes = RepoError::NothingToLand(NothingToLandReason::NoChanges);
@@ -518,13 +545,15 @@ impl<O: ObjectStore> Landing<'_, O> {
         self.repo.merge_roots(roots, &merge_content)
     }
 
-    /// The error of a merge onto `theirs` that conflicts: its conflicts, with who last touched
-    /// each path on the target since the base, from the walk.
+    /// The error of a merge onto `theirs` that conflicts, or whose resolutions of `stale` did not
+    /// apply: its conflicts, with who last touched each path on the target since the base, from
+    /// the walk, and the stale paths.
     fn conflict(
         &mut self,
         read: &RepoRead<'_, O>,
         theirs: &StoredChangeset,
         merged: MergeOutcome,
+        stale: Vec<RepoPath>,
     ) -> Result<RepoError, RepoError> {
         let paths: Vec<RepoPath> = (merged.conflicts.iter())
             .map(|conflict| conflict.path.clone())
@@ -537,6 +566,7 @@ impl<O: ObjectStore> Landing<'_, O> {
             conflicts: merged.conflicts,
             auto_merged: merged.auto_merged,
             last_touched,
+            stale,
         })))
     }
 

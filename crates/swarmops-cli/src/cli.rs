@@ -108,6 +108,26 @@ the land replays (status: replayed) without writing anything; one from another h
 E_INVALID_ARG. Without a key, the same land run again finds its change on the ref already: \
 E_NOTHING_TO_LAND.";
 
+/// `land --resolve`'s short help.
+const RESOLVE_HELP: &str =
+    "Resolve the conflicts a report named: resolutions as JSON in FILE, or - for stdin";
+
+/// `land --resolve`'s long help.
+const RESOLVE_LONG_HELP: &str = "Resolve the conflicts an E_CONFLICT report named, without a \
+checkout: resolutions as a JSON object in FILE, or - for stdin, at most 64 MiB (swarmops schema \
+ResolutionsInput).
+
+{\"against\": THEIRS, \"files\": {PATH: RESOLUTION, ...}}: THEIRS is the report's theirs, by its \
+full id, and each RESOLUTION one of {\"take\": \"ours\"}, {\"take\": \"theirs\"}, {\"content\": \
+CONTENT} with an optional \"mode\" (CONTENT as a commit's change gives it: inline, base64, a \
+file, or a stored blob by id) and {\"delete\": true}. A resolution decides its path and every \
+path below it; the rest of the merge stands.
+
+A resolution applies while the ref holds its path as THEIRS did, whether the path conflicts or \
+not. A path the ref changed since is stale: the land fails with E_CONFLICT again, its report \
+naming the path in stale, as it does for each conflict left unresolved. Read the report's \
+theirs, and resolve against it.";
+
 /// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
 /// on stdout.
 #[derive(Parser, Debug)]
@@ -201,7 +221,8 @@ pub enum Command {
     /// ref gained since the base, and the ref moves to it in the same transaction. A ref that
     /// moves meanwhile makes the land merge again onto its new head and retry, up to
     /// --max-attempts times. A conflict is E_CONFLICT (exit 3), with each conflicting file in
-    /// details.report, and nothing is recorded.
+    /// details.report, and nothing is recorded; land again with --resolve to resolve it without
+    /// a checkout.
     Land {
         /// The changeset to land: the change's head, such as the changeset a commit made.
         #[arg(value_name = "HEAD")]
@@ -224,6 +245,8 @@ pub enum Command {
         /// texts out (truncated) and keeps every line position and blob id.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
         max_conflict_bytes: u64,
+        #[arg(long, value_name = "FILE", help = RESOLVE_HELP, long_help = RESOLVE_LONG_HELP)]
+        resolve: Option<String>,
     },
     /// Store content as a blob for a commit to name by its id, or ask which blobs the store
     /// holds.

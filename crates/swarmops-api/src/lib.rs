@@ -33,6 +33,7 @@ pub use ops::{
     VerifyReport, VerifyReq,
 };
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
 pub use rev::Rev;
 
@@ -131,6 +132,9 @@ pub fn schema_for_all() -> serde_json::Value {
         DeriveResp,
         // land, op log, undo (M4).
         LandReq,
+        ResolutionsInput,
+        ResolutionInput,
+        Side,
         LandResp,
         LandStatus,
         ConflictReport,

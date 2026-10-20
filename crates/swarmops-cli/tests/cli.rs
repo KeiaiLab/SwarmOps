@@ -2158,6 +2158,115 @@ fn a_replayed_land_reports_replayed() {
     assert_eq!(newest(&mut s), before);
 }
 
+/// A land that conflicts is resolved without a checkout: from the report of its `E_CONFLICT`
+/// (exit 3), resolutions against the report's `theirs`, read by the client from a file
+/// (`--resolve FILE`) or from stdin (`--resolve -`). Resolving one of two conflicting files exits
+/// 3 again with the other; a `res.json` that resolves both lands, with the resolved contents. A
+/// resolution file that cannot be read, or holds no resolutions, is `E_INVALID_ARG` (exit 2)
+/// naming it.
+#[test]
+fn a_conflicting_land_resolved_with_a_file_lands() {
+    let mut s = Session::new();
+    let store = s.store();
+    s.run(&["init", &store]);
+    let files = json!([
+        {"path": "f.txt", "op": "put", "content": {"inline": "1\n2\n3\n"}},
+        {"path": "g.txt", "op": "put", "content": {"inline": "1\n2\n3\n"}},
+    ]);
+    let t0 = s.file("t0.json", &files.to_string());
+    let base = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "t0",
+        "--changes",
+        &t0,
+        "--advance",
+        "main",
+    ]);
+    let t0 = s.name_at(&base, "/result/changeset", "t0");
+    let ours = json!([
+        {"path": "f.txt", "op": "put", "content": {"inline": "1\nours\n3\n"}},
+        {"path": "g.txt", "op": "put", "content": {"inline": "1\nours\n3\n"}},
+    ]);
+    let ours = s.file("ours.json", &ours.to_string());
+    let made = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "head",
+        "--changes",
+        &ours,
+        "--parent",
+        &t0,
+    ]);
+    let head = s.name_at(&made, "/result/changeset", "head");
+    let theirs = publish_as_other(&mut s, &store, &t0, ("f.txt", "1\ntheirs\n3\n"), "x");
+    let theirs = publish_as_other(
+        &mut s,
+        &store,
+        &theirs,
+        ("g.txt", "1\ntheirs\n3\n"),
+        "theirs",
+    );
+
+    let land: [&str; 6] = ["--repo", &store, "--as", AGENT, "land", &head];
+    let conflict = s.run(&land);
+    assert_eq!((conflict.exit, conflict.code()), (3, "E_CONFLICT"));
+    let report = &conflict["error"]["details"]["report"];
+    assert_eq!(report["theirs"], theirs.as_str());
+    let resolve = |files: Value| json!({"against": report["theirs"], "files": files}).to_string();
+
+    let one = resolve(json!({"f.txt": {"take": "ours"}}));
+    let partly = s.run_stdin(&one, &[&land[..], &["--resolve", "-"][..]].concat());
+    assert_eq!(
+        (partly.exit, partly.code()),
+        (3, "E_CONFLICT"),
+        "{}",
+        partly.json
+    );
+    let left = &partly["error"]["details"]["report"];
+    assert_eq!(left["files"].as_array().unwrap().len(), 1, "{left}");
+    assert_eq!(left["files"][0]["path"], "g.txt");
+    assert!(left.get("stale").is_none(), "{left}");
+
+    let both = resolve(json!({
+        "f.txt": {"take": "ours"},
+        "g.txt": {"content": {"inline": "1\nours and theirs\n3\n"}},
+    }));
+    let res = s.file("res.json", &both);
+    let landed = s.run(&[&land[..], &["--resolve", &res][..]].concat());
+    assert_eq!(landed.exit, 0, "{}", landed.json);
+    assert_eq!(landed["result"]["rebased_onto"], theirs.as_str());
+    assert_eq!(landed["result"]["files_changed"], 2);
+    for (path, content) in [
+        ("f.txt", "1\nours\n3\n"),
+        ("g.txt", "1\nours and theirs\n3\n"),
+    ] {
+        let cat = s.run(&["--repo", &store, "cat", &format!("main:{path}")]);
+        assert_eq!(cat["result"]["content"], content, "{path}");
+    }
+
+    let missing = format!("{}/missing.json", s.tmp());
+    let unread = s.run(&[&land[..], &["--resolve", &missing][..]].concat());
+    assert_eq!((unread.exit, unread.code()), (2, "E_INVALID_ARG"));
+    assert_eq!(unread["error"]["details"], json!({"resolve": missing}));
+    let not_resolutions = s.run_stdin("[]", &[&land[..], &["--resolve", "-"][..]].concat());
+    assert_eq!(
+        (not_resolutions.exit, not_resolutions.code()),
+        (2, "E_INVALID_ARG")
+    );
+    assert_eq!(not_resolutions["error"]["details"], json!({"resolve": "-"}));
+    let hint = not_resolutions["error"]["hint"].as_str().unwrap();
+    assert!(hint.contains("swarmops schema ResolutionsInput"), "{hint}");
+}
+
 // ---------------------------------------------------------------------------------------------
 // Running the binary.
 // ---------------------------------------------------------------------------------------------

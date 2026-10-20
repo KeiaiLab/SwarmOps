@@ -10,7 +10,9 @@
 //! place is before line `first`); the merge keeps them 0-based and half-open. The hunks' texts go
 //! in, a hunk's three sides together and in the report's order, while their sum stays within the
 //! request's `max_conflict_bytes`: from the first hunk whose texts would pass it, no hunk carries
-//! its texts, and `truncated` says so. The positions and the blob ids are always there.
+//! its texts, and `truncated` says so. The positions and the blob ids are always there. The paths
+//! whose resolutions did not apply, since the target holds them otherwise than their `against`,
+//! are `stale`.
 
 use std::ops::Range;
 
@@ -56,6 +58,7 @@ pub(crate) fn report(conflicts: &MergeConflicts, max_bytes: u64) -> ConflictRepo
         auto_merged: (conflicts.auto_merged.iter())
             .map(ToString::to_string)
             .collect(),
+        stale: conflicts.stale.iter().map(ToString::to_string).collect(),
         truncated: texts.cut,
     }
 }
@@ -206,6 +209,7 @@ mod tests {
                     (id(5), "agent/w-5".to_owned()),
                 ),
             ]),
+            stale: vec![RepoPath::new("e").unwrap(), RepoPath::new("h").unwrap()],
         };
         let report = report(&conflicts, 3);
         assert_eq!(
@@ -262,6 +266,7 @@ mod tests {
             (&blob(1), &None, &blob(3))
         );
         assert_eq!(report.auto_merged, ["g"]);
+        assert_eq!(report.stale, ["e", "h"]);
         assert_eq!(
             (&report.base, &report.ours, &report.theirs),
             (&id(1).to_string(), &id(2).to_string(), &id(3).to_string())

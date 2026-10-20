@@ -771,7 +771,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Merges head (with its first-parent chain since base) three-way onto target, main by default, and publishes the result as one changeset in one transaction; on E_CONFLICT, details.report lists each conflict. Give idempotency_key to make a retry safe.",
+      "description": "Merges head (with its first-parent chain since base) three-way onto target, main by default, and publishes the result as one changeset in one transaction; on E_CONFLICT, details.report lists each conflict: resolve them with resolutions, against the report's theirs, its full 64-hex id (a path the target changed since comes back in the report's stale). Give idempotency_key to make a retry safe.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`land`: merge a change three-way onto a target ref and publish it there as one new\nchangeset, in one transaction (operations spec §3). The change is `head` with its\nfirst-parent chain after `base`, squashed: the landed changeset's parent is the target's\nhead, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in\n`details.report`; nothing is recorded then.",
@@ -820,6 +820,158 @@ expression: listed
               "string",
               "null"
             ]
+          },
+          "resolutions": {
+            "anyOf": [
+              {
+                "description": "A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change\nonto the target, decided against one of the target's heads.",
+                "properties": {
+                  "against": {
+                    "description": "The target's head the resolutions were decided against: the conflict report's `theirs`,\nby its full 64-hex id. A resolution applies while the target holds its path as this\nchangeset does (the same file, the same directory, or nothing). A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  },
+                  "files": {
+                    "additionalProperties": {
+                      "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+                      "properties": {
+                        "content": {
+                          "anyOf": [
+                            {
+                              "description": "A `put`'s content, as an object with one key.",
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "description": "UTF-8 text, verbatim.",
+                                  "properties": {
+                                    "inline": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "inline"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "description": "Bytes in standard, padded base64.",
+                                  "properties": {
+                                    "base64": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "base64"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                                  "properties": {
+                                    "blob": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "blob"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+                                  "properties": {
+                                    "file": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "file"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+                        },
+                        "delete": {
+                          "description": "Nothing there: no file at the path, nor below it.",
+                          "type": "boolean"
+                        },
+                        "mode": {
+                          "anyOf": [
+                            {
+                              "description": "The kind of entry a `put` writes.",
+                              "oneOf": [
+                                {
+                                  "const": "file",
+                                  "description": "A regular file (git mode 100644).",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "exec",
+                                  "description": "An executable file (git mode 100755).",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "symlink",
+                                  "description": "A symlink; the content is the link's target.",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+                        },
+                        "take": {
+                          "anyOf": [
+                            {
+                              "description": "One side of a land's merge.",
+                              "oneOf": [
+                                {
+                                  "const": "ours",
+                                  "description": "The change: its head.",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "theirs",
+                                  "description": "The target: its head when the land merges.",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+                        }
+                      },
+                      "type": "object"
+                    },
+                    "description": "What to make of each path, by its repository path.",
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "against",
+                  "files"
+                ],
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What to make of the paths an `E_CONFLICT` report named, decided without a checkout\n(operations spec §3, resolution path (b)). Each resolution applies to its path while the\ntarget holds there what `against` held, whether the path conflicts or not; a path the\ntarget changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report\nthat names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses\nan `against` that is not a full 64-hex id (`E_INVALID_ARG`)."
           },
           "target": {
             "default": "main",

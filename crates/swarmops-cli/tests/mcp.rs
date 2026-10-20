@@ -1085,6 +1085,96 @@ fn mcp_land_conflict_is_an_error_with_the_report() {
     server.finish_clean();
 }
 
+/// A land's `resolutions` apply while the target holds each path as `against` did, so the server
+/// refuses an `against` that is no full 64-hex id: a ref name or a relative revision is read when
+/// the call runs, so it always matches and protects nothing, and an id prefix stops resolving once
+/// another changeset shares it. Each refusal is a failed call, `E_INVALID_ARG` naming the
+/// `against`, before anything is resolved; a resolution's `{"file": path}` content follows a
+/// commit's rules (an absolute path). The full id resolves the conflict, and the change lands.
+/// The tool's description says to resolve a conflict with resolutions.
+#[test]
+fn mcp_land_refuses_a_symbolic_against() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let listed = server.result("tools/list", json!({}));
+    let tools = listed["tools"].as_array().unwrap();
+    let land = (tools.iter()).find(|tool| tool["name"] == "land").unwrap();
+    let description = land["description"].as_str().unwrap();
+    assert!(
+        description.contains("resolutions") && description.contains("against"),
+        "{description}"
+    );
+
+    let put = |content: &str| json!([{"path": "f", "op": "put", "content": {"inline": content}}]);
+    let base = json!({"message": "t0", "changes": put("1\n2\n3\n")});
+    let t0 = server.ok("commit", base)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    server.ok(
+        "ref_set",
+        json!({"name": "main", "new": t0, "create": true}),
+    );
+    let on_t0 = |content: &str| json!({"message": content, "parent": t0, "changes": put(content)});
+    let head = server.ok("commit", on_t0("1\nours\n3\n"))["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut published = on_t0("1\ntheirs\n3\n");
+    published["advance"] = json!("main");
+    let theirs = server.ok("commit", published)["result"]["changeset"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let conflict = server.err("land", json!({"head": head}), "E_CONFLICT");
+    assert_eq!(
+        conflict["error"]["details"]["report"]["theirs"],
+        theirs.as_str()
+    );
+
+    let resolving = |against: &str, resolution: Value| json!({"head": head, "resolutions": {"against": against, "files": {"f": resolution}}});
+    for against in [
+        "main".to_owned(),
+        theirs[..12].to_owned(),
+        format!("{theirs}~0"),
+    ] {
+        let arguments = resolving(&against, json!({"take": "ours"}));
+        let refused = server.err("land", arguments, "E_INVALID_ARG");
+        assert_eq!(
+            refused["error"]["details"],
+            json!({"against": against}),
+            "{refused}"
+        );
+        let message = refused["error"]["message"].as_str().unwrap();
+        assert!(message.contains("full changeset id"), "{message}");
+        assert_eq!(refused["meta"]["resolved"], json!({}), "{refused}");
+    }
+    let relative = resolving(&theirs, json!({"content": {"file": "res/f"}}));
+    let refused = server.err("land", relative, "E_INVALID_ARG");
+    assert_eq!(
+        refused["error"]["details"],
+        json!({"path": "f", "file": "res/f"}),
+        "{refused}"
+    );
+    assert_eq!(
+        refs_of(&mut server),
+        json!([{"name": "main", "target": theirs, "version": 2}]),
+        "nothing recorded"
+    );
+
+    let landed = server.ok("land", resolving(&theirs, json!({"take": "ours"})));
+    assert_eq!(
+        landed["result"]["rebased_onto"],
+        theirs.as_str(),
+        "{landed}"
+    );
+    let read = server.ok("read_file", json!({"rev": "main", "path": "f"}));
+    assert_eq!(read["result"]["content"], "1\nours\n3\n");
+    server.finish_clean();
+    store.assert_clean("after the resolved land");
+}
+
 /// `commit` with `advance` compares and swaps on its `parent`, so the server refuses it without a
 /// full 64-hex `parent`: an omitted one is the ref's head when the call runs, a ref name or a
 /// relative revision is read when the call runs too, instead of pinning the id the agent read,

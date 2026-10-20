@@ -575,6 +575,7 @@ mod tests {
             conflicts: Vec::new(),
             auto_merged: Vec::new(),
             last_touched: std::collections::BTreeMap::new(),
+            stale: Vec::new(),
         };
         [
             RepoError::Conflict(Box::new(conflicts)),

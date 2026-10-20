@@ -1872,6 +1872,7 @@ mod land {
             ],
             kinds: vec![ConflictKindOut::Content, ConflictKindOut::DeleteModify],
             auto_merged: vec!["h".to_owned()],
+            stale: Vec::new(),
             truncated: false,
         };
         assert_eq!(report, expected);
@@ -2169,6 +2170,209 @@ mod land {
                 };
                 expect_err(ops.land(&who, req), ErrorCode::RevNotFound);
             }
+        }
+    }
+    /// Resolutions through the operations (operations spec §3, resolution path (b)): a land's
+    /// `resolutions` checked, their contents turned into bytes by a commit's rules, and a stale
+    /// one named in the conflict report's `stale`.
+    mod resolutions {
+        use swarmops_api::{ResolutionInput, ResolutionsInput, Side};
+
+        use super::*;
+
+        /// A resolution with these fields.
+        fn resolution(
+            take: Option<Side>,
+            content: Option<ContentInput>,
+            mode: Option<ModeInput>,
+            delete: bool,
+        ) -> ResolutionInput {
+            ResolutionInput {
+                take,
+                content,
+                mode,
+                delete,
+            }
+        }
+
+        /// A resolution that takes `side`.
+        fn take(side: Side) -> ResolutionInput {
+            resolution(Some(side), None, None, false)
+        }
+
+        /// A resolution that puts `text`, inline.
+        fn inline(text: &str) -> ResolutionInput {
+            let content = ContentInput::Inline(text.to_owned());
+            resolution(None, Some(content), None, false)
+        }
+
+        /// A land of `head` with `files` resolved against `against`.
+        fn resolving(head: &str, against: &str, files: Vec<(&str, ResolutionInput)>) -> LandReq {
+            let files = (files.into_iter())
+                .map(|(path, resolution)| (path.to_owned(), resolution))
+                .collect();
+            LandReq {
+                resolutions: Some(ResolutionsInput {
+                    against: against.into(),
+                    files,
+                }),
+                ..landing(head)
+            }
+        }
+
+        /// A resolution takes exactly one of `take`, `content` and `delete`, a `mode` only with
+        /// `content`, a repository path, and an id for a blob it names: each refusal is
+        /// `E_INVALID_ARG` naming the path (and the blob), before anything is resolved (the head
+        /// here is a ref that does not exist). A resolution of each form goes on, to the head.
+        #[test]
+        fn a_resolution_takes_exactly_one_of_take_content_delete() {
+            let (_dir, _root, ops) = new_store();
+            let who = agent();
+            let against = "ab".repeat(32);
+            let text = || Some(ContentInput::Inline("x\n".to_owned()));
+            let refused = |files: Vec<(&str, ResolutionInput)>| {
+                let req = resolving("release/none", &against, files);
+                expect_err(ops.land(&who, req), ErrorCode::InvalidArg)
+            };
+            for (shape, why) in [
+                (resolution(None, None, None, false), "none of the three"),
+                (
+                    resolution(Some(Side::Ours), None, None, true),
+                    "take and delete",
+                ),
+                (
+                    resolution(Some(Side::Theirs), text(), None, false),
+                    "take and content",
+                ),
+                (resolution(None, text(), None, true), "content and delete"),
+                (
+                    resolution(Some(Side::Ours), text(), None, true),
+                    "all three",
+                ),
+                (
+                    resolution(Some(Side::Ours), None, Some(ModeInput::Exec), false),
+                    "a mode with take",
+                ),
+                (
+                    resolution(None, None, Some(ModeInput::File), true),
+                    "a mode with delete",
+                ),
+            ] {
+                let error = refused(vec![("src/f.rs", shape)]);
+                assert_eq!(
+                    Value::Object(error.details.clone()),
+                    json!({"path": "src/f.rs"}),
+                    "{why}: {error:?}"
+                );
+                assert!(error.message.contains("src/f.rs"), "{why}: {error:?}");
+            }
+            for bad in ["", "/abs", "a//b", "../x", "a/./b", "a/"] {
+                let error = refused(vec![(bad, take(Side::Ours))]);
+                assert_eq!(error.details["path"], bad, "{error:?}");
+            }
+            let blob = Some(ContentInput::Blob("not-an-id".to_owned()));
+            let error = refused(vec![("f", resolution(None, blob, None, false))]);
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"path": "f", "blob": "not-an-id"})
+            );
+
+            let id = "cd".repeat(32);
+            let blob = Some(ContentInput::Blob(id));
+            let files = vec![
+                ("a", take(Side::Ours)),
+                ("b", take(Side::Theirs)),
+                ("c", resolution(None, text(), Some(ModeInput::Exec), false)),
+                ("d", resolution(None, blob, None, false)),
+                ("e", resolution(None, None, None, true)),
+            ];
+            let req = resolving("release/none", &against, files);
+            let missing = expect_err(ops.land(&who, req), ErrorCode::RevNotFound);
+            assert_eq!(missing.details["rev"], "release/none");
+        }
+
+        /// A land resolved against its conflict report's `theirs` lands: a resolution of each
+        /// form, its content by a commit's rules (inline, base64 with a mode). Made against a
+        /// head of main that held a resolved path otherwise, it is `E_CONFLICT` again, whose
+        /// report names the path in `stale`; `against` must be a changeset the store holds, and
+        /// a client file a resolution names one it can read, which the error names.
+        #[test]
+        fn resolutions_land_and_a_stale_one_is_reported() {
+            let (_dir, root, ops) = new_store();
+            let who = agent();
+            let base = vec![text("f", "1\n2\n3\n"), text("g", "1\n2\n3\n")];
+            let t0 = publish(&ops, &who, None, base);
+            let ours = vec![text("f", "1\nours\n3\n"), text("g", "1\nours\n3\n")];
+            let head = commit(&ops, Some(&t0), ours);
+            let theirs = vec![text("f", "1\ntheirs\n3\n"), text("g", "1\ntheirs\n3\n")];
+            let x = publish(&ops, &other(), Some(&t0), theirs);
+            let (report, _) = report_of(ops.land(&who, landing(&head)));
+            assert_eq!(
+                (report.theirs.as_str(), report.files.len()),
+                (x.as_str(), 2)
+            );
+            assert_eq!(report.stale, Vec::<String>::new());
+
+            // main moves on and changes g again: a resolution of g against x is stale.
+            let y = publish(
+                &ops,
+                &other(),
+                Some(&x),
+                vec![text("g", "1\ntheirs\nthree\n")],
+            );
+            let before = last_op(&ops);
+            let both = || {
+                let encoded = STANDARD.encode("#!/bin/sh\n");
+                let script = ContentInput::Base64(encoded);
+                vec![
+                    ("f", take(Side::Ours)),
+                    ("g", inline("1\nboth\n3\n")),
+                    (
+                        "run.sh",
+                        resolution(None, Some(script), Some(ModeInput::Exec), false),
+                    ),
+                ]
+            };
+            let (stale, error) = report_of(ops.land(&who, resolving(&head, &x, both())));
+            assert_eq!(
+                (stale.theirs.as_str(), stale.stale.clone()),
+                (y.as_str(), vec!["g".to_owned()])
+            );
+            let files: Vec<&str> = stale.files.iter().map(|f| f.path.as_str()).collect();
+            assert_eq!(files, ["g"], "f was resolved, g still conflicts: {stale:?}");
+            assert!(error.message.contains("stale"), "{error:?}");
+            assert_eq!(last_op(&ops), before, "nothing recorded");
+
+            let unknown = "ef".repeat(32);
+            let missing = expect_err(
+                ops.land(&who, resolving(&head, &unknown, both())),
+                ErrorCode::RevNotFound,
+            );
+            assert_eq!(missing.details["rev"], unknown.as_str());
+            let absent = root.join("absent.txt").to_string();
+            let file = resolution(None, Some(ContentInput::File(absent.clone())), None, false);
+            let error = expect_err(
+                ops.land(&who, resolving(&head, &y, vec![("g", file)])),
+                ErrorCode::InvalidArg,
+            );
+            assert_eq!(
+                Value::Object(error.details),
+                json!({"path": "g", "file": absent})
+            );
+
+            let landed = ops.land(&who, resolving(&head, &y, both())).unwrap();
+            assert_eq!(
+                (landed.rebased_onto.as_str(), landed.files_changed),
+                (y.as_str(), 3)
+            );
+            let read = |path: &str| ops.read_file(cat("main", path)).unwrap();
+            assert_eq!(read("f").content, "1\nours\n3\n");
+            assert_eq!(read("g").content, "1\nboth\n3\n");
+            let script = read("run.sh");
+            assert_eq!(
+                (script.content.as_str(), script.kind),
+                ("#!/bin/sh\n", FileKind::Exec)
+            );
         }
     }
 }

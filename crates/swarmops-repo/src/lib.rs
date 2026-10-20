@@ -56,7 +56,10 @@ pub use derive::{
 };
 pub use error::RepoError;
 pub use history::{FirstParents, SKIP_AFTER};
-pub use land::{LandOutcome, LandRequest, LandStatus, MergeConflicts, NothingToLandReason};
+pub use land::{
+    LandOutcome, LandRequest, LandStatus, MergeConflicts, NothingToLandReason, Resolution,
+    Resolutions, Side,
+};
 pub use merge::MergeOutcome;
 pub use oplog::{OpRecord, Operation, UndoOutcome};
 pub use path_history::PathEvent;
