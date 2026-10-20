@@ -67,7 +67,7 @@ const SECOND_MESSAGE: &str =
 fn agent() -> Signature {
     Signature {
         name: AGENT.as_bytes().to_vec(),
-        email: b"worker-17@claude-code.swarmops.local".to_vec(),
+        email: b"worker-17@agent.swarmops.local".to_vec(),
         secs: 1_760_000_000,
         offset_secs: 0,
         negative_zero: false,

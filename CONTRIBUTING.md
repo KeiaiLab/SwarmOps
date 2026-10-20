@@ -1,17 +1,30 @@
 # Contributing to SwarmOps
 
-SwarmOps is pre-release: 0.1.0 is its first release, and most of its code is written by coding
-agents working for a human maintainer. This page is how changes get made, for people and agents
-alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here expands on it.
+SwarmOps is pre-release: 0.1.0 is its first release. This page is how changes get made, for
+people and agents alike. [The rules](#the-rules) are the short version; everything else here
+expands on them.
+
+## The rules
+
+- The design documents are kept privately by the maintainers;
+  [docs/architecture.md](docs/architecture.md) is the public overview.
+- `unsafe` is forbidden workspace-wide.
+- `just check` is the definition of done for every change.
+- Tests never need the network (tests that read real repositories on this host run only when
+  `SWARMOPS_HOST_REPOS=1`).
+- The durability default is full fsync (the `--durability fast` flag exists only if
+  `docs/perf.md` records the measurement that justifies it).
+- The canonical byte layouts and the hash recipe are the hash contract and are never changed in
+  place (a new layout gets a new kind/version header).
+- Store-facing API types never carry filesystem paths.
 
 ## Before you change anything
 
-- **The specs are the authority.**
-  [`docs/superpowers/specs/2026-10-15-swarmops-design.md`](docs/superpowers/specs/2026-10-15-swarmops-design.md)
-  and its three sub-specs decide how SwarmOps behaves (they are in Korean;
-  [docs/architecture.md](docs/architecture.md) is an English overview). A change that changes
-  behaviour updates the spec paragraph that owns it in the same change. If the code and a spec
-  disagree, one of them is a bug: say which, and fix it.
+- **The design documents are the authority.** The umbrella spec and its three sub-specs decide
+  how SwarmOps behaves. They are in Korean, and the maintainers keep them privately;
+  [docs/architecture.md](docs/architecture.md) is the public overview, in English. A change that
+  changes behaviour updates the spec paragraph that owns it in the same change. If the code and
+  a spec disagree, one of them is a bug: say which, and fix it.
 - **The hash contract never changes in place.** The canonical byte layouts and the hash recipe
   in the storage-core spec (§1) define every object id. A new layout gets a new kind/version
   header; the golden vectors in `crates/swarmops-core/tests/golden/` are regenerated only on
@@ -19,9 +32,9 @@ alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here
   on-disk layout of `FORMAT 1` (journal frames, records, index and ref files) needs a `FORMAT`
   bump. [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md)
   lists every public surface and how each one changes.
-- **Work from a plan.** Each milestone has a plan in
-  [`docs/superpowers/plans/`](docs/superpowers/plans/) with its tasks and acceptance tests, and
-  cites the spec sections it implements. Small fixes need no plan.
+- **Work from a plan.** Each milestone has a plan, kept privately with the design documents,
+  with its tasks and acceptance tests, and cites the spec sections it implements. Small fixes
+  need no plan.
 - **Check what is already known.** [docs/known-limitations.md](docs/known-limitations.md) lists
   what M1, M1.5, M1.6, M2, M3, M4 and M8 leave open and the milestone that is meant to close
   each item.
@@ -98,7 +111,10 @@ reaches test builds too: a `pub` item under `#[cfg(test)]` that the crate root r
 ## Tests
 
 - **Tests never need the network.** Tests that read real repositories on this host run only when
-  `SWARMOPS_HOST_REPOS=1`.
+  `SWARMOPS_HOST_REPOS=1`. Two tests check the design documents against the code (the storage
+  spec's write-ordering rules, the operations spec's conflict kinds): maintainers run them with
+  `SWARMOPS_PRIVATE_DOCS` set to the directory that holds the documents' `specs/` and `plans/`,
+  and without it they skip and say so.
 - **What git writes is a committed fixture.** The git import's tests read repositories that real
   git made, without running git. Each is a POSIX sh script in
   `crates/swarmops-testkit/git-fixtures/scripts/` (`lib.sh` holds the helpers), run in a pinned
@@ -263,37 +279,9 @@ plan allows it, `tests-pass` becomes the one required check.
   `store`, `repo`, `api`, `ops`, `cli` or `spec`. For example:
   `fix(store): sync journal.log before recovery lists a frame`.
 - One logical change per commit; every commit passes `just check`.
+- Commit messages name what and why; no tool or generator attribution.
 - A user-visible change (commands, flags, the envelope, error codes, the schema, the store
   format, durability) adds a line under **Unreleased** in [CHANGELOG.md](CHANGELOG.md).
-
-## AI assistance and attribution
-
-SwarmOps is built mostly by coding agents, and it is built for them, so attribution is part of
-the project's own discipline:
-
-1. **Every tool-assisted commit names its model** in a `Co-Authored-By:` trailer, with the model's
-   exact name and version, for example:
-
-   ```text
-   ```
-
-   A commit made by a subagent names that subagent's model, not the orchestrator's. When several
-   models contributed to one commit, it carries one trailer for each. Never drop or rewrite
-   another model's trailer, and keep them all when commits are squashed.
-2. **A person is responsible for every change.** The git author is the person the agent works
-   for; they answer for the change, whoever typed it.
-3. **Agents identify themselves.** An agent that writes an issue, a pull request, a review or a
-   comment through a person's account says, at the start, that it is an agent and which model it
-   is. It never presents itself as a person or as another agent.
-4. **The same bar for everyone.** tool-assisted changes pass the same gate and the same review as
-   any other; the trailer records who wrote a change, not that it is good.
-
-An exception to rule 2: a commit that `swarmops git export` writes for an agent carries the
-agent's identity as author and committer (`<family>/<instance> <instance@family.swarmops.local>`),
-and it reaches SwarmOps' own `stable` only through a person's merge.
-
-SwarmOps applies the same idea to its own users: every mutation carries the caller's identity
-(`<family>/<instance>`, such as `agent/worker-17`), and the changeset records it.
 
 ## Reporting problems
 

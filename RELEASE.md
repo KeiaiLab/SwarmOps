@@ -91,7 +91,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
      (`scripts/third-party-licenses.py` writes it from `Cargo.lock`).
 4. **Write the changelog.** Move the entries under **Unreleased** in
    [CHANGELOG.md](CHANGELOG.md) to a new `## [X.Y.Z] - YYYY-MM-DD` section, mark breaking
-   changes, and leave an empty **Unreleased** section. At the bottom, add the new section's link,
+   changes, and leave an empty **Unreleased** section. The section's date is the UTC date of the
+   release commit, the last commit before the tag. At the bottom, add the new section's link,
    `[X.Y.Z]: https://github.com/KeiaiLab/SwarmOps/compare/vA.B.C...vX.Y.Z` from the previous
    release `vA.B.C` (`[0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0` for the
    first), and point `[Unreleased]` at `compare/vX.Y.Z...stable`. The new section is the

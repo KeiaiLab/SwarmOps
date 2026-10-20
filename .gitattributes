@@ -1,0 +1,61 @@
+# Attributes: https://git-scm.com/docs/gitattributes. Patterns follow .gitignore rules, except that
+# one naming a directory matches the directory, not the paths inside it: write dir/**, not dir/.
+# linguist-*: https://github.com/github-linguist/linguist/blob/main/docs/overrides.md
+
+# Text is LF in the repository and in every working tree, whatever core.autocrlf says. Generated
+# files are rebuilt and compared byte for byte, so a checkout must not change their line ends.
+# The merge_file fixtures keep their own .gitattributes (* -text): their cases are bytes.
+* text=auto eol=lf
+
+# Windows command scripts need CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary: no end-of-line conversion, no text diff, no text merge (-diff -merge -text).
+*.png binary
+*.ico binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.avif binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.tar binary
+*.gz binary
+*.tgz binary
+*.zst binary
+*.xz binary
+*.zip binary
+
+# Generated: GitHub hides their diffs and leaves them out of the language bar. The comment above
+# each names what rebuilds it.
+
+# cargo
+Cargo.lock linguist-generated
+
+# python3 -I scripts/third-party-licenses.py; the figure build writes the one under site/
+THIRD-PARTY-* linguist-generated
+
+# cargo insta review
+crates/*/tests/snapshots/*.snap linguist-generated
+
+# SWARMOPS_REGEN_GOLDEN=1 and the ignored test regenerate_golden
+crates/swarmops-core/tests/golden/*.hex linguist-generated
+
+# just git-fixtures
+crates/swarmops-testkit/git-fixtures/*.tar linguist-generated
+
+# cargo fuzz cmin
+fuzz/corpus/** binary linguist-generated
+
+# node scripts/site/explainers/store.mjs
+site/explainers/*.html linguist-generated
+site/explainers/*.svg linguist-generated
+docs/assets/store-*.svg linguist-generated
+
+# Left out of git archive (and so of GitHub's source archives); a directory goes whole. The last
+# one is untracked: the line keeps it out should it ever be committed.
+/.github export-ignore
+/.worktrees export-ignore

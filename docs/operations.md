@@ -266,7 +266,7 @@ swarmops: …/swarmops-mcp-log mcp --repo … - ✔ Connected
 The wrapper `exec`s the server, so the client talks to the server itself and sees how it ends as it
 would without the wrapper, the SIGABRT of one of the store's aborts included. `tee` appends each
 answer to the agent's file as the server writes it: `agent/worker-1` writes
-`claude-code_worker-1.jsonl`. A line is one JSON-RPC response. A tool call's holds the call's
+`agent_worker-1.jsonl`. A line is one JSON-RPC response. A tool call's holds the call's
 envelope twice, as an object in `structuredContent` and as the text of the one content block, with
 `isError` true when the envelope's `ok` is false; the answers to `initialize` and `tools/list` are
 lines too, and hold no envelope. A failed `land`, cut down:
@@ -520,9 +520,9 @@ git -C "$GIT_SIDE" log -1 --format=%B review
 ```
 
 ```text
-0eb07c3 agent/worker-2 <worker-2@claude-code.swarmops.local>
+0eb07c3 agent/worker-2 <worker-2@agent.swarmops.local>
     a shorter greeting
-91ac021 agent/worker-1 <worker-1@claude-code.swarmops.local>
+91ac021 agent/worker-1 <worker-1@agent.swarmops.local>
     greet the swarm
 84226f3 Ada Lovelace <ada@example.com>
     docs: say what acme does
@@ -1117,8 +1117,8 @@ cat *.jsonl | grep -o '"elapsed_ms":[0-9]*' | cut -d: -f2 | sort -n | tail -3
 ```
 
 ```text
-claude-code_worker-1   calls 7, failed 1, recovered 0, warnings 0
-claude-code_worker-2   calls 6, failed 2, recovered 0, warnings 0
+agent_worker-1         calls 7, failed 1, recovered 0, warnings 0
+agent_worker-2         calls 6, failed 2, recovered 0, warnings 0
       1 "code":"E_PATH_NOT_FOUND"
       1 "code":"E_CONFLICT"
       1 "code":"E_CAS_MISMATCH"

@@ -94,7 +94,7 @@ fn main_created() -> Record {
         name: "main".into(),
         old: None,
         new: Some(id(0x02)),
-        actor: "claude/1".into(),
+        actor: "worker/1".into(),
         ts: 1_760_486_400,
     }
 }
@@ -201,14 +201,14 @@ fn frame_roundtrip_all_record_kinds() {
             name: "main".into(),
             old: None,
             new: Some(a),
-            actor: "claude/1".into(),
+            actor: "worker/1".into(),
             ts: 1_760_486_400,
         },
         Record::RefMove {
             name: "main".into(),
             old: Some(a),
             new: Some(b),
-            actor: "claude/1".into(),
+            actor: "worker/1".into(),
             ts: 1_760_486_401,
         },
         Record::RefMove {
@@ -1731,7 +1731,7 @@ fn a_refused_record_leaves_the_encoding_untouched() {
             name: too_long.clone(),
             old: None,
             new: Some(id(1)),
-            actor: "claude/1".into(),
+            actor: "worker/1".into(),
             ts: 0,
         },
         Record::RefMove {
@@ -1770,7 +1770,7 @@ fn append_frame_refuses_records_the_layout_cannot_hold() {
                 name: too_long.clone(),
                 old: None,
                 new: Some(id(1)),
-                actor: "claude/1".into(),
+                actor: "worker/1".into(),
                 ts: 0,
             }],
             Some((LimitKind::RefNameBytes, 255, 256)),

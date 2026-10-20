@@ -6,14 +6,26 @@ use std::cell::Cell;
 use swarmops_core::LeafKind;
 use swarmops_merge::conflict::{ConflictHunk, ConflictKind, ContentMerge, ContentMerger};
 
-/// The names operations spec §3 gives the kinds of a conflicting file, in its order: the
-/// backquoted names its sentence "`kind` 는 `content`·`binary`·… 일곱 가운데 하나이고" lists.
-fn ops_spec_kinds() -> Vec<&'static str> {
-    const SPEC: &str = include_str!(
-        "../../../docs/superpowers/specs/2026-10-15-swarmops-operations-landing-design.md"
-    );
-    let start = SPEC.find("\n## 3. ").expect("operations spec §3's heading");
-    let section = &SPEC[start..];
+/// The names operations spec §3 gives the kinds of a conflicting file, in its order.
+const OPS_SPEC_KINDS: [&str; 7] = [
+    "content",
+    "binary",
+    "delete_modify",
+    "modify_delete",
+    "add_add",
+    "mode",
+    "type_change",
+];
+
+/// The variable that names the directory of the maintainers' private design documents (its
+/// `specs/` and `plans/`), which the test of the operations spec's list reads.
+const PRIVATE_DOCS: &str = "SWARMOPS_PRIVATE_DOCS";
+
+/// The names operations spec `spec` gives the kinds of a conflicting file in §3, in its order:
+/// the backquoted names its sentence "`kind` 는 `content`·`binary`·… 일곱 가운데 하나이고" lists.
+fn ops_spec_kinds(spec: &str) -> Vec<&str> {
+    let start = spec.find("\n## 3. ").expect("operations spec §3's heading");
+    let section = &spec[start..];
     let section = section[1..]
         .find("\n## ")
         .map_or(section, |end| &section[..=end]);
@@ -77,7 +89,23 @@ fn one_of_each() -> Vec<ConflictKind> {
 #[test]
 fn every_kind_has_its_ops_spec_name() {
     let names: Vec<&str> = one_of_each().iter().map(ConflictKind::name).collect();
-    assert_eq!(names, ops_spec_kinds());
+    assert_eq!(names, OPS_SPEC_KINDS);
+}
+
+/// Operations spec §3 lists the kinds `OPS_SPEC_KINDS` pins, in its order. The spec is one of
+/// the maintainers' private design documents, read from the directory `SWARMOPS_PRIVATE_DOCS`
+/// names; the test is skipped, saying so, when it is unset.
+#[test]
+fn the_ops_spec_lists_the_pinned_kinds() {
+    let Some(docs) = std::env::var_os(PRIVATE_DOCS).filter(|docs| !docs.is_empty()) else {
+        eprintln!("the_ops_spec_lists_the_pinned_kinds: {PRIVATE_DOCS} is not set; skipped");
+        return;
+    };
+    let path =
+        std::path::Path::new(&docs).join("specs/2026-10-15-swarmops-operations-landing-design.md");
+    let spec =
+        std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
+    assert_eq!(ops_spec_kinds(&spec), OPS_SPEC_KINDS);
 }
 
 /// A closure that captures is a content merger, called with the base's, ours' and theirs'

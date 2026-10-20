@@ -1,10 +1,84 @@
+# What builds, tools and maintainers leave in the tree. Editor and OS files belong in your own
+# core.excludesFile; their sections here are a safety net.
+
+# Rust and Cargo
+# Cargo.lock stays tracked (the binaries build with --locked), and so does proptest-regressions/
+# (proptest asks for it to be committed). /target has no trailing slash on purpose: a
+# directory-only pattern misses a target that is a symlink to another disk.
 /target
 /fuzz/target
 /fuzz/artifacts
 **/*.rs.bk
 
+# MSVC debug symbols, rustc crash dumps, cargo-mutants output
+*.pdb
+rustc-ice-*.txt
+**/mutants.out*/
+
+# Release archives (.github/workflows/release.yml packs into dist/)
+/dist/
+
+# Insta snapshots waiting for review; accepted *.snap files are tracked
+*.snap.new
+*.pending-snap
+
+# cargo-fuzz: new inputs stay in corpus-new/ until they join the tracked fuzz/corpus/
+/fuzz/corpus-new/
+/fuzz/coverage/
+
+# Coverage and profiling output (criterion and nextest write under target/)
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.*
+flamegraph*.svg
+perf.data
+perf.data.old
+
+# Secrets and local environment (wrangler reads .dev.vars and .env)
+.env
+.env.*
+!.env.example
+.dev.vars*
+!.dev.vars.example
+
+# Private keys and certificates; public keys stay trackable
+*.pem
+*.key
+*.p12
+*.pfx
+!*.pub
+
+# Logs, temporary and backup files
+*.log
+*.tmp
+*.swp
+*.swo
+*~
+*.orig
+*.rej
+
+# Editors and IDEs: per-user settings carry absolute paths
+.idea/
+.vscode/
+.vs/
+.zed/
+
+# Operating systems
+.DS_Store
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Python and Node tooling (scripts/)
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+
+# Cloudflare Pages deploys (npx wrangler pages deploy site)
+.wrangler/
+
 # task worktrees (controller-managed)
 .worktrees/
-
-# the host's local brief (.claude/agents/README.md, "Global cards used as is")
-/.claude/agents/local-brief.md

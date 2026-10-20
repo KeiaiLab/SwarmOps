@@ -8,7 +8,7 @@ use swarmops_api::{ErrorCode, Identity, schema_for_all};
 #[test]
 fn parse_accepts_family_slash_instance() {
     for (agent, family, instance) in [
-        ("agent/worker-17", "claude-code", "worker-17"),
+        ("agent/worker-17", "agent", "worker-17"),
         ("human/purple", "human", "purple"),
         ("ci-2/Run_3.a-b", "ci-2", "Run_3.a-b"),
         ("a/_x", "a", "_x"),
@@ -30,11 +30,11 @@ fn parse_rejects_names_outside_the_grammar() {
     let too_long = format!("a/{}", "b".repeat(254));
     for agent in [
         "",
-        "claude-code",
+        "agent",
         "/worker",
         "agent/",
-        "Claude/worker",
-        "claude_code/worker",
+        "Agent/worker",
+        "agent_code/worker",
         "a/b/c",
         "a/b c",
         "a/b\n",
@@ -65,8 +65,7 @@ fn parse_rejects_names_outside_the_grammar() {
 #[test]
 fn deserializing_an_identity_validates_it() {
     let id: Identity =
-        serde_json::from_value(json!({"agent": "agent/worker-17", "run_id": "run-3"}))
-            .unwrap();
+        serde_json::from_value(json!({"agent": "agent/worker-17", "run_id": "run-3"})).unwrap();
     assert_eq!(
         (id.agent(), id.run_id()),
         ("agent/worker-17", Some("run-3"))
@@ -81,7 +80,7 @@ fn deserializing_an_identity_validates_it() {
         serde_json::to_value(&id).unwrap(),
         json!({"agent": "agent/worker-17", "run_id": "run-3"})
     );
-    for agent in ["Claude/worker", "a/..", "a/b/c", ""] {
+    for agent in ["Agent/worker", "a/..", "a/b/c", ""] {
         let err = serde_json::from_value::<Identity>(json!({ "agent": agent })).expect_err(agent);
         assert!(
             err.to_string().contains("E_INVALID_ARG"),

@@ -9,8 +9,8 @@ discussions and every other project space, and to people and agents alike.
 - Respect for every participant, whatever their experience, background or identity.
 - Criticism of work, not of people: a review names the code, the evidence and the fix.
 - Patience with questions, and credit for what others did.
-- Honesty about who did the work: an agent says that it is an agent and which model it is, and
-  the person it works for answers for what it does ([CONTRIBUTING.md](CONTRIBUTING.md#ai-assistance-and-attribution)).
+- Accountability for what you send: the person who submits a change answers for it, whatever
+  helped to write it.
 
 ## What is not acceptable
 

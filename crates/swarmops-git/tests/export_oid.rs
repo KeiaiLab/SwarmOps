@@ -312,7 +312,7 @@ fn trailers_follow_git_rules() {
         ]
     );
     let metadata: [(&str, &[u8]); 8] = [
-        ("agent", b"claude-code/worker-17"),
+        ("agent", b"agent/worker-17"),
         ("commit_key", b"c-1"),
         ("cr", b"cr-7"),
         ("land_key", b"k\n1"),

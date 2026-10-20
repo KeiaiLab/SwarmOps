@@ -1,0 +1,63 @@
+# https://editorconfig.org
+root = true
+
+# UTF-8, LF, a final newline, no trailing blanks; two spaces (YAML, TOML, JSON, HTML, CSS, JS).
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# rustfmt's defaults: the repository has no rustfmt.toml. Some editors otherwise trim spaces
+# inside multi-line string literals.
+[*.rs]
+indent_size = 4
+trim_trailing_whitespace = false
+
+[*.py]
+indent_size = 4
+
+[justfile]
+indent_size = 4
+
+# Shell scripts under scripts/ use 2 spaces; the fixture builders under crates/ use 4.
+[crates/**.sh]
+indent_size = 4
+
+# Windows command scripts
+[*.{bat,cmd}]
+end_of_line = crlf
+
+# Two trailing spaces are a hard line break.
+[*.md]
+trim_trailing_whitespace = false
+
+# Snapshot content may end lines with spaces.
+[*.snap]
+trim_trailing_whitespace = false
+
+# Generated files are rebuilt byte for byte: saving must not change them.
+[THIRD-PARTY-*]
+indent_style = unset
+indent_size = unset
+
+[site/explainers/*.{html,svg}]
+insert_final_newline = unset
+
+[docs/assets/store-*.svg]
+insert_final_newline = unset
+
+# Fixtures and corpora are exact bytes: CRLF lines, a missing final newline, invalid UTF-8.
+[crates/swarmops-merge/tests/fixtures/merge_file/cases/**]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
+
+[fuzz/corpus/**]
+charset = unset
+end_of_line = unset
+insert_final_newline = unset
+trim_trailing_whitespace = unset
