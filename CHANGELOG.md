@@ -177,7 +177,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   none of them. Its numbers, in the M1.5 section of [docs/perf.md](docs/perf.md), are the
   quiet-window run's at the plan's sizes (2026-10-17), no longer provisional.
 
-#### M1.6: the code-review follow-ups (2026-10-19)
+#### M1.6: the code-review follow-ups (2026-10-20)
 
 - The store-level 32-process contention measurement (`crates/swarmops-store/tests/contention.rs`)
   can add other writers' object syncs: with `SWARMOPS_TEST_CONTENTION_OBJECT_SYNCS=<n>` each
@@ -250,7 +250,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `ref set`), and the summary gives publishes/s and the journal frames, so the lock passes, each
   publish took. [docs/perf.md](docs/perf.md) has the section the quiet-window runs fill.
 
-#### M2: diff, history and derived data (2026-10-19)
+#### M2: diff, history and derived data (2026-10-20)
 
 - `swarmops-store`: a store of derived values, `DerivedStore`, for the derivation engine to come:
   each value in an immutable file of its own under `meta/derived/`, named by its slot
@@ -350,7 +350,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   the revision is exactly a ref's name and `changeset` otherwise (M5 adds `workspace`). The schema
   gains `ResolveRevReq`, `ResolvedRev` and `RevKind`, and `StoreOps` gains `resolve_rev`.
 
-#### M3: git import (2026-10-19)
+#### M3: git import (2026-10-20)
 
 - `git import`'s contract, ahead of the command that serves it: `swarmops schema` lists
   `GitImportReq` (`git_path`, the source repository on the caller's host; `git_ref`, `HEAD` by
@@ -503,7 +503,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   the fresh store alone); `just check-slow` takes every call, and imports 100,000 synthetic
   commits: 13 frames, at most 14 compactions, a peak resident memory under 1 GiB.
 
-#### M4: merge and landing (2026-10-19)
+#### M4: merge and landing (2026-10-20)
 
 - The contract of merging and landing, in `swarmops schema`, which `land`, `op log`, `op undo`
   and `commit --key` serve: `LandReq` and `LandResp` (`status` `landed` or `replayed`);
@@ -564,7 +564,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `binary` conflict, as git's merge reports it ("distinct types"), never a regular file holding a
   link target or a symlink to a file's text.
 
-#### M8: git export (2026-10-19)
+#### M8: git export (2026-10-20)
 
 - `MetaStore::read_committed`, a snapshot of the committed metadata only, for the readers whose
   results leave the host (M8's git export first, then M11's `serve` and `push`): it takes
@@ -666,7 +666,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 
 ### Changed
 
-#### M1.6: the code-review follow-ups (2026-10-19)
+#### M1.6: the code-review follow-ups (2026-10-20)
 
 - `missing_docs` joins the workspace lints (M0's set was `unsafe` forbidden, clippy's `all`
   denied and `pedantic` warned): every exported item needs a `///` comment, and `just check`
@@ -775,7 +775,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   (storage spec §2 rule 3 (a)-(c)); any other failure there stays `E_IO_TRANSIENT`. The
   schema's description of `E_IO` says so.
 
-#### M2: diff, history and derived data (2026-10-19)
+#### M2: diff, history and derived data (2026-10-20)
 
 - A lookup by id no longer reads the key it found a second time: the search keeps the key it
   read where it stopped, so the lookup reads one byte range fewer. Lookups by prefix and by
@@ -812,7 +812,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   test of `swarmops-ops` measures it). A `read_tree` cursor that is no repository path is
   `E_INVALID_ARG`, where any string was taken as a name to resume after.
 
-#### M3: git import (2026-10-19)
+#### M3: git import (2026-10-20)
 
 - The repository library refuses a metadata key that ends in `:b64` for every writer, where only
   the operations' `commit` did: `Repo::commit` checks it before it writes anything
@@ -831,7 +831,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `BadHeader`, where a zstd frame that claimed as much was `Corrupt`), so a compression bomb in a
   crafted store costs a read at most 512 MiB (storage spec §2 rule 1, §10 item 6).
 
-#### M8: git export (2026-10-19)
+#### M8: git export (2026-10-20)
 
 - `git import` continues a branch SwarmOps exported: a target whose head is a native changeset goes
   on from the commit that changeset exports to (`ExportOid`), so commits made in git on top of an
@@ -847,7 +847,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 
 ### Fixed
 
-#### M1.6: the code-review follow-ups (2026-10-19)
+#### M1.6: the code-review follow-ups (2026-10-20)
 
 - A reader that measured `journal.off` before a writer cut an entry off it (a listing whose sync
   failed, or the zeroed entries a crash left at its end) reads it again instead of reporting the
@@ -898,7 +898,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `details.fs_op` and `details.store_file`), no longer as one too long by the size a directory
   reports (`E_NOT_A_REPO`, `<store>/REPO is 4096 bytes long, …`).
 
-#### M2: diff, history and derived data (2026-10-19)
+#### M2: diff, history and derived data (2026-10-20)
 
 - `blobs_written` in `commit`'s result (and `blobs_written`, `trees_written` of
   `swarmops_repo::CommitOutcome`) counts exactly what the commit's own writes placed in the
@@ -913,7 +913,7 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
 
 ### Security
 
-#### M1.6: the code-review follow-ups (2026-10-19)
+#### M1.6: the code-review follow-ups (2026-10-20)
 
 - An object file whose zstd frame records a huge decompressed size, in agreement with its header
   (17 bytes of frame are enough), no longer makes a read panic (`E_INTERNAL`) or abort the process
