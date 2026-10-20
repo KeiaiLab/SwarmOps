@@ -1,7 +1,6 @@
 ## Summary
 
-<!-- What this changes and why. Link the plan task or the issue. If you are an AI agent opening
-this through a person's account, say so in the first line and name your model. -->
+<!-- What this changes and why. Link the plan task or the issue. -->
 
 ## Spec
 
@@ -20,4 +19,4 @@ this through a person's account, say so in the first line and name your model. -
 - [ ] Every snapshot change (the schema, the MCP tools, CLI output) and every pinned filesystem-call sequence that changed is intended and named above.
 - [ ] `CHANGELOG.md` has an **Unreleased** entry for a user-visible change.
 - [ ] `docs/known-limitations.md` loses the entries this closes, or gains the ones it opens.
-- [ ] Every tool-assisted commit carries a `Co-Authored-By:` trailer naming its model.
+- [ ] Commit messages say what and why, with no tool or generator attribution.

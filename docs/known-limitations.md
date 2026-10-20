@@ -9,14 +9,13 @@ review, the 2026-10-16 comparison or code review) refer to the maintainer's loca
 are not in the repository. Code-level minors that change nothing a user or an agent can see
 (naming, comments, micro-optimizations, test labels) are not listed.
 
-Targets are milestones of [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md)
+Targets are milestones of the umbrella spec
 (§13): M1.6 the code-review follow-ups · M2 diff, history and derived data · M3 git import ·
 M4 merge and landing · M8 git export · M5 workspaces · M6 verify, crash safety and fuzzing ·
 M7 blame and review · M9 simulation and a benchmark gate · M11 remote sync, offline-first.
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0. M1.5, the hardening
-milestone after M1 ([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)), closed a few,
-and M1.6, the code-review follow-ups after it
-([its plan](superpowers/plans/2026-10-17-m1-6-review-followups.md)), closed more. "Deferred
+milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
+closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
 piloted on a real repository ([pilot.md](pilot.md)): the measurements that need a quiet host,
 and the tests that read the maintainers' service repositories. "Unscheduled" means no milestone

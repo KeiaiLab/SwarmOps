@@ -74,7 +74,7 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   a fuzz smoke weekly; Dependabot keeps the root and fuzz lockfiles valid; the nextest `ci`
   and `ci-slow` profiles kill hung tests.
 - The project policies and the documentation set: [CONTRIBUTING.md](CONTRIBUTING.md),
-  [SECURITY.md](SECURITY.md), [RELEASE.md](RELEASE.md), `AGENTS.md`, `docs/architecture.md`,
+  [SECURITY.md](SECURITY.md), [RELEASE.md](RELEASE.md), `docs/architecture.md`,
   `docs/known-limitations.md`, `docs/policies/`, the issue and pull request templates, and this
   changelog.
 - `swarmops mcp`: a stdio MCP server over `StoreOps`, one tool per operation with the request
@@ -880,6 +880,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   to, where it wrote them into the tracked corpus and left each run's checkout with hundreds of
   untracked inputs to commit or drop. New inputs join the tracked corpus minimised by
   `cargo fuzz cmin`, as [CONTRIBUTING.md](CONTRIBUTING.md) describes.
+- The example agent names in the hint of `E_IDENTITY_REQUIRED` (`--as agent/worker-1`), in the
+  hint for an invalid agent name and in the description of `Identity` in `swarmops schema`
+  (`agent/worker-17`) belong to a generic family, `agent`; the name grammar and the error codes
+  are as before.
 
 ### Fixed
 

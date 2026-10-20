@@ -370,10 +370,7 @@ mod tests {
             auto_merged: vec![RepoPath::new("g").unwrap()],
             last_touched: BTreeMap::from([
                 (RepoPath::new("a").unwrap(), (id(4), String::new())),
-                (
-                    RepoPath::new("b").unwrap(),
-                    (id(5), "agent/w-5".to_owned()),
-                ),
+                (RepoPath::new("b").unwrap(), (id(5), "agent/w-5".to_owned())),
             ]),
             stale: vec![RepoPath::new("e").unwrap(), RepoPath::new("h").unwrap()],
         };

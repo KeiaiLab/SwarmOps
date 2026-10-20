@@ -1,13 +1,13 @@
 # SwarmOps architecture
 
 An overview, in English, of how SwarmOps is built, as of M8. The design specs are the
-authority, and they are in Korean:
+authority. They are in Korean, and the maintainers keep them privately; this page is the
+public overview of:
 
-- [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md) ("umbrella" below),
-- [storage core](superpowers/specs/2026-10-15-swarmops-storage-core-design.md) ("storage"),
-- [operations and landing](superpowers/specs/2026-10-15-swarmops-operations-landing-design.md)
-  ("operations"),
-- [the review model](superpowers/specs/2026-10-15-swarmops-review-model-design.md).
+- the umbrella spec ("umbrella" below),
+- storage core ("storage"),
+- operations and landing ("operations"),
+- the review model.
 
 Section signs (§) point into the spec named beside them. Where this page and a spec disagree,
 the spec is right and this page has a bug.
@@ -64,7 +64,7 @@ swarmops-testkit core, store, repo   (repo behind its default feature `repo`; a 
 `fuzz/` is a cargo workspace of its own, with four cargo-fuzz targets over the codec and the
 journal. The specs plan one more crate, `swarmops-sim` (the simulation harness, M9).
 
-Two rules shape the layers (umbrella §1, AGENTS.md):
+Two rules shape the layers (umbrella §1, [CONTRIBUTING.md](../CONTRIBUTING.md#the-rules)):
 
 - **The library does the work.** Every operation is a library function: the repository's work
   is in `swarmops-repo`, exposed as `StoreOps` operations, and the CLI parses a command line,
@@ -672,5 +672,5 @@ full changeset id, and its result is the envelope the CLI prints.
 - Operations §0 for the envelope and the conventions, §1 for every operation planned and its
   errors, §4 for what agents can rely on under concurrency.
 - [perf.md](perf.md) for every measurement, and the decisions taken on them.
-- [The milestone plans](superpowers/plans/), and [CONTRIBUTING.md](../CONTRIBUTING.md) for how
-  changes are made.
+- The milestone plans, which the maintainers keep privately with the design specs, and
+  [CONTRIBUTING.md](../CONTRIBUTING.md) for how changes are made.

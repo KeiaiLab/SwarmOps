@@ -5,7 +5,7 @@
 <h1 align="center">SwarmOps</h1>
 
 <p align="center">
-  <strong>Source control for swarms of coding agents: many writers, one store, one JSON envelope per command.</strong>
+  <strong>A git replacement for coding-agent swarms: many writers, one store, one JSON envelope per command.</strong>
 </p>
 
 <p align="center">
@@ -207,7 +207,7 @@ names the program as you invoked it (`Usage: so …`).
 
 ```sh
 export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme   # or --repo <store> on each command
-export SWARMOPS_AGENT=agent/worker-1                 # or --as <family>/<instance>
+export SWARMOPS_AGENT=agent/worker-1                       # or --as <family>/<instance>
 
 so init "$SWARMOPS_REPO" --name acme
 printf '#!/bin/sh\necho hello\n' > run.sh                 # the client file the second change reads
@@ -512,8 +512,7 @@ code's exit and `retryable` flag.
 
 ## Roadmap
 
-The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops-design.md)
-(§13), in the order they are built. ✅ delivered · 📋 planned.
+The milestones of the umbrella spec (§13), in the order they are built. ✅ delivered · 📋 planned.
 
 | Status | Milestone | Scope |
 | --- | --- | --- |
@@ -583,8 +582,9 @@ need the hooks. Every other build, `cargo build --release` included, ignores the
 
 ## Documentation
 
-The design specs are the authority, and they are in Korean;
-[docs/architecture.md](docs/architecture.md) is the English overview.
+The design documents are the authority: the umbrella spec and the storage, operations and review
+specs, in Korean. The maintainers keep them privately, and
+[docs/architecture.md](docs/architecture.md) is the public overview, in English.
 
 | Document | What it holds |
 | --- | --- |
@@ -598,17 +598,11 @@ The design specs are the authority, and they are in Korean;
 | [docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md) | The Rust version and the platforms SwarmOps supports. |
 | [CHANGELOG.md](CHANGELOG.md) | What has changed, release by release. |
 | [RELEASE.md](RELEASE.md) | The release checklist. |
-| [The umbrella spec](docs/superpowers/specs/2026-10-15-swarmops-design.md) | The design, which the specs below refine. |
-| [Storage core](docs/superpowers/specs/2026-10-15-swarmops-storage-core-design.md) | Objects, the journal, refs, crash safety, and the canonical byte layouts and hash recipe (the hash contract). |
-| [Operations and landing](docs/superpowers/specs/2026-10-15-swarmops-operations-landing-design.md) | The operations, the CLI, the envelope and the error codes, workspaces and landing. |
-| [The review model](docs/superpowers/specs/2026-10-15-swarmops-review-model-design.md) | Change requests, their classification and approvals, and the landing gate (after M1). |
-| [docs/superpowers/plans/](docs/superpowers/plans/) | The milestone plans, with their tasks and acceptance tests. |
 
 ## Contributing, security and license
 
-- [CONTRIBUTING.md](CONTRIBUTING.md): how changes are made, the tests' rules, and how AI
-  assistance is attributed. [AGENTS.md](AGENTS.md) holds the rules every coding agent here
-  follows.
+- [CONTRIBUTING.md](CONTRIBUTING.md): how changes are made, the rules every change follows, and
+  the tests' rules.
 - [SECURITY.md](SECURITY.md): how to report a vulnerability privately, and what counts as one.
 - SwarmOps is released under the [MIT License](LICENSE). Each release archive also carries
   [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES): the third-party crates compiled into `swarmops`

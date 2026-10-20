@@ -433,10 +433,7 @@ fn show_and_log_the_first_commit(ops: &LocalOps, c1: &str, root: &str, when: (i6
     let signature = &detail.signatures.author;
     assert_eq!(
         (signature.name.as_str(), signature.email.as_str()),
-        (
-            "agent/worker-17",
-            "worker-17@claude-code.swarmops.local"
-        )
+        ("agent/worker-17", "worker-17@agent.swarmops.local")
     );
     assert_eq!(signature.offset_secs, 0);
     assert!((when.0..=when.1).contains(&signature.secs), "{signature:?}");
@@ -601,7 +598,7 @@ fn commit_requires_identity() {
     assert_eq!(detail.author.run_id.as_deref(), Some("run-9"));
     assert_eq!(
         detail.signatures.author.email,
-        "worker-1@claude-code.swarmops.local"
+        "worker-1@agent.swarmops.local"
     );
 }
 
@@ -2206,10 +2203,7 @@ mod land {
             on_behalf_of: None,
         };
         assert_eq!(shown.author, attribution(writer.agent(), "run-w"));
-        assert_eq!(
-            shown.lander,
-            Some(attribution("agent/lander-1", "run-7"))
-        );
+        assert_eq!(shown.lander, Some(attribution("agent/lander-1", "run-7")));
         assert_eq!(shown.land_key.as_deref(), Some("k-7"));
         assert_eq!(shown.squashed_from, [c1.clone(), c2.clone()]);
         assert_eq!(shown.message, "land b and c");
@@ -3528,7 +3522,7 @@ mod path_history {
         let repo = LocalRepo::open_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
         let signature = Signature {
             name: b"agent/worker-17".to_vec(),
-            email: b"worker-17@claude-code.swarmops.local".to_vec(),
+            email: b"worker-17@agent.swarmops.local".to_vec(),
             secs: 1_760_000_000,
             offset_secs: 0,
             negative_zero: false,

@@ -128,7 +128,7 @@ cat > "$PILOT/agent/.mcp.json" <<EOF
 EOF
 ```
 
-**With Claude Code** (not run in the dry run, which ran inside a Claude Code session itself),
+**With Claude Code** (not run in the dry run, which used the scripted client below),
 start a session in `$PILOT/agent`, approve the project's `swarmops` server when Claude Code asks,
 and give it this prompt with the change filled in:
 
@@ -139,10 +139,9 @@ cd "$PILOT/agent" && claude
 ```text
 Use only the swarmops tools. Read <path> at main: ref_list gives main's full changeset id, and
 read_file reads at that id (max_bytes 32768 at most; read on from next_offset while truncated).
-Make this change: <the change>. Commit the whole new file with parent set to the id you read, and
-end the commit message with a Co-Authored-By trailer naming your model. Then land the changeset
-with a new idempotency_key. Reply with the landed changeset id and every error a tool returned,
-with its code.
+Make this change: <the change>. Commit the whole new file with parent set to the id you read.
+Then land the changeset with a new idempotency_key. Reply with the landed changeset id and
+every error a tool returned, with its code.
 ```
 
 Claude Code keeps the session's transcript as JSON lines under `~/.claude/projects/`. In it, the
@@ -153,19 +152,16 @@ result is an envelope whose `meta.elapsed_ms` is the server's own time for that 
 agent): write the changed file's new content to a file, then run the
 [appendix](#appendix-the-scripted-session)'s `mcp_session.py`, which drives the same server through
 the same `.mcp.json`: it reads the file at main's head, commits the new content on that head, lands
-it, shows the result, and prints one line per tool call. The message ends with the trailer that
-names the model of the agent that wrote the change, as CONTRIBUTING.md asks of every tool-assisted
-commit; the export keeps it, and adds its own trailers to that block.
+it, shows the result, and prints one line per tool call. The export adds its own trailers to
+the commit message.
 
 Save the appendix's script as `$PILOT/mcp_session.py`. It changes one file: `FILE` names it by
-its path in the repository, `SUBJECT` is the change in one line, and `MODEL` the model of the
-agent that makes it. Set them for your change, and start the new content from the file as
-`$START` holds it:
+its path in the repository, and `SUBJECT` is the change in one line. Set them for your change,
+and start the new content from the file as `$START` holds it:
 
 ```sh
 FILE=docs/known-limitations.md    # the file your change touches: the example is yours to replace
 SUBJECT=                          # your change in one line, the commit's subject: write it here
-MODEL='the coding agent'           # the model of the agent that makes the change
 git -C "$PILOT/source.git" show "$START:$FILE" > "$PILOT/new-content"
 ```
 
@@ -175,7 +171,7 @@ the session; its first line stops it while `SUBJECT` is empty:
 ```sh
 : "${SUBJECT:?write your change in one line on the SUBJECT line above}" &&
 python3 -I "$PILOT/mcp_session.py" "$PILOT/agent/.mcp.json" "$FILE" "$PILOT/new-content" \
-  "$(printf '%s\n\nCo-Authored-By: %s <agent@example.invalid>' "$SUBJECT" "$MODEL")"
+  "$SUBJECT"
 ```
 
 Before the commit, the script compares the new content with the whole file it read at main's
@@ -408,7 +404,7 @@ holds what `main` holds. They land here, after step 7's import and before the ex
 between an import and the next export only one side may change the trunk. A session's key is a uuid
 v7 (RFC 9562), which `uuidgen` does not make by default; the function below does. The commit and
 the land both take it as their idempotency key, so the same command run again, with the same key
-and `BASE`, makes the same commit and lands it once. `MODEL` is the one step 3 set.
+and `BASE`, makes the same commit and lands it once.
 
 ```sh
 field() { python3 -I -c 'import functools, json, sys; print(functools.reduce(lambda v, k: v[k], sys.argv[1].split("."), json.load(sys.stdin)))' "$1"; }
@@ -438,7 +434,7 @@ conflict report names.
 session() {  # session N FILE KEY [option ...]: one scripted session of agent-N; its last line is the exit code
   n=$1 file=$2 key=$3; shift 3
   python3 -I "$PILOT/mcp_session.py" "$PILOT/agent-$n/.mcp.json" "$file" "$PILOT/new-$n" \
-    "$(printf 'docs: agent-%s marks %s\n\nCo-Authored-By: %s <agent@example.invalid>' "$n" "$file" "$MODEL")" \
+    "docs: agent-$n marks $file" \
     --key "$key" --parent "$BASE" "$@"
   echo "exit $?"
 }
@@ -535,8 +531,7 @@ that commit already, and nothing was written for it. Here its land says `landed`
 killed before it recorded the land. The second command runs the session a third time, on purpose:
 the key has landed, so the land answers `replayed` and writes nothing.
 
-A land is recorded by one journal frame (the
-[storage spec](superpowers/specs/2026-10-15-swarmops-storage-core-design.md), §2 rule 3 and §3). A
+A land is recorded by one journal frame (the storage spec, §2 rule 3 and §3). A
 session killed before its frame is complete has recorded nothing of the land, and any objects it
 wrote stay in the store, unreferenced: nothing collects them yet ([operations.md](operations.md),
 "Limits"). A session killed after it leaves a land that stands: the next write completes what the
@@ -705,9 +700,8 @@ Until the pilot passes, git is the source of truth, and the pilot changed nothin
 own branch. Rolling back deletes that branch, checks what the remote holds, and removes the pilot's
 directory, store included: the store holds nothing that git needs, since its history came from
 git and the session's change is on the pushed branch. If the maintainers want that change, it
-lands on `stable` the usual way before the branch is deleted, after its review and under
-CONTRIBUTING.md's attribution rules: there the git author is the person the agent works for, while
-the exported commit's author is the agent's identity
+lands on `stable` the usual way before the branch is deleted, after its review, as a commit by
+the person who lands it: the exported commit's author is the agent's identity
 (`pilot/agent-1 <agent-1@pilot.swarmops.local>`). The commits of steps 7 to 9 are in `export.git`
 only: nothing of them was pushed, and the rollback removes them with the rest.
 

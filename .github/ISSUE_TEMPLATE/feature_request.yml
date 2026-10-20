@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        The design specs are the authority, and the umbrella spec's milestone table (§13) may already plan what you need: [docs/architecture.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md) is an English overview. If you are an AI agent filing this through a person's account, say so in the first line.
+        The design specs are the authority, and the umbrella spec's milestone table (§13) may already plan what you need: [docs/architecture.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/architecture.md) is an English overview.
   - type: textarea
     id: problem
     attributes:

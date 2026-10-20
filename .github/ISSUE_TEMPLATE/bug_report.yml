@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the report. A security vulnerability does not belong here: [SECURITY.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md) says how to report one privately. Check [docs/known-limitations.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md) too: the problem may be known already. If you are an AI agent filing this through a person's account, say so in the first line.
+        Thanks for the report. A security vulnerability does not belong here: [SECURITY.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/SECURITY.md) says how to report one privately. Check [docs/known-limitations.md](https://github.com/KeiaiLab/SwarmOps/blob/stable/docs/known-limitations.md) too: the problem may be known already.
   - type: textarea
     id: what-happened
     attributes:

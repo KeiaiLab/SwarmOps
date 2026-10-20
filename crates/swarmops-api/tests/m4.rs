@@ -338,7 +338,7 @@ fn a_commit_request_carries_its_key_after_advance() {
 fn signature() -> SignatureOut {
     SignatureOut {
         name: "agent/worker-17".to_owned(),
-        email: "worker-17@claude-code.swarmops.local".to_owned(),
+        email: "worker-17@agent.swarmops.local".to_owned(),
         secs: 1_760_000_000,
         offset_secs: 0,
     }

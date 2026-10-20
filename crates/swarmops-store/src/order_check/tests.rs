@@ -139,28 +139,37 @@ fn old_ids_outside_the_reviews(spec: &str) -> Vec<String> {
         .collect()
 }
 
+/// The variable that names the directory of the maintainers' private design documents (its
+/// `specs/` and `plans/`), which the test of the storage spec's text reads.
+const PRIVATE_DOCS: &str = "SWARMOPS_PRIVATE_DOCS";
+
 /// Storage spec §2 rule 4 states every rule the checker enforces, under its id, and the
 /// checker's old ids, R1 to R7, are gone from the spec: R1 to R4 are only §6's review
-/// invariants. A spec that leaves a rule out, or names an old id beside its rule, fails.
+/// invariants. A spec that leaves a rule out, or names an old id beside its rule, fails. The
+/// spec is one of the maintainers' private design documents, read from the directory
+/// `SWARMOPS_PRIVATE_DOCS` names; the test is skipped, saying so, when it is unset.
 #[test]
 fn the_spec_states_every_write_order_rule() {
-    const SPEC: &str = include_str!(
-        "../../../../docs/superpowers/specs/2026-10-15-swarmops-storage-core-design.md"
-    );
+    let Some(docs) = std::env::var_os(PRIVATE_DOCS).filter(|docs| !docs.is_empty()) else {
+        eprintln!("the_spec_states_every_write_order_rule: {PRIVATE_DOCS} is not set; skipped");
+        return;
+    };
+    let path = PathBuf::from(docs).join("specs/2026-10-15-swarmops-storage-core-design.md");
+    let spec = fs::read_to_string(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display()));
     assert_eq!(
-        unstated(SPEC),
+        unstated(&spec),
         [],
         "storage spec §2 does not state these rules"
     );
     assert_eq!(
-        old_ids_outside_the_reviews(SPEC),
+        old_ids_outside_the_reviews(&spec),
         Vec::<String>::new(),
         "storage spec names these old ids outside §6"
     );
-    assert_eq!(unstated(&SPEC.replacen("- W3 ", "- ", 1)), [Rule::W3]);
-    let stale = SPEC.replacen("- W7 ", "- W7 (옛 R7) ", 1);
+    assert_eq!(unstated(&spec.replacen("- W3 ", "- ", 1)), [Rule::W3]);
+    let stale = spec.replacen("- W7 ", "- W7 (옛 R7) ", 1);
     assert_eq!(old_ids_outside_the_reviews(&stale), ["R7"]);
-    let stale = SPEC.replacen("- W1 ", "- W1 (R1) ", 1);
+    let stale = spec.replacen("- W1 ", "- W1 (R1) ", 1);
     assert_eq!(old_ids_outside_the_reviews(&stale), ["R1"]);
 }
 

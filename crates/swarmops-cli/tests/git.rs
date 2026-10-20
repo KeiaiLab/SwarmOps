@@ -1046,9 +1046,9 @@ fn assert_lands_exported(
         assert_eq!(text, message, "land {n}");
         let (author, committer) = (&commit.author, &commit.committer);
         assert_eq!(author.name, AGENT.as_bytes(), "land {n}");
-        assert_eq!(author.email, b"worker-17@claude-code.swarmops.local");
+        assert_eq!(author.email, b"worker-17@agent.swarmops.local");
         assert_eq!(committer.name, LANDER.as_bytes(), "land {n}");
-        assert_eq!(committer.email, b"lander-1@claude-code.swarmops.local");
+        assert_eq!(committer.email, b"lander-1@agent.swarmops.local");
         assert_eq!((author.offset_secs, committer.offset_secs), (0, 0));
         assert!(commit.extra_headers.is_empty(), "land {n}");
     }

@@ -758,13 +758,13 @@ expression: s.transcript()
         "signatures": {
           "author": {
             "name": "agent/worker-17",
-            "email": "worker-17@claude-code.swarmops.local",
+            "email": "worker-17@agent.swarmops.local",
             "secs": "[secs]",
             "offset_secs": 0
           },
           "committer": {
             "name": "agent/worker-17",
-            "email": "worker-17@claude-code.swarmops.local",
+            "email": "worker-17@agent.swarmops.local",
             "secs": "[secs]",
             "offset_secs": 0
           }
@@ -821,13 +821,13 @@ expression: s.transcript()
         "signatures": {
           "author": {
             "name": "agent/worker-17",
-            "email": "worker-17@claude-code.swarmops.local",
+            "email": "worker-17@agent.swarmops.local",
             "secs": "[secs]",
             "offset_secs": 0
           },
           "committer": {
             "name": "agent/worker-17",
-            "email": "worker-17@claude-code.swarmops.local",
+            "email": "worker-17@agent.swarmops.local",
             "secs": "[secs]",
             "offset_secs": 0
           }
