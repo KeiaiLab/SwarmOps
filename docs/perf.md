@@ -836,8 +836,8 @@ The per-child refs are the measurement's artefact, not a ref model: agents publi
 records nothing and runs again on the winner. So these numbers are never landing throughput;
 the shared-`main` compare-and-swap loop is M4's to measure.
 
-Not measured yet: M1.6 runs its measurements once, after its last task, in a quiet window under
-the host's heavy-run lock, and those two runs fill this section. Each is
+Not measured yet: the two runs wait until after the pilot, when they run once, in a quiet window
+under the host's heavy-run lock, and fill this section. Each is
 
 ```sh
 SWARMOPS_TEST_CLI_CONTENTION_ADVANCE=1 cargo nextest run --locked --release -p swarmops-cli \
@@ -857,8 +857,8 @@ change of 1, 10 and 100 files out of a base of 1,000, against a target that gain
 changesets elsewhere since the land's first attempt (a store built without syncs, the objects in
 the page cache).
 
-Not measured yet: M4 runs its measurements once, at its end, in a quiet window under the host's
-heavy-run lock (the M4 plan's execution policy), with
+Not measured yet: M4's measurements wait until after the pilot, when they run once, in a quiet
+window under the host's heavy-run lock (the M4 plan's execution policy), with
 
 ```sh
 cargo bench --locked -p swarmops-repo --bench remerge
