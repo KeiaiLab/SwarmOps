@@ -130,6 +130,13 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         RepoError::Codec(_) => corrupt(message, during, "swarmops verify"),
         // A derivation that fails on immutable inputs fails again on every call: a bug.
         RepoError::Derived { .. } => error(ErrorCode::Internal, message),
+        // A cache file someone placed, or a faulty build wrote: a deep verify names them all.
+        RepoError::DerivedCorrupt {
+            name, changeset, ..
+        } => corrupt(message, during, "swarmops verify --deep").with_details(details([
+            ("derivation", name.into()),
+            ("changeset", changeset.to_string().into()),
+        ])),
     }
 }
 
@@ -989,6 +996,25 @@ mod tests {
             };
             maps(e, op, code);
         }
+    }
+
+    /// A derived value that a reader's checks find wrong is a store that fails its checks:
+    /// `E_STORE_CORRUPT`, naming the derivation and the changeset, its hint a deep verify, which
+    /// names every such value.
+    #[test]
+    fn a_derived_value_a_reader_refuses_is_store_corrupt() {
+        let wrong = || RepoError::DerivedCorrupt {
+            name: "last_modified".into(),
+            changeset: id(),
+            why: "it names a changeset whose delta does not touch the path".into(),
+        };
+        maps(wrong(), During::Op, ErrorCode::StoreCorrupt);
+        let refused = repo_error(wrong(), During::Op);
+        assert_eq!(refused.hint.as_deref(), Some("swarmops verify --deep"));
+        assert_eq!(
+            Value::Object(refused.details),
+            serde_json::json!({"derivation": "last_modified", "changeset": id().to_string()})
+        );
     }
 
     /// One of each error a land raises.

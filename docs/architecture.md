@@ -199,7 +199,13 @@ journal record or other file names a derived value, so a power loss that takes o
 leaves its file torn, costs a recomputation and nothing else. Each file holds its value's key
 (`SWDV` header, then the key and the value, zstd over 4 KiB) and ends in a BLAKE3 trailer over the
 slot (name, version, object, key) and the value. A read that finds a file failing any of those
-checks removes it and reports the value missing, so that it is derived again.
+checks removes it and reports the value missing, so that it is derived again; so does a header
+that records a value longer than an object holds (512 MiB), before anything is decoded. The
+trailer is a checksum, not a signature: anyone who can write the store's files can place a whole
+file with any value. So the walks and path history check each value they use against the index
+and the objects where they can without the walk the value saves, and refuse one that fails
+(`RepoError::DerivedCorrupt`, `E_STORE_CORRUPT`); `verify --deep` checks every value of the
+built-in derivations against the objects (`derived_mismatch`).
 
 **Deriving a value** (storage §5). A `Derivation` says how one kind of value is made from a
 changeset and a key, out of objects and other derived values only (never a ref, the journal or

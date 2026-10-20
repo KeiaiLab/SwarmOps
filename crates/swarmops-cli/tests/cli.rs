@@ -3042,7 +3042,10 @@ mod derive {
 /// store, whole and with its trailer right (a put of any bytes writes one), holding a value no
 /// derivation gives. `verify --deep` reports each such value as a `derived_mismatch` finding,
 /// naming the derivation, the changeset and the key, where it found the store clean before; a
-/// plain `verify` reads no derived value. Removing the file has the value derived again.
+/// plain `verify` reads no derived value. `history` and `log --path` refuse a last touch whose
+/// changeset does not touch the path, and `resolve` a skip list whose jump disagrees with the list
+/// one level down, as `E_STORE_CORRUPT` naming the derivation and the changeset, where they took
+/// the value as valid before. Removing the file has the value derived again.
 mod crafted_derived_values {
     use std::fs;
     use std::io;
@@ -3079,11 +3082,22 @@ mod crafted_derived_values {
         assert!(derived.put(slot, value).expect("plant a value"), "planted");
     }
 
-    /// The `changeset` of each entry of `history`'s result.
-    fn changesets(result: &Value) -> Vec<String> {
+    /// The `changeset` of each entry of `history`'s result, or the `id` of each of `log`'s
+    /// (`key`).
+    fn ids(result: &Value, key: &str) -> Vec<String> {
         let entries = result["entries"].as_array().expect("entries");
-        let id = |entry: &Value| entry["changeset"].as_str().expect("an id").to_owned();
+        let id = |entry: &Value| entry[key].as_str().expect("an id").to_owned();
         entries.iter().map(id).collect()
+    }
+
+    /// Asserts that `refused` failed with `E_STORE_CORRUPT`, naming derivation `name` and
+    /// changeset `cs`, its hint a deep verify.
+    #[track_caller]
+    fn refused(refused: &crate::support::Run, name: &str, cs: &str) {
+        let error = refused.err("E_STORE_CORRUPT");
+        assert_eq!(error["details"]["derivation"], name, "{error}");
+        assert_eq!(error["details"]["changeset"], cs, "{error}");
+        assert_eq!(error["hint"], "swarmops verify --deep", "{error}");
     }
 
     /// What `verify --deep` finds: no finding for a clean store, else its findings.
@@ -3097,8 +3111,9 @@ mod crafted_derived_values {
 
     /// `c2` leaves `a` alone, so the last changeset to touch it from `c2` is `c1`. A file placed
     /// in `c2`'s slot under the path `a` that says `c2` touched it last is reported by
-    /// `verify --deep`, with the path key's hex; a plain `verify` passes it. Without the file,
-    /// the store is clean again.
+    /// `verify --deep`, with the path key's hex; a plain `verify` passes it; and `history` and
+    /// `log --path` refuse it, `c2`'s delta not touching `a`. Without the file, the history is
+    /// right and the store clean again.
     #[test]
     fn a_crafted_last_touch_is_caught() {
         let store = Store::init();
@@ -3107,7 +3122,8 @@ mod crafted_derived_values {
         let main = ["ref", "set", "main", &c2, "--create"];
         store.run_as(WRITER, &main, &[]).ok();
         let history = || store.read(&["history", "main:a"]);
-        assert_eq!(changesets(&history().ok()), [c1.as_str()]);
+        let log = || store.read(&["log", "--path", "a"]);
+        assert_eq!(ids(&history().ok(), "changeset"), [c1.as_str()]);
         assert_eq!(findings(&store), json!([]));
 
         // The path key `a`, as postcard writes a string; the value `Some(c2)`.
@@ -3128,9 +3144,12 @@ mod crafted_derived_values {
         });
         assert_eq!(findings(&store), json!([finding]));
         assert_eq!(store.read(&["verify"]).ok()["findings"], json!([]));
+        refused(&history(), "last_modified", &c2);
+        refused(&log(), "last_modified", &c2);
 
         fs::remove_file(store.layout().derived_path(&slot)).unwrap();
-        assert_eq!(changesets(&history().ok()), [c1.as_str()]);
+        assert_eq!(ids(&history().ok(), "changeset"), [c1.as_str()]);
+        assert_eq!(ids(&log().ok(), "id"), [c1.as_str()]);
         assert_eq!(findings(&store), json!([]));
     }
 
@@ -3161,7 +3180,10 @@ mod crafted_derived_values {
 
     /// `main~1025`, past the 1,024 steps walked one at a time, lifts along the head's skip list:
     /// its entry 10, 1,024 steps back, then one step. A list placed for the head whose entry 10
-    /// names a changeset of an old side branch is reported by `verify --deep`, without a key.
+    /// names a changeset of an old side branch (whose generation is low enough for the jump) is
+    /// reported by `verify --deep`, without a key; and `resolve`, which named a changeset main's
+    /// history never held with it, refuses it: the jump disagrees with entry 9 of the list of the
+    /// head's entry 9, the derivation's own rule one level down.
     #[test]
     fn a_crafted_skip_list_is_caught() {
         let store = Store::init();
@@ -3199,6 +3221,10 @@ mod crafted_derived_values {
             "derivation": "first_parent_skip_list",
         });
         assert_eq!(findings(&store), json!([finding]));
+        let refusal = resolve();
+        let side_29 = side[29].to_string();
+        assert_eq!(refusal.exit(), 1, "side[29] is {side_29}: {refusal}");
+        refused(&refusal, "first_parent_skip_list", &head.to_string());
 
         fs::remove_file(store.layout().derived_path(&slot)).unwrap();
         assert_eq!(resolve().ok()["id"], main[75].to_string().as_str());

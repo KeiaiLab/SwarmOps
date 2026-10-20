@@ -279,6 +279,21 @@ left).
   (`swarmops_repo::check_metadata`, which `Repo::commit` runs), so only a store written by other
   means, such as a crafted one, can hold such a pair; `show` then gives one of the two entries,
   and `verify` does not report it. *Unscheduled. Found: M1 Task 4b.*
+- **Crafted derived values that agree with each other are read as valid.** A file under
+  `meta/derived/` carries a checksum over its slot and value, not a signature, so anyone who can
+  write the store's files can place a whole file with any value. The readers check what they use
+  where they can without the walk the value saves: a skip list's first entry against the index,
+  its length against the generation, each jump against the generations and against the list one
+  level down, and where a lift or a list ends; a last touch's changeset against the snapshot, its
+  generation and its delta. One that fails is `E_STORE_CORRUPT`. Lists crafted to agree with each
+  other, and a last touch that names an older changeset that touched the path, pass those checks
+  and are read as valid, and the engine derives new values from them; `verify --deep` checks
+  every value of the built-in derivations against the objects and reports each one
+  (`derived_mismatch`), and removing `meta/derived/` has every value derived again. The values the
+  git export memoizes (`git_oid`, `git_tree_oid`, `git_blob_oid`) are checked by nothing yet. A
+  keyed trailer whose key lives outside the store would make a placed file fail its checks, at
+  the cost of a new layout version. *Target: M6 (`fsck --git` for the export's values; an
+  authenticated cache is unscheduled). Found: the 2026-10-20 security review.*
 
 ## Serving requests
 

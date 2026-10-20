@@ -629,3 +629,95 @@ fn last_modified_is_the_newest_touch_on_the_chain() {
         }
     }
 }
+
+/// A value of `LastModified` placed in the store (whole, its trailer right) is checked before a
+/// reader uses it: one naming a changeset that does not touch the path, one the store does not
+/// hold, or one that is not below the changeset asked about is `DerivedCorrupt`, naming the
+/// derivation and that changeset, from `last_modified`, `path_history` and `log_paths` alike,
+/// and the value file stays where it is. One naming an older changeset that touched the path, on
+/// the chain, passes those checks (only a walk of the changesets between tells it from the
+/// value): the reader takes it, and a deep verify reports it. Without the file, the value is
+/// derived again.
+#[test]
+fn a_crafted_last_touch_is_refused_where_a_reader_can_tell() {
+    use swarmops_store::{DerivedSlot, Layout};
+
+    let (_dir, root, repo) = unsynced_repo();
+    let c = chain_of(
+        &repo,
+        vec![
+            vec![put("a", b"0")],
+            vec![put("b", b"1")],
+            vec![put("a", b"2")],
+            vec![put("b", b"3")],
+        ],
+    );
+    let head = c[3];
+    let key = postcard::to_stdvec(&PathKey(path("a"))).unwrap();
+    let slot = |cs: ChangesetId| DerivedSlot {
+        name: LastModified::NAME,
+        version: LastModified::VERSION,
+        subject: cs.0,
+        key: &key,
+    };
+    let layout = Layout::new(&root);
+    let place = |cs: ChangesetId, toucher: Option<ChangesetId>| {
+        let file = layout.derived_path(&slot(cs));
+        if file.exists() {
+            fs::remove_file(&file).unwrap();
+        }
+        let value = postcard::to_stdvec(&LastTouch(toucher)).unwrap();
+        assert!(repo.derived_store().put(&slot(cs), &value).unwrap());
+    };
+    let unknown = ChangesetId(hash_object(ObjectKind::Changeset, b"in no store"));
+    let a_filter = || PathFilter::under(vec![path("a")]);
+
+    for (at, toucher, what) in [
+        (head, head, "a changeset that does not touch the path"),
+        (head, unknown, "a changeset the store does not hold"),
+        (c[1], c[2], "a changeset above the one asked about"),
+    ] {
+        place(at, Some(toucher));
+        let read = repo.snapshot().unwrap();
+        let refused = |got: Result<(), RepoError>| match got {
+            Err(RepoError::DerivedCorrupt {
+                name, changeset, ..
+            }) => {
+                assert_eq!((name.as_str(), changeset), ("last_modified", at), "{what}");
+            }
+            other => panic!("{what}: expected DerivedCorrupt, got {other:?}"),
+        };
+        refused(read.last_modified(at, &path("a")).map(drop));
+        refused(read.path_history(at, &path("a"), 10).map(drop));
+        refused(read.log_paths(at, &a_filter(), 10).map(drop));
+        assert!(
+            layout.derived_path(&slot(at)).exists(),
+            "{what}: left in place"
+        );
+        fs::remove_file(layout.derived_path(&slot(at))).unwrap();
+    }
+
+    // An older changeset that touched `a`: what a reader cannot tell from the value.
+    place(head, Some(c[0]));
+    let read = repo.snapshot().unwrap();
+    assert_eq!(read.last_modified(head, &path("a")).unwrap(), Some(c[0]));
+    let problems = repo.verify(true).unwrap().problems;
+    let mismatch = swarmops_repo::VerifyProblem::DerivedMismatch {
+        name: "last_modified".to_owned(),
+        changeset: head,
+        key: key.clone(),
+    };
+    assert_eq!(problems, [mismatch]);
+    fs::remove_file(layout.derived_path(&slot(head))).unwrap();
+    let read = repo.snapshot().unwrap();
+    assert_eq!(read.last_modified(head, &path("a")).unwrap(), Some(c[2]));
+    let history = read.path_history(head, &path("a"), 10).unwrap();
+    assert_eq!(
+        on_chain(&c, &history),
+        [
+            (2, Held::Leaf(LeafKind::File, blob(b"2"))),
+            (0, Held::Leaf(LeafKind::File, blob(b"0")))
+        ]
+    );
+    assert_eq!(repo.verify(true).unwrap().problems, Vec::new());
+}
