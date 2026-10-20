@@ -29,9 +29,10 @@
 
 SwarmOps is source control built for a swarm of coding agents: 10 to 50 Claude Code or LangGraph
 processes on one host, committing to one repository at once. It is written in Rust and fully
-embedded: one program, no external database, no daemon. It is pre-release, at milestone M2:
+embedded: one program, no external database, no daemon. It is pre-release, at milestone M4:
 usable by one agent, with a store that already takes commits from many processes at once;
-merging and landing, which a swarm needs, come in M4 ([roadmap](#roadmap)).
+merging and landing, which a swarm needs, are built, but landing is not yet measured under a
+swarm's load ([roadmap](#roadmap)).
 
 ## Why SwarmOps
 
@@ -79,7 +80,7 @@ planned, each with its milestone.
 | Sync between hosts | Nothing today. 📋 M11: offline-first sync, a full store on every host, `fetch` and `push` against one upstream. | **Behind**: git clones, fetches and pushes over any transport, and bundles without one. |
 | Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. 📋 M3: git import. 📋 M8: git export. No user hooks, signing, submodules or LFS. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
 | Maturity | Pre-release: no tag yet, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
-| Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load. |
+| Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4, after the pilot: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load. |
 
 No git baseline has been measured yet: these verdicts come from the design, the code, and git's
 own documentation and source, not from a benchmark. The first measured comparison is planned for
@@ -416,7 +417,7 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | ✅ | M1.6 | The code-review follow-ups, before M2: the error contract an agent sees (typed refusals, I/O failures that name the store file and no host path but in two rare `E_IO`s, a report of what a write's recovery repaired); a bound on the lock-free reader's retries; structured `verify` findings, and MCP tool schemas kept plain objects; object reads without a second copy or an allocation of the size a file claims; the test doubles M1.5 left, in one place; spec hygiene (the write-ordering rules W1–W7, §8 in step with the code); the harness for the measurements M2's sync decision needs, whose quiet-window runs are still to come; and `commit --advance`, the commit primitive M4's landing reuses. |
 | ✅ | M2 | Diff, history and the derived-data engine. |
 | 📋 | M3 | git import. |
-| 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |
+| ✅ | M4 | Merge and landing, and the journal shown as an operation log with undo; the landing model chosen by measurement, and landing under contention through the binary, come after the pilot. |
 | 📋 | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |
 | 📋 | M5 | Workspaces, with an adapter for Claude Code's worktree hooks. |
 | 📋 | M6 | Verify, crash safety and fuzzing: fsck, gc, a TLA+/Quint model of the journal protocol, and the next store `FORMAT`. |

@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M1.6, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M4, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -78,8 +78,9 @@ left).
 - **Full fsync is slow on this host.** An uncontended durable commit takes about 21 ms through
   the binary, at about 4 ms per fsync; the umbrella spec's commit target (5 ms plus 0.3 ms per
   file) leaves syncs out. Batching object and journal syncs, and whether any
-  `--durability fast` flag is justified, are re-evaluated with new measurements. *Target: M2.
-  Found: M1 Task 7b; final review, question 4.*
+  `--durability fast` flag is justified, are re-evaluated with new measurements. *Target: M2's
+  journal-sync decision (its plan's Task 4), deferred until after the pilot. Found: M1 Task 7b;
+  final review, question 4.*
 
 ## Concurrency and the lock
 
@@ -361,11 +362,12 @@ left).
 - **Part of each lock pass through the binary is unexplained.** In the quiet-window run the lock
   passed every 8.27 ms at store level (about two raw `fdatasync`s, which is what a transaction
   makes) and every 13.75 ms through the binary; the difference appears only with the commits'
-  own object writes on the same filesystem. *Target: M1.6 (docs/perf.md),
-  then M2. Found: M1 Task 7b.*
+  own object writes on the same filesystem. *Target: M1.6's quiet-window runs (docs/perf.md),
+  then M2's journal-sync decision, both deferred until after the pilot. Found: M1 Task 7b.*
 - **Commit-path costs.** Every
   commit's materialization scans the index tail; and the reflog walks frames past the snapshot
-  only to drop them. *Target: M2. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
+  only to drop them. *Target: M2's measured decision on them (its plan's Task 3), deferred until
+  after the pilot. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
   store's mutex. *Unscheduled. Found: M1 Task 1.*
 - **No benchmark gate.** The benches run by hand (`just bench`, `just perf`); failing on a 20 %
@@ -399,8 +401,8 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `journal.off` a writer cut is tested only at the journal's level. *Target: M6 (the metadata
   read paths through `FsOps`, umbrella spec §14). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
-- **Golden envelopes cover 15 of the 24 error codes.** `error_codes_reach_the_cli` pins the
-  envelope of 15; the other nine are in its `NOT_RAISED` list, each with why the test cannot raise
+- **Golden envelopes cover 19 of the 29 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 19; the other ten are in its `NOT_RAISED` list, each with why the test cannot raise
   it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6). Found: the
   2026-10-16 comparison.*
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
@@ -437,7 +439,7 @@ each ruling is tracked above:
 | 1 | Concurrent `init` on one directory | unsupported, documented; revisit with workspaces | M5, "Concurrent `init`" |
 | 2 | Readers return state from frames not yet synced | allowed for local readers; committed snapshots for off-host readers | M8, "Readers may return state" |
 | 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | M6, "bounded, not first-in, first-out" |
-| 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2, "Full fsync is slow" |
+| 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2 (its Task 4, after the pilot), "Full fsync is slow" |
 | 5 | The recovery walk under the lock | with fsck, and the lock timeout against journal size | M6, "Recovery after a crash walks all of `journal.off`", "No repair tool" |
 | 6 | `read_file` reads the whole blob | ranged reads | M6, "`cat` reads the whole object file" (ranged reads: M2) |
 | 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | M6, "Crafted `journal.off` entries" |
