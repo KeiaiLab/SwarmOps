@@ -12,14 +12,16 @@ are not in the repository. Code-level minors that change nothing a user or an ag
 Targets are milestones of [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md)
 (§13): M1.6 the code-review follow-ups · M2 diff, history and derived data · M3 git import ·
 M4 merge and landing · M8 git export · M5 workspaces · M6 verify, crash safety and fuzzing ·
-M7 blame and review · M9 simulation and benchmarks · M11 remote sync, offline-first · M10 RPC
-server. M1.5, the hardening milestone after M1
-([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)), closed a few, and M1.6, the
-code-review follow-ups after it
+M7 blame and review · M9 simulation and a benchmark gate · M11 remote sync, offline-first.
+M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0. M1.5, the hardening
+milestone after M1 ([its plan](superpowers/plans/2026-10-16-m1-5-hardening.md)), closed a few,
+and M1.6, the code-review follow-ups after it
 ([its plan](superpowers/plans/2026-10-17-m1-6-review-followups.md)), closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
-piloted on a real repository. "Unscheduled" means no milestone has taken the item yet;
-"documented" means it is the intended behaviour.
+piloted on a real repository ([pilot.md](pilot.md)): the measurements that need a quiet host,
+and the tests that read the maintainers' service repositories. "Unscheduled" means no milestone
+has taken the item yet; "documented" means it is the intended behaviour. An RPC server is a
+follow-up after v1 (umbrella spec §17), not a milestone, so no entry targets it.
 
 When a change closes an item, it removes the entry here in the same commit (or says what is
 left).
@@ -92,6 +94,20 @@ left).
   quiet-window measurement saw no `E_BUSY` and a slowest commit of 918 ms (1.2 s at store
   level). A ticket or FIFO hand-off on top of `flock` is the next step. *Target: M6. Found: M1
   Task 7c; final review, question 3.*
+- **Landing retries under a burst.** `land` publishes by compare-and-swap: a land that loses the
+  race for its target records nothing, merges again onto the new head and tries again, up to its
+  `max_attempts` (8 by default, at most 32), and then fails with the retryable
+  `E_CAS_RETRY_EXHAUSTED`. Nothing is lost, but a burst of lands, such as subagents that finish
+  at once, costs retries: in one closed-loop run through the binary on a loaded host (load 80 to
+  87, so the figures are indicative), 8, 16 and 32 processes landing 4, 4 and 3 times each on one
+  `main`, each land its own file and every other one a line of one shared file, landed every
+  change exactly once with `verify --deep` clean, and 22 %, 44 % and 44 % of the lands retried;
+  at 32, four of the 96 took all 8 attempts. The umbrella spec's target (§15) for 50 landing
+  processes is 20 lands/s or more, a p99 under 500 ms, a retry rate under 5 % and nothing lost;
+  the M4 plan measures it with each process landing once every 2 s. An agent that meets
+  `E_CAS_RETRY_EXHAUSTED` lands again with the same key, or asks for more attempts. *Target:
+  M4's landing measurements and landing model (its plan's Tasks 11, 1 and 5), deferred until
+  after the pilot. Found: the 2026-10-20 plan triage (a probe through the binary).*
 - **Recovery after a crash walks all of `journal.off` under the lock.** Before it cuts or
   lists anything, the first writer after a crash checks every entry of `journal.off`. On a long
   journal that walk could approach `lock_timeout` for the writers queued behind it. *Target: M6
@@ -100,8 +116,9 @@ left).
 - **An abandoned lock wait parks a thread.** A wait that times out leaves its helper thread in
   the kernel's queue until the holder lets go, and a hung holder leaves one parked thread per
   abandoned wait. That costs nothing in a short-lived CLI process; a long-lived one (the stdio
-  MCP server is one, a daemon would be another) needs a way out. *Target: M10. Found: M1
-  Task 7c; final review, question 10.*
+  MCP server is one, a network server after v1 would be another) needs a way out. *Unscheduled
+  (it was M10's; an RPC server is a follow-up after v1, umbrella spec §17). Found: M1 Task 7c;
+  final review, question 10.*
 - **Concurrent `init` on one directory is unsupported.** The loser may overwrite the winner's
   `REPO` file or fail; two concurrent creations of a metadata store on one root are unsupported
   too. A no-clobber `REPO` link is the cheap hardening. *Target: M5 (with the workspace
@@ -140,6 +157,25 @@ left).
   every directory it enters, however few of their entries it lists. Bounded reads come later.
   (Sizes and depths came in M2, and the default page was measured again for them: 250 entries.)
   *Target: M6. Found: M1 Task 5; final review, question 9.*
+- **A land merges a file both sides changed in memory, whole.** For a path that both the change
+  and the target changed since their base, `land` reads the three versions whole and line-diffs
+  them, with no cap of its own; a large file changed on both sides costs a few times its size.
+  The commit limits bound what a file can hold (512 MiB a put). *Target: M6 (bounded reads).
+  Found: the 2026-10-20 plan triage.*
+- **`diff` in stat and unified form reads both blobs whole.** For each changed file the two
+  versions are read whole and its hunks are built before the page is cut to `max_bytes`, so
+  memory and time follow the files, not the page (a 33 MB file's unified diff took about
+  122 MB); the default form, `names`, reads no content. *Target: M6 (bounded reads). Found: M2's
+  consolidated review (issue #4 item 5).*
+- **A page cursor does not pin the revisions it pages.** `diff`'s `cursor` and `read_file`'s
+  `next_offset` say where the next page starts, not which revisions it pages: an agent that pages
+  through a diff or a file at `main` while another agent lands gets its next page from the new
+  revision, with no error. Page with the full ids the first page resolved (a diff's `from` and
+  `to`). *Unscheduled (issue #4 item 3). Found: M2's consolidated review.*
+- **`read_file` with `max_bytes` 0 returns nothing, as truncated.** Its result has
+  `truncated: true` and a `next_offset` equal to its `offset`, so an agent that reads on while a
+  result is truncated never ends; ask for at least one byte. *Unscheduled (issue #4 item 2: 0 to
+  be refused with `E_INVALID_ARG`, as `diff` refuses it). Found: M2's consolidated review.*
 - **A snapshot reads every ref file**: cheap with a few refs, linear in their number. Each
   request reads in one snapshot of the metadata (a commit, `cat`, `ls`, `show` and `log` take one
   each, a ref move one besides its write), so a request pays it once. Refs are `main` and
@@ -172,6 +208,20 @@ left).
   `agent` and `run_id` metadata, to check before applying the edits again on top of it. *Target: M9
   (an index of commit keys, if measurements ask for one). Found: M1 final fix pass; the `--advance`
   case, the M1.6 review; narrowed by M4 Task 8.*
+- **A keyed land searches the target's first parents.** A land with a key first looks for an
+  earlier land of the same key on the target's first-parent chain, from its head down to the
+  land's base, so a land made on an old base walks the changesets landed since. *Target: M9 (an
+  index of commit keys, if measurements ask for one). Found: M4 Task 12's hand-off.*
+- **`undo` does not take back a land that later lands built on.** It moves refs back only while
+  they still name what the operation set; under later lands that is `E_CAS_MISMATCH`, and no
+  `revert` lands the inverse change. *Unscheduled. Found: M4 Decision 10.*
+- **No hooks or annotations after a land.** A land records no post-land verification, and
+  `land`'s result has no `verification` field: annotations need a journal record the current
+  `FORMAT` lacks. Agents check a landed tree with `read_file` and their own runs. *Target: M7, on
+  M6's next `FORMAT` (M4 Decision 11). Found: M4 Task 12's hand-off.*
+- **No rename detection.** A rename is a delete and an add, for `diff`, `log --path` and a land's
+  merge alike: v1 finds no renames (storage spec §4). *Documented. Found: M4 Task 12's hand-off
+  (issue #10 item 8).*
 - **History follows first parents only.** `log`, `log --path` and `history` walk first parents,
   and a changeset's changes are those against its first parent: what a merge brought in from its
   other parents shows as the merge's own change, and the changesets on those parents are never
@@ -195,11 +245,11 @@ left).
   a warning; any other frame keeps its number. So an agent lists `op log` again before an
   `op undo` (after an error above all) and checks that the operation's refs and changesets are
   the ones it means; an undo's result lists the moves it made, and an undo is an operation of its
-  own, which `op undo` can take back. *Unscheduled: `op log` could read M8's committed snapshot
-  (`read_committed`), which gives only frames that cannot be taken back, as the git export
-  does; an operation identity that a take-back cannot reuse, checked under the lock, is the
-  other way. Found: the M4 consolidated review (the op-log area's correctness lens and its
-  judge).*
+  own, which `op undo` can take back. *Unscheduled (issue #11 item 1): `op log` could read M8's
+  committed snapshot (`read_committed`), which gives only frames that cannot be taken back, as
+  the git export does; an operation identity that a take-back cannot reuse, checked under the
+  lock, is the other way. Found: the M4 consolidated review (the op-log area's correctness lens
+  and its judge).*
 - **A commit holds its contents in memory.** All of them, up to the 1 GiB they may hold
   together, and up to about two to three times that while their objects are encoded in
   parallel, besides the request's text (at most 64 MiB). `blob put` (`blob_put`) and
@@ -282,7 +332,9 @@ left).
   large payload, a small file that decompresses to the size it records, is decompressed in full
   before its hash is checked: up to 512 MiB, the most an object holds (`MAX_OBJECT_LEN`, storage
   spec §2 rule 1), since a header that records more is refused as corrupt before anything is
-  allocated for it. A frame that only claims a size it does not produce is refused as corrupt
+  allocated for it. The bomb's real cost is 512 MiB of payload, plus the decoder window of up to
+  128 MiB, and about 1.1 GiB of address space. A frame that only claims a size it does not produce
+  is refused as corrupt
   too (`E_STORE_CORRUPT`, which `verify --deep` lists), before more than 64 MiB is reserved for its
   output, beside the decoder's window, which the frame's header sets up to zstd's default limit of
   128 MiB: about 192 MiB at worst. SwarmOps never writes such a file; a crafted store can hold one.
@@ -400,10 +452,10 @@ left).
   Task 5 review.*
 - **`{"file": "<path>"}` content is read by whoever serves the request.** That is the caller for
   the CLI and the stdio MCP server; a server that takes requests from another host (M11's
-  `serve`, then M10's) must refuse such content, and a client must turn it into bytes before the
+  `serve` first) must refuse such content, and a client must turn it into bytes before the
   request leaves. Through MCP a relative path, a path that is the server's own stdin or stdout,
   and anything that is not a regular file (a FIFO, a socket, a device or a directory, or a
-  symlink to one) are refused before anything is read. *Target: M11 (`serve`), M10. Found: M1
+  symlink to one) are refused before anything is read. *Target: M11 (`serve`). Found: M1
   Task 4b; M1.5 Task 9 review (M11's `serve`).*
 - **Four error codes are not raised yet.** `E_REF_NOT_FOUND` (no operation looks a ref up by
   name), `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` (tokens, `policy.toml` and gc's
@@ -414,7 +466,7 @@ left).
   and the directory's absolute path, which an `E_IO` then carries; the names are random, so it
   is not met in practice. The other errors that name the store's own path answer for the path a
   command was given (operations spec §0). A server that takes requests from another host must
-  not pass either on as it is. *Target: M11 (`serve`), M10. Found: the M1.6 consolidated review
+  not pass either on as it is. *Target: M11 (`serve`). Found: the M1.6 consolidated review
   (error contract).*
 - **A request takes the memory its type holds.** The MCP server reads of a message line, at
   most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
@@ -495,11 +547,15 @@ left).
   size together in memory, and more (about 400 MiB at its peak for one commit of 384 MiB of new
   files). *Unscheduled: storing a commit's objects as they gather, within the commit, would bound
   it. Found: the 2026-10-20 security review.*
+- **A commit an earlier import took with a loss is reused without `--lossy`.** A commit the store
+  already holds is reused as it is, so a later import without `--lossy` that reaches one an
+  earlier import took with a loss reports `lossy_total` 0 and skips it rather than refusing.
+  *Unscheduled (issue #8 item 3). Found: M3's consolidated review.*
 
 ## Platforms
 
-- **The filesystem check is by path name only.** A store under `/mnt/` is refused, but NFS, SMB
-  or FUSE mounts are not detected (and not supported). *Target: M6 (detection by `statfs`).
+- **The filesystem check is by path name only.** A store under `/mnt/` is refused, but NFS, SMB and FUSE mounts, Docker Desktop's and virtiofs bind mounts among them, are neither
+  detected nor supported. *Target: M6 (detection by `statfs`).
   Found: M1 Task 3; umbrella spec §4.*
 - **Directory fsync failures are assumed fail-stop.** On ext4 with a journal, XFS and btrfs a
   failed directory fsync makes every later sync fail until the filesystem is mounted again, so a
@@ -520,6 +576,12 @@ left).
 - **No migration between pre-release formats.** A store made before a format change may be
   refused afterwards and need creating again; it happened once during M1. *Documented (the
   versioning policy, before 1.0).*
+- **The release binaries print an `ld.so` line on glibc 2.34 to 2.38.** On glibc 2.34 to 2.38 hosts
+  (Ubuntu 22.04, Debian 12, RHEL 9) every start of the release `swarmops` and `so` binaries prints
+  one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found (required by …)`; exit codes,
+  stdout envelopes and the MCP protocol are unaffected, and on glibc 2.39 nothing is printed.
+  *Unscheduled: a build against an older glibc, or a static build, would remove it. Found: the
+  2026-10-20 review of the aarch64 release build.*
 
 ## Performance
 
@@ -532,6 +594,16 @@ left).
   commit's materialization scans the index tail; and the reflog walks frames past the snapshot
   only to drop them. *Target: M2's measured decision on them (its plan's Task 3), deferred until
   after the pilot. Found: M1 Tasks 2c and 3; deferred again by Task 8.*
+- **Compaction rewrites both sorted views under the writer lock.** When the index's unsorted
+  tail passes 1,024 records, the writer that holds the lock merges it into the sorted views and
+  writes them anew before it lets go, so the writers queued behind it wait for a rewrite that
+  grows with the store; one that waits past the 10 s `lock_timeout` fails with the retryable
+  `E_BUSY`, and nothing is lost. What the rewrite costs at 100,000 and 1,000,000 records is
+  M1.6's compaction bench, deferred until after the pilot. *Target: M6 (the sorted views as
+  immutable runs under a manifest, in the next `FORMAT`, so that the lock holds only the
+  manifest's swap), or M3's merge outside the lock (its plan's Task 15) if the bench shows a
+  stall of 100 ms or more at 100,000 records first. Found: M1.6 Task 7 (the compaction design);
+  the 2026-10-20 plan triage.*
 - **Small object-store costs.** A put that creates a fan-out directory checks for it under the
   store's mutex. *Unscheduled. Found: M1 Task 1.*
 - **No benchmark gate.** The benches run by hand (`just bench`, `just perf`); failing on a 20 %
@@ -609,7 +681,7 @@ each ruling is tracked above:
 | 7 | Crafted `journal.off` entries | a per-entry checksum in the next `FORMAT` | M6, "Crafted `journal.off` entries" |
 | 8 | `objects/tmp` leftovers | `gc` | M6, "Temp files of crashed writes" |
 | 9 | Wide directories in `ls` | size and depth | M6, "`ls` of a wide directory" (size and depth: M2) |
-| 10 | Parked helper threads | the daemon | M10, "An abandoned lock wait" |
+| 10 | Parked helper threads | the daemon | Unscheduled, "An abandoned lock wait" |
 | 11 | `abort()` standing in for `SIGKILL` | a literal `SIGKILL` test | M6, "The crash model" |
 | 12 | Second root commits | `commit_raw` | closed in M3: `Repo::commit_raw`, the git import's writer, makes a root changeset whatever refs exist |
 | 13 | `--expect` with a ref name | documented | "`--expect` with a ref name" |

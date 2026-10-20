@@ -71,8 +71,11 @@ From v0.1.0 on, each release on the
 target, `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` and
 `swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz` (`swarmops`, `so`, the license, the
 third-party licenses, the README and the changelog), and a `SHA256SUMS` file to check them
-against. The binaries need glibc 2.34 or newer. [RELEASE.md](../RELEASE.md) has the release
-steps.
+against. The binaries need glibc 2.34 or newer. On glibc 2.34-2.38 hosts (Ubuntu 22.04, Debian 12,
+RHEL 9) every start of the release `swarmops` and `so` binaries prints one `ld.so` line on stderr,
+`weak version 'GLIBC_2.39' not found (required by …)`; exit codes, stdout envelopes and the MCP
+protocol are unaffected, and on glibc 2.39 nothing is printed. [RELEASE.md](../RELEASE.md) has the
+release steps.
 
 ```sh
 gh release download v0.1.0 --repo KeiaiLab/SwarmOps \
