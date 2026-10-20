@@ -1733,6 +1733,13 @@ impl StoreOps for Recording<'_> {
                 problems.push(line);
                 findings.push(found);
             }
+            // And the external id entries of native changesets against their export oids, which
+            // the store-core verify cannot render either.
+            for entry in swarmops_git::verify_external_ids(&self.ops.repo).map_err(op)? {
+                let (line, found) = external_id_finding(&entry);
+                problems.push(line);
+                findings.push(found);
+            }
         }
         Ok(VerifyReport {
             objects_checked: report.objects_checked,
@@ -2410,6 +2417,33 @@ fn git_memo_finding(mismatch: &swarmops_git::GitMemoMismatch) -> (String, Verify
         system: None,
         key: None,
         derivation: Some(mismatch.memo.clone()),
+    };
+    (line, found)
+}
+
+/// An external id entry of a native changeset that a deep verify found naming another commit than
+/// the one the changeset exports to ([`swarmops_git::ExternalIdMismatch`]) as an
+/// `external_id_mismatch` line and finding, as the store-core verify reports an entry whose
+/// changeset's `git.oid` is another commit.
+fn external_id_finding(entry: &swarmops_git::ExternalIdMismatch) -> (String, VerifyFinding) {
+    let key = entry.commit.to_string();
+    let line = one_line(format!(
+        "external id {key} of system git names changeset {}, which holds no git.oid and \
+         exports to another commit",
+        entry.changeset
+    ));
+    let found = VerifyFinding {
+        kind: "external_id_mismatch".to_owned(),
+        object: None,
+        changeset: Some(entry.changeset.to_string()),
+        parent: None,
+        seq: None,
+        offset: None,
+        ref_name: None,
+        cause: None,
+        system: Some("git".to_owned()),
+        key: Some(key),
+        derivation: None,
     };
     (line, found)
 }

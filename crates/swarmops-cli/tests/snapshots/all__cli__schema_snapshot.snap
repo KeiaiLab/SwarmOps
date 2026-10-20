@@ -6295,7 +6295,7 @@ expression: s.redact(&all)
           ]
         },
         "changeset": {
-          "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key (`external_id_mismatch`), or the one a\nderived value is about (`derived_mismatch`).",
+          "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key, or, found by a deep verify, with none\nand exporting to another commit (`external_id_mismatch`), or the one a derived value is\nabout (`derived_mismatch`).",
           "type": [
             "string",
             "null"
@@ -6385,7 +6385,7 @@ expression: s.redact(&all)
               ]
             },
             "changeset": {
-              "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key (`external_id_mismatch`), or the one a\nderived value is about (`derived_mismatch`).",
+              "description": "The changeset: the first, in seq order, that references the missing object\n(`missing_object`), the one that names a missing parent (`missing_parent`), the one whose\nroot is not its first parent's root with its delta applied (`root_mismatch`), the one\nan external id's entry names: not in the store (`external_id_dangling`), or with a\n`git.oid` that is another oid than the entry's key, or, found by a deep verify, with none\nand exporting to another commit (`external_id_mismatch`), or the one a derived value is\nabout (`derived_mismatch`).",
               "type": [
                 "string",
                 "null"

@@ -1259,8 +1259,8 @@ fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
 /// git import` of `c`, a commit made on `x`, is `E_GIT_IMPORT_DIVERGED` (exit 3) from the commit
 /// the head exports to, naming the entry it passed over (`details.external_id`, its hint a deep
 /// verify), and moves and records nothing, where the walk took `x` for the head and recorded `c`
-/// on it. With the entry removed, the import is diverged all the same, naming no entry, and the
-/// store verifies clean.
+/// on it; `verify --deep` names the entry (`external_id_mismatch`). With the entry removed, the
+/// import is diverged all the same, naming no entry, and the store verifies clean.
 #[test]
 fn git_import_over_a_crafted_external_id_is_e_git_import_diverged() {
     use std::sync::Arc;
@@ -1336,6 +1336,15 @@ fn git_import_over_a_crafted_external_id_is_e_git_import_diverged() {
     assert_eq!(error["hint"], "swarmops verify --deep", "{error}");
     assert_eq!(store.show("main")["id"], native.as_str());
     assert_eq!(store.journal_len(), journal, "a frame was written");
+    let verify = store.read(&["verify", "--deep"]);
+    let findings = &verify.err("E_STORE_CORRUPT")["details"]["findings"];
+    let finding = json!({
+        "kind": "external_id_mismatch",
+        "changeset": native,
+        "system": "git",
+        "key": x.to_string(),
+    });
+    assert_eq!(findings, &json!([finding]), "{verify}");
 
     std::fs::remove_file(store.layout().external_id_path(SYSTEM_GIT, &x.0)).unwrap();
     let diverged = import(&store, &path, &args);

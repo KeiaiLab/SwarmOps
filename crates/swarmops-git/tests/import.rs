@@ -1844,11 +1844,12 @@ mod crafted_memos {
 mod crafted_entries {
     use std::thread;
 
-    use swarmops_core::{LeafKind, ObjectKind, Tree, TreeEntry};
+    use swarmops_core::{LeafKind, ObjectKind, Tree, TreeEntry, hash_object};
     use swarmops_git::{
         ExportOid, ExportRequest, ExternalIdMismatch, GixSink, export, register, render_commit,
+        verify_external_ids,
     };
-    use swarmops_repo::RawChangeset;
+    use swarmops_repo::{RawChangeset, VerifyProblem};
     use swarmops_testkit::repo::{blob, signature};
 
     use super::*;
@@ -2061,6 +2062,58 @@ mod crafted_entries {
         let found = (report.imported, report.skipped, report.head);
         assert_eq!(found, (0, 1, lossy.head));
         assert_eq!(report.warnings, [] as [String; 0]);
+    }
+
+    /// A deep verify of the external id index names each entry whose native changeset exports to
+    /// another commit than the entry's, once ([`verify_external_ids`]), and only those: the entry
+    /// the export writes is right, and an entry naming an imported changeset that holds another
+    /// commit, or one the store lacks, is for the store's own verify to report, which it does,
+    /// once each.
+    #[test]
+    fn a_deep_verify_names_each_entry_a_native_changeset_does_not_stand_for() {
+        let fixture = git::fixture("linear");
+        let dir = fixture
+            .repo
+            .clone()
+            .expect("the fixture holds a repository");
+        let (_dir, _root, repo) = unsynced_repo();
+        let imported = import(&repo, &open(&fixture), &request("HEAD")).unwrap();
+        let native = native_on_main(&repo);
+        let to_main = ExportRequest::new("main", "main");
+        export(&repo, &mut GixSink::open(&dir).unwrap(), &to_main).unwrap();
+        assert_eq!(verify_external_ids(&repo).unwrap(), []);
+        assert_eq!(repo.verify(true).unwrap().problems, []);
+
+        let (_, x, c) = x_and_c();
+        let nowhere = ChangesetId(hash_object(ObjectKind::Changeset, b"nowhere"));
+        let y = GitOid([0x5a; 20]);
+        record(&repo, x, native);
+        record(&repo, c, imported.head);
+        record(&repo, y, nowhere);
+        let found = verify_external_ids(&repo).unwrap();
+        let mismatch = ExternalIdMismatch {
+            commit: x,
+            changeset: native,
+        };
+        assert_eq!(found, [mismatch]);
+        let git = || SYSTEM_GIT.to_owned();
+        let mut theirs = vec![
+            VerifyProblem::ExternalIdMismatch {
+                system: git(),
+                key: c.to_string(),
+                changeset: imported.head,
+            },
+            VerifyProblem::ExternalIdDangling {
+                system: git(),
+                key: y.to_string(),
+                changeset: nowhere,
+            },
+        ];
+        let mut problems = repo.verify(true).unwrap().problems;
+        let key = |problem: &VerifyProblem| format!("{problem:?}");
+        theirs.sort_by_key(key);
+        problems.sort_by_key(key);
+        assert_eq!(problems, theirs);
     }
 
     /// Checking an entry that names a native changeset derives its export oid with the whole
