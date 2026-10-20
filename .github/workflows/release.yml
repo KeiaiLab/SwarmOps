@@ -1,0 +1,328 @@
+# The release (RELEASE.md): a pushed `v*` tag is checked against the workspace version, `stable`
+# and CHANGELOG.md; `just check` runs on the tagged commit; `swarmops` and `so` are built for two
+# Linux targets and smoke-run; and the tag's GitHub release is published with one archive per
+# target, `SHA256SUMS`, and the version's CHANGELOG.md section as its notes.
+#
+# Hardened as ci.yml is: every action is pinned to a full commit SHA (its version in the trailing
+# comment; Dependabot updates both), the token has no permissions unless a job asks for one,
+# `actions/checkout` keeps no credentials, and CI's zizmor job audits this file too. The one
+# write grant, `contents: write`, is the publishing job's, and that job builds nothing: it checks
+# the archives the build jobs made and uploads them with `gh`. No job restores a cache, so what a
+# release ships is built from the tagged commit and Cargo.lock alone, never from a cache another
+# run could have written. No secret is used but each job's own token.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+# A release runs to its end: another run for the same tag (a re-run) waits for it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  version:
+    name: tag, version and notes
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Every branch, so that the next steps find the tagged commit on `stable`.
+          fetch-depth: 0
+      # The release notes are the version's CHANGELOG.md section, from below its heading,
+      # `## [X.Y.Z] - YYYY-MM-DD`, to the next `## ` heading, with its relative links made
+      # absolute, to the tag's files; then how to check a download, and the file's link
+      # definitions. A version with a pre-release part (`0.2.0-rc.1`) is published as a
+      # pre-release.
+      - name: The tag names the workspace version, and CHANGELOG.md has its section
+        id: version
+        run: |
+          python3 -I - <<'EOF'
+          import os
+          import re
+          import sys
+          import tomllib
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+          tag = os.environ["GITHUB_REF_NAME"]
+          with open("Cargo.toml", "rb") as manifest:
+              version = tomllib.load(manifest)["workspace"]["package"]["version"]
+          if tag != f"v{version}":
+              fail(f"this tag is not v{version}, the workspace version in Cargo.toml (RELEASE.md)")
+
+          with open("CHANGELOG.md", encoding="utf-8") as changelog:
+              lines = changelog.read().splitlines()
+          heading = f"## [{version}]"
+
+          def is_heading(line):
+              return line == heading or line.startswith(f"{heading} ")
+
+          start = next((i for i, line in enumerate(lines) if is_heading(line)), None)
+          if start is None:
+              fail(f"CHANGELOG.md has no '{heading} - YYYY-MM-DD' section (RELEASE.md)")
+          after = range(start + 1, len(lines))
+          end = next((i for i in after if lines[i].startswith("## ")), len(lines))
+          definition = re.compile(r"\[[^\]]+\]: \S")
+          body = "\n".join(line for line in lines[start + 1 : end] if not definition.match(line))
+          body = body.strip("\n")
+          if not body.strip():
+              fail(f"CHANGELOG.md's '{heading}' section is empty")
+          files = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/blob/{tag}/"
+          body = re.sub(
+              r"\]\((?![a-z][a-z0-9+.-]*:|#|/)([^)\s]+)\)",
+              lambda link: f"]({files}{link[1]})",
+              body,
+              flags=re.IGNORECASE,
+          )
+          check = (
+              "Check a download against `SHA256SUMS` with"
+              " `sha256sum --check --ignore-missing SHA256SUMS`. The archives carry no"
+              f" build-provenance attestation yet ([RELEASE.md]({files}RELEASE.md))."
+          )
+          notes = f"{body}\n\n---\n\n{check}\n"
+          definitions = "\n".join(line for line in lines if definition.match(line))
+          if definitions:
+              notes += f"\n{definitions}\n"
+          if len(notes) > 125000:
+              fail(f"the release notes are {len(notes)} characters, more than a release's 125000")
+          notes_file = os.path.join(os.environ["RUNNER_TEMP"], "notes.md")
+          with open(notes_file, "w", encoding="utf-8") as out:
+              out.write(notes)
+          prerelease = "-" in version.split("+")[0]
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+              out.write(f"version={version}\nprerelease={str(prerelease).lower()}\n")
+          print(notes)
+          EOF
+      - name: The tagged commit is on stable
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/stable; then
+            echo "::error::stable does not hold the tagged commit $GITHUB_SHA (RELEASE.md)"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  # The release gate: `just check`, as ci.yml's `check` job runs it (the same tool versions: move
+  # them together), on the tagged commit. Without CI's cache, so its build is a clean one.
+  check:
+    name: just check
+    needs: version
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      NEXTEST_PROFILE: ci
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins
+        run: rustup toolchain install --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: just@1.58.0,cargo-nextest@0.9.146,cargo-deny@0.20.2
+          fallback: none
+      - run: just check
+      - name: Upload the JUnit report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: junit-release-check
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: ignore
+          overwrite: true
+          retention-days: 14
+
+  # `swarmops` and `so` for one target, `cargo build --release --locked` on the pinned toolchain
+  # without the `test-hooks` feature, smoke-run, then packed into
+  # `swarmops-<version>-<target>.tar.gz` (both binaries, LICENSE, README.md, CHANGELOG.md) with
+  # its SHA-256.
+  build:
+    name: build ${{ matrix.target }}
+    needs: version
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+          # Cross-compiled: Ubuntu's aarch64 GCC links the binaries and compiles the C sources
+          # of zstd-sys and blake3, and QEMU's user-mode emulator runs them for the smoke test.
+          - target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user
+            run-with: qemu-aarch64 -L /usr/aarch64-linux-gnu
+    env:
+      CARGO_TERM_COLOR: always
+      TARGET_TRIPLE: ${{ matrix.target }}
+      VERSION: ${{ needs.version.outputs.version }}
+      RUN_WITH: ${{ matrix.run-with }}
+      # How cargo and the cc crate build for aarch64; a build for x86_64 reads none of them.
+      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+      CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+      AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
+      # The newest glibc a binary may need: README's install section promises it.
+      GLIBC_FLOOR: "2.34"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the toolchain rust-toolchain.toml pins, for the target
+        run: |
+          rustup toolchain install --no-self-update
+          rustup target add "$TARGET_TRIPLE"
+      - name: Install the cross compiler and QEMU
+        if: matrix.packages
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          read -ra packages <<<"$PACKAGES"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends "${packages[@]}"
+      - name: Build swarmops and so
+        run: cargo build --release --locked -p swarmops-cli --bins --target "$TARGET_TRIPLE"
+      # Each binary prints the tag's version and needs no glibc newer than GLIBC_FLOOR; then a
+      # store is made, committed to, read and deep-verified, with every SWARMOPS_TEST_* hook set,
+      # which a release build ignores (SECURITY.md). Honoured, the first would abort `init` at
+      # its first filesystem call, the second fail the commit's, the third write the file it
+      # names, and the fourth sign the changeset in 2001.
+      - name: Smoke-test the binaries
+        run: |
+          read -ra run_with <<<"$RUN_WITH"
+          bin="target/$TARGET_TRIPLE/release"
+          file "$bin/swarmops" "$bin/so"
+          for name in swarmops so; do
+            glibc=$(readelf --version-info --wide "$bin/$name" | grep -o 'GLIBC_[0-9][0-9.]*' |
+              cut -d_ -f2 | sort -V | tail -n 1)
+            newest=$(printf '%s\n' "$glibc" "$GLIBC_FLOOR" | sort -V | tail -n 1)
+            if [ "$newest" != "$GLIBC_FLOOR" ]; then
+              echo "::error::$name needs glibc $glibc, newer than the $GLIBC_FLOOR README promises"
+              exit 1
+            fi
+            printed=$("${run_with[@]}" "$bin/$name" --version)
+            if [ "$printed" != "swarmops $VERSION" ]; then
+              echo "::error::$name --version printed '$printed', not 'swarmops $VERSION'"
+              exit 1
+            fi
+            echo "$name: '$printed', glibc $glibc at most"
+          done
+
+          smoke="$RUNNER_TEMP/smoke"
+          mkdir -p "$smoke"
+          store="$smoke/store"
+          before=$(date +%s)
+          # Runs one command of a binary under test and prints its envelope, which must be a
+          # success that the jq filter $1 holds for.
+          expect() {
+            local filter=$1 status=0
+            shift
+            envelope=$("${run_with[@]}" "$@") || status=$?
+            printf '%s\n' "$envelope"
+            if [ "$status" -ne 0 ] || ! jq -e --argjson before "$before" ".ok and ($filter)" \
+              >/dev/null <<<"$envelope"; then
+              echo "::error::'$*' exited $status, or its envelope fails '$filter'"
+              exit 1
+            fi
+          }
+          SWARMOPS_TEST_CRASH_AT=1 expect '.result.changesets == 0' \
+            "$bin/swarmops" init "$store" --name smoke
+          printf '%s\n' '[{"path": "hello.txt", "op": "put", "content": {"inline": "hello\n"}}]' \
+            >"$smoke/changes.json"
+          SWARMOPS_TEST_FAIL_AT=1:persistent SWARMOPS_TEST_FS_CALLS="$smoke/fs-calls" \
+            SWARMOPS_TEST_NOW=1000000000 expect '.result.files_changed == 1' \
+            "$bin/so" --repo "$store" --as release/smoke commit -m smoke \
+            --changes "$smoke/changes.json" --advance main
+          if [ -e "$smoke/fs-calls" ]; then
+            echo "::error::SWARMOPS_TEST_FS_CALLS was honoured"
+            exit 1
+          fi
+          # `$before` is jq's: `expect` binds it.
+          # shellcheck disable=SC2016
+          expect '.result.signatures.committer.secs >= $before' \
+            "$bin/swarmops" --repo "$store" show main
+          expect '.result.content == "hello\n"' "$bin/swarmops" --repo "$store" cat main:hello.txt
+          expect '.result.problems == []' "$bin/so" --repo "$store" verify --deep
+      # Reproducible: the entries sorted, owned by root and dated at the tagged commit.
+      - name: Pack the archive
+        id: pack
+        run: |
+          name="swarmops-$VERSION-$TARGET_TRIPLE"
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p "$stage/$name" dist
+          install -m 0755 "target/$TARGET_TRIPLE/release/swarmops" \
+            "target/$TARGET_TRIPLE/release/so" "$stage/$name/"
+          install -m 0644 LICENSE README.md CHANGELOG.md "$stage/$name/"
+          mtime=$(git log -1 --format=%ct)
+          tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$mtime" \
+            -C "$stage" -cf - "$name" | gzip -9 --no-name >"dist/$name.tar.gz"
+          (cd dist && sha256sum "$name.tar.gz" >"$name.tar.gz.sha256")
+          tar -tvzf "dist/$name.tar.gz"
+          cat "dist/$name.tar.gz.sha256"
+          echo "name=$name" >>"$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.pack.outputs.name }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: publish the release
+    needs: [version, check, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # `gh release create`: the release, its notes and its assets
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-notes
+          path: notes
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: swarmops-*
+          merge-multiple: true
+          path: dist
+      # Every archive is checked against the SHA-256 its build job wrote before anything is
+      # uploaded. `gh` creates the release as a draft, uploads the assets, then publishes it.
+      - name: Check the archives and publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.version.outputs.version }}
+          PRERELEASE: ${{ needs.version.outputs.prerelease }}
+        run: |
+          cd dist
+          sha256sum --check --strict -- *.sha256
+          cat -- *.sha256 >SHA256SUMS
+          cat SHA256SUMS
+          flags=()
+          if [ "$PRERELEASE" = true ]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "v$VERSION" --verify-tag --title "SwarmOps $VERSION" \
+            --notes-file ../notes/notes.md "${flags[@]}" -- *.tar.gz SHA256SUMS
