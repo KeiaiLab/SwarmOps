@@ -1,0 +1,10 @@
+# License exceptions for this workspace's lockfile (fuzz/Cargo.lock) alone: cargo-deny reads this
+# file beside the manifest it checks, on top of the policy in ../deny.toml, which `just check` runs
+# over both lockfiles. Each entry allows one more license for one crate, and says why.
+
+# libFuzzer's own license, the University of Illinois/NCSA Open Source License (OSI-approved and
+# permissive), on the crate that compiles libFuzzer's C++ sources into the fuzz targets: no crate
+# of the product depends on it.
+[[exceptions]]
+crate = "libfuzzer-sys"
+allow = ["NCSA"]
