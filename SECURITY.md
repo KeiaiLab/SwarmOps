@@ -49,7 +49,11 @@ filesystem permissions are the access boundary. Within that model, these are vul
   as corrupt); crafted `journal.off` entries that agree with each other, deeper than
   the two links recovery and readers check, pass as valid, so a read that starts past them
   numbers its frames by them until `verify` walks the file and reports them (recovery checks
-  every listed frame before it cuts or lists anything, so no committed frame is lost); and a
+  every listed frame before it cuts or lists anything, so no committed frame is lost); the
+  generations a crafted index records (`meta/idx/gen.col`) are taken as they are, so the history
+  queries that prune by them (a land's merge base, a revision's `~N`) can answer wrongly, though
+  every changeset they reach is on the first-parent chain the changeset objects name, and
+  `verify` reports the damage; and a
   `journal.log`, `journal.off`, index column or sorted view whose length is huge (sparse or
   crafted) is read into one buffer of that length, so a read allocates without bound and aborts
   when the allocation fails instead of returning an error; and a derived value file crafted with
@@ -86,11 +90,13 @@ filesystem permissions are the access boundary. Within that model, these are vul
   crafted repository will be a vulnerability. Workspaces (M5), which write files to disk, are in
   scope the same way.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
-  or run. `cargo deny check` (advisories, licenses, bans, sources) runs in every `just check`,
-  `Cargo.lock` is committed and builds use `--locked`, and the GitHub Actions workflows pin every
-  action by commit, start from `permissions: {}`, keep no credentials after checkout and are
-  checked with zizmor. A known advisory in a dependency that is already public can go to a
-  normal issue.
+  or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the
+  project builds: the workspace's and the fuzz crate's in every `just check`, and
+  `bench/compare`'s, which `just check` does not build, wherever it is built
+  (`just bench-compare` and the weekly scheduled run). The lockfiles are committed and builds use
+  `--locked`, and the GitHub Actions workflows pin every action by commit, start from
+  `permissions: {}`, keep no credentials after checkout and are checked with zizmor. A known
+  advisory in a dependency that is already public can go to a normal issue.
 
 ## What is not a vulnerability under M1's model
 

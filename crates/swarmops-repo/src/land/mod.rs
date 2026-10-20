@@ -71,7 +71,7 @@ use swarmops_core::{
 };
 use swarmops_merge::diff3::merge_content;
 use swarmops_merge::tree_merge::FileConflict;
-use swarmops_store::{ObjectStore, StoreError};
+use swarmops_store::ObjectStore;
 
 use crate::commit::Draft;
 use crate::error::RepoError;
@@ -414,7 +414,7 @@ impl<O: ObjectStore> Landing<'_, O> {
             let on_target = RepoError::NothingToLand(NothingToLandReason::OnTarget);
             return self.settled(theirs, Err(on_target));
         }
-        let squashed = self.squashed(&read)?;
+        let squashed = self.squashed()?;
         let theirs = stored(&read, theirs)?;
         if let Some(key) = &self.req.key {
             match self.walk.find_key(&read, &theirs, key, self.req.head)? {
@@ -494,9 +494,11 @@ impl<O: ObjectStore> Landing<'_, O> {
     }
 
     /// The chain the land squashes, from the base (exclusive) to the head, oldest first, walked
-    /// the first time an attempt needs it, by the index's records alone:
-    /// [`RepoError::MergeChangeset`] for a changeset of it with two parents or more.
-    fn squashed(&mut self, read: &RepoRead<'_, O>) -> Result<Vec<ChangesetId>, RepoError> {
+    /// the first time an attempt needs it, by the changesets' objects, which name their parents
+    /// by their hashes (an index record's parents are what a damaged index says: a first-parent
+    /// walk never takes them, [`RepoRead::walk_step`]): [`RepoError::MergeChangeset`] for a
+    /// changeset of it with two parents or more.
+    fn squashed(&mut self) -> Result<Vec<ChangesetId>, RepoError> {
         if let Some(squashed) = &self.squashed {
             return Ok(squashed.clone());
         }
@@ -504,17 +506,13 @@ impl<O: ObjectStore> Landing<'_, O> {
         let mut chain = Vec::new();
         let mut at = head;
         while at != base {
-            let record = read
-                .meta
-                .changeset(at)?
-                .ok_or(StoreError::MissingParent(at))?;
-            if record.parents.len() > 1 {
+            let parents = self.repo.changeset_object(at)?.parents;
+            if parents.len() > 1 {
                 return Err(RepoError::MergeChangeset(at));
             }
             chain.push(at);
             // The base is a first-parent ancestor of the head: a root comes after it, if at all.
-            at = *record
-                .parents
+            at = *parents
                 .first()
                 .ok_or(RepoError::BaseNotAncestor { base, head })?;
         }

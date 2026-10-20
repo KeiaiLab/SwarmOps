@@ -234,11 +234,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     }
 
     /// The first parent of changeset `id` (`None` for a root), an ancestor of a changeset the
-    /// snapshot holds: a narrow lookup, and a missing one is a damaged index.
+    /// snapshot holds, as its object names it ([`RepoRead::walk_step`]).
     fn parent_of(&self, id: ChangesetId) -> Result<Option<ChangesetId>, RepoError> {
-        Ok(self
-            .meta
-            .first_parent(id)?
-            .ok_or(StoreError::MissingParent(id))?)
+        self.walk_step(id)
     }
 }

@@ -178,13 +178,23 @@ impl<O: ObjectStore> Repo<O> {
         self.snapshot()?.list_tree(cs, dir)
     }
 
-    /// The changeset `meta` records, with its object.
+    /// The changeset `meta` records, with its object, hash-checked against its id, which must
+    /// name the parents `meta` does: a record that names others (a damaged or crafted
+    /// `parents.log` or `par.col`) is [`StoreError::IndexCorrupt`], so that no read returns a
+    /// changeset with a history its object does not have.
     pub(crate) fn stored(&self, meta: &ChangesetMeta) -> Result<StoredChangeset, RepoError> {
+        let changeset = self.changeset_object(meta.id)?;
+        if changeset.parents != meta.parents {
+            return Err(StoreError::IndexCorrupt {
+                what: "a changeset's record names other parents than its object",
+            }
+            .into());
+        }
         Ok(StoredChangeset {
             id: meta.id,
             seq: meta.seq,
             generation: meta.generation,
-            changeset: self.changeset_object(meta.id)?,
+            changeset,
         })
     }
 

@@ -2705,6 +2705,66 @@ fn commit_errors_map_to_codes() {
     );
 }
 
+/// A store whose `meta/lock` is a FIFO, as a restored archive can hold, would block every write
+/// in its open of the lock: a commit fails at once instead, with `E_STORE_CORRUPT` naming the
+/// lock file relative to the store (no host path) and the hint to run verify, which names it as
+/// damaged metadata. Reads take no lock, and go on. Once the FIFO is removed, the next commit
+/// makes a new lock file and lands. The commit runs on a thread with a deadline, so that a
+/// regression fails instead of hanging the test.
+#[test]
+fn a_fifo_at_meta_lock_fails_a_commit_as_corrupt_and_verify_names_it() {
+    use std::process::Command;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    let (_dir, root, ops) = new_store();
+    let c1 = commit(&ops, None, vec![text("f", "1")]);
+    let lock = Layout::new(root.clone()).meta_lock();
+    fs::remove_file(&lock).unwrap();
+    let made = Command::new("mkfifo").arg(&lock).status();
+    assert!(made.expect("run mkfifo").success(), "mkfifo");
+
+    let (tx, rx) = mpsc::channel();
+    let (at, parent) = (root.clone(), c1.clone());
+    thread::spawn(move || {
+        let ops = LocalOps::open(&at).expect("open the store");
+        let _ = tx.send(ops.commit(&agent(), commit_req(Some(&parent), vec![text("f", "2")])));
+    });
+    let committed = rx.recv_timeout(Duration::from_secs(10));
+    let err = expect_err(
+        committed.expect("the commit blocked on the FIFO at meta/lock"),
+        ErrorCode::StoreCorrupt,
+    );
+    assert_eq!(
+        Value::Object(err.details.clone()),
+        json!({"fs_op": "open", "store_file": "meta/lock"})
+    );
+    assert_eq!(
+        err.message,
+        "i/o error: open meta/lock: lock is not a regular file"
+    );
+    assert_eq!(err.hint.as_deref(), Some("swarmops verify"));
+    assert_eq!(ops.read_file(cat(&c1, "f")).unwrap().content, "1");
+
+    let report = ops.verify(VerifyReq { deep: false }).unwrap();
+    assert_eq!(
+        report.problems,
+        [
+            "damaged metadata: meta/lock is not a regular file: every write fails on it until it \
+          is removed, and the next write makes a new one"
+        ]
+    );
+    assert_eq!(
+        serde_json::to_value(&report.findings).unwrap(),
+        json!([{"kind": "meta_corrupt"}])
+    );
+
+    fs::remove_file(&lock).unwrap();
+    commit(&ops, Some(&c1), vec![text("f", "2")]);
+    assert!(fs::symlink_metadata(&lock).unwrap().is_file());
+}
+
 #[test]
 fn read_errors_map_to_codes() {
     let (_dir, _root, ops) = new_store();

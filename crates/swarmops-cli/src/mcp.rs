@@ -42,6 +42,15 @@
 //! as an optional string or integer, so a null one would not validate); a request's id is a
 //! string or an integer.
 //!
+//! A line is checked to be JSON whole first, by the rules a parse into a JSON value holds it to
+//! ([`Json`]), but nothing is built of it: then it is read only as far as the server serves it.
+//! Of a message, that is its `id`, `jsonrpc`, `method` and `params`, and of those `params` the
+//! `_meta`, `protocolVersion`, `cursor`, `name` and `arguments` ([`members`]), each read from its
+//! own JSON text when it is needed; a tool's arguments are read as its request type and nothing
+//! else. What else a line holds (a batch, a member the server does not read, a field that a
+//! request type does not know) is passed over and kept nowhere, so that a line costs the server
+//! no memory beyond its own bytes but what the request it holds takes as its type.
+//!
 //! | Code | Name | For |
 //! |---|---|---|
 //! | `-32700` | Parse error | a line that is not JSON, or not UTF-8 |
@@ -75,7 +84,8 @@
 //! deriving values ahead of readers as the journal grows, which is no agent's work.
 //!
 //! A call runs as one command of the CLI does. Its arguments are the request: a field the type
-//! does not know is ignored, and arguments that do not fit the type are `E_INVALID_ARG`, as is
+//! does not know is ignored, and arguments that do not fit the type, a field of it named twice
+//! among them included (as the CLI refuses one in a change list), are `E_INVALID_ARG`, as is
 //! a request that breaks one of this server's own rules ([`Refuse`]): a `ref_set` or a
 //! `ref_delete` must name what it expects the ref to hold by its full changeset id, since a ref
 //! name or a relative revision resolves when the call runs and so defeats the compare-and-swap,
@@ -124,15 +134,21 @@
 //! mcp`) is a plain usage error of the CLI, whose envelope goes to stdout with exit code 2, and
 //! no server starts either.
 
+use std::fmt;
 use std::fs;
 use std::io::{self, BufRead, Write};
 use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
+use std::str;
 use std::time::Instant;
 
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use serde_json::{Map, Value, json};
+use serde::de::{
+    self, DeserializeOwned, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess,
+    Visitor,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
+use serde_json::{Map, Number, Value, json};
 use swarmops_api::LandReq;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
@@ -591,22 +607,26 @@ impl<'a> Server<'a> {
         if line.is_empty() {
             return None;
         }
-        let mut message = match serde_json::from_slice::<Value>(line) {
-            Ok(Value::Object(message)) => message,
-            Ok(_) => {
-                return Some(error(
-                    None,
-                    INVALID_REQUEST,
-                    "Invalid Request: a message is one JSON object; batches are not served",
-                ));
-            }
-            Err(e) => return Some(error(None, PARSE_ERROR, format!("Parse error: {e}"))),
+        // The whole line is checked to be JSON, and then only what the server serves is read of
+        // it: what else it holds is kept nowhere (the module documentation, # Errors).
+        if let Err(e) = serde_json::from_slice::<Json>(line) {
+            return Some(error(None, PARSE_ERROR, format!("Parse error: {e}")));
+        }
+        // JSON that passed the check is UTF-8: its strings were checked, the rest is ASCII.
+        let Ok(line) = str::from_utf8(line) else {
+            return Some(error(None, PARSE_ERROR, "Parse error: a line is UTF-8"));
         };
-        let id = match message.remove("id") {
+        let Some([id, jsonrpc, method, params, result, failure]) = members(line, MESSAGE) else {
+            return Some(error(
+                None,
+                INVALID_REQUEST,
+                "Invalid Request: a message is one JSON object; batches are not served",
+            ));
+        };
+        let id = match id.map(request_id) {
             None => None,
-            Some(id @ Value::String(_)) => Some(id),
-            Some(Value::Number(n)) if n.is_i64() || n.is_u64() => Some(Value::Number(n)),
-            Some(_) => {
+            Some(Some(id)) => Some(id),
+            Some(None) => {
                 return Some(error(
                     None,
                     INVALID_REQUEST,
@@ -614,23 +634,23 @@ impl<'a> Server<'a> {
                 ));
             }
         };
-        if message.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+        if jsonrpc.and_then(string).as_deref() != Some("2.0") {
             return Some(error(
                 id.as_ref(),
                 INVALID_REQUEST,
                 "Invalid Request: a message has \"jsonrpc\": \"2.0\"",
             ));
         }
-        let method = match message.remove("method") {
-            Some(Value::String(method)) => method,
-            Some(_) => {
+        let method = match method.map(string) {
+            Some(Some(method)) => method,
+            Some(None) => {
                 return Some(error(
                     id.as_ref(),
                     INVALID_REQUEST,
                     "Invalid Request: a method is a string",
                 ));
             }
-            None if message.contains_key("result") || message.contains_key("error") => {
+            None if result.is_some() || failure.is_some() => {
                 let to = id.map_or_else(|| "no request".to_owned(), |id| id.to_string());
                 log(&format!(
                     "ignored a message that is not a request or a notification: a response to \
@@ -648,16 +668,19 @@ impl<'a> Server<'a> {
         };
         // A notification gets no answer, and none of them asks the server to do anything.
         let id = id?;
-        let params = match message.remove("params") {
-            None | Some(Value::Null) => Map::new(),
-            Some(Value::Object(params)) => params,
-            Some(_) => {
-                return Some(error(
-                    Some(&id),
-                    INVALID_PARAMS,
-                    "Invalid params: params are an object",
-                ));
-            }
+        let params = match params {
+            None => Params::default(),
+            Some(params) if is_null(params) => Params::default(),
+            Some(params) => match Params::of(params) {
+                Some(params) => params,
+                None => {
+                    return Some(error(
+                        Some(&id),
+                        INVALID_PARAMS,
+                        "Invalid params: params are an object",
+                    ));
+                }
+            },
         };
         let answer = panic::catch_unwind(AssertUnwindSafe(|| self.request(&id, &method, params)));
         Some(answer.unwrap_or_else(|payload| {
@@ -671,7 +694,7 @@ impl<'a> Server<'a> {
     }
 
     /// The answer to request `id`, of `method` with `params`.
-    fn request(&mut self, id: &Value, method: &str, params: Map<String, Value>) -> String {
+    fn request(&mut self, id: &Value, method: &str, params: Params<'_>) -> String {
         let claim = match claim(&params) {
             Ok(claim) => claim,
             Err(rejected) => return rejected.answer(id),
@@ -730,8 +753,8 @@ impl<'a> Server<'a> {
 
     /// `initialize`: opens a session at the version the client asks for when it is one of
     /// [`HANDSHAKE`], else at [`PREVIOUS`].
-    fn initialize(&mut self, id: &Value, params: &Map<String, Value>) -> String {
-        let Some(asked) = params.get("protocolVersion").and_then(Value::as_str) else {
+    fn initialize(&mut self, id: &Value, params: &Params<'_>) -> String {
+        let Some(asked) = params.protocol_version.and_then(string) else {
             return error(
                 Some(id),
                 INVALID_PARAMS,
@@ -740,7 +763,7 @@ impl<'a> Server<'a> {
         };
         let version = HANDSHAKE
             .into_iter()
-            .find(|version| *version == asked)
+            .find(|version| *version == asked.as_str())
             .unwrap_or(PREVIOUS);
         // A second initialize opens the session anew, at the version it negotiates: tolerated on
         // purpose, since a session holds nothing but its revision, and every revision with a
@@ -759,8 +782,8 @@ impl<'a> Server<'a> {
     }
 
     /// `tools/list`: every tool, on one page.
-    fn list_tools(&self, reply: Reply<'_>, params: &Map<String, Value>) -> String {
-        if params.get("cursor").is_some_and(|cursor| !cursor.is_null()) {
+    fn list_tools(&self, reply: Reply<'_>, params: &Params<'_>) -> String {
+        if params.cursor.is_some_and(|cursor| !is_null(cursor)) {
             return error(
                 Some(reply.id),
                 INVALID_PARAMS,
@@ -779,8 +802,8 @@ impl<'a> Server<'a> {
     }
 
     /// `tools/call`: runs the tool `params` names on its arguments.
-    fn call_tool(&self, reply: Reply<'_>, mut params: Map<String, Value>) -> String {
-        let Some(name) = params.get("name").and_then(Value::as_str) else {
+    fn call_tool(&self, reply: Reply<'_>, params: Params<'_>) -> String {
+        let Some(name) = params.name.and_then(string) else {
             return error(
                 Some(reply.id),
                 INVALID_PARAMS,
@@ -794,9 +817,10 @@ impl<'a> Server<'a> {
                 format!("Unknown tool: {name}"),
             );
         };
-        let arguments = match params.remove("arguments") {
-            None | Some(Value::Null) => Value::Object(Map::new()),
-            Some(arguments @ Value::Object(_)) => arguments,
+        let arguments = match params.arguments {
+            None => NO_ARGUMENTS,
+            Some(arguments) if is_null(arguments) => NO_ARGUMENTS,
+            Some(arguments) if is_object(arguments) => arguments.get(),
             Some(_) => {
                 return error(
                     Some(reply.id),
@@ -815,29 +839,220 @@ impl<'a> Server<'a> {
     }
 }
 
+/// The members of a message that the server reads ([`members`]): its `id`, `jsonrpc`, `method`
+/// and `params`, and a response's `result` and `error`, by which a message without a `method` is
+/// known as one.
+const MESSAGE: [&str; 6] = ["id", "jsonrpc", "method", "params", "result", "error"];
+
+/// The members of a request's `params` that the server reads ([`Params`]).
+const PARAMS: [&str; 5] = ["_meta", "protocolVersion", "cursor", "name", "arguments"];
+
+/// A tool's arguments when a call gives none, or `null`: an empty object.
+const NO_ARGUMENTS: &str = "{}";
+
+/// The members of a request's `params` that the server reads, each as its JSON text ([`members`]):
+/// none when the request has no `params`, or `null` ones.
+#[derive(Debug, Default, Clone, Copy)]
+struct Params<'a> {
+    /// `_meta`, where a request of 2026-07-28 names its version ([`claim`]).
+    meta: Option<&'a RawValue>,
+    /// `initialize`'s `protocolVersion`.
+    protocol_version: Option<&'a RawValue>,
+    /// A `tools/list` cursor, which no request needs: there is one page.
+    cursor: Option<&'a RawValue>,
+    /// The tool a `tools/call` calls.
+    name: Option<&'a RawValue>,
+    /// The tool's arguments, read as its request type only once the tool is known.
+    arguments: Option<&'a RawValue>,
+}
+
+impl<'a> Params<'a> {
+    /// The members of `params`; `None` when it is not an object.
+    fn of(params: &'a RawValue) -> Option<Params<'a>> {
+        let [meta, protocol_version, cursor, name, arguments] = members(params.get(), PARAMS)?;
+        Some(Params {
+            meta,
+            protocol_version,
+            cursor,
+            name,
+            arguments,
+        })
+    }
+}
+
+/// The members named `names` of the JSON object `json`, each as its own JSON text, a slice of
+/// `json` left unparsed (of a member named twice, the later, as a JSON value of the object keeps
+/// it); every other member is passed over, and nothing is built of it. `None` when `json` is not
+/// an object. `json` has passed [`Json`]'s check, so what this passes over is JSON already.
+fn members<'j, const N: usize>(
+    json: &'j str,
+    names: [&str; N],
+) -> Option<[Option<&'j RawValue>; N]> {
+    let mut deserializer = serde_json::Deserializer::from_str(json);
+    let found = (&mut deserializer).deserialize_map(Members(&names)).ok()?;
+    deserializer.end().ok()?;
+    Some(found)
+}
+
+/// The visitor of an object whose members [`members`] keeps: the ones named in its list.
+struct Members<'n, const N: usize>(&'n [&'n str; N]);
+
+impl<'de, const N: usize> Visitor<'de> for Members<'_, N> {
+    type Value = [Option<&'de RawValue>; N];
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("an object")
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut found = [None; N];
+        while let Some(name) = map.next_key_seed(Name(self.0))? {
+            match name {
+                Some(at) => found[at] = Some(map.next_value()?),
+                None => {
+                    map.next_value::<IgnoredAny>()?;
+                }
+            }
+        }
+        Ok(found)
+    }
+}
+
+/// A member's name, read as its place in the list of names that [`members`] keeps: `None` for a
+/// name not in it.
+struct Name<'n, const N: usize>(&'n [&'n str; N]);
+
+impl<'de, const N: usize> DeserializeSeed<'de> for Name<'_, N> {
+    type Value = Option<usize>;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Option<usize>, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<const N: usize> Visitor<'_> for Name<'_, N> {
+    type Value = Option<usize>;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a member's name")
+    }
+
+    fn visit_str<E: de::Error>(self, name: &str) -> Result<Option<usize>, E> {
+        Ok(self.0.iter().position(|kept| *kept == name))
+    }
+}
+
+/// A JSON value read through and kept nowhere: [`Server::answer`] checks a line with it before
+/// it reads anything of the line, by the rules a parse into a JSON value holds the line to
+/// (strings of UTF-8 with valid escapes, numbers in range, at most 127 levels of nesting, nothing
+/// after the value), and builds nothing, whatever the line holds.
+struct Json;
+
+impl<'de> Deserialize<'de> for Json {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Json, D::Error> {
+        deserializer.deserialize_any(Json)
+    }
+}
+
+impl<'de> Visitor<'de> for Json {
+    type Value = Json;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Json, E> {
+        Ok(Json)
+    }
+
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Json, E> {
+        Ok(Json)
+    }
+
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Json, E> {
+        Ok(Json)
+    }
+
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Json, E> {
+        Ok(Json)
+    }
+
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Json, E> {
+        Ok(Json)
+    }
+
+    fn visit_unit<E: de::Error>(self) -> Result<Json, E> {
+        Ok(Json)
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Json, A::Error> {
+        while seq.next_element::<Json>()?.is_some() {}
+        Ok(Json)
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Json, A::Error> {
+        while map.next_entry::<Json, Json>()?.is_some() {}
+        Ok(Json)
+    }
+}
+
+/// The string that the JSON text `json` holds, unescaped; `None` for any other value.
+fn string(json: &RawValue) -> Option<String> {
+    let text = json.get();
+    if text.starts_with('"') {
+        serde_json::from_str(text).ok()
+    } else {
+        None
+    }
+}
+
+/// Whether the JSON text `json` holds an object.
+fn is_object(json: &RawValue) -> bool {
+    json.get().starts_with('{')
+}
+
+/// Whether the JSON text `json` is `null`.
+fn is_null(json: &RawValue) -> bool {
+    json.get() == "null"
+}
+
+/// The request id that the JSON text `json` holds: a string or an integer, else `None`.
+fn request_id(json: &RawValue) -> Option<Value> {
+    let text = json.get();
+    match text.as_bytes().first()? {
+        b'"' => serde_json::from_str(text).ok().map(Value::String),
+        b'-' | b'0'..=b'9' => serde_json::from_str::<Number>(text)
+            .ok()
+            .filter(|n| n.is_i64() || n.is_u64())
+            .map(Value::Number),
+        _ => None,
+    }
+}
+
 /// What the `_meta` of a request with `params` claims: no version, a version with a handshake
 /// (before 2026-07-28), or 2026-07-28 with the client's capabilities. A version of 2026-07-28
 /// or later that is not 2026-07-28, and a 2026-07-28 `_meta` without the client's
 /// capabilities, are refused.
-fn claim(params: &Map<String, Value>) -> Result<Claim, Rejected> {
-    let meta = match params.get("_meta") {
-        None => return Ok(Claim::None),
-        Some(Value::Object(meta)) => meta,
-        Some(_) => return Err(Rejected::params("params._meta is an object")),
+fn claim(params: &Params<'_>) -> Result<Claim, Rejected> {
+    let Some(meta) = params.meta else {
+        return Ok(Claim::None);
     };
-    let version = match meta.get(VERSION_KEY) {
+    let Some([version, capabilities]) = members(meta.get(), [VERSION_KEY, CAPABILITIES_KEY]) else {
+        return Err(Rejected::params("params._meta is an object"));
+    };
+    let version = match version.map(string) {
         None => return Ok(Claim::None),
-        Some(Value::String(version)) => version,
-        Some(_) => return Err(Rejected::params(&format!("{VERSION_KEY} is a string"))),
+        Some(Some(version)) => version,
+        Some(None) => return Err(Rejected::params(&format!("{VERSION_KEY} is a string"))),
     };
     // Revisions are dates, so they sort as strings.
     if version.as_str() < LATEST {
-        return Ok(Claim::Handshake(version.clone()));
+        return Ok(Claim::Handshake(version));
     }
     if version != LATEST {
-        return Err(Rejected::Version(version.clone()));
+        return Err(Rejected::Version(version));
     }
-    if !meta.get(CAPABILITIES_KEY).is_some_and(Value::is_object) {
+    if !capabilities.is_some_and(is_object) {
         return Err(Rejected::params(&format!(
             "a {LATEST} request carries {CAPABILITIES_KEY} in params._meta"
         )));
@@ -938,12 +1153,13 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
     }
 }
 
-/// One `tools/call` of the tool `spec` on `arguments`, answered as `reply`.
+/// One `tools/call` of the tool `spec` on `arguments`, the JSON text of an object, answered as
+/// `reply`.
 struct Call<'s, 'a> {
     server: &'s Server<'a>,
     spec: &'static Spec,
     reply: Reply<'s>,
-    arguments: Value,
+    arguments: &'s str,
 }
 
 impl Operate for Call<'_, '_> {
@@ -1019,14 +1235,19 @@ fn run<P, T: Serialize>(
     }
 }
 
-/// The request `arguments` stand for, of tool `spec`'s type: `E_INVALID_ARG` when they do not
-/// fit it, or break a rule of this server's ([`Refuse`]). Fields the type does not know are
-/// ignored, as the API's types always ignore them.
-fn request_of<R: Refuse>(spec: &Spec, arguments: Value) -> Result<R, OpError> {
-    let req: R = serde_json::from_value(arguments).map_err(|e| {
+/// The request `arguments` stand for, of tool `spec`'s type, read from their JSON text as that
+/// type and nothing else: `E_INVALID_ARG` when they do not fit it (a field of it named twice
+/// included), or break a rule of this server's ([`Refuse`]). Fields the type does not know are
+/// ignored, as the API's types always ignore them, and kept nowhere.
+fn request_of<R: Refuse>(spec: &Spec, arguments: &str) -> Result<R, OpError> {
+    let req: R = serde_json::from_str(arguments).map_err(|e| {
         OpError::new(
             ErrorCode::InvalidArg,
-            output::printable(&format!("the arguments are not a {}: {e}", spec.request)),
+            output::printable(&format!(
+                "the arguments are not a {}: {}",
+                spec.request,
+                unplaced(&e)
+            )),
         )
         .with_hint(format!(
             "the {} tool's inputSchema gives its arguments; swarmops schema {} gives the \
@@ -1036,6 +1257,17 @@ fn request_of<R: Refuse>(spec: &Spec, arguments: Value) -> Result<R, OpError> {
     })?;
     req.refuse()?;
     Ok(req)
+}
+
+/// What `e` says, without the line and column it was found at: they count from the start of a
+/// tool's arguments, which is no place in the line the client sent.
+fn unplaced(e: &serde_json::Error) -> String {
+    let said = e.to_string();
+    let place = format!(" at line {} column {}", e.line(), e.column());
+    match said.strip_suffix(&place) {
+        Some(said) => said.to_owned(),
+        None => said,
+    }
 }
 
 /// This server's own rules for a request, which its type cannot say: a request type with rules
@@ -2446,26 +2678,28 @@ mod tests {
 
     #[test]
     fn a_request_claims_its_version() {
-        let meta = |meta: Value| {
-            let mut params = Map::new();
-            params.insert("_meta".to_owned(), meta);
-            params
+        // What `claim` makes of `params`, read from their JSON text as the server reads them.
+        let claimed = |params: Value| {
+            let text = params.to_string();
+            let params: &RawValue = serde_json::from_str(&text).unwrap();
+            claim(&Params::of(params).unwrap())
         };
-        assert_eq!(claim(&Map::new()).ok(), Some(Claim::None));
-        assert_eq!(claim(&meta(json!({"other": 1}))).ok(), Some(Claim::None));
+        let meta = |meta: Value| json!({"_meta": meta});
+        assert_eq!(claimed(json!({})).ok(), Some(Claim::None));
+        assert_eq!(claimed(meta(json!({"other": 1}))).ok(), Some(Claim::None));
         for version in HANDSHAKE.into_iter().chain(["2024-11-05"]) {
             assert_eq!(
-                claim(&meta(json!({VERSION_KEY: version}))).ok(),
+                claimed(meta(json!({VERSION_KEY: version}))).ok(),
                 Some(Claim::Handshake(version.to_owned())),
                 "an earlier version is the session's, or wants one"
             );
         }
         assert_eq!(
-            claim(&meta(json!({VERSION_KEY: LATEST, CAPABILITIES_KEY: {}}))).ok(),
+            claimed(meta(json!({VERSION_KEY: LATEST, CAPABILITIES_KEY: {}}))).ok(),
             Some(Claim::Latest)
         );
         assert!(matches!(
-            claim(&meta(json!({VERSION_KEY: "2027-01-01", CAPABILITIES_KEY: {}}))),
+            claimed(meta(json!({VERSION_KEY: "2027-01-01", CAPABILITIES_KEY: {}}))),
             Err(Rejected::Version(version)) if version == "2027-01-01"
         ));
         for refused in [
@@ -2475,7 +2709,7 @@ mod tests {
             json!("not an object"),
         ] {
             assert!(
-                matches!(claim(&meta(refused.clone())), Err(Rejected::Params(_))),
+                matches!(claimed(meta(refused.clone())), Err(Rejected::Params(_))),
                 "{refused}"
             );
         }

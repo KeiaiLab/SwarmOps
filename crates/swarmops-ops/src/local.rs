@@ -389,7 +389,11 @@ const MAX_LAND_KEY: usize = 64;
 /// - `E_GIT_UNSUPPORTED` `{reason, …}`: a repository the import does not read as it is, refused
 ///   before anything past its configuration is read: `reason` `object_format`
 ///   `{object_format}`, `ref_storage` `{ref_storage}`, or `shallow`, whose hint deepens it
-///   (`git -C <path> fetch --unshallow`); or a commit no lossy class covers: `parents`
+///   (`git -C <path> fetch --unshallow`); `special_file` `{file}`, a FIFO, a socket or a device
+///   (or a symlink to one) where it reads a file of the git directory, named by its path there
+///   and refused before any file is read; `file_too_long` `{file, size, max}`, a file it reads
+///   whole there (a ref, `config`, `config.worktree`, `objects/info/alternates`) longer than
+///   16 MiB, refused unread; or a commit no lossy class covers: `parents`
 ///   `{commit, parents, max}`, more than 255 of them, or `mode` `{commit, path, mode}`.
 /// - `E_GIT_READ` `{reason, object?}`: an object the repository lacks (`missing`, as a partial
 ///   clone lacks blobs), whose bytes are not its id's (`corrupt`) or do not parse (`malformed`),
@@ -424,7 +428,8 @@ const MAX_LAND_KEY: usize = 64;
 /// - `E_GIT_NOT_A_REPO` `{git_path}`: no git repository gix can open at that path; the hint makes
 ///   one (`git init --bare <path>`).
 /// - `E_GIT_UNSUPPORTED` `{reason, …}`: a repository the export does not write as it is, as the
-///   import refuses a source: `object_format`, `ref_storage` or `shallow`.
+///   import refuses a source: `object_format`, `ref_storage`, `shallow`, `special_file` or
+///   `file_too_long`.
 /// - `E_INVALID_ARG` `{reason: "checked_out", branch}`: the branch `HEAD` names in a repository
 ///   with a work tree, refused with or without `force`, before the store is read; the hint
 ///   detaches `HEAD` or names another branch.

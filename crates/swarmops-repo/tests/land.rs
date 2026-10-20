@@ -654,9 +654,12 @@ impl Watch for ObjectReads {
 
 /// A keyed land whose base is off the target (M11's form) looks for its key only down to the
 /// target's first changeset at or below the base's generation: on a target of 1,000 changesets
-/// whose head is 3 generations above the base, it reads at most 4 of the target's changesets (its
-/// head and the 3 below it), and lands. The store is built without syncs, and read through a
-/// watcher that counts the reads of the target's changeset objects.
+/// whose head is 3 generations above the base, it reads at most 6 of the target's changesets, and
+/// lands. Its head and the one below it, as the check whether the change's head is on the target
+/// walks down to that head's generation, 2 below the target's (each step of a first-parent walk
+/// reads the changeset's object); then the target's head and the 3 below it, for the key. The
+/// store is built without syncs, and read through a watcher that counts the reads of the target's
+/// changeset objects.
 #[test]
 fn a_keyed_land_with_a_base_off_the_target_stops_at_its_generation() {
     let dir = tempfile::tempdir().unwrap();
@@ -697,7 +700,7 @@ fn a_keyed_land_with_a_base_off_the_target_stops_at_its_generation() {
     );
     let read = reads.reads.load(Ordering::SeqCst);
     assert!(
-        (1..=4).contains(&read),
+        (1..=6).contains(&read),
         "the land read {read} of the target's changesets"
     );
 }
