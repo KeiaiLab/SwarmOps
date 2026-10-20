@@ -52,6 +52,9 @@ serde_json.workspace = true
 
 [dev-dependencies]
 swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+# `git export`'s tests read what it wrote back through the git side (`GixSource`), and make a
+# commit in git through it (`GixSink`).
+swarmops-git = { path = "../swarmops-git", version = "0.1.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }

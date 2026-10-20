@@ -305,6 +305,7 @@ and starts no server either.
 | `derive [--after N] [--follow] [--interval-ms N] [--from-start]` | Derive ahead of any reader the eager derived values (the first-parent skip list) of the changesets the journal records. Once: up to 1,000 journal frames, from the first or after `--after N`, its `next` saying where to go on. With `--follow`: as they are committed, from the journal's end (its start with `--from-start`), until killed, one envelope a line for each run that derived something. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
 | `git import PATH [--ref GIT_REF] [--into REF] [--lossy CLASS]... [--gitlinks refuse\|drop]` | Bring the history of the git repository at `PATH` in: every commit `--ref` (`HEAD`) reaches that the store does not hold, then move `--into` (`main`) to it ([Bring a git repository in](#bring-a-git-repository-in)). |
+| `git export PATH [--ref REF] [--branch BRANCH] [--force]` | Write the history of `--ref` (`main`) into the git repository at `PATH`: every commit the last export into `--branch` (`main`) does not reach, then move `--branch` to the export of `--ref`'s head ([Send the work back to git](#send-the-work-back-to-git)). |
 | `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([MCP](#mcp)). |
 
 ### Revisions and change lists
@@ -330,7 +331,9 @@ whole-file puts would revert the winner's edits to shared files), and publish wi
 `--repo <store>` names the store, else `SWARMOPS_REPO`. Reads need no identity. A commit, a ref
 move or a git import needs one: `--as <family>/<instance>`, else `SWARMOPS_AGENT`, and `SWARMOPS_RUN_ID`
 naming the agent's run if it has one. The changeset records it (and the journal records who
-moved each ref); without one, a mutation fails with `E_IDENTITY_REQUIRED` (exit 5).
+moved each ref); without one, a mutation fails with `E_IDENTITY_REQUIRED` (exit 5). A git export
+needs none: it records nothing in the store's history, and writes only a git repository and the
+store's caches.
 
 ### Bring a git repository in
 
@@ -369,6 +372,37 @@ SHA-256 repository, reftable refs and a shallow clone are refused (`E_GIT_UNSUPP
 is an object the repository lacks, as a partial clone lacks blobs (`E_GIT_READ`). `git import`
 is not an MCP tool: an agent runs it as a command.
 
+### Send the work back to git
+
+`git export PATH` writes the history behind a store ref (`--ref`, `main` by default) into a
+branch (`--branch`, `main` by default) of the git repository at `PATH`, written on this host
+(a relative path from the working directory), never by a server: a bare repository, which
+`git init --bare` makes, or a work tree, whose checked-out branch it refuses as `git push` does
+(`E_INVALID_ARG`). Every commit the branch does not reach is written, parents first: a changeset
+imported from git as the commit it came from, byte for byte, and one made in the store as a
+commit with its own author and committer and a `SwarmOps-Changeset:` trailer (with
+`SwarmOps-Land-Key:` and `SwarmOps-Squashed-From:` once a land records them). The objects are made
+durable before the branch moves, by compare-and-swap, and the same store gives the same commits
+every time. It needs no identity.
+
+```sh
+so git export ~/src/acme --branch stable   # stable moves to the export of main's head
+so git export ~/src/acme --branch stable   # again: exports 0, stable is up to date
+git -C ~/src/acme push origin stable       # and on, as before
+```
+
+Run again, `git export` writes only what the branch's last export does not reach. A branch at a
+commit that is no export of `--ref`'s head or of an ancestor of it fails with
+`E_GIT_EXPORT_DIVERGED` (exit 3), and nothing is written; `details.reason` says why, and the hint
+what to do: `branch_ahead` (commits made in git on top of the export, which `git import` brings
+in), `both_moved` (git and the store both moved on, and nothing is merged), `branch_moved`,
+`source_moved_back` (`--ref` moved back, as `swarmops op log` shows), `lossy_history` (the branch
+holds the commits a lossy import was made of) or `moved_during_export` (run it again).
+`--force` moves the branch all the same, still by compare-and-swap, replacing what git holds there.
+A branch whose lock file another git process holds, or a dead one left, is refused
+(`E_GIT_WRITE`, `ref_locked`) until the file is removed. `git export` is not an MCP tool: an agent
+runs it as a command.
+
 ### Output and exit codes
 
 Every command prints exactly one JSON envelope on stdout (only `--help`, `--version` and the
@@ -393,7 +427,7 @@ the next command to run. The exit code is
 | 0 | Success. | |
 | 1 | The operation failed. | `E_EMPTY_COMMIT`, `E_STORE_CORRUPT`, `E_IO` |
 | 2 | A malformed request or command line. | `E_INVALID_ARG` |
-| 3 | A conflict with what the change lands on: resolve it, then run it again. | `E_GIT_IMPORT_DIVERGED` |
+| 3 | A conflict with what the change lands on: resolve it, then run it again. | `E_GIT_IMPORT_DIVERGED`, `E_GIT_EXPORT_DIVERGED` |
 | 4 | Retryable: the operation can succeed if run again (after a CAS mismatch, on top of `details.actual`, with your edits re-applied there). | `E_CAS_MISMATCH`, `E_BUSY`, `E_IO_TRANSIENT` |
 | 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED` |
 | 6 | Something it names does not exist. | `E_NOT_A_REPO`, `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND` |

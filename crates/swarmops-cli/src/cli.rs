@@ -104,6 +104,38 @@ const GIT_LOSSY_HELP: &str =
 const GIT_GITLINKS_HELP: &str = "What to do with a submodule's entry: refuse it, or drop it as \
 --lossy gitlinks does; given, it decides that class whatever --lossy says";
 
+/// `git export`'s short help.
+const GIT_EXPORT_HELP: &str = "Send the store's history to git: write every commit of --ref's \
+history that --branch's last export does not reach into the git repository at PATH, then move \
+--branch to it";
+
+/// `git export`'s long help.
+const GIT_EXPORT_LONG_HELP: &str = "Send the store's history to git: every commit of --ref's \
+history that the last export into --branch does not reach is written into the git repository at \
+PATH, parents first, made durable, and --branch moves to the export of --ref's head, created if it \
+does not exist.
+
+The repository is written on this host, at PATH, relative to the working directory: a bare \
+repository (git init --bare makes one), or a work tree, which holds .git and whose checked-out \
+branch is refused (E_INVALID_ARG). A changeset imported from git exports to the commit it came from, byte for byte; \
+one made in the store exports to a commit with its own signatures and SwarmOps-* trailers, the \
+same commit every time. Run again, it writes only what the branch does not reach, and nothing \
+when the branch is at the export of --ref's head. It needs no identity.
+
+A branch at a commit that is no export of --ref's head or of an ancestor of it fails with \
+E_GIT_EXPORT_DIVERGED (exit 3), details.reason saying why, and nothing is written; --force moves \
+it all the same, still by compare-and-swap. Then git push sends the branch on.";
+
+/// `git export --ref`'s help.
+const GIT_EXPORT_REF_HELP: &str = "The store ref whose history to export: main or release/<name>";
+
+/// `git export --branch`'s help.
+const GIT_EXPORT_BRANCH_HELP: &str = "The git branch to write, refs/heads/<BRANCH>: main, or a trunk named otherwise, such as stable";
+
+/// `git export --force`'s help.
+const GIT_EXPORT_FORCE_HELP: &str = "Move a branch that diverged all the same, replacing what git \
+holds there (by compare-and-swap; never a checked-out branch)";
+
 /// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
 /// on stdout.
 #[derive(Parser, Debug)]
@@ -279,7 +311,7 @@ pub enum Command {
         #[arg(long)]
         deep: bool,
     },
-    /// Bring history in from git.
+    /// Bring history in from git, or send it back.
     #[command(subcommand)]
     Git(GitCommand),
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
@@ -428,6 +460,22 @@ pub enum GitCommand {
         lossy: Vec<LossyArg>,
         #[arg(long, value_name = "WHAT", help = GIT_GITLINKS_HELP)]
         gitlinks: Option<Gitlinks>,
+    },
+    #[command(about = GIT_EXPORT_HELP, long_about = GIT_EXPORT_LONG_HELP)]
+    Export {
+        /// The git repository's directory.
+        path: String,
+        #[arg(long = "ref", value_name = "REF", default_value = "main", help = GIT_EXPORT_REF_HELP)]
+        source_ref: String,
+        #[arg(
+            long,
+            value_name = "BRANCH",
+            default_value = "main",
+            help = GIT_EXPORT_BRANCH_HELP
+        )]
+        branch: String,
+        #[arg(long, help = GIT_EXPORT_FORCE_HELP)]
+        force: bool,
     },
 }
 
@@ -623,6 +671,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["ref", "delete"] => "ref_delete",
         ["verify"] => "verify",
         ["git", "import"] => "git_import",
+        ["git", "export"] => "git_export",
         ["mcp"] => "mcp",
         ["derive"] => "derive",
         _ => return None,
@@ -750,10 +799,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 21);
+        assert_eq!(ops.len(), 22);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 21, "two subcommands name one op");
+        assert_eq!(ops.len(), 22, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["git"]), None);
@@ -942,6 +991,43 @@ mod tests {
         };
         assert_eq!(error.kind(), ErrorKind::InvalidValue);
         assert_eq!(path, ["git", "import"]);
+    }
+
+    /// A `git export` line: its defaults (`main` into `main`, not forced), and `--ref`, `--branch`
+    /// and `--force` given.
+    #[test]
+    fn a_git_export_line_takes_its_defaults() {
+        let parsed = |line: &[&str]| {
+            let Parsed::Run(cli, op) = parse(&args(line)) else {
+                panic!("{line:?}: a valid line");
+            };
+            assert_eq!(op, "git_export", "{line:?}");
+            let Command::Git(GitCommand::Export {
+                path,
+                source_ref,
+                branch,
+                force,
+            }) = cli.command
+            else {
+                panic!("{line:?}: git export");
+            };
+            (path, source_ref, branch, force)
+        };
+        let defaults = parsed(&["git", "export", "repo.git"]);
+        let expected = ("repo.git".into(), "main".into(), "main".into(), false);
+        assert_eq!(defaults, expected);
+        let line = [
+            "git",
+            "export",
+            "repo.git",
+            "--ref",
+            "release/x",
+            "--branch",
+            "stable",
+            "--force",
+        ];
+        let expected = ("repo.git".into(), "release/x".into(), "stable".into(), true);
+        assert_eq!(parsed(&line), expected);
     }
 
     #[test]

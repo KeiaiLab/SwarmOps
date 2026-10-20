@@ -1,7 +1,9 @@
-//! `swarmops git import`, through the binary: a git repository's history brought into a store from
-//! the test kit's git fixtures (`swarmops_testkit::git`), which real git made and which no test
-//! runs git to read; the error each refusal exits with, and what it names; and that the import is
-//! no MCP tool, since it reads its source on the caller's host (the M3 plan's decision 7).
+//! `swarmops git import` and `swarmops git export`, through the binary: a git repository's history
+//! brought into a store from the test kit's git fixtures (`swarmops_testkit::git`), which real git
+//! made and which no test runs git to read, and a store's history written back into a git
+//! repository, read back through the git side's own reader (`swarmops_git::GixSource`); the error
+//! each refusal exits with, and what it names; and that neither is an MCP tool, since each works
+//! on a repository on the caller's host (the M3 plan's decision 7, the M8 plan's decision 1).
 
 use serde_json::{Value, json};
 use swarmops_testkit::git::{GitFixture, Manifest, ManifestCommit, fixture};
@@ -362,6 +364,420 @@ fn git_import_is_not_an_mcp_tool() {
         .collect();
     assert!(names.contains(&"commit"), "{listed}");
     assert!(!names.contains(&"git_import"), "{listed}");
+    assert_eq!(called["id"], 2, "{called}");
+    assert_eq!(called["error"]["code"], -32602, "{called}");
+}
+
+/// `git export <destination> <args…>` on `store`, with no identity: an export needs none (the M8
+/// plan's decision 8).
+fn export(store: &Store, destination: &str, args: &[&str]) -> Run {
+    let mut line = vec!["git", "export", destination];
+    line.extend_from_slice(args);
+    store.read(&line)
+}
+
+/// `path` as the command line gives it.
+fn utf8(path: &std::path::Path) -> String {
+    path.to_str().expect("UTF-8 temp paths").to_owned()
+}
+
+/// The loose object files of the git repository whose git directory is `git_dir`: those of its
+/// fan-out directories, named by two hex digits (`info/` and `pack/` are not).
+fn loose_objects(git_dir: &std::path::Path) -> usize {
+    let objects = std::fs::read_dir(git_dir.join("objects")).expect("objects/");
+    let mut count = 0;
+    for fanout in objects {
+        let fanout = fanout.expect("an entry of objects/");
+        if fanout.file_name().len() == 2 {
+            count += std::fs::read_dir(fanout.path()).expect("a fan-out").count();
+        }
+    }
+    count
+}
+
+/// The commit the branch `name` of the git repository at `git_dir` names, read through the git
+/// side's reader.
+fn branch_at(git_dir: &std::path::Path, name: &str) -> String {
+    use swarmops_git::{GitSource as _, GixSource};
+
+    let repository = GixSource::open(git_dir).expect("open the repository");
+    let commit = repository.resolve(&format!("refs/heads/{name}"));
+    commit.expect("the branch exists").to_string()
+}
+
+/// A store that imported the fixture `name` from its `HEAD`; the fixture, and the head's
+/// changeset.
+fn imported(name: &str) -> (Store, Source, String) {
+    let store = Store::init();
+    let source = Source::new(name);
+    let result = import(&store, &source.path, &[]).ok();
+    let head = result["head_changeset"].as_str().expect("an id").to_owned();
+    (store, source, head)
+}
+
+/// `linear` imported and exported into an empty repository, whose branch git then moved to a
+/// commit of another history (the second commit of `roots`, written there through the git
+/// side's writer, its tree and parent not): what the tests of a moved branch start from.
+struct Moved {
+    /// The store, which imported `linear`.
+    store: Store,
+    /// The repository the store exported to, and git moved the branch of.
+    destination: swarmops_testkit::git::EmptyRepository,
+    /// The destination's path.
+    path: String,
+    /// The changeset at `main`'s head, `linear`'s tip imported.
+    head: String,
+    /// `linear`'s tip: the export of `head`.
+    tip: String,
+    /// The commit of `roots` the branch names now.
+    foreign: String,
+}
+
+impl Moved {
+    /// The store, the destination and the branch as the tests of a moved branch start from them.
+    fn new() -> Moved {
+        use swarmops_git::{BranchUpdate, GitOid, GitSink as _, GixSink, RawKind};
+
+        let (store, linear, head) = imported("linear");
+        let tip = linear.commit("refs/heads/main");
+        let destination = swarmops_testkit::git::empty_repository();
+        let path = utf8(&destination.dir);
+        assert_eq!(export(&store, &path, &[]).ok()["head_sha"], tip.as_str());
+        let roots = Source::new("roots");
+        let commit = &roots.commits()[1];
+        let mut sink = GixSink::open(&destination.dir).expect("open the destination");
+        let foreign = sink.write_object(RawKind::Commit, &commit.raw).unwrap();
+        assert_eq!(foreign.to_string(), commit.oid);
+        sink.sync(&[foreign]).unwrap();
+        let exported: GitOid = tip.parse().expect("a commit id");
+        let moved = sink.cas_branch("main", Some(exported), foreign);
+        assert_eq!(moved, Ok(BranchUpdate::Applied));
+        Moved {
+            store,
+            destination,
+            path,
+            head,
+            tip,
+            foreign: foreign.to_string(),
+        }
+    }
+}
+
+/// A repository with a work tree, whose `HEAD` names `main`: an empty repository's files as its
+/// `.git`, `bare = false`.
+fn work_tree() -> tempfile::TempDir {
+    let made = swarmops_testkit::git::empty_repository();
+    let work = tempfile::tempdir().expect("make a temp dir");
+    let dot_git = work.path().join(".git");
+    std::fs::rename(&made.dir, &dot_git).expect("move the repository under .git");
+    let config = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n";
+    std::fs::write(dot_git.join("config"), config).expect("write .git/config");
+    work
+}
+
+/// `linear` imported, then exported into an empty repository: exit 0, its five commits written
+/// with every tree and blob they reach, and the branch created at the fixture's tip; no old sha,
+/// nothing incremental, nothing rewritten, and `main`, read once, echoed in `meta.resolved`. Read
+/// back through the git side, every commit of the fixture is there with its own bytes, every tree
+/// with its bytes and every blob with its size.
+#[test]
+fn git_export_round_trips_an_imported_fixture() {
+    use swarmops_git::{GitOid, GitSource as _, GixSource, RawKind};
+
+    let (store, linear, head) = imported("linear");
+    let tip = linear.commit("refs/heads/main");
+    let destination = swarmops_testkit::git::empty_repository();
+    let run = export(&store, &utf8(&destination.dir), &[]);
+    let result = run.ok();
+    let manifest = linear.manifest();
+    let objects = manifest.commits.len() + manifest.trees.len() + manifest.blobs.len();
+    assert_eq!(result["exported"], 5, "{result}");
+    assert_eq!(result["objects_written"], objects, "{result}");
+    assert_eq!(result["head_changeset"], head.as_str(), "{result}");
+    assert_eq!(result["head_sha"], tip.as_str(), "{result}");
+    assert_eq!(result["branch"], "main", "{result}");
+    assert!(result.get("old_sha").is_none(), "{result}");
+    assert_eq!(result["branch_moved"], true, "{result}");
+    assert_eq!(result["incremental"], false, "{result}");
+    assert_eq!(result["rewritten"], 0, "{result}");
+    assert!(result.get("warnings").is_none(), "{result}");
+    let resolved = &run.envelope()["meta"]["resolved"];
+    assert_eq!(resolved, &json!({"main": head}), "{run}");
+
+    let repository = GixSource::open(&destination.dir).expect("open the export");
+    assert_eq!(branch_at(&destination.dir, "main"), tip);
+    let read = |oid: &str| {
+        let oid: GitOid = oid.parse().expect("an object id");
+        repository.read(oid).expect("the export holds it")
+    };
+    for commit in linear.commits() {
+        assert_eq!(read(&commit.oid), (RawKind::Commit, commit.raw.clone()));
+    }
+    for (oid, bytes) in &manifest.trees {
+        assert_eq!(read(oid), (RawKind::Tree, bytes.clone()), "tree {oid}");
+    }
+    for (oid, size) in &manifest.blobs {
+        let (kind, bytes) = read(oid);
+        let read = (kind, u64::try_from(bytes.len()).expect("a length"));
+        assert_eq!(read, (RawKind::Blob, *size), "blob {oid}");
+    }
+}
+
+/// The same export again finds the branch at the head's export: it exports nothing, writes no
+/// object, leaves the branch where it is (`old_sha` is `head_sha`) and goes on from the export the
+/// branch holds; `--human` says it in a line.
+#[test]
+fn git_export_again_is_a_no_op() {
+    let (store, linear, _) = imported("linear");
+    let tip = linear.commit("refs/heads/main");
+    let destination = swarmops_testkit::git::empty_repository();
+    let path = utf8(&destination.dir);
+    let first = export(&store, &path, &[]).ok();
+    let files = loose_objects(&destination.dir);
+    let again = export(&store, &path, &[]).ok();
+    assert_eq!(again["exported"], 0, "{again}");
+    assert_eq!(again["objects_written"], 0, "{again}");
+    assert_eq!(again["branch_moved"], false, "{again}");
+    assert_eq!(again["incremental"], true, "{again}");
+    assert_eq!(again["head_sha"], first["head_sha"], "{again}");
+    assert_eq!(again["old_sha"], tip.as_str(), "{again}");
+    assert_eq!(
+        loose_objects(&destination.dir),
+        files,
+        "objects were written"
+    );
+
+    let human = store.read(&["--human", "git", "export", &path]);
+    assert_eq!(human.exit(), 0, "{human}");
+    let line = format!("main is up to date at {tip}");
+    assert_eq!(human.stdout.lines().next(), Some(line.as_str()), "{human}");
+}
+
+/// A branch moved in git to a commit of another history after an export: the next export is
+/// `E_GIT_EXPORT_DIVERGED`, exit 3, not retryable, `details.reason` `branch_moved`, naming the
+/// branch, the commit it names and the source's head, with a hint that names `--force`; nothing
+/// is written, and the branch stays where git moved it.
+#[test]
+fn git_export_of_a_moved_branch_exits_3() {
+    let moved = Moved::new();
+    let files = loose_objects(&moved.destination.dir);
+    let failed = export(&moved.store, &moved.path, &[]);
+    assert_eq!(failed.exit(), 3, "{failed}");
+    let error = failed.err("E_GIT_EXPORT_DIVERGED");
+    assert_eq!(error["retryable"], false, "{failed}");
+    let details = json!({
+        "reason": "branch_moved",
+        "branch": "main",
+        "git_head": moved.foreign,
+        "head_changeset": moved.head,
+    });
+    assert_eq!(error["details"], details, "{failed}");
+    let hint = error["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("--force"), "{hint}");
+    assert_eq!(
+        loose_objects(&moved.destination.dir),
+        files,
+        "nothing is written"
+    );
+    assert_eq!(branch_at(&moved.destination.dir, "main"), moved.foreign);
+}
+
+/// `--force` moves a moved branch all the same, by compare-and-swap against the commit the export
+/// read: to the export of the source's head again, from the commit git moved it to (`old_sha`),
+/// not incrementally, with a warning that says it had diverged. The first export's objects are
+/// still there, so it writes no commit: it reads them back.
+#[test]
+fn git_export_force_moves_it() {
+    let moved = Moved::new();
+    let forced = export(&moved.store, &moved.path, &["--force"]).ok();
+    assert_eq!(forced["branch_moved"], true, "{forced}");
+    assert_eq!(forced["old_sha"], moved.foreign.as_str(), "{forced}");
+    assert_eq!(forced["head_sha"], moved.tip.as_str(), "{forced}");
+    assert_eq!(forced["incremental"], false, "{forced}");
+    assert_eq!(forced["exported"], 0, "{forced}");
+    let warnings = forced["warnings"].as_array().expect("a warning");
+    assert_eq!(warnings.len(), 1, "{forced}");
+    let warning = warnings[0].as_str().unwrap_or_default();
+    assert!(warning.contains("branch_moved"), "{warning}");
+    assert_eq!(branch_at(&moved.destination.dir, "main"), moved.tip);
+}
+
+/// In a repository with a work tree whose `HEAD` names the branch, the export refuses to move it,
+/// as `git push` does by default: `E_INVALID_ARG`, exit 2, `details.reason` `checked_out` and the
+/// branch, `--force` or not, and nothing is written. Another branch of the same repository takes
+/// the export.
+#[test]
+fn git_export_into_a_checked_out_branch_is_refused() {
+    let (store, _, _) = imported("linear");
+    let work = work_tree();
+    let path = utf8(work.path());
+    for args in [&[][..], &["--force"]] {
+        let failed = export(&store, &path, args);
+        assert_eq!(failed.exit(), 2, "{failed}");
+        let error = failed.err("E_INVALID_ARG");
+        let details = json!({"reason": "checked_out", "branch": "main"});
+        assert_eq!(error["details"], details, "{failed}");
+    }
+    assert_eq!(
+        loose_objects(&work.path().join(".git")),
+        0,
+        "nothing is written"
+    );
+    let other = export(&store, &path, &["--branch", "exported"]).ok();
+    assert_eq!(other["exported"], 5, "{other}");
+    assert_eq!(other["branch"], "exported", "{other}");
+}
+
+/// A path where no git repository is, missing or a plain directory, is `E_GIT_NOT_A_REPO`, exit
+/// 6, naming the path as it was given, with the hint that makes one: an export writes into a
+/// repository that exists.
+#[test]
+fn git_export_of_a_missing_path_is_e_git_not_a_repo_exit_6() {
+    let (store, _, _) = imported("linear");
+    let missing = nowhere(&store);
+    let plain = utf8(store.tmp());
+    for path in [missing, plain] {
+        let failed = export(&store, &path, &[]);
+        assert_eq!(failed.exit(), 6, "{failed}");
+        let error = failed.err("E_GIT_NOT_A_REPO");
+        assert_eq!(error["details"], json!({"git_path": path}), "{failed}");
+        let hint = error["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("git init --bare"), "{hint}");
+    }
+}
+
+/// A source ref the store does not have is `E_REV_NOT_FOUND`, exit 6, naming it, with the hint
+/// to list the refs: `main` in a store that has none yet, and a release ref no one made. Nothing
+/// is written.
+#[test]
+fn git_export_of_an_unknown_source_ref_is_e_rev_not_found() {
+    let store = Store::init();
+    let destination = swarmops_testkit::git::empty_repository();
+    let path = utf8(&destination.dir);
+    for (args, rev) in [
+        (&[][..], "main"),
+        (&["--ref", "release/none"], "release/none"),
+    ] {
+        let failed = export(&store, &path, args);
+        assert_eq!(failed.exit(), 6, "{failed}");
+        let error = failed.err("E_REV_NOT_FOUND");
+        assert_eq!(error["details"], json!({"rev": rev}), "{failed}");
+        assert_eq!(error["hint"], "swarmops ref list", "{failed}");
+    }
+    assert_eq!(loose_objects(&destination.dir), 0, "nothing is written");
+}
+
+/// A branch name git does not take is `E_REF_NAME_INVALID`, naming it, with a hint that says how
+/// git checks one, and nothing is written. A source ref that is no store ref name is the same
+/// code, before the repository is opened, so that a missing one says nothing of itself.
+#[test]
+fn git_export_into_a_bad_branch_name_is_e_ref_name_invalid() {
+    let (store, _, _) = imported("linear");
+    let destination = swarmops_testkit::git::empty_repository();
+    let path = utf8(&destination.dir);
+    for name in ["a..b", "x.lock", ""] {
+        let failed = export(&store, &path, &["--branch", name]);
+        assert_eq!(failed.exit(), 1, "{failed}");
+        let error = failed.err("E_REF_NAME_INVALID");
+        assert_eq!(error["details"], json!({"name": name}), "{failed}");
+        let hint = error["hint"].as_str().unwrap_or_default();
+        assert!(hint.contains("git check-ref-format --branch"), "{hint}");
+    }
+    assert_eq!(loose_objects(&destination.dir), 0, "nothing is written");
+    for repository in [path, nowhere(&store)] {
+        let failed = export(&store, &repository, &["--ref", "feature/x"]);
+        assert_eq!(failed.exit(), 1, "{failed}");
+        let error = failed.err("E_REF_NAME_INVALID");
+        assert_eq!(error["details"], json!({"name": "feature/x"}), "{failed}");
+    }
+}
+
+/// A branch whose lock file is there, as another git process holding the branch or one that died
+/// leaves it, is `E_GIT_WRITE`, exit 1, `details.reason` `ref_locked` with the lock's path in the
+/// git directory, and a hint to remove it once no git process runs; the branch is not made. Once
+/// the lock is gone, the same export makes it, at the export of the head.
+#[test]
+fn git_export_with_a_held_ref_lock_is_e_git_write() {
+    let (store, linear, _) = imported("linear");
+    let destination = swarmops_testkit::git::empty_repository();
+    let path = utf8(&destination.dir);
+    let lock = destination.dir.join("refs/heads/main.lock");
+    std::fs::write(&lock, "").expect("write the lock");
+    let failed = export(&store, &path, &[]);
+    assert_eq!(failed.exit(), 1, "{failed}");
+    let error = failed.err("E_GIT_WRITE");
+    let details = json!({"reason": "ref_locked", "path": "refs/heads/main.lock"});
+    assert_eq!(error["details"], details, "{failed}");
+    assert_eq!(error["retryable"], false, "{failed}");
+    let hint = error["hint"].as_str().unwrap_or_default();
+    assert!(hint.contains("refs/heads/main.lock"), "{hint}");
+    assert!(
+        !destination.dir.join("refs/heads/main").exists(),
+        "no branch"
+    );
+
+    std::fs::remove_file(&lock).expect("remove the lock");
+    let again = export(&store, &path, &[]).ok();
+    assert_eq!(again["branch_moved"], true, "{again}");
+    let tip = linear.commit("refs/heads/main");
+    assert_eq!(branch_at(&destination.dir, "main"), tip);
+}
+
+/// An export writes a git repository and the store's caches, never a journal frame, so it needs
+/// no identity (the M8 plan's decision 8): without `--as` or `SWARMOPS_AGENT` it exits 0, and the
+/// store's journal does not grow.
+#[test]
+fn git_export_needs_no_identity() {
+    let (store, _, _) = imported("linear");
+    let destination = swarmops_testkit::git::empty_repository();
+    let journal = store.journal_len();
+    let run = store.read(&["git", "export", &utf8(&destination.dir)]);
+    assert_eq!(run.exit(), 0, "{run}");
+    assert_eq!(run.ok()["exported"], 5, "{run}");
+    assert_eq!(
+        store.journal_len(),
+        journal,
+        "an export writes no journal frame"
+    );
+}
+
+/// `swarmops mcp` serves no `git_export` tool: `tools/list` names none, and a `tools/call` of it
+/// is refused as a call of an unknown tool (`-32602`), so that no agent of the server can make it
+/// write a path. (`mcp_tools_list_schema_snapshot` pins the tools themselves.)
+#[test]
+fn git_export_is_not_an_mcp_tool() {
+    let store = Store::init();
+    let meta = json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "swarmops-tests", "version": "0"},
+    });
+    let list = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {"_meta": meta},
+    });
+    let call = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": "git_export", "arguments": {"git_path": "."}, "_meta": meta},
+    });
+    let args = ["--repo", store.path(), "--as", AGENT, "mcp"];
+    let served = run_bin(BIN, &args, &[], &format!("{list}\n{call}\n"));
+    assert_eq!(served.exit(), 0, "{served}");
+    let replies: Vec<Value> = (served.stdout.lines())
+        .map(|line| serde_json::from_str(line).expect("one JSON-RPC message a line"))
+        .collect();
+    let [listed, called] = &replies[..] else {
+        panic!("two replies: {served}");
+    };
+    let names: Vec<&str> = (listed["result"]["tools"].as_array().expect("tools").iter())
+        .map(|tool| tool["name"].as_str().expect("a name"))
+        .collect();
+    assert!(names.contains(&"commit"), "{listed}");
+    assert!(!names.contains(&"git_export"), "{listed}");
     assert_eq!(called["id"], 2, "{called}");
     assert_eq!(called["error"]["code"], -32602, "{called}");
 }

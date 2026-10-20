@@ -1386,9 +1386,6 @@ fn error_codes_reach_the_cli() {
             "E_MAINTENANCE_BUSY",
             "the maintenance lease arrives after M1",
         ),
-        // `git export`'s codes, in the schema before the command that raises them.
-        ("E_GIT_EXPORT_DIVERGED", "no command exports to git yet"),
-        ("E_GIT_WRITE", "no command exports to git yet"),
     ];
     let mut s = Session::new();
     let store = s.store();
@@ -1408,7 +1405,8 @@ fn error_codes_reach_the_cli() {
         assert_eq!(failed.code(), code, "{args:?}");
         raised.push(code);
     }
-    // `git import`'s, from git fixtures, each named after its fixture in the transcript.
+    // `git import`'s, from git fixtures, each named after its fixture in the transcript; then
+    // `git export`'s, into `refs`' repository and into an empty one whose branch is locked.
     let fixtures = ["refs", "gitlinks", "shallow", "partial_clone"].map(|name| {
         let fixture = swarmops_testkit::git::fixture(name);
         s.name(fixture.dir.to_str().expect("UTF-8 temp paths"), name);
@@ -1423,7 +1421,12 @@ fn error_codes_reach_the_cli() {
             .expect("the fixture holds a repository");
         repo.to_str().expect("UTF-8 temp paths").to_owned()
     };
-    for (code, args) in git_error_cases(&s, &store, &repo) {
+    let locked = swarmops_testkit::git::empty_repository();
+    let exports = git_export_error_cases(&mut s, &store, &repo("refs"), &locked);
+    for (code, args) in git_error_cases(&s, &store, &repo)
+        .into_iter()
+        .chain(exports)
+    {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
         let failed = s.run(&args);
         assert_eq!(failed.code(), code, "{args:?}");
@@ -1593,6 +1596,35 @@ fn git_error_cases(
             "E_GIT_READ",
             import(&[&repo("partial_clone"), "--into", "release/partial"]),
         ),
+    ]
+}
+
+/// The failing `git export`s of [`error_codes_reach_the_cli`], each with the code it must raise,
+/// from `store`, whose main holds a native changeset, run without an identity, which an export
+/// does not need: into `refs`, the `refs` fixture's repository, whose main is a history of its
+/// own, and into `locked`, an empty repository, named `[locked]` in the transcript, whose
+/// branch's lock file this writes.
+fn git_export_error_cases(
+    s: &mut Session,
+    store: &str,
+    refs: &str,
+    locked: &swarmops_testkit::git::EmptyRepository,
+) -> Vec<(&'static str, Vec<String>)> {
+    let locked_path = locked.dir.to_str().expect("UTF-8 temp paths");
+    s.name(locked_path, "locked");
+    fs::write(locked.dir.join("refs/heads/main.lock"), "").unwrap();
+    let export = |args: &[&str]| -> Vec<String> {
+        ["--repo", store, "git", "export"]
+            .iter()
+            .chain(args)
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    };
+    vec![
+        // main's head has no export in what the branch holds.
+        ("E_GIT_EXPORT_DIVERGED", export(&[refs])),
+        // The objects are written and made durable, and the lock stops the branch's move.
+        ("E_GIT_WRITE", export(&[locked_path])),
     ]
 }
 

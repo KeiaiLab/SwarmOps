@@ -666,6 +666,62 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store git export [refs]/repo.git",
+    "exit": 3,
+    "stdout": {
+      "ok": false,
+      "op": "git_export",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_EXPORT_DIVERGED",
+        "message": "the branch main has diverged from [c1] (branch_moved): it names [id3]",
+        "retryable": false,
+        "exit": 3,
+        "details": {
+          "branch": "main",
+          "git_head": "[id3]",
+          "head_changeset": "[c1]",
+          "reason": "branch_moved"
+        },
+        "hint": "git -C [refs]/repo.git log refs/heads/main shows what the branch holds; --force replaces it with the export"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store git export [locked]",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "git_export",
+      "api": 1,
+      "error": {
+        "code": "E_GIT_WRITE",
+        "message": "refs/heads/main.lock is there: another writer holds the branch, or one that died left it",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "path": "refs/heads/main.lock",
+          "reason": "ref_locked"
+        },
+        "hint": "once no git process runs in the repository, remove refs/heads/main.lock from its git directory (git -C [locked] rev-parse --git-path refs/heads/main.lock names it), as git itself says, then run the export again"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store verify",
     "exit": 1,
     "stdout": {
