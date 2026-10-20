@@ -48,7 +48,7 @@
 <div class="hero">
   <div class="wrap">
     <div>
-      <span class="pill"><b>Pre-release</b> · milestone M1.5 · MIT licence</span>
+      <span class="pill"><b>Pre-release</b> · milestone M1.6 · MIT licence</span>
       <h1>Source control for <em>swarms of coding agents</em></h1>
       <p class="lead">Many writers, one store, one JSON envelope per command. SwarmOps is
         <strong>fully embedded</strong>, written in Rust: one program, no daemon, no external
@@ -165,7 +165,7 @@
         <tr><td>Stale locks</td><td>The writer lock is an <code>flock</code>, released by the kernel when its holder dies.</td><td><span class="v ahead">Ahead by design</span></td></tr>
         <tr><td>Durability</td><td>Full fsync is the only mode: objects synced before a frame names them.</td><td><span class="v ahead">Ahead by design</span></td></tr>
         <tr><td>Machine-readable contract</td><td>One JSON envelope per command and a JSON Schema for every request and response.</td><td><span class="v ahead">Ahead by design</span></td></tr>
-        <tr><td>Commits from many writers</td><td>Concurrent commits all succeed, short of a lock wait past 10 s (the retryable <code>E_BUSY</code>).</td><td><span class="v parity">Parity</span></td></tr>
+        <tr><td>Commits from many writers</td><td>Concurrent commits all succeed, short of a lock wait past 10 s or, since M1.6, a snapshot that meets a new commit in each of its 32 rounds (the retryable <code>E_BUSY</code>).</td><td><span class="v parity">Parity</span></td></tr>
         <tr><td>Throughput of many writers</td><td>Writers take turns, each commit holding the store-wide lock across its journal syncs.</td><td><span class="v behind">Behind by design</span></td></tr>
         <tr><td>Conflicts and landing</td><td>Today one signal, <code>E_CAS_MISMATCH</code>. Three-way merge and <code>land</code> come in M4.</td><td><span class="v behind">Behind today</span></td></tr>
         <tr><td>Sync between hosts</td><td>Nothing yet; offline-first <code>fetch</code> and <code>push</code> come in M11.</td><td><span class="v behind">Behind</span></td></tr>
@@ -241,12 +241,12 @@ so verify --deep</pre>
           <li><b>M0</b><span>the workspace and its gates, the canonical codec and its golden vectors</span></li>
           <li><b>M1</b><span>the single-agent core: commit, read, log and ref compare-and-swap; crash sweeps</span></li>
           <li><b>M1.5</b><span>hardening: CI, fault injection, power-loss images, the MCP server</span></li>
+          <li><b>M1.6</b><span>the code-review follow-ups: the error contract an agent sees, structured <code>verify</code> findings, and <code>commit --advance</code>, the commit primitive M4's landing reuses</span></li>
         </ol>
       </div>
       <div class="now">
         <h3><span class="dot" aria-hidden="true"></span>In development</h3>
         <ol>
-          <li><b>M1.6</b><span>the review follow-ups</span></li>
           <li><b>M2</b><span>diff, history and the derived-data engine</span></li>
           <li><b>M3</b><span>git import</span></li>
           <li><b>M4</b><span>merge and landing, and the operation log with undo</span></li>
@@ -261,6 +261,7 @@ so verify --deep</pre>
           <li><b>M7</b><span>blame and review</span></li>
           <li><b>M9</b><span>simulation and benchmarks: v1</span></li>
           <li><b>M11</b><span>offline-first sync between hosts</span></li>
+          <li><b>M10</b><span>the RPC server, after v1</span></li>
         </ol>
       </div>
     </div>
