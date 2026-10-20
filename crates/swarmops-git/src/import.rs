@@ -56,6 +56,7 @@ use swarmops_core::{ChangesetId, EntryTarget, LeafKind, ObjectKind, RepoPath, Tr
 use swarmops_repo::{CasResult, LocalRepo, MAX_RAW_BATCH, RawChangeset, RepoError, StoreError};
 use swarmops_store::{ExternalEntry, Recovered, SYSTEM_GIT, check_ref_name};
 
+use crate::ancestry;
 use crate::{
     ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID, GitOid, GitSource, LossySet,
     ObjectFormat, RawCommit, RawError, RawKind, RawTree, SourceError, Unsupported,
@@ -499,42 +500,6 @@ fn read_commit(source: &dyn GitSource, oid: GitOid) -> Result<RawCommit, ImportE
 fn malformed(oid: GitOid, error: &RawError) -> ImportError {
     match *error {
         RawError::Malformed { what } => ConvertError::Malformed { oid, what }.into(),
-    }
-}
-
-/// The ancestry of the store's changesets, as the import checks a base against it.
-mod ancestry {
-    use std::collections::HashSet;
-
-    use swarmops_core::ChangesetId;
-    use swarmops_repo::{LocalRepo, RepoError};
-
-    /// Whether `base`, of generation `generation`, is one of `from` or an ancestor of one, over
-    /// every parent: a walk down the store's records ([`swarmops_repo::Repo::changeset_meta`]),
-    /// pruned where the generation is no higher than the base's, since generations grow from
-    /// parent to child.
-    pub(super) fn reaches(
-        repo: &LocalRepo,
-        from: impl IntoIterator<Item = ChangesetId>,
-        base: ChangesetId,
-        generation: u64,
-    ) -> Result<bool, RepoError> {
-        let mut stack: Vec<ChangesetId> = from.into_iter().collect();
-        let mut seen = HashSet::new();
-        while let Some(at) = stack.pop() {
-            if at == base {
-                return Ok(true);
-            }
-            if !seen.insert(at) {
-                continue;
-            }
-            if let Some(meta) = repo.changeset_meta(at)?
-                && meta.generation > generation
-            {
-                stack.extend(meta.parents);
-            }
-        }
-        Ok(false)
     }
 }
 

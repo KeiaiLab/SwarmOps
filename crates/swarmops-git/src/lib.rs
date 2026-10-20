@@ -1,6 +1,6 @@
 //! SwarmOps' git side: the repositories `git import` takes history from and `git export` writes
-//! it to, the exact bytes of git's commits and trees, and the import that brings that history
-//! into a store.
+//! it to, the exact bytes of git's commits and trees, the import that brings that history into a
+//! store, and the export that writes a store's history back.
 //!
 //! - [`oid`]: git's object ids ([`GitOid`]), its object kinds ([`RawKind`]) and formats
 //!   ([`ObjectFormat`]), and [`git_hash`], the id git gives an object's bytes.
@@ -29,6 +29,11 @@
 //! - [`sink`]: [`GitSink`], what the export writes to a repository: objects, made durable before a
 //!   branch moves, and the branch, moved by compare-and-swap.
 //! - [`gix_sink`]: [`GixSink`], the [`GitSink`] of a repository on disk.
+//! - [`export`](mod@export): [`export()`], which writes the history behind a store ref into a
+//!   branch of a git repository, every commit the branch's last export does not reach, parents
+//!   first, makes it durable and records its native commits' oids, then moves the branch by
+//!   compare-and-swap ([`ExportRequest`], [`ExportReport`]); run again, it writes only what is
+//!   new, and it refuses a branch that diverged ([`ExportError`], [`DivergedReason`]).
 //!
 //! Umbrella decision 3: gix is pinned (`=0.89.0`, its `sha1` feature alone, no default features)
 //! and seen by [`gix_source`] and [`gix_sink`] alone; the first also computes the SHA-1 behind
@@ -37,7 +42,9 @@
 //! be a second [`GitSource`] and [`GitSink`] in place of those two modules, and nothing else would
 //! change.
 
+mod ancestry;
 pub mod convert;
+pub mod export;
 pub mod export_oid;
 pub mod gix_sink;
 pub mod gix_source;
@@ -51,6 +58,7 @@ pub mod sink;
 pub mod source;
 
 pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
+pub use export::{DivergedReason, ExportError, ExportReport, ExportRequest, export};
 pub use export_oid::{
     ExportObjects, ExportOid, ExportReader, ExportedOid, blob_oid, register, tree_oid,
 };

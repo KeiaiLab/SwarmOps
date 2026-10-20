@@ -21,7 +21,7 @@ use swarmops_core::{
     BlobId, Changeset, ChangesetId, EntryTarget, LeafKind, ObjectId, ObjectKind, RepoPath, Tree,
     TreeEntry, TreeId,
 };
-use swarmops_store::{ChangesetMeta, MetaRead, ObjectStat, ObjectStore, StoreError};
+use swarmops_store::{ChangesetMeta, MetaRead, ObjectStat, ObjectStore, StoreError, TailRepair};
 
 use crate::error::RepoError;
 use crate::repo::{self, Repo};
@@ -131,6 +131,20 @@ impl<O: ObjectStore> Repo<O> {
             repo: self,
             meta: self.meta.read()?,
         })
+    }
+
+    /// A snapshot of the committed metadata only, for the readers whose results leave the host
+    /// (M8's git export, M11's `serve` and `push`; design-L107): a [`RepoRead`] built as
+    /// [`Repo::snapshot`] builds one, from [`MetaStore::read_committed`], with what the journal's
+    /// tail check under the lock repaired ([`TailRepair`]). It waits for the writer lock as a
+    /// commit does ([`StoreError::Busy`] if the wait runs out) and lets it go before it returns,
+    /// so that no frame a power loss or a failed sync's cut could take back is in it. The same two
+    /// rules as [`Repo::snapshot`]'s hold for it.
+    ///
+    /// [`MetaStore::read_committed`]: swarmops_store::MetaStore::read_committed
+    pub fn snapshot_committed(&self) -> Result<(RepoRead<'_, O>, TailRepair), RepoError> {
+        let (meta, repaired) = self.meta.read_committed()?;
+        Ok((RepoRead { repo: self, meta }, repaired))
     }
 
     /// Changeset `id`, if the store holds it, in a snapshot of its own

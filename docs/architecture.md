@@ -429,6 +429,43 @@ names, the ref move recorded for the caller's identity. It maps each failure to 
 `E_GIT_IMPORT_LOSSY`, `E_GIT_IMPORT_DIVERGED`, or the store failure's own, with how far the import
 got), and reports what its writes repaired in `meta.recovered`, as a commit does.
 
+## Git export
+
+`swarmops_git::export` (storage §7, umbrella §12) writes the history behind a store ref into a
+branch of a git repository. It writes through `GitSink` alone: `GixSink` on disk, where gix writes
+the loose objects and the sink makes them durable and moves the branch by git's own lock
+protocol.
+
+1. It refuses a branch that a work tree has checked out, then reads the source ref's head
+   (`main` by default) in a committed snapshot (`Repo::snapshot_committed`, over
+   `MetaStore::read_committed`): taken under the writer lock after the journal's tail check, so
+   that neither a power loss nor a failed sync's cut can take back what the export sends off the
+   host.
+2. It reads the branch (`main` by default) and the head's export oid, the derived value `git_oid`
+   (`ExportOid`): the commit each changeset exports to. An imported changeset whose lineage
+   SwarmOps did not change takes its `git.oid` without reading a tree; any other is rendered and
+   hashed, the git oids of its trees and blobs memoized per object in the derived store.
+3. A branch at the head's export is up to date. Otherwise a branch that exists must name the
+   export of the head or of an ancestor of it, the base: found through the external id index, or
+   along the head's first parents. Anything else stops the export with `E_GIT_EXPORT_DIVERGED`
+   and its reason before anything is written; `force` moves the branch all the same, still by
+   compare-and-swap.
+4. It walks from the head over every parent, highest generation first, the base's history left
+   out and a commit the repository holds in a pack trusted with all it reaches, and writes what
+   it found parents first: for each commit, the trees and blobs its root holds that its first
+   parent's root does not, then the commit, whose rendering must hash to its export oid. An
+   object the repository lacks is written as a loose object; a loose one there already is read
+   back, and written again if it is damaged.
+5. Objects, then sync, then entries, then the branch: every object written or read back is
+   fsynced with its fan-out directory; then the native commits' oids go into the external id
+   index (W8: their changesets are committed); then the branch moves by compare-and-swap through
+   `refs/heads/<branch>.lock`, synced before its rename and its directory after, with no reflog
+   entry. A branch another writer moved meanwhile stops it there (`moved_during_export`), which
+   leaves the objects, loose and unreached, and the entries, which are true.
+
+It writes no journal frame: its store-side writes are derived values and external id entries, so
+it needs no identity.
+
 ## Durability
 
 Full fsync is the default and the only mode (umbrella §16, decision 5). An object is synced and
