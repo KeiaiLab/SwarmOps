@@ -137,8 +137,9 @@ h3 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
 /* Numbers */
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; margin-top: 44px; }
 @media (max-width: 900px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { .stats { grid-template-columns: 1fr; } }
 .stat { background: var(--surface); padding: 22px 22px 20px; }
-.stat b { display: block; font-size: 28px; letter-spacing: -0.02em; line-height: 1.1; }
+.stat b { display: block; font-size: 28px; letter-spacing: -0.02em; line-height: 1.1; white-space: nowrap; }
 .stat span { color: var(--muted); font-size: 14px; }
 .note { color: var(--muted); font-size: 13.5px; margin-top: 14px; }
 
@@ -177,7 +178,11 @@ h3 { font-size: 19px; margin: 0 0 8px; letter-spacing: -0.01em; }
 .cmp td:last-child { color: var(--muted); font-size: 14px; }
 .cmp td:last-child .v { margin-right: 4px; }
 .cmp code { white-space: nowrap; }
-@media (max-width: 720px) { .cmp td:nth-child(2) { display: none; } .cmp th:nth-child(2) { display: none; } }
+@media (max-width: 720px) {
+  .cmp td:nth-child(2) { display: none; } .cmp th:nth-child(2) { display: none; }
+  .cmp th, .cmp td { padding: 12px; }
+  .cmp td:first-child { white-space: normal; width: 36%; }
+}
 
 /* Code blocks */
 .code { background: var(--code-bg); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
