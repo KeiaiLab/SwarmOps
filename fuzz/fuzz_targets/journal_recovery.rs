@@ -8,11 +8,12 @@
 //! entries, `journal.ckpt` if given), or a valid journal built with `Journal::create` and
 //! `append_frame` from arbitrary records and then damaged by a patch (mode 1): bytes flipped, a
 //! file cut, the last `journal.off` entry dropped (a crash between a frame's two appends),
-//! garbage, zeros (blocks a filesystem exposed zero-filled after a crash) or a frame with a
-//! correct CRC appended. Each case runs in a fresh `tempfile::tempdir()`. A typed error is
-//! `JournalCorrupt`, or `Io` with `InvalidData`, `UnexpectedEof` or `InvalidInput`. A torn
-//! tail is an unlisted frame cut short, failing its CRC, or whose length reads 0 (a header that
-//! never reached the disk, whatever follows it: zeros to the end of `journal.log` among them).
+//! garbage, zeros (blocks a filesystem exposed zero-filled after a crash, or a `journal.off`
+//! zero-filled far past what a power loss leaves) or a frame with a correct CRC appended. Each
+//! case runs in a fresh `tempfile::tempdir()`. A typed error is `JournalCorrupt`, or `Io` with
+//! `InvalidData`, `UnexpectedEof` or `InvalidInput`. A torn tail is an unlisted frame cut short,
+//! failing its CRC, or whose length reads 0 (a header that never reached the disk, whatever
+//! follows it: zeros to the end of `journal.log` among them).
 //! Readers measure `journal.off` before `journal.log`, so every frame listed in their snapshot
 //! is whole in the `journal.log` they read: for them, as for recovery, a listed frame cut
 //! short, missing or failing its CRC is damage.
@@ -1207,7 +1208,10 @@ enum Edit {
     /// Append 1 to 256 zero bytes to `journal.log`: blocks a filesystem exposed zero-filled
     /// after a crash.
     AppendZeros(u8),
-    /// Append 1 to 4 zeroed entries to `journal.off`: the same, in `journal.off`.
+    /// Append zeroed entries to `journal.off`: 1 to 4, the same, in `journal.off`; or, for the
+    /// eight largest values, 64 to 8,192 (`64 << (n - 248)`): a damaged or crafted file,
+    /// zero-filled far past what a power loss leaves, which readers and recovery refuse past
+    /// [`MAX_ZEROED`].
     ZeroEntries(u8),
 }
 
@@ -1227,8 +1231,11 @@ impl Edit {
             Self::AppendOff(bytes) => files.off.extend(bytes),
             Self::AppendZeros(n) => files.log.resize(files.log.len() + usize::from(n) + 1, 0),
             Self::ZeroEntries(n) => {
-                let len = files.off.len() + (usize::from(n % 4) + 1) * ENTRY_LEN;
-                files.off.resize(len, 0);
+                let entries = match n.checked_sub(248) {
+                    Some(long) => 64 << long,
+                    None => usize::from(n % 4) + 1,
+                };
+                files.off.resize(files.off.len() + entries * ENTRY_LEN, 0);
             }
         }
     }
