@@ -6,6 +6,8 @@ use swarmops_core::{BlobId, ChangesetId, CodecError, ObjectId, ObjectKind, RepoP
 use swarmops_store::{IoFailure, Recovered, StoreError};
 use thiserror::Error;
 
+use crate::land::{MergeConflicts, NothingToLandReason};
+
 /// Why a repository operation failed.
 #[derive(Debug, Error)]
 pub enum RepoError {
@@ -153,6 +155,64 @@ pub enum RepoError {
         /// earlier writers left ([`swarmops_store::MetaWrite::recovered`]): those repairs stay
         /// made. Boxed, as for [`RepoError::RefMoved`].
         recovered: Box<Recovered>,
+    },
+    /// A land's change conflicts with the target's head: the merge's conflicts, with what the
+    /// report of them needs ([`MergeConflicts`]). Nothing was recorded; resolve them, then land
+    /// again. Boxed, as the conflicts would otherwise make every result this large.
+    #[error(
+        "{} path(s) of the change conflict with the target's head {}: nothing was recorded",
+        .0.conflicts.len(),
+        .0.theirs
+    )]
+    Conflict(Box<MergeConflicts>),
+    /// A land has nothing to add to the target: its head is on the target's first-parent chain,
+    /// or the target holds its change already ([`NothingToLandReason`]). Nothing was recorded.
+    #[error("nothing to land: {0}")]
+    NothingToLand(NothingToLandReason),
+    /// A land's target moved before each of its attempts could publish, `attempts` of them; it
+    /// names `actual` now. Nothing was recorded, and the same land made again can succeed.
+    #[error(
+        "the target moved before each of the land's {attempts} attempt(s) could publish (it \
+         names {actual}): nothing was recorded"
+    )]
+    RetryExhausted {
+        /// How many attempts the land made.
+        attempts: u32,
+        /// What the target named when the last attempt found it moved.
+        actual: ChangesetId,
+    },
+    /// A land's idempotency key landed another change already: the changeset `landed` on the
+    /// target carries it, squashed from another head. Nothing was recorded; a land of another
+    /// change takes a key of its own.
+    #[error("land key {key:?} landed another change already, as {landed}")]
+    KeyReused {
+        /// The key.
+        key: String,
+        /// The changeset it landed.
+        landed: ChangesetId,
+    },
+    /// A land squashes a first-parent chain, and this changeset of the chain from the land's
+    /// base to its head has two parents or more: a merge, which v1 does not land.
+    #[error("changeset {0} has more than one parent: a land squashes a chain without merges")]
+    MergeChangeset(ChangesetId),
+    /// A land's base is not a first-parent ancestor of its head, so the head's chain does not
+    /// start from it.
+    #[error("{base} is not a first-parent ancestor of {head}, so it is not the change's base")]
+    BaseNotAncestor {
+        /// The base the land was given.
+        base: ChangesetId,
+        /// The head.
+        head: ChangesetId,
+    },
+    /// A land given no base found none: its head and the target's head `theirs` share no
+    /// first-parent ancestor (their chains start from different roots). Give it the base the
+    /// change starts from.
+    #[error("{head} and the target's head {theirs} share no first-parent ancestor: give a base")]
+    NoMergeBase {
+        /// The head.
+        head: ChangesetId,
+        /// The target's head.
+        theirs: ChangesetId,
     },
 }
 

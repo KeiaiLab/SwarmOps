@@ -1195,7 +1195,9 @@ dependencies = [
 name = "swarmops-repo"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "camino",
+ "criterion",
  "postcard",
  "proptest",
  "serde",
