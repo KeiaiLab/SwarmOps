@@ -422,6 +422,193 @@ fn add_add_conflicts_unless_identical() {
     assert_eq!(outcome.auto_merged, [path("both")]);
 }
 
+/// What a merge holds of the conflict hunks of the files it cannot merge (storage spec §4): the
+/// first ones as the content merger made them, and a file's hunks past those as one hunk that
+/// spans them, each side's lines from the first one's to the last one's with their bytes. So what
+/// it holds of a file whose sides' edits meet at very many places stays small, and each of those
+/// places is still within a hunk it holds; every conflicting path is still there.
+mod held_hunks {
+    use std::ops::Range;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+
+    /// A file whose sides' edits meet at `n` places, as `side` holds it: its line `2i` is `side`
+    /// and `i`, its line `2i + 1` a `}` that no side changes.
+    fn alternating(side: &str, n: usize) -> Vec<u8> {
+        (0..n)
+            .flat_map(|i| format!("{side}{i}\n}}\n").into_bytes())
+            .collect()
+    }
+
+    /// The hunks diff3 makes of the base `alternating("l", n)` and the sides `alternating("o", n)`
+    /// and `alternating("t", n)`, one at each changed line, made here without its line diff, whose
+    /// cost is not the point.
+    fn hunks_of(n: usize) -> Vec<ConflictHunk> {
+        let hunk = |i: usize| {
+            let line = u32::try_from(2 * i).expect("a line number");
+            ConflictHunk {
+                base: line..line + 1,
+                ours: line..line + 1,
+                theirs: line..line + 1,
+                base_text: format!("l{i}\n").into_bytes(),
+                ours_text: format!("o{i}\n").into_bytes(),
+                theirs_text: format!("t{i}\n").into_bytes(),
+            }
+        };
+        (0..n).map(hunk).collect()
+    }
+
+    /// The bytes of `content`'s lines `lines`, numbered from 0, each with its `\n`.
+    fn lines_of(content: &[u8], lines: &Range<u32>) -> Vec<u8> {
+        (content.split_inclusive(|&byte| byte == b'\n'))
+            .skip(lines.start as usize)
+            .take(lines.len())
+            .flatten()
+            .copied()
+            .collect()
+    }
+
+    /// One hunk spanning `hunks`, which are in file order, over the base's, ours' and theirs'
+    /// contents `sides`: each side's lines from the first hunk's start to the last one's end, and
+    /// those lines' bytes.
+    fn spanning(hunks: &[ConflictHunk], sides: [&[u8]; 3]) -> ConflictHunk {
+        let (first, last) = (&hunks[0], &hunks[hunks.len() - 1]);
+        let [base, ours, theirs] = [
+            first.base.start..last.base.end,
+            first.ours.start..last.ours.end,
+            first.theirs.start..last.theirs.end,
+        ];
+        ConflictHunk {
+            base_text: lines_of(sides[0], &base),
+            ours_text: lines_of(sides[1], &ours),
+            theirs_text: lines_of(sides[2], &theirs),
+            base,
+            ours,
+            theirs,
+        }
+    }
+
+    /// The hunks a conflict holds: a content conflict's.
+    #[track_caller]
+    fn held(conflict: &FileConflict) -> &[ConflictHunk] {
+        match &conflict.kind {
+            ConflictKind::Content { hunks } => hunks,
+            other => panic!("a content conflict at {}: {}", conflict.path, other.name()),
+        }
+    }
+
+    /// `held` is `made` as a merge holds it: the first hunks as they were made, at least one,
+    /// then, if any is left, one spanning the rest over the contents `sides`. How many it holds
+    /// as made.
+    #[track_caller]
+    fn as_made_then_spanning(
+        held: &[ConflictHunk],
+        made: &[ConflictHunk],
+        sides: [&[u8]; 3],
+    ) -> usize {
+        let Some((last, exact)) = held.split_last() else {
+            panic!("no hunk held of {}", made.len());
+        };
+        if held.len() == made.len() {
+            assert_eq!(held, made, "all held as made");
+            return made.len();
+        }
+        assert_eq!(exact, &made[..exact.len()], "the first ones as made");
+        assert_eq!(
+            *last,
+            spanning(&made[exact.len()..], sides),
+            "then one spanning the rest"
+        );
+        exact.len()
+    }
+
+    /// A file both sides changed at a hundred thousand places, each a hunk: the merge holds at
+    /// most a hundredth of them, the first as they were made, and the rest as one hunk that spans
+    /// them; it takes well under a second over what the content merger made.
+    #[test]
+    fn a_file_with_very_many_hunks_holds_few() {
+        const N: usize = 100_000;
+        let (_dir, _root, repo) = unsynced_repo();
+        let sides = ["l", "o", "t"].map(|side| alternating(side, N));
+        let [base, ours, theirs] = sides.clone().map(|content| vec![put("f", &content)]);
+        let [b, o, t] = three(&repo, base, ours, theirs);
+        let made = hunks_of(N);
+        let handed = RefCell::new(Some(made.clone()));
+        let merger = |_: &[u8], _: &[u8], _: &[u8]| {
+            ContentMerge::Conflicted(handed.borrow_mut().take().expect("one file to merge"))
+        };
+
+        let started = Instant::now();
+        let outcome = repo.merge_with(b, o, t, &merger).unwrap();
+        let took = started.elapsed();
+        let [conflict] = &outcome.conflicts[..] else {
+            panic!("one conflict: {}", outcome.conflicts.len());
+        };
+        let hunks = held(conflict);
+        assert!(hunks.len() <= N / 100, "{} of {N} hunks held", hunks.len());
+        let exact = as_made_then_spanning(hunks, &made, sides.each_ref().map(Vec::as_slice));
+        assert!(exact >= 1, "the first hunk as made");
+        assert!(took < Duration::from_secs(1), "{took:?}");
+    }
+
+    /// Hunks over many files, merged by diff3: every conflicting path is there, each with its
+    /// first hunks as diff3 made them and the rest spanned; once the merge holds many, a later
+    /// file holds one hunk spanning all of its own. The incremental re-merge's `merge_trees`
+    /// holds the same.
+    #[test]
+    fn many_files_hold_few_hunks_in_all() {
+        const FILES: usize = 300;
+        const PLACES: usize = 3;
+        let (_dir, _root, repo) = unsynced_repo();
+        let name = |i: usize| format!("src/{i:03}.rs");
+        let side = |side: &str| -> Vec<Change> {
+            let content = alternating(side, PLACES);
+            (0..FILES).map(|i| put(&name(i), &content)).collect()
+        };
+        let [b, o, t] = three(&repo, side("l"), side("o"), side("t"));
+        let sides = ["l", "o", "t"].map(|side| alternating(side, PLACES));
+        let made = match merge_content(&sides[0], &sides[1], &sides[2]) {
+            ContentMerge::Conflicted(hunks) => hunks,
+            other => panic!("diff3 conflicts on each file: {other:?}"),
+        };
+        assert_eq!(made.len(), PLACES, "one hunk at each place");
+
+        let outcome = repo.merge_with(b, o, t, &merge_content).unwrap();
+        let paths: Vec<String> = outcome
+            .conflicts
+            .iter()
+            .map(|c| c.path.to_string())
+            .collect();
+        assert_eq!(
+            paths,
+            (0..FILES).map(name).collect::<Vec<_>>(),
+            "every path conflicts"
+        );
+        let sides = sides.each_ref().map(Vec::as_slice);
+        let exact: Vec<usize> = (outcome.conflicts.iter())
+            .map(|conflict| as_made_then_spanning(held(conflict), &made, sides))
+            .collect();
+        let total: usize = outcome.conflicts.iter().map(|c| held(c).len()).sum();
+        assert!(
+            total < FILES * PLACES,
+            "{total} hunks held of {}",
+            FILES * PLACES
+        );
+        assert_eq!(
+            held(&outcome.conflicts[FILES - 1]).len(),
+            1,
+            "the last file: one spanning"
+        );
+        assert_eq!(exact[0], PLACES, "the first file as made: {exact:?}");
+
+        let root = |cs| root_of(&repo, cs);
+        let paths: Vec<RepoPath> = (0..FILES).map(|i| path(&name(i))).collect();
+        let again = repo.merge_trees_with(root(b), root(o), root(t), &paths, &merge_content);
+        assert_eq!(again.unwrap().conflicts, outcome.conflicts);
+    }
+}
+
 /// Ours made a file executable and theirs changed its content: the merge keeps both, an
 /// executable with theirs' content, without a content merge (only theirs changed the content);
 /// and the other way round. `plan_path` decides it from the three leaves alone.
@@ -651,6 +838,50 @@ fn a_symlink_changed_on_both_sides_is_binary() {
             conflicts,
             ..MergeOutcome::default()
         }
+    );
+}
+
+/// A text file past the line diff's bound, which both sides changed, is a `binary` conflict with
+/// diff3 as the content merger, whatever its edits: here 200,000 lines (past the bound by their
+/// lines alone) with two edits far apart, which a line merge would take both of.
+#[test]
+fn a_text_file_past_the_line_diff_bound_is_binary() {
+    let (_dir, _root, repo) = unsynced_repo();
+    let numbered = |edited: usize, side: &str| -> Vec<u8> {
+        let text: String = (0..200_000)
+            .map(|n| {
+                if n == edited {
+                    format!("{side} {n}\n")
+                } else {
+                    format!("line {n}\n")
+                }
+            })
+            .collect();
+        text.into_bytes()
+    };
+    let (b, o, t) = (
+        numbered(usize::MAX, "base"),
+        numbered(10, "ours"),
+        numbered(190_000, "theirs"),
+    );
+    let [base, ours, theirs] = three(
+        &repo,
+        vec![put("big.txt", &b)],
+        vec![put("big.txt", &o)],
+        vec![put("big.txt", &t)],
+    );
+    let sides = (Some(file(&b)), Some(file(&o)), Some(file(&t)));
+    let outcome = repo.merge(base, ours, theirs).unwrap();
+    // Compared without the merged content, which a failure would print whole.
+    let merged = (
+        outcome.delta.len(),
+        outcome.new_blobs.len(),
+        outcome.auto_merged,
+    );
+    assert_eq!(merged, (0, 0, Vec::new()));
+    assert_eq!(
+        outcome.conflicts,
+        [conflict("big.txt", ConflictKind::Binary, sides)]
     );
 }
 

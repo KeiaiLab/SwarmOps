@@ -319,6 +319,30 @@ left).
   reaches is on the objects' first-parent chain, and `verify` reports the damage. Checking a
   generation takes the journal, or every generation down to a root. *Target: M6 (fsck). Found:
   2026-10-20, when the read path came to check the index.*
+- **A text file past the line diff's bound is not diffed or merged by lines.** The histogram diff's
+  time can grow with the square of a file's lines, so `diff` and a land's merge run it only on sides
+  of at most 49,152 lines and 8 MiB (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`): past that,
+  `diff --format stat` and `unified` give a changed file no line counts and mark its hunks cut
+  (`hunks_truncated`, `unified` with no hunk), an added or deleted file included, and a land whose
+  two sides changed or added the file differently conflicts on it as `binary`, not `content` or
+  `add_add`, which `land --resolve` takes whole, where git diffs and merges it by lines. Within the
+  bound the slowest line diff measured takes about 4 s, and a merge of two such sides about 10 s on
+  a loaded 32-thread host, once for each such file a request reaches, so a request over many of them
+  can still take minutes. *Unscheduled: a line diff whose work, not its input, is bounded (upstream,
+  in imara-diff). Found: the 2026-10-20 security review of M4.*
+- **A land's conflict report leaves files out and joins hunks past its bound.** A merge holds its
+  first 128 conflict hunks, over all its files, as the three-way merge makes them, and past those
+  each file's hunks as one hunk that spans them, each side's lines from the first one's start to the
+  last one's end, so such a hunk can span many lines that do not conflict; `read_file` reads its
+  lines by their range. The report lists the conflicting files in path order while their entries,
+  texts aside, fit in 24 KiB: the first always, its hunks that do not fit as one entry without texts
+  that spans them, and a later one whole or not at all. The files it leaves out are counted only in
+  the error's message, not in a field of the report, which says `truncated`, and `land --human`
+  prints a `conflict:` line for the listed files alone. The report's `auto_merged` and `stale` lists
+  have no bound but the paths of the change, and the three-way merge still makes every hunk of a
+  file, within the line diff's bound, before the merge keeps 128 of them. *Unscheduled: a count of
+  the files left out, a field of the report (a schema change). Found: the 2026-10-20 security review
+  of M4.*
 - **A changeset written outside the repository library can hold both `x` and `x:b64`.** The
   library refuses a metadata key that ends in `:b64` for every writer
   (`swarmops_repo::check_metadata`, which `Repo::commit` runs), so only a store written by other

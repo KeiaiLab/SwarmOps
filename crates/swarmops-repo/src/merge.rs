@@ -18,6 +18,13 @@
 //! merge cleanly. The contents both sides changed are merged by the caller's
 //! [`ContentMerger`]; ours' unchanged paths are never read.
 //!
+//! A merge holds the hunks of the contents that conflict as the content merger makes them, the
+//! first 128 of them in path order (`MAX_HELD_HUNKS`); a file's hunks past those are held as one
+//! hunk that spans them, each side's lines from the first one's start to the last one's end, the
+//! lines between them included, with their bytes. So what a merge holds of its conflicts grows
+//! with the files that conflict, not with their lines, and each place where the two sides' edits
+//! meet is still within a hunk it holds. Every conflicting path is there, whatever its hunks.
+//!
 //! [`plan_path`]: tree_merge::plan_path
 //! [`entry_in`]: tree_merge::entry_in
 //! [`ContentMerger`]: conflict::ContentMerger
@@ -32,7 +39,7 @@ use swarmops_core::{
     BlobId, ChangesetId, DeltaEntry, DeltaOp, EntryTarget, LeafKind, ObjectKind, RepoPath, Tree,
     TreeId, hash_object,
 };
-use swarmops_merge::conflict::{ConflictKind, ContentMerge, ContentMerger};
+use swarmops_merge::conflict::{ConflictHunk, ConflictKind, ContentMerge, ContentMerger};
 use swarmops_merge::diff3::merge_content;
 use swarmops_merge::tree_diff::{Leaf, PathFilter, PathTriple, TreeRead, diff_trees, three_way};
 use swarmops_merge::tree_merge::{FileConflict, PathPlan, entry_in, plan_path};
@@ -40,6 +47,10 @@ use swarmops_store::ObjectStore;
 
 use crate::error::RepoError;
 use crate::repo::{self, Repo};
+
+/// The most conflict hunks a merge holds as the content merger makes them, over all its files;
+/// past them, each file's hunks are held as one that spans them ([the module documentation](self)).
+const MAX_HELD_HUNKS: usize = 128;
 
 /// What a three-way merge made ([`Repo::merge_with`]), for its caller to commit, or to report.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -51,7 +62,8 @@ pub struct MergeOutcome {
     /// The merged contents the delta puts that neither ours nor theirs holds, by blob id: the
     /// caller stores them before it commits the delta.
     pub new_blobs: BTreeMap<BlobId, Vec<u8>>,
-    /// The paths whose changes conflict, sorted by path.
+    /// The paths whose changes conflict, sorted by path; their hunks as
+    /// [the module documentation](self) says a merge holds them.
     pub conflicts: Vec<FileConflict>,
     /// The paths both sides changed whose contents merged cleanly into a content neither had
     /// (`new_blobs` holds it), sorted.
@@ -157,6 +169,9 @@ fn merge_trees<O: ObjectStore>(
         .map(|at| type_change(reads, theirs, &triples, &plans, at))
         .collect::<Result<Vec<bool>, RepoError>>()?;
     let mut outcome = MergeOutcome::default();
+    let mut held = Held {
+        left: MAX_HELD_HUNKS,
+    };
     for ((triple, plan), type_change) in triples.iter().zip(plans).zip(type_changes) {
         let plan = if type_change {
             PathPlan::Conflict(ConflictKind::TypeChange)
@@ -172,7 +187,7 @@ fn merge_trees<O: ObjectStore>(
                 renamed_from: None,
             }),
             PathPlan::MergeContent { kind } => {
-                merge_contents(reads, triple, kind, content, &mut outcome)?;
+                merge_contents(reads, triple, kind, content, &mut held, &mut outcome)?;
             }
             PathPlan::Conflict(kind) => outcome.conflicts.push(conflict(triple, kind)),
         }
@@ -242,12 +257,15 @@ fn below(triples: &[PathTriple], path: &RepoPath) -> Range<usize> {
 /// `outcome`: clean contents make a leaf of `kind`, put unless theirs holds it, and a new blob and
 /// an auto-merged path unless ours or theirs holds those contents; a conflict between texts is
 /// [`ConflictKind::Content`] (or [`ConflictKind::AddAdd`], over the empty base of a path the base
-/// lacks), and contents that are not all text [`ConflictKind::Binary`].
+/// lacks), its hunks as `held` holds them, and contents that `content` does not merge by lines
+/// [`ConflictKind::Binary`]: for diff3, contents that are not all text or not all within the line
+/// diff's bound ([`line_diff::MAX_DIFF_LINES`] lines, [`line_diff::MAX_DIFF_BYTES`] bytes).
 fn merge_contents<O: ObjectStore>(
     reads: &Reads<'_, O>,
     triple: &PathTriple,
     kind: LeafKind,
     content: ContentMerger<'_>,
+    held: &mut Held,
     outcome: &mut MergeOutcome,
 ) -> Result<(), RepoError> {
     let read =
@@ -268,6 +286,7 @@ fn merge_contents<O: ObjectStore>(
             }
         }
         ContentMerge::Conflicted(hunks) => {
+            let hunks = held.hold(hunks, [&base, &ours, &theirs]);
             let kind = if triple.base.is_none() {
                 ConflictKind::AddAdd { hunks }
             } else {
@@ -280,6 +299,69 @@ fn merge_contents<O: ObjectStore>(
             .push(conflict(triple, ConflictKind::Binary)),
     }
     Ok(())
+}
+
+/// How many more conflict hunks a merge holds as they are made ([`MAX_HELD_HUNKS`] at first).
+struct Held {
+    /// The hunks that still go in as they are.
+    left: usize,
+}
+
+impl Held {
+    /// `hunks`, one file's in file order, as the merge holds them: the first while it holds fewer
+    /// than [`MAX_HELD_HUNKS`] in all, then one spanning the rest, over the base's, ours' and
+    /// theirs' contents `sides` ([`span`]). A single hunk left over spans itself.
+    fn hold(&mut self, mut hunks: Vec<ConflictHunk>, sides: [&[u8]; 3]) -> Vec<ConflictHunk> {
+        let kept = hunks.len().min(self.left);
+        self.left -= kept;
+        // Two or more past the budget: one hunk in their place, and their bytes freed.
+        if let [first, .., last] = &hunks[kept..] {
+            let spanning = span(first, last, sides);
+            hunks.truncate(kept);
+            hunks.push(spanning);
+            hunks.shrink_to_fit();
+        }
+        hunks
+    }
+}
+
+/// The hunk that spans the hunks from `first` to `last` of a file, in file order, over the
+/// base's, ours' and theirs' contents `sides`: each side's lines from `first`'s start to `last`'s
+/// end, with their bytes. Three edits a `}` apart, say, the last two past the budget:
+///
+/// ```text
+/// line   0   1  2   3  4
+/// base   l0  }  l1  }  l2      held: l0 | o0 | t0 as made,
+/// ours   o0  }  o1  }  o2            then lines 2..5 of each side: "l1 } l2", "o1 } o2", "t1 } t2"
+/// theirs t0  }  t1  }  t2
+/// ```
+fn span(first: &ConflictHunk, last: &ConflictHunk, sides: [&[u8]; 3]) -> ConflictHunk {
+    let [base, ours, theirs] = [
+        first.base.start..last.base.end,
+        first.ours.start..last.ours.end,
+        first.theirs.start..last.theirs.end,
+    ];
+    let [base_bytes, ours_bytes, theirs_bytes] = sides;
+    ConflictHunk {
+        base_text: lines_text(base_bytes, &base),
+        ours_text: lines_text(ours_bytes, &ours),
+        theirs_text: lines_text(theirs_bytes, &theirs),
+        base,
+        ours,
+        theirs,
+    }
+}
+
+/// The bytes of `content`'s lines `lines`, numbered from 0, each up to and including its `\n` (a
+/// last line may have none), as [`split_lines`](line_diff::split_lines) splits them; a line past
+/// the content's end has none.
+fn lines_text(content: &[u8], lines: &Range<u32>) -> Vec<u8> {
+    let mut each = content.split_inclusive(|&byte| byte == b'\n');
+    let before: usize = (each.by_ref().take(lines.start as usize))
+        .map(<[u8]>::len)
+        .sum();
+    let within: usize = each.take(lines.len()).map(<[u8]>::len).sum();
+    content[before..before + within].to_vec()
 }
 
 /// The delta entry that puts `leaf` at `path`.
@@ -341,5 +423,81 @@ impl<O: ObjectStore> TreeRead for Reads<'_, O> {
         let tree = repo::tree(self.objects, id)?;
         self.trees.borrow_mut().insert(id, tree.clone());
         Ok(tree)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One hunk at line `at` of each side, its texts `side` and `at` on a line.
+    fn hunk(at: u32) -> ConflictHunk {
+        let text = |side: &str| format!("{side}{at}\n").into_bytes();
+        ConflictHunk {
+            base: at..at + 1,
+            ours: at..at + 1,
+            theirs: at..at + 1,
+            base_text: text("l"),
+            ours_text: text("o"),
+            theirs_text: text("t"),
+        }
+    }
+
+    /// `n` lines of `side`, each `side` and its number.
+    fn content(side: &str, n: u32) -> Vec<u8> {
+        (0..n)
+            .flat_map(|at| format!("{side}{at}\n").into_bytes())
+            .collect()
+    }
+
+    /// A merge holds its first [`MAX_HELD_HUNKS`] hunks as they were made, over its files: the
+    /// file that passes them holds one spanning the rest, a later file one spanning all of its
+    /// own, and a later file of one hunk that hunk.
+    #[test]
+    fn a_merge_holds_its_first_hunks_then_spans() {
+        let n = u32::try_from(MAX_HELD_HUNKS).unwrap() + 2;
+        let [base, ours, theirs] = ["l", "o", "t"].map(|side| content(side, n));
+        let sides = [&base[..], &ours, &theirs];
+        let mut held = Held {
+            left: MAX_HELD_HUNKS,
+        };
+
+        let first = held.hold((0..n).map(hunk).collect(), sides);
+        let spanned = ConflictHunk {
+            base: n - 2..n,
+            ours: n - 2..n,
+            theirs: n - 2..n,
+            base_text: lines_text(&base, &(n - 2..n)),
+            ours_text: lines_text(&ours, &(n - 2..n)),
+            theirs_text: lines_text(&theirs, &(n - 2..n)),
+        };
+        let mut expected: Vec<ConflictHunk> = (0..n - 2).map(hunk).collect();
+        expected.push(spanned);
+        assert_eq!(first, expected);
+        assert_eq!(
+            first[first.len() - 1].ours_text,
+            format!("o{}\no{}\n", n - 2, n - 1).into_bytes()
+        );
+
+        let later = held.hold((0..3).map(hunk).collect(), sides);
+        assert_eq!(later.len(), 1);
+        assert_eq!(
+            (later[0].base.clone(), later[0].theirs_text.as_slice()),
+            (0..3, b"t0\nt1\nt2\n".as_slice())
+        );
+        assert_eq!(held.hold(vec![hunk(5)], sides), [hunk(5)]);
+    }
+
+    /// The bytes of lines: a last line without its `\n` is a line, and lines past the end, or
+    /// none, have no bytes.
+    #[test]
+    fn lines_text_takes_whole_lines() {
+        let content = b"a\nbb\nccc";
+        assert_eq!(lines_text(content, &(0..1)), b"a\n");
+        assert_eq!(lines_text(content, &(1..3)), b"bb\nccc");
+        assert_eq!(lines_text(content, &(2..9)), b"ccc");
+        assert_eq!(lines_text(content, &(3..5)), b"");
+        assert_eq!(lines_text(content, &(1..1)), b"");
+        assert_eq!(lines_text(b"", &(0..2)), b"");
     }
 }

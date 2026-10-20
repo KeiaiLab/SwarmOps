@@ -433,6 +433,66 @@ fn a_type_change_names_who_touched_the_directory() {
     );
 }
 
+/// A land whose change conflicts on a file at very many places carries few hunks: the first ones
+/// as diff3 made them and one spanning the rest, each side's lines from the first one's to the
+/// last one's, so the lines of every place where the sides' edits meet are within a hunk it
+/// carries; and every conflicting path. Nothing is recorded.
+#[test]
+fn a_land_conflicting_at_very_many_places_carries_few_hunks() {
+    use swarmops_repo::merge::conflict::ConflictKind;
+
+    const PLACES: u32 = 2_000;
+    let (_dir, root, repo) = new_store();
+    // Line `2i` changed by each side, line `2i + 1` by none.
+    let alternating = |side: &str| -> Vec<u8> {
+        (0..PLACES)
+            .flat_map(|i| format!("{side}{i}\n}}\n").into_bytes())
+            .collect()
+    };
+    let t0 = advance(
+        &repo,
+        ACTOR,
+        &[],
+        vec![put("f", &alternating("l")), put("g", b"g\n")],
+    );
+    let ours = vec![put("f", &alternating("o")), put("g", b"ours\n")];
+    let head = commit_by(&repo, ACTOR, &[t0], ours);
+    let theirs = vec![put("f", &alternating("t")), put("g", b"theirs\n")];
+    advance(&repo, OTHER, &[t0], theirs);
+    let (frames, before) = (frame_count(&root), main_head(&repo));
+
+    let conflicts = conflicts_of(repo.land(landing(head)));
+    assert_eq!(kinds(&conflicts), [("f", "content"), ("g", "content")]);
+    let ConflictKind::Content { hunks } = &conflicts.conflicts[0].kind else {
+        unreachable!("f conflicts on its content");
+    };
+    assert!(hunks.len() <= 200, "{} hunks of {PLACES}", hunks.len());
+    let first = &hunks[0];
+    assert_eq!(
+        (first.base.clone(), first.ours_text.as_slice()),
+        (0..1, b"o0\n".as_slice())
+    );
+    for at in 0..PLACES {
+        let line = 2 * at;
+        let within = hunks.iter().any(|hunk| hunk.base.contains(&line));
+        assert!(within, "base line {line} is in no hunk");
+    }
+    let last = &hunks[hunks.len() - 1];
+    assert_eq!(
+        last.base.end,
+        2 * PLACES - 1,
+        "the last place's line ends the last hunk"
+    );
+    let lines = (last.base.end - last.base.start) as usize;
+    assert_eq!(
+        last.base_text
+            .split_inclusive(|&byte| byte == b'\n')
+            .count(),
+        lines
+    );
+    assert_eq!((frame_count(&root), main_head(&repo)), (frames, before));
+}
+
 /// A keyed land run again is a replay: it finds the changeset its key landed, squashed from the
 /// same head, on the target below its head, and answers with it, writing nothing: no new frame,
 /// `main` as it was.

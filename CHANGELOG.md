@@ -1040,6 +1040,29 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   on them, 1 GiB together, checked by the sizes they declare before a byte of them is read
   (`E_TOO_LARGE`, `details.scope` `commit`; **Changed**, M2), is the fix, and a test now holds that
   the MCP server refuses such a commit before it reads any of the files it names, and serves on.
+- A `land` or a `diff` that reached a text file changed at many places could hold the process,
+  `swarmops mcp` included, for about a minute at 200,000 lines and some four times as long at each
+  doubling: the histogram line diff's time can grow with the square of a file's lines, and nothing
+  bounded what it was given but the 512 MiB an object holds. The line diff now runs only on sides of
+  at most 49,152 lines and 8 MiB (`MAX_DIFF_LINES`, `MAX_DIFF_BYTES`), checked before any line is
+  diffed: past that, a land whose two sides changed the file differently conflicts on it as
+  `binary`, which `land --resolve` takes whole, and `diff --format stat` or `unified` gives the file
+  no line counts and marks its hunks cut (`hunks_truncated`). Within the bound a file diffs and
+  merges as before, which can still take seconds
+  ([docs/known-limitations.md](docs/known-limitations.md), "A text file past the line diff's bound
+  is not diffed or merged by lines").
+- A `land` that conflicted at many places answered `E_CONFLICT` with a report of one entry per
+  conflict hunk of every conflicting file, which `--max-conflict-bytes` did not bound (it bounds the
+  hunks' texts): one text file conflicting at 100,000 places gave an envelope of 12.7 MB, which a
+  `swarmops mcp` response carries twice. A merge now holds its first 128 conflict hunks, over all
+  its files, as the three-way merge makes them, and past those each file's hunks as one hunk that
+  spans them, so every place where the two sides' edits meet stays within a hunk; the report lists
+  the conflicting files in path order while their entries, texts aside, fit in 24 KiB, the first
+  file always (its hunks while they fit, then one that spans the rest) and a later one whole or not
+  at all, and says `truncated` when it leaves any out. The error's message still counts every
+  conflicting path, and the texts stay within `max_conflict_bytes` as before
+  ([docs/known-limitations.md](docs/known-limitations.md), "A land's conflict report leaves files
+  out and joins hunks past its bound").
 - `git import` and `git export` no longer open a file of the git directory without looking at what
   it is: a FIFO where they read one (`config`, `HEAD`, a ref or `objects/info/alternates`, among
   others) held the command until it was killed, and a file there that never ends, or of huge length,
