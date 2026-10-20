@@ -39,10 +39,10 @@ leave open.
 | `swarmops-core` | Object ids, repository paths and the canonical object codec. It does no I/O; its byte layouts are the hash contract. |
 | `swarmops-store` | The loose object files (`FsObjectStore`), the store's layout (`Layout`), the native metadata store (`MetaStore`): the journal, the writer lock, the changeset index and the ref files; and the cache of derived values beside it (`DerivedStore`). The object store's filesystem access, every metadata write and the derived values' reads and writes go through the `FsOps` seam, which the crash tests hook. |
 | `swarmops-merge` | Pure algorithms over trees and lines, with no I/O and no store: the tree diff (leaf-level changes, canonical deltas and three-way path entries) and the line diff (histogram hunks, by `imara-diff`) from M2, and the three-way merge from M4. `swarmops-repo` re-exports it as `swarmops_repo::merge`. |
-| `swarmops-git` | git's side of the import, from M3: git's commit and tree bytes parsed into their fields and rendered back byte for byte (`raw`), the ids git gives objects (`GitOid`, `git_hash`), and `GitSource`, what the import reads from a repository: refs resolved to commits, and objects' bytes, each checked against its id. `GixSource` reads a repository on disk through gix, pinned and seen by that one module, so that git2 could replace it there. `Converter` turns git's commits, trees and blobs into a changeset's fields, trees and blobs, and checks that a commit it took without loss renders back to its own id (`render`); what a changeset cannot hold is refused by class (`LossyClass`) unless the import allows the class. `import` brings every commit a git ref reaches that a store does not hold into it, parents first and many to a journal frame, and moves a target ref to the tip's changeset; run again, it takes only what is new (below, "Git import"). |
+| `swarmops-git` | git's side of the import, from M3, and of the export, from M8: git's commit and tree bytes parsed into their fields and rendered back byte for byte (`raw`), the ids git gives objects (`GitOid`, `git_hash`), and `GitSource`, what the import reads from a repository: refs resolved to commits, and objects' bytes, each checked against its id. `GixSource` reads a repository on disk through gix, pinned and seen by that one module, so that git2 could replace it there. `Converter` turns git's commits, trees and blobs into a changeset's fields, trees and blobs, and checks that a commit it took without loss renders back to its own id (`render`); what a changeset cannot hold is refused by class (`LossyClass`) unless the import allows the class. `import` brings every commit a git ref reaches that a store does not hold into it, parents first and many to a journal frame, and moves a target ref to the tip's changeset; run again, it takes only what is new (below, "Git import"). The export, from M8, writes a store's history behind a ref into a git branch through `GitSink` (`GixSink` on disk), and `ExportOid` names the commit each changeset exports to (below, "Git export"). |
 | `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, `verify`, and the derivation engine, which derives values from the immutable objects when they are asked for and caches them in `meta/derived/` (`Repo::derived`), the eager ones also ahead of any reader as the journal grows (`Repo::derive_eager`, which `swarmops derive` runs). `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
-| `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. Beside them, `git import`, a client-side operation that no `StoreOps` has: it runs `swarmops-git`'s import on a repository of the caller's host. |
+| `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. Beside them, `git import` and `git export`, client-side operations that no `StoreOps` has: they run `swarmops-git`'s import and export on a repository of the caller's host. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
 | `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, and builders of stores, repositories and runs of the binary. A dev-dependency of the store, the repository, the operations, the CLI and the git crate, and a dependency of the fuzz targets, which take it without its default features `cli`, `git` and `repo` (the runs of the binary, the git fixtures and the repository builders); no product build includes it. |
 
@@ -71,13 +71,14 @@ Two rules shape the layers (umbrella §1, AGENTS.md):
   calls the operation and prints the result.
 - **Store-facing types carry no filesystem paths.** Every operation takes and returns serde
   types, so `StoreOps` is the seam a remote client and a server will share: M11's sync, over
-  `ssh <host> swarmops serve --stdio`, and M10's RPC server (operations §7). The three
-  exceptions are client-side: a change's `{"file": "<path>"}` content, which is read on the
-  client, in the caller's process; `init`'s path (`init` is not a `StoreOps` operation); and
-  `git import`'s source repository (`GitImportReq.git_path`), which the caller's process reads:
-  `git import` is no `StoreOps` operation and no MCP tool, and no server receives its request
-  (operations §0, §7). This is also why
-  `swarmops-api` and `swarmops-repo` each have their own `ChangeOp`, `RepoInfo` and
+  `ssh <host> swarmops serve --stdio`, and an RPC server, a follow-up after v1 (operations §7,
+  umbrella §17). The four exceptions are client-side: a change's `{"file": "<path>"}` content,
+  which is read on the client, in the caller's process; `init`'s path (`init` is not a
+  `StoreOps` operation); `git import`'s source repository (`GitImportReq.git_path`), which the
+  caller's process reads; and `git export`'s destination repository (`GitExportReq.git_path`),
+  which the caller's process writes: neither `git import` nor `git export` is a `StoreOps`
+  operation or an MCP tool, and no server receives their requests (operations §0, §7). This is
+  also why `swarmops-api` and `swarmops-repo` each have their own `ChangeOp`, `RepoInfo` and
   `VerifyReport`: the first are the wire format, the second the domain, and `swarmops-ops`
   converts between them.
 
@@ -423,7 +424,9 @@ changesets (`Repo::raw_batch`), objects and external id index:
 
 1. It resolves the source ref (`HEAD` by default) to the tip and reads the target ref (`main` by
    default). A target that exists must hold a git commit at its head (`git.oid`): the base the
-   import goes on from. A native changeset on the target is a divergence.
+   import goes on from. A native changeset on the target is a divergence unless an export of this
+   store wrote it: a native head goes on from the commit it exports to (`ExportOid`), so that
+   commits made in git on top of an export come back on the changeset they were made on.
 2. It walks from the tip over every parent, on a stack of its own, and stops at the base and at
    each commit the external id index names a changeset of the store for. An entry that is
    damaged, or names a changeset the store lacks, is no stop: the commit is converted again, and

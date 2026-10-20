@@ -109,8 +109,9 @@ const MAX_LAND_KEY: usize = 64;
 ///   already. The change list follows [`crate::content`]'s rules. `file` content is read here,
 ///   in the caller's process: `LocalOps` runs on the client. A server that exposes
 ///   [`StoreOps`] over a wire must refuse [`ContentInput::File`](swarmops_api::ContentInput)
-///   instead of reading a path its caller names (M10 adds the client-side pass that turns such
-///   content into bytes before a request leaves the client); `swarmops mcp` is no such server,
+///   instead of reading a path its caller names (the first such server, M11's `serve`, comes
+///   with the client-side pass that turns such content into bytes before a request leaves the
+///   client); `swarmops mcp` is no such server,
 ///   since its caller starts it, as its own user, to serve that caller alone over stdio, and it
 ///   reads such content as the CLI does. A metadata key may not end in
 ///   `:b64`, which `show` reserves (`E_INVALID_ARG`).
@@ -377,8 +378,9 @@ const MAX_LAND_KEY: usize = 64;
 ///   - to a `ref_delete`: re-check before deleting;
 ///   - to a move of a ref that is gone: that it is gone;
 /// - `E_TOO_LARGE` `{index, path, size, limit, scope}` (and the client `file` for file content) for
-///   a put over 512 MiB (`scope` `put`) or a commit's contents over 1 GiB together (`commit`, whose
-///   `size` is theirs up to and with the change's), measured before any is read;
+///   a put over 512 MiB (`scope` `put`, measured as each content is converted, in list order) or a
+///   commit's contents over 1 GiB together (`commit`, whose `size` is theirs up to and with the
+///   change's), the second measured by the sizes the contents declare, before any is read;
 /// - `E_INVALID_ARG` for limits, cursors and requests that break their own rules.
 ///
 /// `git_import`'s failures map as follows, the source repository named by the path the request

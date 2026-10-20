@@ -1,6 +1,6 @@
 # Contributing to SwarmOps
 
-SwarmOps is pre-release: nothing is published yet, and most of its code is written by coding
+SwarmOps is pre-release: 0.1.0 is its first release, and most of its code is written by coding
 agents working for a human maintainer. This page is how changes get made, for people and agents
 alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here expands on it.
 
@@ -28,7 +28,8 @@ alike. The short version of the rules is [AGENTS.md](AGENTS.md); everything here
 
 ## Setup
 
-Linux only ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)).
+Linux today (x86_64 and aarch64 release builds); macOS and Windows are the next milestone, M12
+([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)).
 Install Rust with rustup; `rust-toolchain.toml` selects Rust 1.99.0 with rustfmt and clippy.
 Then the tools the gates use:
 
@@ -111,6 +112,10 @@ reaches test builds too: a `pub` item under `#[cfg(test)]` that the crate root r
   script whose first lines say `# needs git X.Y` is made by that release or a later one only: an
   older git skips it and says so. While the declared git is older, such a script has no archive,
   and only the version matrix's newest git makes it (`reftable`).
+  The three-way merge's corpus, `crates/swarmops-merge/tests/fixtures/merge_file/`, is committed
+  the same way, from `git merge-file`: its `generate.sh` rewrites `expected.json` only by hand or
+  with `SWARMOPS_REGEN_FIXTURES=1`, and runs the git 2.43 that `SWARMOPS_GIT` names (else `git`
+  on `PATH`).
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
   build without the feature can name), and a release build honours no test hook. The hooks are
@@ -282,6 +287,10 @@ the project's own discipline:
    is. It never presents itself as a person or as another agent.
 4. **The same bar for everyone.** tool-assisted changes pass the same gate and the same review as
    any other; the trailer records who wrote a change, not that it is good.
+
+An exception to rule 2: a commit that `swarmops git export` writes for an agent carries the
+agent's identity as author and committer (`<family>/<instance> <instance@family.swarmops.local>`),
+and it reaches SwarmOps' own `stable` only through a person's merge.
 
 SwarmOps applies the same idea to its own users: every mutation carries the caller's identity
 (`<family>/<instance>`, such as `agent/worker-17`), and the changeset records it.
