@@ -3037,3 +3037,171 @@ mod derive {
         assert!(rounds.iter().sum::<u64>() <= 4, "{rounds:?}");
     }
 }
+
+/// Crafted derived values (storage spec §5, `meta/derived/`): a value file someone placed in a
+/// store, whole and with its trailer right (a put of any bytes writes one), holding a value no
+/// derivation gives. `verify --deep` reports each such value as a `derived_mismatch` finding,
+/// naming the derivation, the changeset and the key, where it found the store clean before; a
+/// plain `verify` reads no derived value. Removing the file has the value derived again.
+mod crafted_derived_values {
+    use std::fs;
+    use std::io;
+    use std::sync::Arc;
+
+    use camino::Utf8PathBuf;
+    use serde_json::{Value, json};
+    use swarmops_core::{ChangesetId, ObjectId};
+    use swarmops_repo::{FirstParentSkipList, LocalRepo};
+    use swarmops_store::{DerivedSlot, DerivedStore, RealFs};
+    use swarmops_testkit::fs::NoSyncFs;
+    use swarmops_testkit::repo::{put, request};
+
+    use crate::support::Store;
+
+    /// The agent the commits act as.
+    const WRITER: &str = "agent/worker-19";
+
+    /// Changeset `hex`, by its id.
+    fn id(hex: &str) -> ChangesetId {
+        ChangesetId(ObjectId::from_hex(hex).expect("a changeset id"))
+    }
+
+    /// Places `value` in `slot` of `store`'s derived values in place of whatever file is there,
+    /// as a put writes it, trailer and all: what anyone with the store's files can write.
+    fn plant(store: &Store, slot: &DerivedSlot<'_>, value: &[u8]) {
+        let layout = store.layout();
+        match fs::remove_file(layout.derived_path(slot)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => panic!("remove the value file: {e}"),
+        }
+        let derived = DerivedStore::open(layout, Arc::new(RealFs));
+        assert!(derived.put(slot, value).expect("plant a value"), "planted");
+    }
+
+    /// The `changeset` of each entry of `history`'s result.
+    fn changesets(result: &Value) -> Vec<String> {
+        let entries = result["entries"].as_array().expect("entries");
+        let id = |entry: &Value| entry["changeset"].as_str().expect("an id").to_owned();
+        entries.iter().map(id).collect()
+    }
+
+    /// What `verify --deep` finds: no finding for a clean store, else its findings.
+    fn findings(store: &Store) -> Value {
+        let verify = store.read(&["verify", "--deep"]);
+        match verify.exit() {
+            0 => verify.ok()["findings"].take(),
+            _ => verify.err("E_STORE_CORRUPT")["details"]["findings"].take(),
+        }
+    }
+
+    /// `c2` leaves `a` alone, so the last changeset to touch it from `c2` is `c1`. A file placed
+    /// in `c2`'s slot under the path `a` that says `c2` touched it last is reported by
+    /// `verify --deep`, with the path key's hex; a plain `verify` passes it. Without the file,
+    /// the store is clean again.
+    #[test]
+    fn a_crafted_last_touch_is_caught() {
+        let store = Store::init();
+        let c1 = store.commit(WRITER, "a", "1", None);
+        let c2 = store.commit(WRITER, "b", "1", Some(&c1));
+        let main = ["ref", "set", "main", &c2, "--create"];
+        store.run_as(WRITER, &main, &[]).ok();
+        let history = || store.read(&["history", "main:a"]);
+        assert_eq!(changesets(&history().ok()), [c1.as_str()]);
+        assert_eq!(findings(&store), json!([]));
+
+        // The path key `a`, as postcard writes a string; the value `Some(c2)`.
+        let key = [&[1_u8][..], b"a"].concat();
+        let slot = DerivedSlot {
+            name: "last_modified",
+            version: 1,
+            subject: id(&c2).0,
+            key: &key,
+        };
+        plant(&store, &slot, &[&[1_u8][..], &id(&c2).0.0].concat());
+
+        let finding = json!({
+            "kind": "derived_mismatch",
+            "changeset": c2,
+            "derivation": "last_modified",
+            "key": "0161",
+        });
+        assert_eq!(findings(&store), json!([finding]));
+        assert_eq!(store.read(&["verify"]).ok()["findings"], json!([]));
+
+        fs::remove_file(store.layout().derived_path(&slot)).unwrap();
+        assert_eq!(changesets(&history().ok()), [c1.as_str()]);
+        assert_eq!(findings(&store), json!([]));
+    }
+
+    /// A first-parent chain of 1,101 changesets on `main` and a side branch of 40 off its 11th,
+    /// committed through the library (nothing synced) into `store`: the chain's ids, its root
+    /// first, and the side branch's.
+    fn chain_and_side_branch(store: &Store) -> (Vec<ChangesetId>, Vec<ChangesetId>) {
+        let root = Utf8PathBuf::from(store.path());
+        let repo = LocalRepo::open_with_fs(&root, Arc::new(NoSyncFs)).unwrap();
+        let commit = |parent: Option<ChangesetId>, message: &str| {
+            let parents: Vec<ChangesetId> = parent.into_iter().collect();
+            let changes = vec![put("f", message.as_bytes())];
+            repo.commit(request(&parents, changes, message)).unwrap().id
+        };
+        let mut main: Vec<ChangesetId> = Vec::new();
+        for i in 0..1_101 {
+            main.push(commit(main.last().copied(), &format!("main {i}")));
+        }
+        let mut side: Vec<ChangesetId> = Vec::new();
+        for i in 0..40 {
+            let parent = side.last().copied().unwrap_or(main[10]);
+            side.push(commit(Some(parent), &format!("side {i}")));
+        }
+        repo.cas_ref("main", None, main.last().copied(), WRITER)
+            .unwrap();
+        (main, side)
+    }
+
+    /// `main~1025`, past the 1,024 steps walked one at a time, lifts along the head's skip list:
+    /// its entry 10, 1,024 steps back, then one step. A list placed for the head whose entry 10
+    /// names a changeset of an old side branch is reported by `verify --deep`, without a key.
+    #[test]
+    fn a_crafted_skip_list_is_caught() {
+        let store = Store::init();
+        let (main, side) = chain_and_side_branch(&store);
+        let head = main[1_100];
+        let resolve = || store.read(&["resolve", "main~1025"]);
+        assert_eq!(resolve().ok()["id"], main[75].to_string().as_str());
+        assert_eq!(findings(&store), json!([]));
+
+        let root = Utf8PathBuf::from(store.path());
+        let repo = LocalRepo::open(&root).unwrap();
+        let mut list = repo
+            .derived::<FirstParentSkipList>(head, &())
+            .unwrap()
+            .into_vec();
+        drop(repo);
+        assert_eq!((list.len(), list[10]), (11, main[76]), "the head's list");
+        list[10] = side[30];
+        // A skip list as postcard writes it: the number of ids, then each id's 32 bytes.
+        let mut value = vec![u8::try_from(list.len()).unwrap()];
+        for entry in &list {
+            value.extend(entry.0.0);
+        }
+        let slot = DerivedSlot {
+            name: "first_parent_skip_list",
+            version: 1,
+            subject: head.0,
+            key: &[],
+        };
+        plant(&store, &slot, &value);
+
+        let finding = json!({
+            "kind": "derived_mismatch",
+            "changeset": head.to_string(),
+            "derivation": "first_parent_skip_list",
+        });
+        assert_eq!(findings(&store), json!([finding]));
+
+        fs::remove_file(store.layout().derived_path(&slot)).unwrap();
+        assert_eq!(resolve().ok()["id"], main[75].to_string().as_str());
+        assert_eq!(findings(&store), json!([]));
+    }
+}

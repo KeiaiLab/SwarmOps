@@ -450,7 +450,8 @@ static TOOLS: [Spec; 18] = [
         name: "verify",
         request: "VerifyReq",
         title: "Verify the store",
-        description: "Checks the whole store's consistency; deep re-hashes every object too.",
+        description: "Checks the whole store's consistency; deep re-hashes every object and \
+                      checks the derived values against the objects too.",
         effect: Effect::Reads,
         result_chars: None,
     },

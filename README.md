@@ -320,7 +320,7 @@ and starts no server either.
 | `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
 | `op log [--before OP] [-n N] [--max-changesets N]` | The store's operations, newest first, a page at a time: each write transaction with its kind, its changesets and its ref moves. |
 | `op undo OP` | Move every ref operation `OP` moved back to what it named before, by compare-and-swap in one transaction: all of them or none. |
-| `verify [--deep]` | Check the store; `--deep` re-hashes every object. |
+| `verify [--deep]` | Check the store; `--deep` re-hashes every object and checks the derived values against the objects. |
 | `derive [--after N] [--follow] [--interval-ms N] [--from-start]` | Derive ahead of any reader the eager derived values (the first-parent skip list) of the changesets the journal records. Once: up to 1,000 journal frames, from the first or after `--after N`, its `next` saying where to go on. With `--follow`: as they are committed, from the journal's end (its start with `--from-start`), until killed, one envelope a line for each run that derived something. |
 | `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
 | `git import PATH [--ref GIT_REF] [--into REF] [--lossy CLASS]... [--gitlinks refuse\|drop]` | Bring the history of the git repository at `PATH` in: every commit `--ref` (`HEAD`) reaches that the store does not hold, then move `--into` (`main`) to it ([Bring a git repository in](#bring-a-git-repository-in)). |

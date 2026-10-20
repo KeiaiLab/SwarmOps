@@ -1106,3 +1106,249 @@ fn verify_reports_external_ids_that_are_damaged_dangling_or_mismatched() {
         ]
     );
 }
+
+/// What a deep verify finds in the derived store (storage spec §5): every value it holds of the
+/// two built-in derivations, checked against the changesets' objects.
+mod derived_values {
+    use swarmops_core::RepoPath;
+    use swarmops_repo::{Derivation, FirstParentSkipList, LastModified, LastTouch, PathKey};
+    use swarmops_store::DerivedSlot;
+    use swarmops_testkit::fs::NoSyncFs;
+
+    use super::*;
+
+    /// A history whose derived values the tests check, committed through a filesystem that never
+    /// syncs (`NoSyncFs`): `c0` puts `a` and `d/x`, `c1` on it `b`, `c2` on that `a`; `s1`, a side
+    /// branch off `c0`, puts `a` and `d/y`; `merge` of `c2` and `s1` puts `e`; and on it, `quiet`
+    /// (the merge first), 70 changesets that put only `q`.
+    struct History {
+        _dir: TempDir,
+        root: Utf8PathBuf,
+        repo: LocalRepo,
+        c0: ChangesetId,
+        c1: ChangesetId,
+        c2: ChangesetId,
+        s1: ChangesetId,
+        merge: ChangesetId,
+        quiet: Vec<ChangesetId>,
+    }
+
+    impl History {
+        /// The history, with the values the engine derives for it: every changeset's skip list,
+        /// and the last touches of paths that `path_history` chases from the last changeset and
+        /// from the side branch's, among them the memos of a walk over the 70 that leave `a`
+        /// alone.
+        fn derived() -> History {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let repo = LocalRepo::create_with_fs(&root, "test", Arc::new(NoSyncFs)).unwrap();
+            let c0 = commit(&repo, &[], vec![put("a", b"0"), put("d/x", b"0")]);
+            let c1 = commit(&repo, &[c0], vec![put("b", b"1")]);
+            let c2 = commit(&repo, &[c1], vec![put("a", b"2")]);
+            let s1 = commit(&repo, &[c0], vec![put("a", b"s"), put("d/y", b"s")]);
+            let merge = commit(&repo, &[c2, s1], vec![put("e", b"m")]);
+            let mut quiet = vec![merge];
+            for i in 0..70_u32 {
+                let parent = *quiet.last().unwrap();
+                quiet.push(commit(&repo, &[parent], vec![put("q", &i.to_le_bytes())]));
+            }
+            let head = *quiet.last().unwrap();
+            for &cs in [c0, c1, c2, s1].iter().chain(&quiet) {
+                repo.derived::<FirstParentSkipList>(cs, &()).unwrap();
+            }
+            let read = repo.snapshot().unwrap();
+            for p in ["a", "b", "d", "d/x", "e", "q", "never"] {
+                read.path_history(head, &path(p), 100).unwrap();
+                read.path_history(s1, &path(p), 100).unwrap();
+            }
+            assert_eq!(read.last_modified(head, &path("a")).unwrap(), Some(c2));
+            assert_eq!(read.last_modified(s1, &path("b")).unwrap(), None);
+            drop(read);
+            History {
+                _dir: dir,
+                root,
+                repo,
+                c0,
+                c1,
+                c2,
+                s1,
+                merge,
+                quiet,
+            }
+        }
+
+        /// Places `value` in `slot` in place of the file there, if any, as a put writes it,
+        /// trailer and all.
+        fn place(&self, slot: &DerivedSlot<'_>, value: &[u8]) {
+            let file = Layout::new(&self.root).derived_path(slot);
+            if file.exists() {
+                fs::remove_file(&file).unwrap();
+            }
+            assert!(
+                self.repo.derived_store().put(slot, value).unwrap(),
+                "{slot:?}"
+            );
+        }
+    }
+
+    /// The key of `p`'s values of `last_modified`: its path's postcard bytes.
+    fn path_key(p: &str) -> Vec<u8> {
+        postcard::to_stdvec(&PathKey(path(p))).unwrap()
+    }
+
+    /// The slot of `cs`'s value of `last_modified` under `key`.
+    fn touch_slot(cs: ChangesetId, key: &[u8]) -> DerivedSlot<'_> {
+        DerivedSlot {
+            name: LastModified::NAME,
+            version: LastModified::VERSION,
+            subject: cs.0,
+            key,
+        }
+    }
+
+    /// The slot of `cs`'s skip list.
+    fn list_slot(cs: ChangesetId) -> DerivedSlot<'static> {
+        DerivedSlot {
+            name: FirstParentSkipList::NAME,
+            version: FirstParentSkipList::VERSION,
+            subject: cs.0,
+            key: &[],
+        }
+    }
+
+    /// A value of `last_modified`, as postcard writes it.
+    fn touch(cs: Option<ChangesetId>) -> Vec<u8> {
+        postcard::to_stdvec(&LastTouch(cs)).unwrap()
+    }
+
+    /// A skip list of `ids`, as postcard writes it: their number, then each one's 32 bytes.
+    fn list(ids: &[ChangesetId]) -> Vec<u8> {
+        let mut bytes = vec![u8::try_from(ids.len()).unwrap()];
+        for id in ids {
+            bytes.extend(id.0.0);
+        }
+        bytes
+    }
+
+    /// The values the engine derives are clean, deep and shallow. Each value placed over them that
+    /// is not the one the objects give, whole and with its trailer right, is a `DerivedMismatch`
+    /// of a deep check (by derivation, changeset and key), which a shallow one does not read: a
+    /// last touch from a merge's second parent, a none where a changeset touched the path, an
+    /// older toucher in the memo the walk from the last changeset left, a changeset the store
+    /// does not hold, and bytes that are no value; a skip list with an entry on a side branch at
+    /// the right distance from the root (entry 0, entry 1), cut short, with an entry on the chain
+    /// at the wrong distance, an entry too many, empty for a changeset with a parent, naming a
+    /// changeset the store does not hold, and bytes that are no list. Values placed where the
+    /// engine stored none that are the ones the objects give are no problem, a last touch of none
+    /// on the side branch among them; nor are a torn file, a value about a changeset the store
+    /// does not hold, a key that is no path, and a skip list under a key: no reader takes them as
+    /// valid. Verify removes none of the files.
+    #[test]
+    fn verify_deep_checks_derived_values_against_the_objects() {
+        let h = History::derived();
+        let quiet = &h.quiet;
+        let head = *quiet.last().unwrap();
+        assert_problems(&h.repo, Vec::new());
+        let missing = ChangesetId(hash_object(ObjectKind::Changeset, b"in no store"));
+        let keys = ["a", "b", "d", "e", "q"].map(path_key);
+        let [key_a, key_b, key_d, key_e, key_q] = keys.each_ref().map(Vec::as_slice);
+        let layout = Layout::new(&h.root);
+        assert!(
+            layout.derived_path(&touch_slot(head, key_a)).exists(),
+            "a memo"
+        );
+        let wrong: Vec<(DerivedSlot<'_>, Vec<u8>)> = vec![
+            (touch_slot(h.merge, key_a), touch(Some(h.s1))),
+            (touch_slot(h.c1, key_a), touch(None)),
+            (touch_slot(head, key_a), touch(Some(h.c0))),
+            (touch_slot(h.c2, key_b), touch(Some(missing))),
+            (touch_slot(h.c0, key_d), vec![9, 9]),
+            (list_slot(h.c2), list(&[h.s1, h.c0])),
+            (list_slot(h.merge), list(&[h.c2, h.s1])),
+            (list_slot(quiet[10]), list(&[quiet[9], quiet[8], quiet[6]])),
+            (
+                list_slot(quiet[20]),
+                list(&[quiet[19], quiet[18], quiet[16], quiet[12], quiet[5]]),
+            ),
+            (list_slot(h.c1), list(&[h.c0, h.c0])),
+            (list_slot(quiet[1]), list(&[])),
+            (list_slot(quiet[2]), list(&[quiet[1], missing, h.c1])),
+            (list_slot(quiet[3]), vec![2, 0]),
+        ];
+        for (slot, value) in &wrong {
+            h.place(slot, value);
+        }
+        h.place(&touch_slot(h.s1, key_b), &touch(None));
+        h.place(&touch_slot(h.s1, key_d), &touch(Some(h.s1)));
+        h.place(&touch_slot(quiet[30], key_a), &touch(Some(h.c2)));
+        h.place(&touch_slot(quiet[30], key_q), &touch(Some(quiet[30])));
+        h.place(&touch_slot(quiet[40], key_e), &touch(Some(h.merge)));
+        let torn = layout.derived_path(&list_slot(quiet[4]));
+        let mut bytes = fs::read(&torn).unwrap();
+        *bytes.last_mut().unwrap() ^= 0x01;
+        fs::write(&torn, bytes).unwrap();
+        h.place(&list_slot(missing), &list(&[h.c0]));
+        let no_path: &[u8] = &[4, b'a', b'/', b'/', b'b'];
+        assert!(RepoPath::new("a//b").is_err());
+        h.place(&touch_slot(h.c2, no_path), &touch(Some(h.c0)));
+        let keyed_list = DerivedSlot {
+            key: b"k",
+            ..list_slot(h.c2)
+        };
+        h.place(&keyed_list, &list(&[h.c0]));
+
+        let mut want: Vec<(&str, ChangesetId, Vec<u8>)> = (wrong.iter())
+            .map(|(slot, _)| (slot.name, ChangesetId(slot.subject), slot.key.to_vec()))
+            .collect();
+        want.sort_unstable();
+        let want: Vec<VerifyProblem> = (want.into_iter())
+            .map(|(name, changeset, key)| VerifyProblem::DerivedMismatch {
+                name: name.to_owned(),
+                changeset,
+                key,
+            })
+            .collect();
+        assert_eq!(
+            h.repo.verify(true).unwrap().problems,
+            want,
+            "in their order"
+        );
+        assert_problems_when(&h.repo, false, Vec::new());
+        for (slot, _) in &wrong {
+            assert!(layout.derived_path(slot).exists(), "verify removes nothing");
+        }
+        assert!(torn.exists(), "nor a torn file");
+    }
+
+    /// A `DerivedMismatch` line names the derivation, the changeset and the key (a path for
+    /// `last_modified`, hex for another key, nothing for none), and the remedy.
+    #[test]
+    fn a_derived_mismatch_line_names_the_value_and_the_remedy() {
+        let cs = ChangesetId(hash_object(ObjectKind::Changeset, b"a changeset"));
+        let line = |name: &str, key: &[u8]| {
+            VerifyProblem::DerivedMismatch {
+                name: name.to_owned(),
+                changeset: cs,
+                key: key.to_vec(),
+            }
+            .to_string()
+        };
+        assert_eq!(
+            line(LastModified::NAME, &path_key("src/lib.rs")),
+            format!(
+                "the derived value last_modified of changeset {cs} under path src/lib.rs is not \
+                 the one the store's objects give; remove its file under \
+                 meta/derived/last_modified/, or all of meta/derived/, to have it derived again"
+            )
+        );
+        assert_eq!(
+            line(FirstParentSkipList::NAME, &[]),
+            format!(
+                "the derived value first_parent_skip_list of changeset {cs} is not the one the \
+                 store's objects give; remove its file under meta/derived/first_parent_skip_list/, \
+                 or all of meta/derived/, to have it derived again"
+            )
+        );
+        assert!(line("other", &[0xab, 0x01]).contains(" under key ab01 "));
+    }
+}

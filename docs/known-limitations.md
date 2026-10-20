@@ -216,7 +216,9 @@ left).
 - **`verify` does not scale to very large stores.** It holds the journal and the index in memory,
   and checks each sorted-view entry with its own reads (about 9 million reads at a million
   changesets, about 9 per changeset: each index record, and each entry of both sorted views, is
-  read on its own). *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
+  read on its own). A deep check of a store with derived values also holds the first-parent
+  forest (a few words per changeset) and every `last_modified` value the store holds.
+  *Target: M6 (streaming verify). Found: M1 Task 3; final review.*
 - **`verify`'s report has no cap.** `problems` and `findings` list every problem found, a line
   and a finding each, and a failed verify's `E_STORE_CORRUPT` carries the whole report in
   `details`, so a store damaged in many places gives a response as long as its damage, twice
