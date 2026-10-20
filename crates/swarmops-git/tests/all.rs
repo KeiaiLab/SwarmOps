@@ -10,6 +10,7 @@ mod export;
 mod export_oid;
 mod import;
 mod raw;
+mod round_trip;
 mod sink;
 mod source;
 mod support;
