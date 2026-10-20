@@ -92,9 +92,6 @@ swarmops-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK
 swarmops 0.1.0
 ```
 
-Until v0.1.0 is published, `gh release download` fails with `release not found`; the commands
-after it were run on an archive packed the way the release workflow packs one.
-
 ## Create a store
 
 A store is one directory. Put it on the host's local disk with room to grow: it keeps one file per
