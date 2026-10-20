@@ -65,7 +65,9 @@ pub use export_oid::{
 };
 pub use gix_sink::GixSink;
 pub use gix_source::GixSource;
-pub use import::{ImportError, ImportReport, ImportRequest, LossyCommit, import};
+pub use import::{
+    ExternalIdMismatch, ImportError, ImportReport, ImportRequest, LossyCommit, import,
+};
 pub use lossy::{LossyClass, LossySet};
 pub use native::{TRAILERS, export_message, render_commit};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};

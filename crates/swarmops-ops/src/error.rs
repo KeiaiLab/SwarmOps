@@ -491,6 +491,7 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
             target_head,
             base,
             git_head,
+            external_id,
         } => {
             let mut found = details([
                 ("target_ref", target_ref.as_str().into()),
@@ -500,9 +501,22 @@ pub(crate) fn git_import_error(e: ImportError, git_path: &str, git_ref: &str) ->
             if let Some(base) = base {
                 found.insert("base".to_owned(), base.to_string().into());
             }
+            // An entry the walk passed over, which a deep verify reports, is the first thing to
+            // look at; otherwise the target's history.
+            let next = match external_id {
+                Some(entry) => {
+                    let entry = details([
+                        ("commit", entry.commit.to_string().into()),
+                        ("changeset", entry.changeset.to_string().into()),
+                    ]);
+                    found.insert("external_id".to_owned(), entry.into());
+                    "swarmops verify --deep".to_owned()
+                }
+                None => hint(format!("swarmops log {}", shell_word(&target_ref))),
+            };
             error(ErrorCode::GitImportDiverged, message)
                 .with_details(found)
-                .with_hint(hint(format!("swarmops log {}", shell_word(&target_ref))))
+                .with_hint(next)
         }
         ImportError::CasMismatch { target_ref, actual } => {
             let message = format!(
@@ -1823,8 +1837,9 @@ mod tests {
     }
 
     /// A target that is no ref name; one whose head the tip does not lead from, whose `base` is
-    /// the git commit that head holds, if any (exit 3, the hint its log); and one that moved
-    /// during the import, `E_CAS_MISMATCH` with a hint that only reads.
+    /// the git commit that head holds, if any (exit 3, the hint its log), and which names the
+    /// external id entry the walk passed over, if any (the hint then a deep verify); and one that
+    /// moved during the import, `E_CAS_MISMATCH` with a hint that only reads.
     #[test]
     fn git_import_target_errors_map_to_their_codes() {
         use serde_json::json;
@@ -1841,6 +1856,7 @@ mod tests {
             target_head: head,
             base,
             git_head: COMMIT,
+            external_id: None,
         };
         let want = json!({
             "target_ref": "main",
@@ -1857,6 +1873,26 @@ mod tests {
             "git_head": COMMIT.to_string(),
         });
         git_maps(diverged(None), ErrorCode::GitImportDiverged, &want);
+        let entry = swarmops_git::ExternalIdMismatch {
+            commit: OBJECT,
+            changeset: head,
+        };
+        let passed_over = ImportError::Diverged {
+            target_ref: "main".into(),
+            target_head: head,
+            base: Some(COMMIT),
+            git_head: COMMIT,
+            external_id: Some(Box::new(entry)),
+        };
+        let want = json!({
+            "target_ref": "main",
+            "target_head": head.to_string(),
+            "base": COMMIT.to_string(),
+            "git_head": COMMIT.to_string(),
+            "external_id": {"commit": OBJECT.to_string(), "changeset": head.to_string()},
+        });
+        let error = git_maps(passed_over, ErrorCode::GitImportDiverged, &want);
+        assert_eq!(error.hint.as_deref(), Some("swarmops verify --deep"));
         let actual = ChangesetId(ObjectId([8; 32]));
         let moved = ImportError::CasMismatch {
             target_ref: "main".into(),

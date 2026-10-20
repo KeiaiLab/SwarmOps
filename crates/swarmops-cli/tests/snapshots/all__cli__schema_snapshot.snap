@@ -2381,7 +2381,7 @@ expression: s.redact(&all)
         },
         {
           "const": "E_GIT_IMPORT_DIVERGED",
-          "description": "`git import`: the target ref's head is not the import of `git_ref`'s commit or of an\nancestor of it, because the source was rewritten or a native changeset was committed on\nthe target, so nothing was written; there is no silent merge. `details` names\n`target_ref`, `target_head`, `git_head` and, when the head was imported, its git commit\n`base`.",
+          "description": "`git import`: the target ref's head is not the import of `git_ref`'s commit or of an\nancestor of it, because the source was rewritten or a native changeset was committed on\nthe target, so nothing was written; there is no silent merge. `details` names\n`target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for\n(the one it holds, or for a native head the one it exports to); and `external_id`\n(`commit`, `changeset`) where the import passed over an external id entry whose changeset\nstands for another commit, which `verify --deep` reports.",
           "type": "string"
         },
         {

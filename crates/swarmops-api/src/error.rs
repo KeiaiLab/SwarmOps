@@ -137,8 +137,10 @@ error_codes! {
     /// `git import`: the target ref's head is not the import of `git_ref`'s commit or of an
     /// ancestor of it, because the source was rewritten or a native changeset was committed on
     /// the target, so nothing was written; there is no silent merge. `details` names
-    /// `target_ref`, `target_head`, `git_head` and, when the head was imported, its git commit
-    /// `base`.
+    /// `target_ref`, `target_head`, `git_head` and `base`, the git commit the head stands for
+    /// (the one it holds, or for a native head the one it exports to); and `external_id`
+    /// (`commit`, `changeset`) where the import passed over an external id entry whose changeset
+    /// stands for another commit, which `verify --deep` reports.
     GitImportDiverged => "E_GIT_IMPORT_DIVERGED", EXIT_CONFLICT, false;
     /// `git import`: a commit holds content a changeset cannot keep as git has it; `details`
     /// names the `commit`, the `path` (also as `path_base64` when it is not UTF-8) and the

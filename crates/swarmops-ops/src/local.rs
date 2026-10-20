@@ -406,9 +406,12 @@ const MAX_LAND_KEY: usize = 64;
 ///   its header before it is read; `{object, kind, size, max}`: a commit, a tree or an annotated
 ///   tag (`kind`) longer than that, refused by its header the same way, before a byte of it is
 ///   read whole to be parsed.
-/// - `E_GIT_IMPORT_DIVERGED` (exit 3) `{target_ref, target_head, git_head, base?}`: the
-///   target's head holds no git commit (no `base`: a native changeset is on it), or one that
-///   `git_ref`'s commit does not reach; nothing was written. The hint is the target's log.
+/// - `E_GIT_IMPORT_DIVERGED` (exit 3) `{target_ref, target_head, git_head, base?, external_id?}`:
+///   the git commit the target's head stands for (`base`: the one it holds, or for a native head
+///   the one it exports to) is not one that `git_ref`'s commit reaches; nothing was written. The
+///   hint is the target's log, or a deep verify, which reports it, where the import passed over
+///   an external id entry whose changeset stands for another commit (`external_id`
+///   `{commit, changeset}`).
 /// - `E_CAS_MISMATCH` (retryable) `{name, actual}`: the target moved during the import, with
 ///   every commit recorded; the same import run again moves it if what it names leads to the
 ///   tip. The hint only reads, as for a ref move.

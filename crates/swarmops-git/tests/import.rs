@@ -518,9 +518,10 @@ fn a_rewritten_source_is_diverged_and_writes_nothing() {
         target_head,
         base,
         git_head,
+        external_id: None,
     } = error
     else {
-        panic!("diverged: {error:?}");
+        panic!("diverged, passing over no external id entry: {error:?}");
     };
     assert_eq!(target_ref, "main");
     assert_eq!(target_head, older.head);
@@ -1830,5 +1831,314 @@ mod crafted_memos {
         });
         refused_memo_of(&result, halfway);
         assert_eq!(main_head(&repo), head);
+    }
+}
+
+/// Crafted external id entries (the 2026-10-20 security review's re-verification of the git
+/// import): an entry of the index (`meta/external_ids/git/`) is a file anyone who can write the
+/// store's files can place whole, its checksum right, naming any changeset the store holds. The
+/// import takes an entry only where the changeset it names stands for its commit, holding it as
+/// its `git.oid` or exporting to it; any other is a miss and a warning, as a damaged entry is,
+/// where the walk took the commit for that changeset and recorded the commits above it on it: on
+/// the target's head, the import its base check exists to refuse.
+mod crafted_entries {
+    use std::thread;
+
+    use swarmops_core::{LeafKind, ObjectKind, Tree, TreeEntry};
+    use swarmops_git::{ExportOid, ExportRequest, GixSink, export, register, render_commit};
+    use swarmops_repo::RawChangeset;
+    use swarmops_testkit::repo::{blob, signature};
+
+    use super::*;
+
+    /// A source holding `x`, a root commit, and `c`, a commit on `x`: the source, `x` and `c`.
+    fn x_and_c() -> (MemSource, GitOid, GitOid) {
+        let mut source = MemSource::default();
+        let git = source.blob(b"git\n");
+        let x_tree = source.tree(&[("100644", b"foo.txt", git)]);
+        let x = source.commit(x_tree, &[], "X\n");
+        let new = source.blob(b"new\n");
+        let c_tree = source.tree(&[("100644", b"foo.txt", git), ("100644", b"new.txt", new)]);
+        let c = source.commit(c_tree, &[x], "C\n");
+        (source, x, c)
+    }
+
+    /// Records in `repo`'s external id index, with the store's own writer, an entry for commit
+    /// `commit` that names `changeset`: whole, its checksum right.
+    fn record(repo: &LocalRepo, commit: GitOid, changeset: ChangesetId) {
+        let entry = ExternalEntry {
+            changeset,
+            faithful: true,
+        };
+        let put = repo.record_external_ids(SYSTEM_GIT, &[(commit.0.to_vec(), entry)]);
+        assert_eq!(put.unwrap().written, 1, "{commit}: an entry is in the way");
+    }
+
+    /// A request to import `tip` into `target`.
+    fn into(tip: GitOid, target: &str) -> ImportRequest {
+        ImportRequest::new(tip.to_string(), target, ACTOR)
+    }
+
+    /// What `run` returns, run on a thread with a 256 KiB stack, named `name`: a walk that
+    /// recursed once a parent would overflow it on a history thousands of changesets deep.
+    fn on_a_small_stack<T: Send>(name: &str, run: impl FnOnce() -> T + Send) -> T {
+        thread::scope(|scope| {
+            thread::Builder::new()
+                .name(name.to_owned())
+                .stack_size(256 * 1024)
+                .spawn_scoped(scope, run)
+                .unwrap()
+                .join()
+                .unwrap()
+        })
+    }
+
+    /// An entry for `x` that names the target's head, native or imported, which stands for
+    /// another commit: the import of `c`, made on `x`, does not lead from the head, and is
+    /// refused as diverged from the commit the head stands for, naming the entry it passed over,
+    /// with nothing written, where the walk took `x` for the head, recorded `c` on it and moved
+    /// `main`.
+    #[test]
+    fn an_entry_naming_the_head_grafts_nothing_onto_it() {
+        for kind in ["native", "imported"] {
+            let (_dir, root, mut repo) = unsynced_repo();
+            register(&mut repo).unwrap();
+            let (head, stands_for) = if kind == "native" {
+                let head = commit(&repo, &[], vec![put("foo.txt", b"store\n")]);
+                let created = repo.cas_ref("main", None, Some(head), ACTOR).unwrap();
+                assert!(matches!(created.result, CasResult::Applied { .. }));
+                (
+                    head,
+                    repo.derived::<ExportOid>(head, &()).unwrap().git_oid(),
+                )
+            } else {
+                let mut other = MemSource::default();
+                let file = other.blob(b"other\n");
+                let tree = other.tree(&[("100644", b"other.txt", file)]);
+                let y = other.commit(tree, &[], "Y\n");
+                (import(&repo, &other, &into(y, "main")).unwrap().head, y)
+            };
+            let (source, x, c) = x_and_c();
+            record(&repo, x, head);
+            let (log_len, before) = (journal_len(&root), files_but_derived(&root));
+
+            let error = match import(&repo, &source, &into(c, "main")) {
+                Ok(report) => panic!("{kind}: c recorded on the head: {report:?}"),
+                Err(error) => error,
+            };
+            let ImportError::Diverged {
+                target_head,
+                base,
+                git_head,
+                ..
+            } = &error
+            else {
+                panic!("{kind}: a divergence, not {error:?}");
+            };
+            let found = (*target_head, *base, *git_head);
+            assert_eq!(found, (head, Some(stands_for), c), "{kind}");
+            let message = error.to_string();
+            assert!(message.contains(&x.to_string()), "{kind}: {message}");
+            assert_eq!(main_head(&repo), head, "{kind}");
+            assert_eq!(journal_len(&root), log_len, "{kind}: a frame was written");
+            assert_eq!(files_but_derived(&root), before, "{kind}: nothing written");
+        }
+    }
+
+    /// An entry below the target's head that names another changeset than its commit's: the
+    /// import of `merged` passes over it, converting its commit again into the changeset the store
+    /// holds for it, warns once and leaves the entry as it is, as for a damaged entry, where the
+    /// walk took the commit for the changeset the entry names and recorded the commit above it on
+    /// that one: a history git does not have.
+    #[test]
+    fn an_entry_naming_another_changeset_is_a_miss_and_a_warning() {
+        let fixture = git::fixture("refs");
+        let manifest = manifest(&fixture);
+        let source = open(&fixture);
+        let (_dir, root, repo) = unsynced_repo();
+        let older = import(&repo, &source, &request("older")).unwrap();
+        // `older`'s second commit, which `merged` reaches through its side commit: its entry is
+        // made to name `older`'s tip.
+        let fork = first_parents(manifest, &tip(manifest, "older"))[1];
+        let own = repo.external_id(SYSTEM_GIT, &fork.0).unwrap();
+        let own = own.expect("the fork's entry").changeset;
+        let hex = fork.to_string();
+        let entry = (root.join("meta/external_ids/git"))
+            .join(&hex[..2])
+            .join(&hex[2..]);
+        fs::remove_file(&entry).unwrap();
+        record(&repo, fork, older.head);
+        let before = fs::read(&entry).unwrap();
+
+        let merged = import(&repo, &source, &request("merged")).unwrap();
+        assert_eq!((merged.imported, merged.skipped), (3, 2));
+        let [warning] = &merged.warnings[..] else {
+            panic!("one warning: {:?}", merged.warnings);
+        };
+        assert!(warning.contains(&hex), "{warning}");
+        assert_eq!(fs::read(&entry).unwrap(), before, "the entry as it was");
+        let head = main_head(&repo);
+        assert_eq!(git_oid(&repo, head), oid(&tip(manifest, "merged")));
+        let [side, second] = parents(&repo, head)[..] else {
+            panic!("main names a merge");
+        };
+        assert_eq!(second, older.head);
+        assert_eq!(parents(&repo, side), [own], "the side commit's parent");
+    }
+
+    /// The entries the import and the export write still stop the walk, whatever the target: an
+    /// imported changeset's, whose `git.oid` is the commit, and a native changeset's, which
+    /// exports to the commit. `merged` imported into a target of its own stops at `older`'s tip
+    /// and its second commit, at the changesets their entries name; and a commit made in git on
+    /// an export, imported into another target, stops at the export, at the native changeset the
+    /// export's entry names.
+    #[test]
+    fn the_entries_the_import_and_the_export_write_stop_the_walk() {
+        let fixture = git::fixture("refs");
+        let manifest = manifest(&fixture);
+        let source = open(&fixture);
+        let (_dir, _root, repo) = unsynced_repo();
+        let older = import(&repo, &source, &request("older")).unwrap();
+        let fork = first_parents(manifest, &tip(manifest, "older"))[1];
+        let own = repo.external_id(SYSTEM_GIT, &fork.0).unwrap();
+        let own = own.expect("the fork's entry").changeset;
+        let merged = oid(&tip(manifest, "merged"));
+        let report = import(&repo, &source, &into(merged, "release/merged")).unwrap();
+        let counts = (report.imported, report.skipped, report.old_head);
+        assert_eq!(counts, (2, 2, None));
+        assert_eq!(report.warnings, [] as [String; 0]);
+        let [side, second] = parents(&repo, report.head)[..] else {
+            panic!("the target names a merge");
+        };
+        assert_eq!((parents(&repo, side), second), (vec![own], older.head));
+
+        let fixture = git::fixture("linear");
+        let dir = fixture
+            .repo
+            .clone()
+            .expect("the fixture holds a repository");
+        let (_dir, _root, repo) = unsynced_repo();
+        import(&repo, &open(&fixture), &request("HEAD")).unwrap();
+        let native = native_on_main(&repo);
+        let to_main = ExportRequest::new("main", "main");
+        let out = export(&repo, &mut GixSink::open(&dir).unwrap(), &to_main).unwrap();
+        let entry = repo.external_id(SYSTEM_GIT, &out.head_oid.0).unwrap();
+        assert_eq!(entry.map(|entry| entry.changeset), Some(native));
+        let made = commit_in_git(&dir, out.head_oid, "git.txt");
+        let mut req = request("main");
+        req.target_ref = "release/side".to_owned();
+        let report = import(&repo, &open(&fixture), &req).unwrap();
+        let counts = (report.imported, report.skipped, report.old_head);
+        assert_eq!(counts, (1, 1, None));
+        assert_eq!(report.warnings, [] as [String; 0]);
+        assert_eq!(parents(&repo, report.head), [native]);
+        assert_eq!(git_oid(&repo, report.head), made);
+    }
+
+    /// The entry of a commit imported with a loss, which the import writes, stops the walk too:
+    /// its changeset holds the commit, though it exports to another. `gitlinks` imported with its
+    /// gitlinks dropped, its `HEAD` imported again into a target of its own, without the loss
+    /// allowed, is that changeset, with nothing converted and nothing refused.
+    #[test]
+    fn the_entry_of_a_commit_imported_with_a_loss_stops_the_walk() {
+        let fixture = git::fixture("gitlinks");
+        let (_dir, _root, repo) = unsynced_repo();
+        let mut req = request("HEAD");
+        req.lossy = [LossyClass::Gitlinks].into_iter().collect();
+        let lossy = import(&repo, &open(&fixture), &req).unwrap();
+        assert!(lossy.lossy_total > 0, "{lossy:?}");
+        let mut again = request("HEAD");
+        again.target_ref = "release/again".to_owned();
+        let report = import(&repo, &open(&fixture), &again).unwrap();
+        let found = (report.imported, report.skipped, report.head);
+        assert_eq!(found, (0, 1, lossy.head));
+        assert_eq!(report.warnings, [] as [String; 0]);
+    }
+
+    /// Checking an entry that names a native changeset derives its export oid with the whole
+    /// history below it, without recursion: a first-parent chain of 10,000 native changesets
+    /// (recorded in one raw batch, on a filesystem that never syncs), the entry the export records
+    /// for the one halfway down, and a commit made in git on that export, imported into a target
+    /// of its own on a thread with a 256 KiB stack, every memo gone: the walk stops at the export.
+    /// Then an entry for `x` that names the chain's head, which exports to another commit: the
+    /// import of `c` into another target, on such a thread too, passes over it, warns and converts
+    /// `x` as well.
+    #[test]
+    fn an_entry_deep_in_a_native_history_is_checked_without_recursion() {
+        const DEPTH: usize = 10_000;
+        let (_dir, root, mut repo) = unsynced_repo();
+        register(&mut repo).unwrap();
+        let deep: &[u8] = b"deep\n";
+        let entry = TreeEntry::leaf("f.txt", LeafKind::File, blob(deep));
+        let tree = Tree::new(vec![entry]).unwrap();
+        let objects = vec![
+            (ObjectKind::Blob, deep.to_vec()),
+            (ObjectKind::Tree, tree.encode()),
+        ];
+        repo.put_objects(objects).unwrap();
+        let mut batch = repo.raw_batch();
+        let mut chain: Vec<ChangesetId> = Vec::with_capacity(DEPTH);
+        for i in 0..DEPTH {
+            let raw = RawChangeset {
+                parents: chain.last().copied().into_iter().collect(),
+                root: tree.id(),
+                author: signature(),
+                committer: signature(),
+                message: format!("{i}\n").into_bytes(),
+                extra_headers: Vec::new(),
+                metadata: Vec::new(),
+            };
+            chain.push(batch.push(raw).unwrap());
+        }
+        batch.commit().unwrap();
+
+        // The export of the changeset halfway down, its entry, and a commit made in git on it.
+        let halfway = chain[DEPTH / 2];
+        let exported = |id| repo.derived::<ExportOid>(id, &()).unwrap().git_oid();
+        let mut source = MemSource::default();
+        let f = source.blob(deep);
+        let git_tree = source.tree(&[("100644", b"f.txt", f)]);
+        let cs = repo.changeset(halfway).unwrap().unwrap().changeset;
+        let below = exported(chain[DEPTH / 2 - 1]);
+        let e = source.put(
+            RawKind::Commit,
+            render_commit(halfway, &cs, &[below], git_tree),
+        );
+        assert_eq!(e, exported(halfway));
+        record(&repo, e, halfway);
+        let made = source.blob(b"made in git\n");
+        let made_tree = source.tree(&[("100644", b"f.txt", f), ("100644", b"git.txt", made)]);
+        let on_e = source.commit(made_tree, &[e], "Made in git\n");
+        fs::remove_dir_all(root.join("meta/derived")).unwrap();
+
+        let report = on_a_small_stack("an import onto an exported commit", || {
+            import(&repo, &source, &into(on_e, "release/deep"))
+        });
+        let report = report.expect("import");
+        assert_eq!((report.imported, report.skipped), (1, 1));
+        assert_eq!(report.warnings, [] as [String; 0]);
+        assert_eq!(parents(&repo, report.head), [halfway]);
+
+        let (source, x, c) = x_and_c();
+        record(&repo, x, chain[DEPTH - 1]);
+        // The memos the first import wrote, if any.
+        match fs::remove_dir_all(root.join("meta/derived")) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("remove meta/derived: {error}"),
+        }
+        let report = on_a_small_stack("an import over a crafted entry", || {
+            import(&repo, &source, &into(c, "release/crafted"))
+        });
+        let report = report.expect("import");
+        assert_eq!((report.imported, report.skipped), (2, 0));
+        let [warning] = &report.warnings[..] else {
+            panic!("one warning: {:?}", report.warnings);
+        };
+        assert!(warning.contains(&x.to_string()), "{warning}");
+        let [parent] = parents(&repo, report.head)[..] else {
+            panic!("c has one parent");
+        };
+        assert_eq!(git_oid(&repo, parent), x);
     }
 }
