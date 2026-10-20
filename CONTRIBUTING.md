@@ -168,7 +168,7 @@ reaches test builds too: a `pub` item under `#[cfg(test)]` that the crate root r
 | `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden`, the git fixtures' two switches and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |
-| `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. |
+| `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. It reads the tracked corpus as a seed and writes the new inputs it finds into `fuzz/corpus-new/<target>/`, which git ignores, so a run leaves the tree clean. |
 | `just git-fixtures` | Rebuilds the git fixtures' archives and manifests (`crates/swarmops-testkit/git-fixtures/`) from their scripts with the declared git, 2.43.0: the ignored test `regenerate_git_fixtures`, with `SWARMOPS_REGEN_GIT_FIXTURES=1`. A few seconds; run it after changing a script, and commit what it rewrites. |
 
 Run `just check-slow` before landing a change to the store's write, recovery or locking paths.
@@ -176,8 +176,16 @@ Run `just perf` only in a quiet window (nothing else heavy on the disk), and rec
 prints in `docs/perf.md`, with the host's load, when a decision rests on it: a
 `--durability fast` flag, for one, may exist only if `docs/perf.md` records a measurement that
 justifies it. The fuzz crate (`fuzz/`) is a cargo workspace of its own with a tracked corpus
-(`fuzz/corpus/<target>/`); crashes land in `fuzz/artifacts/` (git-ignored), and a crash found
-there belongs in a regression test.
+(`fuzz/corpus/<target>/`), which `just fuzz` only reads: libFuzzer writes the new inputs it
+finds into the first corpus directory it is given only, and the recipe gives it
+`fuzz/corpus-new/<target>/` (git-ignored) first and the tracked corpus after it, as a seed. New
+inputs join the tracked corpus minimised. Copy the tracked corpus and the new inputs into one
+scratch directory and run `cargo +nightly fuzz cmin <target> <that directory>` from `fuzz/`
+(it replaces the directory with the smallest set of its inputs that keeps their coverage, and
+it moves the directory into a temporary one under `fuzz/`, so the two must share a filesystem);
+then commit only the inputs it kept that are not tracked yet, removing no tracked input, with
+each target's count and size before and after in the commit body. Crashes land in
+`fuzz/artifacts/` (git-ignored), and a crash found there belongs in a regression test.
 
 ## Continuous integration
 
