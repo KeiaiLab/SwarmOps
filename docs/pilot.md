@@ -162,15 +162,16 @@ agent that makes it. Set them for your change, and start the new content from th
 
 ```sh
 FILE=docs/known-limitations.md    # the file your change touches: the example is yours to replace
-SUBJECT='docs: …'                 # your change in one line, the commit's subject
+SUBJECT=                          # your change in one line, the commit's subject: write it here
 MODEL='the coding agent'           # the model of the agent that makes the change
 git -C "$PILOT/source.git" show "$START:$FILE" > "$PILOT/new-content"
 ```
 
 Make the change in `$PILOT/new-content`, with an editor or with the agent's own edit, then run
-the session:
+the session; its first line stops it while `SUBJECT` is empty:
 
 ```sh
+: "${SUBJECT:?write your change in one line on the SUBJECT line above}" &&
 python3 -I "$PILOT/mcp_session.py" "$PILOT/agent/.mcp.json" "$FILE" "$PILOT/new-content" \
   "$(printf '%s\n\nCo-Authored-By: %s <agent@example.invalid>' "$SUBJECT" "$MODEL")"
 ```
@@ -180,8 +181,7 @@ head. When the two are the same, as when the change was not made, it stops with 
 says so and exits 1, and nothing is recorded: make the change, and run it again.
 
 The dry run's lines, for its change and the subject `docs: known limitations as of M2`; its file
-fit in one `read_file` page. The block as written here ran on 2026-10-20 too, against `stable` at
-`23ce4a1`, whose `docs/known-limitations.md` takes two pages, and so two `read_file` lines:
+fit in one `read_file` page:
 
 ```text
 {"tools": 18}
@@ -192,6 +192,9 @@ fit in one `read_file` page. The block as written here ran on 2026-10-20 too, ag
 {"tool": "show", "wall_ms": 2, "elapsed_ms": 0, "ok": true, "code": null}
 {"base": "a6bcf9d8932d205f14023823bd8aadd8e3edc2b7c357bee5da57de7e227e8019", "changeset": "b0e4812ba53c76c6e3cd8541b2f5e276cfaef7efcae23420f169b6d574ffbfeb", "landed": "41b15c96e8bf50b1ecf88faf6d0f7718589220b8be2421531c8c745ff997857b", "status": "landed", "attempts": 1}
 ```
+
+The block as written here ran on 2026-10-20 too, against `stable` at `23ce4a1`, whose
+`docs/known-limitations.md` takes two pages, and so two `read_file` lines.
 
 ## Step 4: Check the store
 
@@ -429,11 +432,11 @@ It starts the server that a `.mcp.json` names (expanding `${VAR}` and `${VAR:-de
 arguments and environment, as Claude Code does), opens the session with
 `initialize`, lists the tools, then calls `ref_list`, `read_file`, `commit`, `land` and `show`. It
 prints one JSON line per call and stops at the first error, printing it. It reads the whole file,
-one `read_file` call per page of up to 32 KiB, and compares it with the new content before the
-commit: when the two are the same, it stops with a message instead, since `commit` refuses a
-change that changes nothing (`E_EMPTY_COMMIT`). Save it as `$PILOT/mcp_session.py`; step 3 gives
-it four arguments: the `.mcp.json`, the file's path in the repository, the file that holds the
-new content, and the commit message.
+one `read_file` call per page of up to 32 KiB, and compares it with the new content, line endings
+included, before the commit: when the two are the same, it stops with a message instead, since
+`commit` refuses a change that changes nothing (`E_EMPTY_COMMIT`). Save it as
+`$PILOT/mcp_session.py`; step 3 gives it four arguments: the `.mcp.json`, the file's path in the
+repository, the file that holds the new content, and the commit message.
 
 ```python
 """One scripted agent session through `swarmops mcp`: read a file at main, commit a new version
@@ -482,7 +485,7 @@ while True:  # the whole file: read on from next_offset while truncated
     if not page["truncated"]:
         break
     offset = page["next_offset"]
-new = open(new_file, encoding="utf-8").read()
+new = open(new_file, encoding="utf-8", newline="").read()
 if new.encode("utf-8") == old:
     sys.exit(f"{path}: the new content is the same as at main's head: make the change first "
              "(nothing was committed)")
