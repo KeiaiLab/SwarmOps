@@ -353,6 +353,15 @@ left).
   (`rewritten`, and a warning), which a branch built on the originals does not take
   (`lossy_history`), and the signature headers they keep verbatim (`gpgsig`) no longer verify.
   *Documented (storage spec §7; M8 Decision 13). Found: M8 Task 5.*
+- **A git directory's file longer than 16 MiB is refused.** The git import and export let gix
+  read a repository's refs (`HEAD`, every loose ref and every pseudo-ref, which a symbolic `HEAD`
+  can name), `config`, `config.worktree` and `objects/info/alternates` whole, so they refuse one
+  longer than 16 MiB before anything reads it (`E_GIT_UNSUPPORTED`, `details.reason`
+  `file_too_long`), as they refuse a FIFO, a socket or a device where they read a file
+  (`special_file`). No such file that git writes comes near the bound, but a `FETCH_HEAD` left by
+  a fetch of some hundreds of thousands of refs, or a `SQUASH_MSG` of a squash of very many
+  commits, can pass it: remove that file, which git keeps only for its next command, and run the
+  import or export again. *Documented (storage spec §7). Found: 2026-10-20.*
 
 ## Platforms
 

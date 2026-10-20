@@ -11,7 +11,8 @@ use crate::{GitOid, ObjectFormat, RawKind, Unsupported};
 /// ([`sync`]), and only then moves the branch ([`cas_branch`]), so that the branch never names an
 /// object a power loss can take. Branches are `refs/heads/<name>`, named without that prefix. A
 /// sink refuses, when it opens, a repository it cannot write as it is (a SHA-256 one, reftable
-/// refs, a shallow clone), as a source refuses one it cannot read.
+/// refs, a shallow clone, a FIFO, a socket or a device where it reads a file), as a source
+/// refuses one it cannot read.
 ///
 /// [`write_object`]: GitSink::write_object
 /// [`sync`]: GitSink::sync

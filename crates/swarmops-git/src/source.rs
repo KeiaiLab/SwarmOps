@@ -9,7 +9,7 @@ use crate::{GitOid, ObjectFormat, RawKind};
 ///
 /// Replacement objects (`refs/replace/`) and grafts never apply: every object is the one its id
 /// names. A source refuses, when it opens, a repository it cannot read as it is (a SHA-256 one,
-/// reftable refs, a shallow clone).
+/// reftable refs, a shallow clone, a FIFO, a socket or a device where it reads a file).
 pub trait GitSource {
     /// The hash the repository names its objects by.
     fn object_format(&self) -> ObjectFormat;
@@ -97,4 +97,25 @@ pub enum Unsupported {
     /// It is a shallow clone: some of its commits lack their parents.
     #[error("it is a shallow clone, whose oldest commits lack their parents")]
     Shallow,
+    /// A file it reads in its git directory, named by its path there (`config`,
+    /// `refs/heads/main`, `objects/info/alternates`, …; an alternate object directory elsewhere
+    /// by its own path), is a FIFO, a socket or a device, or a symlink to one: opening a FIFO
+    /// blocks until something writes to it, and a device's read can block or never end. Refused
+    /// before any file of the repository is read.
+    #[error("its {0} is a FIFO, a socket or a device, not a regular file")]
+    SpecialFile(String),
+    /// A file it reads whole in its git directory (`HEAD` and every other ref file, `config`,
+    /// `config.worktree`, `objects/info/alternates`), named as
+    /// [`SpecialFile`](Unsupported::SpecialFile) names one, is longer than the most it reads of
+    /// such a file, which none that git writes comes near: a crafted one, sparse so that it
+    /// costs no disk, would be read into memory whole. Refused before it is read.
+    #[error("its {file} is {len} bytes long, more than the {max} it reads of it")]
+    FileTooLong {
+        /// The file, by its path in the git directory.
+        file: String,
+        /// Its length.
+        len: u64,
+        /// The most it reads of such a file.
+        max: u64,
+    },
 }
