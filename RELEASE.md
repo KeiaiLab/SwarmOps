@@ -1,10 +1,11 @@
 # Releasing SwarmOps
 
-Nothing has been released yet. This is the checklist for the first release and every one after
-it. What may change between versions is in
+SwarmOps 0.1.0 is the first release. This is the checklist for it and for every one after it.
+What may change between versions is in
 [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md).
 
-A release is a signed `vX.Y.Z` tag on a commit of `stable`. Pushing the tag runs
+A release is an annotated `vX.Y.Z` tag on a commit of `stable`, unsigned until a signing key is
+registered (step 7). Pushing the tag runs
 [`.github/workflows/release.yml`](.github/workflows/release.yml), which publishes the GitHub
 release `vX.Y.Z` on the [releases page](https://github.com/KeiaiLab/SwarmOps/releases) if every
 check below passes, and nothing otherwise.
@@ -53,7 +54,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
   publishing job can attest them with `actions/attest-build-provenance`, which needs
   `id-token: write` and `attestations: write` there too, and step 9 below gains
   `gh attestation verify <archive> --repo KeiaiLab/SwarmOps`.
-- **Linux only, x86_64 and aarch64, glibc 2.34 or newer.** The aarch64 binaries are
+- **Linux today (x86_64 and aarch64, glibc 2.34 or newer); macOS and Windows are the next
+  milestone, M12.** The aarch64 binaries are
   cross-compiled and only smoke-tested, under QEMU; the test suite runs on x86_64
   ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)). There is no
   macOS, Windows or static (musl) build.
@@ -96,7 +98,9 @@ installs the same tool versions as `ci.yml`'s: move them together.
    release's notes: the workflow refuses a tag without one. The first release also brings up to
    date what says nothing is released yet: README's status badge, status line, maturity row and
    install section, SECURITY.md's supported versions, CHANGELOG.md's introduction, the
-   versioning policy's first paragraph and this file's first line.
+   versioning policy's first paragraph, this file's first line, `site/index.html`'s status texts
+   (the page's description, the pill, the comparison's Maturity row, the roadmap's sub line and its
+   In development item) and the issue template's contact text (`.github/ISSUE_TEMPLATE/config.yml`).
 5. **Bump the version** in `[workspace.package]` of `Cargo.toml` and in the
    `version = "X.Y.Z"` of every internal dependency in `crates/*/Cargo.toml`,
    `fuzz/Cargo.toml` and `bench/compare/Cargo.toml`; let `cargo check` update `Cargo.lock`.
@@ -110,10 +114,11 @@ installs the same tool versions as `ci.yml`'s: move them together.
    (for 0.1.0, the changelog and the first release's updates): `chore: release X.Y.Z`.
 6. **Land that commit on `stable`** and wait for `tests-pass` to be green for it. Push `stable`
    before the tag: the workflow refuses a tagged commit that `stable` does not hold.
-7. **Tag** the commit with an annotated, signed tag, and push the tag:
+7. **Tag** the commit with an annotated tag, unsigned until a signing key is registered (then
+   `git tag -s`), and push the tag:
 
    ```sh
-   git tag -s vX.Y.Z -m "SwarmOps X.Y.Z"
+   git tag -a vX.Y.Z -m "SwarmOps X.Y.Z"
    git push origin vX.Y.Z
    ```
 
