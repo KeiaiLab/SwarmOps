@@ -863,3 +863,97 @@ window under the host's heavy-run lock (the M4 plan's execution policy), with
 ```sh
 cargo bench --locked -p swarmops-repo --bench remerge
 ```
+
+## v0.1.0 — `just perf` in a quiet window (2026-10-21)
+
+Head: the v0.1.0 release commit (the one tagged `v0.1.0`), 556 commits after the 2026-10-16 run's,
+with M1.5, M1.6, M2, M3, M4, M8 and the v0.1.0 release batch merged in between. `just perf` ran once
+(store-level contention → CLI contention → store benches, one after another) under the host's lock
+for heavy runs, its three steps built beforehand so that the timed run compiled nothing. Wall time
+1,463.7 s: 255.6 s, 463.6 s and 744.5 s for the three steps (the benches: 7 bench binaries, 92
+benchmarks). Same host as M0: WSL2 (kernel 5.15.153.1), ext4 (`data=ordered`) on the same virtual
+disk, AMD Ryzen 9 7950X3D (16 cores, 32 threads), 106 GiB RAM; Rust 1.99.0, optimized builds. Every
+store lives in a fresh temporary directory under `~/.local/state/swarmops-bench`.
+
+The window was quiet: start load 0.93 → end load 2.27, and no other test, build or bench on the
+host. The 1-minute load of 7–12 during the CLI test is its own 32 fsyncing processes, and the disk
+under the stores was busy 99 % of the store-level test (813 writes/s) and 97 % of the CLI test
+(1,086 writes/s), its 32 writers' own load, and 45 % of the benches. The raw `fdatasync` probe (the
+median of 40 appends of 120 B, each `sync_data`'d) took 3.56 ms at the start and 3.71 ms at the end,
+M1's quiet-disk speed (3.7–3.8 ms; M0 measured 4.1 ms). One run (the M1 experiments above ran each
+measurement twice), so every p99 and max below is a single run's. Nearest-rank percentiles;
+criterion figures are medians.
+
+| Measurement | Result |
+|---|---|
+| Store-level 32 × 1,000 `MetaStore::write()` | wall 254.2 s, **125.9 tx/s**, Busy 0; transaction p50 288.35 ms, p99 418.68 ms, max 548.43 ms; lock wait p50 280.74 ms, p99 408.66 ms, max 526.56 ms; in lock (transaction minus lock wait) p50 7.16 ms, p99 21.36 ms, max 89.75 ms; spread 1.03×; uncontended `write()` p50 0.07 ms, p99 0.18 ms; uncontended transaction p50 7.01 ms, p99 20.50 ms; journal 32,031 frames (31 `Compacted`), 1 past `journal.ckpt`, `journal.log` 3,711,565 bytes |
+| CLI 32 × 1,000 `swarmops commit` | 32,000 commits in 446.1 s, **71.7 commits/s**, `E_BUSY` 0 (control: `E_BUSY` after 10,009 ms); `meta.elapsed_ms` mean 442, p50 433, p90 487, p99 621, p99.9 680, max 712 ms; spawn to exit p50 436.2, p99 624.0, max 715.8 ms; spread 1.00× (children 444.6–446.0 s); no commit over 1 s; uncontended commit p50 19 ms (p99 32, max 32; wall p50 22.1 ms); estimated lock wait mean 423, p50 414, p99 602, max 693 ms; `verify --deep` clean, 128,306 objects and 32,101 changesets in 1,758 ms; `log -n 5` 5 entries in 0 ms; the whole test 460.3 s |
+| `fsync_latency` (M0's instrument) | no fsync 22.5 µs; `sync_data` 3.53 ms; `sync_all` 3.56 ms; `sync_all` + rename + directory fsync 7.04 ms |
+| `fsync_fanout` | serial 17.3 ms, parallel 7.09 ms (2.44×), one file 3.51 ms; `index_sync/1` 11.4 ms vs `index_sync/5` 4.62 ms (2.47×) |
+| `index_lookup` (criterion median) | 10k: find 2.26 µs compacted / 3.07 µs with a 1,000-record tail; 100k: 2.52 / 3.46 µs; 200k: 2.54 / 3.49 µs; `find_prefix` ≤ 6.13 µs; `find_delta_hash` ≤ 4.50 µs |
+| `put_batch` 256 × 4 KiB + flush | 1 thread 954 ms (268 obj/s), 8 threads 224 ms, **32 threads 72.9 ms (3,509 obj/s, 13.1×)**; with a busy writer 1,493 / 296 / 100 ms (**14.9×**); `put_batch` alone 940 / 223 / 66.3 ms (14.2×); `flush_only` 5.08 ms (33.7 ms busy) |
+| `read_snapshot` (`read()` + `changeset(id)`, p50 / p99) | 10k: 50.9 / 101.5 µs (ckpt at end), 68.4 / 132.7 µs (31 frames past); 100k: 55.2 / 107.6 µs, 71.9 / 152.9 µs; `journal.off` search 3.50–4.60 µs. Refs on 10k changesets: 0 refs 55.8 / 113.6 µs, 16 refs 145 / 282 µs, **256 refs 1.55 ms / 3.00 ms**; `show main` as two snapshots / as one (p50) at 0, 16 and 256 refs: 110 / 59.1 µs, 289 / 149 µs, 3.13 / 1.55 ms |
+| `compaction` (criterion median; p50, p90, max over every compaction) | 100k records: 52.1 ms (p50 51.7, p90 53.4, max 55.3 ms over 131 compactions, 8,000,000 bytes written each); 1M records: 201 ms (p50 200.0, p90 211.5, max 221.4 ms over 37, 80,000,000 bytes each) |
+| `history` (200k / 1M changesets, p50) | `find` hit 2.44 / 2.58 µs, miss 1.80 / 1.81 µs; the bisection copy: hit 5.86 / 7.23 µs, miss 5.51 / 6.50 µs; `insert_changeset` with no tail 4.81 / 4.74 µs, with a 1,024-record tail 8.03 / 8.59 µs; 100-step first-parent walk 419 / 479 µs by `changeset`, 375 / 411 µs by `first_parent`; `reflog(100)` with 31 frames past the checkpoint 30.9 / 154 ms (criterion median) |
+
+`compaction`, `history`, and `read_snapshot`'s store with refs have no earlier number in this file.
+`compaction` times one `Index::compact`, every sync on, as a writer makes it while it holds
+`meta/lock` once the unsorted tail has passed its threshold: it rewrites both sorted views whole, 80
+bytes per record. `history` times, on linear chains of 200k and 1M changesets, `Index::find` (an
+interpolation search) against a plain bisection the bench copies, on the same reads, an insert that
+scans an empty and a full (1,024-record) unsorted tail, 100 first-parent steps by whole records
+(`changeset`) and by parent entries (`first_parent`), and the reflog of `main`'s last 100 moves.
+`read_snapshot`'s third store holds 0, 16 or 256 `release/*` refs besides `main`; `show main`
+resolved `main` in one snapshot and read its changeset in a second, and makes both reads in one now.
+
+**The lock pass, store against CLI.** At store level the lock passes every 7.94 ms (254.2 s /
+32,000), 2.2 raw `fdatasync`s of the 3.56 ms probe; an uncontended transaction takes 7.01 ms and a
+contended one 7.16 ms in the lock. Through the binary it passes every 13.94 ms (446.1 s / 32,000),
+3.9 raw `fdatasync`s: 6.0 ms more (2026-10-16: 8.27 and 13.75 ms, 5.5 ms more). The 2026-10-16
+section puts that difference down to the commits' own object writes on the same filesystem; this run
+did not isolate it.
+
+**The wait.** The lock rotated at both levels. At store level the wait's p50, 280.74 ms, is 35.3
+passes (about one round of the other 31 writers), its p99 51.4 passes and its max 66.3. Through the
+binary, estimated as `meta.elapsed_ms` minus 19 ms: p50 29.7, p99 43.2, max 49.7 passes. 7c's
+rotating runs had a p99 of 131–157 passes and a longest wait of 283–359, and a uniformly random
+winner among 31 waiters gives a p99 of 140 and a longest wait near 316 ("M1 store fixes (7c)"). Both
+tails stayed under 0.7 s, against the 10 s timeout. The 2026-10-16 store-level run was in the other
+regime, the committing writer taking the lock straight back (wait p50 0.11 ms, p99 108 passes, max
+145). The lock's queueing is the code it was then (only its open and its error messages changed),
+and 7c found that the regime depends on the host.
+
+**Against the 2026-10-16 run.**
+
+- **Unchanged within 5 %:** the store-level and CLI throughput (125.9 transactions/s against 120.9,
+  71.7 commits/s against 72.7), the uncontended transaction (7.01 ms p50 against 7.24),
+  `fsync_fanout`, `put_batch` with and without the busy writer, and `flush`. The `read_snapshot`
+  medians moved by at most 7 %, and the uncontended commit went from 21 to 19 ms (whole
+  milliseconds). The disk ran at M1's quiet-disk speed; the host's start load was 0.93, against 16.4
+  then.
+- **The lock wait changed regime, not throughput**, on the same queueing code (above). Its tails are
+  the shortest recorded for either test (store p99 0.41 s, longest 0.53 s; CLI p99 0.60 s, longest
+  0.69 s, estimated), at the lowest start load of any run (M1's runs started at 7.6–33).
+- **`index_lookup` is about 2× faster** (−43 % to −63 %). Two commits between the runs aim at it,
+  `72f9112` (a guarded interpolation search over the sorted views) and `092d077` (`find` without
+  re-reading the key it found, and lookups that read one field), and the 2026-10-16 run had a busier
+  host (start load 16.4, a debug build of another worktree during its benches); this run does not
+  separate the causes.
+- **`read_snapshot`'s p99 is higher** with 31 frames past the checkpoint (132.7 and 152.9 µs,
+  against ≤ 126 µs): single-run tails, while its p50s moved by at most 7 %.
+
+**M0's fsync, inside `just perf`.** The criterion means, 22.4 µs, 3.54 ms, 3.58 ms and 7.07 ms, are
+54 %, 13 %, 11 % and 20 % below M0's (49 µs, 4.07, 4.01 and 8.81 ms): the same speed class. M0's
+no-fsync mean was twice its own per-write p50 (23 µs), where this run's mean and median agree (22.4
+and 22.5 µs). `just perf` takes no per-write percentiles, so M0's per-write table is not
+re-measured; the probe's 40 appends at the start had a p90 of 4.09 ms and a worst of 5.56 ms.
+
+Decisions confirmed on this run: the kernel-queue lock keeps `Busy` and `E_BUSY` at 0 of 32,000 at
+both levels, the longest waits 0.53 s (store) and 0.69 s (CLI, estimated), so `lock_timeout` stays
+at 10 s; parallel `Index::sync` is 2.47× serial (decision (b) asks at least 2×); 32-thread
+`put_batch` + `flush` reaches 13.1× the 1-thread rate, and 14.9× with the busy writer (decision (a)
+reconsiders the flag below 4×), so a `--durability fast` flag is not justified by this data.
+
+Not in `just perf`, so not refreshed: M0's per-write percentiles (`fsync_percentiles`), the M1.5
+comparison (`just bench-compare`), and the M1.6 publish pair and M4's re-merge bench above, which
+stay not measured.
