@@ -41,8 +41,10 @@ filesystem permissions are the access boundary. Within that model, these are vul
   (`objects/<2hex>/<62hex>`: the header, the zstd frame and the payload, which is checked against
   its id on every read), the journal (`meta/journal.log`, `journal.off`, `journal.ckpt`), the
   changeset index (`meta/idx/*.col`, `meta/parents.log`, `meta/sorted/*`), ref files
-  (`meta/refs/*`) and derived values (`meta/derived/*`, a cache whose files carry a checksum
-  over their slot and value, not a signature). These cases are known and tracked
+  (`meta/refs/*`), derived values (`meta/derived/*`, a cache whose files carry a checksum
+  over their slot and value, not a signature) and external id entries (`meta/external_ids/*`,
+  a cache that maps a git commit to its changeset, whose files carry a checksum, not a
+  signature). These cases are known and tracked
   ([docs/known-limitations.md](docs/known-limitations.md), "Hostile input"): an object whose
   zstd frame really decompresses to a large size (a compression bomb) is decompressed in full
   before its hash is checked, so reading it takes 512 MiB of payload, the most an object holds,

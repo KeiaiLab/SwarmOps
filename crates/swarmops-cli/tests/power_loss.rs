@@ -22,8 +22,9 @@
 //!   it, after which `verify --deep` is clean again and the history is whole.
 //!
 //! The run ends by recording two external ids (`meta/external_ids/`) of commits whose frames are
-//! durable ([`Op::ExternalIds`]): in every image each is whole and names its commit, or is
-//! absent, and it is absent from no image of a power failure after its put returned.
+//! durable, keyed as an export keys them ([`Op::ExternalIds`]): in every image each is whole and
+//! names its commit, or is absent, and it is absent from no image of a power failure after its
+//! put returned.
 //!
 //! Then three changesets whose fields the caller gives are recorded in one frame through
 //! `Repo::commit_raw_batch` ([`Op::Batch`]): a second root changeset, its child, and a merge of
@@ -112,12 +113,12 @@ enum Op {
         content: &'static str,
     },
     /// External ids of system `git` recorded with `Repo::record_external_ids`, after the frames
-    /// of the commits they name: each a key (20 bytes in hex, as a git oid is) and the commit
-    /// number its entry names. No frame: each entry's file, and the directories it makes,
+    /// of the commits they name, as `swarmops git export` records them: each entry names the
+    /// commit of its number, keyed by the git commit that commit's changeset exports to
+    /// ([`export_oids`]), so that `verify --deep`, which checks such an entry against that
+    /// commit, finds it right. No frame: each entry's file, and the directories it makes,
     /// durable before the put returns.
-    ExternalIds {
-        entries: &'static [(&'static str, usize)],
-    },
+    ExternalIds { entries: &'static [usize] },
     /// [`BATCHED`] changesets with caller-given fields in one frame, through
     /// `Repo::commit_raw_batch`: a second root changeset, a child of it, and a merge of that child
     /// with commit number `merge`. Their trees and blobs are put first (`Repo::put_objects`), and
@@ -243,12 +244,7 @@ const RUN: &[Op] = &[
         path: "blob.bin",
         content: "a blob named by id\n",
     },
-    Op::ExternalIds {
-        entries: &[
-            ("0a1b2c3d4e5f60718293a4b5c6d7e8f901234567", 0),
-            ("fedcba9876543210fedcba9876543210fedcba98", 4),
-        ],
-    },
+    Op::ExternalIds { entries: &[0, 4] },
     Op::Batch { merge: 4 },
 ];
 
@@ -305,20 +301,12 @@ struct Recorded {
 /// An external id the run recorded ([`Op::ExternalIds`]).
 #[derive(Debug, Clone)]
 struct External {
-    /// Its key.
+    /// Its key: the git commit its changeset exports to.
     key: Vec<u8>,
     /// The number of the commit its entry names.
     commit: usize,
     /// How many steps came before its put returned.
     returned: usize,
-}
-
-/// The bytes the hex digits `hex` spell.
-fn key_bytes(hex: &str) -> Vec<u8> {
-    (0..hex.len())
-        .step_by(2)
-        .map(|at| u8::from_str_radix(&hex[at..at + 2], 16).expect("hex digits"))
-        .collect()
 }
 
 /// A fixed signature, so that a commit makes the same changeset in every run.
@@ -364,6 +352,7 @@ fn record_ops(ops: &[Op]) -> Recorded {
         commits,
         parents,
         named,
+        keys,
     } = pool.install(|| run(&root, &fs, ops));
     let calls = fs.calls();
     let timeline = Timeline::new(&base, &calls);
@@ -395,11 +384,12 @@ fn record_ops(ops: &[Op]) -> Recorded {
     }
     assert!(whats.next().is_none(), "a frame per commit and ref move");
     let mut external = Vec::new();
+    let mut keys = keys.into_iter();
     for (n, op) in ops.iter().enumerate() {
         if let Op::ExternalIds { entries } = *op {
             let returned = timeline.mark(&format!("op {n}"));
-            external.extend(entries.iter().map(|&(key, commit)| External {
-                key: key_bytes(key),
+            external.extend(entries.iter().map(|&commit| External {
+                key: keys.next().expect("a key for each entry recorded"),
                 commit,
                 returned,
             }));
@@ -427,6 +417,8 @@ struct Ran {
     parents: Vec<Option<usize>>,
     /// The blobs commits named by id: the commit's number and the blob.
     named: Vec<(usize, swarmops_core::ObjectId)>,
+    /// The keys of the external ids [`Op::ExternalIds`] recorded, in their order.
+    keys: Vec<Vec<u8>>,
 }
 
 /// The run itself, `init` then `ops`.
@@ -435,6 +427,7 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
     let repo = LocalRepo::create_with_fs(root, "power", Arc::clone(&shared)).expect("init");
     fs.mark("init");
     let (mut commits, mut parents, mut named) = (Vec::new(), Vec::new(), Vec::new());
+    let mut keys = Vec::new();
     for (n, op) in ops.iter().enumerate() {
         match *op {
             Op::Commit { parent, puts } | Op::CommitAdvance { parent, puts, .. } => {
@@ -514,7 +507,7 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
                 commits.push(id);
                 parents.push(parent);
             }
-            Op::ExternalIds { entries } => record_external_ids(&repo, &commits, entries),
+            Op::ExternalIds { entries } => keys.extend(record_entries(&repo, &commits, entries)),
             Op::Batch { merge } => {
                 let (first, merged) = (commits.len(), commits[merge]);
                 commits.extend(raw_batch(&repo, merged));
@@ -527,6 +520,7 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
         commits,
         parents,
         named,
+        keys,
     }
 }
 
@@ -576,24 +570,67 @@ fn commit_blob(
     (outcome.id, id)
 }
 
-/// [`Op::ExternalIds`] on `repo`: each of `entries`, a key in hex digits and the number of the
-/// commit in `commits` it names, recorded in the external id index as system `git`'s; each is
-/// new, so the put writes every one.
-fn record_external_ids(repo: &LocalRepo, commits: &[ChangesetId], entries: &[(&str, usize)]) {
+/// [`Op::ExternalIds`] on `repo`: an entry of system `git` for each commit of `commits` that
+/// `entries` numbers, keyed by the git commit its changeset exports to ([`export_oids`]), as an
+/// export records it, each in a fan-out directory of its own; each is new, so the put writes
+/// every one. The keys, in order.
+fn record_entries(repo: &LocalRepo, commits: &[ChangesetId], entries: &[usize]) -> Vec<Vec<u8>> {
+    let last = entries.iter().copied().max().expect("an entry");
+    let exported = export_oids(repo, &commits[..=last]);
     let entries: Vec<(Vec<u8>, swarmops_store::ExternalEntry)> = entries
         .iter()
-        .map(|&(key, commit)| {
+        .map(|&commit| {
             let entry = swarmops_store::ExternalEntry {
                 changeset: commits[commit],
                 faithful: true,
             };
-            (key_bytes(key), entry)
+            (exported[commit].0.to_vec(), entry)
         })
         .collect();
+    let fanouts: BTreeSet<u8> = entries.iter().map(|(key, _)| key[0]).collect();
+    assert_eq!(
+        fanouts.len(),
+        entries.len(),
+        "two entries in one fan-out directory: {entries:?}"
+    );
     let put = repo
         .record_external_ids(swarmops_store::SYSTEM_GIT, &entries)
         .expect("record_external_ids");
     assert_eq!(put.written, to_u64(entries.len()), "{put:?}");
+    entries.into_iter().map(|(key, _)| key).collect()
+}
+
+/// The git commit each of `commits` exports to, as `swarmops git export` renders it: changesets
+/// SwarmOps made, with no `git.oid`, each parent before its children. The trees' and blobs' git
+/// oids are memoized in a derived store of their own, in a temp dir, so that nothing is written
+/// to the store whose calls the run records (its reads are not recorded).
+fn export_oids(repo: &LocalRepo, commits: &[ChangesetId]) -> Vec<swarmops_git::GitOid> {
+    let dir = tempfile::tempdir().expect("make a temp dir");
+    let at = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("a UTF-8 temp path");
+    let memos = swarmops_store::DerivedStore::open(Layout::new(at), Arc::new(RealFs));
+    let read = repo.snapshot().expect("a snapshot");
+    let reader = swarmops_git::ExportReader {
+        read: &read,
+        store: &memos,
+    };
+    let mut exported: HashMap<ChangesetId, swarmops_git::GitOid> = HashMap::new();
+    let mut oids = Vec::with_capacity(commits.len());
+    for &id in commits {
+        let stored = read
+            .changeset(id)
+            .expect("read")
+            .expect("a commit of the run");
+        let changeset = stored.changeset;
+        let parents: Vec<swarmops_git::GitOid> = (changeset.parents.iter())
+            .map(|parent| exported[parent])
+            .collect();
+        let tree = swarmops_git::tree_oid(&reader, changeset.root).expect("the root's git oid");
+        let bytes = swarmops_git::render_commit(id, &changeset, &parents, tree);
+        let oid = swarmops_git::git_hash(swarmops_git::RawKind::Commit, &bytes);
+        exported.insert(id, oid);
+        oids.push(oid);
+    }
+    oids
 }
 
 /// [`Op::Bulk`] on the store at `root`, its calls through `shared` (the recorder `fs`, which

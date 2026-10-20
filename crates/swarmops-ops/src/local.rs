@@ -248,8 +248,10 @@ const MAX_LAND_KEY: usize = 64;
 ///   check, and records it under the ref's name as a revision it resolved. A changeset imported
 ///   from git exports to the commit it came from, one made in the store to a commit with its own
 ///   signatures and `SwarmOps-*` trailers. It needs no identity: it writes no journal frame, only
-///   the git repository and the store's caches (derived values, external id entries). Every
-///   `LocalOps` has the derivation of export oids registered, which the export reads.
+///   the git repository and the store's caches (derived values, external id entries). The
+///   export oids it compares the branch with, names as parents and moves the branch to are
+///   derived from the store's own objects, each memo it meets checked against them, not read
+///   from the derivation of export oids that every `LocalOps` has registered.
 /// - `op_log` lists the store's operations, newest first, below `before`: each one write
 ///   transaction, a journal frame numbered from 0 in commit order, with its kind (read from its
 ///   records: one changeset and a move of a ref to it is a `land` when the changeset's metadata
@@ -408,9 +410,12 @@ const MAX_LAND_KEY: usize = 64;
 ///   its header before it is read; `{object, kind, size, max}`: a commit, a tree or an annotated
 ///   tag (`kind`) longer than that, refused by its header the same way, before a byte of it is
 ///   read whole to be parsed.
-/// - `E_GIT_IMPORT_DIVERGED` (exit 3) `{target_ref, target_head, git_head, base?}`: the
-///   target's head holds no git commit (no `base`: a native changeset is on it), or one that
-///   `git_ref`'s commit does not reach; nothing was written. The hint is the target's log.
+/// - `E_GIT_IMPORT_DIVERGED` (exit 3) `{target_ref, target_head, git_head, base?, external_id?}`:
+///   the git commit the target's head stands for (`base`: the one it holds, or for a native head
+///   the one it exports to) is not one that `git_ref`'s commit reaches; nothing was written. The
+///   hint is the target's log, or a deep verify, which reports it, where the import passed over
+///   an external id entry whose changeset stands for another commit (`external_id`
+///   `{commit, changeset}`).
 /// - `E_CAS_MISMATCH` (retryable) `{name, actual}`: the target moved during the import, with
 ///   every commit recorded; the same import run again moves it if what it names leads to the
 ///   tip. The hint only reads, as for a ref move.
@@ -511,8 +516,8 @@ impl LocalOps {
     }
 
     /// The operations over `repo`, the store at `path`, with the derivation of export oids
-    /// registered ([`swarmops_git::register`]), which `git export` reads and which the import of
-    /// an exported head will read: so every `LocalOps` has it, once.
+    /// registered ([`swarmops_git::register`]), once. Neither `git export` nor `git import` reads
+    /// its values: each derives the export oids it uses from the store's own objects.
     fn with_repo(mut repo: LocalRepo, path: &Utf8Path) -> LocalOps {
         // A repository just opened has only the built-in derivations, none named `git_oid`.
         swarmops_git::register(&mut repo).expect("a repository just opened has no git_oid");
@@ -1732,6 +1737,13 @@ impl StoreOps for Recording<'_> {
                 problems.push(line);
                 findings.push(found);
             }
+            // And the external id entries of native changesets against their export oids, which
+            // the store-core verify cannot render either.
+            for entry in swarmops_git::verify_external_ids(&self.ops.repo).map_err(op)? {
+                let (line, found) = external_id_finding(&entry);
+                problems.push(line);
+                findings.push(found);
+            }
         }
         Ok(VerifyReport {
             objects_checked: report.objects_checked,
@@ -2409,6 +2421,33 @@ fn git_memo_finding(mismatch: &swarmops_git::GitMemoMismatch) -> (String, Verify
         system: None,
         key: None,
         derivation: Some(mismatch.memo.clone()),
+    };
+    (line, found)
+}
+
+/// An external id entry of a native changeset that a deep verify found naming another commit than
+/// the one the changeset exports to ([`swarmops_git::ExternalIdMismatch`]) as an
+/// `external_id_mismatch` line and finding, as the store-core verify reports an entry whose
+/// changeset's `git.oid` is another commit.
+fn external_id_finding(entry: &swarmops_git::ExternalIdMismatch) -> (String, VerifyFinding) {
+    let key = entry.commit.to_string();
+    let line = one_line(format!(
+        "external id {key} of system git names changeset {}, which holds no git.oid and \
+         exports to another commit",
+        entry.changeset
+    ));
+    let found = VerifyFinding {
+        kind: "external_id_mismatch".to_owned(),
+        object: None,
+        changeset: Some(entry.changeset.to_string()),
+        parent: None,
+        seq: None,
+        offset: None,
+        ref_name: None,
+        cause: None,
+        system: Some("git".to_owned()),
+        key: Some(key),
+        derivation: None,
     };
     (line, found)
 }

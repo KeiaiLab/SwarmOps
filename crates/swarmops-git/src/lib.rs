@@ -61,11 +61,13 @@ pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
 pub use export::{DivergedReason, ExportError, ExportReport, ExportRequest, export};
 pub use export_oid::{
     ExportObjects, ExportOid, ExportReader, ExportedOid, GitMemoMismatch, OidCache, blob_oid,
-    real_blob_oid, real_tree_oid, register, tree_oid, verify_export_oids,
+    real_blob_oid, real_tree_oid, register, tree_oid, verify_export_oids, verify_external_ids,
 };
 pub use gix_sink::GixSink;
 pub use gix_source::GixSource;
-pub use import::{ImportError, ImportReport, ImportRequest, LossyCommit, import};
+pub use import::{
+    ExternalIdMismatch, ImportError, ImportReport, ImportRequest, LossyCommit, import,
+};
 pub use lossy::{LossyClass, LossySet};
 pub use native::{TRAILERS, export_message, render_commit};
 pub use oid::{GitOid, ObjectFormat, ParseGitOidError, RawKind, git_hash};

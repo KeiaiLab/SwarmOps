@@ -506,6 +506,17 @@ impl<O: ObjectStore> Repo<O> {
         Ok(self.external_ids.put_batch(system, entries)?)
     }
 
+    /// Every entry of `system` in the external id index, by key ([`ExternalIds::list`]): each
+    /// key with its entry, or with [`StoreError::ExternalIdCorrupt`] for a file that is no entry.
+    /// For a check of the entries beside [`Repo::verify`]'s own, such as the git side's deep one
+    /// of the entries its export writes.
+    pub fn list_external_ids(
+        &self,
+        system: &str,
+    ) -> Result<Vec<swarmops_store::ListedEntry>, RepoError> {
+        Ok(self.external_ids.list(system)?)
+    }
+
     /// The derived store, `meta/derived/`, where [`Repo::derived`] keeps its values: for a reader
     /// outside a derivation that memoizes values of its own there per object (the git export's
     /// tree and blob oids, M8), under names no derivation registers, as a derivation does through

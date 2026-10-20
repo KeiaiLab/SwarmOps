@@ -1254,6 +1254,109 @@ fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
     store.assert_clean("after the memo was removed");
 }
 
+/// A crafted external id entry (a file under `meta/external_ids/git/`, placed whole with its
+/// checksum right) for a commit of the source, `x`, that names `main`'s native head: `swarmops
+/// git import` of `c`, a commit made on `x`, is `E_GIT_IMPORT_DIVERGED` (exit 3) from the commit
+/// the head exports to, naming the entry it passed over (`details.external_id`, its hint a deep
+/// verify), and moves and records nothing, where the walk took `x` for the head and recorded `c`
+/// on it; `verify --deep` names the entry (`external_id_mismatch`). With the entry removed, the
+/// import is diverged all the same, naming no entry, and the store verifies clean.
+#[test]
+fn git_import_over_a_crafted_external_id_is_e_git_import_diverged() {
+    use std::sync::Arc;
+
+    use swarmops_core::{ChangesetId, ObjectId};
+    use swarmops_git::{
+        BranchUpdate, GitOid, GitSink as _, GixSink, RawKind, RawTree, RawTreeEntry, commit_bytes,
+    };
+    use swarmops_store::{ExternalEntry, ExternalIds, RealFs, SYSTEM_GIT};
+    use swarmops_testkit::repo::signature;
+
+    let store = Store::init();
+    let native = store.commit(AGENT, "foo.txt", "store\n", None);
+    let main = ["ref", "set", "main", &native, "--create"];
+    store.run_as(AGENT, &main, &[]).ok();
+
+    // The source: `x`, a root, and `c` on it.
+    let source = swarmops_testkit::git::empty_repository();
+    let mut sink = GixSink::open(&source.dir).expect("open the source");
+    let mut write = |kind, bytes: &[u8]| sink.write_object(kind, bytes).unwrap();
+    let file = |name: &str, oid| RawTreeEntry {
+        mode: b"100644".to_vec(),
+        name: name.as_bytes().to_vec(),
+        oid,
+    };
+    let git = write(RawKind::Blob, b"git\n");
+    let x_tree = RawTree {
+        entries: vec![file("foo.txt", git)],
+    };
+    let x_tree = write(RawKind::Tree, &x_tree.render());
+    let sig = signature();
+    let x = write(
+        RawKind::Commit,
+        &commit_bytes(x_tree, &[], &sig, &sig, &[], b"X\n"),
+    );
+    let new = write(RawKind::Blob, b"new\n");
+    let c_tree = RawTree {
+        entries: vec![file("foo.txt", git), file("new.txt", new)],
+    };
+    let c_tree = write(RawKind::Tree, &c_tree.render());
+    let c = write(
+        RawKind::Commit,
+        &commit_bytes(c_tree, &[x], &sig, &sig, &[], b"C\n"),
+    );
+    sink.sync(&[git, x_tree, x, new, c_tree, c]).unwrap();
+    assert_eq!(sink.cas_branch("main", None, c), Ok(BranchUpdate::Applied));
+
+    // The entry: `x`, it says, is the head's.
+    let head = ChangesetId(ObjectId::from_hex(&native).expect("a changeset id"));
+    let entry = ExternalEntry {
+        changeset: head,
+        faithful: true,
+    };
+    let ids = ExternalIds::new(store.layout(), Arc::new(RealFs));
+    let put = ids.put_batch(SYSTEM_GIT, &[(x.0.to_vec(), entry)]).unwrap();
+    assert_eq!(put.written, 1, "planted");
+    let journal = store.journal_len();
+
+    let path = utf8(&source.dir);
+    let args = ["--ref", "main", "--into", "main"];
+    let refused = import(&store, &path, &args);
+    assert_eq!(refused.exit(), 3, "{refused}");
+    let error = refused.err("E_GIT_IMPORT_DIVERGED");
+    let details = &error["details"];
+    assert_eq!(details["target_head"], native.as_str(), "{error}");
+    assert_eq!(details["git_head"], c.to_string(), "{error}");
+    let entry = json!({"commit": x.to_string(), "changeset": native});
+    assert_eq!(details["external_id"], entry, "{error}");
+    let base: GitOid = (details["base"].as_str().expect("a base"))
+        .parse()
+        .expect("a commit id");
+    assert_ne!(base, x, "{error}");
+    assert_eq!(error["hint"], "swarmops verify --deep", "{error}");
+    assert_eq!(store.show("main")["id"], native.as_str());
+    assert_eq!(store.journal_len(), journal, "a frame was written");
+    let verify = store.read(&["verify", "--deep"]);
+    let findings = &verify.err("E_STORE_CORRUPT")["details"]["findings"];
+    let finding = json!({
+        "kind": "external_id_mismatch",
+        "changeset": native,
+        "system": "git",
+        "key": x.to_string(),
+    });
+    assert_eq!(findings, &json!([finding]), "{verify}");
+
+    std::fs::remove_file(store.layout().external_id_path(SYSTEM_GIT, &x.0)).unwrap();
+    let diverged = import(&store, &path, &args);
+    assert_eq!(diverged.exit(), 3, "{diverged}");
+    let error = diverged.err("E_GIT_IMPORT_DIVERGED");
+    assert_eq!(error["details"]["base"], base.to_string(), "{error}");
+    assert!(error["details"].get("external_id").is_none(), "{error}");
+    assert_eq!(error["hint"], "swarmops log main", "{error}");
+    assert_eq!(store.show("main")["id"], native.as_str());
+    store.assert_clean("after the entry was removed");
+}
+
 /// `swarmops git export` cut short at each of the store's filesystem calls, through the binary
 /// (the M8 plan's Review Focus 3): an export crashed (`SWARMOPS_TEST_CRASH_AT`) or failed
 /// (`SWARMOPS_TEST_FAIL_AT`) at any store call leaves the branch where it was and a store that

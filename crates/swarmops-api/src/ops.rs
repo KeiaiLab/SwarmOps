@@ -1067,8 +1067,9 @@ pub struct VerifyFinding {
     /// (`missing_object`), the one that names a missing parent (`missing_parent`), the one whose
     /// root is not its first parent's root with its delta applied (`root_mismatch`), the one
     /// an external id's entry names: not in the store (`external_id_dangling`), or with a
-    /// `git.oid` that is another oid than the entry's key (`external_id_mismatch`), or the one a
-    /// derived value is about (`derived_mismatch`).
+    /// `git.oid` that is another oid than the entry's key, or, found by a deep verify, with none
+    /// and exporting to another commit (`external_id_mismatch`), or the one a derived value is
+    /// about (`derived_mismatch`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changeset: Option<String>,
     /// The parent the changeset names, which the store does not hold (`missing_parent`).

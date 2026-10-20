@@ -11,10 +11,12 @@
 //!    export come back on the changeset they were made on.
 //! 2. The walk: from the tip over parents, first parents first, on a stack of its own, never by
 //!    recursion. A commit is known when it is the base, which stands for the target's head, or
-//!    when the external id index names a changeset the store holds for it; the walk stops there.
-//!    An entry that is damaged, or names a changeset the store lacks, is a miss and a warning:
-//!    its commit is converted again. The commits it does not know come out parents first; how
-//!    many known ones it stopped at is [`ImportReport::skipped`].
+//!    when the external id index names a changeset for it that the store holds and that stands
+//!    for it, holding it as its `git.oid` or exporting to it; the walk stops there. Any other
+//!    entry (damaged, naming a changeset the store lacks, or one that stands for another commit)
+//!    is a miss and a warning: its commit is converted again, so that no store file decides
+//!    which changeset a commit is. The commits it does not know come out parents first; how many
+//!    known ones it stopped at is [`ImportReport::skipped`].
 //! 3. The base must be the tip, and then nothing is written, or an ancestor of it: met by the
 //!    walk, or reached from a known commit it stopped at by a walk down the store's parents,
 //!    pruned to the generations above the base's (a base reached only through a merge's second
@@ -23,8 +25,8 @@
 //!    that commit too, which a tip made on its export descends from: when the tip does not lead
 //!    from the `git.oid` and the walk met that commit, the walk is made again with it as a second
 //!    base, and the one the tip descends from is the base. Otherwise [`ImportError::Diverged`],
-//!    naming the head's `git.oid`, else the commit a native head exports to, and nothing is
-//!    written.
+//!    naming the head's `git.oid`, else the commit a native head exports to, and the first entry
+//!    the walk passed over whose changeset stands for another commit, and nothing is written.
 //! 4. A base whose tree the head's root holds without loss (a `git.oid` without `git.lossy`, or
 //!    the head's export, which is its root rendered) seeds the conversion: the head's root and
 //!    the base commit's git tree are walked together, entries matched by name and kind, and a
@@ -55,9 +57,10 @@
 //! import run again continues after the frames that committed. A commit the conversion refuses
 //! ([`ImportError::Convert`]) ends the import before the frame that would hold it.
 //!
-//! The export oids of steps 1 and 3 are derived from the store's own objects, as the export
+//! The export oids of steps 1 to 3 are derived from the store's own objects, as the export
 //! derives them: the import asks for one only where the target's head is native, or holds a git
-//! commit the tip does not lead from, so a plain incremental import derives none. Deriving one
+//! commit the tip does not lead from, or the walk meets an entry whose changeset does not hold
+//! the entry's commit, so a plain incremental import derives none. Deriving one
 //! walks the whole history below the head, each changeset once, parents first, on a stack of its
 //! own, and takes no `git_oid` memo of the derived store as a value: a memo it meets that
 //! disagrees with what it derives is [`RepoError::DerivedCorrupt`] ([`ImportError::Store`]),
@@ -169,8 +172,8 @@ pub struct ImportReport {
     /// How many commits were recorded with a loss.
     pub lossy_total: u64,
     /// What went wrong without stopping the import, one line each: an external id entry found
-    /// damaged or naming a changeset the store lacks, one the index kept with other bytes, a
-    /// step after the target's move that failed.
+    /// damaged, naming a changeset the store lacks or one that stands for another commit, one
+    /// the index kept with other bytes, a step after the target's move that failed.
     pub warnings: Vec<String>,
     /// What the import's write transactions repaired before their own work, of what earlier
     /// writers left ([`swarmops_store::MetaWrite::recovered`]), added up.
@@ -210,8 +213,9 @@ pub enum ImportError {
     /// written.
     #[error(
         "{target_ref} has diverged from the git history: its head {target_head} {}, which the \
-         tip {git_head} does not reach",
-        holding(*.base)
+         tip {git_head} does not reach{}",
+        holding(*.base),
+        passed_over(.external_id.as_deref())
     )]
     Diverged {
         /// The target ref.
@@ -225,6 +229,11 @@ pub enum ImportError {
         base: Option<GitOid>,
         /// The tip.
         git_head: GitOid,
+        /// The first external id entry the walk passed over because its changeset stands for
+        /// another commit, if any: a file someone placed in the store, which can be what the
+        /// divergence comes from (`swarmops verify --deep` reports each such entry). Boxed, so
+        /// that it does not make every result of the import larger.
+        external_id: Option<Box<ExternalIdMismatch>>,
     },
     /// The target moved while the import ran: the compare-and-swap found it naming another
     /// changeset. Every changeset and external id is recorded; the same import run again moves
@@ -282,6 +291,28 @@ fn holding(base: Option<GitOid>) -> String {
     )
 }
 
+/// What [`ImportError::Diverged`] says of the external id entry the walk passed over, if any.
+fn passed_over(entry: Option<&ExternalIdMismatch>) -> String {
+    entry.map_or_else(String::new, |entry| {
+        format!(
+            "; the external id entry of git commit {} names changeset {}, which stands for \
+             another commit, and was passed over",
+            entry.commit, entry.changeset
+        )
+    })
+}
+
+/// An external id entry of system `git` whose changeset stands for another commit than the
+/// entry's: it neither holds the commit as its `git.oid` nor exports to it. No import or export
+/// writes one; the import passes over one it meets ([`ImportError::Diverged::external_id`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ExternalIdMismatch {
+    /// The commit whose entry it is: the entry's key.
+    pub commit: GitOid,
+    /// The changeset the entry names.
+    pub changeset: ChangesetId,
+}
+
 /// How many times a store call that found the writer lock held for its whole wait
 /// ([`StoreError::Busy`]) is made again.
 const BUSY_RETRIES: usize = 3;
@@ -314,7 +345,7 @@ pub fn import(
     let tip = source.resolve(&req.git_ref)?;
     let mut oids = Oids::new(repo)?;
     let mut base = Base::of(&mut oids, req)?;
-    let mut walk = Walk::from_tip(repo, source, tip, base.as_ref())?;
+    let mut walk = Walk::from_tip(repo, &mut oids, source, tip, base.as_ref())?;
     let old_head = base.as_ref().map(|base| base.head);
     // The commit that seeds the conversion, and whether the walk met it.
     let mut seeds = None;
@@ -323,7 +354,7 @@ pub fn import(
         if leads.is_none() && base.add_export(&mut oids, &walk)? {
             // The tip may descend from the head's export, which the walk met: the walk again,
             // knowing it.
-            walk = Walk::from_tip(repo, source, tip, Some(base))?;
+            walk = Walk::from_tip(repo, &mut oids, source, tip, Some(base))?;
             leads = base.leads(repo, tip, &walk)?;
         }
         match leads {
@@ -333,6 +364,7 @@ pub fn import(
                     target_head: base.head,
                     base: Some(base.commits[0].oid),
                     git_head: tip,
+                    external_id: walk.mismatched.map(Box::new),
                 });
             }
             Some(Leads::Tip) => {
@@ -546,6 +578,16 @@ impl<'r> Oids<'r> {
             .git_oid())
     }
 
+    /// Whether changeset `id` exports to commit `oid` ([`Oids::export_of`]); `false` for a
+    /// changeset the snapshot does not hold, one committed since it was taken.
+    fn exports_to(&mut self, id: ChangesetId, oid: GitOid) -> Result<bool, ImportError> {
+        let held = self.read.changeset(id);
+        if held.map_err(|source| stopped(source, 0, None))?.is_none() {
+            return Ok(false);
+        }
+        Ok(self.export_of(id)? == oid)
+    }
+
     /// The git oid that tree `tree` renders to, from the store's own bytes.
     fn tree_oid(&self, tree: TreeId) -> Result<GitOid, ImportError> {
         let oid = rendered_tree_oid(&self.reader(), &self.cache, tree);
@@ -566,17 +608,25 @@ fn value<'m>(metadata: &'m [(String, Vec<u8>)], key: &str) -> Option<&'m [u8]> {
         .map(|(_, value)| value.as_slice())
 }
 
+/// Whether a changeset of `metadata` holds git commit `oid`: its `git.oid` is the commit's 40
+/// lowercase hex digits, as the import records it.
+fn holds(metadata: &[(String, Vec<u8>)], oid: GitOid) -> bool {
+    value(metadata, GIT_OID) == Some(oid.to_string().as_bytes())
+}
+
 /// What the walk from the tip found (step 2 of [the module documentation](self)).
 struct Walk {
     /// The commits it did not know, parents first.
     unknown: Vec<GitOid>,
     /// The known commits it stopped at, with their changesets.
     known: HashMap<GitOid, ChangesetId>,
-    /// One line for each external id entry it found damaged, or naming a changeset the store
-    /// lacks.
+    /// One line for each external id entry it found damaged, naming a changeset the store
+    /// lacks, or naming one that stands for another commit.
     warnings: Vec<String>,
     /// The commits of those entries.
     flagged: HashSet<GitOid>,
+    /// The first of them that names a changeset standing for another commit.
+    mismatched: Option<ExternalIdMismatch>,
 }
 
 /// A commit on the walk's stack: the parents it has not looked at yet, first parents first.
@@ -586,9 +636,11 @@ struct Visit {
 }
 
 impl Walk {
-    /// Walks from `tip` over parents, on a stack of its own, stopping at each known commit.
+    /// Walks from `tip` over parents, on a stack of its own, stopping at each known commit. An
+    /// entry's changeset is checked against its commit in `oids`' snapshot.
     fn from_tip(
         repo: &LocalRepo,
+        oids: &mut Oids<'_>,
         source: &dyn GitSource,
         tip: GitOid,
         base: Option<&Base>,
@@ -598,14 +650,15 @@ impl Walk {
             known: HashMap::new(),
             warnings: Vec::new(),
             flagged: HashSet::new(),
+            mismatched: None,
         };
         let mut seen = HashSet::from([tip]);
         let mut stack = Vec::new();
-        walk.reach(repo, source, base, tip, &mut stack)?;
+        walk.reach(repo, oids, source, base, tip, &mut stack)?;
         while let Some(top) = stack.last_mut() {
             if let Some(parent) = top.parents.next() {
                 if seen.insert(parent) {
-                    walk.reach(repo, source, base, parent, &mut stack)?;
+                    walk.reach(repo, oids, source, base, parent, &mut stack)?;
                 }
             } else if let Some(done) = stack.pop() {
                 // Every parent of it is known or out already: it comes out after them.
@@ -620,12 +673,13 @@ impl Walk {
     fn reach(
         &mut self,
         repo: &LocalRepo,
+        oids: &mut Oids<'_>,
         source: &dyn GitSource,
         base: Option<&Base>,
         oid: GitOid,
         stack: &mut Vec<Visit>,
     ) -> Result<(), ImportError> {
-        if let Some(changeset) = self.known_as(repo, base, oid)? {
+        if let Some(changeset) = self.known_as(repo, oids, base, oid)? {
             self.known.insert(oid, changeset);
         } else {
             let parents = read_commit(source, oid)?.parents.into_iter();
@@ -635,11 +689,14 @@ impl Walk {
     }
 
     /// The changeset commit `oid` is known as: the base's head, for a commit it stands for, or the
-    /// one its external id entry names if the store holds it. An entry that is damaged, or names a
-    /// changeset the store lacks, is a miss and a warning.
+    /// one its external id entry names, if the store holds it and it stands for the commit,
+    /// holding it as its `git.oid` or exporting to it ([`Oids::exports_to`]). Any other entry
+    /// (damaged, naming a changeset the store lacks, or one that stands for another commit) is a
+    /// miss and a warning, whatever its file says.
     fn known_as(
         &mut self,
         repo: &LocalRepo,
+        oids: &mut Oids<'_>,
         base: Option<&Base>,
         oid: GitOid,
     ) -> Result<Option<ChangesetId>, ImportError> {
@@ -656,18 +713,29 @@ impl Walk {
             }
             Err(source) => return Err(stopped(source, 0, None)),
         };
-        let Some(entry) = entry else {
+        let Some(ExternalEntry { changeset, .. }) = entry else {
             return Ok(None);
         };
-        let held = repo.changeset_meta(entry.changeset);
-        if held.map_err(|source| stopped(source, 0, None))?.is_some() {
-            return Ok(Some(entry.changeset));
+        // Read in the store as it is now, as the entry is: another import's entries name the
+        // changesets it committed since the snapshot (W8).
+        let held = repo.changeset(changeset);
+        let Some(held) = held.map_err(|source| stopped(source, 0, None))? else {
+            let why = format!("it names changeset {changeset}, which the store does not hold");
+            self.flag(oid, &why);
+            return Ok(None);
+        };
+        if holds(&held.changeset.metadata, oid) || oids.exports_to(changeset, oid)? {
+            return Ok(Some(changeset));
         }
         let why = format!(
-            "it names changeset {}, which the store does not hold",
-            entry.changeset
+            "it names changeset {changeset}, which neither holds that commit nor exports to it"
         );
         self.flag(oid, &why);
+        let mismatched = ExternalIdMismatch {
+            commit: oid,
+            changeset,
+        };
+        self.mismatched.get_or_insert(mismatched);
         Ok(None)
     }
 

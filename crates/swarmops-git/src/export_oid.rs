@@ -22,7 +22,9 @@
 //! Neither the export, the import nor a deep verify takes a `git_oid` memo as the truth: each
 //! derives every export oid it uses again, with the history below it, from the objects, the export
 //! and the import checking each memo they meet against what they derive and refusing one that
-//! disagrees, the verify reporting it ([`verify_export_oids`]).
+//! disagrees, the verify reporting it ([`verify_export_oids`]). A deep verify checks the external
+//! id entries of native changesets against their export oids the same way
+//! ([`verify_external_ids`]).
 //!
 //! Export oids read objects and derived values alone, never a ref, the journal or the clock, so a
 //! changeset's export oid never changes. Version 1 fixes git's tree order and modes, the commit
@@ -37,11 +39,11 @@ use swarmops_core::{
     BlobId, Changeset, ChangesetId, EntryTarget, ObjectId, Tree, TreeEntry, TreeId,
 };
 use swarmops_repo::{Derivation, DeriveCtx, DeriveError, Repo, RepoError, RepoRead, Subject};
-use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore};
+use swarmops_store::{DerivedSlot, DerivedStore, ObjectStore, SYSTEM_GIT};
 
 use crate::native::{metadata, render_commit};
 use crate::render::tree_bytes;
-use crate::{GIT_LOSSY, GIT_OID, GitOid, RawKind, git_hash};
+use crate::{ExternalIdMismatch, GIT_LOSSY, GIT_OID, GitOid, RawKind, git_hash};
 
 /// The derived store's name for a tree's memoized git oid ([`tree_oid`]).
 const TREE_MEMO: &str = "git_tree_oid";
@@ -622,6 +624,55 @@ pub fn verify_export_oids<O: ObjectStore>(
                 subject: id.0,
                 stored: stored.git_oid(),
                 real: got.git_oid(),
+            });
+        }
+    }
+    Ok(found)
+}
+
+/// Checks each entry of system `git` in the external id index that names a native changeset, one
+/// without [`GIT_OID`], against that changeset's export oid, re-derived from the store's own
+/// objects as [`verify_export_oids`] derives it, and reports each entry whose commit is not the one
+/// its changeset exports to ([`ExternalIdMismatch`]): an entry the git import passes over, which
+/// no import or export writes. A deep `verify` calls this beside [`verify_export_oids`] (storage
+/// spec §7). Every other entry is the store's own verify's to check ([`Repo::verify`]): one that
+/// is damaged, one naming a changeset the store does not hold, and one naming a changeset with a
+/// [`GIT_OID`], which it checks against that, so that each entry is reported once. An entry whose
+/// changeset's export oid does not derive (an object missing or damaged below it, which the deep
+/// verify reports on its own) is passed over. It reads no memo of the derived store and writes
+/// none. [`RepoError`] only where a read cannot go on.
+pub fn verify_external_ids<O: ObjectStore>(
+    repo: &Repo<O>,
+) -> Result<Vec<ExternalIdMismatch>, RepoError> {
+    // The entries before the snapshot: an entry is written only once its changeset is (W8).
+    let entries = repo.list_external_ids(SYSTEM_GIT)?;
+    let snapshot = repo.snapshot()?;
+    let reader = ExportReader {
+        read: &snapshot,
+        store: repo.derived_store(),
+    };
+    let cache = OidCache::new();
+    let mut exports = ExportOids::new(OnMemo::Skip);
+    let mut found = Vec::new();
+    for (key, entry) in entries {
+        let (Ok(entry), Ok(commit)) = (entry, <[u8; 20]>::try_from(key.as_slice())) else {
+            continue;
+        };
+        let commit = GitOid(commit);
+        // A changeset the snapshot lacks, or whose object does not read, is the store's own
+        // verify's to report, as one that holds a `git.oid` is its to check.
+        let Ok(Some(stored)) = snapshot.changeset(entry.changeset) else {
+            continue;
+        };
+        if metadata(&stored.changeset, GIT_OID).is_some() {
+            continue;
+        }
+        if let Ok(exported) = exports.of(&snapshot, &reader, &cache, entry.changeset)
+            && exported.git_oid() != commit
+        {
+            found.push(ExternalIdMismatch {
+                commit,
+                changeset: entry.changeset,
             });
         }
     }
