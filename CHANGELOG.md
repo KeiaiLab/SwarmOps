@@ -405,6 +405,11 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   conflicts or not, while the target still holds that path as `against` did. A path the target
   changed since comes back in the `E_CONFLICT` report's new `stale` list, and a conflict left
   unresolved fails the land as before; `swarmops mcp` takes `against` only as a full 64-hex id.
+- A land's three-way merge takes a file's kind from one side and its content from the other only
+  between a file and an executable: a symlink on one side against a file on the other, both sides
+  having changed the path (one its kind, the other the link's target or the file's content), is a
+  `binary` conflict, as git's merge reports it ("distinct types"), never a regular file holding a
+  link target or a symlink to a file's text.
 
 ### Changed
 

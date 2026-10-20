@@ -654,6 +654,83 @@ fn a_symlink_changed_on_both_sides_is_binary() {
     );
 }
 
+/// A symlink against a file is `binary` where both sides changed the path, one its kind and the
+/// other its target or content (git's "distinct types" conflict), never a leaf of one side's kind
+/// holding the other side's bytes: ours made the file `f1` a symlink to its text while theirs
+/// edited the text (merged apart, a symlink whose target is a file's text), and `f2` is the same
+/// with the sides swapped; ours made the symlink `l1` a regular file of its target while theirs
+/// pointed it elsewhere (merged apart, a file holding a link target), and `l2` is swapped; `l3`
+/// and `l4` are `l1` and `l2` with both sides' bytes alike. `f3` (a symlink on theirs) and `l5`
+/// (a symlink in the base only) are contents both sides changed, never merged by lines. The
+/// content merger is never called. Where both sides give the path one kind, kind and content
+/// still merge apart, a symlink on the way included: ours made the symlink `k1` a file of other
+/// bytes, theirs a file of its target; ours made the file `k2` a symlink elsewhere, theirs a
+/// symlink to its text. git 2.43 merges these two cleanly, as here, and conflicts on the others.
+#[test]
+fn a_symlink_against_a_file_changed_on_both_sides_is_binary() {
+    use LeafKind::{File, Symlink};
+    /// A path's base, ours and theirs: each a kind and the bytes it holds.
+    type Sides = [(LeafKind, &'static [u8]); 3];
+    let lines: &[u8] = b"c2 line one\nc2 line two\n";
+    let binary: [(&str, Sides); 8] = [
+        ("f1", [(File, b"c1\n"), (Symlink, b"c1\n"), (File, lines)]),
+        ("f2", [(File, b"c1\n"), (File, lines), (Symlink, b"c1\n")]),
+        ("f3", [(File, b"1\n"), (File, b"2\n"), (Symlink, b"t")]),
+        ("l1", [(Symlink, b"t1"), (File, b"t1"), (Symlink, b"t2")]),
+        ("l2", [(Symlink, b"t1"), (Symlink, b"t2"), (File, b"t1")]),
+        ("l3", [(Symlink, b"t1"), (File, b"t2"), (Symlink, b"t2")]),
+        ("l4", [(Symlink, b"t1"), (Symlink, b"t2"), (File, b"t2")]),
+        ("l5", [(Symlink, b"t"), (File, b"x\n"), (File, b"y\n")]),
+    ];
+    // Both sides give the path one kind: ours' leaf is put.
+    let clean: [(&str, Sides); 2] = [
+        ("k1", [(Symlink, b"t1"), (File, b"x"), (File, b"t1")]),
+        ("k2", [(File, b"a"), (Symlink, b"b"), (Symlink, b"a")]),
+    ];
+    let triple = |p: &str, sides: &Sides| {
+        let [base, ours, theirs] = sides.map(|(kind, bytes)| Some(leaf(kind, bytes)));
+        PathTriple {
+            path: path(p),
+            base,
+            ours,
+            theirs,
+        }
+    };
+    let mut wrong = Vec::new();
+    let mut want = MergeOutcome::default();
+    for (p, sides) in &binary {
+        let t = triple(p, sides);
+        let plan = plan_path(&t);
+        if plan != PathPlan::Conflict(ConflictKind::Binary) {
+            wrong.push(format!("{p}: {plan:?}, not binary"));
+        }
+        let leaves = (t.base, t.ours, t.theirs);
+        want.conflicts
+            .push(conflict(p, ConflictKind::Binary, leaves));
+    }
+    for (p, sides) in &clean {
+        let t = triple(p, sides);
+        let (plan, ours) = (plan_path(&t), t.ours.unwrap());
+        if plan != PathPlan::Put(ours) {
+            wrong.push(format!("{p}: {plan:?}, not ours' leaf"));
+        }
+        want.delta.push(put_entry(p, ours));
+    }
+    assert!(wrong.is_empty(), "plan_path:\n{}", wrong.join("\n"));
+
+    let (_dir, _root, repo) = unsynced_repo();
+    let side = |at: usize| -> Vec<Change> {
+        let all = binary.iter().chain(&clean);
+        all.map(|(p, sides)| put_as(p, sides[at].0, sides[at].1))
+            .collect()
+    };
+    let [base, ours, theirs] = three(&repo, side(0), side(1), side(2));
+    let outcome = repo
+        .merge_with(base, ours, theirs, &no_content_merge)
+        .unwrap();
+    assert_eq!(outcome, want);
+}
+
 /// Ours deleted the only file of the directory `d`, theirs added another file to it: no conflict,
 /// the delta deletes ours' file, and `d` keeps theirs' file.
 #[test]
@@ -992,7 +1069,8 @@ impl Expected {
 struct Conflicts;
 
 /// What one path merges to from its three leaves: the leaf it holds after (`None`: none), or
-/// [`Conflicts`]. Kind and content are taken apart, each from the side that changed it.
+/// [`Conflicts`]. Kind and content are taken apart, each from the side that changed it, but a
+/// symlink on one side only conflicts: one side changed the kind, the other the bytes.
 fn one_path(
     base: Option<(LeafKind, u8)>,
     ours: Option<(LeafKind, u8)>,
@@ -1007,6 +1085,9 @@ fn one_path(
     let (Some(ours), Some(theirs)) = (ours, theirs) else {
         return Err(Conflicts);
     };
+    if ours.0 != theirs.0 && [ours.0, theirs.0].contains(&LeafKind::Symlink) {
+        return Err(Conflicts);
+    }
     let kind = changed_by_one(base.map(|b| b.0), ours.0, theirs.0).ok_or(Conflicts)?;
     let content = changed_by_one(base.map(|b| b.1), ours.1, theirs.1).ok_or(Conflicts)?;
     Ok(Some((kind, content)))
