@@ -7,7 +7,8 @@
 //!
 //! The text rendering prints the result as `key: value` lines in the same order, a nested key
 //! as `outer.inner` and an array item as `key[i]`; a multi-line string as `key: |` and its
-//! lines indented by two spaces; control characters other than line breaks escaped. A failure
+//! lines indented by two spaces; control characters other than line breaks escaped. A
+//! `git export` says what it did in a sentence first ([`summary`]). A failure
 //! prints `error: <code>: <message>`, then its details, `retryable: true` when it is, and the
 //! hint. The exit code is the same in both formats.
 
@@ -78,7 +79,11 @@ fn json<T: Serialize>(envelope: &Envelope<T>, pretty: bool) -> String {
 fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
     let mut out = String::new();
     if let Some(result) = &envelope.result {
-        lines(&mut out, "", &Tree::of(result));
+        let result = Tree::of(result);
+        if let Some(sentence) = summary(&envelope.op, &result) {
+            line(&mut out, "", &printable(&sentence));
+        }
+        lines(&mut out, "", &result);
     }
     if let Some(error) = &envelope.error {
         line(
@@ -97,6 +102,36 @@ fn human<T: Serialize>(envelope: &Envelope<T>) -> String {
         }
     }
     out
+}
+
+/// The sentence the text rendering prints before the lines of `op`'s `result`, for the operations
+/// that have one: `git export`'s, `exported <n> commits to <branch> (<old> → <new>)` (`none` for
+/// a branch it created), or `<branch> is up to date at <sha>` when it did not move the branch.
+fn summary(op: &str, result: &Tree) -> Option<String> {
+    if op != "git_export" {
+        return None;
+    }
+    let Tree::Object(fields) = result else {
+        return None;
+    };
+    let field =
+        |name: &str| (fields.iter()).find_map(|(key, value)| (key == name).then_some(value));
+    let text = |name: &str| match field(name) {
+        Some(Tree::String(text)) => Some(text.as_str()),
+        _ => None,
+    };
+    let (branch, head) = (text("branch")?, text("head_sha")?);
+    if field("branch_moved") != Some(&Tree::Bool(true)) {
+        return Some(format!("{branch} is up to date at {head}"));
+    }
+    let Some(Tree::Number(exported)) = field("exported") else {
+        return None;
+    };
+    let commits = if exported == "1" { "commit" } else { "commits" };
+    let old = text("old_sha").unwrap_or("none");
+    Some(format!(
+        "exported {exported} {commits} to {branch} ({old} → {head})"
+    ))
 }
 
 /// `tree`, under `key` (`""` at the top), as `key: value` lines.
@@ -337,6 +372,42 @@ mod tests {
              blank: \"\"\n\
              odd: bell\\u{7}esc\\u{1b}[31m\n"
         );
+    }
+
+    /// A `git export`'s result starts with a sentence: what it exported and where the branch
+    /// moved, from `none` for a branch it created; and that the branch is up to date when it moved
+    /// nothing. The result's lines follow. No other operation has one.
+    #[test]
+    fn human_text_of_a_git_export_says_what_it_did() {
+        let (old, new) = ("a".repeat(40), "b".repeat(40));
+        let printed = |op: &str, result: &Value| {
+            render(&Envelope::ok(op, result, meta()), Format::Human).stdout
+        };
+        let created =
+            json!({"exported": 5, "head_sha": new, "branch": "main", "branch_moved": true});
+        let text = printed("git_export", &created);
+        let sentence = format!("exported 5 commits to main (none \u{2192} {new})\n");
+        assert!(text.starts_with(&sentence), "{text}");
+        assert!(text.contains("\nexported: 5\n"), "{text}");
+        let moved = json!({
+            "exported": 1,
+            "head_sha": new,
+            "branch": "stable",
+            "old_sha": old,
+            "branch_moved": true,
+        });
+        let sentence = format!("exported 1 commit to stable ({old} \u{2192} {new})\n");
+        assert!(printed("git_export", &moved).starts_with(&sentence));
+        let same = json!({
+            "exported": 0,
+            "head_sha": new,
+            "branch": "main",
+            "old_sha": new,
+            "branch_moved": false,
+        });
+        let sentence = format!("main is up to date at {new}\n");
+        assert!(printed("git_export", &same).starts_with(&sentence));
+        assert!(!printed("git_import", &created).contains('\u{2192}'));
     }
 
     #[test]

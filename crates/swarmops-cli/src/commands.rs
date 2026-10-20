@@ -1,7 +1,7 @@
 //! Running a command (operations spec §1): its request built from the command line, the
-//! operation called through `dyn StoreOps` (spec §7), or, for `git import`, a client-side
-//! operation that no `StoreOps` has, on the store's `LocalOps` ([`Ctx::on_local`]), and its
-//! envelope rendered.
+//! operation called through `dyn StoreOps` (spec §7), or, for `git import` and `git export`, a
+//! client-side operation that no `StoreOps` has, on the store's `LocalOps` ([`Ctx::on_local`]),
+//! and its envelope rendered.
 //!
 //! A command first checks what it can without the store: the store the user named (only
 //! whether the variable is readable), a mutation's identity, its own arguments and a commit's
@@ -42,9 +42,9 @@ use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
-    DiffReq, Envelope, ErrorCode, GitImportReq, InfoReq, LineRange, LogReq, Meta, OpError,
-    PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq, RefSetReq,
-    RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
+    DiffReq, Envelope, ErrorCode, GitExportReq, GitImportReq, InfoReq, LineRange, LogReq, Meta,
+    OpError, PathHistoryReq, ReadFileReq, ReadTreeReq, RecoveredOut, RefDeleteReq, RefListReq,
+    RefSetReq, RepoInfo, Rev, ShowReq, StoreOps, VerifyReport, VerifyReq, schema_for_all,
 };
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
@@ -478,10 +478,11 @@ impl Ctx<'_> {
         self.envelope_on_local(op, prepare, |ops, input| call(&ops, input))
     }
 
-    /// Runs operation `op`, a client-side one that no [`StoreOps`] has (`git import`), on the
-    /// store the user named, as [`Ctx::on_store`] runs one: `prepare` builds its input without
-    /// the store, then `call` runs it on the store, opened, handed the concrete operations of
-    /// this one request, which record what the request resolves and repairs in [`Ctx::used`].
+    /// Runs operation `op`, a client-side one that no [`StoreOps`] has (`git import`,
+    /// `git export`), on the store the user named, as [`Ctx::on_store`] runs one: `prepare`
+    /// builds its input without the store, then `call` runs it on the store, opened, handed the
+    /// concrete operations of this one request, which record what the request resolves and
+    /// repairs in [`Ctx::used`].
     pub fn on_local<P, T: Serialize>(
         &self,
         op: &str,
@@ -633,8 +634,9 @@ fn envelope<T>(
     }
 }
 
-/// Runs a `git` subcommand, which names operation `op`: client-side operations, which read a git
-/// repository on this host and no [`StoreOps`] has.
+/// Runs a `git` subcommand, which names operation `op`: client-side operations, which read or
+/// write a git repository on this host and no [`StoreOps`] has. `git import` needs an identity,
+/// `git export` none.
 fn run_git(ctx: &Ctx<'_>, op: &'static str, command: GitCommand) -> Printed {
     let agent = ctx.global.agent.as_deref();
     match command {
@@ -656,6 +658,23 @@ fn run_git(ctx: &Ctx<'_>, op: &'static str, command: GitCommand) -> Printed {
                 Ok((context::mutator(agent, ctx.env)?, req))
             },
             |ops, (who, req)| ops.git_import(&who, req),
+        ),
+        GitCommand::Export {
+            path,
+            source_ref,
+            branch,
+            force,
+        } => ctx.on_local(
+            op,
+            || {
+                Ok(GitExportReq {
+                    git_path: path,
+                    source_ref,
+                    branch,
+                    force,
+                })
+            },
+            |ops, req| ops.git_export(req),
         ),
     }
 }

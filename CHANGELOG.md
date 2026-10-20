@@ -558,6 +558,18 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   `branch_ahead`, `both_moved`, `branch_moved`, `source_moved_back`, `lossy_history`, or
   `moved_during_export` from the compare-and-swap) unless it is forced, and a branch a work tree
   has checked out is refused.
+- `swarmops git export PATH [--ref REF] [--branch BRANCH] [--force]` (op `git_export`): the export
+  as a command, `LocalOps::git_export` on the client. It writes the history behind `--ref`
+  (`main`) into the branch `--branch` (`main`) of the git repository at `PATH`, on this host, for
+  `git push` to take on, needs no identity, echoes the head it read in `meta.resolved` and what
+  the tail check of its committed read repaired in `meta.recovered`, and says what it did in one
+  line under `--human`. It refuses with a hint for each case: `E_GIT_EXPORT_DIVERGED` (exit 3,
+  `details.reason` and, where the branch holds one, `exported_changeset`; `--force` moves the
+  branch all the same, by compare-and-swap), `E_GIT_WRITE` (`ref_locked` with the lock's path,
+  `ref_name_conflict`, `io`), `E_INVALID_ARG` (`reason: "checked_out"`), `E_GIT_NOT_A_REPO` (the
+  hint is `git init --bare`), `E_GIT_UNSUPPORTED`, `E_GIT_READ`, `E_REF_NAME_INVALID` (a source
+  ref, or a branch name git does not take) and `E_REV_NOT_FOUND`. Every `LocalOps` registers the
+  derivation of export oids as it opens a store. Like `git import`, it is no MCP tool.
 
 ### Changed
 
