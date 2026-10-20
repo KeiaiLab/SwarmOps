@@ -230,7 +230,9 @@ pub struct MergeConflicts {
     pub ours: ChangesetId,
     /// The target's head the change was merged onto.
     pub theirs: ChangesetId,
-    /// The paths that conflict, sorted, each with its kind and the leaf each side holds there.
+    /// The paths that conflict, sorted, each with its kind and the leaf each side holds there:
+    /// every one, its hunks as a merge holds them ([`crate::merge`]: the first ones as diff3 made
+    /// them, and each file's past those as one that spans them).
     pub conflicts: Vec<FileConflict>,
     /// The paths both sides changed whose contents merged cleanly, sorted.
     pub auto_merged: Vec<RepoPath>,
