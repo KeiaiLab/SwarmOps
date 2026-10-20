@@ -21,6 +21,7 @@ use swarmops_api::{
     TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding, VerifyReport, VerifyReq,
 };
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+use swarmops_api::{ContentInput, ModeInput, ResolutionInput, ResolutionsInput};
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
 use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
 use swarmops_core::bytes::to_u64;
@@ -37,6 +38,7 @@ use swarmops_repo::{
     CasResult, CommitRequest, FileSpan, ListedEntry, LocalRepo, MismatchCause, OpRecord, Operation,
     PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
 };
+use swarmops_repo::{Resolution, Resolutions};
 use swarmops_store::{FsObjectStore, LogCut, Recovered};
 
 use crate::content;
@@ -143,7 +145,14 @@ const MAX_LAND_KEY: usize = 64;
 ///   `E_INVALID_ARG`, naming it in `details.idempotency_key`, and so is a `max_attempts` outside 1
 ///   to 32 (`details.max_attempts`), both checked before anything is resolved. What `head`, `base`
 ///   and the target name in the request's snapshot is recorded in its [`Resolved`]; each attempt
-///   reads the target again, and `rebased_onto` says which head the change landed on.
+///   reads the target again, and `rebased_onto` says which head the change landed on. With
+///   `resolutions` (operations spec §3, resolution path (b)), each path is a repository path and
+///   each resolution exactly one of `take`, `content` (a `mode` only beside it) and `delete`, also
+///   checked before anything is resolved (`E_INVALID_ARG`, naming the path in `details.path`);
+///   `against` resolves in the request's snapshot, recorded with the rest, and the contents follow
+///   the change list's rules, each error said of its resolution's path. Each attempt applies a
+///   resolution while the target holds its path as `against` does; a path it holds otherwise comes
+///   back in the `E_CONFLICT` report's `stale`.
 /// - `blob_put` stores its content as a blob, by the change list's rules for content (`blob`
 ///   content aside, which names a blob already stored), durable when it returns, and says
 ///   whether it placed it (`written`). It needs an identity, which it records nowhere.
@@ -252,7 +261,8 @@ const MAX_LAND_KEY: usize = 64;
 ///   (`repo_name_bytes`): a commit has one parent, the identity bounds the actor, and revision
 ///   resolution takes 12 to 63 hex digits. And `MissingBlob` `{index, path, blob}`: a change
 ///   that names by id a blob the store does not hold (no object, or a tree or a changeset), a
-///   mistake in the request rather than damage; its hint is `swarmops blob put <file>`.
+///   mistake in the request rather than damage; its hint is `swarmops blob put <file>`. A land's
+///   resolution that names such a blob is `MissingBlob` `{path, blob}`.
 /// - `E_EXISTS`: `Exists`; the hint is `swarmops --repo <path> info`.
 /// - `E_UNKNOWN_PARENT` `{parent}`: `UnknownParent`; the hint is `swarmops log`.
 /// - `E_EMPTY_COMMIT`: `EmptyChanges`; the hint names `--allow-empty`.
@@ -278,8 +288,9 @@ const MAX_LAND_KEY: usize = 64;
 ///   head, which recorded nothing. `report` is the conflict report (operations spec §3): each
 ///   conflicting file with its kind, its blobs, its hunks (each side's lines numbered from 1, both
 ///   ends included, and their texts while they fit within the request's `max_conflict_bytes`, else
-///   `truncated`) and the target's changeset and agent that last changed it. The hint reads the
-///   target's side of the first conflicting path, then names the land again with its resolutions.
+///   `truncated`) and the target's changeset and agent that last changed it, and the paths whose
+///   resolutions did not apply (`stale`). The hint reads the target's side of the first
+///   conflicting path, then names the land again with its resolutions.
 /// - `E_NOTHING_TO_LAND` `{reason}`: `NothingToLand`, a land whose head is on the target
 ///   (`on_target`) or whose change the target holds already (`no_changes`).
 /// - `E_CAS_RETRY_EXHAUSTED` (retryable) `{attempts, actual}`: `RetryExhausted`, a land whose
@@ -1048,6 +1059,7 @@ impl StoreOps for Recording<'_> {
             idempotency_key,
             max_attempts,
             max_conflict_bytes,
+            resolutions,
         } = req;
         // The request's own rules are checked before anything is resolved or read.
         if let Some(key) = &idempotency_key {
@@ -1060,6 +1072,7 @@ impl StoreOps for Recording<'_> {
             )
             .with_details(details([("max_attempts", max_attempts.into())])));
         }
+        let resolutions = resolutions.map(shaped_resolutions).transpose()?;
         // The revisions resolve in one snapshot, and the target's head is recorded as it names
         // it; the land reads the target again in each attempt's own snapshot.
         let read = self.snapshot()?;
@@ -1068,8 +1081,17 @@ impl StoreOps for Recording<'_> {
             Some(rev) => Some(self.resolve(&read, rev)?),
             None => None,
         };
+        let against = match &resolutions {
+            Some(shaped) => Some(self.resolve(&read, &shaped.against)?),
+            None => None,
+        };
         self.head(&read, &target)?;
         drop(read);
+        // Their contents are read once the revisions resolved, as a commit's are.
+        let resolutions = match (resolutions, against) {
+            (Some(shaped), Some(against)) => Some(shaped.resolutions(against)?),
+            _ => None,
+        };
         let mut lander_metadata = Vec::new();
         if let Some(run_id) = who.run_id() {
             let run_id = run_id.as_bytes().to_vec();
@@ -1081,6 +1103,7 @@ impl StoreOps for Recording<'_> {
             message: message.map(String::into_bytes),
             lander_metadata,
             max_attempts,
+            resolutions,
             ..LandRequest::new(head, &target, native_signature(who, None))
         };
         let outcome = self.ops.repo.land(land).map_err(|e| {
@@ -1951,6 +1974,123 @@ fn land_key(key: &str) -> Result<(), OpError> {
     )
     .with_details(details([("idempotency_key", key.into())]))
     .with_hint("make a new uuid v7 for each land, and give it again only to retry that land"))
+}
+
+/// A land's resolutions as the request gives them, their shape checked before anything is
+/// resolved or read ([`shaped_resolutions`]).
+struct ShapedResolutions {
+    /// The revision they were decided against.
+    against: Rev,
+    /// Each resolution, with its path, in path order.
+    files: Vec<(RepoPath, Shaped)>,
+}
+
+/// One resolution of a land, its shape checked.
+enum Shaped {
+    /// What one side holds there.
+    Take(swarmops_api::Side),
+    /// New content, not yet converted, and the mode it gives, if any.
+    Content(ContentInput, Option<ModeInput>),
+    /// A blob the store is to hold, by its id, and the mode it gives, if any.
+    Blob(swarmops_core::BlobId, Option<ModeInput>),
+    /// Nothing there.
+    Delete,
+}
+
+/// `input`, its shape checked (operations spec §3, resolution path (b)): each path a repository
+/// path, each resolution exactly one of `take`, `content` and `delete`, a `mode` only beside
+/// `content`, and a blob it names by id an id. `E_INVALID_ARG` otherwise, naming the path in its
+/// message and its `details` ([`content::in_resolution`]).
+fn shaped_resolutions(input: ResolutionsInput) -> Result<ShapedResolutions, OpError> {
+    let ResolutionsInput { against, files } = input;
+    let files = (files.into_iter())
+        .map(|(path, resolution)| {
+            let refuse = |what: String| {
+                content::in_resolution(error(ErrorCode::InvalidArg, what), path.as_str())
+            };
+            let at = RepoPath::new(path.as_str())
+                .map_err(|e| refuse(format!("not a repository path: {e}")))?;
+            let ResolutionInput {
+                take,
+                content,
+                mode,
+                delete,
+            } = resolution;
+            let given: Vec<&str> = [
+                ("take", take.is_some()),
+                ("content", content.is_some()),
+                ("delete", delete),
+            ]
+            .into_iter()
+            .filter_map(|(field, given)| given.then_some(field))
+            .collect();
+            let shaped = match (take, content, delete) {
+                (Some(side), None, false) if mode.is_none() => Shaped::Take(side),
+                (None, Some(ContentInput::Blob(id)), false) => {
+                    let id = content::blob_id(&id)
+                        .map_err(|e| content::in_resolution(e, path.as_str()))?;
+                    Shaped::Blob(id, mode)
+                }
+                (None, Some(content), false) => Shaped::Content(content, mode),
+                (None, None, true) if mode.is_none() => Shaped::Delete,
+                _ if given.len() == 1 => {
+                    let only = given[0];
+                    return Err(refuse(format!(
+                        "a mode goes with content only, not with {only}"
+                    )));
+                }
+                _ if given.is_empty() => {
+                    return Err(refuse("give one of take, content and delete".to_owned()));
+                }
+                _ => {
+                    let given = given.join(" and ");
+                    return Err(refuse(format!(
+                        "give exactly one of take, content and delete, not {given}"
+                    )));
+                }
+            };
+            Ok((at, shaped))
+        })
+        .collect::<Result<Vec<_>, OpError>>()?;
+    Ok(ShapedResolutions { against, files })
+}
+
+impl ShapedResolutions {
+    /// The repository's resolutions, against `against`, the changeset `self.against` named: a
+    /// side, a delete, a blob by id, or new content, converted by a commit's rules for contents
+    /// ([`content::resolution_bytes`]), each of the kind its mode gives, if it gives one.
+    fn resolutions(self, against: ChangesetId) -> Result<Resolutions, OpError> {
+        let kind = |mode: Option<ModeInput>| mode.map(|mode| content::leaf_kind(Some(mode)));
+        let mut files = BTreeMap::new();
+        let (mut contents, mut modes) = (Vec::new(), Vec::new());
+        for (path, shaped) in self.files {
+            let resolution = match shaped {
+                Shaped::Take(swarmops_api::Side::Ours) => {
+                    Resolution::Take(swarmops_repo::Side::Ours)
+                }
+                Shaped::Take(swarmops_api::Side::Theirs) => {
+                    Resolution::Take(swarmops_repo::Side::Theirs)
+                }
+                Shaped::Blob(id, mode) => Resolution::PutBlob {
+                    kind: kind(mode),
+                    id,
+                },
+                Shaped::Delete => Resolution::Delete,
+                Shaped::Content(content, mode) => {
+                    contents.push((path, content));
+                    modes.push(mode);
+                    continue;
+                }
+            };
+            files.insert(path, resolution);
+        }
+        let converted = content::resolution_bytes(contents)?;
+        for ((path, content), mode) in converted.into_iter().zip(modes) {
+            let kind = kind(mode);
+            files.insert(path, Resolution::Put { kind, content });
+        }
+        Ok(Resolutions { against, files })
+    }
 }
 
 /// When a changeset with `committer` was recorded, in Unix milliseconds: 0 before 1970.

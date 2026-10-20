@@ -37,6 +37,8 @@ const REQUESTS: &[&str] = &[
     "RefDeleteReq",
     "RefListReq",
     "RefSetReq",
+    "ResolutionInput",
+    "ResolutionsInput",
     "ResolveRevReq",
     "ShowReq",
     "UndoReq",
@@ -108,6 +110,7 @@ const SCALARS: &[&str] = &[
     "OperationKind",
     "Rev",
     "RevKind",
+    "Side",
 ];
 
 #[test]

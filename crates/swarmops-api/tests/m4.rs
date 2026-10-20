@@ -86,6 +86,7 @@ fn a_land_request_takes_its_defaults() {
             idempotency_key: None,
             max_attempts: 8,
             max_conflict_bytes: 32_768,
+            resolutions: None,
         }
     );
     assert_eq!(
@@ -121,6 +122,81 @@ fn a_land_request_takes_its_defaults() {
         (&json!(8), &json!(1), &json!(32))
     );
     assert_eq!(properties["max_conflict_bytes"]["default"], 32_768);
+}
+
+/// A land's resolutions (operations spec §3, resolution path (b)): `against`, and by path one of
+/// `take` (`ours` or `theirs`), `content` with an optional `mode`, and `delete`, each written
+/// only when given (`delete` only when true); a land without them omits `resolutions`. A
+/// conflict report names its stale paths in `stale`, omitted when there is none. The schema lists
+/// the three new types, and a resolution's description says the rule its type cannot, exactly
+/// one of the three, which keeps its schema a plain object.
+#[test]
+fn a_land_request_carries_its_resolutions() {
+    use swarmops_api::{ContentInput, ModeInput, ResolutionInput, ResolutionsInput, Side};
+
+    let text = concat!(
+        r#"{"head":"h7","target":"main","max_attempts":8,"max_conflict_bytes":32768,"#,
+        r#""resolutions":{"against":"m9","files":{"a":{"take":"ours"},"b":{"take":"theirs"},"#,
+        r#""c":{"content":{"inline":"c\n"},"mode":"exec"},"d":{"delete":true}}}}"#
+    );
+    let req: LandReq = serde_json::from_str(text).unwrap();
+    let only = |take, content, mode, delete| ResolutionInput {
+        take,
+        content,
+        mode,
+        delete,
+    };
+    let expected = ResolutionsInput {
+        against: Rev::from("m9"),
+        files: BTreeMap::from([
+            ("a".to_owned(), only(Some(Side::Ours), None, None, false)),
+            ("b".to_owned(), only(Some(Side::Theirs), None, None, false)),
+            (
+                "c".to_owned(),
+                only(
+                    None,
+                    Some(ContentInput::Inline("c\n".to_owned())),
+                    Some(ModeInput::Exec),
+                    false,
+                ),
+            ),
+            ("d".to_owned(), only(None, None, None, true)),
+        ]),
+    };
+    assert_eq!(req.resolutions.as_ref(), Some(&expected));
+    assert_eq!(round_trip(&req), text);
+    let plain: LandReq = serde_json::from_value(json!({"head": "h7"})).unwrap();
+    assert_eq!(plain.resolutions, None);
+    assert!(!round_trip(&plain).contains("resolutions"));
+
+    let all = schema_for_all();
+    for name in ["ResolutionsInput", "ResolutionInput", "Side"] {
+        assert!(all.get(name).is_some(), "{name} in the schema");
+    }
+    assert!(all["LandReq"]["properties"].get("resolutions").is_some());
+    let resolution = all["ResolutionInput"].as_object().unwrap();
+    assert_eq!(resolution["type"], "object");
+    assert!(!resolution.contains_key("oneOf") && !resolution.contains_key("anyOf"));
+    let description = resolution["description"].as_str().unwrap();
+    assert!(description.contains("exactly one"), "{description}");
+    assert_eq!(resolution["properties"]["delete"]["type"], "boolean");
+    assert_eq!(resolution.get("required"), None, "every field is optional");
+    assert!(all["ConflictReport"]["properties"].get("stale").is_some());
+
+    let report = ConflictReport {
+        base: "b1".to_owned(),
+        ours: "h7".to_owned(),
+        theirs: "m9".to_owned(),
+        files: Vec::new(),
+        kinds: Vec::new(),
+        auto_merged: Vec::new(),
+        stale: vec!["src/lib.rs".to_owned()],
+        truncated: false,
+    };
+    assert_eq!(
+        round_trip(&report),
+        r#"{"base":"b1","ours":"h7","theirs":"m9","files":[],"kinds":[],"stale":["src/lib.rs"],"truncated":false}"#
+    );
 }
 
 /// An operation log names nothing: the 50 newest operations, at most 20 changesets listed for
@@ -404,6 +480,7 @@ fn a_conflict_report_has_the_spec_shape() {
         files: vec![content, deleted],
         kinds: vec![ConflictKindOut::Content, ConflictKindOut::DeleteModify],
         auto_merged: vec!["src/other.rs".to_owned()],
+        stale: Vec::new(),
         truncated: false,
     };
     let hunk = concat!(

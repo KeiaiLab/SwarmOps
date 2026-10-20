@@ -397,6 +397,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   path with its kind. `show` names a land's lander, key and squashed chain (`lander`, `land_key`,
   `squashed_from`). The MCP server's instructions now say to publish a changeset by landing it,
   where they told an agent how to retry after `E_CAS_MISMATCH`.
+- `swarmops land HEAD --resolve FILE` (`-` for stdin) and the `land` tool's `resolutions`
+  (`LandReq.resolutions`, with `ResolutionsInput`, `ResolutionInput` and `Side` in
+  `swarmops schema`) resolve a land's conflicts without a checkout: decided against the conflict
+  report's `theirs`, each path takes `ours` or `theirs`, new `content` (as a commit's change gives
+  it, with an optional `mode`) or `delete`, for the path and every path below it, whether it
+  conflicts or not, while the target still holds that path as `against` did. A path the target
+  changed since comes back in the `E_CONFLICT` report's new `stale` list, and a conflict left
+  unresolved fails the land as before; `swarmops mcp` takes `against` only as a full 64-hex id.
 
 ### Changed
 

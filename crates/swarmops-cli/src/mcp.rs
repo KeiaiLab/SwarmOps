@@ -80,11 +80,12 @@
 //! `ref_delete` must name what it expects the ref to hold by its full changeset id, since a ref
 //! name or a relative revision resolves when the call runs and so defeats the compare-and-swap,
 //! and an id prefix stops resolving once another changeset shares it (the CLI takes any
-//! revision for `--expect`, and its help warns why not to); and a `commit` or a `blob_put` whose
-//! `{"file": <path>}` content names a relative path, this process's own stdin or stdout, or
-//! anything but a regular file, is refused, since the server would read the file from a working
-//! directory the agent cannot see, block on the pipe that carries the protocol, or block on a
-//! FIFO or a device. A mutation then
+//! revision for `--expect`, and its help warns why not to); a `land` must name what its
+//! `resolutions` were decided `against` by its full changeset id, for the same reasons; and a
+//! `commit`, a `blob_put` or a `land` whose `{"file": <path>}` content names a relative path,
+//! this process's own stdin or stdout, or anything but a regular file, is refused, since the
+//! server would read the file from a working directory the agent cannot see, block on the pipe
+//! that carries the protocol, or block on a FIFO or a device. A mutation then
 //! needs the server's identity, and last the store is opened and the operation runs; a
 //! `verify` that finds problems is `E_STORE_CORRUPT`, as `swarmops verify` is, and a panic in
 //! the operation is `E_INTERNAL`. The tool result holds the envelope the CLI prints for the
@@ -414,7 +415,9 @@ static TOOLS: [Spec; 18] = [
         title: "Land a change",
         description: "Merges head (with its first-parent chain since base) three-way onto target, \
                       main by default, and publishes the result as one changeset in one \
-                      transaction; on E_CONFLICT, details.report lists each conflict. Give \
+                      transaction; on E_CONFLICT, details.report lists each conflict: resolve them \
+                      with resolutions, against the report's theirs, its full 64-hex id (a path \
+                      the target changed since comes back in the report's stale). Give \
                       idempotency_key to make a retry safe.",
         effect: Effect::Lands,
         result_chars: None,
@@ -1054,7 +1057,6 @@ impl Refuse for DiffReq {}
 impl Refuse for OpLogReq {}
 impl Refuse for RefListReq {}
 impl Refuse for UndoReq {}
-impl Refuse for LandReq {}
 impl Refuse for VerifyReq {}
 impl Refuse for BlobHasReq {}
 
@@ -1140,6 +1142,64 @@ fn unreadable(file: &str) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/// A land's resolutions apply while the target holds each path as `against` did, so `against`
+/// is a full changeset id ([`concrete_against`]); a resolution's client file is read by this
+/// server as a commit's is, so the same rules hold ([`unreadable`]); the refusal names the
+/// resolution's `path` and the `file`.
+impl Refuse for LandReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        let Some(resolutions) = &self.resolutions else {
+            return Ok(());
+        };
+        concrete_against(&resolutions.against)?;
+        for (path, resolution) in &resolutions.files {
+            let Some(ContentInput::File(file)) = &resolution.content else {
+                continue;
+            };
+            let Some(why) = unreadable(file) else {
+                continue;
+            };
+            return Err(OpError::new(
+                ErrorCode::InvalidArg,
+                output::printable(&format!(
+                    "the resolution of {path:?}: the client file {file:?} {why}: name a regular \
+                     file by its absolute path, or send the bytes as inline or base64 content"
+                )),
+            )
+            .with_details(Map::from_iter([
+                ("path".to_owned(), Value::from(path.as_str())),
+                ("file".to_owned(), Value::from(file.as_str())),
+            ])));
+        }
+        Ok(())
+    }
+}
+
+/// `E_INVALID_ARG` unless `against`, what a land's resolutions were decided against, is a full
+/// changeset id ([`is_full_id`]): a resolution applies while the target holds its path as
+/// `against` did, so `against` must pin the head the caller read the conflict report at. A ref
+/// name or a relative revision is read when the call runs instead, so it holds every path as the
+/// target does and protects nothing, and an id prefix stops resolving once another changeset
+/// shares it. The CLI takes any revision there, as it does for `--expect`; an agent through this
+/// server gets the rule enforced.
+fn concrete_against(against: &Rev) -> Result<(), OpError> {
+    let rev = against.as_str();
+    if is_full_id(rev) {
+        return Ok(());
+    }
+    Err(OpError::new(
+        ErrorCode::InvalidArg,
+        output::printable(&format!(
+            "resolutions.against {rev:?} is not a full changeset id: a resolution applies while \
+             the target holds its path as against did, and a ref name or a relative revision is \
+             read when the call runs instead of pinning the head you read, so it would protect \
+             nothing, while an id prefix stops resolving once another changeset shares it; pass \
+             the conflict report's theirs, its 64-hex id"
+        )),
+    )
+    .with_details(Map::from_iter([("against".to_owned(), Value::from(rev))])))
 }
 
 /// A move names the target it expects by its full id ([`concrete_expectation`]), unless it
