@@ -198,17 +198,16 @@ Every command, its revisions and change lists, and its output are in [Commands](
 
 `swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an
 agent harness that speaks the Model Context Protocol, such as Claude Code, calls the operations
-as tools: `repo_info`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`,
-`op_log`, `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `blob_put`, `blob_has` and
-`verify`. A tool's arguments are the operation's request: its `inputSchema` is the request
-type's schema, as `swarmops schema <Type>` prints it, with the definitions it refers to written
-in place, and kept a plain object: a rule across fields that the type's schema states with a
-top-level `oneOf`, which the Claude API refuses in a tool, is left to the description and to the
-server's own check, and the `expected_old` of `ref_set` and `ref_delete` asks for a full
-changeset id. Its result is the envelope the CLI prints for that request, as `structuredContent`
-and as text, and a failed operation sets `isError`, with the envelope's `error` saying why. The
-server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18 to clients that open with
-`initialize`.
+as tools: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`,
+`diff`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `blob_put`, `blob_has` and
+`verify`. A tool's arguments are the operation's request: its `inputSchema` is the request type's
+schema, as `swarmops schema <Type>` prints it, with the definitions it refers to written in place,
+and kept a plain object: a rule across fields that the type's schema states with a top-level
+`oneOf`, which the Claude API refuses in a tool, is left to the description and to the server's own
+check, and the `expected_old` of `ref_set` and `ref_delete` asks for a full changeset id. Its result
+is the envelope the CLI prints for that request, as `structuredContent` and as text, and a failed
+operation sets `isError`, with the envelope's `error` saying why. The server speaks MCP 2026-07-28,
+and 2025-11-25 and 2025-06-18 to clients that open with `initialize`.
 
 ### Register the server
 
@@ -302,6 +301,7 @@ and starts no server either.
 | `whoami` | The identity this caller's changes carry. |
 | `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--key UUID] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. With `--key`, a uuid v7, the same commit run again replays the first run (`replayed: true`) instead of recording a second changeset. |
 | `blob put FILE\|-`, `blob has ID…` | Store a file's content (stdin's for `-`) as a blob, outside any commit, and print its id; or list which of the ids the store holds blobs under. A change names a stored blob by id. |
+| `resolve REV` | The full id of the changeset REV names, and its kind: `ref` when REV is exactly a ref's name, `changeset` otherwise. |
 | `cat REV:PATH [--offset N \| --lines A-B] [--max-bytes N]` | One file at a revision, or part of it, from byte N or lines A to B: UTF-8 text, or base64. A read cut short gives `next_offset`, where `--offset` reads on. |
 | `ls REV[:PATH] [--depth N] [--limit N] [--cursor C]` | One directory at a revision, a page at a time, each file with its size; with `--depth`, the directories below it too, each entry with its path. |
 | `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |

@@ -2,9 +2,11 @@
 //! change list into blobs, rebuilt trees and a changeset ([`Repo::commit`]), reads files and
 //! directories at a changeset without a checkout ([`Repo::read_blob_at`], [`Repo::list_tree`]),
 //! resolves revisions ([`Repo::resolve`]), walks first-parent history
-//! ([`Repo::log_first_parent`]), moves refs by compare-and-swap ([`Repo::cas_ref`]), and checks
-//! a whole store ([`Repo::verify`]). It reads the journal back as the store's operations
-//! ([`Repo::op_log`]), and undoes an operation's ref moves by compare-and-swap ([`Repo::undo`]).
+//! ([`Repo::log_first_parent`]) and ancestry (the [`history`] module: [`RepoRead::ancestor`],
+//! [`RepoRead::is_ancestor`], [`RepoRead::merge_base`]), moves refs by compare-and-swap
+//! ([`Repo::cas_ref`]), and checks a whole store ([`Repo::verify`]). It reads the journal back as
+//! the store's operations ([`Repo::op_log`]), and undoes an operation's ref moves by
+//! compare-and-swap ([`Repo::undo`]).
 //!
 //! A request reads in one snapshot of the metadata ([`Repo::snapshot`], a [`RepoRead`]), which
 //! resolves every revision and ref it names in the same view, and commits on the parents it
@@ -31,6 +33,7 @@ pub mod commit;
 pub mod derive;
 pub mod diff;
 pub mod error;
+pub mod history;
 #[cfg(feature = "test-hooks")]
 pub mod land_models;
 pub mod log;
@@ -48,6 +51,7 @@ pub use derive::{
     PathKey, Registry, SkipList, Subject,
 };
 pub use error::RepoError;
+pub use history::{FirstParents, SKIP_AFTER};
 pub use merge::MergeOutcome;
 pub use oplog::{OpRecord, Operation, UndoOutcome};
 pub use path_history::PathEvent;

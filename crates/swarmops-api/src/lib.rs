@@ -33,6 +33,7 @@ pub use ops::{
     VerifyReport, VerifyReq,
 };
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
+pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
 pub use rev::Rev;
 
 /// The JSON Schema (2020-12) of every request, response and shared type, keyed by type name.
@@ -78,6 +79,10 @@ pub fn schema_for_all() -> serde_json::Value {
         BlobPutResp,
         BlobHasReq,
         BlobHasResp,
+        // resolve_rev.
+        ResolveRevReq,
+        ResolvedRev,
+        RevKind,
         // read_file, read_tree.
         ReadFileReq,
         LineRange,

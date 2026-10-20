@@ -36,6 +36,7 @@ use std::time::{Duration, Instant};
 use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
+use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
@@ -154,6 +155,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             |ops, (who, req)| ops.commit(&who, req),
         ),
         Command::Blob(command) => run_blob(ctx, op, command),
+        Command::Resolve { rev } => resolve_rev(ctx, op, rev),
         Command::Cat {
             target,
             offset,
@@ -412,6 +414,12 @@ fn diff(ctx: &Ctx<'_>, op: &'static str, args: DiffArgs) -> Printed {
         max_bytes,
     };
     ctx.on_store(op, || Ok(req), |ops, req| ops.diff(req))
+}
+
+/// Runs `resolve`, which names operation `op`: the changeset `rev` names, and its kind.
+fn resolve_rev(ctx: &Ctx<'_>, op: &'static str, rev: String) -> Printed {
+    let req = ResolveRevReq { rev: rev.into() };
+    ctx.on_store(op, || Ok(req), |ops, req| ops.resolve_rev(req))
 }
 
 /// Runs a `ref` subcommand, which names operation `op`.

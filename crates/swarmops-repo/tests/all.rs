@@ -6,6 +6,7 @@
 mod commit;
 mod derive;
 mod diff;
+mod history;
 #[cfg(feature = "test-hooks")]
 mod landing_models;
 mod merge;

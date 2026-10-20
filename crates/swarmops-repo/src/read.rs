@@ -13,7 +13,8 @@
 //!
 //! A revision (operations spec §0) is a ref name (`main`, `release/<x>`), a full id (64 hex
 //! digits), or a unique id prefix of 12 to 63 hex digits, either case; followed by any number
-//! of `~N` suffixes, each walking `N` first parents back (`main~2`, `main~1~1`).
+//! of `~N` suffixes, each walking `N` first parents back (`main~2`, `main~1~1`), as
+//! [`RepoRead::ancestor`] walks them.
 
 use swarmops_core::bytes::to_u64;
 use swarmops_core::{
@@ -199,7 +200,8 @@ impl<O: ObjectStore> RepoRead<'_, O> {
 
     /// The changeset revision `rev` names in the snapshot: see [the module documentation](self)
     /// for the grammar. [`RepoError::NotFound`] when it names none (a ref that does not exist or
-    /// names a changeset the store does not hold, an id or a prefix of none, a `~N` past a root),
+    /// names a changeset the store does not hold, an id or a prefix of none, a `~N` past a root;
+    /// the `~N` suffixes add up to one walk, [`RepoRead::ancestor`]'s),
     /// [`RepoError::Ambiguous`] for a prefix of more than one, [`RepoError::BadRev`] for anything
     /// that is not a revision. The errors carry `rev` as given (a dangling ref's error adds the
     /// changeset it names).
@@ -215,13 +217,12 @@ impl<O: ObjectStore> RepoRead<'_, O> {
             let n: u64 = part.parse().map_err(|_| bad())?;
             steps = steps.checked_add(n).ok_or_else(bad)?;
         }
-        let mut id = self.resolve_base(base, rev)?;
-        for _ in 0..steps {
-            id = self
-                .first_parent(id)?
-                .ok_or_else(|| RepoError::NotFound(rev.to_owned()))?;
+        let id = self.resolve_base(base, rev)?;
+        if steps == 0 {
+            return Ok(id);
         }
-        Ok(id)
+        self.ancestor(id, steps)?
+            .ok_or_else(|| RepoError::NotFound(rev.to_owned()))
     }
 
     /// The kind, the blob id and the bytes of the file at `path` in changeset `cs`'s tree;

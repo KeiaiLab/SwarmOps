@@ -486,11 +486,11 @@ What an agent sees (operations §4):
 
 Every operation is a function from a request type to a response type or an `OpError`, and
 every type is serde and JSON Schema (draft 2020-12, by schemars). Requests and responses ignore
-fields they do not know, so versions can differ (operations §0). `StoreOps` has seventeen
-operations: `repo_info`, `commit`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`,
-`log`, `path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `op_log`, `undo`, `verify`
-and `derive`; `init`, `whoami` and `schema` live in the CLI. `op_log` shows the journal as the
-store's operations, a frame each (storage §3), and `undo` moves an operation's refs back by
+fields they do not know, so versions can differ (operations §0). `StoreOps` has eighteen operations:
+`repo_info`, `commit`, `resolve_rev`, `blob_put`, `blob_has`, `read_file`, `read_tree`, `show`,
+`log`, `path_history`, `diff`, `ref_list`, `ref_set`, `ref_delete`, `op_log`, `undo`, `verify` and
+`derive`; `init`, `whoami` and `schema` live in the CLI. `op_log` shows the journal as the store's
+operations, a frame each (storage §3), and `undo` moves an operation's refs back by
 compare-and-swap.
 
 Every run of `swarmops` prints exactly one envelope on stdout (only `--help` and `--version` print
@@ -503,7 +503,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 A failure's `code` is one of 29 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
 found) and whether retrying can help. `hint` is often the next command to run.
-`swarmops schema` prints the JSON Schema of 79 types, and its snapshot test is where contract
+`swarmops schema` prints the JSON Schema of 82 types, and its snapshot test is where contract
 changes are reviewed ([the versioning policy](policies/versioning-and-stability.md)).
 `meta.recovered`, there only when a command's write repaired what an earlier writer left (a torn
 journal tail cut, frames listed, index records cut, changesets and ref files replayed), says what

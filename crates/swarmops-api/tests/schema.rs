@@ -37,6 +37,7 @@ const REQUESTS: &[&str] = &[
     "RefDeleteReq",
     "RefListReq",
     "RefSetReq",
+    "ResolveRevReq",
     "ShowReq",
     "UndoReq",
     "VerifyReq",
@@ -80,6 +81,7 @@ const RESPONSES: &[&str] = &[
     "RefOut",
     "RefSetResp",
     "RepoInfo",
+    "ResolvedRev",
     "SignatureOut",
     "Signatures",
     "TreeEntryOut",
@@ -105,6 +107,7 @@ const SCALARS: &[&str] = &[
     "ModeInput",
     "OperationKind",
     "Rev",
+    "RevKind",
 ];
 
 #[test]
@@ -183,6 +186,8 @@ fn schema_descriptions_name_no_rust_items() {
 fn store_ops_signatures<S: StoreOps + ?Sized>() {
     let _: fn(&S, InfoReq) -> Result<RepoInfo, OpError> = S::repo_info;
     let _: fn(&S, &Identity, CommitReq) -> Result<CommitResp, OpError> = S::commit;
+    let _: fn(&S, swarmops_api::ResolveRevReq) -> Result<swarmops_api::ResolvedRev, OpError> =
+        S::resolve_rev;
     let _: fn(&S, ReadFileReq) -> Result<FileContent, OpError> = S::read_file;
     let _: fn(&S, ReadTreeReq) -> Result<TreeListing, OpError> = S::read_tree;
     let _: fn(&S, ShowReq) -> Result<ChangesetDetail, OpError> = S::show;
@@ -1658,4 +1663,24 @@ mod diff {
             json!({"from": "c0", "to": "c1", "files": [{"path": "a", "status": "added", "zz_nested": 1}], "truncated": false}),
         );
     }
+}
+
+/// `resolve_rev` takes a revision and answers with the full id of the changeset it names and its
+/// kind, `ref` or `changeset` in snake case; both ignore fields they do not know, as every request
+/// and response does.
+#[test]
+fn resolve_rev_uses_its_wire_forms() {
+    use swarmops_api::{ResolveRevReq, ResolvedRev, RevKind};
+
+    assert_ignores_unknown_fields::<ResolveRevReq>("ResolveRevReq", json!({"rev": "main~1"}));
+    assert_ignores_unknown_fields::<ResolvedRev>("ResolvedRev", json!({"id": "c", "kind": "ref"}));
+    let resolved = ResolvedRev {
+        id: "c".to_owned(),
+        kind: RevKind::Changeset,
+    };
+    assert_eq!(
+        serde_json::to_value(&resolved).unwrap(),
+        json!({"id": "c", "kind": "changeset"})
+    );
+    assert_eq!(serde_json::to_value(RevKind::Ref).unwrap(), "ref");
 }
