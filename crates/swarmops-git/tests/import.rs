@@ -1845,7 +1845,9 @@ mod crafted_entries {
     use std::thread;
 
     use swarmops_core::{LeafKind, ObjectKind, Tree, TreeEntry};
-    use swarmops_git::{ExportOid, ExportRequest, GixSink, export, register, render_commit};
+    use swarmops_git::{
+        ExportOid, ExportRequest, ExternalIdMismatch, GixSink, export, register, render_commit,
+    };
     use swarmops_repo::RawChangeset;
     use swarmops_testkit::repo::{blob, signature};
 
@@ -1930,6 +1932,7 @@ mod crafted_entries {
                 target_head,
                 base,
                 git_head,
+                external_id,
                 ..
             } = &error
             else {
@@ -1937,6 +1940,11 @@ mod crafted_entries {
             };
             let found = (*target_head, *base, *git_head);
             assert_eq!(found, (head, Some(stands_for), c), "{kind}");
+            let passed_over = ExternalIdMismatch {
+                commit: x,
+                changeset: head,
+            };
+            assert_eq!(external_id.as_deref(), Some(&passed_over), "{kind}");
             let message = error.to_string();
             assert!(message.contains(&x.to_string()), "{kind}: {message}");
             assert_eq!(main_head(&repo), head, "{kind}");
