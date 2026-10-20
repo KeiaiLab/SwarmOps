@@ -1,6 +1,6 @@
 # SwarmOps architecture
 
-An overview, in English, of how SwarmOps is built, as of M4. The design specs are the
+An overview, in English, of how SwarmOps is built, as of M8. The design specs are the
 authority, and they are in Korean:
 
 - [the umbrella spec](superpowers/specs/2026-10-15-swarmops-design.md) ("umbrella" below),
@@ -23,13 +23,14 @@ function and the command line is a thin shell that prints JSON. It is fully embe
 program, no external database, no daemon.
 
 M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening), M1.6 (the
-code-review follow-ups), M2 (diff, history and the derived-data engine) and M4 (merge and
-landing, and the operation log with undo) are done, but for work of M1.6, M2 and M4 that waits
-until after the pilot. Since M1, SwarmOps is usable by one agent: its store takes commits from
-many processes at once, safely. Since M4, `land` merges an agent's change three-way onto a ref
-and publishes it, not yet measured under a swarm's load. Git import and export (M3, M8),
-workspaces (M5) and review (M7) come later, in the order of umbrella §13.
-[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2 and M4 leave open.
+code-review follow-ups), M2 (diff, history and the derived-data engine), M3 (git import), M4
+(merge and landing, and the operation log with undo) and M8 (git export) are done, but for work
+of M1.6, M2, M3, M4 and M8 that waits until after the pilot. Since M1, SwarmOps is usable by one
+agent: its store takes commits from many processes at once, safely. Since M4, `land` merges an
+agent's change three-way onto a ref and publishes it, not yet measured under a swarm's load.
+Workspaces (M5) and review (M7) come later, in the order of umbrella §13.
+[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2, M3, M4 and M8
+leave open.
 
 ## Crates and layering
 
