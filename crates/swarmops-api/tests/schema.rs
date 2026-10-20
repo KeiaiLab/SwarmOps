@@ -1154,7 +1154,8 @@ fn verify_report_carries_findings_beside_problems() {
             "ref",
             "cause",
             "system",
-            "key"
+            "key",
+            "derivation"
         ])
     );
 
@@ -1174,6 +1175,7 @@ fn verify_report_carries_findings_beside_problems() {
         cause: None,
         system: None,
         key: None,
+        derivation: None,
     };
     let report = VerifyReport {
         objects_checked: 3,

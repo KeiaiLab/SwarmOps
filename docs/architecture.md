@@ -199,7 +199,13 @@ journal record or other file names a derived value, so a power loss that takes o
 leaves its file torn, costs a recomputation and nothing else. Each file holds its value's key
 (`SWDV` header, then the key and the value, zstd over 4 KiB) and ends in a BLAKE3 trailer over the
 slot (name, version, object, key) and the value. A read that finds a file failing any of those
-checks removes it and reports the value missing, so that it is derived again.
+checks removes it and reports the value missing, so that it is derived again; so does a header
+that records a value longer than an object holds (512 MiB), before anything is decoded. The
+trailer is a checksum, not a signature: anyone who can write the store's files can place a whole
+file with any value. So the walks and path history check each value they use against the index
+and the objects where they can without the walk the value saves, and refuse one that fails
+(`RepoError::DerivedCorrupt`, `E_STORE_CORRUPT`); `verify --deep` checks every value of the
+built-in derivations against the objects (`derived_mismatch`).
 
 **Deriving a value** (storage §5). A `Derivation` says how one kind of value is made from a
 changeset and a key, out of objects and other derived values only (never a ref, the journal or
@@ -389,6 +395,13 @@ linear scan of the records past the view and the in-memory frames; a lookup read
 small byte ranges. Files and directories at a revision are read from the trees, starting at the
 changeset's root: O(depth) object reads and no checkout.
 Every object read checks the object's header and hash.
+A lookup checks what the index says where it can do so cheaply: the record a sorted view names
+must hold the key looked up (one more `read_at`), and a record read by id must have its parents
+start where the record before it leaves off; a lookup that finds either broken fails with
+`E_STORE_CORRUPT` rather than answer with another changeset. A first-parent walk (`log`, a
+revision's `~N`, ancestry and merge bases, path history, a land's squash) takes each parent from
+the changeset's object, which its hash binds, not from the index, and a read that returns a
+record with its object checks that the two name the same parents.
 
 A request reads in one snapshot (storage §8, operations §4). `Repo::snapshot()` returns a
 `RepoRead`; `LocalOps` takes one when an operation starts and resolves every revision and ref

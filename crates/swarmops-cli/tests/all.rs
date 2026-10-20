@@ -12,6 +12,7 @@ mod cli;
 mod contention;
 #[cfg(feature = "test-hooks")]
 mod crash;
+mod damaged_index;
 #[cfg(feature = "test-hooks")]
 mod faults;
 mod git;

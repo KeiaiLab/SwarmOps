@@ -102,23 +102,37 @@ impl Layout {
     /// as [`crate::DerivedStore`] checks before it asks: another could name a path out of the
     /// name's directory.
     pub fn derived_path(&self, slot: &DerivedSlot<'_>) -> Utf8PathBuf {
+        self.derived_file(
+            slot.name,
+            slot.version,
+            slot.subject,
+            derived_key_hash(slot.key),
+        )
+    }
+
+    /// The file of the value of derivation `name` at `version` about `subject`, under a key whose
+    /// hash ([`derived_key_hash`]) is `key_hash`: [`Layout::derived_path`]'s path, for a caller
+    /// that has the hash from a file's name rather than the key.
+    pub(crate) fn derived_file(
+        &self,
+        name: &str,
+        version: u32,
+        subject: ObjectId,
+        key_hash: Option<[u8; 8]>,
+    ) -> Utf8PathBuf {
         debug_assert!(
-            is_derived_name(slot.name),
-            "derived value name {:?} is not one a store takes",
-            slot.name
+            is_derived_name(name),
+            "derived value name {name:?} is not one a store takes"
         );
-        let hex = slot.subject.to_hex();
+        let hex = subject.to_hex();
         let (fanout, rest) = hex.split_at(2);
-        let file = if slot.key.is_empty() {
-            rest.to_owned()
-        } else {
-            let hash = blake3::hash(slot.key);
-            let (first, _) = hash.as_bytes().split_first_chunk::<8>().expect("32 bytes");
-            format!("{rest}.{:016x}", u64::from_be_bytes(*first))
+        let file = match key_hash {
+            None => rest.to_owned(),
+            Some(hash) => format!("{rest}.{:016x}", u64::from_be_bytes(hash)),
         };
         self.derived_dir()
-            .join(slot.name)
-            .join(slot.version.to_string())
+            .join(name)
+            .join(version.to_string())
             .join(fanout)
             .join(file)
     }
@@ -166,4 +180,16 @@ pub fn is_native_linux_fs(path: &Utf8Path) -> bool {
         Ok(below) => below.as_str().is_empty(),
         Err(_) => true,
     }
+}
+
+/// The first 8 bytes of BLAKE3 of `key`, which the name of a derived value's file ends in
+/// (`.<16 hex>`, [`Layout::derived_path`]); `None` for an empty key, whose file's name has no
+/// such end.
+pub(crate) fn derived_key_hash(key: &[u8]) -> Option<[u8; 8]> {
+    if key.is_empty() {
+        return None;
+    }
+    let hash = blake3::hash(key);
+    let (first, _) = hash.as_bytes().split_first_chunk::<8>().expect("32 bytes");
+    Some(*first)
 }

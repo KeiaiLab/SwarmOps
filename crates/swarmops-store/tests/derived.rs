@@ -268,6 +268,232 @@ fn a_damaged_value_file_reads_as_missing_and_is_removed() {
     }
 }
 
+/// A zstd value file whose header records one byte more than an object holds
+/// (`MAX_OBJECT_LEN + 1`, 512 MiB + 1), its frame honest about that length (zstd's own encoder,
+/// fed zeros, records it: about 16 KiB on disk) and its trailer right for those zeros, is refused
+/// before its frame is decoded: the slot reads as missing and its file is removed, as any value
+/// file that does not check out is. Nothing the size of the value is allocated: the process's
+/// peak resident memory (`VmHWM`, Linux; nextest runs each test in a process of its own) grows by
+/// less than half the claimed length, where decoding it would write all of it.
+#[test]
+fn a_zstd_value_past_the_object_limit_is_refused_before_it_is_decoded() {
+    use std::io::Write as _;
+
+    use swarmops_store::MAX_OBJECT_LEN;
+
+    let (_dir, layout, store) = new_store();
+    let slot = slot("depth", 1, 1, b"");
+    let len = MAX_OBJECT_LEN + 1;
+    let zeros = vec![0_u8; 1 << 20];
+    let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).unwrap();
+    encoder.set_pledged_src_size(Some(len)).unwrap();
+    encoder.include_contentsize(true).unwrap();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"swarmops:derived:v1\0");
+    hasher.update(&[u8::try_from(slot.name.len()).unwrap()]);
+    hasher.update(slot.name.as_bytes());
+    hasher.update(&slot.version.to_le_bytes());
+    hasher.update(&slot.subject.0);
+    hasher.update(&0_u32.to_le_bytes());
+    hasher.update(&len.to_le_bytes());
+    let mut left = len;
+    while left > 0 {
+        let n = usize::try_from(left.min(1 << 20)).unwrap();
+        encoder.write_all(&zeros[..n]).unwrap();
+        hasher.update(&zeros[..n]);
+        left -= u64::try_from(n).unwrap();
+    }
+    let frame = encoder.finish().unwrap();
+    assert!(frame.len() < 64 << 10, "{} bytes of zstd", frame.len());
+
+    let mut file = b"SWDV".to_vec();
+    file.extend([1, 1, 0, 0]);
+    file.extend(0_u32.to_le_bytes());
+    file.extend(len.to_le_bytes());
+    file.extend(&frame);
+    file.extend(hasher.finalize().as_bytes());
+    let path = layout.derived_path(&slot);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(&path, &file).unwrap();
+
+    let before = peak_resident_kib();
+    let got = store.get(&slot).unwrap().map(|value| value.len());
+    let grew = peak_resident_kib().saturating_sub(before);
+    assert_eq!(
+        got, None,
+        "a value past the object limit reads as missing (the read grew the peak resident memory \
+         by {grew} KiB)"
+    );
+    assert!(!path.exists(), "and its file is removed");
+    assert!(
+        grew < len / 2 / 1024,
+        "the read grew the peak resident memory by {grew} KiB"
+    );
+}
+
+/// A put of a value longer than an object holds (`MAX_OBJECT_LEN + 1` zeros, whose pages stay
+/// untouched until something reads them) is a call the store does not take: `BadCall`, before
+/// any filesystem call, since no read would take such a value back.
+#[test]
+fn a_put_of_a_value_past_the_object_limit_is_refused() {
+    use swarmops_store::MAX_OBJECT_LEN;
+
+    let (_dir, layout) = new_root();
+    let (fs, calls) = RecordingFs::new();
+    let store = DerivedStore::open(layout.clone(), Arc::new(fs));
+    let past = vec![0_u8; usize::try_from(MAX_OBJECT_LEN + 1).unwrap()];
+    let got = store.put(&slot("depth", 1, 1, b""), &past);
+    assert!(matches!(got, Err(StoreError::BadCall(_))), "{got:?}");
+    assert_eq!(calls(), Vec::<String>::new(), "no filesystem call");
+    assert!(!layout.derived_dir().exists(), "nothing written");
+}
+
+/// A check of the store lists a derivation's value files by their names (`list`, sorted by subject
+/// and key hash) and reads each with the key it records (`read_listed`): a whole file gives its
+/// key and its value, and a file that does not check out gives nothing and stays where it is: a
+/// damaged one, one whose recorded key does not hash to its name's end (another slot's file
+/// copied there), and a directory under a value file's name. A link to the slot's own file reads
+/// as that file, as `get` reads it. Names the layout gives no slot (another length, a capital
+/// digit, a suffix that is not 16 hex digits, a fan-out of one digit) are passed over, and so are
+/// another version's and another derivation's directories.
+#[test]
+fn a_check_lists_value_files_and_reads_them_without_removing_any() {
+    use std::os::unix::fs::symlink;
+
+    use swarmops_store::{ListedValue, StoredValue};
+
+    let (_dir, layout, store) = new_store();
+    let empty = slot("depth", 1, 1, b"");
+    let keyed = slot("depth", 1, 2, b"src/lib.rs");
+    let zstd = slot("depth", 1, 3, b"key");
+    let linked = slot("depth", 1, 4, b"");
+    let damaged = slot("depth", 1, 5, b"");
+    let copied = slot("depth", 1, 6, b"other");
+    let not_a_file = slot("depth", 1, 7, b"");
+    for (slot, len) in [(&empty, 10), (&keyed, 10), (&zstd, 5 << 10), (&linked, 10)] {
+        assert!(store.put(slot, &value(len, 1)).unwrap());
+    }
+    assert!(store.put(&damaged, &value(10, 1)).unwrap());
+    assert!(store.put(&slot("depth", 2, 1, b""), b"v2").unwrap());
+    assert!(store.put(&slot("width", 1, 1, b""), b"w").unwrap());
+    let path = |slot: &DerivedSlot<'_>| layout.derived_path(slot);
+    fs::write(path(&damaged), b"torn").unwrap();
+    fs::create_dir_all(path(&copied).parent().unwrap()).unwrap();
+    fs::copy(path(&keyed), path(&copied)).unwrap();
+    let elsewhere = layout.root().join("elsewhere");
+    fs::rename(path(&linked), &elsewhere).unwrap();
+    symlink(&elsewhere, path(&linked)).unwrap();
+    fs::create_dir_all(path(&not_a_file)).unwrap();
+    let dir = layout.derived_dir().join("depth/1");
+    let hex = subject(1).to_hex();
+    let fanout = dir.join(&hex[..2]);
+    for stray in [
+        fanout.join("abc"),
+        fanout.join(hex[2..].to_uppercase()),
+        fanout.join(format!("{}.0123", &hex[2..])),
+        fanout.join(format!("{}.0123456789abcdeg", &hex[2..])),
+        dir.join(&hex[..1]).join(&hex[1..]),
+    ] {
+        fs::create_dir_all(stray.parent().unwrap()).unwrap();
+        fs::write(&stray, b"stray").unwrap();
+    }
+
+    let hash = |key: &[u8]| -> Option<[u8; 8]> {
+        (!key.is_empty()).then(|| blake3::hash(key).as_bytes()[..8].try_into().unwrap())
+    };
+    let listed = |slot: &DerivedSlot<'_>| ListedValue {
+        subject: slot.subject,
+        key_hash: hash(slot.key),
+    };
+    let mut want: Vec<ListedValue> = [
+        &empty,
+        &keyed,
+        &zstd,
+        &linked,
+        &damaged,
+        &copied,
+        &not_a_file,
+    ]
+    .into_iter()
+    .map(listed)
+    .collect();
+    want.sort_unstable();
+    assert_eq!(store.list("depth", 1).unwrap(), want);
+
+    let read = |slot: &DerivedSlot<'_>| store.read_listed("depth", 1, &listed(slot)).unwrap();
+    let stored = |slot: &DerivedSlot<'_>, len| StoredValue {
+        key: slot.key.to_vec(),
+        value: value(len, 1),
+    };
+    for (slot, len) in [(&empty, 10), (&keyed, 10), (&zstd, 5 << 10), (&linked, 10)] {
+        assert_eq!(read(slot), Some(stored(slot, len)), "{slot:?}");
+    }
+    for (what, slot) in [
+        ("damaged", &damaged),
+        ("another slot's file", &copied),
+        ("a directory", &not_a_file),
+    ] {
+        assert_eq!(read(slot), None, "{what}");
+        assert!(path(slot).exists(), "{what}: left where it is");
+    }
+    assert_eq!(fs::read(path(&damaged)).unwrap(), b"torn");
+    assert_eq!(
+        store.list("depth", 3).unwrap(),
+        Vec::new(),
+        "no such version"
+    );
+    assert!(matches!(store.list("tmp", 1), Err(StoreError::BadCall(_))));
+    assert!(matches!(
+        store.list("depth", 0),
+        Err(StoreError::BadCall(_))
+    ));
+}
+
+/// A read of a listed value file that fails names the file, relative to the store's root, as
+/// every store failure does.
+#[test]
+fn a_failed_read_of_a_listed_value_names_its_file() {
+    use swarmops_store::ListedValue;
+
+    let (_dir, layout) = new_root();
+    let slot = slot("depth", 1, 1, b"key");
+    assert!(
+        DerivedStore::open(layout.clone(), Arc::new(RealFs))
+            .put(&slot, b"value")
+            .unwrap()
+    );
+    let fs = FailingFs::new(|method, _| method == FsMethod::Read);
+    let store = DerivedStore::open(layout.clone(), Arc::new(fs));
+    let [listed] = store.list("depth", 1).unwrap()[..] else {
+        panic!("one value file");
+    };
+    assert_eq!(
+        listed,
+        ListedValue {
+            subject: slot.subject,
+            key_hash: Some(blake3::hash(b"key").as_bytes()[..8].try_into().unwrap()),
+        }
+    );
+    match store.read_listed("depth", 1, &listed) {
+        Err(StoreError::Io(read)) => {
+            assert_eq!(read.op, FileOp::Fs(FsMethod::Read));
+            assert_eq!(read.file.as_ref(), Some(&slot_file(&slot)));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// The process's peak resident memory, in KiB: `VmHWM` of `/proc/self/status` on Linux; 0
+/// elsewhere, where the check that uses it checks nothing.
+fn peak_resident_kib() -> u64 {
+    let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("VmHWM:"))
+        .and_then(|kib| kib.trim().trim_end_matches("kB").trim().parse().ok())
+        .unwrap_or(0)
+}
+
 /// Holds each `link_noclobber` until all the racers have come to theirs, so that each has written
 /// its temp file before any links one into place.
 struct LinkTogether(Barrier);

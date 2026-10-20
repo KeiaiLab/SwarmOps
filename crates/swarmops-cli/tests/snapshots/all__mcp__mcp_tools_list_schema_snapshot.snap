@@ -1103,14 +1103,14 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": true
       },
-      "description": "Checks the whole store's consistency; deep re-hashes every object too.",
+      "description": "Checks the whole store's consistency; deep re-hashes every object and checks the derived values against the objects too.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`verify`: check the whole store's consistency.",
         "properties": {
           "deep": {
             "default": false,
-            "description": "Re-hash every object. When `false`, verify checks structure only: parents, that\nreferenced objects exist, the index against the journal, and refs.",
+            "description": "Re-hash every object, and check every derived value of the built-in derivations (the\nfirst-parent skip lists, the last touches of paths) against the objects. When `false`,\nverify checks structure only: parents, that referenced objects exist, the index against\nthe journal, and refs.",
             "type": "boolean"
           }
         },

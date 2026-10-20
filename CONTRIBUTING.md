@@ -69,7 +69,15 @@ A change is done when `just check` passes on it. It runs, in order:
    private items too, so that the CLI's internal docs (its modules are private to its library)
    stay link-checked, run twice: as it stands, and with `--all-features`, which also renders and
    link-checks the code behind `test-hooks` (the order checker and the fault doubles);
-6. `cargo deny check`: advisories, licenses, bans and sources.
+6. `cargo deny check`, advisories, licenses, bans and sources, with `deny.toml`, over both
+   lockfiles the steps above build: the workspace's and the fuzz crate's, whose one license
+   exception is in `fuzz/deny.exceptions.toml`.
+
+The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
+where it is built, by `just bench-compare` and the weekly scheduled run, with a policy of its
+own: `bench/compare/deny.toml`, every line of `deny.toml` and the harness's own entries. The
+`supply_chain` tests of `swarmops-core` fail a gate step, recipe, script or workflow job that
+builds a workspace whose lockfile no `cargo deny` checks.
 
 Every cargo build, test, clippy and doc step uses `--locked`, so `Cargo.lock` (committed, like
 `fuzz/Cargo.lock`) is exactly what is built. `scripts/check.sh` runs the same steps on a machine
@@ -168,7 +176,7 @@ reaches test builds too: a `pub` item under `#[cfg(test)]` that the crate root r
 | `just check-ci-slow` | The regular suite at `PROPTEST_CASES=2000` plus every ignored test except `regenerate_golden`, the git fixtures' two switches and the two 32-process contention measurements, which are far too heavy for CI runners: what the weekly CI run does, under the `ci-slow` nextest profile. |
 | `just perf` | The measurements `docs/perf.md` records, optimized: the store-level and the CLI-level 32 × 1,000 contention tests, then every store bench. It prints their summary lines; `target/perf/` keeps the full output. |
 | `just bench` | The criterion benches. |
-| `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. |
+| `just fuzz [target]` | One cargo-fuzz target for 60 s on the nightly toolchain: `codec_roundtrip` (the default), `tree_decode`, `frame_decode` or `journal_recovery`. It reads the tracked corpus as a seed and writes the new inputs it finds into `fuzz/corpus-new/<target>/`, which git ignores, so a run leaves the tree clean. |
 | `just git-fixtures` | Rebuilds the git fixtures' archives and manifests (`crates/swarmops-testkit/git-fixtures/`) from their scripts with the declared git, 2.43.0: the ignored test `regenerate_git_fixtures`, with `SWARMOPS_REGEN_GIT_FIXTURES=1`. A few seconds; run it after changing a script, and commit what it rewrites. |
 
 Run `just check-slow` before landing a change to the store's write, recovery or locking paths.
@@ -176,18 +184,26 @@ Run `just perf` only in a quiet window (nothing else heavy on the disk), and rec
 prints in `docs/perf.md`, with the host's load, when a decision rests on it: a
 `--durability fast` flag, for one, may exist only if `docs/perf.md` records a measurement that
 justifies it. The fuzz crate (`fuzz/`) is a cargo workspace of its own with a tracked corpus
-(`fuzz/corpus/<target>/`); crashes land in `fuzz/artifacts/` (git-ignored), and a crash found
-there belongs in a regression test.
+(`fuzz/corpus/<target>/`), which `just fuzz` only reads: libFuzzer writes the new inputs it
+finds into the first corpus directory it is given only, and the recipe gives it
+`fuzz/corpus-new/<target>/` (git-ignored) first and the tracked corpus after it, as a seed. New
+inputs join the tracked corpus minimised. Copy the tracked corpus and the new inputs into one
+scratch directory and run `cargo +nightly fuzz cmin <target> <that directory>` from `fuzz/`
+(it replaces the directory with the smallest set of its inputs that keeps their coverage, and
+it moves the directory into a temporary one under `fuzz/`, so the two must share a filesystem);
+then commit only the inputs it kept that are not tracked yet, removing no tracked input, with
+each target's count and size before and after in the commit body. Crashes land in
+`fuzz/artifacts/` (git-ignored), and a crash found there belongs in a regression test.
 
 ## Continuous integration
 
 GitHub Actions runs `just check` on every push to `stable` and to `feat/**` branches and on every
 pull request to `stable`. The one check to look at is `tests-pass`: it passes only when every job
 it depends on passed. A weekly scheduled workflow runs `just check-ci-slow`, a 60-second fuzz
-smoke of every target, the format, lint and test commands of `bench/compare` (a cargo workspace
-of its own that `just check` does not build) and the git version matrix. Dependabot proposes
-grouped, weekly updates for Cargo and GitHub Actions, after a cooldown; review them like any
-other change.
+smoke of every target, the `cargo deny`, format, lint and test commands of `bench/compare` (a
+cargo workspace of its own that `just check` does not build) and the git version matrix.
+Dependabot proposes grouped, weekly updates for Cargo and GitHub Actions, after a cooldown;
+review them like any other change.
 
 - **Hung tests are killed and named.** The `ci` nextest profile ends a test after 10 minutes and
   the weekly `ci-slow` profile after 20; either way the test appears as a failure in the JUnit
@@ -217,7 +233,8 @@ other change.
 - **A new RustSec advisory turns every push red** through `cargo deny check`, on purpose. Update
   the affected crate; if no fixed release exists and the advisory cannot affect SwarmOps, add an
   `ignore` entry with the advisory id and the reason to `[advisories]` in `deny.toml`, in a
-  commit of its own.
+  commit of its own. An advisory for a crate that only `bench/compare` uses turns the weekly run
+  and `just bench-compare` red instead, and its `ignore` entry goes to `bench/compare/deny.toml`.
 - **A semver-incompatible release of a crate both lockfiles share** changes a requirement in
   `Cargo.toml`, so its Dependabot pull request fails until
   `cargo update --manifest-path fuzz/Cargo.toml -p <crate>` is pushed to it.

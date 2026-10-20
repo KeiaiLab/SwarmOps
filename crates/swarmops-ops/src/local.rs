@@ -39,6 +39,7 @@ use swarmops_repo::{
     PathEvent, RepoError, RepoRead, StoredChangeset, VerifyProblem,
 };
 use swarmops_repo::{Resolution, Resolutions};
+use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{FsObjectStore, LogCut, Recovered};
 
 use crate::content;
@@ -388,7 +389,11 @@ const MAX_LAND_KEY: usize = 64;
 /// - `E_GIT_UNSUPPORTED` `{reason, …}`: a repository the import does not read as it is, refused
 ///   before anything past its configuration is read: `reason` `object_format`
 ///   `{object_format}`, `ref_storage` `{ref_storage}`, or `shallow`, whose hint deepens it
-///   (`git -C <path> fetch --unshallow`); or a commit no lossy class covers: `parents`
+///   (`git -C <path> fetch --unshallow`); `special_file` `{file}`, a FIFO, a socket or a device
+///   (or a symlink to one) where it reads a file of the git directory, named by its path there
+///   and refused before any file is read; `file_too_long` `{file, size, max}`, a file it reads
+///   whole there (a ref, `config`, `config.worktree`, `objects/info/alternates`) longer than
+///   16 MiB, refused unread; or a commit no lossy class covers: `parents`
 ///   `{commit, parents, max}`, more than 255 of them, or `mode` `{commit, path, mode}`.
 /// - `E_GIT_READ` `{reason, object?}`: an object the repository lacks (`missing`, as a partial
 ///   clone lacks blobs), whose bytes are not its id's (`corrupt`) or do not parse (`malformed`),
@@ -425,7 +430,8 @@ const MAX_LAND_KEY: usize = 64;
 /// - `E_GIT_NOT_A_REPO` `{git_path}`: no git repository gix can open at that path; the hint makes
 ///   one (`git init --bare <path>`).
 /// - `E_GIT_UNSUPPORTED` `{reason, …}`: a repository the export does not write as it is, as the
-///   import refuses a source: `object_format`, `ref_storage` or `shallow`.
+///   import refuses a source: `object_format`, `ref_storage`, `shallow`, `special_file` or
+///   `file_too_long`.
 /// - `E_INVALID_ARG` `{reason: "checked_out", branch}`: the branch `HEAD` names in a repository
 ///   with a work tree, refused with or without `force`, before the store is read; the hint
 ///   detaches `HEAD` or names another branch.
@@ -2367,6 +2373,7 @@ fn finding(problem: &VerifyProblem) -> VerifyFinding {
         cause: None,
         system: None,
         key: None,
+        derivation: None,
     };
     match problem {
         VerifyProblem::CorruptObject(id) => VerifyFinding {
@@ -2429,6 +2436,16 @@ fn finding(problem: &VerifyProblem) -> VerifyFinding {
             system: Some(system.clone()),
             key: Some(key.clone()),
             ..of("external_id_mismatch")
+        },
+        VerifyProblem::DerivedMismatch {
+            name,
+            changeset,
+            key,
+        } => VerifyFinding {
+            changeset: Some(changeset.to_string()),
+            key: (!key.is_empty()).then(|| lower_hex(key)),
+            derivation: Some(name.clone()),
+            ..of("derived_mismatch")
         },
     }
 }
@@ -2604,9 +2621,11 @@ mod tests {
     /// Each problem `verify` can find, `IndexMismatch` once for each cause, is a finding of its
     /// own kind with exactly the keys that kind names, its ids in lowercase hex, so that a
     /// program reads what is damaged without parsing the line. No two problems share a kind but
-    /// `IndexMismatch`'s causes, which `cause` tells apart. The finding each problem should be
-    /// comes from an exhaustive match, as `finding` does its own: a new problem, or a new
-    /// cause, does not compile here until it is given its kind and keys, and with them a case.
+    /// `IndexMismatch`'s causes, which `cause` tells apart, and `DerivedMismatch`'s derivations,
+    /// which `derivation` does (with a key in lowercase hex where the value has one). The finding
+    /// each problem should be comes from an exhaustive match, as `finding` does its own: a new
+    /// problem, or a new cause, does not compile here until it is given its kind and keys, and
+    /// with them a case.
     #[test]
     fn every_verify_problem_is_a_finding_with_its_keys() {
         let (object, child, parent) = ("ab".repeat(32), "cd".repeat(32), "ef".repeat(32));
@@ -2646,6 +2665,14 @@ mod tests {
             VerifyProblem::ExternalIdMismatch { .. } => json!({
                 "kind": "external_id_mismatch", "changeset": child, "system": "git", "key": key
             }),
+            VerifyProblem::DerivedMismatch { key: path, .. } if path.is_empty() => json!({
+                "kind": "derived_mismatch", "changeset": child,
+                "derivation": "first_parent_skip_list"
+            }),
+            VerifyProblem::DerivedMismatch { .. } => json!({
+                "kind": "derived_mismatch", "changeset": child, "key": "0161",
+                "derivation": "last_modified"
+            }),
         };
         let cases = [
             VerifyProblem::CorruptObject(id(&object)),
@@ -2667,8 +2694,18 @@ mod tests {
             VerifyProblem::MetaCorrupt("journal.off is missing".to_owned()),
         ];
         let external = external_id_cases(changeset(&child), &key);
+        // A derived value under a path's key (`a`, as postcard writes it) and one without a key.
+        let derived = [
+            ("last_modified", vec![1, b'a']),
+            ("first_parent_skip_list", Vec::new()),
+        ]
+        .map(|(name, key)| VerifyProblem::DerivedMismatch {
+            name: name.to_owned(),
+            changeset: changeset(&child),
+            key,
+        });
         let mut kinds: BTreeMap<String, Vec<&VerifyProblem>> = BTreeMap::new();
-        for problem in cases.iter().chain(&external) {
+        for problem in cases.iter().chain(&external).chain(&derived) {
             let found = finding(problem);
             assert_eq!(
                 serde_json::to_value(&found).unwrap(),
@@ -2677,10 +2714,14 @@ mod tests {
             );
             kinds.entry(found.kind).or_default().push(problem);
         }
-        assert_eq!(kinds.len(), 12, "{kinds:?}");
+        assert_eq!(kinds.len(), 13, "{kinds:?}");
         for (kind, problems) in &kinds {
             let shared = problems.len() > 1;
-            assert!(!shared || kind == "index_mismatch", "{kind}: {problems:?}");
+            let told_apart = ["index_mismatch", "derived_mismatch"];
+            assert!(
+                !shared || told_apart.contains(&kind.as_str()),
+                "{kind}: {problems:?}"
+            );
         }
     }
 

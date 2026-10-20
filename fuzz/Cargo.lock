@@ -302,6 +302,7 @@ dependencies = [
  "blake3",
  "camino",
  "crc32fast",
+ "libc",
  "rayon",
  "swarmops-core",
  "tempfile",

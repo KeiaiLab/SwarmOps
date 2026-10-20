@@ -37,6 +37,9 @@
 //!   A ref's target is checked only if the journal reads whole or the index opens: with
 //!   neither, no changeset is known for certain, and the [`VerifyProblem::MetaCorrupt`] says
 //!   that the refs' targets go unchecked.
+//! - The lock file: a `meta/lock` that is not a regular file, which every write refuses before
+//!   it opens it, is a [`VerifyProblem::MetaCorrupt`]. Verify only looks at it
+//!   (`MetaLock::refuses`), and checks it first.
 //! - Every changeset, in seq order: its object, its record against its object (parents, delta
 //!   hash) and its parents' generations, its parents ([`VerifyProblem::MissingParent`]), every
 //!   tree under its root, and its root against its first parent's root with its delta applied
@@ -53,10 +56,14 @@
 //!   entry under `objects/`, are passed over.
 //!
 //! A deep check also re-hashes every object file, referenced or not, and reports one whose
-//! content does not match its id as a [`VerifyProblem::CorruptObject`]. A shallow check reads
+//! content does not match its id as a [`VerifyProblem::CorruptObject`]; and it checks every value
+//! the derived store holds of the built-in derivations, the first-parent skip lists and the last
+//! touches of paths, against what the changesets' objects give, and reports one that is not that
+//! value as a [`VerifyProblem::DerivedMismatch`] (the values are listed, and those of the last
+//! touches read, before the changesets are checked, and checked after them). A shallow check reads
 //! only what the structure needs: the changeset and tree objects, which are verified as they
 //! are read (so one of those that is corrupt is reported all the same), while a blob is only
-//! looked for, its bytes unread.
+//! looked for, its bytes unread, and no derived value is read.
 //!
 //! A damaged object is reported once, against the first changeset (in seq order) that
 //! references it.
@@ -74,9 +81,12 @@ use swarmops_store::{
     SYSTEM_GIT, SortedView, StoreError,
 };
 
+use crate::derive::{LastModified, PathKey};
 use crate::error::RepoError;
 use crate::repo::Repo;
 use crate::tree_edit::TreeEdit;
+
+mod derived;
 
 /// How many journal frames verify reads with one call.
 const FRAME_BATCH: usize = 4096;
@@ -90,8 +100,9 @@ pub struct VerifyReport {
     /// How many changesets it checked.
     pub changesets_checked: u64,
     /// What is damaged: metadata files that do not read first, then the journal, the index
-    /// records, the refs, the changesets in seq order, the objects, and last the external id
-    /// index's entries, by system and key. Empty for a sound store.
+    /// records, the refs, the changesets in seq order, the objects, the external id index's
+    /// entries, by system and key, and last (deep only) the derived values, by derivation,
+    /// changeset and key. Empty for a sound store.
     pub problems: Vec<VerifyProblem>,
 }
 
@@ -140,6 +151,8 @@ pub enum VerifyProblem {
     /// A metadata file that verify cannot read as one, so that what depends on it goes
     /// unchecked: a journal file missing, `journal.ckpt` malformed or not a frame boundary, or
     /// index files that do not open. Carries what is damaged and what is not checked for it.
+    /// A `meta/lock` that is not a regular file, which every write refuses, is one too; it then
+    /// carries what to do.
     MetaCorrupt(String),
     /// An entry of the external id index (storage spec §7) that is not one: its file is not 44
     /// bytes of a version-1 entry with a CRC that matches, or not a regular file.
@@ -167,6 +180,22 @@ pub enum VerifyProblem {
         key: String,
         /// The changeset it names.
         changeset: ChangesetId,
+    },
+    /// A value the derived store holds of a built-in derivation (storage spec §5), its file whole
+    /// and its trailer right, that is not the value the changesets' objects give: a first-parent
+    /// skip list whose entries are not the changesets 1, 2, 4, … first-parent steps below its
+    /// changeset, or a last touch of a path that is not the nearest changeset of the first-parent
+    /// chain that touches it. No crash or power loss writes one: someone placed the file, or a
+    /// faulty build wrote it. A reader takes it as valid where its own checks cannot tell; removing
+    /// the file, or all of `meta/derived/`, has the value derived again. Found by a deep check.
+    DerivedMismatch {
+        /// The derivation: `first_parent_skip_list` or `last_modified`.
+        name: String,
+        /// The changeset the value is about.
+        changeset: ChangesetId,
+        /// The value's key, as its file records it: a path's postcard bytes for `last_modified`,
+        /// none for a skip list.
+        key: Vec<u8>,
     },
 }
 
@@ -255,8 +284,33 @@ impl fmt::Display for VerifyProblem {
                 "external id {key} of system {system} names changeset {changeset}, whose git.oid \
                  is another oid"
             ),
+            Self::DerivedMismatch {
+                name,
+                changeset,
+                key,
+            } => write!(
+                f,
+                "the derived value {name} of changeset {changeset}{} is not the one the store's \
+                 objects give; remove its file under meta/derived/{name}/, or all of \
+                 meta/derived/, to have it derived again",
+                key_text(name, key)
+            ),
         }
     }
+}
+
+/// How a [`VerifyProblem::DerivedMismatch`] line names the value's key: a path for
+/// `last_modified`, lowercase hex for any other key, nothing for none.
+fn key_text(name: &str, key: &[u8]) -> String {
+    if key.is_empty() {
+        return String::new();
+    }
+    if name == <LastModified as crate::derive::Derivation>::NAME
+        && let Ok((PathKey(path), [])) = postcard::take_from_bytes::<PathKey>(key)
+    {
+        return format!(" under path {path}");
+    }
+    format!(" under key {}", lower_hex(key))
 }
 
 impl<O: ObjectStore> Repo<O> {
@@ -266,12 +320,19 @@ impl<O: ObjectStore> Repo<O> {
     /// Errors only where it cannot read on.
     pub fn verify(&self, deep: bool) -> Result<VerifyReport, RepoError> {
         let mut check = Check::new(self, deep);
+        check.lock_file();
         let changesets = check.metadata()?;
+        if deep {
+            check.derived = derived::Derived::read(self)?;
+        }
         for meta in &changesets {
             check.changeset(meta)?;
         }
         check.external_entries()?;
         check.objects()?;
+        if let Some(derived) = check.derived.take() {
+            check.derived_problems = derived.check(self)?;
+        }
         Ok(check.report())
     }
 }
@@ -316,6 +377,11 @@ struct Check<'r, O: ObjectStore> {
     git_oids: HashMap<ChangesetId, Vec<u8>>,
     /// The external id index's problems, by system and key.
     external_problems: Vec<VerifyProblem>,
+    /// The derived values a deep check reads and checks, and the changesets it notes for them;
+    /// `None` for a shallow check, and for a store that holds none.
+    derived: Option<derived::Derived>,
+    /// The derived values' problems, by derivation, changeset and key.
+    derived_problems: Vec<VerifyProblem>,
 }
 
 impl<'r, O: ObjectStore> Check<'r, O> {
@@ -340,6 +406,8 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             wants_git_oids: false,
             git_oids: HashMap::new(),
             external_problems: Vec::new(),
+            derived: None,
+            derived_problems: Vec::new(),
         }
     }
 
@@ -467,6 +535,18 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             listed.push((system, entries));
         }
         Ok(listed)
+    }
+
+    /// Reports a `meta/lock` that every write refuses before it opens it (one that is not a
+    /// regular file), looked at without opening it.
+    fn lock_file(&mut self) {
+        if swarmops_store::MetaLock::refuses(&self.repo.layout) {
+            self.meta.push(VerifyProblem::MetaCorrupt(
+                "meta/lock is not a regular file: every write fails on it until it is removed, \
+                 and the next write makes a new one"
+                    .to_owned(),
+            ));
+        }
     }
 
     /// A handle on the journal, or what is wrong with it if one of its files is missing: the
@@ -646,6 +726,9 @@ impl<'r, O: ObjectStore> Check<'r, O> {
             && let Some((_, oid)) = cs.metadata.iter().find(|(key, _)| key == "git.oid")
         {
             self.git_oids.insert(id, oid.clone());
+        }
+        if let Some(derived) = &mut self.derived {
+            derived.note(id, &cs);
         }
         // 1 + the largest parent generation, if the metadata holds every parent.
         let generation = meta
@@ -885,6 +968,7 @@ impl<'r, O: ObjectStore> Check<'r, O> {
         problems.extend(self.refs);
         problems.extend(self.problems);
         problems.extend(self.external_problems);
+        problems.extend(self.derived_problems);
         VerifyReport {
             objects_checked: to_u64(self.hashed.len() + looked_for),
             changesets_checked: self.changesets_checked,

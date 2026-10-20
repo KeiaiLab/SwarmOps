@@ -49,6 +49,7 @@ mod engine;
 mod last_modified;
 mod skiplist;
 
+pub(crate) use self::last_modified::touches;
 pub use self::last_modified::{LastModified, LastTouch, PathKey};
 pub use self::skiplist::{FirstParentSkipList, SkipList};
 

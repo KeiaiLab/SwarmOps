@@ -383,6 +383,38 @@ fn git_import_of_a_shallow_clone_is_e_git_unsupported() {
     assert_eq!(refs["refs"], json!([]), "{refs}");
 }
 
+/// A FIFO where the repository's git directory keeps a file that `git import` reads (here its
+/// `config`, as an extracted archive can leave one) is refused before anything opens it, rather
+/// than blocking the import until something writes to it: `E_GIT_UNSUPPORTED`, exit 1, with
+/// `details.reason` `special_file` and the file. `git export` opens its repository the same way
+/// and refuses it the same. Each runs within a short deadline, which a blocked run fails.
+#[test]
+#[cfg(unix)]
+fn git_import_of_a_repository_holding_a_fifo_is_e_git_unsupported() {
+    use std::time::Duration;
+
+    use crate::support::run_within;
+
+    let store = Store::init();
+    let linear = Source::new("linear");
+    let config = std::path::Path::new(&linear.path).join("config");
+    std::fs::remove_file(&config).expect("remove config");
+    let made = std::process::Command::new("mkfifo").arg(&config).status();
+    assert!(made.expect("run mkfifo").success(), "mkfifo");
+    let deadline = Duration::from_secs(30);
+    let import = store.args(AGENT, &["git", "import", &linear.path]);
+    let export = ["--repo", store.path(), "git", "export", &linear.path];
+    for failed in [
+        run_within(&import, &[], deadline),
+        run_within(&export, &[], deadline),
+    ] {
+        assert_eq!(failed.exit(), 1, "{failed}");
+        let error = failed.err("E_GIT_UNSUPPORTED");
+        let details = json!({"reason": "special_file", "file": "config"});
+        assert_eq!(error["details"], details, "{failed}");
+    }
+}
+
 /// An import is a mutation, so it needs the caller's identity: without one it is
 /// `E_IDENTITY_REQUIRED`, exit 5, before the source is opened (a missing source says nothing of
 /// itself).
