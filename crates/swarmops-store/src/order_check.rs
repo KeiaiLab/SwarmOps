@@ -644,10 +644,35 @@ impl State {
     }
 }
 
-/// A write-ordering rule, as [the module documentation](self) states it; a violation's panic
-/// names it by its id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Rule {
+/// Declares [`Rule`] from one list of the rules, each with its documentation: the ids the
+/// panics name and, for the tests, `Rule::ALL` come from the same list, so that a rule cannot be
+/// left out of either.
+macro_rules! rules {
+    ($($(#[$attr:meta])* $rule:ident,)+) => {
+        /// A write-ordering rule, as [the module documentation](self) states it; a violation's
+        /// panic names it by its id.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum Rule {
+            $($(#[$attr])* $rule,)+
+        }
+
+        #[cfg(test)]
+        impl Rule {
+            /// Every rule, in order.
+            const ALL: [Rule; [$(stringify!($rule)),+].len()] = [$(Rule::$rule),+];
+        }
+
+        impl fmt::Display for Rule {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(match self {
+                    $(Rule::$rule => stringify!($rule),)+
+                })
+            }
+        }
+    };
+}
+
+rules! {
     /// The journal.
     W1,
     /// The refs.
@@ -664,36 +689,6 @@ enum Rule {
     W7,
     /// The external ids.
     W8,
-}
-
-#[cfg(test)]
-impl Rule {
-    /// Every rule, in order.
-    const ALL: [Rule; 8] = [
-        Rule::W1,
-        Rule::W2,
-        Rule::W3,
-        Rule::W4,
-        Rule::W5,
-        Rule::W6,
-        Rule::W7,
-        Rule::W8,
-    ];
-}
-
-impl fmt::Display for Rule {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Rule::W1 => "W1",
-            Rule::W2 => "W2",
-            Rule::W3 => "W3",
-            Rule::W4 => "W4",
-            Rule::W5 => "W5",
-            Rule::W6 => "W6",
-            Rule::W7 => "W7",
-            Rule::W8 => "W8",
-        })
-    }
 }
 
 /// Panics if `violation` holds one: rule `rule` is broken by `method` on `paths`.
