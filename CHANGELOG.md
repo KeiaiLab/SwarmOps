@@ -1073,5 +1073,13 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   refuses, before the frame that would hold the commit. Within the bound an object is still read
   whole ([docs/known-limitations.md](docs/known-limitations.md), "A git object is read whole, up
   to 512 MiB").
+- An external id entry's file (`meta/external_ids/`, 44 bytes) is read no further than a byte
+  past an entry, so a longer one is a damaged entry, however long: `verify` lists it as an
+  `external_id_corrupt` finding (`E_STORE_CORRUPT`) and goes on, the git import and export pass
+  over it with a warning, as over any damaged entry, and a put names its id as a conflict and
+  leaves the file as it is. Such a file, sparse or crafted, used to be read whole, so `verify`,
+  and any import, export or put that reached it, took its whole length in memory, enough for
+  the system to kill the process (`swarmops mcp` with it), or failed with `E_IO` where the
+  allocation was refused.
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
