@@ -3,8 +3,8 @@
 This guide is for whoever runs SwarmOps for a swarm of coding agents on one host. It installs the
 binary, creates a store, gives agents the store through MCP, runs the daily loop between the store
 and the git repository that CI and deployment watch, with a person's review before the trunk moves,
-checks and backs up the store, and says what an upgrade means, where the limits are and what to
-watch. [pilot.md](pilot.md) runs the same loop once on this repository, as the first real use.
+checks, backs up and trims the store, and says what an upgrade means, where the limits are and what
+to watch. [pilot.md](pilot.md) runs the same loop once on this repository, as the first real use.
 
 Every command below was run with the binary built from this repository, and every output is
 copied from those runs, cut down where it is long: `…` marks a cut, and the store's path in
@@ -209,6 +209,71 @@ them, not the agents.
   whole files through `commit`. There are no workspaces yet (M5), so an agent that must build or
   test its change needs the files on disk some other way, such as a git worktree of the git side
   ([Building and testing a change](#building-and-testing-a-change)).
+
+### Where the envelopes are
+
+Every tool result is an envelope, and the server keeps none of them: `swarmops mcp` writes its
+answers to the client and to nothing else, and `op log` lists the writes that succeeded, not the
+calls that failed or how long they took. What [What to monitor](#what-to-monitor) reads is therefore
+in the client's transcript of the session (Claude Code keeps one for each, as JSON lines under
+`~/.claude/projects/`), or in a file that you have the server's answers copied to. This wrapper does
+the second, one file per agent, named by its identity:
+
+```sh
+cat > ~/.local/bin/swarmops-mcp-log <<'EOF'
+#!/bin/bash
+# `swarmops` with a copy of every answer the server writes, in one file per agent.
+dir=~/.local/state/swarmops/envelopes
+install -d -m 0700 "$dir"
+agent=${SWARMOPS_AGENT:-no-identity}
+exec swarmops "$@" > >(tee -a "$dir/${agent//\//_}.jsonl")
+EOF
+chmod +x ~/.local/bin/swarmops-mcp-log
+```
+
+It takes the arguments of `swarmops` as they are, so a registration differs from the ones above in
+its command only:
+
+```json
+{
+  "mcpServers": {
+    "swarmops": {
+      "command": "/home/me/.local/bin/swarmops-mcp-log",
+      "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
+      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT:-}"}
+    }
+  }
+}
+```
+
+`claude mcp add` takes it in the same place:
+
+```sh
+claude mcp add swarmops -e SWARMOPS_AGENT=agent/worker-1 -- ~/.local/bin/swarmops-mcp-log mcp --repo ~/.local/state/swarmops/repos/acme
+claude mcp list
+```
+
+```text
+Added stdio MCP server swarmops with command: …/swarmops-mcp-log mcp --repo … to local config
+…
+swarmops: …/swarmops-mcp-log mcp --repo … - ✔ Connected
+```
+
+The wrapper `exec`s the server, so the client talks to the server itself and sees how it ends as it
+would without the wrapper, the SIGABRT of one of the store's aborts included. `tee` appends each
+answer to the agent's file as the server writes it: `agent/worker-1` writes
+`claude-code_worker-1.jsonl`. A line is one JSON-RPC response. A tool call's holds the call's
+envelope twice, as an object in `structuredContent` and as the text of the one content block, with
+`isError` true when the envelope's `ok` is false; the answers to `initialize` and `tools/list` are
+lines too, and hold no envelope. A failed `land`, cut down:
+
+```text
+{"jsonrpc":"2.0","id":6,"result":{"content":[{"type":"text","text":"{\"ok\":false,\"op\":\"land\",\"api\":1,\"error\":{\"code\":\"E_CONFLICT\",…}"}],"structuredContent":{"ok":false,"op":"land","api":1,"error":{"code":"E_CONFLICT",…},…},"isError":true}}
+```
+
+The files hold what the agents read and write, and a `read_file` line holds its page twice. They
+grow for as long as the agents work and nothing prunes them: the wrapper makes their directory
+`0700`, and old files are yours to move away between sessions.
 
 ## The daily loop
 
@@ -766,8 +831,9 @@ What a copy may rely on comes from the store's own guarantees (storage-core spec
 - **The journal is the truth.** `meta/journal.log` records every write transaction as one frame,
   and a write is committed once its frame is synced. The index, the ref files and the checkpoint
   are projections of the journal, which the next writer brings up to date.
-- **Every metadata write holds `meta/lock`**, an `flock`. Object writes take no lock, but no frame
-  names an object before the object is durable. Readers take no lock.
+- **Every journal, index and ref write holds `meta/lock`**, an `flock`. Object writes take no lock,
+  but no frame names an object before the object is durable; derived values and external id entries
+  take none either, and are caches that no frame names. Readers take no lock.
 - **A crash at any point leaves a store that the next writer repairs.**
 
 So:
@@ -841,6 +907,111 @@ unlanded commits, lands made since the last export), ref moves, and the operatio
 The git side is itself a copy of everything exported. Without any backup, a new store made from it
 (`swarmops init`, then `swarmops git import` of each branch) exports to the same commits.
 
+## Making room
+
+A store only grows ([Limits](#limits)): nothing is collected until M6's `swarmops gc`. Two kinds of
+file in it may go by hand meanwhile, with every writer stopped. This is what the storage spec gives
+for each, and no more:
+
+- **The leftovers of interrupted writes**, files in `objects/tmp/` and `meta/derived/tmp/`. A write
+  stages its file there and links it into place, and a writer that dies on the way leaves the file.
+  The spec has a crash before the frame that names an object leave only orphan objects and temp
+  files, and no frame names an object before it is linked and durable (§2, rules 1 and 2), so a
+  staging file is never the only name of an object that a changeset needs. `swarmops gc` is to clear
+  the files of `objects/tmp/` that are older than an hour (§2) and the temp files of `meta/derived/`
+  (§3). By hand, remove the files older than an hour, and not the directories: the spec lists them
+  as part of the layout, and does not say that a store makes them again.
+- **The derived values**, `meta/derived/`, which may go whole. They are a cache that neither the
+  journal nor any other file names (§3), and removing a value's file, or `meta/derived/`, makes the
+  value derived again (§5).
+
+The orphan objects stay: telling them from the objects a changeset names takes the mark and sweep
+from the journal that `gc` gets later. The objects, the journal, the index and the refs stay as they
+are.
+
+Both removals need the store to themselves. A writer is every process that can write it: the agents'
+sessions and their MCP servers (a server lives as long as its session), the loop's commands and
+`swarmops derive`, and also a read, which stores the values it derives. `flock` on `meta/lock` stops
+none of them, since objects and derived values are written without it. Check that no `swarmops` is
+left (`so` is the same program):
+
+```sh
+pgrep -ax 'swarmops|so'
+```
+
+```text
+1503 swarmops mcp --repo …
+```
+
+That is an MCP server that a client started for its session: end the session. With nothing left, the
+command prints nothing and exits 1. Then, from the store's directory (the `:?` refuses an empty
+variable, which `cd` would take for the current directory), the leftovers (on a store that never
+derived a value, `find` says that `meta/derived/tmp` does not exist, which is right):
+
+```sh
+cd "${SWARMOPS_REPO:?}"
+find objects/tmp meta/derived/tmp -type f -mmin +60
+```
+
+```text
+objects/tmp/.tmpUbSpKg
+meta/derived/tmp/3849408-0-ffc434ac1bd4cb92
+```
+
+This store had three leftovers of writers that were killed in the middle of a write; two were set
+back a day with `touch -d`, to have the hour pass, and the third is as young as it was. The removal
+leaves that one:
+
+```sh
+find objects/tmp meta/derived/tmp -type f -mmin +60 -delete
+find objects/tmp meta/derived/tmp -type f
+```
+
+```text
+objects/tmp/.tmpoyk2fg
+```
+
+The derived values come off whole, and `verify --deep` has no stored value left to check:
+
+```sh
+du -sh meta/derived; find meta/derived -type f | wc -l
+rm -rf meta/derived
+swarmops verify --deep
+```
+
+```text
+344K	meta/derived
+38
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":45,"changesets_checked":15,"problems":[],"findings":[]},"meta":{"repo":"…","elapsed_ms":2,…}}
+```
+
+A read derives the values it needs and stores them in a `meta/derived/` that it makes again,
+`swarmops derive` makes the eager ones for every changeset at once, and `verify --deep` then checks
+the stored values of the built-in derivations against the changesets (§5):
+
+```sh
+swarmops history main:src/lib.rs --limit 1 --human
+find meta/derived -type f | wc -l
+swarmops derive
+swarmops verify --deep
+```
+
+```text
+path: src/lib.rs
+entries[0].changeset: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
+…
+2
+{"ok":true,"op":"derive","api":1,"result":{"derived":15,"cached":0,"next":20},"meta":{"repo":"…","elapsed_ms":1,…}}
+{"ok":true,"op":"verify","api":1,"result":{"objects_checked":45,"changesets_checked":15,"problems":[],"findings":[]},"meta":{"repo":"…","elapsed_ms":2,…}}
+```
+
+At the size of the pilot's store, SwarmOps' own 470 commits with a change landed on top, removing
+`meta/derived/` took it from 92 MB in 17,230 files to 57 MB in 8,859 files (measured on 2026-10-20).
+An export into an empty git directory stored its 8,371 values again and wrote the same head; an
+export to the branch that already held everything wrote nothing and still stored 2,544 of them. So
+the values trade room for the time a later export spends deriving them, and the objects, most of a
+store, stay.
+
 ## Upgrades
 
 Every store today is `FORMAT 1`:
@@ -904,7 +1075,8 @@ each with the milestone that takes it.
 - **No review** (M7): SwarmOps does not hold a landing for a person's approval. The loop puts the
   review in git, between the review branch and the trunk ([step 5](#5-review-then-move-the-trunk)).
 - **Nothing is collected** (M6): `objects/tmp/` keeps the leftovers of interrupted writes, and
-  `meta/derived/` every derived value. A store only grows.
+  `meta/derived/` every derived value. A store only grows, but for what [Making room](#making-room)
+  removes by hand.
 - **No repair tool** (M6): `verify` reports damage, and a restore fixes it.
 - **Writers take turns.** Every write holds one store-wide lock across two journal syncs: about
   21 ms per uncontended commit on the maintainers' host. With 32 writers committing in a loop, a
@@ -922,8 +1094,39 @@ each with the milestone that takes it.
 
 ## What to monitor
 
-Every command and every tool result is an envelope, so a log of envelopes, one JSON line per run,
-is the monitoring data. What to read in them:
+Every command and every tool result is an envelope, so a log of envelopes is the monitoring data. A
+command prints its envelope; the MCP server keeps none of its answers, so what agents' calls did is
+read from the files that [the wrapper](#where-the-envelopes-are) keeps, one per agent, or from the
+client's transcripts. A line of those files holds its envelope twice, as an object and, escaped, as
+text; these commands read the object, which has no escaped quotes, and need no `jq`. In the
+wrapper's directory:
+
+```sh
+cd ~/.local/state/swarmops/envelopes
+for f in *.jsonl; do
+  printf '%-22s calls %s, failed %s, recovered %s, warnings %s\n' "${f%.jsonl}" \
+    "$(grep -c '"structuredContent"' "$f")" "$(grep -c '"isError":true' "$f")" \
+    "$(grep -c '"recovered"' "$f")" "$(grep -c '"warnings":' "$f")"
+done
+cat *.jsonl | grep -o '"code":"E_[A-Z_]*"' | sort | uniq -c | sort -rn
+cat *.jsonl | grep -o '"elapsed_ms":[0-9]*' | cut -d: -f2 | sort -n | tail -3
+```
+
+```text
+claude-code_worker-1   calls 7, failed 1, recovered 0, warnings 0
+claude-code_worker-2   calls 6, failed 2, recovered 0, warnings 0
+      1 "code":"E_PATH_NOT_FOUND"
+      1 "code":"E_CONFLICT"
+      1 "code":"E_CAS_MISMATCH"
+19
+23
+31
+```
+
+The first command counts, for each agent, the calls answered, the failed ones, the writes that
+repaired what a dead writer left (`meta.recovered`) and the results that carry `warnings`; the
+second counts the failures by code; the third lists the three slowest calls by `meta.elapsed_ms`.
+What to read in them:
 
 - **Errors by code.** Expected now and then, and handled by the agent: `E_CONFLICT` (exit 3),
   `E_CAS_MISMATCH` (re-read, then land). A rising count of `E_BUSY` or `E_CAS_RETRY_EXHAUSTED`
@@ -944,6 +1147,22 @@ is the monitoring data. What to read in them:
   `objects/` holds, each taking a whole filesystem block (4 KiB on ext4) for its 72 or 73 bytes. At
   470 commits the store took 57 MB in 8,854 files after the import, and 92 MB in 17,232 files after
   the first export.
+
+  The store keeps one file per object and one per derived value, so count its files and the
+  filesystem's inodes as well: ext4 fixes the number of inodes when the filesystem is made, and a
+  store of small files can use them up before it uses the space. [Making room](#making-room) says
+  what may go.
+
+  ```sh
+  find "$SWARMOPS_REPO" -type f | wc -l
+  df --output=iused,iavail,ipcent "$SWARMOPS_REPO"
+  ```
+
+  ```text
+  91
+    IUsed     IFree IUse%
+  3021323 241161717    2%
+  ```
 - **The git side**: each export's `exported`, `branch_moved` and `rewritten` (0 unless the history
   was imported with a loss), any `E_GIT_IMPORT_DIVERGED` or `E_GIT_EXPORT_DIVERGED` (someone wrote
   the trunk, or an export waits for its review) or `E_GIT_WRITE`, how long the review branch has
