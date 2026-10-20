@@ -325,11 +325,16 @@ left).
   other, and a last touch that names an older changeset that touched the path, pass those checks
   and are read as valid, and the engine derives new values from them; `verify --deep` checks
   every value of the built-in derivations against the objects and reports each one
-  (`derived_mismatch`), and removing `meta/derived/` has every value derived again. The values the
-  git export memoizes (`git_oid`, `git_tree_oid`, `git_blob_oid`) are checked by nothing yet. A
-  keyed trailer whose key lives outside the store would make a placed file fail its checks, at
-  the cost of a new layout version. *Target: M6 (`fsck --git` for the export's values; an
-  authenticated cache is unscheduled). Found: the 2026-10-20 security review.*
+  (`derived_mismatch`), and removing `meta/derived/` has every value derived again. The git
+  oids the export memoizes (`git_oid`, `git_tree_oid`, `git_blob_oid`) are no longer among the
+  values a crafted file can steer: the export derives every tree's, blob's and commit's git oid
+  from the store's own bytes and binds what it reuses, writes or moves a branch to to them, so a
+  memo it reads is never taken for an object's content (a memo that disagrees is
+  `E_STORE_CORRUPT`, refused before the branch moves), and a deep `verify` re-derives
+  `git_tree_oid`, `git_blob_oid` and `git_oid` against the objects too (`derived_mismatch`). A
+  keyed trailer whose key lives outside the store would make a placed file fail the built-in
+  derivations' checks, at the cost of a new layout version. *Target: an authenticated cache is
+  unscheduled. Found: the 2026-10-20 security review.*
 
 ## Serving requests
 

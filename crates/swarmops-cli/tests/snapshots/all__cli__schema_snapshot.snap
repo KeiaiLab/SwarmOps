@@ -6302,7 +6302,7 @@ expression: s.redact(&all)
           ]
         },
         "derivation": {
-          "description": "The derivation whose stored value is not the one the objects give: `first_parent_skip_list`\nor `last_modified` (`derived_mismatch`, which a deep verify finds). Removing the value's\nfile under `meta/derived/<derivation>/`, or all of `meta/derived/`, has it derived again.",
+          "description": "The derivation whose stored value is not the one the objects give: `first_parent_skip_list`,\n`last_modified`, or a git export oid memo `git_tree_oid`, `git_blob_oid` or `git_oid`\n(`derived_mismatch`, which a deep verify finds; `git_oid` names its `changeset`, the tree\nand blob memos their `object`). Removing the value's file under `meta/derived/<derivation>/`,\nor all of `meta/derived/`, has it derived again.",
           "type": [
             "string",
             "null"
@@ -6320,7 +6320,7 @@ expression: s.redact(&all)
           "type": "string"
         },
         "object": {
-          "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks, or holds as\nanother kind (`missing_object`).",
+          "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), one a changeset references that the store lacks, or holds as\nanother kind (`missing_object`), or the tree or blob a git export oid memo\n(`git_tree_oid`, `git_blob_oid`) is about (`derived_mismatch`).",
           "type": [
             "string",
             "null"
@@ -6392,7 +6392,7 @@ expression: s.redact(&all)
               ]
             },
             "derivation": {
-              "description": "The derivation whose stored value is not the one the objects give: `first_parent_skip_list`\nor `last_modified` (`derived_mismatch`, which a deep verify finds). Removing the value's\nfile under `meta/derived/<derivation>/`, or all of `meta/derived/`, has it derived again.",
+              "description": "The derivation whose stored value is not the one the objects give: `first_parent_skip_list`,\n`last_modified`, or a git export oid memo `git_tree_oid`, `git_blob_oid` or `git_oid`\n(`derived_mismatch`, which a deep verify finds; `git_oid` names its `changeset`, the tree\nand blob memos their `object`). Removing the value's file under `meta/derived/<derivation>/`,\nor all of `meta/derived/`, has it derived again.",
               "type": [
                 "string",
                 "null"
@@ -6410,7 +6410,7 @@ expression: s.redact(&all)
               "type": "string"
             },
             "object": {
-              "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), or one a changeset references that the store lacks, or holds as\nanother kind (`missing_object`).",
+              "description": "The object: one whose content does not hash to its id or does not decode\n(`corrupt_object`), one a changeset references that the store lacks, or holds as\nanother kind (`missing_object`), or the tree or blob a git export oid memo\n(`git_tree_oid`, `git_blob_oid`) is about (`derived_mismatch`).",
               "type": [
                 "string",
                 "null"

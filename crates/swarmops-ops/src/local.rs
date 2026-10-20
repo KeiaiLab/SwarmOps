@@ -1707,15 +1707,25 @@ impl StoreOps for Recording<'_> {
 
     fn verify(&self, req: VerifyReq) -> Result<VerifyReport, OpError> {
         let report = self.ops.repo.verify(req.deep).map_err(op)?;
+        let mut problems: Vec<String> = (report.problems.iter())
+            .map(|problem| one_line(problem.to_string()))
+            .collect();
+        let mut findings: Vec<VerifyFinding> = report.problems.iter().map(finding).collect();
+        // A deep verify also re-derives the git export's oid memos against the objects, which the
+        // store-core verify cannot (rendering git objects lives in swarmops-git): a crafted or
+        // torn git_tree_oid, git_blob_oid or git_oid is reported as the other derived values are.
+        if req.deep {
+            for mismatch in swarmops_git::verify_export_oids(&self.ops.repo).map_err(op)? {
+                let (line, found) = git_memo_finding(&mismatch);
+                problems.push(line);
+                findings.push(found);
+            }
+        }
         Ok(VerifyReport {
             objects_checked: report.objects_checked,
             changesets_checked: report.changesets_checked,
-            problems: report
-                .problems
-                .iter()
-                .map(|problem| one_line(problem.to_string()))
-                .collect(),
-            findings: report.problems.iter().map(finding).collect(),
+            problems,
+            findings,
         })
     }
 
@@ -2359,6 +2369,38 @@ fn change_out(entry: &DeltaEntry) -> ChangeOut {
 /// `problem` as a program reads it (operations spec §1, `verify`): its kind, a string of its
 /// own for each variant, and what it names, ids in lowercase hex. The match has no catch-all,
 /// so a new kind of problem does not compile until it has a finding.
+/// A git-export oid memo a deep verify found wrong ([`swarmops_git::GitMemoMismatch`]) as a
+/// `derived_mismatch` line and finding: `git_oid` names its changeset, `git_tree_oid` and
+/// `git_blob_oid` their object. No store path, only ids (storage subspec §5, §7).
+fn git_memo_finding(mismatch: &swarmops_git::GitMemoMismatch) -> (String, VerifyFinding) {
+    let subject = mismatch.subject.to_hex();
+    let line = one_line(format!(
+        "the derived value {memo} of {subject} is not the one the store's objects give \
+         (memoized {stored}, the objects give {real}); remove its file under \
+         meta/derived/{memo}/, or all of meta/derived/, to have it derived again",
+        memo = mismatch.memo,
+        stored = mismatch.stored,
+        real = mismatch.real,
+    ));
+    // `git_oid` ([`swarmops_git::ExportOid`]) is a changeset's export oid; the other two memos are
+    // a tree's and a blob's.
+    let is_commit = mismatch.memo == "git_oid";
+    let found = VerifyFinding {
+        kind: "derived_mismatch".to_owned(),
+        object: (!is_commit).then(|| subject.clone()),
+        changeset: is_commit.then_some(subject),
+        parent: None,
+        seq: None,
+        offset: None,
+        ref_name: None,
+        cause: None,
+        system: None,
+        key: None,
+        derivation: Some(mismatch.memo.clone()),
+    };
+    (line, found)
+}
+
 fn finding(problem: &VerifyProblem) -> VerifyFinding {
     let of = |kind: &str| VerifyFinding {
         kind: kind.to_owned(),

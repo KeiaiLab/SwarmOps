@@ -1044,5 +1044,21 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   a comparison engine, brings in, and that no shipped binary holds). A test of `swarmops-core` fails
   the gate when a recipe, a script or a workflow job builds a lockfile that no `cargo deny` checks
   there.
+- A `git export` trusted the git oids it had memoized in the derived store
+  (`meta/derived/git_blob_oid`, `git_tree_oid`, `git_oid`) as the truth about an object's content:
+  a memo placed there whole and with its checksum right, naming an object the destination already
+  held, could make the export write that object's bytes in place of the store's — git history a
+  CI or deploy pipeline consumes, with exit 0 and a clean `verify --deep` — or move the branch to
+  an arbitrary commit the destination held, neither rendered nor mapped by the export. The export
+  now derives every tree's, blob's and commit's git oid from the store's own bytes and binds what
+  it reuses, writes or moves the branch to to them (a native commit's oid from rendering over oids
+  derived that way, an imported commit's from the external-id mapping, which stays authoritative);
+  a memo that is not the oid the objects give is `E_STORE_CORRUPT` (`details.derivation`, hint
+  `swarmops verify --deep`), refused before any object is reused or the branch moves, never a
+  silent reuse. `verify --deep` now re-derives `git_tree_oid`, `git_blob_oid` and `git_oid` against
+  the objects too and reports each mismatch (`derived_mismatch`), as it does the other derived
+  values (`git_oid` names its changeset, the other two their object). The memo stays a hint that
+  saves a write, not a statement of content ([docs/known-limitations.md](docs/known-limitations.md),
+  "Crafted derived values that agree with each other are read as valid").
 
 [Unreleased]: https://github.com/KeiaiLab/SwarmOps/commits/stable
