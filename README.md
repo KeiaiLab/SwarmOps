@@ -27,8 +27,10 @@
   <a href="#documentation">Documentation</a>
 </p>
 
-SwarmOps is source control built for a swarm of coding agents: 10 to 50 Claude Code or LangGraph
-processes on one host, committing to one repository at once. It is written in Rust and fully
+SwarmOps is a git replacement for coding-agent swarms: many agents commit into one embedded store
+at once, every command answers in JSON, and the work moves back to git. It is built for 10 to 50
+Claude Code or LangGraph processes on one host, committing to one repository at once.
+It is written in Rust and fully
 embedded: one program, no external database, no daemon. It is pre-release, at milestone M8:
 usable by one agent, with a store that already takes commits from many processes at once;
 merging and landing, which a swarm needs, are built, but landing is not yet measured under a
