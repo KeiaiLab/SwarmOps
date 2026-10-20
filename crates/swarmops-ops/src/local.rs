@@ -2604,23 +2604,23 @@ mod tests {
         assert!(warning.contains("committed"), "{warning}");
     }
 
-    /// The external id index's problems, about the entry named by `system` `git` and `key`, the
-    /// changeset `child` named where the problem names one.
-    fn external_id_cases(child: ChangesetId, key: &str) -> [VerifyProblem; 3] {
-        let system = "git".to_owned();
+    /// The external id index's problems, each naming the entry `key` of system `git`, and the
+    /// changeset `child` where the problem names one.
+    fn external_id_cases(key: &str, child: ChangesetId) -> [VerifyProblem; 3] {
+        let (system, key) = ("git".to_owned(), key.to_owned());
         [
             VerifyProblem::ExternalIdCorrupt {
                 system: system.clone(),
-                key: key.to_owned(),
+                key: key.clone(),
             },
             VerifyProblem::ExternalIdDangling {
                 system: system.clone(),
-                key: key.to_owned(),
+                key: key.clone(),
                 changeset: child,
             },
             VerifyProblem::ExternalIdMismatch {
                 system,
-                key: key.to_owned(),
+                key,
                 changeset: child,
             },
         ]
@@ -2667,12 +2667,12 @@ mod tests {
             VerifyProblem::ExternalIdCorrupt { .. } => {
                 json!({"kind": "external_id_corrupt", "system": "git", "key": key})
             }
-            VerifyProblem::ExternalIdDangling { .. } => json!({
-                "kind": "external_id_dangling", "changeset": child, "system": "git", "key": key
-            }),
-            VerifyProblem::ExternalIdMismatch { .. } => json!({
-                "kind": "external_id_mismatch", "changeset": child, "system": "git", "key": key
-            }),
+            VerifyProblem::ExternalIdDangling { .. } => {
+                json!({"kind": "external_id_dangling", "changeset": child, "system": "git", "key": key})
+            }
+            VerifyProblem::ExternalIdMismatch { .. } => {
+                json!({"kind": "external_id_mismatch", "changeset": child, "system": "git", "key": key})
+            }
             VerifyProblem::DerivedMismatch { key: path, .. } if path.is_empty() => json!({
                 "kind": "derived_mismatch", "changeset": child,
                 "derivation": "first_parent_skip_list"
@@ -2701,7 +2701,7 @@ mod tests {
             VerifyProblem::JournalCorrupt { offset: 4096 },
             VerifyProblem::MetaCorrupt("journal.off is missing".to_owned()),
         ];
-        let external = external_id_cases(changeset(&child), &key);
+        let external = external_id_cases(&key, changeset(&child));
         // A derived value under a path's key (`a`, as postcard writes it) and one without a key.
         let derived = [
             ("last_modified", vec![1, b'a']),

@@ -77,7 +77,7 @@ filesystem permissions are the access boundary. Within that model, these are vul
   fail at a chosen filesystem call, count its calls, or pin its clock. A build without the
   `test-hooks` feature, as `cargo build --release` is, must ignore them; one that honours them
   is a vulnerability.
-- **The git import (M3, planned).** Importing a git repository brings in content and paths that
+- **The git import (M3).** Importing a git repository brings in content and paths that
   an attacker controls. Path traversal and symlink attacks through crafted repositories are a
   known class in this field: jj's critical
   [GHSA-88h5-6w7m-5w56](https://github.com/jj-vcs/jj/security/advisories/GHSA-88h5-6w7m-5w56),
@@ -87,7 +87,7 @@ filesystem permissions are the access boundary. Within that model, these are vul
   [GHSA-x862-c2wj-4mwr](https://github.com/GitoxideLabs/gitoxide/security/advisories/GHSA-x862-c2wj-4mwr),
   an allocation sized by a pack header's object count that aborts the process. An import that
   writes outside the store, follows a symlink out of a workspace, or exhausts memory on a
-  crafted repository will be a vulnerability. Workspaces (M5), which write files to disk, are in
+  crafted repository is a vulnerability. Workspaces (M5), which write files to disk, are in
   scope the same way.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
   or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the

@@ -16,9 +16,9 @@
 //! ([`MetaWrite::get_ref`]) or a changeset ([`MetaWrite::changeset`]) as it sees them: what it
 //! queued first, then those files.
 //! [`MetaWrite::commit`] appends them as one frame ([`Journal::append_frame`]: the commit
-//! point), materializes the frame (its changesets with one [`Index::append_batch`], a ref file
-//! per moved ref), and, in §3's batches or on [`MetaStore::flush`], syncs the index and moves
-//! the checkpoint.
+//! point), materializes the frame (its changesets with one [`Index::append_batch`], a ref file per
+//! moved ref), and, in §3's batches or on [`MetaStore::flush`], syncs the index and moves the
+//! checkpoint.
 //!
 //! An error says which side of the commit point it fell on. After [`StoreError::NotCommitted`]
 //! nothing of the transaction is in the store. After [`StoreError::PostCommit`] the frame is
