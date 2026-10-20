@@ -1949,6 +1949,115 @@ mod land {
         }
     }
 
+    /// The bound a land's conflict report stays within, however large or many the conflicting
+    /// files: whatever lines and files it leaves out, `truncated` says so.
+    mod report_bound {
+        use std::fmt::Write as _;
+
+        use super::*;
+
+        /// The operations spec's target for a default response (§9): 64 KiB.
+        const RESPONSE_TARGET: usize = 64 * 1024;
+
+        /// What the envelope around an error adds to it (`ok`, `op`, `api` and `meta`): less.
+        const ENVELOPE_BYTES: usize = 1024;
+
+        /// A file whose sides' edits meet at `n` places, as `side` holds it: its line `2i + 1`,
+        /// from 1, is `side` and `i`, the line after it a `}` that no side changes.
+        fn alternating(side: &str, n: u64) -> String {
+            let mut content = String::new();
+            for i in 0..n {
+                writeln!(content, "{side}{i}\n}}").expect("a String takes it");
+            }
+            content
+        }
+
+        /// How many bytes `error` takes with its envelope.
+        fn enveloped(error: &OpError) -> usize {
+            serde_json::to_vec(error)
+                .expect("an error serializes")
+                .len()
+                + ENVELOPE_BYTES
+        }
+
+        /// A land that conflicts on a file at two thousand places stays within the response
+        /// target, whatever its `max_conflict_bytes`: the report carries the first hunks, at
+        /// least one, and one spanning the rest, so that the lines of every place where the
+        /// sides' edits meet are within a hunk it carries; and it says `truncated`.
+        #[test]
+        fn a_file_conflicting_at_many_places_stays_within_it() {
+            const PLACES: u64 = 2_000;
+            let (_dir, _root, ops) = new_store();
+            let who = agent();
+            let t0 = publish(&ops, &who, None, vec![text("f", &alternating("l", PLACES))]);
+            let head = commit(&ops, Some(&t0), vec![text("f", &alternating("o", PLACES))]);
+            let theirs = vec![text("f", &alternating("t", PLACES))];
+            publish(&ops, &other(), Some(&t0), theirs);
+
+            for max_conflict_bytes in [0, DEFAULT_MAX_CONFLICT_BYTES] {
+                let req = LandReq {
+                    max_conflict_bytes,
+                    ..landing(&head)
+                };
+                let (report, error) = report_of(ops.land(&who, req));
+                let size = enveloped(&error);
+                assert!(
+                    size < RESPONSE_TARGET,
+                    "{size} bytes, max {max_conflict_bytes}"
+                );
+                assert!(report.truncated, "max {max_conflict_bytes}");
+                let [file] = &report.files[..] else {
+                    panic!("one file: {}", report.files.len());
+                };
+                let first = &file.hunks[0];
+                let lines = |side: &LinesOut| (side.first, side.last);
+                assert_eq!(
+                    [&first.base, &first.ours, &first.theirs].map(lines),
+                    [(1, 1); 3]
+                );
+                for at in 0..PLACES {
+                    let line = 2 * at + 1;
+                    let within = |hunk: &HunkOut| hunk.base.first <= line && line <= hunk.base.last;
+                    assert!(file.hunks.iter().any(within), "base line {line} in no hunk");
+                }
+            }
+        }
+
+        /// A land that conflicts on four hundred files stays within the response target: the
+        /// report lists the first ones, in path order, each with its hunk, and says
+        /// `truncated`; the error's message counts them all.
+        #[test]
+        fn many_conflicting_files_stay_within_it() {
+            const FILES: usize = 400;
+            let (_dir, _root, ops) = new_store();
+            let who = agent();
+            let name = |i: usize| format!("src/module-{i:03}/lib.rs");
+            let all = |content: &str| -> Vec<ChangeInput> {
+                (0..FILES).map(|i| text(&name(i), content)).collect()
+            };
+            let t0 = publish(&ops, &who, None, all("base\n"));
+            let head = commit(&ops, Some(&t0), all("ours\n"));
+            publish(&ops, &other(), Some(&t0), all("theirs\n"));
+
+            let (report, error) = report_of(ops.land(&who, landing(&head)));
+            let size = enveloped(&error);
+            assert!(size < RESPONSE_TARGET, "{size} bytes");
+            assert!(report.truncated);
+            let listed: Vec<&str> = report.files.iter().map(|file| file.path.as_str()).collect();
+            assert!(listed.len() < FILES, "{} files listed", listed.len());
+            let first: Vec<String> = (0..listed.len()).map(name).collect();
+            assert_eq!(listed, first, "the first ones, in path order");
+            for file in &report.files {
+                let [hunk] = &file.hunks[..] else {
+                    panic!("{}: {} hunks", file.path, file.hunks.len());
+                };
+                assert_eq!((hunk.base.first, hunk.base.last), (1, 1), "{}", file.path);
+            }
+            let counted = format!("{FILES} path(s)");
+            assert!(error.message.contains(&counted), "{}", error.message);
+        }
+    }
+
     /// Each side of a hunk is the lines `read_file` takes as `lines` at that side's changeset
     /// (the report's `base`, `ours` or `theirs`): read there, they are the side's text. A side
     /// without lines there has `last` one less than `first`, and an empty text.
