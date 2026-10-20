@@ -104,4 +104,18 @@ pub enum Unsupported {
     /// before any file of the repository is read.
     #[error("its {0} is a FIFO, a socket or a device, not a regular file")]
     SpecialFile(String),
+    /// A file it reads whole in its git directory (`HEAD` and every other ref file, `config`,
+    /// `config.worktree`, `objects/info/alternates`), named as
+    /// [`SpecialFile`](Unsupported::SpecialFile) names one, is longer than the most it reads of
+    /// such a file, which none that git writes comes near: a crafted one, sparse so that it
+    /// costs no disk, would be read into memory whole. Refused before it is read.
+    #[error("its {file} is {len} bytes long, more than the {max} it reads of it")]
+    FileTooLong {
+        /// The file, by its path in the git directory.
+        file: String,
+        /// Its length.
+        len: u64,
+        /// The most it reads of such a file.
+        max: u64,
+    },
 }

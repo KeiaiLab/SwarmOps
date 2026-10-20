@@ -3,7 +3,8 @@
 //! object directories it names), and every ref. A FIFO, a socket or a device among them, or a
 //! symlink to one, is refused before anything opens it: an extracted archive can hold one, the
 //! open of a FIFO blocks until something writes to it, and a device's read can block or never
-//! end. Files the source never reads are not looked at. Each open runs on a thread of its own
+//! end. Those gix reads whole are refused past 16 MiB, which none that git writes comes near.
+//! Files the source never reads are not looked at. Each open runs on a thread of its own
 //! with a deadline, so that a regression fails the test instead of hanging it. Unix alone has
 //! FIFOs, sockets and devices.
 #![cfg(unix)]
@@ -266,6 +267,68 @@ fn a_config_symlinked_to_dev_zero_is_refused_unread() {
             "config".to_owned()
         ))))
     );
+}
+
+/// A file of `len` bytes at `path`, in place of what was there: sparse, so it costs no disk.
+fn sparse(path: &Path, len: u64) {
+    let file = fs::File::create(path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+    file.set_len(len).unwrap();
+}
+
+/// `got` as a failure shows it: its start alone, since gix quotes a ref it cannot decode whole.
+fn shown(got: &impl std::fmt::Debug) -> String {
+    format!("{got:?}").chars().take(300).collect()
+}
+
+/// The files gix reads whole, `HEAD` and every other ref file (a loose ref, a pseudo-ref, which a
+/// symbolic `HEAD` can name), `config`, `config.worktree` (under `extensions.worktreeConfig`) and
+/// `objects/info/alternates`, are refused unread when longer than 16 MiB, which none that git
+/// writes comes near: a crafted one, sparse, costs no disk and would be read into memory whole.
+/// A `config` of 16 MiB is taken.
+#[test]
+fn a_file_gix_reads_whole_is_refused_past_16_mib() {
+    const MAX: u64 = 16 << 20;
+    let files = [
+        "HEAD",
+        "refs/heads/main",
+        "FETCH_HEAD",
+        "config",
+        "config.worktree",
+        "objects/info/alternates",
+    ];
+    let mut wrong = Vec::new();
+    for file in files {
+        let fixture = linear();
+        let dir = repo(&fixture);
+        if file == "config.worktree" {
+            worktree_config(dir);
+        }
+        sparse(&dir.join(file), MAX + 1);
+        let refused = SourceError::Unsupported(Unsupported::FileTooLong {
+            file: file.to_owned(),
+            len: MAX + 1,
+            max: MAX,
+        });
+        // `HEAD` names `main`, and `FETCH_HEAD` is read when a lookup names it.
+        let name = if file == "FETCH_HEAD" { file } else { "HEAD" };
+        let got = open_and_resolve(dir, name);
+        if got != Some(Err(refused)) {
+            wrong.push(format!("{file}: {}", shown(&got)));
+        }
+    }
+    assert!(wrong.is_empty(), "not refused:\n{}", wrong.join("\n"));
+
+    // A configuration of 16 MiB, padded with a comment, opens.
+    let fixture = linear();
+    let config = repo(&fixture).join("config");
+    let mut text = fs::read(&config).unwrap();
+    text.push(b'#');
+    let padding = usize::try_from(MAX).unwrap() - text.len() - 1;
+    text.extend(std::iter::repeat_n(b'x', padding));
+    text.push(b'\n');
+    fs::write(&config, &text).unwrap();
+    let got = open_and_resolve(repo(&fixture), "HEAD");
+    assert!(got == Some(Ok(())), "{}", shown(&got));
 }
 
 /// What the source never reads is not looked at, and a symlink to a regular file or to a
