@@ -16,6 +16,7 @@
 </p>
 
 <p align="center">
+  <a href="https://swarmops.cc">Website</a> ·
   <a href="#why-swarmops">Why</a> ·
   <a href="#swarmops-and-git">SwarmOps and git</a> ·
   <a href="#how-it-works">How it works</a> ·
@@ -28,7 +29,7 @@
 
 SwarmOps is source control built for a swarm of coding agents: 10 to 50 Claude Code or LangGraph
 processes on one host, committing to one repository at once. It is written in Rust and fully
-embedded: one program, no external database, no daemon. It is pre-release, at milestone M1.6:
+embedded: one program, no external database, no daemon. It is pre-release, at milestone M2:
 usable by one agent, with a store that already takes commits from many processes at once;
 merging and landing, which a swarm needs, come in M4 ([roadmap](#roadmap)).
 
@@ -84,6 +85,21 @@ No git baseline has been measured yet: these verdicts come from the design, the 
 own documentation and source, not from a benchmark. The first measured comparison is planned for
 M9: SwarmOps' 32-agent contention scenario, run side by side with git worktrees. SwarmOps' own
 measurements are in [docs/perf.md](docs/perf.md).
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/store-dark.svg">
+    <img src="docs/assets/store-light.svg" alt="An isometric drawing of the store as a machine: commit cartridges wait on a feed rail behind one gate, the metadata lock, which lets one through at a time in no strict order; a press stamps each one as a frame onto a paper tape, the append-only journal; beside it, object pellets drop into sixteen bins with no gate." width="760">
+  </picture>
+  <br>
+  <sub>The store as a machine: writers wait for one lock, which the kernel hands to one of them at
+  a time, in no strict order, and each commit becomes one CRC-framed frame of the journal, while
+  objects need no lock.
+  <a href="https://swarmops.cc/explainers/store.html">Interactive version</a>
+  (<a href="https://swarmops.cc/explainers/store-light.html">light</a>), drawn with
+  <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT,
+  <a href="site/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
+</p>
 
 ## How it works
 
@@ -398,7 +414,7 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | ✅ | M1 | The single-agent core: `init`, `commit`, `cat`, `ls`, `log` and ref compare-and-swap, over the native metadata store and object files; crash sweeps. |
 | ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, `--locked` everywhere; I/O-error injection, write-ordering checks and the fsync-failure policy; power-loss images; the project policies; the tests' shared support in one crate; benchmarks of the metadata store against embedded databases; the MCP server and `so`. |
 | ✅ | M1.6 | The code-review follow-ups, before M2: the error contract an agent sees (typed refusals, I/O failures that name the store file and no host path but in two rare `E_IO`s, a report of what a write's recovery repaired); a bound on the lock-free reader's retries; structured `verify` findings, and MCP tool schemas kept plain objects; object reads without a second copy or an allocation of the size a file claims; the test doubles M1.5 left, in one place; spec hygiene (the write-ordering rules W1–W7, §8 in step with the code); the harness for the measurements M2's sync decision needs, whose quiet-window runs are still to come; and `commit --advance`, the commit primitive M4's landing reuses. |
-| 📋 | M2 | Diff, history and the derived-data engine. |
+| ✅ | M2 | Diff, history and the derived-data engine. |
 | 📋 | M3 | git import. |
 | 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |
 | 📋 | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |

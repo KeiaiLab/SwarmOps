@@ -548,10 +548,10 @@ and says when it cut the list.
 
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
 stdio: one tool per `StoreOps` operation but `derive`, maintenance that `swarmops derive` runs
-beside the store; a tool's input schema is the request type's JSON Schema,
-kept a plain object (a rule across fields that the type's schema states with a top-level `oneOf`
-goes into the description and the server's own check) and with the `expected_old` of `ref_set`
-and `ref_delete` narrowed to a full changeset id, and its result is the envelope the CLI prints.
+beside the store; a tool's input schema is the request type's JSON Schema, kept a plain object (a
+rule across fields that the type's schema states with a top-level `oneOf` goes into the description
+and the server's own check) and with the `expected_old` of `ref_set` and `ref_delete` narrowed to a
+full changeset id, and its result is the envelope the CLI prints.
 
 ## Where to read more
 
