@@ -108,8 +108,14 @@ bench-compare *args:
 
 # cargo-fuzz takes no `--locked`; `just check` lints the fuzz workspace with it, so a
 # fuzz/Cargo.lock that has gone stale fails the gate before a fuzz build could rewrite it.
+# Two corpus directories: libFuzzer writes the new inputs it finds into the first one it is
+# given only, fuzz/corpus-new/<target>/ (git-ignored, kept from one run to the next, and it
+# must exist), and reads the tracked fuzz/corpus/<target>/ after it as a seed that it never
+# writes to, so a run leaves the tree clean. New inputs join the tracked corpus minimised by
+# `cargo fuzz cmin`, as CONTRIBUTING.md says.
 # `-timeout=30`: an input that runs for more than 30 s fails the run, and libFuzzer saves it
 # under fuzz/artifacts/<target>/ (by default it would run for 20 minutes first).
 # Needs a nightly toolchain: `rustup toolchain install nightly`. Targets: codec_roundtrip, tree_decode, frame_decode, journal_recovery.
 fuzz target="codec_roundtrip":
-    cd fuzz && cargo +nightly fuzz run {{target}} -- -max_total_time=60 -timeout=30
+    mkdir -p fuzz/corpus-new/{{target}}
+    cd fuzz && cargo +nightly fuzz run {{target}} corpus-new/{{target}} corpus/{{target}} -- -max_total_time=60 -timeout=30

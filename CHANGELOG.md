@@ -848,6 +848,14 @@ there are no tags. Until the first release ([RELEASE.md](RELEASE.md)) everything
   must have `ExportOid` registered there (`swarmops_git::register`), as every `LocalOps` does
   (storage spec §7, operations spec §6).
 
+#### Release preparation (2026-10-20)
+
+- `just fuzz` writes the new inputs a run finds into `fuzz/corpus-new/<target>/`, which git
+  ignores, and reads the tracked corpus (`fuzz/corpus/<target>/`) as a seed that it never writes
+  to, where it wrote them into the tracked corpus and left each run's checkout with hundreds of
+  untracked inputs to commit or drop. New inputs join the tracked corpus minimised by
+  `cargo fuzz cmin`, as [CONTRIBUTING.md](CONTRIBUTING.md) describes.
+
 ### Fixed
 
 #### M1.6: the code-review follow-ups (2026-10-19)
