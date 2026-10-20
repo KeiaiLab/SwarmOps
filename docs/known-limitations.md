@@ -145,6 +145,13 @@ left).
   a validated lazy read, a per-handle map of refs or a packed refs file (a FORMAT change), and
   the `read_snapshot` bench measures 0, 16 and 256 refs to tell. *Unscheduled: when refs grow
   past dozens. Found: M1 Tasks 2c, 3 and 4b.*
+- **A file of control characters reads back at many times its size.** `read_file` returns UTF-8
+  content as JSON text, which spells most control characters in six bytes each (`\u0001`): a page of
+  a file made of them prints at six times its length through the CLI, and at thirteen times through
+  MCP, whose result holds its envelope twice, the second time as JSON text again (a 1 MiB page of
+  such a file is a 13 MiB answer). `max_bytes` (1 MiB unless asked otherwise) has no upper limit but
+  the file's size, and the MCP server builds its answer in memory before it sends it. *Unscheduled.
+  Found: the 2026-10-20 security review.*
 
 ## Commits, refs and history
 
@@ -229,6 +236,14 @@ left).
   `E_STORE_CORRUPT`. *Unscheduled. Found: M1 final review.*
 - **`verify --deep` skips object files that are symlinks**, because the object listing ignores
   them; SwarmOps never writes one. *Unscheduled. Found: M1 final review.*
+- **A damaged object file stays until it is removed by hand.** A put never replaces a file, so where
+  an object's file is there already, whatever it holds (other bytes, or a symlink to nothing), a
+  commit of that object's content takes the file for the object: it succeeds, names the object and
+  does not count it in `blobs_written`. Reads of the object then fail with `E_STORE_CORRUPT`, and
+  `verify --deep` reports it (`corrupt_object`, or `missing_object` for a symlink to nothing, which
+  a shallow `verify` reports too). Once the file is removed, the same content committed again writes
+  it afresh, and every changeset that names it reads again. *Target: M6 (fsck). Found: the
+  2026-10-20 security review.*
 
 ## Hostile input
 
@@ -256,10 +271,13 @@ left).
   delta-hash lookup returns) are each read into one buffer sized from the file's length, with an
   infallible allocation: a sparse or crafted file of gigabytes makes any command take that much
   memory and abort when the allocation fails, instead of failing with an error, and the abort is
-  no panic, so `swarmops mcp` dies with it. SwarmOps never writes such a file. *Target: M6
-  (bounded reads, when M6 moves the metadata read path onto `FsOps` for fault injection: the
-  journal a frame at a time with a streaming CRC, `journal.off`, the index columns and the views
-  in windows, and a cap on what a lookup returns). Found: M1.5 final review (security-1).*
+  no panic, so `swarmops mcp` dies with it. A `journal.off` that ends in more than 512 zeroed
+  entries, as a sparse one does, is refused before that read ("A `journal.off` that ends in more
+  than 512 zeroed entries is refused, not repaired" below); one that does not still takes that read.
+  SwarmOps never writes such a file. *Target: M6 (bounded reads, when M6 moves the metadata read
+  path onto `FsOps` for fault injection: the journal a frame at a time with a streaming CRC,
+  `journal.off`, the index columns and the views in windows, and a cap on what a lookup returns).
+  Found: M1.5 final review (security-1); narrowed by the 2026-10-20 security review.*
 - **Crafted `journal.off` entries can mis-number a read.** Entries crafted to agree with each
   other (one pointing into a payload whose bytes read as a frame header ending where the next
   entry starts), three or more links before the end, pass the two links recovery and readers
@@ -395,6 +413,13 @@ left).
   a fetch of some hundreds of thousands of refs, or a `SQUASH_MSG` of a squash of very many
   commits, can pass it: remove that file, which git keeps only for its next command, and run the
   import or export again. *Documented (storage spec §7). Found: 2026-10-20.*
+- **An import holds each commit's new files in memory together.** The import stores the trees and
+  blobs it converts each time 64 MiB of them have gathered (`ImportRequest::object_batch_bytes`),
+  but only between commits: the new files of one commit are all held until that commit is converted,
+  each up to 512 MiB, however many the commit adds, so a commit that adds large files takes their
+  size together in memory, and more (about 400 MiB at its peak for one commit of 384 MiB of new
+  files). *Unscheduled: storing a commit's objects as they gather, within the commit, would bound
+  it. Found: the 2026-10-20 security review.*
 
 ## Platforms
 
