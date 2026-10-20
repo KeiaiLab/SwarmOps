@@ -28,7 +28,7 @@
 
 SwarmOps is source control built for a swarm of coding agents: 10 to 50 Claude Code or LangGraph
 processes on one host, committing to one repository at once. It is written in Rust and fully
-embedded: one program, no external database, no daemon. It is pre-release, at milestone M1.6:
+embedded: one program, no external database, no daemon. It is pre-release, at milestone M3:
 usable by one agent, with a store that already takes commits from many processes at once;
 merging and landing, which a swarm needs, come in M4 ([roadmap](#roadmap)).
 
@@ -50,7 +50,7 @@ A swarm of agents is not a team of people, and it needs other things from source
 
 ## SwarmOps and git
 
-SwarmOps is not meant as a general-purpose git replacement: it will import from git (M3) and
+SwarmOps is not meant as a general-purpose git replacement: it imports from git (M3) and will
 export to it (M8). Where the two compare, this is where SwarmOps stands, judged strictly:
 
 **Ahead**: built, with evidence · **Ahead by design**, **behind by design**: judged from the
@@ -76,7 +76,7 @@ planned, each with its milestone.
 | Conflicts | Today the one signal is `E_CAS_MISMATCH`, with the ref's actual target. 📋 M4: three-way merge, conflicts reported per hunk as JSON and resolved without a checkout. | **Behind** today: git merges without a checkout (`git merge-tree`), with typed conflict records. M4 is **not yet comparable**. |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | Nothing today. 📋 M11: offline-first sync, a full store on every host, `fetch` and `push` against one upstream. | **Behind**: git clones, fetches and pushes over any transport, and bundles without one. |
-| Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. 📋 M3: git import. 📋 M8: git export. No user hooks, signing, submodules or LFS. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
+| Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. ✅ M3: git import. 📋 M8: git export. No user hooks, signing, submodules or LFS. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
 | Maturity | Pre-release: no tag yet, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
 | Landing | Today an agent that loses a ref race re-applies its edits on the winner's head by hand, commits again and retries the compare-and-swap. 📋 M4: `land`. | **Not yet comparable**; the loop by hand is behind. |
 
@@ -410,7 +410,7 @@ The milestones of [the umbrella spec](docs/superpowers/specs/2026-10-15-swarmops
 | ✅ | M1.5 | Hardening and opening: CI behind one `tests-pass` check, `--locked` everywhere; I/O-error injection, write-ordering checks and the fsync-failure policy; power-loss images; the project policies; the tests' shared support in one crate; benchmarks of the metadata store against embedded databases; the MCP server and `so`. |
 | ✅ | M1.6 | The code-review follow-ups, before M2: the error contract an agent sees (typed refusals, I/O failures that name the store file and no host path but in two rare `E_IO`s, a report of what a write's recovery repaired); a bound on the lock-free reader's retries; structured `verify` findings, and MCP tool schemas kept plain objects; object reads without a second copy or an allocation of the size a file claims; the test doubles M1.5 left, in one place; spec hygiene (the write-ordering rules W1–W7, §8 in step with the code); the harness for the measurements M2's sync decision needs, whose quiet-window runs are still to come; and `commit --advance`, the commit primitive M4's landing reuses. |
 | 📋 | M2 | Diff, history and the derived-data engine. |
-| 📋 | M3 | git import. |
+| ✅ | M3 | git import. |
 | 📋 | M4 | Merge and landing, with the landing model chosen by measurement, and the journal shown as an operation log with undo. |
 | 📋 | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |
 | 📋 | M5 | Workspaces, with an adapter for Claude Code's worktree hooks. |
