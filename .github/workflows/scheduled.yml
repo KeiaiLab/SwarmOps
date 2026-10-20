@@ -1,9 +1,10 @@
 # What is too slow for every push, weekly and on demand: `just check-ci-slow` (the regular suite
 # at 2,000 proptest cases plus the ignored slow tests, crash sweeps included, without the
 # 32-process contention measurements), a 60-second fuzz smoke of every fuzz target on nightly,
-# the formatting, lints and tests of bench/compare, a workspace of its own that `just check`
-# does not build, and the git version matrix, which rebuilds the git fixtures with three gits and
-# runs the git import's tests on what each made. Hardened and pinned to ubuntu-24.04 as ci.yml is.
+# the cargo-deny check, formatting, lints and tests of bench/compare, a workspace of its own
+# that `just check` does not build, and the git version matrix, which rebuilds the git fixtures
+# with three gits and runs the git import's tests on what each made. Hardened and pinned to
+# ubuntu-24.04 as ci.yml is.
 name: Scheduled
 
 on:
@@ -127,11 +128,17 @@ jobs:
           persist-credentials: false
       - name: Install the toolchain rust-toolchain.toml pins
         run: rustup toolchain install --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with:
+          tool: cargo-deny@0.20.2
+          fallback: none
       # The comparison harness is a cargo workspace and lockfile of its own, outside `just check`,
       # on swarmops-core and swarmops-store as path dependencies: this is the only automated build
-      # that notices a change to either breaking `just bench-compare`. The three commands are the
-      # ones its README names. No cache: about a hundred crates, SQLite's C sources among them,
-      # once a week.
+      # that notices a change to either breaking `just bench-compare`. The commands are the ones
+      # its README names: `cargo deny` first, which checks the lockfile with the harness's own
+      # policy (bench/compare/deny.toml) before anything of it is built, then fmt, clippy and
+      # test. No cache: about a hundred crates, SQLite's C sources among them, once a week.
+      - run: cargo deny --locked --manifest-path bench/compare/Cargo.toml --config bench/compare/deny.toml check
       - run: cargo fmt --manifest-path bench/compare/Cargo.toml --check
       - run: cargo clippy --locked --manifest-path bench/compare/Cargo.toml --all-targets -- -D warnings
       - run: cargo test --locked --manifest-path bench/compare/Cargo.toml

@@ -2001,6 +2001,49 @@ fn a_fifo_where_a_store_file_should_be_is_refused_not_opened() {
 }
 
 #[test]
+fn a_fifo_at_meta_lock_fails_a_write_at_once_instead_of_blocking() {
+    // A FIFO where the lock file should be, which a restored store can hold, would block every
+    // writer's open of it until something opened it for reading: a write transaction, and a
+    // committed snapshot (both take the lock), fail at once instead, as damage (`InvalidData`)
+    // that names meta/lock. Reads take no lock, and go on. Each runs on a thread with a deadline,
+    // so that a regression fails instead of hanging the test.
+    let (_dir, root, store) = new_store();
+    insert(&store, &[cs(0, &[])]);
+    drop(store);
+    let lock = Layout::new(&root).meta_lock();
+    fs::remove_file(&lock).unwrap();
+    let made = Command::new("mkfifo").arg(&lock).status();
+    assert!(made.unwrap().success(), "mkfifo");
+    for (what, committed) in [("write", false), ("read_committed", true)] {
+        let (tx, rx) = mpsc::channel();
+        let opened_root = root.clone();
+        thread::spawn(move || {
+            let store = MetaStore::open(&opened_root).unwrap();
+            let _ = tx.send(if committed {
+                store.read_committed().map(drop)
+            } else {
+                store.write().map(drop)
+            });
+        });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Err(StoreError::Io(e))) => {
+                let file = e.file.as_ref().map(|file| file.as_str());
+                assert_eq!(
+                    (e.kind(), file),
+                    (io::ErrorKind::InvalidData, Some("meta/lock")),
+                    "{what}: {e}"
+                );
+                assert_eq!(e.to_string(), "open meta/lock: lock is not a regular file");
+            }
+            Ok(other) => panic!("{what}: a FIFO at meta/lock: expected InvalidData, got {other:?}"),
+            Err(timeout) => panic!("{what} blocked on the FIFO at meta/lock: {timeout}"),
+        }
+    }
+    let store = MetaStore::open(&root).unwrap();
+    assert_eq!(store.read().unwrap().count_changesets().unwrap(), 1);
+}
+
+#[test]
 fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_unreadable_one() {
     // Past the checkpoint the journal vouches for the index's records: a power loss zeroed
     // record 1's generation, so it is not counted. A checkpoint that does not hold a u64le is
@@ -3530,10 +3573,10 @@ fn a_directory_for(meta: &Utf8Path, file: &str) {
 /// A failure of the metadata store's own reads, off the `FsOps` seam, names its file relative to
 /// the store's root as well, and never the root: a `journal.off` that is gone fails the open of
 /// it (`NotFound`); a `journal.ckpt` that is a directory, or three bytes long, and a ref file
-/// that is a directory fail their reads as damage (`InvalidData`: a store file that is not a
-/// regular file is refused before it is opened); a `meta/lock` that is a directory fails its
-/// open (`EISDIR`); and each of the nine index files, gone, is [`StoreError::IndexCorrupt`]
-/// naming it. Root-safe: no file mode is involved.
+/// that is a directory fail their reads as damage, and a `meta/lock` that is a directory its
+/// open (`InvalidData`: a store file that is not a regular file is refused before it is opened);
+/// and each of the nine index files, gone, is [`StoreError::IndexCorrupt`] naming it. Root-safe:
+/// no file mode is involved.
 #[test]
 fn a_direct_read_that_fails_names_its_file() {
     use swarmops_store::{FileOp, FsMethod};
@@ -3590,7 +3633,7 @@ fn a_direct_read_that_fails_names_its_file() {
             run: |root| MetaStore::open(root).and_then(|store| store.write().map(drop)),
             op: FileOp::Open,
             file: "meta/lock",
-            kind: io::ErrorKind::IsADirectory,
+            kind: io::ErrorKind::InvalidData,
         },
     ];
     for case in cases {

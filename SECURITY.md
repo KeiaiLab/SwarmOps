@@ -82,11 +82,13 @@ filesystem permissions are the access boundary. Within that model, these are vul
   crafted repository will be a vulnerability. Workspaces (M5), which write files to disk, are in
   scope the same way.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
-  or run. `cargo deny check` (advisories, licenses, bans, sources) runs in every `just check`,
-  `Cargo.lock` is committed and builds use `--locked`, and the GitHub Actions workflows pin every
-  action by commit, start from `permissions: {}`, keep no credentials after checkout and are
-  checked with zizmor. A known advisory in a dependency that is already public can go to a
-  normal issue.
+  or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the
+  project builds: the workspace's and the fuzz crate's in every `just check`, and
+  `bench/compare`'s, which `just check` does not build, wherever it is built
+  (`just bench-compare` and the weekly scheduled run). The lockfiles are committed and builds use
+  `--locked`, and the GitHub Actions workflows pin every action by commit, start from
+  `permissions: {}`, keep no credentials after checkout and are checked with zizmor. A known
+  advisory in a dependency that is already public can go to a normal issue.
 
 ## What is not a vulnerability under M1's model
 

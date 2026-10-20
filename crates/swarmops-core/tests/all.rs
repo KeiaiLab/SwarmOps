@@ -8,6 +8,7 @@ mod codec;
 mod id;
 mod lints;
 mod path;
+mod supply_chain;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's

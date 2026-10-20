@@ -319,6 +319,56 @@ fn verify_deep_lists_an_object_whose_zstd_frame_lies_about_its_size() {
     assert_problems_when(&repo, false, Vec::new());
 }
 
+/// A blob's file grown to 2 GiB, sparse behind its header (no disk; that much memory, were it
+/// read), is longer than any object file: a deep check lists it as corrupt by its length, without
+/// reading it, and goes on. The recorder fails a read of that file, should one come, so that no
+/// run of this test reads gigabytes. A shallow check reads no blob.
+#[test]
+fn verify_deep_lists_an_object_file_of_huge_length_without_reading_it() {
+    let (_dir, root, repo) = new_repo();
+    let content = b"a blob whose file grows to 2 GiB\n";
+    commit(&repo, &[], vec![put("huge.txt", content)]);
+    drop(repo);
+    let huge = blob(content).0;
+    let file = object_file(&root, huge);
+    (fs::OpenOptions::new().write(true).open(&file).unwrap())
+        .set_len(2 << 30)
+        .unwrap();
+
+    let (recording, calls) = RecordingFs::new();
+    let read = format!("read {}", file.file_name().unwrap());
+    recording
+        .failing()
+        .set(Box::leak(read.clone().into_boxed_str()));
+    let repo = LocalRepo::open_with_fs(&root, Arc::new(recording)).unwrap();
+    assert_problems_when(&repo, true, vec![VerifyProblem::CorruptObject(huge)]);
+    assert_problems_when(&repo, false, Vec::new());
+    assert!(!calls().contains(&read), "the blob's file is never read");
+}
+
+/// A blob rewritten as a zstd object whose frame is of zstd's legacy v0.7 format, holding the
+/// very content the blob's id names: the store writes no such frame and its zstd has no decoder
+/// for one (storage spec §2 rule 1), so the deep check lists the blob as corrupt, where a zstd
+/// built with the legacy decoders passed it as clean.
+#[test]
+fn verify_deep_lists_an_object_held_in_a_legacy_zstd_frame() {
+    use swarmops_core::bytes::to_u64;
+    use swarmops_testkit::store::{zstd_object, zstd_v07_frame};
+
+    let (_dir, root, repo) = new_repo();
+    let content = b"a blob that a frame of zstd's legacy v0.7 format holds in full\n";
+    commit(&repo, &[], vec![put("legacy.txt", content)]);
+    let legacy = blob(content).0;
+    let file = object_file(&root, legacy);
+    let mut bytes = fs::read(&file).unwrap();
+    zstd_object(&mut bytes, to_u64(content.len()), &zstd_v07_frame(content));
+    fs::write(&file, bytes).unwrap();
+
+    assert_problems_when(&repo, true, vec![VerifyProblem::CorruptObject(legacy)]);
+    // A shallow check reads no blob.
+    assert_problems_when(&repo, false, Vec::new());
+}
+
 #[test]
 fn verify_detects_dangling_ref() {
     let (_dir, root, repo) = new_repo();
@@ -805,6 +855,54 @@ fn verify_reports_a_checkpoint_that_is_not_a_frame_boundary() {
         );
         assert_eq!(report.changesets_checked, 2, "ckpt {bogus}");
     }
+}
+
+#[test]
+fn verify_reports_a_lock_file_that_is_not_a_regular_file() {
+    // Every write refuses a `meta/lock` that is not a regular file, as damage (E_STORE_CORRUPT,
+    // whose hint is to run verify), so verify must name it too; it only looks at the file, without
+    // opening it or following a symlink, and checks the rest as before. A lock file that is
+    // missing is no damage: the next write makes it.
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+
+    let lock_text = "meta/lock is not a regular file: every write fails on it until it is \
+                     removed, and the next write makes a new one";
+    let dangling = VerifyProblem::DanglingRef("release/gone".to_owned());
+    let corrupt = VerifyProblem::CorruptObject(blob(b"1").0);
+    for what in ["a FIFO", "a symlink to a regular file", "a directory"] {
+        let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
+        let lock = Layout::new(&root).meta_lock();
+        fs::remove_file(&lock).unwrap();
+        match what {
+            "a FIFO" => {
+                let made = Command::new("mkfifo").arg(&lock).status();
+                assert!(made.expect("run mkfifo").success(), "mkfifo");
+            }
+            "a symlink to a regular file" => {
+                let regular = root.join("regular");
+                fs::write(&regular, b"").unwrap();
+                symlink(regular, &lock).unwrap();
+            }
+            _ => fs::create_dir(&lock).unwrap(),
+        }
+        let report = repo.verify(true).unwrap();
+        assert_eq!(
+            report.problems,
+            [
+                VerifyProblem::MetaCorrupt(lock_text.to_owned()),
+                dangling.clone(),
+                corrupt.clone()
+            ],
+            "{what}"
+        );
+        assert_eq!(report.changesets_checked, 2, "{what}");
+    }
+
+    let (_dir, root, repo) = store_with_refs_and_a_corrupt_blob();
+    fs::remove_file(Layout::new(&root).meta_lock()).unwrap();
+    let report = repo.verify(true).unwrap();
+    assert_eq!(report.problems, [dangling, corrupt], "a missing lock file");
 }
 
 /// Damages metadata file `file` of the store at `root`: `journal.ckpt` malformed, a journal

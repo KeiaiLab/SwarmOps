@@ -1,5 +1,6 @@
 //! `meta/lock` under contention: a writer that gives up leaves no lock behind, and 32 writers
-//! in one process take turns through the kernel's flock queue without meeting `Busy`.
+//! in one process take turns through the kernel's flock queue without meeting `Busy`. And a
+//! lock file that is not a regular file, which no writer opens.
 //!
 //! The basic acquire, timeout and release tests are in `journal.rs`. Every test here owns a
 //! fresh store root (`tempfile::tempdir()`), so tests are independent and may run in any order
@@ -111,6 +112,94 @@ fn abandoned_waiter_releases_the_lock_it_acquires_late() {
     );
     let again = MetaLock::acquire(&layout, Duration::ZERO);
     assert!(again.is_ok(), "the lock is free again: {again:?}");
+}
+
+/// What [`MetaLock::acquire`] returned within `deadline`, run on a thread of its own so that an
+/// acquire that blocks fails a test instead of hanging it: `None` if it had not returned by then
+/// (its thread is left where it blocked).
+fn acquire_within(layout: &Layout, deadline: Duration) -> Option<Result<MetaLock, StoreError>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let layout = layout.clone();
+    thread::spawn(move || {
+        let _ = tx.send(MetaLock::acquire(&layout, Duration::from_secs(10)));
+    });
+    rx.recv_timeout(deadline).ok()
+}
+
+/// A `meta/lock` that is not a regular file is refused before it is opened, at once, as every
+/// store file is: a FIFO (whose open for writing waits for a reader, so that every writer would
+/// wait with it), a symlink whatever it points at (a regular file or a device outside the store,
+/// a path that does not exist), a socket and a directory. The refusal names `meta/lock` relative
+/// to the store's root; no symlink is followed, so nothing outside the store is opened or made.
+/// Once the file is removed, the next acquire makes a regular one. Each acquire runs on a thread
+/// with a deadline, so that one that blocks fails the test instead of hanging it; every case
+/// runs before the test fails, so that its message says what each one did.
+#[test]
+fn a_lock_file_that_is_not_a_regular_file_is_refused_before_it_is_opened() {
+    use std::io;
+    use std::os::unix::fs::symlink;
+    use std::os::unix::net::UnixListener;
+    use std::process::Command;
+
+    use swarmops_store::FileOp;
+
+    let (_root, layout) = new_meta();
+    let lock = layout.meta_lock().into_std_path_buf();
+    let outside = tempfile::tempdir().expect("create a directory outside the store");
+    let regular = outside.path().join("regular");
+    fs::write(&regular, b"not the lock").expect("write a file outside the store");
+    let nowhere = outside.path().join("nowhere");
+    let mkfifo = || {
+        let made = Command::new("mkfifo").arg(&lock).status();
+        assert!(made.expect("run mkfifo").success(), "mkfifo");
+    };
+    let cases: [(&str, &dyn Fn()); 6] = [
+        ("a FIFO", &mkfifo),
+        ("a symlink to a regular file", &|| {
+            symlink(&regular, &lock).unwrap();
+        }),
+        ("a symlink to a path that does not exist", &|| {
+            symlink(&nowhere, &lock).unwrap();
+        }),
+        ("a symlink to a device", &|| {
+            symlink("/dev/null", &lock).unwrap();
+        }),
+        ("a socket", &|| drop(UnixListener::bind(&lock).unwrap())),
+        ("a directory", &|| fs::create_dir(&lock).unwrap()),
+    ];
+    let mut wrong = Vec::new();
+    for (what, make) in cases {
+        make();
+        match acquire_within(&layout, Duration::from_secs(5)) {
+            Some(Err(StoreError::Io(failure)))
+                if failure.op == FileOp::Open
+                    && failure.file.as_ref().map(|file| file.as_str()) == Some("meta/lock")
+                    && failure.kind() == io::ErrorKind::InvalidData
+                    && failure.to_string() == "open meta/lock: lock is not a regular file" => {}
+            Some(other) => wrong.push(format!("{what}: {other:?}")),
+            None => wrong.push(format!("{what}: still blocked after 5 s")),
+        }
+        if fs::exists(&nowhere).unwrap() {
+            wrong.push(format!(
+                "{what}: the symlink was followed, and its target made"
+            ));
+            fs::remove_file(&nowhere).unwrap();
+        }
+        assert_eq!(fs::read(&regular).unwrap(), b"not the lock", "{what}");
+        if fs::symlink_metadata(&lock).unwrap().is_dir() {
+            fs::remove_dir(&lock).unwrap();
+        } else {
+            fs::remove_file(&lock).unwrap();
+        }
+        // Removed, it is made again, as a regular file.
+        match acquire_within(&layout, Duration::from_secs(5)) {
+            Some(Ok(held)) => drop(held),
+            other => wrong.push(format!("{what}, then removed: {other:?}")),
+        }
+        assert!(fs::symlink_metadata(&lock).unwrap().is_file(), "{what}");
+        fs::remove_file(&lock).unwrap();
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
 /// What one of [`thirty_two_threads_take_turns_without_busy`]'s threads saw: the wait of each of

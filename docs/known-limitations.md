@@ -268,6 +268,12 @@ left).
 - **A zeroed `journal.off` entry deep in the chain** (three or more links before the end) is
   outside the crash model: recovery checks the last two links, and `verify` finds the rest.
   *Target: M6 (the next `FORMAT`'s checksums). Found: M1 fuzzing review.*
+- **A `journal.off` that ends in more than 512 zeroed entries is refused, not repaired.** A
+  power loss leaves zeroed only the entry being written, so readers and recovery drop at most a
+  4 KiB block of zeroed entries at the end of `journal.off`, found with one read, and refuse a
+  longer run as damage (`E_STORE_CORRUPT`, at offset 0; `verify` reports it): every read and
+  write fails until the file is cut back to its last entry that is not zero. *Target: M6
+  (fsck). Found: 2026-10-20 review.*
 - **A crafted index's generations steer history queries.** A read checks what the changeset
   index says where it can do so cheaply: a sorted view's entry must name a record that holds its
   key, and a record's parents must start where the record before it leaves off, or the read
@@ -311,6 +317,14 @@ left).
   command was given (operations spec §0). A server that takes requests from another host must
   not pass either on as it is. *Target: M11 (`serve`), M10. Found: the M1.6 consolidated review
   (error contract).*
+- **A request takes the memory its type holds.** The MCP server reads of a message line, at
+  most 64 MiB, only the members it serves, and a tool's arguments only as their request type,
+  so what else a line holds costs it nothing beyond the line's bytes (operations spec §0). A
+  request type's own fields are built in full, though: a long list of short strings (`blob_has`
+  ids) or a map of small entries (`land` resolutions) takes up to about 15 times its text, near
+  1 GiB for a line at the cap, before the operation refuses what is not an id or a resolution;
+  the CLI reads `--changes` and `--resolve` the same way. *Unscheduled. Found: the 2026-10-20
+  security audit.*
 
 ## Git import and export
 
@@ -351,6 +365,15 @@ left).
   (`rewritten`, and a warning), which a branch built on the originals does not take
   (`lossy_history`), and the signature headers they keep verbatim (`gpgsig`) no longer verify.
   *Documented (storage spec §7; M8 Decision 13). Found: M8 Task 5.*
+- **A git directory's file longer than 16 MiB is refused.** The git import and export let gix
+  read a repository's refs (`HEAD`, every loose ref and every pseudo-ref, which a symbolic `HEAD`
+  can name), `config`, `config.worktree` and `objects/info/alternates` whole, so they refuse one
+  longer than 16 MiB before anything reads it (`E_GIT_UNSUPPORTED`, `details.reason`
+  `file_too_long`), as they refuse a FIFO, a socket or a device where they read a file
+  (`special_file`). No such file that git writes comes near the bound, but a `FETCH_HEAD` left by
+  a fetch of some hundreds of thousands of refs, or a `SQUASH_MSG` of a squash of very many
+  commits, can pass it: remove that file, which git keeps only for its next command, and run the
+  import or export again. *Documented (storage spec §7). Found: 2026-10-20.*
 
 ## Platforms
 

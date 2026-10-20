@@ -1,3 +1,8 @@
+# The cargo-deny policy of the workspace's lockfile, and of the fuzz crate's (fuzz/Cargo.lock),
+# whose one license exception is in fuzz/deny.exceptions.toml, beside its manifest: `just check`
+# runs it over both. bench/compare/deny.toml repeats every line of this file, beside that
+# harness's own entries (a test of swarmops-core holds it to that).
+
 [graph]
 all-features = true
 

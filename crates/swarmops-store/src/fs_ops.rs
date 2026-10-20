@@ -45,22 +45,27 @@ use tempfile::NamedTempFile;
 use crate::error::{FileOp, IoFailure};
 
 /// Opens `path` read-only if it is a regular file, a symlink to one included; anything else
-/// is refused with `InvalidData` before it is opened, the message naming the file by its
-/// name alone: the rest of the path is the store's root, a host path. No store file is a
-/// FIFO, a device or a socket, and opening a FIFO would block until something opened it for
-/// writing.
+/// is refused before it is opened ([`not_a_regular_file`]). No store file is a FIFO, a device
+/// or a socket, and opening a FIFO would block until something opened it for writing.
 pub(crate) fn open_regular(path: impl AsRef<Path>) -> io::Result<File> {
     let path = path.as_ref();
     if !fs::metadata(path)?.is_file() {
-        let name = path
-            .file_name()
-            .map_or_else(|| "a store file".into(), |name| name.to_string_lossy());
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("{name} is not a regular file"),
-        ));
+        return Err(not_a_regular_file(path));
     }
     File::open(path)
+}
+
+/// The refusal of the store file at `path`, which is not a regular file: `InvalidData`, the
+/// message naming the file by its name alone (`"journal.ckpt is not a regular file"`), since the
+/// rest of the path is the store's root, a host path.
+pub(crate) fn not_a_regular_file(path: &Path) -> io::Error {
+    let name = path
+        .file_name()
+        .map_or_else(|| "a store file".into(), |name| name.to_string_lossy());
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("{name} is not a regular file"),
+    )
 }
 
 /// The bytes of the regular file at `path`, opened as [`open_regular`] opens it.

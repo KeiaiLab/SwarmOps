@@ -19,6 +19,12 @@ pub const HEADER_LEN: usize = 8;
 /// The size of one `journal.off` entry: a frame's start offset, `u64le`.
 pub const ENTRY_LEN: usize = 8;
 
+/// The most zeroed entries at the end of `journal.off`, past frame 0, that readers and recovery
+/// drop (storage spec §2 rule 3): a 4 KiB block of them. A power loss leaves zeroed only the
+/// entry being written, so more is damage, `JournalCorrupt` at 0 (the offset such an entry
+/// holds), for every reader and for recovery.
+pub const MAX_ZEROED: usize = 512;
+
 /// The canonical frame holding `records`.
 pub fn frame_bytes(records: &[Record]) -> Vec<u8> {
     let count = u16::try_from(records.len()).expect("a frame holds at most 65,535 records");
