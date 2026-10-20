@@ -1760,14 +1760,14 @@ mod git_import {
             json!({"$ref": "#/$defs/LossyClass"})
         );
 
-        let wire = r#"{"git_path":"../traders","git_ref":"refs/heads/stable","target_ref":"release/traders","lossy":["gitlinks","tree_order"]}"#;
+        let wire = r#"{"git_path":"../example","git_ref":"refs/heads/stable","target_ref":"release/example","lossy":["gitlinks","tree_order"]}"#;
         let req: GitImportReq = serde_json::from_str(wire).unwrap();
         assert_eq!(
             req,
             GitImportReq {
-                git_path: "../traders".to_owned(),
+                git_path: "../example".to_owned(),
                 git_ref: "refs/heads/stable".to_owned(),
-                target_ref: "release/traders".to_owned(),
+                target_ref: "release/example".to_owned(),
                 lossy: vec![LossyClass::Gitlinks, LossyClass::TreeOrder],
             }
         );
@@ -1966,13 +1966,13 @@ mod git_export {
         let path = properties["git_path"]["description"].as_str().unwrap();
         assert!(path.contains("caller's host"), "{path}");
 
-        let wire = r#"{"git_path":"../traders","source_ref":"release/traders","branch":"stable","force":true}"#;
+        let wire = r#"{"git_path":"../example","source_ref":"release/example","branch":"stable","force":true}"#;
         let req: GitExportReq = serde_json::from_str(wire).unwrap();
         assert_eq!(
             req,
             GitExportReq {
-                git_path: "../traders".to_owned(),
-                source_ref: "release/traders".to_owned(),
+                git_path: "../example".to_owned(),
+                source_ref: "release/example".to_owned(),
                 branch: "stable".to_owned(),
                 force: true,
             }
