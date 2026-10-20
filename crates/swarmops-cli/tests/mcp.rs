@@ -1717,6 +1717,97 @@ fn requests_before_initialize_are_refused(server: &mut Server) {
     );
 }
 
+/// A message line is read only as far as the server serves it, and what else it holds costs the
+/// server no memory beyond the line's own bytes, however much a JSON value of it would take: a
+/// batch, an id that is neither a string nor an integer, a member the server does not read (of a
+/// request, of its `params`, of a notification's, of a response the client sends) and a field
+/// that a tool's request type does not know. Each line holds the same array of half a million
+/// objects of one member, 3.5 MiB, which a JSON value holds in many times as many bytes; each line
+/// is answered as it would be without the array, the server serves on, and its peak resident
+/// memory grows by less than four times the longest line, and 16 MiB. Read as their request type,
+/// a tool's arguments that name a field of it twice are `E_INVALID_ARG`, as a change list that does
+/// is in the CLI.
+#[test]
+fn a_line_is_read_only_as_far_as_the_server_serves_it() {
+    let store = Store::init();
+    let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
+    server.initialize();
+    let before = server.peak_resident_kib();
+    let filler = format!("[{}{{\"\":0}}]", "{\"\":0},".repeat((1 << 19) - 1));
+    let batch = filler.clone();
+    let id = format!(r#"{{"jsonrpc":"2.0","id":{filler},"method":"ping"}}"#);
+    let unread = format!(r#"{{"jsonrpc":"2.0","id":"unread","method":"ping","x":{filler}}}"#);
+    let params =
+        format!(r#"{{"jsonrpc":"2.0","id":"params","method":"ping","params":{{"x":{filler}}}}}"#);
+    let arguments = format!(
+        r#"{{"jsonrpc":"2.0","id":"arguments","method":"tools/call","params":{{"name":"repo_info","arguments":{{"x":{filler}}}}}}}"#
+    );
+    let notification =
+        format!(r#"{{"jsonrpc":"2.0","method":"notifications/x","params":{{"x":{filler}}}}}"#);
+    let response = format!(r#"{{"jsonrpc":"2.0","id":9,"result":{filler}}}"#);
+    let lines = [
+        &batch,
+        &id,
+        &unread,
+        &params,
+        &arguments,
+        &notification,
+        &response,
+    ];
+    let longest = lines.iter().map(|line| line.len()).max().unwrap();
+
+    // A batch, and an id that is neither a string nor an integer: refused, without an id.
+    for line in [&batch, &id] {
+        server.send_line(line.as_bytes());
+        server.reply_error(None, INVALID_REQUEST);
+    }
+    // Members the server does not read, of a request and of its params: the request is answered.
+    for (line, id) in [(&unread, "unread"), (&params, "params")] {
+        server.send_line(line.as_bytes());
+        assert_eq!(
+            server.reply(),
+            json!({"jsonrpc": "2.0", "id": id, "result": {}})
+        );
+    }
+    // A field that the tool's request type does not know: the call runs.
+    server.send_line(arguments.as_bytes());
+    let mut reply = server.reply();
+    assert_eq!(reply["id"], "arguments", "{reply}");
+    let call = check_tool_result("repo_info", reply["result"].take());
+    assert_eq!(call.envelope["ok"], true, "{}", call.envelope);
+    // A notification's params, and a response from the client: no answer, and the next request
+    // is answered.
+    server.send_line(notification.as_bytes());
+    server.send_line(response.as_bytes());
+    assert_eq!(server.result("ping", json!({})), json!({}));
+
+    let grown = server.peak_resident_kib().saturating_sub(before);
+    let line_kib = u64::try_from(longest / 1024).unwrap();
+    assert!(
+        grown < 4 * line_kib + 16 * 1024,
+        "the server's peak resident memory grew by {grown} KiB for lines of at most {line_kib} KiB"
+    );
+    server.send_line(
+        br#"{"jsonrpc":"2.0","id":"twice","method":"tools/call","params":{"name":"read_file","arguments":{"rev":"main","path":"a","rev":"main"}}}"#,
+    );
+    let mut reply = server.reply();
+    assert_eq!(reply["id"], "twice", "{reply}");
+    let twice = check_tool_result("read_file", reply["result"].take());
+    assert_eq!(
+        twice.envelope["error"]["code"], "E_INVALID_ARG",
+        "{}",
+        twice.envelope
+    );
+    let message = twice.envelope["error"]["message"].as_str().unwrap();
+    assert!(message.contains("duplicate field `rev`"), "{message}");
+    let (status, stderr) = server.finish();
+    assert!(status.success(), "{status}: {stderr}");
+    assert!(
+        stderr.contains("not a request"),
+        "the response is reported on stderr: {stderr}"
+    );
+}
+
 /// The `diff` tool: listed with `DiffReq`'s schema standing alone as a plain object, as a read,
 /// its description asking for small pages; a call returns the envelope the CLI prints for the
 /// same request, with both revisions in `meta.resolved`.
@@ -2032,6 +2123,16 @@ impl Server {
         let (status, stderr) = self.finish();
         assert!(status.success(), "{status}: {stderr}");
         assert_eq!(stderr, "", "nothing on stderr");
+    }
+
+    /// The server's peak resident memory (`VmHWM` in its `/proc/<pid>/status`), in KiB.
+    fn peak_resident_kib(&self) -> u64 {
+        let status = fs::read_to_string(format!("/proc/{}/status", self.child.id()))
+            .expect("the server's /proc/<pid>/status");
+        (status.lines())
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .and_then(|value| value.trim().strip_suffix("kB")?.trim().parse().ok())
+            .expect("VmHWM in the server's /proc/<pid>/status")
     }
 }
 
