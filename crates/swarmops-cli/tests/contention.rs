@@ -259,6 +259,7 @@ fn a_hung_child_is_killed_and_reported() {
     );
     wait_until_ready(work.path(), &mut children);
     fs::write(work.path().join("go"), b"").expect("say go");
+    #[cfg(target_os = "linux")]
     let pids = children.pids();
     // Child 0 makes its one commit and exits; child 1 sleeps on.
     let done = Instant::now() + RUN_TIMEOUT;
@@ -281,11 +282,18 @@ fn a_hung_child_is_killed_and_reported() {
         failure.contains("children [1] still running at the parent's deadline"),
         "{failure}"
     );
+    // On Linux a child that was killed and not waited for stays a zombie, which `/proc` lists
+    // until it is reaped: look there before `try_wait` reaps it.
+    #[cfg(target_os = "linux")]
     for pid in pids {
         assert!(
             !Path::new(&format!("/proc/{pid}")).exists(),
             "child process {pid} was killed and reaped"
         );
+    }
+    for (number, child) in children.0.iter_mut().enumerate() {
+        let ended = child.try_wait().expect("look whether a child ended");
+        assert!(ended.is_some(), "child {number} was killed and reaped");
     }
     let zero = report_of(work.path(), 0).expect("child 0's report");
     assert_eq!(zero.elapsed_ms.len(), 1, "{zero:?}");
@@ -829,6 +837,7 @@ struct Children(Vec<Child>);
 
 impl Children {
     /// The children's process ids.
+    #[cfg(target_os = "linux")]
     fn pids(&self) -> Vec<u32> {
         self.0.iter().map(Child::id).collect()
     }
