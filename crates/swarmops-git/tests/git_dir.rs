@@ -46,10 +46,14 @@ fn fifo(path: &Path) {
 }
 
 /// A socket at `path`, in place of what was there; it stays a socket file once its listener is
-/// dropped.
+/// dropped. A socket's own path may hold 103 bytes on macOS (`sun_path`), and a fixture's comes
+/// close to that under a temp dir: the socket is bound under a short name of its own, and moved.
 fn socket(path: &Path) {
     let _ = fs::remove_file(path);
-    drop(UnixListener::bind(path).unwrap_or_else(|error| panic!("{}: {error}", path.display())));
+    let short = tempfile::tempdir().expect("make a directory for the socket");
+    let bound = short.path().join("s");
+    drop(UnixListener::bind(&bound).unwrap_or_else(|error| panic!("{}: {error}", bound.display())));
+    fs::rename(&bound, path).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
 }
 
 /// A symlink at `path` to `target`, in place of what was there.
