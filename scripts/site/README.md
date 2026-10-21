@@ -52,14 +52,15 @@ or the README; change them together.
 
 ## Deploy
 
-**Cloudflare Pages** (the domain is on Cloudflare): create a Pages project connected to the
-repository, with production branch `stable`, no build command and build output directory
-`site`, then add `swarmops.cc` as its custom domain (Cloudflare writes the DNS record; leave
-the domain's mail records as they are). A direct upload works without connecting the
-repository:
+**Cloudflare Pages**, project `swarmops`: a direct upload project with production branch `stable`
+and the directory `site`, and `swarmops.cc` as its custom domain (the domain is on Cloudflare;
+its mail records stay as they are). Every deploy names its branch: `--branch stable` is
+production, any other branch is a preview. Every `*.pages.dev` address answers with
+`X-Robots-Tag: noindex`, so only `swarmops.cc` is indexed.
 
 ```sh
-npx wrangler pages deploy site --project-name swarmops --branch stable
+npx wrangler pages deploy site --project-name swarmops --branch preview   # a preview
+npx wrangler pages deploy site --project-name swarmops --branch stable    # production
 ```
 
 **GitHub Pages** serves a private repository only on paid plans; the repository is public, so an
