@@ -20,8 +20,9 @@ Explained in: [README, The store on disk](../README.md#the-store-on-disk) ·
 
 An object is immutable and content-addressed: a [blob](#blob), a [tree](#tree) or a
 [changeset](#changeset), each one file in `objects/`. Its id is a BLAKE3-256 hash with the object's
-kind and layout version hashed in, printed as 64 lowercase hex digits; on the command line any
-unique prefix of 12 digits or more names it.
+kind and layout version hashed in, printed as 64 lowercase hex digits. A blob's id is given in
+full; a changeset's may be shortened to a unique prefix of 12 digits or more
+([Revision](#revision)).
 
 The byte layouts and the hash recipe are the hash contract: they never change in place, and a new
 layout gets a new kind/version header.
@@ -67,8 +68,8 @@ the CLI, on the client) or `{"blob": "<id>"}`, a blob stored before; its `mode` 
 default), `exec` or `symlink`.
 
 `commit --changes` reads one from a file, or from stdin for `-`; directories follow from the paths.
-A commit's contents hold at most 1 GiB together and a change list's text at most 64 MiB
-(`E_TOO_LARGE` past either), and a file's content at most 512 MiB.
+A commit's contents hold at most 1 GiB together (a blob named by id counts nothing) and a change
+list's text at most 64 MiB (`E_TOO_LARGE` past either), and a file's content at most 512 MiB.
 
 Explained in: [README, Revisions and change lists](../README.md#revisions-and-change-lists) ·
 [architecture, Data model](architecture.md#data-model).
