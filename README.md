@@ -89,6 +89,13 @@ documentation and source, not from a benchmark, and a side-by-side benchmark aga
 worktrees is not on the roadmap (umbrella spec §17). SwarmOps' own measurements are in
 [docs/perf.md](docs/perf.md).
 
+SwarmOps' design has prior art in git, Mononoke's Bonsai changesets and pushrebase, and jj's
+operation log. It adapts several principles that Anthropic described for its in-house system
+Scion, in the engineering post
+["Redesigning source control at Anthropic"](https://www.anthropic.com/engineering/redesigning-source-control),
+to a single host. SwarmOps is an independent project, not affiliated with or endorsed by
+Anthropic, and contains no Scion code, which is not public.
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/assets/store-dark.svg">
