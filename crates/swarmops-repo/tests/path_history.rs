@@ -420,11 +420,10 @@ fn a_long_quiet_stretch_is_walked_once() {
     }
     drop(writer);
     let head = chain[1000];
-    let canonical = root.canonicalize_utf8().unwrap();
+    // `open` names the store by the path it is given, where `create` makes it canonical (macOS
+    // keeps its temp dirs behind a symlink, `/var`): the calls are named by `root`.
     let calls = Arc::new(ValueCalls {
-        dir: canonical
-            .join("meta/derived/last_modified")
-            .into_std_path_buf(),
+        dir: root.join("meta/derived/last_modified").into_std_path_buf(),
         reads: AtomicU64::new(0),
         puts: AtomicU64::new(0),
     });
