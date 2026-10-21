@@ -62,7 +62,6 @@ repository:
 npx wrangler pages deploy site --project-name swarmops --branch stable
 ```
 
-**GitHub Pages** serves a private repository only on paid plans; once the repository is public,
-an Actions workflow can publish the same `site/` directory. After the switch, set the
-repository's social preview to `docs/assets/social-card.png` and its website to
-`https://swarmops.cc`.
+**GitHub Pages** serves a private repository only on paid plans; the repository is public, so an
+Actions workflow can publish the same `site/` directory. Set the repository's social preview to
+`docs/assets/social-card.png` and its website to `https://swarmops.cc`.

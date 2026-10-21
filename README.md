@@ -174,12 +174,15 @@ and the changelog, beside a `SHA256SUMS` file to check them against
 smoke-tested under QEMU, not tested on aarch64 hardware. On glibc 2.34 to 2.38 hosts, every start
 of `swarmops` and `so` prints one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found
 (required by …)`; exit codes, stdout envelopes and the MCP protocol are unaffected, and glibc
-2.39 prints nothing. The first release is v0.1.0; to build from source instead, see below. While
-the repository is private, `gh` downloads a release with your GitHub login:
+2.39 prints nothing. The first release is v0.1.0; to build from source instead, see below.
+`gh` downloads a release with your GitHub login, and `curl` without one:
 
 ```sh
 gh release download --repo KeiaiLab/SwarmOps \
   --pattern 'swarmops-*-x86_64-unknown-linux-gnu.tar.gz' --pattern SHA256SUMS  # the latest release
+# or, without a login (v = the release's version):
+v=0.1.0; u=https://github.com/KeiaiLab/SwarmOps/releases/download/v$v
+curl -fL -O "$u/swarmops-$v-x86_64-unknown-linux-gnu.tar.gz" -O "$u/SHA256SUMS"
 sha256sum --check --ignore-missing SHA256SUMS
 tar -xzf swarmops-*-x86_64-unknown-linux-gnu.tar.gz
 cd swarmops-*-x86_64-unknown-linux-gnu && install -D -t ~/.local/bin swarmops so

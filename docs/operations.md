@@ -58,11 +58,11 @@ swarmops --version
 swarmops 0.1.0
 ```
 
-The repository is private for now, so `gh` clones it with your GitHub login. `cargo install`
-builds in release mode, without the `test-hooks` feature, and installs both names into
-`~/.cargo/bin` (add `--bin swarmops` for the long name alone); it took 20 to 36 s of wall time on
-a 32-thread host. To install another commit, check it out and run the same `cargo install`: it
-replaces both binaries (`Replaced package`).
+`gh repo clone` uses your GitHub login; `git clone https://github.com/KeiaiLab/SwarmOps` needs
+none. `cargo install` builds in release mode, without the `test-hooks` feature, and installs both
+names into `~/.cargo/bin` (add `--bin swarmops` for the long name alone); it took 20 to 36 s of
+wall time on a 32-thread host. To install another commit, check it out and run the same
+`cargo install`: it replaces both binaries (`Replaced package`).
 
 ### From a release
 

@@ -267,10 +267,11 @@ review them like any other change.
   `Cargo.toml`, so its Dependabot pull request fails until
   `cargo update --manifest-path fuzz/Cargo.toml -p <crate>` is pushed to it.
 
-The repository is private on GitHub's Free plan, which offers no branch protection or rulesets
-for it, so nothing stops a push that would fail. The rule is still the rule: land on `stable`
-only what passed `just check` locally and has `tests-pass` green for the same commit. When the
-plan allows it, `tests-pass` becomes the one required check.
+A ruleset on `stable` makes `tests-pass` the one required check and blocks force pushes and
+deleting the branch. A push to `stable` is refused unless `tests-pass` is already green for the
+commit it moves `stable` to: push a local merge to its `feat/**` branch first, and push `stable`
+once CI has passed there. The rule stays: land on `stable` only what passed `just check` locally
+and has `tests-pass` green for the same commit.
 
 ## Commits
 

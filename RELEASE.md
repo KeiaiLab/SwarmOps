@@ -50,9 +50,10 @@ installs the same tool versions as `ci.yml`'s: move them together.
 - **No provenance attestations.** On GitHub's Free plan, artifact attestations are available
   for public repositories only
   ([GitHub docs](https://docs.github.com/en/actions/how-tos/secure-your-work/use-artifact-attestations/use-artifact-attestations)),
-  so the archives ship with SHA-256 checksums only. Once the repository is public, the
-  publishing job can attest them with `actions/attest-build-provenance`, which needs
-  `id-token: write` and `attestations: write` there too, and step 9 below gains
+  and v0.1.0 was released while the repository was private, so its archives ship with SHA-256
+  checksums only. The repository is public now: the publishing job can attest a release's
+  archives with `actions/attest-build-provenance`, which needs `id-token: write` and
+  `attestations: write` there too, and step 9 below gains
   `gh attestation verify <archive> --repo KeiaiLab/SwarmOps`.
 - **Linux today (x86_64 and aarch64, glibc 2.34 or newer); macOS and Windows are the next
   milestone, M12.** The aarch64 binaries are
@@ -64,8 +65,6 @@ installs the same tool versions as `ci.yml`'s: move them together.
   version and MSRV policy.
 - **Before the first release that promises store compatibility**, add a test that opens a store
   written by the previous release (from 1.0 on, the versioning policy asks for one).
-- **Once the repository is public**, turn on private vulnerability reporting
-  ([SECURITY.md](SECURITY.md)).
 
 ## Checklist
 
