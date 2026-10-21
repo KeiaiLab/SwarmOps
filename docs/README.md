@@ -1,0 +1,60 @@
+# SwarmOps documentation
+
+The documents, grouped by what you want to do. The [README](../README.md) shows the core
+features, each with an example.
+
+## Get started
+
+| Document | Read it to |
+| --- | --- |
+| [Install](guides/install.md) | Install `swarmops` and `so` with the installer, from a release archive or from source; upgrade or remove them. |
+| [Quick start](guides/quick-start.md) | Make a store, commit, land a change, meet a conflict and read the op log. |
+| [Concepts](concepts.md) | Learn what a store, a revision, a change list, a ref, a land and an envelope are. |
+
+## Use
+
+| Document | Read it to |
+| --- | --- |
+| [Commit and land](guides/commit-and-land.md) | Publish a change: commits, compare-and-swap, landing, retries and conflicts. |
+| [History and undo](guides/history-and-undo.md) | Read history and diffs, and take an operation back. |
+| [Parallel agents](guides/parallel-agents.md) | Run many agents on one repository, and see how that compares with agents in git worktrees. |
+| [Claude Code](guides/claude-code.md) | Give Claude Code agents the store through MCP. |
+| [Git round trip](guides/git-round-trip.md) | Import a git repository, and export the work back for review and CI. |
+
+## Operate
+
+| Document | Read it to |
+| --- | --- |
+| [Operations](operations.md) | Run SwarmOps for a swarm: a store, agents through MCP, the daily loop with git, checks, backup and restore, upgrades, limits and what to monitor. |
+| [Troubleshooting](troubleshooting.md) | Go from a symptom to its cause and the command that fixes it. |
+| [Pilot](pilot.md) | Follow the runbook of the first real use, on this repository. |
+| [Support](../SUPPORT.md) | Find where to ask a question or report a problem. |
+| [Security](../SECURITY.md) | Report a vulnerability privately, and learn what counts as one. |
+
+## Reference
+
+| Document | Read it to |
+| --- | --- |
+| [CLI reference](reference/cli.md) | Look up a command, its arguments and its output. |
+| [Error reference](reference/errors.md) | Look up an `E_*` code, its exit code and what to do. |
+| [Commands](../README.md#commands) | See every command in one table, with revisions, change lists, and output and exit codes. |
+| [MCP](../README.md#mcp) | Register the MCP server, and learn the rules an agent follows. |
+| [Versioning and stability](policies/versioning-and-stability.md) | Know what stays compatible, and how a breaking change is made. |
+| [MSRV and platforms](policies/msrv-and-platforms.md) | Know the Rust version and the platforms SwarmOps supports. |
+| [Changelog](../CHANGELOG.md) | See what changed, release by release. |
+
+## Design
+
+| Document | Read it to |
+| --- | --- |
+| [Architecture](architecture.md) | Understand the design: crates, data model, the store on disk, the write and read paths, durability, concurrency, the contract. |
+| [Known limitations](known-limitations.md) | See what is still open, and which milestone takes each item. |
+| [Performance](perf.md) | See every measurement, and the decisions taken on them. |
+| [Metadata store comparison](../bench/compare/README.md) | See how the native metadata store is measured against embedded databases. |
+| [SwarmOps and git](../README.md#swarmops-and-git) | Compare SwarmOps with git, dimension by dimension. |
+| [Roadmap](../README.md#roadmap) | See the milestones, built and planned. |
+
+The design documents are the authority: the umbrella spec and the storage, operations and review
+specs, in Korean, which the maintainers keep privately; [Architecture](architecture.md) is their
+public overview. How changes are made is in [CONTRIBUTING.md](../CONTRIBUTING.md), who makes them
+in [MAINTAINERS.md](../MAINTAINERS.md), and how a release is cut in [RELEASE.md](../RELEASE.md).
