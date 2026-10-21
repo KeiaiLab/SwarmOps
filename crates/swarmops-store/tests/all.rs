@@ -13,6 +13,9 @@ mod layout;
 mod lock;
 mod meta;
 mod objects;
+mod platform_lock;
+mod platform_names;
+mod platform_sync;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's

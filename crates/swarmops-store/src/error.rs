@@ -36,7 +36,10 @@ pub enum StoreError {
     /// The store's `FORMAT` file is missing or names an unsupported version.
     #[error("unsupported store format: {0}")]
     Format(String),
-    /// The store root is not on a native Linux filesystem (for example WSL's `/mnt/*` drvfs).
+    /// The store root is on a filesystem a store may not live on (storage-core design, §2.1 P4):
+    /// on Linux a path under `/mnt/`, where WSL mounts Windows drives (drvfs); on macOS a volume
+    /// that is neither APFS nor journaled HFS+; on Windows a network share (UNC) or a path in the
+    /// device namespace.
     #[error("store path {0} is not on a native Linux filesystem")]
     UnsupportedFs(Utf8PathBuf),
     /// Another writer held `meta/lock` for the whole wait. Retryable.

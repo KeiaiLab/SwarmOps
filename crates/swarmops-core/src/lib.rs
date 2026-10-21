@@ -9,6 +9,7 @@ pub mod error;
 pub mod id;
 pub mod object;
 pub mod path;
+pub mod portable;
 
 pub use error::{IdError, PathError};
 pub use id::{BlobId, ChangesetId, Hashed, ObjectId, ObjectKind, TreeId, hash_object};

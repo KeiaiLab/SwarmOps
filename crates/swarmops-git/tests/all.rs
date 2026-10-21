@@ -10,6 +10,7 @@ mod export;
 mod export_oid;
 mod git_dir;
 mod import;
+mod platform_export;
 mod raw;
 mod round_trip;
 mod sink;

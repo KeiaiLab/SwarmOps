@@ -22,6 +22,8 @@ pub mod layout;
 pub mod meta;
 #[cfg(feature = "test-hooks")]
 pub mod order_check;
+mod pread;
+mod volume;
 
 pub use error::{FileOp, IoFailure, LimitKind, StoreError};
 pub use external_ids::{ExternalEntry, ExternalIds, ExternalPut, ListedEntry, SYSTEM_GIT};
