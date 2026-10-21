@@ -9,7 +9,11 @@
 //!
 //! A name is `main` or `release/<x>`, where `x` is one or more of `[A-Za-z0-9._-]` and does
 //! not start with `.`, so that `.`, `..` and the store's own temp files (`.tmp…`) are never
-//! refs; at most 255 bytes, what a `RefMove` record holds.
+//! refs; at most 255 bytes, what a `RefMove` record holds. A write transaction makes a new name
+//! only if every platform can hold its file (storage-core design, §2.1 P8): not one that differs
+//! from another ref's only in ASCII case, is a Windows device name or ends in a dot
+//! (`check_move`). A name the store holds already reads and moves as before, and replay
+//! materializes any name the journal holds.
 //!
 //! A ref's version counts the writes of its file since the ref was created, from 1. A
 //! transaction writes the file of each ref it moves once, with the target its last move
@@ -21,10 +25,11 @@
 //! [`FsOps::atomic_replace`]: crate::FsOps::atomic_replace
 //! [`FsOps::read`]: crate::FsOps::read
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io;
 
 use camino::{Utf8Path, Utf8PathBuf};
+use swarmops_core::portable::{Unportable, check_component};
 use swarmops_core::{ChangesetId, ObjectId};
 
 use crate::error::{FileOp, StoreError};
@@ -37,6 +42,21 @@ const MAX_NAME_LEN: usize = 255;
 /// The most bytes a ref file holds: 64 hex digits, a line break, a version of at most 20
 /// decimal digits (a `u64`), a line break.
 const MAX_FILE_LEN: u64 = 64 + 1 + 20 + 1;
+
+/// What a ref name is, as the refusal of a name off the grammar says it ([`broken_rule`]).
+const GRAMMAR: &str = "a ref name is main or release/<x>, x one or more of [A-Za-z0-9._-] not \
+                       starting with '.', at most 255 bytes";
+
+/// The rule a new ref name breaks as a Windows device name ([`check_move`]).
+const DEVICE: &str = "a new ref name may not be a Windows device name (con, prn, aux, nul, \
+                      com1 to com9, lpt1 to lpt9, in any case, with or without an extension)";
+
+/// The rule a new ref name breaks as one that ends in a dot ([`check_move`]).
+const DOT: &str = "a new ref name may not end in a dot";
+
+/// The rule a new ref name breaks as one that differs from another's only in ASCII case
+/// ([`check_move`]).
+const CASE: &str = "a new ref name may not differ from another ref's only in case";
 
 /// Where a ref points, as its file (or the journal past the checkpoint) says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +93,70 @@ pub fn check_ref_name(name: &str) -> Result<(), StoreError> {
         Ok(())
     } else {
         Err(StoreError::RefName(name.to_owned()))
+    }
+}
+
+/// Whether a ref holds `name` (a valid name) for a write transaction that moves it from
+/// `expected`: a ref file of that very name, case and all, or a move of it the transaction
+/// queued (`moved`). Always for `main`, which no other name differs from only in case.
+///
+/// A name no ref holds is new, and names nothing. A move of it from a target (`expected` is
+/// `Some`) is a mismatch and records nothing. One from nothing is recorded, and makes the name
+/// if it moves to a target, so it is refused with [`StoreError::RefName`] where another platform
+/// could not hold the name's file (storage-core design, §2.1 P8): the name differs from a held
+/// one only in ASCII case, is a Windows device name or ends in a dot. A held name passes,
+/// whatever it is, and replay never comes here: a name the journal holds reads and moves as
+/// before.
+///
+/// The held names are those of the files in `meta/refs/release/`, listed under the lock with
+/// `std::fs`, once per call and outside [`FsOps`], which has no listing; a failed listing fails
+/// the call, located by `fs`.
+///
+/// [`FsOps`]: crate::FsOps
+pub(crate) fn check_move(
+    layout: &Layout,
+    fs: &StoreFs,
+    name: &str,
+    expected: Option<ChangesetId>,
+    moved: &HashMap<String, Option<ChangesetId>>,
+) -> Result<bool, StoreError> {
+    let Some(x) = name.strip_prefix("release/") else {
+        return Ok(true);
+    };
+    if moved.contains_key(name) {
+        return Ok(true);
+    }
+    let held = release_names(layout, fs)?;
+    if held.iter().any(|file| file == name) {
+        return Ok(true);
+    }
+
+    // A new name: a move of it from a target records nothing; any other must be portable.
+    if expected.is_some() {
+        return Ok(false);
+    }
+    let mut others = held.iter().chain(moved.keys());
+    let folded = others.any(|other| other.eq_ignore_ascii_case(name));
+    if folded || check_component(x).is_err() {
+        return Err(StoreError::RefName(name.to_owned()));
+    }
+    Ok(false)
+}
+
+/// The rule ref name `name`, which [`StoreError::RefName`] refused, breaks, as its message says
+/// it: the grammar [`check_ref_name`] checks, or for a new name one of the rules of
+/// [`check_move`]. Worked out from the name alone: a name that keeps the grammar and that every
+/// platform holds was refused for differing from another ref's only in case.
+pub(crate) fn broken_rule(name: &str) -> &'static str {
+    if check_ref_name(name).is_err() {
+        return GRAMMAR;
+    }
+    match name.strip_prefix("release/").map(check_component) {
+        Some(Err(Unportable::DeviceName)) => DEVICE,
+        Some(Err(Unportable::TrailingDotOrSpace)) => DOT,
+        // The grammar leaves no character Windows refuses.
+        Some(Err(Unportable::Character(_))) => GRAMMAR,
+        Some(Ok(())) | None => CASE,
     }
 }
 

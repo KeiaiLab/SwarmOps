@@ -39,6 +39,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use rayon::ThreadPool;
 use rayon::prelude::*;
 use swarmops_core::bytes::to_u64;
+use swarmops_core::portable::is_windows_device_name;
 use swarmops_core::{ChangesetId, ObjectId};
 
 use crate::error::{FileOp, StoreError};
@@ -400,7 +401,8 @@ fn parent(path: &Utf8Path) -> &Utf8Path {
         .expect("an entry's path has a fan-out directory")
 }
 
-/// Whether `system` is a system's name: `[a-z0-9][a-z0-9-]{0,63}`.
+/// Whether `system` is a system's name: `[a-z0-9][a-z0-9-]{0,63}`, and not a Windows device
+/// name, which no directory on Windows can have (storage-core design, §2.1 P8).
 fn is_system(system: &str) -> bool {
     let name = system.as_bytes();
     let starts = name
@@ -409,7 +411,7 @@ fn is_system(system: &str) -> bool {
     let rest = name
         .iter()
         .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
-    starts && rest && name.len() <= MAX_SYSTEM_LEN
+    starts && rest && name.len() <= MAX_SYSTEM_LEN && !is_windows_device_name(system)
 }
 
 /// [`StoreError::BadCall`] unless `system` is a system's name.
@@ -418,7 +420,8 @@ fn check_system(system: &str) -> Result<(), StoreError> {
         Ok(())
     } else {
         Err(StoreError::BadCall(format!(
-            "external id system {system:?}: a system's name is [a-z0-9][a-z0-9-]{{0,63}}"
+            "external id system {system:?}: a system's name is [a-z0-9][a-z0-9-]{{0,63}}, and \
+             not a Windows device name"
         )))
     }
 }
