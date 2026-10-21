@@ -9,6 +9,7 @@
 use std::fs;
 #[cfg(feature = "test-hooks")]
 use std::os::unix::process::ExitStatusExt;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::Arc;
 #[cfg(feature = "test-hooks")]
@@ -777,6 +778,10 @@ fn create_refuses_a_name_of_more_than_255_bytes_before_touching_anything() {
     assert_eq!(LocalRepo::open(&store).unwrap().info().unwrap().name, name);
 }
 
+// The refusal of a path under /mnt/ is Linux's: WSL mounts Windows drives there (drvfs). Elsewhere
+// /mnt names nothing, and a volume is judged by its file system (the storage-core design, §2.1
+// P4): the four tests that expect the refusal run on Linux alone.
+#[cfg(target_os = "linux")]
 #[test]
 fn create_refuses_mnt_paths_before_touching_them() {
     // WSL mounts Windows drives under /mnt/ (drvfs): no store may live there. The check is
@@ -796,6 +801,7 @@ fn create_refuses_mnt_paths_before_touching_them() {
 }
 
 /// The entries of directory `dir`, sorted; `None` if it does not exist.
+#[cfg(target_os = "linux")]
 fn entries(dir: &str) -> Option<Vec<String>> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .ok()?
@@ -805,6 +811,7 @@ fn entries(dir: &str) -> Option<Vec<String>> {
     Some(names)
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn create_refuses_a_path_that_leads_under_mnt_before_touching_it() {
     // As given, the path is not under /mnt/, but it leads there: the check resolves it one
@@ -828,6 +835,7 @@ fn create_refuses_a_path_that_leads_under_mnt_before_touching_it() {
     assert_eq!(entries("/mnt"), before, "nothing was created under /mnt");
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn create_follows_symlinks_below_a_missing_directory_before_touching_anything() {
     let dir = tempfile::tempdir().unwrap();
@@ -858,9 +866,14 @@ fn create_follows_symlinks_below_a_missing_directory_before_touching_anything() 
         "nothing was created here"
     );
     assert!(!Path::new("/mnt/swarmops-test-nowhere").exists());
+}
 
-    // A symlink loop is an error, not a hang: one of working out where the path leads, which
-    // names no file of a store (there is none yet).
+/// A symlink loop is an error, not a hang: one of working out where the path leads, which names
+/// no file of a store (there is none yet).
+#[test]
+fn create_refuses_a_symlink_loop_without_hanging() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
     std::os::unix::fs::symlink(base.join("loop"), base.join("loop")).unwrap();
     match LocalRepo::create(&base.join("loop/x"), "x") {
         Err(RepoError::Store(StoreError::Io(swarmops_store::IoFailure {
@@ -875,6 +888,7 @@ fn create_follows_symlinks_below_a_missing_directory_before_touching_anything() 
     }
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn open_refuses_a_path_that_leads_under_mnt() {
     // A store copied, moved or linked under /mnt/ (drvfs, whose locking and sync semantics the

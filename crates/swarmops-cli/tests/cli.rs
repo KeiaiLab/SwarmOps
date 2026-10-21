@@ -954,7 +954,10 @@ fn not_a_repo_exits_6() {
 
 /// A store that leads under `/mnt/` is refused on open as `init` refuses it ([`MNT_STORE`]):
 /// `info` on a path there, and on a symlink that leads there, is `E_UNSUPPORTED_FS` with the
-/// `/mnt` path in `details.path`, before anything is read, and nothing is made there.
+/// `/mnt` path in `details.path`, before anything is read, and nothing is made there. The
+/// refusal by that name is Linux's (WSL's drvfs): other systems judge a volume by its file system
+/// (the storage-core design, §2.1 P4).
+#[cfg(target_os = "linux")]
 #[test]
 fn a_store_that_leads_under_mnt_is_refused_on_open() {
     let mut s = Session::new();

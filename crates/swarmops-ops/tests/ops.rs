@@ -2673,6 +2673,9 @@ fn open_on_non_repo_is_e_not_a_repo() {
     }
 }
 
+// The refusal of a path under /mnt/ is Linux's: WSL mounts Windows drives there (drvfs), and
+// other systems judge a volume by its file system (the storage-core design, §2.1 P4).
+#[cfg(target_os = "linux")]
 #[test]
 fn init_refuses_mnt_path() {
     // WSL mounts Windows drives under /mnt/; the refusal is by path, so /mnt need not exist.
