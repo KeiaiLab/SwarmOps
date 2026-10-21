@@ -44,6 +44,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 import urllib.parse
 from bisect import bisect_right
 from dataclasses import dataclass, field
@@ -98,6 +99,10 @@ COMMENT = re.compile(r"<!--.*?-->", re.S)
 ATX = re.compile(r" {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*")
 HTML_HEADING = re.compile(r"<h([1-6])(?:\s[^<>]*)?>(.*?)</h\1\s*>", re.I | re.S)
 SETEXT = re.compile(r" {0,3}(?:=+|-+)[ \t]*")
+# The markers of the containers a heading may sit in: block quotes (`> `) and list items (`- `,
+# `1. `), nested as deep as they go.
+QUOTES = re.compile(r"(?: {0,3}>[ \t]?)*")
+CONTAINERS = re.compile(r"(?: {0,3}>[ \t]?| {0,3}(?:[-*+]|[0-9]{1,9}[.)])[ \t]+)*")
 # A line that cannot be a setext heading's text: blank, a list item, quote, table row, HTML,
 # heading or fence.
 NOT_TEXT = re.compile(r"\s*(?:$|[-*+>|<#]|\d+[.)](?:\s|$)|`{3}|~{3})")
@@ -125,7 +130,14 @@ HTML_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
 UNDERSCORES = re.compile(r"_+")
 ESCAPED_UNDERSCORE = "\\_"
 KEPT_UNDERSCORE = "\0"
-SLUG_DROP = re.compile(r"[^\w\- ]")
+# A code span stands in the heading's Markdown as one private-use character, its index added.
+CODE_MARK = 0xE000
+CODE_MARKS = re.compile("[\uE000-\uF8FF]")
+# What a slug keeps: letters, marks, decimal and letter numbers, connector punctuation (`_`),
+# `-` and spaces. GitHub drops the rest: symbols, other numbers (`①`, `²`), other punctuation.
+SLUG_KEEP_CLASSES = frozenset("LM")
+SLUG_KEEP_CATEGORIES = frozenset({"Nd", "Nl", "Pc"})
+SLUG_KEEP_CHARS = frozenset("- ")
 
 # Where a link may point: a file in the repository (as GitHub serves this one), or anywhere on
 # the web.
@@ -357,21 +369,58 @@ def mask(text: str) -> str:
     return blank(prose, [found.span() for found in COMMENT.finditer(prose)])
 
 
+def setext_text(lines: list[str], fence: set[int], index: int) -> tuple[int, str] | None:
+    """The first line and the text of the setext heading that line `index` underlines: its
+    whole paragraph, in the same block quote, lines joined with nothing between. `Exit`,
+    `codes`, `-----` gives `Exitcodes`. None when no paragraph ends just above, or when the
+    paragraph continues a list item, quote, table or HTML block."""
+    depth = len(QUOTES.match(lines[index])[0])
+    first = index
+    while first:
+        line = lines[first - 1]
+        inner = line[len(QUOTES.match(line)[0]):]
+
+        # 1. A blank line, a fence, a heading or a rule ends the paragraph above: it starts here.
+        if first - 1 in fence or not inner.strip() or ATX.fullmatch(inner):
+            break
+        if SETEXT.fullmatch(inner):
+            break
+
+        # 2. Any other block continues into the lines here, so they are no heading's text.
+        if NOT_TEXT.match(inner) or len(QUOTES.match(line)[0]) != depth:
+            return None
+        first -= 1
+
+    if first == index:
+        return None
+    words = [line[len(QUOTES.match(line)[0]):].strip() for line in lines[first:index]]
+    return first, "".join(words)
+
+
 def md_headings(text: str, prose: str) -> list[tuple[int, str]]:
-    """The offset and text of each Markdown heading: ATX (`## Name`) and setext (a line
-    underlined with `===` or `---`). The prose finds them, so that headings in code and comments
-    do not count; the text gives their words."""
+    """The offset and text of each Markdown heading: ATX (`## Name`) and setext (a paragraph
+    underlined with `===` or `---`), in block quotes and list items too. The prose finds them,
+    so that headings in code and comments do not count; the text gives their words."""
     lines = text.split("\n")
     masked = prose.split("\n")
+    fence = fenced(lines)
     starts = line_starts(text)
     found = []
     for index, line in enumerate(masked):
-        atx = ATX.fullmatch(line) and ATX.fullmatch(lines[index])
+        # 1. An ATX heading, after any container markers: `> ## In short`, `- ## Step one`.
+        cut = len(CONTAINERS.match(lines[index])[0])
+        atx = ATX.fullmatch(line[cut:]) and ATX.fullmatch(lines[index][cut:])
         if atx:
             found.append((starts[index], plain(atx[2] or "")))
             continue
-        if index and SETEXT.fullmatch(line) and not NOT_TEXT.match(masked[index - 1]):
-            found.append((starts[index - 1], plain(lines[index - 1].strip())))
+
+        # 2. A setext underline, in a block quote or not: its paragraph is the heading.
+        cut = len(QUOTES.match(lines[index])[0])
+        if index in fence or not SETEXT.fullmatch(line[cut:]):
+            continue
+        heading = setext_text(lines, fence, index)
+        if heading:
+            found.append((starts[heading[0]], plain(heading[1])))
     return found
 
 
@@ -392,23 +441,105 @@ def code_text(code: str) -> str:
     return code
 
 
+class Flank(enum.Enum):
+    """How CommonMark sees the character beside a delimiter run."""
+
+    SPACE = "space"
+    PUNCT = "punct"
+    WORD = "word"
+
+
+def flank(char: str) -> Flank:
+    """The kind of `char`: a line's end is a space; a code span's backtick and an escape count
+    as punctuation."""
+    if not char or char.isspace():
+        return Flank.SPACE
+    if char == KEPT_UNDERSCORE or CODE_MARKS.fullmatch(char):
+        return Flank.PUNCT
+    if unicodedata.category(char).startswith("P") or (char.isascii() and not char.isalnum()):
+        return Flank.PUNCT
+    return Flank.WORD
+
+
+@dataclass
+class Delimiter:
+    """A run of `_`: where it is, how many of its characters remain, and what it can do."""
+
+    start: int
+    length: int
+    size: int
+    opens: bool
+    closes: bool
+
+
+def delimiters(text: str) -> list[Delimiter]:
+    """The `_` runs of `text`, each with CommonMark's flanking rules for `_`: it opens only when
+    left-flanking and not inside a word, and closes the same way round."""
+    runs = []
+    for run in UNDERSCORES.finditer(text):
+        before = flank(text[run.start() - 1] if run.start() else "")
+        after = flank(text[run.end()] if run.end() < len(text) else "")
+        left = after != Flank.SPACE and (after != Flank.PUNCT or before != Flank.WORD)
+        right = before != Flank.SPACE and (before != Flank.PUNCT or after != Flank.WORD)
+        size = len(run.group())
+        opens = left and (not right or before == Flank.PUNCT)
+        closes = right and (not left or after == Flank.PUNCT)
+        runs.append(Delimiter(run.start(), size, size, opens, closes))
+    return runs
+
+
+def odd_match(opener: Delimiter, closer: Delimiter) -> bool:
+    """CommonMark's rule of 3: a run that both opens and closes pairs with another only when
+    their sizes do not add up to a multiple of 3, unless both sizes are."""
+    if not (opener.closes or closer.opens):
+        return False
+    both = opener.size % 3 == 0 and closer.size % 3 == 0
+    return (opener.size + closer.size) % 3 == 0 and not both
+
+
 def strip_emphasis(text: str) -> str:
-    """The text without the `_` runs that delimit emphasis, as in `_word_`; a run inside a word,
-    as in `snake_case`, is a literal underscore and stays."""
+    """The text without the `_` that pair up as emphasis, as CommonMark pairs them: `_emph_`
+    and `__strong__` go, while `snake_case`, `the _id field` and `foo_` keep theirs."""
+    runs = delimiters(text)
+    stack: list[Delimiter] = []
+    for closer in runs:
+        # 1. Pair the closer with the nearest opener below it, as often as both have characters.
+        while closer.closes and closer.length:
+            at = next(
+                (i for i in range(len(stack) - 1, -1, -1) if not odd_match(stack[i], closer)), None
+            )
+            if at is None:
+                break
+            opener = stack[at]
+            used = 2 if opener.length >= 2 and closer.length >= 2 else 1
+            opener.length -= used
+            closer.length -= used
+            del stack[at + 1:]
+            if not opener.length:
+                stack.pop()
 
-    def keep(run: re.Match[str]) -> str:
-        before = text[run.start() - 1] if run.start() else " "
-        after = text[run.end()] if run.end() < len(text) else " "
-        return run.group() if before.isalnum() and after.isalnum() else ""
+        # 2. A run with characters left that can open waits for a closer.
+        if closer.length and closer.opens:
+            stack.append(closer)
 
-    return UNDERSCORES.sub(keep, text)
+    # 3. Each run keeps the characters no pair used.
+    parts = []
+    position = 0
+    for run in runs:
+        parts.append(text[position:run.start] + "_" * run.length)
+        position = run.start + run.size
+    parts.append(text[position:])
+    return "".join(parts)
 
 
 def inline_text(markdown: str) -> str:
-    """Markdown outside code spans as text: images, tags and emphasis dropped, links by their
-    text, escapes and entities resolved."""
-    text = IMAGE.sub("", markdown)
+    """A heading's Markdown, its code spans each one CODE_MARKS character, as text: comments,
+    images, tags and emphasis dropped, links by their text, autolinks by their URL, escapes and
+    entities resolved."""
+    text = COMMENT.sub("", markdown)
+    text = IMAGE.sub("", text)
     text = LINK_TEXT.sub(r"\1", text)
+    text = AUTOLINK.sub(r"\1", text)
     text = HTML_TAG.sub("", text)
     text = strip_emphasis(text.replace(ESCAPED_UNDERSCORE, KEPT_UNDERSCORE))
     text = MD_ESCAPE.sub(r"\1", text).replace(KEPT_UNDERSCORE, "_")
@@ -416,21 +547,36 @@ def inline_text(markdown: str) -> str:
 
 
 def plain(markdown: str) -> str:
-    """A heading's Markdown as the text GitHub renders: code spans word for word."""
-    parts = []
-    position = 0
-    for span in CODE_SPAN.finditer(markdown):
-        parts.append(inline_text(markdown[position:span.start()]))
-        parts.append(code_text(span[2]))
-        position = span.end()
-    parts.append(inline_text(markdown[position:]))
-    return "".join(parts)
+    """A heading's Markdown as the text GitHub renders: code spans word for word, also inside
+    a link's text. `See [`land`](#x)` -> `See land`."""
+    codes = []
+
+    def mark(span: re.Match[str]) -> str:
+        codes.append(code_text(span[2]))
+        return chr(CODE_MARK + len(codes) - 1)
+
+    def unmark(found: re.Match[str]) -> str:
+        index = ord(found.group()) - CODE_MARK
+        return codes[index] if index < len(codes) else found.group()
+
+    text = inline_text(CODE_SPAN.sub(mark, markdown))
+    return CODE_MARKS.sub(unmark, text)
+
+
+def slug_keeps(char: str) -> bool:
+    """Whether GitHub's slug keeps a character of a heading's lower-cased text."""
+    category = unicodedata.category(char)
+    if char in SLUG_KEEP_CHARS or category in SLUG_KEEP_CATEGORIES:
+        return True
+    return category[0] in SLUG_KEEP_CLASSES
 
 
 def slugify(text: str) -> str:
-    """GitHub's anchor for a heading's text: lower-cased, every character but word characters,
-    `-` and spaces dropped, each space a `-`. `The API (v2)` -> `the-api-v2`."""
-    return SLUG_DROP.sub("", text.lower()).replace(" ", "-")
+    """GitHub's anchor for a heading's text: each character lower-cased on its own (`ΣΑΣ` ->
+    `σασ`), all but SLUG_KEEP_CATEGORIES, `-` and spaces dropped, each space a `-`.
+    `The API (v2)` -> `the-api-v2`, `① Install` -> `-install`."""
+    lower = "".join(char.lower() for char in text)
+    return "".join(char for char in lower if slug_keeps(char)).replace(" ", "-")
 
 
 def unique(slug: str, seen: dict[str, int]) -> str:
@@ -778,6 +924,14 @@ SELFTEST_PAGES = {
 [a reference][guide], [a line](logo.svg#L1), <https://swarmops.cc> and
 https://example.com/data/archive.
 
+GitHub's slugs: [a lone underscore](docs/slugs.md#using-foo_),
+[an unmatched one](docs/slugs.md#the-_id-field-and-emph),
+[a label with code](docs/slugs.md#see-swarmops-land),
+[an autolink](docs/slugs.md#mirror-httpsexamplecom), [a comment](docs/slugs.md#setup-),
+[symbols, marks and case](docs/slugs.md#-install-\ufe0f-limits-x-σασ-i\u0307),
+[a setext paragraph](docs/slugs.md#exitcodes), [a quote](docs/slugs.md#in-short),
+[a list item](docs/slugs.md#step-one), [a quoted setext](docs/slugs.md#quotedsetext).
+
 [guide]: <docs/guide.md> "The guide"
 
 <p><a href="docs/guide.md#kept">
@@ -827,7 +981,40 @@ repository is public, on the Free plan. The docs/reference/ pages are generated.
 [no target]()
 [a line past the end](../logo.svg#L1-L9)
 [a heading anchor in a source file](../logo.svg#top)
+[a lone underscore dropped](slugs.md#using-foo)
+[an unmatched underscore dropped](slugs.md#the-id-field-and-emph)
+[a link label's destination kept](slugs.md#see-swarmops-landslugs)
+[an autolink's text dropped](slugs.md#mirror-)
+[a comment's words kept](slugs.md#setup----todo---)
+[symbols kept, marks dropped](slugs.md#\u2460-install--limits-x\u00b2-\u03c3\u03b1\u03c2-i\u0307)
+[a setext heading's last line](slugs.md#codes)
 [unused]: missing.md
+""",
+    "docs/slugs.md": """# Slugs
+
+## Using foo_
+
+## The _id field and _emph_
+
+## See [`swarmops land`](#slugs)
+
+## Mirror <https://example.com>
+
+## Setup <!-- todo -->
+
+## \u2460 Install \u26a0\ufe0f Limits x\u00b2 \u03a3\u0391\u03a3 \u0130
+
+Exit
+codes
+-----
+
+> ## In short
+
+- ## Step one
+
+> Quoted
+> setext
+> ---
 """,
     "docs/host-paths.md": """Built in /home/someone/src.
 Cached under /data/cache.
