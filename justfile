@@ -1,5 +1,8 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
+# The Python launcher of the scripts below: Windows has `python`, and no `python3`.
+python := if os_family() == "windows" { "python" } else { "python3" }
+
 # A bare `just` runs `check`, the definition of done.
 default: check
 
@@ -40,7 +43,7 @@ check:
     RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --document-private-items --all-features
     cargo deny --locked check
     cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
-    python3 -I scripts/third-party-licenses.py --check
+    {{python}} -I scripts/third-party-licenses.py --check
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,

@@ -3,6 +3,11 @@
 # dependencies runs `--locked`, so a stale Cargo.lock fails here instead of being rewritten.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# The Python launcher: Windows has `python`, and no `python3`.
+case "$(uname -s)" in
+  MINGW* | MSYS* | CYGWIN*) python=python ;;
+  *) python=python3 ;;
+esac
 cargo fmt --all --check
 cargo fmt --manifest-path fuzz/Cargo.toml --check
 cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
@@ -35,4 +40,4 @@ cargo deny --locked check
 # in fuzz/deny.exceptions.toml.
 cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
 # THIRD-PARTY-LICENSES, the notices the release archives carry, still matches Cargo.lock.
-python3 -I scripts/third-party-licenses.py --check
+"$python" -I scripts/third-party-licenses.py --check
