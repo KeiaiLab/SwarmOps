@@ -12,6 +12,14 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+- A one-line installer, `curl -fsSL https://get.swarmops.cc/install.sh | bash` (`scripts/install.sh`,
+  served as `site/install.sh`): it installs `swarmops` and `so` from a release, checked against
+  its `SHA256SUMS`, into `~/.local/bin` (`/usr/local/bin` as root); `--version` pins a release,
+  `--dir` picks the directory, a second run updates, and `--uninstall` removes the binaries and
+  no store. `just check` runs its offline tests, `scripts/test-install.py`.
+
 ## [0.1.0] - 2026-10-20
 
 ### Added

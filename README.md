@@ -171,35 +171,33 @@ is durable, so the next write repairs whatever a crash cut short.
 
 ### Install
 
-Each released version is on the [releases page](https://github.com/KeiaiLab/SwarmOps/releases):
-one archive per Linux target, `swarmops-<version>-x86_64-unknown-linux-gnu.tar.gz` and
-`swarmops-<version>-aarch64-unknown-linux-gnu.tar.gz`, each with `swarmops`, `so`, the license,
-the licenses of the third-party crates compiled into them (`THIRD-PARTY-LICENSES`), this README
-and the changelog, beside a `SHA256SUMS` file to check them against
-([RELEASE.md](RELEASE.md) says how they are built). The binaries need glibc 2.34 or newer
-(Ubuntu 22.04, Debian 12 and RHEL 9 have it); the aarch64 ones are cross-compiled and
-smoke-tested under QEMU, not tested on aarch64 hardware. On glibc 2.34 to 2.38 hosts, every start
-of `swarmops` and `so` prints one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found
-(required by …)`; exit codes, stdout envelopes and the MCP protocol are unaffected, and glibc
-2.39 prints nothing. The first release is v0.1.0; to build from source instead, see below.
-`gh` downloads a release with your GitHub login, and `curl` without one:
-
 ```sh
-gh release download --repo KeiaiLab/SwarmOps \
-  --pattern 'swarmops-*-x86_64-unknown-linux-gnu.tar.gz' --pattern SHA256SUMS  # the latest release
-# or, without a login (v = the release's version):
-v=0.1.0; u=https://github.com/KeiaiLab/SwarmOps/releases/download/v$v
-curl -fL -O "$u/swarmops-$v-x86_64-unknown-linux-gnu.tar.gz" -O "$u/SHA256SUMS"
-sha256sum --check --ignore-missing SHA256SUMS
-tar -xzf swarmops-*-x86_64-unknown-linux-gnu.tar.gz
-cd swarmops-*-x86_64-unknown-linux-gnu && install -D -t ~/.local/bin swarmops so
+curl -fsSL https://get.swarmops.cc/install.sh | bash
 ```
 
-From source, with Rust 1.99 (`rust-toolchain.toml` pins it), on Linux:
+That installs `swarmops` and `so` from the latest [release](https://github.com/KeiaiLab/SwarmOps/releases),
+checked against its `SHA256SUMS`, into `~/.local/bin` (`/usr/local/bin` as root). Run it again to
+update. Options go after `bash -s --`:
 
 ```sh
-cargo build --release                               # target/release/swarmops and target/release/so
-cargo install --path crates/swarmops-cli --locked   # both, into ~/.cargo/bin
+curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --version 0.1.0     # pin a release
+curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --dir /opt/swarmops/bin
+curl -fsSL https://get.swarmops.cc/install.sh | bash -s -- --uninstall         # stores stay
+```
+
+Linux, x86_64 or aarch64, glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9). On glibc 2.34
+to 2.38 every start prints one `ld.so` line on stderr, `weak version 'GLIBC_2.39' not found`;
+exit codes, stdout and the MCP protocol are unaffected. The aarch64 build is cross-compiled and
+smoke-tested under QEMU, not on aarch64 hardware. The installer needs no sudo for its default
+directory, sends no telemetry and edits no shell startup file; `bash install.sh --help` lists every
+option. To check a release by hand instead, each one holds a
+`swarmops-<version>-<target>.tar.gz` per target and `SHA256SUMS`
+([RELEASE.md](RELEASE.md) says how they are built).
+
+From source, with Rust 1.99 (`rust-toolchain.toml` pins it):
+
+```sh
+cargo install --git https://github.com/KeiaiLab/SwarmOps --tag v0.1.0 --locked swarmops-cli
 ```
 
 `so` is the short form of `swarmops`: the same program by a shorter name. An archive holds both,

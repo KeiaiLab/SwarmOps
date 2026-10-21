@@ -38,6 +38,33 @@ The examples run the long name, `swarmops`; `so` is the same program.
 
 ## Install
 
+### With the installer
+
+```sh
+curl -fsSL https://get.swarmops.cc/install.sh | bash
+```
+
+`scripts/install.sh`, which swarmops.cc serves, downloads the latest release's archive for this
+host's target, checks it against the release's `SHA256SUMS`, and puts `swarmops` and `so` in
+`~/.local/bin`, or `/usr/local/bin` when run as root; nothing is installed on a mismatch. It
+refuses a host the release builds do not run on (not Linux, not x86_64 or aarch64, musl, or
+glibc older than 2.34) before it downloads anything. Each binary is written under a temporary
+name in the directory and renamed into place, so an interrupted run leaves the old binary, never
+half a new one.
+
+| To | Run |
+| --- | --- |
+| install a given release | `… \| bash -s -- --version 0.1.0` |
+| install elsewhere | `… \| bash -s -- --dir /opt/swarmops/bin` (or `SWARMOPS_INSTALL_DIR`) |
+| update | the same command again: it says which version it replaced |
+| uninstall | `… \| bash -s -- --uninstall`: removes the two binaries, if they are SwarmOps', and no store |
+
+For a fleet, pin `--version` (or `SWARMOPS_VERSION`) so that every host runs the same release,
+and keep a reviewed copy of the script with your provisioning rather than piping it from the
+network each time. It needs curl or wget, tar, and sha256sum or shasum; it sends no telemetry
+and edits no shell startup file, so it prints the `PATH` line to add when the directory is not
+on `PATH`.
+
 ### From a clone
 
 The repository's `rust-toolchain.toml` pins Rust 1.99.0, which rustup installs on the first build

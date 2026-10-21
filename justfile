@@ -27,7 +27,9 @@ default: check
 # CI (.github/workflows/ci.yml) runs this recipe with `NEXTEST_PROFILE=ci`; the release run
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
-# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices.
+# Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
+# offline, and checks that site/install.sh is the same file.
+# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
@@ -41,6 +43,7 @@ check:
     cargo deny --locked check
     cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
     python3 -I scripts/third-party-licenses.py --check
+    python3 -I scripts/test-install.py
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,

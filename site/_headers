@@ -20,11 +20,19 @@
   Cache-Control: public, max-age=86400
 /styles.css
   Cache-Control: public, max-age=3600
+# The installer, also served at get.swarmops.cc: read as text in a browser, and an update reaches
+# `curl | bash` within minutes.
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=300
 
 # Search engines skip the pages.dev addresses; custom domains do not match these hosts.
 https://:project.pages.dev/*
   X-Robots-Tag: noindex
 https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex
+# get.swarmops.cc serves the installer; the site itself is indexed at swarmops.cc only.
+https://get.swarmops.cc/*
   X-Robots-Tag: noindex
 
 # One canonical for the dark and the light figure page, which differ only in theme.

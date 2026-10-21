@@ -93,6 +93,10 @@ A change is done when `just check` passes on it. It runs, in order:
    matches `Cargo.lock`, the licenses `deny.toml` allows and the crates' own license files. After
    a dependency change, run `python3 -I scripts/third-party-licenses.py` and commit the file it
    writes with `Cargo.lock`.
+8. `scripts/test-install.py`: the one-line installer, `scripts/install.sh`, run under sh (and
+   dash and busybox sh where installed) against a fake release on 127.0.0.1, with no network;
+   and `site/install.sh`, the copy get.swarmops.cc serves, still the same file. After changing the
+   installer, copy it to `site/install.sh`.
 
 The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
 where it is built, by `just bench-compare` and the weekly scheduled run, with a policy of its

@@ -194,12 +194,11 @@
   <div class="wrap">
     <p class="eyebrow">Quick start</p>
     <h2>Build it, make a store, commit</h2>
-    <p class="sub">Linux, Rust 1.99 (the repository pins it). A store must live on a native Linux filesystem. <code>so</code> is the short name of <code>swarmops</code>: the same program.</p>
+    <p class="sub">Linux, x86_64 or aarch64, glibc 2.34 or newer. A store must live on a native Linux filesystem. <code>so</code> is the short name of <code>swarmops</code>: the same program.</p>
     <div class="steps one">
       <div class="code">
-        <div class="label">Install, in a clone of the repository</div>
-<pre>cargo build --release                               <span class="c"># target/release/swarmops and target/release/so</span>
-cargo install --path crates/swarmops-cli --locked   <span class="c"># both, into ~/.cargo/bin</span></pre>
+        <div class="label">Install</div>
+<pre>curl -fsSL https://get.swarmops.cc/install.sh | bash        <span class="c"># swarmops and so, into ~/.local/bin</span></pre>
       </div>
       <div class="code">
         <div class="label">First commands</div>
