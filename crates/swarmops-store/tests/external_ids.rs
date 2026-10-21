@@ -355,8 +355,9 @@ fn a_damaged_entry_is_external_id_corrupt() {
 /// `ExternalIdCorrupt`, and a put of its key names it as a conflict and leaves it as it is. Each
 /// file here is the entry it was, then a byte too many, or a hole (no disk) to 64 MiB, or to
 /// 1 TiB, more than a host holds in memory. What a call read is what this thread's `read` calls
-/// returned meanwhile, by its `rchar` count (`/proc/thread-self/io`); the entry itself reads back
-/// in 44 bytes.
+/// returned meanwhile, by its `rchar` count (`/proc/thread-self/io`, a file only Linux has, so
+/// this test runs on Linux alone); the entry itself reads back in 44 bytes.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_entry_file_longer_than_an_entry_is_corrupt_and_read_no_further() {
     use std::fs::{File, OpenOptions};

@@ -273,8 +273,9 @@ fn a_damaged_value_file_reads_as_missing_and_is_removed() {
 /// fed zeros, records it: about 16 KiB on disk) and its trailer right for those zeros, is refused
 /// before its frame is decoded: the slot reads as missing and its file is removed, as any value
 /// file that does not check out is. Nothing the size of the value is allocated: the process's
-/// peak resident memory (`VmHWM`, Linux; nextest runs each test in a process of its own) grows by
-/// less than half the claimed length, where decoding it would write all of it.
+/// peak resident memory (`VmHWM`, on Linux alone, which has the file; nextest runs each test in a
+/// process of its own) grows by less than half the claimed length, where decoding it would write
+/// all of it.
 #[test]
 fn a_zstd_value_past_the_object_limit_is_refused_before_it_is_decoded() {
     use std::io::Write as _;
@@ -316,15 +317,14 @@ fn a_zstd_value_past_the_object_limit_is_refused_before_it_is_decoded() {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, &file).unwrap();
 
+    #[cfg(target_os = "linux")]
     let before = peak_resident_kib();
     let got = store.get(&slot).unwrap().map(|value| value.len());
+    #[cfg(target_os = "linux")]
     let grew = peak_resident_kib().saturating_sub(before);
-    assert_eq!(
-        got, None,
-        "a value past the object limit reads as missing (the read grew the peak resident memory \
-         by {grew} KiB)"
-    );
+    assert_eq!(got, None, "a value past the object limit reads as missing");
     assert!(!path.exists(), "and its file is removed");
+    #[cfg(target_os = "linux")]
     assert!(
         grew < len / 2 / 1024,
         "the read grew the peak resident memory by {grew} KiB"
@@ -483,8 +483,9 @@ fn a_failed_read_of_a_listed_value_names_its_file() {
     }
 }
 
-/// The process's peak resident memory, in KiB: `VmHWM` of `/proc/self/status` on Linux; 0
-/// elsewhere, where the check that uses it checks nothing.
+/// The process's peak resident memory, in KiB: `VmHWM` of `/proc/self/status`, a file only Linux
+/// has; what asks for it runs on Linux alone.
+#[cfg(target_os = "linux")]
 fn peak_resident_kib() -> u64 {
     let status = fs::read_to_string("/proc/self/status").unwrap_or_default();
     status

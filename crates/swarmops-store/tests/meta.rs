@@ -25,7 +25,9 @@ use swarmops_store::{
     JournalEntry, Layout, LimitKind, LogCut, MetaLock, MetaRead, MetaStore, RealFs, Record,
     Recovered, RefMoveEntry, RefState, StoreError,
 };
-use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
+#[cfg(target_os = "linux")]
+use swarmops_testkit::child::test_args;
+use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, NoSyncFs, RecordingFs, Watch, Watched, When, copy_dir};
 #[cfg(feature = "test-hooks")]
