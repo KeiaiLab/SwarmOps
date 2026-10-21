@@ -14,6 +14,7 @@ mod landing_models;
 mod merge;
 mod oplog;
 mod path_history;
+mod platform_paths;
 mod raw;
 mod read;
 mod verify;

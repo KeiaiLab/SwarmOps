@@ -19,6 +19,7 @@ mod git;
 mod landing;
 mod mcp;
 mod multiprocess;
+mod platform_cli;
 mod power_loss;
 mod so;
 

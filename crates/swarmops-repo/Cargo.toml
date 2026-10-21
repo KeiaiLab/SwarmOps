@@ -31,6 +31,12 @@ postcard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 
+# The store root without Windows' `\\?\` prefix, so that the names the store joins with `/` still
+# read as separators (storage-core design, §2.1 P9). Windows only: elsewhere it is std's own
+# canonical path, and a release build would carry a crate for nothing.
+[target.'cfg(windows)'.dependencies]
+dunce.workspace = true
+
 [dev-dependencies]
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
 criterion.workspace = true

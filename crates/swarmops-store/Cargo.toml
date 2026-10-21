@@ -27,11 +27,26 @@ swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 blake3.workspace = true
 camino.workspace = true
 crc32fast.workspace = true
-libc.workspace = true
 rayon.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 zstd.workspace = true
+
+# The flags `meta/lock` is opened with, `O_NOFOLLOW` and `O_NONBLOCK`: constants std does not
+# name; no call. Windows opens it with `FILE_FLAG_OPEN_REPARSE_POINT` (windows-sys, below).
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+# macOS's volume check: `statfs` of the nearest directory that exists, through rustix's safe API,
+# so that the store holds no `unsafe` (storage-core design, §2.1 P4).
+[target.'cfg(target_os = "macos")'.dependencies]
+rustix = { workspace = true, features = ["fs"] }
+
+# Windows constants by name: the flags a directory and `meta/lock` are opened with, and the error
+# codes a rename, a removal and a link retry on (storage-core design, §2.1 P2, P5, P10). Constants
+# only: `unsafe_code = "forbid"` stands, and no function of the crate is called.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 # The integration tests' and benches' support; no unit test uses it (it depends on this crate).
