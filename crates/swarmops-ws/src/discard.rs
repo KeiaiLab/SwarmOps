@@ -70,13 +70,29 @@ pub fn discard(ctx: &Ctx<'_>, req: WsDiscardReq) -> Result<WsDiscardResp, OpErro
 }
 
 /// Removes the file or symlink the agent added at `path`, which the head lacks; a directory is
-/// left (it may hold a build's output).
+/// left (it may hold a build's output). A symlink or file above `path` is never gone through:
+/// `E_WS_DIRTY` naming it.
 fn discard_added(
     host: &dyn HostFs,
     ws: &Workspace,
     path: &str,
     discarded: &mut BTreeSet<String>,
 ) -> Result<(), OpError> {
+    // 1. Each directory above it: missing, nothing to remove; not a directory, refused.
+    let parts: Vec<&str> = path.split('/').collect();
+    for n in 1..parts.len() {
+        let ancestor = parts[..n].join("/");
+        let there = host
+            .symlink_metadata(&ws.dir.join(&ancestor))
+            .map_err(|e| host_failed(&ancestor, &e))?;
+        match there.map(|meta| meta.kind) {
+            None => return Ok(()),
+            Some(HostKind::Dir) => {}
+            Some(_) => return Err(dirty(vec![ancestor])),
+        }
+    }
+
+    // 2. The file or symlink itself.
     let abs = ws.dir.join(path);
     let there = host
         .symlink_metadata(&abs)

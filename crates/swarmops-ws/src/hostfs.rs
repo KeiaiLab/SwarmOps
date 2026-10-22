@@ -10,6 +10,7 @@
 //!      RealHost              RealFs
 //!      RecordingHost         CrashAtFs (test-hooks)
 //!      CrashAtHost
+//!      (both test-hooks)
 //! ```
 //!
 //! The M5 plan's task W1 froze the trait; task W5 wrote `RealHost`, `RecordingHost` and
@@ -18,11 +19,14 @@
 //! executable bit, which a materialisation and the volume probe write).
 
 use std::io;
+#[cfg(feature = "test-hooks")]
 use std::sync::Mutex;
 #[cfg(feature = "test-hooks")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8Path;
+#[cfg(feature = "test-hooks")]
+use camino::Utf8PathBuf;
 
 /// What a path is on the host, as `symlink_metadata` sees it: a symlink is never followed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -274,7 +278,8 @@ fn inode_and_mode(_meta: &std::fs::Metadata) -> (u64, u32) {
     (0, 0)
 }
 
-/// A [`HostFs`] method, as [`RecordingHost`] records it.
+/// A [`HostFs`] method, as [`RecordingHost`] records it (feature `test-hooks`).
+#[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HostMethod {
     /// [`HostFs::write_file`].
@@ -302,6 +307,7 @@ pub enum HostMethod {
 }
 
 /// One call [`RecordingHost`] saw: the method and the path it named (`from` for a rename).
+#[cfg(feature = "test-hooks")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HostCall {
     /// The method.
@@ -311,7 +317,8 @@ pub struct HostCall {
 }
 
 /// A host that forwards every call to `inner` and records it, in order: what a test counts to
-/// see that an update writes only what changed.
+/// see that an update writes only what changed (feature `test-hooks`).
+#[cfg(feature = "test-hooks")]
 pub struct RecordingHost<H: HostFs = RealHost> {
     /// The host the calls go to.
     inner: H,
@@ -319,6 +326,7 @@ pub struct RecordingHost<H: HostFs = RealHost> {
     calls: Mutex<Vec<HostCall>>,
 }
 
+#[cfg(feature = "test-hooks")]
 impl<H: HostFs> RecordingHost<H> {
     /// Records the calls made on `inner`.
     pub fn new(inner: H) -> RecordingHost<H> {
@@ -356,6 +364,7 @@ impl<H: HostFs> RecordingHost<H> {
     }
 }
 
+#[cfg(feature = "test-hooks")]
 impl<H: HostFs> HostFs for RecordingHost<H> {
     fn write_file(&self, path: &Utf8Path, bytes: &[u8]) -> io::Result<()> {
         self.record(HostMethod::WriteFile, path);
