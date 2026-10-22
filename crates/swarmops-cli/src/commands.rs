@@ -63,6 +63,9 @@ use crate::output::{self, Format, Printed};
 /// The client file `blob put -` reads: this process's stdin, through the path it is open at.
 const STDIN: &str = "/dev/stdin";
 
+/// The fd file system's names for this process's fd 0 and 1 ([`is_own_stdio`]).
+const OWN_STDIO: [&str; 4] = [STDIN, "/dev/stdout", "/dev/fd/0", "/dev/fd/1"];
+
 /// The hint of a change list past [`MAX_REQUEST_BYTES`]: what takes contents out of it.
 const REQUEST_HINT: &str = "send large contents as {\"file\": path} content, or store them first \
                             with swarmops blob put and name them by id: {\"blob\": id}";
@@ -984,11 +987,21 @@ fn read_text(
 /// Whether `path` names this process's own stdin or stdout (the same device and inode), which
 /// `swarmops mcp` must never read: they carry the protocol, and a read would block on them.
 /// `stat`, not `open`, so that a FIFO at `path` cannot block here either; a path that cannot be
-/// stat'ed is not ours, and the read reports its own error later.
+/// stat'ed is not ours, and the read reports its own error later. A path that resolves to one of
+/// [`OWN_STDIO`] is ours by name: on macOS a pipe's dev and inode differ from the name's.
 pub(crate) fn is_own_stdio(path: &str) -> bool {
     let Ok(meta) = fs::metadata(path) else {
         return false;
     };
+
+    // 1. By name, as given or with its symlinks resolved (a Linux pipe resolves to nothing).
+    let resolved = fs::canonicalize(path).ok();
+    let named = |name: &&str| path == *name || resolved.as_deref() == Some(Path::new(name));
+    if OWN_STDIO.iter().any(named) {
+        return true;
+    }
+
+    // 2. By device and inode, for any other path to the same file.
     let own = |fd: std::os::fd::BorrowedFd<'_>| {
         fd.try_clone_to_owned()
             .ok()
@@ -1099,6 +1112,30 @@ fn quoted(arg: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The fd file system's names for fd 0 and 1 are this process's stdin and stdout, whatever
+    /// their dev and inode: on macOS a pipe's differ from those `stat` reports for the name.
+    /// A symlink to one is resolved; another file is not ours.
+    #[test]
+    fn the_fd_names_of_stdin_and_stdout_are_own_stdio() {
+        // 1. Every name of fd 0 and 1, when this host has it.
+        for name in OWN_STDIO {
+            if fs::metadata(name).is_ok() {
+                assert!(is_own_stdio(name), "{name}");
+            }
+        }
+
+        // 2. A symlink to /dev/stdin is stdin; a regular file is not.
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("in");
+        std::os::unix::fs::symlink(STDIN, &link).unwrap();
+        if fs::metadata(&link).is_ok() {
+            assert!(is_own_stdio(link.to_str().unwrap()));
+        }
+        let regular = dir.path().join("a.txt");
+        fs::write(&regular, "a\n").unwrap();
+        assert!(!is_own_stdio(regular.to_str().unwrap()));
+    }
 
     #[test]
     fn cat_splits_its_target_at_the_first_colon() {
