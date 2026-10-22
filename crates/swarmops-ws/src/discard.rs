@@ -45,31 +45,46 @@ pub fn discard(ctx: &Ctx<'_>, req: WsDiscardReq) -> Result<WsDiscardResp, OpErro
         ));
     }
 
-    // 2. What to restore, and what the agent put in its way, path by path.
-    let head = Tree::new(ctx.store, &ws.file.head);
+    // 2. The head's files written back.
+    let discarded = restore(ctx, &ws, &ws.file.head, &named)?;
+    Ok(WsDiscardResp {
+        discarded: discarded.into_iter().collect(),
+        status_after: after::attach(ctx, &ws, status_after),
+    })
+}
+
+/// Makes each of the `named` paths of workspace `ws` (whose lock the caller holds) what
+/// changeset `rev` holds there, whatever the agent did to it; a file `rev` lacks is removed. The
+/// paths it changed. What `ws discard` does from the head, and what a rebase's `--abort` and
+/// `ws resolve --take` do from one side.
+pub(crate) fn restore(
+    ctx: &Ctx<'_>,
+    ws: &Workspace,
+    rev: &str,
+    named: &[String],
+) -> Result<BTreeSet<String>, OpError> {
+    // 1. What to restore, and what the agent put in its way, path by path.
+    let tree = Tree::new(ctx.store, rev);
     let mut restore = Vec::new();
     let mut discarded = BTreeSet::new();
-    for path in &named {
-        let items = items_under(ctx.store, &head, Some(path))?.unwrap_or_default();
+    for path in named {
+        let items = items_under(ctx.store, &tree, Some(path))?.unwrap_or_default();
         if items.is_empty() {
-            discard_added(ctx.host.as_ref(), &ws, path, &mut discarded)?;
+            discard_added(ctx.host.as_ref(), ws, path, &mut discarded)?;
         }
         for item in items {
-            clear_way(ctx.host.as_ref(), &ws, path, &item.path, &mut discarded)?;
-            if let Some(put) = unrestored(ctx.host.as_ref(), &ws, item)? {
+            clear_way(ctx.host.as_ref(), ws, path, &item.path, &mut discarded)?;
+            if let Some(put) = unrestored(ctx.host.as_ref(), ws, item)? {
                 discarded.insert(put.item.path.clone());
                 restore.push(put);
             }
         }
     }
 
-    // 3. The head's files written back.
+    // 2. Its files written back.
     restore.sort_by(|a, b| a.item.path.cmp(&b.item.path));
     materialize::put_all(ctx, &ws.dir, ws.file.volume, &restore)?;
-    Ok(WsDiscardResp {
-        discarded: discarded.into_iter().collect(),
-        status_after: after::attach(ctx, &ws, status_after),
-    })
+    Ok(discarded)
 }
 
 /// Every path workspace `ws`'s status finds changed, as discard takes paths.

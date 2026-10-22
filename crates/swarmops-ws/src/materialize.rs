@@ -872,7 +872,10 @@ fn batches(puts: &[Put]) -> Vec<&[Put]> {
 
 /// The contents of blobs `ids`, by `blob_get`, decoded; `E_STORE_CORRUPT` for one the store
 /// lacks.
-fn fetch(store: &dyn StoreOps, mut ids: Vec<&str>) -> Result<HashMap<String, Vec<u8>>, OpError> {
+pub(crate) fn fetch(
+    store: &dyn StoreOps,
+    mut ids: Vec<&str>,
+) -> Result<HashMap<String, Vec<u8>>, OpError> {
     let mut contents = HashMap::with_capacity(ids.len());
     while !ids.is_empty() {
         // 1. As many as fit in one answer.

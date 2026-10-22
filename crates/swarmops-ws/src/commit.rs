@@ -47,7 +47,7 @@ struct Entry {
 
 /// `ws_commit` in the workspace `req` names.
 pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> {
-    // 1. The request's paths and modes, then the workspace under its lock, not rebasing.
+    // 1. The request's paths and modes, then the workspace under its lock.
     let WsCommitReq {
         workspace,
         message,
@@ -58,6 +58,24 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
     let named = normalize(paths)?;
     let modes = modes_of(modes)?;
     let (mut ws, _held) = open_locked(ctx, &Locate::Name(workspace))?;
+
+    // 2. The commit, then the status after it.
+    let mut done = commit_in(ctx, &mut ws, message, &named, &modes)?;
+    done.status_after = after::attach(ctx, &ws, status_after);
+    Ok(done)
+}
+
+/// Commits the edits of workspace `ws`, whose lock the caller holds, under the `named` paths
+/// (every path when empty) with `modes`: what `ws commit` does once it holds the lock, and what
+/// `ws rebase -m` and `ws land -m` do first. The response carries no status.
+pub(crate) fn commit_in(
+    ctx: &Ctx<'_>,
+    ws: &mut Workspace,
+    message: String,
+    named: &[String],
+    modes: &BTreeMap<String, FileKind>,
+) -> Result<WsCommitResp, OpError> {
+    // 1. Not rebasing; a mode only where the volume drops the bit.
     if let State::Rebasing { .. } = ws.file.state {
         return Err(OpError::new(
             ErrorCode::UnresolvedConflicts,
@@ -74,8 +92,8 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
 
     // 2. What changed, under the named paths (and those of the modes); a named path outside the
     //    prefixes joins them.
-    let extra = outside(ctx, &ws, &named)?;
-    let mut filter = named.clone();
+    let extra = outside(ctx, ws, named)?;
+    let mut filter = named.to_vec();
     if !named.is_empty() {
         filter.extend(modes.keys().cloned());
     }
@@ -84,11 +102,11 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
         full: false,
         extra: extra.clone(),
     };
-    let scanned = scan::scan(ctx, &ws, &want)?;
+    let scanned = scan::scan(ctx, ws, &want)?;
 
     // 3. The entries: each change, and each mode asked for; nothing, an empty commit.
-    let mut entries = entries_of(&scanned.changes, &modes);
-    entries.extend(mode_only(&scanned.index, &scanned.changes, &modes));
+    let mut entries = entries_of(&scanned.changes, modes);
+    entries.extend(mode_only(&scanned.index, &scanned.changes, modes));
     entries.sort_by(|a, b| a.path.cmp(&b.path));
     if entries.is_empty() {
         return Err(OpError::new(
@@ -106,13 +124,13 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
     }
 
     // 5. The bytes the scan did not hash, hashed under the budget.
-    hash_missing(ctx, &ws, &mut entries)?;
+    hash_missing(ctx, ws, &mut entries)?;
 
     // 6. The pending record, durable before the store hears of the commit (WS1).
-    let key = pending_key(ctx, &ws)?;
+    let key = pending_key(ctx, ws)?;
 
     // 7. The blobs the store lacks, uploaded.
-    let blobs_written = upload(ctx, &ws, &entries)?;
+    let blobs_written = upload(ctx, ws, &entries)?;
 
     // 8. The commit, by blob id, on the head's full id.
     let changes = entries.iter().map(change_input).collect();
@@ -139,7 +157,7 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
     ws.file = file;
     let mut scanned = scanned;
     learn(&mut scanned.index, &entries);
-    scanned.keep(&ws.dir, &scan::binding_of(&ws), Keep::Always);
+    scanned.keep(&ws.dir, &scan::binding_of(ws), Keep::Always);
     pending::remove_pending(ctx.fs.as_ref(), &ws.dir)?;
 
     Ok(WsCommitResp {
@@ -148,7 +166,7 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
         files_changed: done.files_changed,
         blobs_written,
         replayed: done.replayed,
-        status_after: after::attach(ctx, &ws, status_after),
+        status_after: None,
     })
 }
 
