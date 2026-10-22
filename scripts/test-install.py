@@ -226,6 +226,7 @@ class Sandbox:
     dest: Path
     tmp: Path
     env: dict[str, str]
+    staged: Path
 
 
 @dataclass
@@ -410,6 +411,12 @@ def sandbox(case: Case, release: Release, tools: dict, root: Path) -> Sandbox:
     write_fakes(fakes, case.system)
     dest = Path(case.dest.format(home=home))
 
+    # Other programs' files, written now and renamed into DEST after the setup install.
+    staged = base / "foreign"
+    staged.mkdir()
+    for name in case.foreign:
+        script(staged / name, FOREIGN)
+
     # wget reads no startup file but this empty one: it refuses /dev/null as one.
     wgetrc = base / "wgetrc"
     wgetrc.touch()
@@ -429,11 +436,12 @@ def sandbox(case: Case, release: Release, tools: dict, root: Path) -> Sandbox:
     }
     env |= {name: release.url for name in PROXIES}
     env |= {key: value.format(home=home, dest=dest, path=path) for key, value in case.env}
-    return Sandbox(base, dest, tmp, env)
+    return Sandbox(base, dest, tmp, env, staged)
 
 
-def run_case(case: Case, shell: tuple[str, list[str]], release: Release, tools: dict, root: Path) -> Outcome:
-    """Runs a case under a shell, `case.runs` times in a row, and checks each run."""
+def run_case(case: Case, shell: tuple[str, list[str]], box: Sandbox) -> Outcome:
+    """Runs a case under a shell in its sandbox, `case.runs` times in a row, and checks each
+    run."""
     label = f"[{shell[0]}] {case.name}"
     missing = [name for name in case.needs if not shutil.which(name)]
     if missing:
@@ -443,7 +451,6 @@ def run_case(case: Case, shell: tuple[str, list[str]], release: Release, tools: 
     if shell[0] == BUSYBOX and (applets or case.drop):
         return Outcome(label, [], "busybox sh runs its own applets, not this case's fakes")
 
-    box = sandbox(case, release, tools, root)
     args = [arg.format(dest=box.dest) for arg in case.args]
     problems = []
 
@@ -462,7 +469,7 @@ def run_case(case: Case, shell: tuple[str, list[str]], release: Release, tools: 
             return Outcome(label, [f"its setup install failed: {proc.stderr.strip()!r}"])
     for name in case.foreign:
         box.dest.mkdir(parents=True, exist_ok=True)
-        script(box.dest / name, FOREIGN)
+        (box.staged / name).rename(box.dest / name)
 
     # 2. The runs, each checked.
     for number in range(1, case.runs + 1):
@@ -724,15 +731,19 @@ def run_all(shells: list, root: Path) -> list[Outcome]:
         # 2. The tool directories the cases need.
         tools = {drop: tool_dir(root, drop) for drop in {case.drop for case in CASES}}
 
-        # 3. The cases, in parallel; the interrupts share the server's held download.
-        jobs = [(case, shell) for shell in shells for case in CASES]
+        # 3. Every case's sandbox, before any process starts: a fake written while another
+        # thread forks stays open in that child until it execs, and running the fake then
+        # fails with ETXTBSY ("Text file busy").
+        jobs = [(case, shell, sandbox(case, release, tools, root)) for shell in shells for case in CASES]
+
+        # 4. The cases, in parallel; the interrupts share the server's held download.
         with ThreadPoolExecutor(WORKERS) as pool:
-            outcomes += pool.map(lambda job: run_case(*job, release, tools, root), jobs)
+            outcomes += pool.map(lambda job: run_case(*job), jobs)
         for shell in shells:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 outcomes.append(interrupt(shell, sig, release, tools, root))
 
-        # 4. No request went anywhere but the fake release.
+        # 5. No request went anywhere but the fake release.
         if release.escapes:
             outcomes.append(Outcome("the network", [f"requests left 127.0.0.1: {release.escapes}"]))
     finally:
