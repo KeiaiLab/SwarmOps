@@ -134,7 +134,7 @@ landed e1b27d16… on main (onto 31528945…, attempt 1)
 ### One JSON envelope per command
 
 Every command prints one JSON envelope on stdout (the few exceptions are under
-[Output and exit codes](#output-and-exit-codes)): `ok`, `op`, `api`, then `result` or `error`,
+[The envelope](docs/develop/cli-scripting.md#the-envelope)): `ok`, `op`, `api`, then `result` or `error`,
 then `meta`. A failure carries a stable `E_*` code, the exit code, whether running it
 again can help (`retryable`), machine-readable `details` and a `hint`, often the next command to
 run. `swarmops schema` prints the JSON Schema of every request and response type.
@@ -150,7 +150,7 @@ SWARMOPS_AGENT= so commit -m "who am I" --changes two.json; echo "exit $?"
 exit 5
 ```
 
-[Output and exit codes](#output-and-exit-codes) has the exit table, and the
+[Exit codes](docs/develop/cli-scripting.md#exit-codes) has the exit table, and the
 [error reference](docs/reference/errors.md) has every code.
 
 ### An MCP server for agents
@@ -170,8 +170,8 @@ Added stdio MCP server swarmops with command: swarmops mcp --repo … to local c
 swarmops: swarmops mcp --repo … - ✔ Connected
 ```
 
-[MCP](#mcp) below covers a project's `.mcp.json`, the identity rules and result sizes;
-[Claude Code](docs/guides/claude-code.md) is the guide.
+[MCP integration](docs/develop/mcp.md) covers a project's `.mcp.json`, the identity rules and
+result sizes; [Claude Code](docs/guides/claude-code.md) is the guide.
 
 <a id="first-commands"></a>
 
@@ -494,278 +494,55 @@ milestone takes each item.
 
 ## MCP
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout, so that an agent
-harness that speaks the Model Context Protocol, such as Claude Code, calls the operations as tools:
-`repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`,
-`op_log`, `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has` and
-`verify`. A tool's arguments are the operation's request: its `inputSchema` is the request type's
-schema, as `swarmops schema <Type>` prints it, with the definitions it refers to written in place,
-and kept a plain object: a rule across fields that the type's schema states with a top-level
-`oneOf`, which the Claude API refuses in a tool, is left to the description and to the server's own
-check, and the `expected_old` of `ref_set` and `ref_delete` asks for a full changeset id. Its result
-is the envelope the CLI prints for that request, as `structuredContent` and as text, and a failed
-operation sets `isError`, with the envelope's `error` saying why. The server speaks MCP 2026-07-28,
-and 2025-11-25 and 2025-06-18 to clients that open with `initialize`. Until M5's workspaces, an
-agent cannot build or test a change on disk before it lands it;
-[docs/operations.md](docs/operations.md) gives the stopgap.
+`swarmops mcp` serves the store's operations to an agent as an MCP server on stdin and stdout:
+18 tools, one per operation, each taking the operation's request and returning the envelope the
+CLI prints. [MCP integration](docs/develop/mcp.md) is the reference,
+[MCP tools](docs/reference/mcp-tools/README.md) has a page per tool, and
+[Claude Code](docs/guides/claude-code.md) is the guide.
 
-### Register the server
-
-Register it with Claude Code:
-
-```sh
-claude mcp add swarmops -- so mcp --repo <store> --as <agent>
-```
-
-or give a project a `.mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "swarmops": {
-      "command": "swarmops",
-      "args": ["mcp", "--repo", "/home/me/.local/state/swarmops/repos/acme"],
-      "env": {"SWARMOPS_AGENT": "${SWARMOPS_AGENT:-}"}
-    }
-  }
-}
-```
-
-A project's `.mcp.json` is shared by every agent that opens the project, so it takes each
-agent's identity from that agent's own `SWARMOPS_AGENT`, which Claude Code expands into the
-server's environment, rather than giving all of them one `--as`. For the same reason it runs
-`swarmops`, not `so`: on some machine the short name may be missing (`--bin swarmops` installs
-the long one alone) or belong to another program. The empty default (`:-`) is deliberate:
-Claude Code passes an unset `${SWARMOPS_AGENT}` on as that very text, which the server refuses
-as an invalid agent name (`E_INVALID_ARG`; `claude mcp list` warns too), but an empty value is
-no identity, so a mutation by an agent without one gets `E_IDENTITY_REQUIRED`, as the next
-section says.
-
-Claude Code starts one server for a session, and the session's subagents share it, so every
-commit and ref move they make is recorded for the session's agent. An agent that needs an
-identity of its own runs as its own Claude Code process, with its own `SWARMOPS_AGENT`.
-
-### Store, identity and lifetime
-
-The store and the identity are the server's, as they are a command's: `--repo`, else
-`SWARMOPS_REPO`, and `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`. No call can name
-another identity: every commit and ref move is recorded for the server's agent, and without one
-they fail with `E_IDENTITY_REQUIRED`. The client starts the server as its own user, so the
-server reads `{"file": "<path>"}` content as the CLI does, on its own machine; it refuses a
-relative path (`E_INVALID_ARG`), since an agent cannot see the server's working directory; a
-path that is the server's own stdin or stdout, the protocol's pipes; and anything that is not
-a regular file (a FIFO, a socket, a device or a directory), which a read could block on: give
-absolute paths, the store's too. It opens the store for each call, and so sees what other
-agents commit meanwhile. The store runs in the server's process, so the server ends
-with it on any of the store's four documented aborts (storage spec §2): a failed journal write
-or sync whose cut-back fails too, in a write or in the repair before one, or frames that repair
-writes afresh which land anywhere but where they were and cannot be cut back, which any commit
-or ref move can meet; or an `init` that cannot take its `FORMAT` back, which no tool runs. The
-client sees the server exit, and has to start it again.
-
-### Rules for agents
-
-Two rules matter more to an agent than to a person at the CLI:
-
-- `ref_set` and `ref_delete` take `expected_old` as the full changeset id the ref held when the
-  agent read it (from `ref_list`, `show`, `log` or a commit's result). A ref name or a relative
-  revision such as `main~1` is read from the store when the call runs instead of pinning what
-  the agent saw, so the compare-and-swap protects nothing (the ref's own name always matches,
-  and `main~1` on `main` never does), and an id prefix stops resolving (`E_AMBIGUOUS_ID`) once
-  another changeset shares it: the server refuses all three with `E_INVALID_ARG`. The CLI's
-  `--expect` still takes any revision, and its help says why not to. A `commit` with `advance`
-  takes its `parent` by the same rule, since the move expects the ref to name it.
-- Clients limit long tool results. Claude Code saves a successful one over 25,000 tokens by
-  default, or over 50,000 characters whatever its token count, to a file and gives the agent its
-  path instead; it cuts only the text of an error. Each result holds its envelope twice, so an
-  agent should ask for little: `max_bytes` of 32 KiB or less for `read_file`, a `limit` of 100
-  or less for `read_tree` and `log`, paging on with the `cursor` a result returns, and
-  `max_changes` of 100 or less for `show`. The tools' descriptions say so; the operations' own
-  defaults stay as they are. `read_file` alone raises Claude Code's limit for itself: its entry
-  in `tools/list` carries `_meta: {"anthropic/maxResultSizeChars": 200000}`, so Claude Code
-  keeps a `read_file` result of up to 200,000 characters in the conversation instead of saving
-  it to a file.
-
-### When the server does not start
-
-A command line that parses as `swarmops mcp` but is refused starts no server, and its envelope
-goes to stderr, not to stdout, which belongs to the protocol. A usage error before the word
-`mcp` (`swarmops --frob mcp`) is an ordinary command error, printed on stdout with exit code 2,
-and starts no server either.
+- <a id="register-the-server"></a>**Register the server**: `claude mcp add` for one agent, or a
+  project's `.mcp.json` for every agent session that opens it
+  ([Register the server with Claude Code](docs/develop/mcp.md#register-the-server-with-claude-code)).
+- <a id="store-identity-and-lifetime"></a>**Store, identity and lifetime**: the store and the
+  identity are the server's, never a call's, and the server ends with the store on any of its four
+  documented aborts ([Identity](docs/develop/mcp.md#identity-one-per-agent-process),
+  [The server exits](docs/develop/mcp.md#the-server-exits)).
+- <a id="rules-for-agents"></a>**Rules for agents**: full changeset ids for every
+  compare-and-swap, and small result pages ([The tools](docs/develop/mcp.md#the-tools),
+  [Result size limits](docs/develop/mcp.md#result-size-limits)).
+- <a id="when-the-server-does-not-start"></a>**When the server does not start**:
+  [Failure modes](docs/develop/mcp.md#failure-modes).
 
 ## Commands
 
-| Command | What it does |
+`swarmops` and `so` run the same commands. The [CLI reference](docs/reference/cli.md) has a page
+for each: its syntax, its arguments, an example, what it returns and the errors it fails with.
+
+| Task | Commands |
 | --- | --- |
-| `init <dir> [--name N]` | Create a store in `<dir>` (made if missing) and describe it. The name `N` (by default the directory's name) takes at most 255 bytes. |
-| `info` | Describe the store: its id, name, `main`, and how many changesets and refs it holds. |
-| `whoami` | The identity this caller's changes carry. |
-| `commit -m MSG --changes FILE\|- [--parent REV] [--advance REF] [--key UUID] [--allow-empty]` | Record a changeset from a JSON change list, on `--parent` or else on `main`'s head (REF's, with `--advance`). With `--advance REF`, also move REF to it in the same transaction, if REF still names `--parent`; otherwise it records nothing. With `--key`, a uuid v7, the same commit run again replays the first run (`replayed: true`) instead of recording a second changeset. |
-| `land HEAD [--base REV] [--target REF] [-m MSG] [--key KEY] [--max-attempts N] [--max-conflict-bytes N] [--resolve FILE]` | Merge HEAD's change (its first-parent chain after `--base`, by default the merge base of HEAD and REF's head) three-way onto REF (`main` by default) and publish it there as one new changeset in one transaction, merging again and retrying, up to N attempts, when REF moves meanwhile. A conflict is `E_CONFLICT` (exit 3) with the report in `details.report`, and nothing is recorded; land again with `--resolve` (a JSON file, or `-` for stdin: per path, take a side, new content or delete, against the report's `theirs`) to resolve it without a checkout. With `--key`, the same land run again replays (`status: replayed`). |
-| `blob put FILE\|-`, `blob has ID…` | Store a file's content (stdin's for `-`) as a blob, outside any commit, and print its id; or list which of the ids the store holds blobs under. A change names a stored blob by id. |
-| `resolve REV` | The full id of the changeset REV names, and its kind: `ref` when REV is exactly a ref's name, `changeset` otherwise. |
-| `cat REV:PATH [--offset N \| --lines A-B] [--max-bytes N]` | One file at a revision, or part of it, from byte N or lines A to B: UTF-8 text, or base64. A read cut short gives `next_offset`, where `--offset` reads on. |
-| `ls REV[:PATH] [--depth N] [--limit N] [--cursor C]` | One directory at a revision, a page at a time, each file with its size; with `--depth`, the directories below it too, each entry with its path. |
-| `show REV [--max-changes N]` | One changeset: parents, author, message, changes, signatures. |
-| `log [REV] [-n N] [--cursor C] [--path P]...` | History along first parents, newest first (from `main` by default); with `--path`, only the changesets that change those paths. |
-| `diff FROM TO [--path P]... [--format names\|stat\|unified] [--context N] [--limit N] [--cursor C] [--max-bytes N]` | The files that differ between two revisions, in path order, a page at a time: each one's path and status (`added`, `deleted`, `modified`, `type_changed`); with `stat` also whether it is binary and its inserted and deleted lines; with `unified` also its kinds, blobs and hunks, the page within `--max-bytes` (32 KiB) of JSON. `--path` keeps the files at or below some paths. |
-| `history REV:PATH [-n N] [--cursor C]` | The changesets that changed a file, or anything below a directory, newest first, each with what the path holds after it. |
-| `ref list`, `ref set NAME REV (--expect OLD \| --create)`, `ref delete NAME --expect OLD` | List refs, or move one by compare-and-swap. |
-| `op log [--before OP] [-n N] [--max-changesets N]` | The store's operations, newest first, a page at a time: each write transaction with its kind, its changesets and its ref moves. |
-| `op undo OP` | Move every ref operation `OP` moved back to what it named before, by compare-and-swap in one transaction: all of them or none. |
-| `verify [--deep]` | Check the store; `--deep` re-hashes every object and checks the derived values against the objects. |
-| `derive [--after N] [--follow] [--interval-ms N] [--from-start]` | Derive ahead of any reader the eager derived values (the first-parent skip list) of the changesets the journal records. Once: up to 1,000 journal frames, from the first or after `--after N`, its `next` saying where to go on. With `--follow`: as they are committed, from the journal's end (its start with `--from-start`), until killed, one envelope a line for each run that derived something. |
-| `schema [TYPE]` | The JSON Schema of every request and response type, or of one. |
-| `git import PATH [--ref GIT_REF] [--into REF] [--lossy CLASS]... [--gitlinks refuse\|drop]` | Bring the history of the git repository at `PATH` in: every commit `--ref` (`HEAD`) reaches that the store does not hold, then move `--into` (`main`) to it ([Bring a git repository in](#bring-a-git-repository-in)). |
-| `git export PATH [--ref REF] [--branch BRANCH] [--force]` | Write the history of `--ref` (`main`) into the git repository at `PATH`: every commit the last export into `--branch` (`main`) does not reach, then move `--branch` to the export of `--ref`'s head ([Send the work back to git](#send-the-work-back-to-git)). |
-| `mcp` | Serve the operations to an agent as an MCP server on stdin and stdout ([MCP](#mcp)). |
+| Make and describe a store | [`init`](docs/reference/commands/init.md) · [`info`](docs/reference/commands/info.md) · [`whoami`](docs/reference/commands/whoami.md) |
+| Publish a change | [`commit`](docs/reference/commands/commit.md) · [`land`](docs/reference/commands/land.md) · [`blob put`](docs/reference/commands/blob-put.md) · [`blob has`](docs/reference/commands/blob-has.md) |
+| Read | [`resolve`](docs/reference/commands/resolve.md) · [`cat`](docs/reference/commands/cat.md) · [`ls`](docs/reference/commands/ls.md) · [`show`](docs/reference/commands/show.md) · [`log`](docs/reference/commands/log.md) · [`history`](docs/reference/commands/history.md) · [`diff`](docs/reference/commands/diff.md) |
+| Move refs | [`ref list`](docs/reference/commands/ref-list.md) · [`ref set`](docs/reference/commands/ref-set.md) · [`ref delete`](docs/reference/commands/ref-delete.md) |
+| Take an operation back | [`op log`](docs/reference/commands/op-log.md) · [`op undo`](docs/reference/commands/op-undo.md) |
+| Check and derive | [`verify`](docs/reference/commands/verify.md) · [`derive`](docs/reference/commands/derive.md) · [`schema`](docs/reference/commands/schema.md) |
+| Move work to and from git | [`git import`](docs/reference/commands/git-import.md) · [`git export`](docs/reference/commands/git-export.md) |
+| Serve agents | [`mcp`](docs/reference/commands/mcp.md) |
 
-### Publishing a change
-
-`commit --advance main` publishes the commit: the same transaction moves `main` to the new
-changeset, only if `main` still names `--parent` (for a root commit, as in the
-[quick start](#quick-start), only if `main` does not exist yet), and otherwise the commit records
-nothing and fails with `E_CAS_MISMATCH`. A later publish is a commit, then a land:
-`so commit -m … --changes … --parent <the id main held when you read it>` records your change
-without moving any ref, and `so land <that changeset> --key <a new uuid v7>` merges it three-way
-onto `main`'s head, whatever `main` gained since, and moves `main` to the result in one
-transaction, as one new changeset whose parent is that head. A land that loses a race to another
-publish merges again and retries by itself; a change that conflicts with what `main` gained fails
-with `E_CONFLICT` (exit 3) and the conflict report in `details.report`, recording nothing; and the
-same land run again with its key replays it (`status: replayed`).
-`commit --parent <that id> --advance main` publishes in one step while `main` has not moved. To
-move a ref past several changesets at once, commit them with `--parent`, then move it once with
-`so ref set main <last> --expect <old>` (or `--create`).
-
-### Revisions and change lists
-
-A revision is `main`, `release/<name>`, a changeset id or a unique prefix of 12 or more of its
-hex digits, then any number of `~N` (the N-th first parent). A change list is a JSON array of
-`{"path", "op": "put" | "delete", "content", "mode"}`: a put's `content` is `{"inline": "<UTF-8
-text>"}`, `{"base64": "<bytes>"}` or `{"file": "<path>"}` (read by the CLI, on the client), at
-most 512 MiB, or `{"blob": "<id>"}`, a blob stored before (`blob put`), whose bytes the commit
-neither sends nor reads; its `mode` is `file` (the default), `exec` or `symlink`; directories
-follow from the paths. A commit's contents hold at most 1 GiB together (a blob named by id counts
-nothing) and a change list's text at most 64 MiB (`E_TOO_LARGE` past either), so a large file
-goes as `file` content, or through `blob put`. A ref moves only by compare-and-swap: when another agent moved it first,
-`ref set` and `commit --advance` fail with `E_CAS_MISMATCH` (exit 4) and the ref's target in
-`details.actual` (a `commit --advance` that fails so records nothing). Then land your change:
-commit it on the head you read, and `land` merges it three-way onto the ref's head however far
-the ref moved. Re-sending your old whole-file puts on top of `<actual>` would revert the
-winner's edits to shared files; to publish without a land, read the files you changed at
-`<actual>`, re-apply your edits to them, and publish with `commit --parent <actual> --advance
-<ref>`, or commit with `--parent <actual>` and retry `ref set` with `--expect <actual>`.
-
-### Bring a git repository in
-
-`git import PATH` brings the history of the git repository at `PATH` into the store: a work tree
-or a bare repository, read on this host (a relative path from the working directory), never by a
-server. Every commit `--ref` reaches (`HEAD` by default) that the store does not hold becomes a
-changeset, parents first, a merge with all of its parents in their order, and `--into` (`main`
-by default) moves to the changeset of `--ref`'s commit, created if it does not exist.
-
-```sh
-so git import ~/src/acme --ref stable     # creates main, or moves it on from an earlier import
-so git import ~/src/acme --ref stable     # again: imports 0, skips 1, writes nothing
-```
-
-An imported changeset is its git commit: its author and committer are the commit's, with their
-exact times and offsets, in `show`'s `signatures`, and its `git.oid` metadata holds the commit's
-id, which the changeset renders back to when nothing was lost. It records no agent, so `show` and
-`log` attribute it to `unknown/unknown`, and the same git commit is the same changeset in every
-store.
-
-Run again, `git import` takes only the commits after the one the target's head holds, and writes
-nothing when that is `--ref`'s commit. A target whose head is not the import of an ancestor of
-`--ref`'s commit, because the git history was rewritten, or a changeset was committed on the
-target that `git export` did not write, fails with `E_GIT_IMPORT_DIVERGED` (exit 3), and nothing
-is written. A head that `git export` wrote is continued: commits made in git on top of that export
-import linearly. An import cut short
-says how many commits it recorded (`details.imported`), and the same command run again continues
-after them.
-
-Content a changeset cannot hold as git has it is refused with `E_GIT_IMPORT_LOSSY`, naming the
-commit, the path and the class: a submodule's entry (`gitlinks`), a name that is not UTF-8 or is
-`.` or `..` (`paths`), a mode git does not write (`modes`), a tree out of git's order
-(`tree_order`), an empty directory (`empty_trees`), or a commit whose bytes its fields cannot give
-back (`nonstandard`). `--lossy CLASS` (repeatable, or `all`) drops or normalizes that class
-instead, and the changeset names it in its `git.lossy` metadata; `--gitlinks drop` is
-`--lossy gitlinks`, and `--gitlinks`, given, decides that class whatever `--lossy` says. A
-SHA-256 repository, reftable refs and a shallow clone are refused (`E_GIT_UNSUPPORTED`), and so
-is an object the repository lacks, as a partial clone lacks blobs (`E_GIT_READ`). `git import`
-is not an MCP tool: an agent runs it as a command.
-
-### Send the work back to git
-
-`git export PATH` writes the history behind a store ref (`--ref`, `main` by default) into a
-branch (`--branch`, `main` by default) of the git repository at `PATH`, written on this host
-(a relative path from the working directory), never by a server: a bare repository, which
-`git init --bare` makes, or a work tree, whose checked-out branch it refuses as `git push` does
-(`E_INVALID_ARG`). Every commit the branch does not reach is written, parents first: a changeset
-imported from git as the commit it came from, byte for byte, and one made in the store as a
-commit with its own author and committer and a `SwarmOps-Changeset:` trailer (with
-`SwarmOps-Land-Key:` and `SwarmOps-Squashed-From:` once a land records them). The objects are made
-durable before the branch moves, by compare-and-swap, and the same store gives the same commits
-every time. It needs no identity.
-
-```sh
-so git export ~/src/acme --branch stable   # stable moves to the export of main's head
-so git export ~/src/acme --branch stable   # again: exports 0, stable is up to date
-git -C ~/src/acme push origin stable       # and on, as before
-```
-
-Run again, `git export` writes only what the branch's last export does not reach. A branch at a
-commit that is no export of `--ref`'s head or of an ancestor of it fails with
-`E_GIT_EXPORT_DIVERGED` (exit 3), and nothing is written; `details.reason` says why, and the hint
-what to do: `branch_ahead` (commits made in git on top of the export, which `git import` brings
-in), `both_moved` (git and the store both moved on, and nothing is merged), `branch_moved`,
-`source_moved_back` (`--ref` moved back, as `swarmops op log` shows), `lossy_history` (the branch
-holds the commits a lossy import was made of) or `moved_during_export` (run it again).
-`--force` moves the branch all the same, still by compare-and-swap, replacing what git holds there.
-A branch whose lock file another git process holds, or a dead one left, is refused
-(`E_GIT_WRITE`, `ref_locked`) until the file is removed. `git export` is not an MCP tool: an agent
-runs it as a command.
-
-### Output and exit codes
-
-The examples use `so`, the short form; every command runs the same by either name. The hints in
-the envelopes give their commands as `swarmops …`; only a usage error's hint, the usage line,
-names the program as you invoked it (`Usage: so …`).
-
-Every command prints exactly one JSON envelope on stdout, but `derive --follow`, which prints one
-envelope a line for each run that derived something (only `--help`, `--version` and the `help`
-subcommand print plain text, and `mcp` speaks MCP there instead): pretty on a terminal,
-compact otherwise (`--pretty[=BOOL]` decides), or a short text rendering with `--human` or
-`SWARMOPS_FORMAT=human`. A run that meets one of the store's four documented aborts (storage
-spec §2) prints no envelope: the process aborts, saying why on stderr.
-
-```json
-{"ok":true,"op":"read_file","api":1,"result":{"blob":"f5f5…","size":14,"kind":"file","encoding":"utf8","content":"pub fn f() {}\n","truncated":false},"meta":{"repo":"/home/me/.local/state/swarmops/repos/acme","elapsed_ms":0,"resolved":{"main":"014c…"},"auth":"trust"}}
-{"ok":false,"op":"commit","api":1,"error":{"code":"E_IDENTITY_REQUIRED","message":"this operation changes the store, so it needs the caller's identity","retryable":false,"exit":5,"details":{},"hint":"pass --as <family>/<instance> or set SWARMOPS_AGENT, e.g. --as agent/worker-1"},"meta":{"repo":"…","elapsed_ms":0,"resolved":{},"auth":"trust"}}
-```
-
-`op` names the operation (`cat` is `read_file`), and `meta.resolved` what each revision named.
-After a `commit`, `ref set` or `ref delete` whose write first repaired what an earlier writer
-left behind, `meta.recovered` says what it repaired, on success and on `E_CAS_MISMATCH` alike;
-it is no warning. A failure's `error` carries a stable `E_*` code, whether running it again can
-succeed (as it is, or after re-reading what the error names), machine-readable `details` (for
-an I/O failure, `fs_op` and `store_file`: the file operation that failed and its file in the
-store, never a host path), and a `hint`, often the next command to run. The exit code is
-`error.exit`:
-
-| Exit | Meaning | For example |
-| --- | --- | --- |
-| 0 | Success. | |
-| 1 | The operation failed. | `E_EMPTY_COMMIT`, `E_STORE_CORRUPT`, `E_IO` |
-| 2 | A malformed request or command line. | `E_INVALID_ARG` |
-| 3 | A conflict with what the change lands on: resolve it, then run it again. `land` could not merge the change onto the target, and recorded nothing; `details.report` says where. | `E_CONFLICT`, `E_GIT_IMPORT_DIVERGED`, `E_GIT_EXPORT_DIVERGED` |
-| 4 | Retryable: the operation can succeed if run again (after a CAS mismatch, by a land, or on top of `details.actual` with your edits re-applied there). | `E_CAS_MISMATCH`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY`, `E_IO_TRANSIENT` |
-| 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED` |
-| 6 | Something it names does not exist. | `E_NOT_A_REPO`, `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND` |
-
-`swarmops schema` gives every type and error code; `ErrorCode` in
-[crates/swarmops-api/src/error.rs](crates/swarmops-api/src/error.rs) is the one table of each
-code's exit and `retryable` flag.
+- <a id="publishing-a-change"></a>**Publishing a change**: commit on the head you read, then
+  land it ([Commit and land](docs/guides/commit-and-land.md)).
+- <a id="revisions-and-change-lists"></a>**Revisions and change lists**:
+  [Revision](docs/concepts.md#revision), [Change list](docs/concepts.md#change-list) and
+  [Write a change list](docs/guides/commit-and-land.md#write-a-change-list).
+- <a id="bring-a-git-repository-in"></a>**Bring a git repository in**:
+  [`git import`](docs/reference/commands/git-import.md) and [The git round trip](docs/guides/git-round-trip.md).
+- <a id="send-the-work-back-to-git"></a>**Send the work back to git**:
+  [`git export`](docs/reference/commands/git-export.md) and [The git round trip](docs/guides/git-round-trip.md).
+- <a id="output-and-exit-codes"></a>**Output and exit codes**:
+  [The envelope](docs/develop/cli-scripting.md#the-envelope),
+  [Output flags](docs/develop/cli-scripting.md#output-flags),
+  [Exit codes](docs/develop/cli-scripting.md#exit-codes) and the
+  [error reference](docs/reference/errors.md).
 
 ## Development
 
