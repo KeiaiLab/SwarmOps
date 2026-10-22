@@ -648,12 +648,16 @@ impl GixSink {
             synced: None,
         };
 
-        // 1. The repository as gix makes it.
+        // 1. The repository as gix makes it. Its errors name it by its own name (`mirror.git`):
+        // gix's text carries the host path, so only the io error under it is kept.
+        let name = path
+            .file_name()
+            .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
         let options = gix::create::Options::default();
         gix::create::into(path, gix::create::Kind::Bare, options).map_err(|error| {
             SinkError::Write {
-                what: "the repository".to_owned(),
-                reason: reason(&error),
+                what: name.clone(),
+                reason: unpathed(&error, path, &name),
             }
         })?;
 
@@ -663,10 +667,18 @@ impl GixSink {
         fs::create_dir(&hooks).map_err(|error| files.failed_write(&hooks, &error))?;
 
         // 3. Everything made, durable: the files and directories inside, then the repository's
-        // own entry in its parent.
-        let mut made = files.tree(path)?;
-        made.extend(path.parent().map(Path::to_owned));
-        files.sync_all(&made)
+        // own entry in its parent, which is outside the git directory and so named by the
+        // repository's name.
+        let made = files.tree(path)?;
+        files.sync_all(&made)?;
+        let Some(parent) = path.parent() else {
+            return Ok(());
+        };
+        let synced = File::open(parent).and_then(|dir| dir.sync_all());
+        synced.map_err(|error| SinkError::Write {
+            what: format!("the directory holding {name}"),
+            reason: error.to_string(),
+        })
     }
 
     /// Moves the ref `full` (a full name: `refs/remotes/<remote>/<branch>`,
@@ -925,6 +937,15 @@ impl Files {
         }
         Ok(found)
     }
+}
+
+/// What failed in gix's `error` about `path`, without the host path: the io error under it, or
+/// gix's text with `path` replaced by `name` when there is none (e.g. a non-empty directory).
+fn unpathed(error: &gix::Error, path: &Path, name: &str) -> String {
+    if let Some(io) = error.downcast_any_ref::<io::Error>() {
+        return io.to_string();
+    }
+    reason(error).replace(&path.display().to_string(), name)
 }
 
 /// Checks that git takes `full` as a ref name; [`SinkError::BadBranch`] names it otherwise.

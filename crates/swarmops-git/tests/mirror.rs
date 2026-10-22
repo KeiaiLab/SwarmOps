@@ -387,3 +387,25 @@ fn hooks_path_points_at_an_empty_directory() {
     let entries = fs::read_dir(&dir).expect("hooks-none is a directory");
     assert_eq!(entries.count(), 0);
 }
+
+/// A repository gix cannot make is named by its own name, never by its host path: gix's text,
+/// which carries the absolute path, does not reach the error.
+#[cfg(unix)]
+#[test]
+fn create_bare_error_names_no_host_path() {
+    let root = Root::new();
+    let git = root.git();
+    fs::create_dir(&git).expect("make git/");
+
+    // 1. A dangling symlink where the repository goes: gix finds no directory and cannot make
+    // one, as root too.
+    let path = git.join("mirror.git");
+    std::os::unix::fs::symlink(git.join("absent"), &path).expect("make the symlink");
+
+    // 2. The error names mirror.git and no part of the host path.
+    let error = GixSink::create_bare(&path).expect_err("the symlink is in the way");
+    let text = error.to_string();
+    let host = root.dir.path().display().to_string();
+    assert!(!text.contains(&host), "{text}");
+    assert!(text.contains("mirror.git"), "{text}");
+}
