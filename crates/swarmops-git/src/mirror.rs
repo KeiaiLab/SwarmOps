@@ -18,6 +18,7 @@
 //! the next fetch. Its lock is taken once per command and passed down by reference
 //! ([`MirrorLock`]): it is not re-entrant, and a held lock is refused at once, never waited for.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -214,6 +215,18 @@ impl Mirror {
         Ok(sink.reference(&tracking_ref(remote, branch))?)
     }
 
+    /// What the last fetch saw of each of `remote`'s branches: `refs/remotes/<remote>/*`, by
+    /// the branch's short name.
+    pub fn branches(&self, remote: &str) -> Result<BTreeMap<String, GitOid>, MirrorError> {
+        self.refs_under(&format!("{TRACKING}/{remote}/"))
+    }
+
+    /// `remote`'s tags as the last fetch saw them: `refs/remote-tags/<remote>/*`, by the tag's
+    /// short name.
+    pub fn tags(&self, remote: &str) -> Result<BTreeMap<String, GitOid>, MirrorError> {
+        self.refs_under(&format!("{REMOTE_TAGS}/{remote}/"))
+    }
+
     /// Moves `refs/remotes/<remote>/<branch>` from `old` to `new` by compare-and-swap. A ref that
     /// names something else is left as it is, and is [`SinkError::Write`]: under the mirror's lock
     /// nothing else moves it.
@@ -278,6 +291,17 @@ impl Mirror {
             }
         }
         Ok(removed)
+    }
+
+    /// The refs under `prefix` (which ends with `/`), each by its name without the prefix.
+    fn refs_under(&self, prefix: &str) -> Result<BTreeMap<String, GitOid>, MirrorError> {
+        let sink = GixSink::open(&self.git_dir)?;
+        let listed = sink.references_under(prefix)?;
+        let short = listed.into_iter().filter_map(|(full, oid)| {
+            let name = full.strip_prefix(prefix)?;
+            Some((name.to_owned(), oid))
+        });
+        Ok(short.collect())
     }
 
     /// `git/`, which holds the marker, the lock and `mirror.git`.

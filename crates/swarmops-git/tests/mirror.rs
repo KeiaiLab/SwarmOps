@@ -374,6 +374,33 @@ fn remove_remote_drops_its_refs_only() {
     assert_eq!(mirror.remove_remote(REMOTE).expect("remove"), 0);
 }
 
+/// `branches` and `tags` list one remote's tracking refs and tags by their short names, and
+/// nothing of another remote or of the staging branches.
+#[test]
+fn branches_and_tags_list_one_remote() {
+    let root = Root::new();
+    let (mirror, _lock) = made(&root);
+    let [first, second] = two_blobs(&mirror);
+    let mut sink = GixSink::open(mirror.git_dir()).expect("open");
+    for (full, oid) in [
+        ("refs/remotes/origin/main", first),
+        ("refs/remotes/origin/topic/a", second),
+        ("refs/remote-tags/origin/v1", first),
+        ("refs/heads/push/origin/main", second),
+        ("refs/remotes/upstream/main", second),
+    ] {
+        let made = sink.cas_ref(full, None, Some(oid)).expect(full);
+        assert_eq!(made, swarmops_git::BranchUpdate::Applied, "{full}");
+    }
+
+    let branches = mirror.branches(REMOTE).expect("list the branches");
+    let expected = [("main".to_owned(), first), ("topic/a".to_owned(), second)];
+    assert_eq!(branches, expected.into_iter().collect());
+    let tags = mirror.tags(REMOTE).expect("list the tags");
+    assert_eq!(tags, [("v1".to_owned(), first)].into_iter().collect());
+    assert!(mirror.branches("none").expect("list").is_empty());
+}
+
 /// `mirror.git`'s `core.hooksPath` names `hooks-none`, an empty directory in it, by a path
 /// relative to the repository, so that no host path is written into the store and git runs no
 /// hook there.
