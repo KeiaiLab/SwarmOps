@@ -232,7 +232,9 @@ each target's count and size before and after in the commit body. Crashes land i
 ## Continuous integration
 
 GitHub Actions runs `just check` on every push to `stable` and to `feat/**` branches and on every
-pull request to `stable`. The one check to look at is `tests-pass`: it passes only when every job
+pull request to `stable`. Every workflow (CI, the weekly run, the site and the release) runs on
+self-hosted runners on the maintainers' host, labelled `swarmops-local`; a pull request from a
+fork runs on GitHub's `ubuntu-24.04` instead, so that the host never runs a stranger's code. The one check to look at is `tests-pass`: it passes only when every job
 it depends on passed. A weekly scheduled workflow runs `just check-ci-slow`, a 60-second fuzz
 smoke of every target, the `cargo deny`, format, lint and test commands of `bench/compare` (a
 cargo workspace of its own that `just check` does not build) and the git version matrix.

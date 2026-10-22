@@ -15,7 +15,7 @@ the pinned one, for now. Three reasons:
 - SwarmOps ships two binaries, `swarmops` and `so` (the same program), and publishes no crate,
   so no one else compiles it as a dependency with an older compiler.
 - One toolchain is the one that is tested. An MSRV below the pin would need a CI job of its own
-  to mean anything, and CI runs on small runners with a minutes budget.
+  to mean anything, and CI's runners share one host.
 - The code uses recent standard-library features: the metadata lock is `std::fs::File::lock`
   and `try_lock` (stable since Rust 1.89), and the workspace uses edition 2024.
 
@@ -70,5 +70,6 @@ Some tests read Linux's `/proc/locks`.
 Every measurement in [docs/perf.md](../perf.md) was taken on one host: WSL2 (kernel
 5.15.153.1), ext4 (`data=ordered`) on the virtual disk, an AMD Ryzen 9 7950X3D (16 cores, 32
 threads) and 106 GiB of RAM, where one `fsync` takes about 4 ms. Other disks will give other
-numbers. CI runs on GitHub's hosted `ubuntu-24.04` runners: they check correctness, and nothing
-records or compares their timings.
+numbers. CI and the release builds run on this same host, through self-hosted GitHub Actions
+runners, several jobs at a time: they check correctness, and nothing records or compares their
+timings.
