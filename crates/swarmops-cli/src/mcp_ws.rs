@@ -281,15 +281,15 @@ mod tests {
         assert_eq!(advertised, requests, "one tool per workspace request type");
         assert_eq!(WS_TOOLS.len(), 11);
 
-        // 2. Each arm runs the function of its name: one not built yet names itself, a built
-        //    one answers as it does on a store without workspaces.
+        // 2. Each arm runs the function of its name, which answers as it does on a store
+        //    without workspaces.
         for spec in &WS_TOOLS {
             let called = RefCell::new(Vec::new());
             let outcome = RefCell::new(Vec::new());
             operate_ws(spec.tool, Probe::new(&called, &outcome));
             let outcome = outcome.into_inner();
             assert_eq!(outcome.len(), 1, "the {} tool", spec.name);
-            let expected = built(spec.tool).unwrap_or(spec.name);
+            let expected = built(spec.tool);
             assert!(
                 outcome[0].contains(expected),
                 "the {} tool ran {:?}",
@@ -299,17 +299,21 @@ mod tests {
         }
     }
 
-    /// What a built workspace operation answers to the probe's sample on a store without
-    /// workspaces; none for one not built yet.
-    fn built(tool: WsTool) -> Option<&'static str> {
+    /// What a workspace operation answers to the probe's sample on a store without
+    /// workspaces.
+    fn built(tool: WsTool) -> &'static str {
         match tool {
-            WsTool::List => Some("ok"),
-            WsTool::Info | WsTool::Status | WsTool::Diff | WsTool::Commit | WsTool::Discard => {
-                Some(r#"the store has no workspace named "probe""#)
-            }
-            WsTool::Create => Some("ws create needs an identity"),
-            WsTool::Materialize => Some("ws materialize needs at least one path"),
-            _ => None,
+            WsTool::List => "ok",
+            WsTool::Info
+            | WsTool::Status
+            | WsTool::Diff
+            | WsTool::Commit
+            | WsTool::Discard
+            | WsTool::Rebase
+            | WsTool::Resolve
+            | WsTool::Land => r#"the store has no workspace named "probe""#,
+            WsTool::Create => "ws create needs an identity",
+            WsTool::Materialize => "ws materialize needs at least one path",
         }
     }
 }
