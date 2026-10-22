@@ -120,6 +120,8 @@ jobs:
         uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22.15.0
+          # No cache: nothing restored can reach the job that holds the deploy token.
+          package-manager-cache: false
 
       # 4. The deploy. The project's production branch is stable: `--branch stable` is
       # production, any other branch a preview. _headers and _redirects in web/out apply.
