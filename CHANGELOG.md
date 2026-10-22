@@ -14,6 +14,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ### Added
 
+- CI, the weekly run, the website build and the release now run on the maintainers' own host through
+  self-hosted runners; release binaries are built inside an ubuntu:24.04 container pinned by digest
+  (pull requests from forks still run on GitHub's ubuntu-24.04).
 - A one-line installer, `curl -fsSL https://get.swarmops.cc/install.sh | bash` (`scripts/install.sh`,
   served as `web/public/install.sh`): it installs `swarmops` and `so` from a release, checked against
   its `SHA256SUMS`, into `~/.local/bin` (`/usr/local/bin` as root); `--version` pins a release,
