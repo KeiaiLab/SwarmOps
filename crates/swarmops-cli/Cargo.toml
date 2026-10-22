@@ -28,7 +28,11 @@ path = "src/bin/so.rs"
 # A `swarmops` and `so` that honor the test hooks (`swarmops-ops/test-hooks` turns on all of
 # them, and the test kit's puts this crate's tests under the order checker): for the crash
 # tests, which require it, never for a release.
-test-hooks = ["swarmops-ops/test-hooks", "swarmops-testkit/test-hooks"]
+test-hooks = [
+    "swarmops-ops/test-hooks",
+    "swarmops-testkit/test-hooks",
+    "swarmops-ws/test-hooks",
+]
 
 # One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`,
 # its tests named `<file>::<test>`; `crash.rs` and `faults.rs` drive the test hooks, so `all.rs`
@@ -45,6 +49,8 @@ name = "test_hooks"
 [dependencies]
 swarmops-api = { path = "../swarmops-api", version = "0.1.0" }
 swarmops-ops = { path = "../swarmops-ops", version = "0.1.0" }
+# The workspaces (M5): `so ws`, its hooks and the MCP server's workspace tools.
+swarmops-ws = { path = "../swarmops-ws", version = "0.1.0" }
 camino.workspace = true
 clap.workspace = true
 serde.workspace = true

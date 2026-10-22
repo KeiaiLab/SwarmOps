@@ -34,6 +34,14 @@ pub use ops::{
     Signatures, StoreOps, TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding,
     VerifyReport, VerifyReq,
 };
+pub use ops::{
+    BlobGetReq, BlobGetResp, BlobOut, DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S,
+    DEFAULT_WS_STATUS_LIMIT, LandMode, RebaseReq, RebaseResp, RebaseStatus, StatusAfter, WsChange,
+    WsChangeKind, WsCheckInput, WsCommitReq, WsCommitResp, WsCreateReq, WsDeleteReq, WsDeleteResp,
+    WsDiffReq, WsDiscardReq, WsDiscardResp, WsInfo, WsInfoReq, WsLandReq, WsLandResp, WsList,
+    WsListReq, WsMaterializeReq, WsMaterializeResp, WsRebaseAction, WsRebaseReq, WsRebaseResp,
+    WsRebasing, WsResolveReq, WsResolveResp, WsState, WsStatus, WsStatusReq,
+};
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
@@ -62,12 +70,13 @@ macro_rules! schemas {
 /// [`Envelope`] is listed as `Envelope<serde_json::Value>`: its `result` is an operation's
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
-    // The store's operations' types, then the git remotes'.
+    // The store's operations' types, then the git remotes', then the workspaces'.
     let mut all = store_schemas();
-    if let (serde_json::Value::Object(all), serde_json::Value::Object(remote)) =
-        (&mut all, remote_schemas())
-    {
-        all.extend(remote);
+    for more in [remote_schemas(), workspace_schemas()] {
+        if let (serde_json::Value::Object(all), serde_json::Value::Object(more)) = (&mut all, more)
+        {
+            all.extend(more);
+        }
     }
     all
 }
@@ -180,6 +189,13 @@ fn store_schemas() -> serde_json::Value {
         RefMoveOut,
         UndoReq,
         UndoResp,
+        // rebase, blob_get (M5).
+        RebaseReq,
+        RebaseResp,
+        RebaseStatus,
+        BlobGetReq,
+        BlobGetResp,
+        BlobOut,
     ]
 }
 
@@ -212,5 +228,42 @@ fn remote_schemas() -> serde_json::Value {
         HeadMove,
         SyncStatusReq,
         SyncStatus,
+    ]
+}
+
+/// The schemas of the workspaces' types (M5), which run on the client, as git import and export
+/// do.
+fn workspace_schemas() -> serde_json::Value {
+    schemas![
+        StatusAfter,
+        WsCreateReq,
+        WsInfo,
+        WsStatusReq,
+        WsStatus,
+        WsState,
+        WsChange,
+        WsChangeKind,
+        WsRebasing,
+        WsDiffReq,
+        WsCommitReq,
+        WsCommitResp,
+        WsRebaseReq,
+        WsRebaseAction,
+        WsRebaseResp,
+        WsResolveReq,
+        WsResolveResp,
+        WsLandReq,
+        WsCheckInput,
+        LandMode,
+        WsLandResp,
+        WsMaterializeReq,
+        WsMaterializeResp,
+        WsDiscardReq,
+        WsDiscardResp,
+        WsListReq,
+        WsList,
+        WsInfoReq,
+        WsDeleteReq,
+        WsDeleteResp,
     ]
 }

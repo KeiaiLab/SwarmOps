@@ -50,7 +50,8 @@ pub(super) const DIR: &str = "commands";
 /// The hand-written notes' folder in `docs/reference/`.
 const NOTES_DIR: &str = "notes/commands";
 
-/// The release every command first shipped in, but [`REMOTE_COMMANDS`].
+/// The release every command first shipped in, but [`REMOTE_COMMANDS`] and
+/// [`WORKSPACE_COMMANDS`].
 const SINCE: &str = "0.1.0";
 
 /// The git remotes' commands (M13), and the release they first shipped in.
@@ -66,10 +67,17 @@ const REMOTE_COMMANDS: [&str; 8] = [
 ];
 const REMOTE_SINCE: &str = "0.2.0";
 
+/// The commands the workspaces brought (M5), and the release they first ship in.
+const WORKSPACE_COMMANDS: [&str; 1] = ["rebase"];
+const WORKSPACE_SINCE: &str = "0.3.0";
+
 /// The release the command at `path` first shipped in.
 fn since(path: &str) -> &'static str {
     if REMOTE_COMMANDS.contains(&path) {
         return REMOTE_SINCE;
+    }
+    if WORKSPACE_COMMANDS.contains(&path) {
+        return WORKSPACE_SINCE;
     }
     SINCE
 }
@@ -178,7 +186,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 33] = [
+const META: [Meta; 34] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -203,6 +211,13 @@ const META: [Meta; 33] = [
         Returns::Type("CommitResp"),
     ),
     meta("land", Group::Write, true, true, Returns::Type("LandResp")),
+    meta(
+        "rebase",
+        Group::Write,
+        true,
+        true,
+        Returns::Type("RebaseResp"),
+    ),
     meta(
         "blob put",
         Group::Write,
@@ -1168,7 +1183,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 31] = [
+const RETURN_SITES: [(&str, &str, &str); 32] = [
     ("init", "src/commands.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1178,6 +1193,7 @@ const RETURN_SITES: [(&str, &str, &str); 31] = [
     ),
     ("commit", "../swarmops-api/src/ops.rs", "fn commit("),
     ("land", "../swarmops-api/src/ops.rs", "fn land("),
+    ("rebase", "../swarmops-api/src/ops.rs", "fn rebase("),
     ("blob put", "../swarmops-api/src/ops.rs", "fn blob_put("),
     ("blob has", "../swarmops-api/src/ops.rs", "fn blob_has("),
     ("resolve", "../swarmops-api/src/ops.rs", "fn resolve_rev("),

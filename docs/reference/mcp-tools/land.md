@@ -24,6 +24,7 @@ max_result_chars: null
 | Field | Type | Required | Default | Description |
 | --- | --- | --- | --- | --- |
 | `base` | string or null | no |  | Where the change starts: a first-parent ancestor of `head`, whose own changes are not part of it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the merge base of `head` and the target's head, along first parents. |
+| `expect_target` | string or null | no |  | Publish only while the target names this changeset (M5): one attempt, and a target that names another is `E_CAS_MISMATCH`, nothing written; `max_attempts` does not apply. With a `head` rebased onto it, the landed tree is the rebased tree. `swarmops mcp` refuses one that is not a full 64-hex id (`E_INVALID_ARG`). |
 | `head` | string | yes |  | The changeset to land: the change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`, `release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits, optionally followed by `~N` for the N-th first-parent ancestor. |
 | `idempotency_key` | string or null | no |  | Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land with a key first looks down the target's first parents, to `base`, for a changeset that landed with the same key: one squashed from this `head` is the replay, which writes nothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used for another change. |
 | `max_attempts` | integer | no | `8` | How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32. |
@@ -53,6 +54,18 @@ Its descriptions' citations of the design documents are left out here.
         }
       ],
       "description": "Where the change starts: a first-parent ancestor of `head`, whose own changes are not part\nof it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the\nmerge base of `head` and the target's head, along first parents."
+    },
+    "expect_target": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-fA-F]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Publish only while the target names this changeset (M5): one attempt, and a target that\nnames another is `E_CAS_MISMATCH`, nothing written; `max_attempts` does not apply. With a\n`head` rebased onto it, the landed tree is the rebased tree. `swarmops mcp` refuses one\nthat is not a full 64-hex id (`E_INVALID_ARG`)."
     },
     "head": {
       "description": "The changeset to land: the change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",

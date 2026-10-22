@@ -68,6 +68,109 @@ expression: s.redact(&all)
       "title": "Attribution",
       "type": "object"
     },
+    "BlobGetReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_get` (M5): blobs by id, for a client that writes them out (a workspace's\nmaterialisation). Not an MCP tool.",
+      "properties": {
+        "ids": {
+          "description": "The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "max_bytes": {
+          "default": 67108864,
+          "description": "The most bytes of content to return: the blobs past it are left for the next request\n(`truncated`).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ids"
+      ],
+      "title": "BlobGetReq",
+      "type": "object"
+    },
+    "BlobGetResp": {
+      "$defs": {
+        "BlobOut": {
+          "description": "One blob's content, encoded as a file's is.",
+          "properties": {
+            "content": {
+              "description": "The bytes.",
+              "type": "string"
+            },
+            "encoding": {
+              "$ref": "#/$defs/ContentEncoding",
+              "description": "How `content` encodes the bytes: `utf8` for text, `base64` otherwise."
+            },
+            "id": {
+              "description": "The blob's id.",
+              "type": "string"
+            },
+            "size": {
+              "description": "Its size in bytes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "size",
+            "encoding",
+            "content"
+          ],
+          "type": "object"
+        },
+        "ContentEncoding": {
+          "description": "How `FileContent.content` encodes bytes.",
+          "oneOf": [
+            {
+              "const": "utf8",
+              "description": "The bytes are UTF-8 text, and `content` is that text.",
+              "type": "string"
+            },
+            {
+              "const": "base64",
+              "description": "`content` is the bytes in standard, padded base64.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under.",
+      "properties": {
+        "blobs": {
+          "description": "The blobs, each whole.",
+          "items": {
+            "$ref": "#/$defs/BlobOut"
+          },
+          "type": "array"
+        },
+        "missing": {
+          "description": "The ids the store holds no blob under.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "truncated": {
+          "description": "Whether blobs were left out to keep within `max_bytes`.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "blobs",
+        "missing",
+        "truncated"
+      ],
+      "title": "BlobGetResp",
+      "type": "object"
+    },
     "BlobHasReq": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "`blob_has` (CLI `blob has`): which of some blobs the store holds.",
@@ -102,6 +205,55 @@ expression: s.redact(&all)
         "present"
       ],
       "title": "BlobHasResp",
+      "type": "object"
+    },
+    "BlobOut": {
+      "$defs": {
+        "ContentEncoding": {
+          "description": "How `FileContent.content` encodes bytes.",
+          "oneOf": [
+            {
+              "const": "utf8",
+              "description": "The bytes are UTF-8 text, and `content` is that text.",
+              "type": "string"
+            },
+            {
+              "const": "base64",
+              "description": "`content` is the bytes in standard, padded base64.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One blob's content, encoded as a file's is.",
+      "properties": {
+        "content": {
+          "description": "The bytes.",
+          "type": "string"
+        },
+        "encoding": {
+          "$ref": "#/$defs/ContentEncoding",
+          "description": "How `content` encodes the bytes: `utf8` for text, `base64` otherwise."
+        },
+        "id": {
+          "description": "The blob's id.",
+          "type": "string"
+        },
+        "size": {
+          "description": "Its size in bytes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "size",
+        "encoding",
+        "content"
+      ],
+      "title": "BlobOut",
       "type": "object"
     },
     "BlobPutReq": {
@@ -2894,6 +3046,51 @@ expression: s.redact(&all)
           "const": "E_REMOTE_NOT_FOUND",
           "description": "The store records no remote of that name (`details.remote`).",
           "type": "string"
+        },
+        {
+          "const": "E_WS_EXISTS",
+          "description": "`ws create` found a workspace of that name already, made by other arguments\n(`details.name`, `details.path` of the existing one).",
+          "type": "string"
+        },
+        {
+          "const": "E_WS_NOT_FOUND",
+          "description": "No workspace by that name, or at that path (`details.name` when named).",
+          "type": "string"
+        },
+        {
+          "const": "E_WS_LOCKED",
+          "description": "Another mutation held the workspace's lock for the whole wait (`details.holder`, when it\nis known); running the operation again can succeed.",
+          "type": "string"
+        },
+        {
+          "const": "E_WS_DIRTY",
+          "description": "The workspace holds edits the operation would overwrite or lose (`details.paths`, the\nfirst 20); the hint names the command that commits or discards them.",
+          "type": "string"
+        },
+        {
+          "const": "E_PATH_NOT_EMPTY",
+          "description": "`ws create` was given a directory that holds something already (`details.path`).",
+          "type": "string"
+        },
+        {
+          "const": "E_UNRESOLVED_CONFLICTS",
+          "description": "A rebase still has conflicting paths no one resolved (`details.paths`).",
+          "type": "string"
+        },
+        {
+          "const": "E_MARKERS_PRESENT",
+          "description": "`ws resolve` found a conflict marker line still in a file (`details.paths`).",
+          "type": "string"
+        },
+        {
+          "const": "E_WS_UNPORTABLE",
+          "description": "The tree holds paths the workspace's volume cannot hold: `details.reason` says why\n(`case_collision`, `windows_name`, `reserved_name`) and `details.paths` names them.\nNothing was written.",
+          "type": "string"
+        },
+        {
+          "const": "E_CHECK_FAILED",
+          "description": "A workspace's check or bootstrap command failed or ran past its time\n(`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its\noutput, `log`, `changeset`). Nothing was landed.",
+          "type": "string"
         }
       ],
       "title": "ErrorCode"
@@ -4051,6 +4248,23 @@ expression: s.redact(&all)
       "title": "InitReq",
       "type": "object"
     },
+    "LandMode": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How a workspace lands.",
+      "oneOf": [
+        {
+          "const": "merge",
+          "description": "Merge onto the target's head, wherever it has moved.",
+          "type": "string"
+        },
+        {
+          "const": "exact",
+          "description": "Publish only onto the target's head the workspace was rebased onto, so that the landed\ntree is the rebased one.",
+          "type": "string"
+        }
+      ],
+      "title": "LandMode"
+    },
     "LandReq": {
       "$defs": {
         "ContentInput": {
@@ -4227,6 +4441,17 @@ expression: s.redact(&all)
             }
           ],
           "description": "Where the change starts: a first-parent ancestor of `head`, whose own changes are not part\nof it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the\nmerge base of `head` and the target's head, along first parents."
+        },
+        "expect_target": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Publish only while the target names this changeset (M5): one attempt, and a target that\nnames another is `E_CAS_MISMATCH`, nothing written; `max_attempts` does not apply. With a\n`head` rebased onto it, the landed tree is the rebased tree. `swarmops mcp` refuses one\nthat is not a full 64-hex id (`E_INVALID_ARG`)."
         },
         "head": {
           "$ref": "#/$defs/Rev",
@@ -5919,6 +6144,334 @@ expression: s.redact(&all)
       "title": "ReadTreeReq",
       "type": "object"
     },
+    "RebaseReq": {
+      "$defs": {
+        "ContentInput": {
+          "description": "A `put`'s content, as an object with one key.",
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "description": "UTF-8 text, verbatim.",
+              "properties": {
+                "inline": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "inline"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "Bytes in standard, padded base64.",
+              "properties": {
+                "base64": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "base64"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+              "properties": {
+                "blob": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "blob"
+              ],
+              "type": "object"
+            },
+            {
+              "additionalProperties": false,
+              "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+              "properties": {
+                "file": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "file"
+              ],
+              "type": "object"
+            }
+          ]
+        },
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "ResolutionInput": {
+          "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+          "properties": {
+            "content": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ContentInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+            },
+            "delete": {
+              "description": "Nothing there: no file at the path, nor below it.",
+              "type": "boolean"
+            },
+            "mode": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/ModeInput"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+            },
+            "take": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Side"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+            }
+          },
+          "type": "object"
+        },
+        "ResolutionsInput": {
+          "description": "A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change\nonto the target, decided against one of the target's heads.",
+          "properties": {
+            "against": {
+              "$ref": "#/$defs/Rev",
+              "description": "The target's head the resolutions were decided against: the conflict report's `theirs`,\nby its full 64-hex id. A resolution applies while the target holds its path as this\nchangeset does (the same file, the same directory, or nothing)."
+            },
+            "files": {
+              "additionalProperties": {
+                "$ref": "#/$defs/ResolutionInput"
+              },
+              "description": "What to make of each path, by its repository path.",
+              "type": "object"
+            }
+          },
+          "required": [
+            "against",
+            "files"
+          ],
+          "type": "object"
+        },
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        },
+        "Side": {
+          "description": "One side of a land's merge.",
+          "oneOf": [
+            {
+              "const": "ours",
+              "description": "The change: its head.",
+              "type": "string"
+            },
+            {
+              "const": "theirs",
+              "description": "The target: its head when the land merges.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`rebase` (M5): merge a change three-way onto a ref's head and record the result as one\nchangeset whose parent is that head, moving no ref. The merge, its conflicts and its\nresolutions are a land's (operations spec §3): a conflict is the error `E_CONFLICT`, with the\nreport in `details.report`, and nothing is recorded then.",
+      "properties": {
+        "base": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Rev"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the change starts, as a land's `base`: a first-parent ancestor of `head`; when\nomitted, the merge base of `head` and the head of `onto`."
+        },
+        "head": {
+          "$ref": "#/$defs/Rev",
+          "description": "The changeset to rebase: the change's head."
+        },
+        "idempotency_key": {
+          "description": "Makes a retry safe: a uuid v7, as a commit's key. The same request on the same head of\n`onto` is the same changeset, replayed without writing.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_conflict_bytes": {
+          "default": 32768,
+          "description": "The most bytes of hunk text an `E_CONFLICT` report carries, as a land's.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "message": {
+          "description": "The recorded changeset's message; `head`'s when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "onto": {
+          "default": "main",
+          "description": "The ref to rebase onto: `main` or `release/<name>`, which must exist.",
+          "type": "string"
+        },
+        "resolutions": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ResolutionsInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "What to make of the paths a conflict report named, as a land's resolutions."
+        }
+      },
+      "required": [
+        "head"
+      ],
+      "title": "RebaseReq",
+      "type": "object"
+    },
+    "RebaseResp": {
+      "$defs": {
+        "RebaseStatus": {
+          "description": "How a rebase ended.",
+          "oneOf": [
+            {
+              "const": "rebased",
+              "description": "This request recorded the merged changeset.",
+              "type": "string"
+            },
+            {
+              "const": "replayed",
+              "description": "The same keyed request had recorded it already; nothing was written.",
+              "type": "string"
+            },
+            {
+              "const": "up_to_date",
+              "description": "The change already sits on the ref's head; nothing was written.",
+              "type": "string"
+            },
+            {
+              "const": "absorbed",
+              "description": "The ref's head holds the change already; nothing was written.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`rebase`: the changeset that holds the change merged onto the ref's head. Ids are full.",
+      "properties": {
+        "auto_merged": {
+          "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "base": {
+          "description": "The changeset the change was taken from.",
+          "type": "string"
+        },
+        "changeset": {
+          "description": "The changeset that holds the result: the recorded one, `head` when it is up to date, the\nref's head when the change was absorbed.",
+          "type": "string"
+        },
+        "files_changed": {
+          "description": "How many paths `changeset` changes against `onto`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "onto": {
+          "description": "The ref's head the change was merged onto: `changeset`'s parent when one was recorded.",
+          "type": "string"
+        },
+        "root": {
+          "description": "The root tree of `changeset`.",
+          "type": "string"
+        },
+        "status": {
+          "$ref": "#/$defs/RebaseStatus",
+          "description": "How the rebase ended."
+        }
+      },
+      "required": [
+        "status",
+        "changeset",
+        "root",
+        "onto",
+        "base",
+        "files_changed"
+      ],
+      "title": "RebaseResp",
+      "type": "object"
+    },
+    "RebaseStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How a rebase ended.",
+      "oneOf": [
+        {
+          "const": "rebased",
+          "description": "This request recorded the merged changeset.",
+          "type": "string"
+        },
+        {
+          "const": "replayed",
+          "description": "The same keyed request had recorded it already; nothing was written.",
+          "type": "string"
+        },
+        {
+          "const": "up_to_date",
+          "description": "The change already sits on the ref's head; nothing was written.",
+          "type": "string"
+        },
+        {
+          "const": "absorbed",
+          "description": "The ref's head holds the change already; nothing was written.",
+          "type": "string"
+        }
+      ],
+      "title": "RebaseStatus"
+    },
     "RecoveredOut": {
       "$defs": {
         "LogCutOut": {
@@ -7159,6 +7712,23 @@ expression: s.redact(&all)
       "title": "Signatures",
       "type": "object"
     },
+    "StatusAfter": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+      "oneOf": [
+        {
+          "const": "page",
+          "description": "The first page of the status, up to 100 changes.",
+          "type": "string"
+        },
+        {
+          "const": "none",
+          "description": "No status.",
+          "type": "string"
+        }
+      ],
+      "title": "StatusAfter"
+    },
     "SyncMode": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "Whether `sync` sends what it landed.",
@@ -8065,6 +8635,2876 @@ expression: s.redact(&all)
         }
       },
       "title": "VerifyReq",
+      "type": "object"
+    },
+    "WsChange": {
+      "$defs": {
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "One changed path of a workspace.",
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/WsChangeKind",
+          "description": "What changed."
+        },
+        "path": {
+          "description": "The repository path.",
+          "type": "string"
+        },
+        "size": {
+          "description": "The file's size now; omitted for a deleted path.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path",
+        "kind"
+      ],
+      "title": "WsChange",
+      "type": "object"
+    },
+    "WsChangeKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What changed at a workspace path.",
+      "oneOf": [
+        {
+          "const": "added",
+          "description": "A file the head does not hold.",
+          "type": "string"
+        },
+        {
+          "const": "modified",
+          "description": "Its content changed.",
+          "type": "string"
+        },
+        {
+          "const": "deleted",
+          "description": "It is gone.",
+          "type": "string"
+        },
+        {
+          "const": "type_changed",
+          "description": "A file became a symlink, or the other way round.",
+          "type": "string"
+        },
+        {
+          "const": "mode_changed",
+          "description": "Its executable bit changed.",
+          "type": "string"
+        }
+      ],
+      "title": "WsChangeKind"
+    },
+    "WsCheckInput": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "The check a workspace's land runs.",
+      "properties": {
+        "argv": {
+          "description": "The command and its arguments, run without a shell in the workspace; when omitted, the\nrepository's `.swarmops/workspaces.json` `check.argv`.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "timeout_s": {
+          "default": 900,
+          "description": "The most seconds the command runs before it is killed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "title": "WsCheckInput",
+      "type": "object"
+    },
+    "WsCommitReq": {
+      "$defs": {
+        "ModeInput": {
+          "description": "The kind of entry a `put` writes.",
+          "oneOf": [
+            {
+              "const": "file",
+              "description": "A regular file (git mode 100644).",
+              "type": "string"
+            },
+            {
+              "const": "exec",
+              "description": "An executable file (git mode 100755).",
+              "type": "string"
+            },
+            {
+              "const": "symlink",
+              "description": "A symlink; the content is the link's target.",
+              "type": "string"
+            }
+          ]
+        },
+        "StatusAfter": {
+          "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+          "oneOf": [
+            {
+              "const": "page",
+              "description": "The first page of the status, up to 100 changes.",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "description": "No status.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_commit` (client-side): record a workspace's edits as one changeset on its head.",
+      "properties": {
+        "message": {
+          "description": "The changeset's message.",
+          "type": "string"
+        },
+        "modes": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ModeInput"
+          },
+          "description": "A kind to record for a path, where the volume cannot hold the executable bit.",
+          "type": "object"
+        },
+        "paths": {
+          "description": "Only these repository paths; paths outside the workspace's prefixes join them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status_after": {
+          "$ref": "#/$defs/StatusAfter",
+          "default": "page",
+          "description": "Whether the response carries the status after the mutation."
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace",
+        "message"
+      ],
+      "title": "WsCommitReq",
+      "type": "object"
+    },
+    "WsCommitResp": {
+      "$defs": {
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_commit`: the changeset recorded.",
+      "properties": {
+        "blobs_written": {
+          "description": "How many blobs the store did not hold and got.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changeset": {
+          "description": "The new changeset: the workspace's head now.",
+          "type": "string"
+        },
+        "files_changed": {
+          "description": "How many paths it changes.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "parent": {
+          "description": "Its parent: the head before.",
+          "type": "string"
+        },
+        "replayed": {
+          "description": "A crashed commit's key replayed: the changeset was recorded before.",
+          "type": "boolean"
+        },
+        "status_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status after the mutation; omitted when the request said `none`."
+        }
+      },
+      "required": [
+        "changeset",
+        "parent",
+        "files_changed",
+        "blobs_written",
+        "replayed"
+      ],
+      "title": "WsCommitResp",
+      "type": "object"
+    },
+    "WsCreateReq": {
+      "$defs": {
+        "Rev": {
+          "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+          "type": "string"
+        },
+        "StatusAfter": {
+          "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+          "oneOf": [
+            {
+              "const": "page",
+              "description": "The first page of the status, up to 100 changes.",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "description": "No status.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_create` (M5, client-side): make a workspace, a directory holding a sparse copy of a\nchangeset's tree. The same request again is the same workspace (`created` false).",
+      "properties": {
+        "all": {
+          "description": "The whole tree instead of `prefixes`.",
+          "type": "boolean"
+        },
+        "base": {
+          "$ref": "#/$defs/Rev",
+          "default": "main",
+          "description": "The changeset whose tree it holds."
+        },
+        "from": {
+          "description": "A directory on the caller's host whose `.worktreeinclude` names files to copy in; when\nomitted, nothing is copied.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "The workspace's name: 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, not starting with `.`.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The directory to make it in, on the caller's host; when omitted, one named after it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prefixes": {
+          "description": "The repository paths whose subtrees are written out.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "session": {
+          "description": "The hook's session, 16 hex digits; set by the Claude Code hook only.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status_after": {
+          "$ref": "#/$defs/StatusAfter",
+          "default": "page",
+          "description": "Whether the response carries the status after the mutation."
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "WsCreateReq",
+      "type": "object"
+    },
+    "WsDeleteReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_delete` (client-side, CLI only): remove a workspace's directory, then its entry.",
+      "properties": {
+        "force": {
+          "description": "Delete it even with edits or unlanded commits.",
+          "type": "boolean"
+        },
+        "rescue": {
+          "description": "Commit its edits as a rescue changeset first.",
+          "type": "boolean"
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsDeleteReq",
+      "type": "object"
+    },
+    "WsDeleteResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_delete`: what the deleted workspace left in the store.",
+      "properties": {
+        "deleted": {
+          "description": "The workspace's name.",
+          "type": "string"
+        },
+        "head": {
+          "description": "Its head when it was deleted.",
+          "type": "string"
+        },
+        "rescued": {
+          "description": "The rescue changeset of its edits, when there were some.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "deleted",
+        "head"
+      ],
+      "title": "WsDeleteResp",
+      "type": "object"
+    },
+    "WsDiffReq": {
+      "$defs": {
+        "DiffFormat": {
+          "description": "What `diff` says of each file.",
+          "oneOf": [
+            {
+              "const": "names",
+              "description": "Its path and status.",
+              "type": "string"
+            },
+            {
+              "const": "stat",
+              "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+              "type": "string"
+            },
+            {
+              "const": "unified",
+              "description": "Also its kinds, its blobs and, for text, its hunks.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_diff` (client-side): a workspace's edits against its head, as the store's diff gives a\ndiff (`from` the head, `to` `ws:<name>`).",
+      "properties": {
+        "context": {
+          "default": 3,
+          "description": "Unchanged lines around each change.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cursor": {
+          "description": "Where the previous page stopped.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "format": {
+          "$ref": "#/$defs/DiffFormat",
+          "default": "names",
+          "description": "How much each file says: as the store's diff."
+        },
+        "limit": {
+          "default": 500,
+          "description": "The most files to return: at least 1.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "max_bytes": {
+          "default": 32768,
+          "description": "The most bytes of a `unified` page's files.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "paths": {
+          "description": "Only these repository paths, and what is below them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsDiffReq",
+      "type": "object"
+    },
+    "WsDiscardReq": {
+      "$defs": {
+        "StatusAfter": {
+          "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+          "oneOf": [
+            {
+              "const": "page",
+              "description": "The first page of the status, up to 100 changes.",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "description": "No status.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_discard` (client-side): restore paths from the workspace's head.",
+      "properties": {
+        "paths": {
+          "description": "The repository paths to restore; every changed one when empty.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status_after": {
+          "$ref": "#/$defs/StatusAfter",
+          "default": "page",
+          "description": "Whether the response carries the status after the mutation."
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsDiscardReq",
+      "type": "object"
+    },
+    "WsDiscardResp": {
+      "$defs": {
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_discard`: the paths restored.",
+      "properties": {
+        "discarded": {
+          "description": "The paths restored.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status after the mutation; omitted when the request said `none`."
+        }
+      },
+      "required": [
+        "discarded"
+      ],
+      "title": "WsDiscardResp",
+      "type": "object"
+    },
+    "WsInfo": {
+      "$defs": {
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A workspace: where it is and what it holds.",
+      "properties": {
+        "all": {
+          "description": "Whether the whole tree is written out.",
+          "type": "boolean"
+        },
+        "base": {
+          "description": "The target's changeset its chain starts from.",
+          "type": "string"
+        },
+        "created": {
+          "default": false,
+          "description": "Whether this request made it: false for one that existed.",
+          "type": "boolean"
+        },
+        "head": {
+          "description": "Its chain's last changeset; `base` when nothing is committed.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Its name.",
+          "type": "string"
+        },
+        "orphan": {
+          "description": "Whether its directory is gone while its entry stays (`ws_list` with `check`).",
+          "type": "boolean"
+        },
+        "path": {
+          "description": "Its directory on the caller's host.",
+          "type": "string"
+        },
+        "prefixes": {
+          "description": "The repository paths written out.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status after the mutation; omitted when the request said `none`."
+        }
+      },
+      "required": [
+        "name",
+        "path",
+        "base",
+        "head"
+      ],
+      "title": "WsInfo",
+      "type": "object"
+    },
+    "WsInfoReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_info` (client-side): one workspace.",
+      "properties": {
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsInfoReq",
+      "type": "object"
+    },
+    "WsLandReq": {
+      "$defs": {
+        "LandMode": {
+          "description": "How a workspace lands.",
+          "oneOf": [
+            {
+              "const": "merge",
+              "description": "Merge onto the target's head, wherever it has moved.",
+              "type": "string"
+            },
+            {
+              "const": "exact",
+              "description": "Publish only onto the target's head the workspace was rebased onto, so that the landed\ntree is the rebased one.",
+              "type": "string"
+            }
+          ]
+        },
+        "StatusAfter": {
+          "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+          "oneOf": [
+            {
+              "const": "page",
+              "description": "The first page of the status, up to 100 changes.",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "description": "No status.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsCheckInput": {
+          "description": "The check a workspace's land runs.",
+          "properties": {
+            "argv": {
+              "description": "The command and its arguments, run without a shell in the workspace; when omitted, the\nrepository's `.swarmops/workspaces.json` `check.argv`.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            },
+            "timeout_s": {
+              "default": 900,
+              "description": "The most seconds the command runs before it is killed.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_land` (client-side): land a workspace's chain on its target; with a check, rebase, run\nthe check there, and publish only the tree the check ran on.",
+      "properties": {
+        "check": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsCheckInput"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The check to run on the rebased tree before it lands."
+        },
+        "idempotency_key": {
+          "description": "The land's key, a uuid v7; when omitted, the workspace makes one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "max_attempts": {
+          "default": 8,
+          "description": "How many times to rebase, check and land before `E_CAS_RETRY_EXHAUSTED`: 1 to 32.",
+          "format": "uint32",
+          "maximum": 32,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "message": {
+          "description": "The landed changeset's message, and the message to commit edits with first.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LandMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "`merge` or `exact`; when omitted, `exact` with a check and `merge` without."
+        },
+        "status_after": {
+          "$ref": "#/$defs/StatusAfter",
+          "default": "page",
+          "description": "Whether the response carries the status after the mutation."
+        },
+        "target": {
+          "description": "The ref to land on; the workspace's target when omitted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsLandReq",
+      "type": "object"
+    },
+    "WsLandResp": {
+      "$defs": {
+        "LandResp": {
+          "description": "`land`: where the change landed. Ids are full.",
+          "properties": {
+            "attempts": {
+              "description": "How many times the land tried to publish.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "auto_merged": {
+              "description": "The paths both sides changed that merged cleanly. Omitted when empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "base": {
+              "description": "The changeset the change was taken from: what `head`'s first-parent chain added after it\nis what landed.",
+              "type": "string"
+            },
+            "files_changed": {
+              "description": "How many paths the landed changeset changes.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "landed": {
+              "description": "The landed changeset: the change squashed into one changeset on the target.",
+              "type": "string"
+            },
+            "rebased_onto": {
+              "description": "The target's head the change landed on: `landed`'s parent.",
+              "type": "string"
+            },
+            "relocated": {
+              "description": "The target moved after the land read it, and the publish put the change on the new head\nitself, without another attempt.",
+              "type": "boolean"
+            },
+            "squashed_from": {
+              "description": "The changesets the land squashed, oldest first: `head`'s first-parent chain after `base`,\nending at `head`.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "status": {
+              "$ref": "#/$defs/LandStatus",
+              "description": "`landed`, or `replayed` when a land with the same `idempotency_key` had landed the change\nalready."
+            },
+            "target": {
+              "description": "The ref it landed on.",
+              "type": "string"
+            },
+            "warnings": {
+              "description": "Problems found after the land became durable, such as failed housekeeping; the land\nitself succeeded. Omitted when empty.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "status",
+            "landed",
+            "rebased_onto",
+            "target",
+            "base",
+            "attempts",
+            "relocated",
+            "files_changed",
+            "squashed_from"
+          ],
+          "type": "object"
+        },
+        "LandStatus": {
+          "description": "How a land ended.",
+          "oneOf": [
+            {
+              "const": "landed",
+              "description": "This request landed the change.",
+              "type": "string"
+            },
+            {
+              "const": "replayed",
+              "description": "A land with the same `idempotency_key` had landed it already; nothing was written.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_land`: the land, and how many attempts it took.",
+      "properties": {
+        "attempts": {
+          "description": "How many rebase, check and land attempts it took.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "land": {
+          "$ref": "#/$defs/LandResp",
+          "description": "The store's land."
+        },
+        "status_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status after the mutation; omitted when the request said `none`."
+        }
+      },
+      "required": [
+        "land",
+        "attempts"
+      ],
+      "title": "WsLandResp",
+      "type": "object"
+    },
+    "WsList": {
+      "$defs": {
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsInfo": {
+          "description": "A workspace: where it is and what it holds.",
+          "properties": {
+            "all": {
+              "description": "Whether the whole tree is written out.",
+              "type": "boolean"
+            },
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "created": {
+              "default": false,
+              "description": "Whether this request made it: false for one that existed.",
+              "type": "boolean"
+            },
+            "head": {
+              "description": "Its chain's last changeset; `base` when nothing is committed.",
+              "type": "string"
+            },
+            "name": {
+              "description": "Its name.",
+              "type": "string"
+            },
+            "orphan": {
+              "description": "Whether its directory is gone while its entry stays (`ws_list` with `check`).",
+              "type": "boolean"
+            },
+            "path": {
+              "description": "Its directory on the caller's host.",
+              "type": "string"
+            },
+            "prefixes": {
+              "description": "The repository paths written out.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "status_after": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsStatus"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The status after the mutation; omitted when the request said `none`."
+            }
+          },
+          "required": [
+            "name",
+            "path",
+            "base",
+            "head"
+          ],
+          "type": "object"
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_list`: the workspaces, by name.",
+      "properties": {
+        "workspaces": {
+          "description": "The workspaces.",
+          "items": {
+            "$ref": "#/$defs/WsInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "workspaces"
+      ],
+      "title": "WsList",
+      "type": "object"
+    },
+    "WsListReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_list` (client-side): the store's workspaces, from its registry.",
+      "properties": {
+        "check": {
+          "description": "Also open each workspace, and report one whose directory is gone as an orphan.",
+          "type": "boolean"
+        }
+      },
+      "title": "WsListReq",
+      "type": "object"
+    },
+    "WsMaterializeReq": {
+      "$defs": {
+        "StatusAfter": {
+          "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+          "oneOf": [
+            {
+              "const": "page",
+              "description": "The first page of the status, up to 100 changes.",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "description": "No status.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_materialize` (client-side): write out more of the tree.",
+      "properties": {
+        "paths": {
+          "description": "The repository paths to add to its prefixes.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status_after": {
+          "$ref": "#/$defs/StatusAfter",
+          "default": "page",
+          "description": "Whether the response carries the status after the mutation."
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace",
+        "paths"
+      ],
+      "title": "WsMaterializeReq",
+      "type": "object"
+    },
+    "WsMaterializeResp": {
+      "$defs": {
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_materialize`: what was written.",
+      "properties": {
+        "bytes": {
+          "description": "How many bytes were written.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "materialized": {
+          "description": "The prefixes added.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status after the mutation; omitted when the request said `none`."
+        }
+      },
+      "required": [
+        "materialized",
+        "bytes"
+      ],
+      "title": "WsMaterializeResp",
+      "type": "object"
+    },
+    "WsRebaseAction": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a workspace's rebase does.",
+      "oneOf": [
+        {
+          "const": "start",
+          "description": "Rebase the workspace's chain onto the target's head.",
+          "type": "string"
+        },
+        {
+          "const": "continue",
+          "description": "Rebase again with the resolved conflicts.",
+          "type": "string"
+        },
+        {
+          "const": "abort",
+          "description": "Leave the rebase: restore the conflicting paths from the head.",
+          "type": "string"
+        }
+      ],
+      "title": "WsRebaseAction"
+    },
+    "WsRebaseReq": {
+      "$defs": {
+        "StatusAfter": {
+          "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+          "oneOf": [
+            {
+              "const": "page",
+              "description": "The first page of the status, up to 100 changes.",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "description": "No status.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebaseAction": {
+          "description": "What a workspace's rebase does.",
+          "oneOf": [
+            {
+              "const": "start",
+              "description": "Rebase the workspace's chain onto the target's head.",
+              "type": "string"
+            },
+            {
+              "const": "continue",
+              "description": "Rebase again with the resolved conflicts.",
+              "type": "string"
+            },
+            {
+              "const": "abort",
+              "description": "Leave the rebase: restore the conflicting paths from the head.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_rebase` (client-side): move a workspace's chain onto its target's head, as `rebase`\nrecords it, and its files with it.",
+      "properties": {
+        "action": {
+          "$ref": "#/$defs/WsRebaseAction",
+          "default": "start",
+          "description": "Start, continue after resolving, or abort."
+        },
+        "message": {
+          "description": "Commit the workspace's edits first, with this message; without it, edits are\n`E_WS_DIRTY`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "onto": {
+          "default": "main",
+          "description": "The ref to rebase onto.",
+          "type": "string"
+        },
+        "status_after": {
+          "$ref": "#/$defs/StatusAfter",
+          "default": "page",
+          "description": "Whether the response carries the status after the mutation."
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsRebaseReq",
+      "type": "object"
+    },
+    "WsRebaseResp": {
+      "$defs": {
+        "RebaseStatus": {
+          "description": "How a rebase ended.",
+          "oneOf": [
+            {
+              "const": "rebased",
+              "description": "This request recorded the merged changeset.",
+              "type": "string"
+            },
+            {
+              "const": "replayed",
+              "description": "The same keyed request had recorded it already; nothing was written.",
+              "type": "string"
+            },
+            {
+              "const": "up_to_date",
+              "description": "The change already sits on the ref's head; nothing was written.",
+              "type": "string"
+            },
+            {
+              "const": "absorbed",
+              "description": "The ref's head holds the change already; nothing was written.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_rebase`: where the workspace stands now.",
+      "properties": {
+        "changeset": {
+          "description": "The workspace's head now.",
+          "type": "string"
+        },
+        "onto": {
+          "description": "The target's head it was rebased onto.",
+          "type": "string"
+        },
+        "status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RebaseStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "How the rebase ended; `None` after an abort."
+        },
+        "status_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status after the mutation; omitted when the request said `none`."
+        }
+      },
+      "required": [
+        "changeset",
+        "onto"
+      ],
+      "title": "WsRebaseResp",
+      "type": "object"
+    },
+    "WsRebasing": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A workspace's rebase in progress.",
+      "properties": {
+        "conflicts": {
+          "description": "The paths that still conflict.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "onto": {
+          "description": "The target's head it rebases onto.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "onto",
+        "conflicts"
+      ],
+      "title": "WsRebasing",
+      "type": "object"
+    },
+    "WsResolveReq": {
+      "$defs": {
+        "Side": {
+          "description": "One side of a land's merge.",
+          "oneOf": [
+            {
+              "const": "ours",
+              "description": "The change: its head.",
+              "type": "string"
+            },
+            {
+              "const": "theirs",
+              "description": "The target: its head when the land merges.",
+              "type": "string"
+            }
+          ]
+        },
+        "StatusAfter": {
+          "description": "Whether a workspace mutation's response carries the workspace's status after it.",
+          "oneOf": [
+            {
+              "const": "page",
+              "description": "The first page of the status, up to 100 changes.",
+              "type": "string"
+            },
+            {
+              "const": "none",
+              "description": "No status.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_resolve` (client-side): mark conflicting paths of a rebase resolved.",
+      "properties": {
+        "all": {
+          "description": "Every conflicting path.",
+          "type": "boolean"
+        },
+        "force": {
+          "description": "Resolve a file that still holds a conflict marker line.",
+          "type": "boolean"
+        },
+        "paths": {
+          "description": "The paths resolved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status_after": {
+          "$ref": "#/$defs/StatusAfter",
+          "default": "page",
+          "description": "Whether the response carries the status after the mutation."
+        },
+        "take": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Side"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Take one side's content instead of the file's."
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsResolveReq",
+      "type": "object"
+    },
+    "WsResolveResp": {
+      "$defs": {
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsStatus": {
+          "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+          "properties": {
+            "base": {
+              "description": "The target's changeset its chain starts from.",
+              "type": "string"
+            },
+            "behind_by": {
+              "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "changes": {
+              "description": "The changes, by path.",
+              "items": {
+                "$ref": "#/$defs/WsChange"
+              },
+              "type": "array"
+            },
+            "cursor": {
+              "description": "Where this page stopped.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "head": {
+              "description": "Its chain's last changeset.",
+              "type": "string"
+            },
+            "main": {
+              "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The workspace's name.",
+              "type": "string"
+            },
+            "rebasing": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/WsRebasing"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The rebase in progress, when `state` is `rebasing`."
+            },
+            "state": {
+              "$ref": "#/$defs/WsState",
+              "description": "Whether the workspace is rebasing."
+            },
+            "truncated": {
+              "description": "Whether more changes follow: give `cursor` to read them.",
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "base",
+            "head",
+            "main",
+            "behind_by",
+            "state",
+            "changes",
+            "truncated"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_resolve`: the paths resolved and those left.",
+      "properties": {
+        "remaining": {
+          "description": "The paths that still conflict.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "resolved": {
+          "description": "The paths this request resolved.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "status_after": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsStatus"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The status after the mutation; omitted when the request said `none`."
+        }
+      },
+      "required": [
+        "resolved",
+        "remaining"
+      ],
+      "title": "WsResolveResp",
+      "type": "object"
+    },
+    "WsState": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A workspace's state.",
+      "oneOf": [
+        {
+          "const": "clean",
+          "description": "No rebase in progress.",
+          "type": "string"
+        },
+        {
+          "const": "rebasing",
+          "description": "A rebase stopped on conflicts.",
+          "type": "string"
+        }
+      ],
+      "title": "WsState"
+    },
+    "WsStatus": {
+      "$defs": {
+        "WsChange": {
+          "description": "One changed path of a workspace.",
+          "properties": {
+            "kind": {
+              "$ref": "#/$defs/WsChangeKind",
+              "description": "What changed."
+            },
+            "path": {
+              "description": "The repository path.",
+              "type": "string"
+            },
+            "size": {
+              "description": "The file's size now; omitted for a deleted path.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "path",
+            "kind"
+          ],
+          "type": "object"
+        },
+        "WsChangeKind": {
+          "description": "What changed at a workspace path.",
+          "oneOf": [
+            {
+              "const": "added",
+              "description": "A file the head does not hold.",
+              "type": "string"
+            },
+            {
+              "const": "modified",
+              "description": "Its content changed.",
+              "type": "string"
+            },
+            {
+              "const": "deleted",
+              "description": "It is gone.",
+              "type": "string"
+            },
+            {
+              "const": "type_changed",
+              "description": "A file became a symlink, or the other way round.",
+              "type": "string"
+            },
+            {
+              "const": "mode_changed",
+              "description": "Its executable bit changed.",
+              "type": "string"
+            }
+          ]
+        },
+        "WsRebasing": {
+          "description": "A workspace's rebase in progress.",
+          "properties": {
+            "conflicts": {
+              "description": "The paths that still conflict.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "onto": {
+              "description": "The target's head it rebases onto.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "onto",
+            "conflicts"
+          ],
+          "type": "object"
+        },
+        "WsState": {
+          "description": "A workspace's state.",
+          "oneOf": [
+            {
+              "const": "clean",
+              "description": "No rebase in progress.",
+              "type": "string"
+            },
+            {
+              "const": "rebasing",
+              "description": "A rebase stopped on conflicts.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A workspace's status: its changes against its head, a page at a time, and how far its target\nhas moved since its base.",
+      "properties": {
+        "base": {
+          "description": "The target's changeset its chain starts from.",
+          "type": "string"
+        },
+        "behind_by": {
+          "description": "How many changesets the target holds past `base`, along first parents: at most 10,000.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "changes": {
+          "description": "The changes, by path.",
+          "items": {
+            "$ref": "#/$defs/WsChange"
+          },
+          "type": "array"
+        },
+        "cursor": {
+          "description": "Where this page stopped.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "head": {
+          "description": "Its chain's last changeset.",
+          "type": "string"
+        },
+        "main": {
+          "description": "The head of the workspace's target ref (`main`, or `release/<name>`), read first.",
+          "type": "string"
+        },
+        "name": {
+          "description": "The workspace's name.",
+          "type": "string"
+        },
+        "rebasing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WsRebasing"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The rebase in progress, when `state` is `rebasing`."
+        },
+        "state": {
+          "$ref": "#/$defs/WsState",
+          "description": "Whether the workspace is rebasing."
+        },
+        "truncated": {
+          "description": "Whether more changes follow: give `cursor` to read them.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "name",
+        "base",
+        "head",
+        "main",
+        "behind_by",
+        "state",
+        "changes",
+        "truncated"
+      ],
+      "title": "WsStatus",
+      "type": "object"
+    },
+    "WsStatusReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`ws_status` (client-side): what changed in a workspace against its head.",
+      "properties": {
+        "cursor": {
+          "description": "Where the previous page stopped.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "full": {
+          "description": "Hash every file instead of trusting unchanged stats.",
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 500,
+          "description": "The most changes to return: at least 1.",
+          "format": "uint",
+          "minimum": 1,
+          "type": "integer"
+        },
+        "paths": {
+          "description": "Only these repository paths, and what is below them.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "workspace": {
+          "description": "The workspace, by name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "workspace"
+      ],
+      "title": "WsStatusReq",
       "type": "object"
     }
   },

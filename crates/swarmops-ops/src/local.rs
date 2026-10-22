@@ -20,6 +20,7 @@ use swarmops_api::{
     RefSetReq, RefSetResp, RepoInfo, Rev, ShowReq, SignatureOut, Signatures, StoreOps,
     TreeEntryOut, TreeListing, UndoReq, UndoResp, VerifyFinding, VerifyReport, VerifyReq,
 };
+use swarmops_api::{BlobGetReq, BlobGetResp, RebaseReq, RebaseResp};
 use swarmops_api::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 use swarmops_api::{ContentInput, ModeInput, ResolutionInput, ResolutionsInput};
 use swarmops_api::{LandReq, LandResp, LandStatus, MAX_LAND_ATTEMPTS};
@@ -1187,8 +1188,16 @@ impl StoreOps for Recording<'_> {
             idempotency_key,
             max_attempts,
             max_conflict_bytes,
+            expect_target,
             resolutions,
         } = req;
+        // An exact land, onto the head the change was rebased on, is the M5 plan's task W2.
+        if expect_target.is_some() {
+            return Err(error(
+                ErrorCode::InvalidArg,
+                "land's expect_target is not built yet (the M5 plan's task W2)",
+            ));
+        }
         // The request's own rules are checked before anything is resolved or read.
         if let Some(key) = &idempotency_key {
             land_key(key)?;
@@ -1275,6 +1284,14 @@ impl StoreOps for Recording<'_> {
             size: stored.size,
             written: stored.written,
         })
+    }
+
+    fn rebase(&self, who: &Identity, req: RebaseReq) -> Result<RebaseResp, OpError> {
+        crate::rebase::run(self, who, req)
+    }
+
+    fn blob_get(&self, req: BlobGetReq) -> Result<BlobGetResp, OpError> {
+        crate::blob_get::run(self, req)
     }
 
     fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError> {
@@ -1781,6 +1798,14 @@ impl StoreOps for LocalOps {
 
     fn blob_put(&self, who: &Identity, req: BlobPutReq) -> Result<BlobPutResp, OpError> {
         self.recording(&Resolved::default()).blob_put(who, req)
+    }
+
+    fn rebase(&self, who: &Identity, req: RebaseReq) -> Result<RebaseResp, OpError> {
+        self.recording(&Resolved::default()).rebase(who, req)
+    }
+
+    fn blob_get(&self, req: BlobGetReq) -> Result<BlobGetResp, OpError> {
+        self.recording(&Resolved::default()).blob_get(req)
     }
 
     fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError> {

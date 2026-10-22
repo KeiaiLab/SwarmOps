@@ -41,6 +41,7 @@ use camino::Utf8Path;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use swarmops_api::LandReq;
+use swarmops_api::RebaseReq;
 use swarmops_api::ResolutionsInput;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::remote::DEFAULT_PUSH_SOURCE;
@@ -168,6 +169,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
             |ops, (who, req)| ops.commit(&who, req),
         ),
         land @ Command::Land { .. } => run_land(ctx, op, land),
+        rebase @ Command::Rebase { .. } => run_rebase(ctx, op, rebase),
         Command::Blob(command) => run_blob(ctx, op, command),
         Command::Resolve { rev } => resolve_rev(ctx, op, rev),
         Command::Cat {
@@ -307,11 +309,45 @@ fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                 idempotency_key: key,
                 max_attempts,
                 max_conflict_bytes,
+                expect_target: None,
                 resolutions: resolve.as_deref().map(read_resolutions).transpose()?,
             };
             Ok((who, req))
         },
         |ops, (who, req)| ops.land(&who, req),
+    )
+}
+
+/// Runs `rebase`, which names operation `op`.
+fn run_rebase(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::Rebase {
+        head,
+        base,
+        onto,
+        message,
+        key,
+        max_conflict_bytes,
+        resolve,
+    } = command
+    else {
+        unreachable!("run passes rebase its own command alone");
+    };
+    ctx.on_store(
+        op,
+        || {
+            let who = context::mutator(ctx.global.agent.as_deref(), ctx.env)?;
+            let req = RebaseReq {
+                head: head.into(),
+                base: base.map(Rev::from),
+                onto,
+                message,
+                idempotency_key: key,
+                max_conflict_bytes,
+                resolutions: resolve.as_deref().map(read_resolutions).transpose()?,
+            };
+            Ok((who, req))
+        },
+        |ops, (who, req)| ops.rebase(&who, req),
     )
 }
 
@@ -585,16 +621,33 @@ impl Ctx<'_> {
         prepare: impl FnOnce() -> Result<P, OpError>,
         call: impl FnOnce(Recording<'_>, P) -> Result<T, OpError>,
     ) -> Envelope<T> {
+        self.envelope_at_root(op, prepare, |ops, _root, input| call(ops, input))
+    }
+
+    /// [`Ctx::envelope_on_local`], with `call` handed the store's root too, as the user named
+    /// it: what a workspace tool of `swarmops mcp` runs on (M5), since `StoreOps` carries no
+    /// path and the workspaces' registry is a directory of the store's. The one place that
+    /// opens the store for both.
+    pub(crate) fn envelope_at_root<P, T>(
+        &self,
+        op: &str,
+        prepare: impl FnOnce() -> Result<P, OpError>,
+        call: impl FnOnce(Recording<'_>, &Utf8Path, P) -> Result<T, OpError>,
+    ) -> Envelope<T> {
+        // 1. The store the user named, kept for meta.repo.
         let named = context::store_named(self.global.repo.as_deref(), self.env);
         if let Ok(Some(store)) = &named {
             self.used.repo.replace(Some(store.clone()));
         }
+
+        // 2. The input, then the store opened, then the call on both.
         let result = named.and_then(|named| {
             let input = prepare()?;
             let store =
                 named.ok_or_else(|| context::no_store_named(self.global.repo.as_deref()))?;
-            let ops = LocalOps::open(Utf8Path::new(&store))?;
-            call(ops.recording(&self.used.resolved), input)
+            let root = Utf8Path::new(&store);
+            let ops = LocalOps::open(root)?;
+            call(ops.recording(&self.used.resolved), root, input)
         });
         envelope(op, self.used.meta(), result, self.started)
     }

@@ -829,6 +829,18 @@ expression: golden.transcript()
                     ],
                     "description": "Where the change starts: a first-parent ancestor of `head`, whose own changes are not part\nof it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the\nmerge base of `head` and the target's head, along first parents."
                   },
+                  "expect_target": {
+                    "anyOf": [
+                      {
+                        "pattern": "^[0-9a-fA-F]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Publish only while the target names this changeset (M5): one attempt, and a target that\nnames another is `E_CAS_MISMATCH`, nothing written; `max_attempts` does not apply. With a\n`head` rebased onto it, the landed tree is the rebased tree. `swarmops mcp` refuses one\nthat is not a full 64-hex id (`E_INVALID_ARG`)."
+                  },
                   "head": {
                     "description": "The changeset to land: the change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
                     "type": "string"
@@ -1028,6 +1040,222 @@ expression: golden.transcript()
               },
               "name": "land",
               "title": "Land a change"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Merges head (with its first-parent chain since base) three-way onto onto's head, main by default, as land merges it, and records the result as one changeset there without moving any ref: build and test that changeset, then land it with expect_target set to result.onto, so that the landed tree is the one you tested. Pass head, base and resolutions' against as full 64-hex ids, and an idempotency_key to make a retry safe.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`rebase` (M5): merge a change three-way onto a ref's head and record the result as one\nchangeset whose parent is that head, moving no ref. The merge, its conflicts and its\nresolutions are a land's (operations spec §3): a conflict is the error `E_CONFLICT`, with the\nreport in `details.report`, and nothing is recorded then.",
+                "properties": {
+                  "base": {
+                    "anyOf": [
+                      {
+                        "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Where the change starts, as a land's `base`: a first-parent ancestor of `head`; when\nomitted, the merge base of `head` and the head of `onto`."
+                  },
+                  "head": {
+                    "description": "The changeset to rebase: the change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "description": "Makes a retry safe: a uuid v7, as a commit's key. The same request on the same head of\n`onto` is the same changeset, replayed without writing.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "max_conflict_bytes": {
+                    "default": 32768,
+                    "description": "The most bytes of hunk text an `E_CONFLICT` report carries, as a land's.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "message": {
+                    "description": "The recorded changeset's message; `head`'s when omitted.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "onto": {
+                    "default": "main",
+                    "description": "The ref to rebase onto: `main` or `release/<name>`, which must exist.",
+                    "type": "string"
+                  },
+                  "resolutions": {
+                    "anyOf": [
+                      {
+                        "description": "A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change\nonto the target, decided against one of the target's heads.",
+                        "properties": {
+                          "against": {
+                            "description": "The target's head the resolutions were decided against: the conflict report's `theirs`,\nby its full 64-hex id. A resolution applies while the target holds its path as this\nchangeset does (the same file, the same directory, or nothing). A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                            "type": "string"
+                          },
+                          "files": {
+                            "additionalProperties": {
+                              "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+                              "properties": {
+                                "content": {
+                                  "anyOf": [
+                                    {
+                                      "description": "A `put`'s content, as an object with one key.",
+                                      "oneOf": [
+                                        {
+                                          "additionalProperties": false,
+                                          "description": "UTF-8 text, verbatim.",
+                                          "properties": {
+                                            "inline": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "inline"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        {
+                                          "additionalProperties": false,
+                                          "description": "Bytes in standard, padded base64.",
+                                          "properties": {
+                                            "base64": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "base64"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        {
+                                          "additionalProperties": false,
+                                          "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                                          "properties": {
+                                            "blob": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "blob"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        {
+                                          "additionalProperties": false,
+                                          "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+                                          "properties": {
+                                            "file": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "file"
+                                          ],
+                                          "type": "object"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ],
+                                  "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+                                },
+                                "delete": {
+                                  "description": "Nothing there: no file at the path, nor below it.",
+                                  "type": "boolean"
+                                },
+                                "mode": {
+                                  "anyOf": [
+                                    {
+                                      "description": "The kind of entry a `put` writes.",
+                                      "oneOf": [
+                                        {
+                                          "const": "file",
+                                          "description": "A regular file (git mode 100644).",
+                                          "type": "string"
+                                        },
+                                        {
+                                          "const": "exec",
+                                          "description": "An executable file (git mode 100755).",
+                                          "type": "string"
+                                        },
+                                        {
+                                          "const": "symlink",
+                                          "description": "A symlink; the content is the link's target.",
+                                          "type": "string"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ],
+                                  "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+                                },
+                                "take": {
+                                  "anyOf": [
+                                    {
+                                      "description": "One side of a land's merge.",
+                                      "oneOf": [
+                                        {
+                                          "const": "ours",
+                                          "description": "The change: its head.",
+                                          "type": "string"
+                                        },
+                                        {
+                                          "const": "theirs",
+                                          "description": "The target: its head when the land merges.",
+                                          "type": "string"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ],
+                                  "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "description": "What to make of each path, by its repository path.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "against",
+                          "files"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "What to make of the paths a conflict report named, as a land's resolutions."
+                  }
+                },
+                "required": [
+                  "head"
+                ],
+                "title": "RebaseReq",
+                "type": "object"
+              },
+              "name": "rebase",
+              "title": "Rebase a change"
             },
             {
               "annotations": {
@@ -1324,6 +1552,724 @@ expression: golden.transcript()
               },
               "name": "sync_status",
               "title": "Show sync status"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Makes a workspace: a directory holding a sparse copy of a changeset's tree (base, main by default) under the prefixes given, for building and testing a change on disk. The same call again is the same workspace (created false).",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_create` (M5, client-side): make a workspace, a directory holding a sparse copy of a\nchangeset's tree. The same request again is the same workspace (`created` false).",
+                "properties": {
+                  "all": {
+                    "description": "The whole tree instead of `prefixes`.",
+                    "type": "boolean"
+                  },
+                  "base": {
+                    "default": "main",
+                    "description": "The changeset whose tree it holds. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  },
+                  "from": {
+                    "description": "A directory on the caller's host whose `.worktreeinclude` names files to copy in; when\nomitted, nothing is copied.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "name": {
+                    "description": "The workspace's name: 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, not starting with `.`.",
+                    "type": "string"
+                  },
+                  "path": {
+                    "description": "The directory to make it in, on the caller's host; when omitted, one named after it.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "prefixes": {
+                    "description": "The repository paths whose subtrees are written out.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "session": {
+                    "description": "The hook's session, 16 hex digits; set by the Claude Code hook only.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status_after": {
+                    "default": "page",
+                    "description": "Whether the response carries the status after the mutation. Whether a workspace mutation's response carries the workspace's status after it.",
+                    "oneOf": [
+                      {
+                        "const": "page",
+                        "description": "The first page of the status, up to 100 changes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "none",
+                        "description": "No status.",
+                        "type": "string"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "title": "WsCreateReq",
+                "type": "object"
+              },
+              "name": "ws_create",
+              "title": "Create a workspace"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "What changed in a workspace against its head, a page at a time, and how far its target has moved since its base; pass a limit of 100 or less.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_status` (client-side): what changed in a workspace against its head.",
+                "properties": {
+                  "cursor": {
+                    "description": "Where the previous page stopped.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "full": {
+                    "description": "Hash every file instead of trusting unchanged stats.",
+                    "type": "boolean"
+                  },
+                  "limit": {
+                    "default": 500,
+                    "description": "The most changes to return: at least 1.",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "paths": {
+                    "description": "Only these repository paths, and what is below them.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "WsStatusReq",
+                "type": "object"
+              },
+              "name": "ws_status",
+              "title": "Show a workspace's status"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "A workspace's edits against its head, as the diff tool gives a diff; pass max_bytes of 32768 or less and a limit of 100 or less.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_diff` (client-side): a workspace's edits against its head, as the store's diff gives a\ndiff (`from` the head, `to` `ws:<name>`).",
+                "properties": {
+                  "context": {
+                    "default": 3,
+                    "description": "Unchanged lines around each change.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "cursor": {
+                    "description": "Where the previous page stopped.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "format": {
+                    "default": "names",
+                    "description": "How much each file says: as the store's diff. What `diff` says of each file.",
+                    "oneOf": [
+                      {
+                        "const": "names",
+                        "description": "Its path and status.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stat",
+                        "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "unified",
+                        "description": "Also its kinds, its blobs and, for text, its hunks.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "limit": {
+                    "default": 500,
+                    "description": "The most files to return: at least 1.",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "max_bytes": {
+                    "default": 32768,
+                    "description": "The most bytes of a `unified` page's files.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "paths": {
+                    "description": "Only these repository paths, and what is below them.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "WsDiffReq",
+                "type": "object"
+              },
+              "name": "ws_diff",
+              "title": "Diff a workspace"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Records a workspace's edits as one changeset on its head, uploading only the blobs the store lacks; a crashed commit replays by its key.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_commit` (client-side): record a workspace's edits as one changeset on its head.",
+                "properties": {
+                  "message": {
+                    "description": "The changeset's message.",
+                    "type": "string"
+                  },
+                  "modes": {
+                    "additionalProperties": {
+                      "description": "The kind of entry a `put` writes.",
+                      "oneOf": [
+                        {
+                          "const": "file",
+                          "description": "A regular file (git mode 100644).",
+                          "type": "string"
+                        },
+                        {
+                          "const": "exec",
+                          "description": "An executable file (git mode 100755).",
+                          "type": "string"
+                        },
+                        {
+                          "const": "symlink",
+                          "description": "A symlink; the content is the link's target.",
+                          "type": "string"
+                        }
+                      ]
+                    },
+                    "description": "A kind to record for a path, where the volume cannot hold the executable bit.",
+                    "type": "object"
+                  },
+                  "paths": {
+                    "description": "Only these repository paths; paths outside the workspace's prefixes join them.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "status_after": {
+                    "default": "page",
+                    "description": "Whether the response carries the status after the mutation. Whether a workspace mutation's response carries the workspace's status after it.",
+                    "oneOf": [
+                      {
+                        "const": "page",
+                        "description": "The first page of the status, up to 100 changes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "none",
+                        "description": "No status.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace",
+                  "message"
+                ],
+                "title": "WsCommitReq",
+                "type": "object"
+              },
+              "name": "ws_commit",
+              "title": "Commit a workspace's edits"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Moves a workspace's chain onto its target's head, as the rebase tool records it, and its files with it; on a conflict the workspace holds markers: edit them, ws_resolve, then ws_rebase with action continue.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_rebase` (client-side): move a workspace's chain onto its target's head, as `rebase`\nrecords it, and its files with it.",
+                "properties": {
+                  "action": {
+                    "default": "start",
+                    "description": "Start, continue after resolving, or abort. What a workspace's rebase does.",
+                    "oneOf": [
+                      {
+                        "const": "start",
+                        "description": "Rebase the workspace's chain onto the target's head.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "continue",
+                        "description": "Rebase again with the resolved conflicts.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "abort",
+                        "description": "Leave the rebase: restore the conflicting paths from the head.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "message": {
+                    "description": "Commit the workspace's edits first, with this message; without it, edits are\n`E_WS_DIRTY`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "onto": {
+                    "default": "main",
+                    "description": "The ref to rebase onto.",
+                    "type": "string"
+                  },
+                  "status_after": {
+                    "default": "page",
+                    "description": "Whether the response carries the status after the mutation. Whether a workspace mutation's response carries the workspace's status after it.",
+                    "oneOf": [
+                      {
+                        "const": "page",
+                        "description": "The first page of the status, up to 100 changes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "none",
+                        "description": "No status.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "WsRebaseReq",
+                "type": "object"
+              },
+              "name": "ws_rebase",
+              "title": "Rebase a workspace"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Marks conflicting paths of a workspace's rebase resolved; a file that still holds a marker line is refused unless force.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_resolve` (client-side): mark conflicting paths of a rebase resolved.",
+                "properties": {
+                  "all": {
+                    "description": "Every conflicting path.",
+                    "type": "boolean"
+                  },
+                  "force": {
+                    "description": "Resolve a file that still holds a conflict marker line.",
+                    "type": "boolean"
+                  },
+                  "paths": {
+                    "description": "The paths resolved.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "status_after": {
+                    "default": "page",
+                    "description": "Whether the response carries the status after the mutation. Whether a workspace mutation's response carries the workspace's status after it.",
+                    "oneOf": [
+                      {
+                        "const": "page",
+                        "description": "The first page of the status, up to 100 changes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "none",
+                        "description": "No status.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "take": {
+                    "anyOf": [
+                      {
+                        "description": "One side of a land's merge.",
+                        "oneOf": [
+                          {
+                            "const": "ours",
+                            "description": "The change: its head.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "theirs",
+                            "description": "The target: its head when the land merges.",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Take one side's content instead of the file's."
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "WsResolveReq",
+                "type": "object"
+              },
+              "name": "ws_resolve",
+              "title": "Resolve a workspace's conflicts"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Lands a workspace's chain on its target. With your own shell, ws_rebase, build and test in the workspace, then ws_land with mode exact, which publishes only if the target has not moved since the rebase, so that the landed tree is the one you tested; check runs a command here instead, and blocks this server while it runs.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_land` (client-side): land a workspace's chain on its target; with a check, rebase, run\nthe check there, and publish only the tree the check ran on.",
+                "properties": {
+                  "check": {
+                    "anyOf": [
+                      {
+                        "description": "The check a workspace's land runs.",
+                        "properties": {
+                          "argv": {
+                            "description": "The command and its arguments, run without a shell in the workspace; when omitted, the\nrepository's `.swarmops/workspaces.json` `check.argv`.",
+                            "items": {
+                              "type": "string"
+                            },
+                            "type": [
+                              "array",
+                              "null"
+                            ]
+                          },
+                          "timeout_s": {
+                            "default": 900,
+                            "description": "The most seconds the command runs before it is killed.",
+                            "format": "uint64",
+                            "minimum": 0,
+                            "type": "integer"
+                          }
+                        },
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The check to run on the rebased tree before it lands."
+                  },
+                  "idempotency_key": {
+                    "description": "The land's key, a uuid v7; when omitted, the workspace makes one.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "max_attempts": {
+                    "default": 8,
+                    "description": "How many times to rebase, check and land before `E_CAS_RETRY_EXHAUSTED`: 1 to 32.",
+                    "format": "uint32",
+                    "maximum": 32,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "message": {
+                    "description": "The landed changeset's message, and the message to commit edits with first.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "mode": {
+                    "anyOf": [
+                      {
+                        "description": "How a workspace lands.",
+                        "oneOf": [
+                          {
+                            "const": "merge",
+                            "description": "Merge onto the target's head, wherever it has moved.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "exact",
+                            "description": "Publish only onto the target's head the workspace was rebased onto, so that the landed\ntree is the rebased one.",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "`merge` or `exact`; when omitted, `exact` with a check and `merge` without."
+                  },
+                  "status_after": {
+                    "default": "page",
+                    "description": "Whether the response carries the status after the mutation. Whether a workspace mutation's response carries the workspace's status after it.",
+                    "oneOf": [
+                      {
+                        "const": "page",
+                        "description": "The first page of the status, up to 100 changes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "none",
+                        "description": "No status.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "target": {
+                    "description": "The ref to land on; the workspace's target when omitted.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "WsLandReq",
+                "type": "object"
+              },
+              "name": "ws_land",
+              "title": "Land a workspace"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Writes out more of a workspace's tree: the paths given join its prefixes.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_materialize` (client-side): write out more of the tree.",
+                "properties": {
+                  "paths": {
+                    "description": "The repository paths to add to its prefixes.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "status_after": {
+                    "default": "page",
+                    "description": "Whether the response carries the status after the mutation. Whether a workspace mutation's response carries the workspace's status after it.",
+                    "oneOf": [
+                      {
+                        "const": "page",
+                        "description": "The first page of the status, up to 100 changes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "none",
+                        "description": "No status.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace",
+                  "paths"
+                ],
+                "title": "WsMaterializeReq",
+                "type": "object"
+              },
+              "name": "ws_materialize",
+              "title": "Materialise more of a workspace"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Restores paths of a workspace from its head, every changed one when none is given; the edits are lost.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_discard` (client-side): restore paths from the workspace's head.",
+                "properties": {
+                  "paths": {
+                    "description": "The repository paths to restore; every changed one when empty.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "status_after": {
+                    "default": "page",
+                    "description": "Whether the response carries the status after the mutation. Whether a workspace mutation's response carries the workspace's status after it.",
+                    "oneOf": [
+                      {
+                        "const": "page",
+                        "description": "The first page of the status, up to 100 changes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "none",
+                        "description": "No status.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "WsDiscardReq",
+                "type": "object"
+              },
+              "name": "ws_discard",
+              "title": "Discard a workspace's edits"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "The store's workspaces, from its registry; with check, a workspace whose directory is gone is reported as an orphan.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_list` (client-side): the store's workspaces, from its registry.",
+                "properties": {
+                  "check": {
+                    "description": "Also open each workspace, and report one whose directory is gone as an orphan.",
+                    "type": "boolean"
+                  }
+                },
+                "title": "WsListReq",
+                "type": "object"
+              },
+              "name": "ws_list",
+              "title": "List workspaces"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "One workspace: its directory, base, head and prefixes.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ws_info` (client-side): one workspace.",
+                "properties": {
+                  "workspace": {
+                    "description": "The workspace, by name.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "workspace"
+                ],
+                "title": "WsInfoReq",
+                "type": "object"
+              },
+              "name": "ws_info",
+              "title": "Describe a workspace"
             }
           ]
         }

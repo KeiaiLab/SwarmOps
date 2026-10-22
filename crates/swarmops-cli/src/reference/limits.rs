@@ -292,6 +292,7 @@ static CONTRACT: [Limit; 10] = [
             "whoami",
             "commit",
             "land",
+            "rebase",
             "blob put",
             "ref set",
             "ref delete",

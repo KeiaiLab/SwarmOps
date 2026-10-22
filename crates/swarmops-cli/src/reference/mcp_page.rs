@@ -64,21 +64,37 @@ const INDEX: &str = "README.md";
 /// The hand-written notes' folder in `docs/reference/`.
 const NOTES_DIR: &str = "notes/mcp-tools";
 
-/// The release every tool first shipped in, but [`REMOTE_TOOLS`].
+/// The release every tool first shipped in, but [`REMOTE_TOOLS`] and [`WORKSPACE_TOOLS`].
 const SINCE: &str = "0.1.0";
 
 /// The git remotes' tools (M13), and the release they first shipped in.
 const REMOTE_TOOLS: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
 const REMOTE_SINCE: &str = "0.2.0";
 
+/// The store's tools the workspaces brought (M5), and the release they first ship in.
+const WORKSPACE_TOOLS: [&str; 1] = ["rebase"];
+const WORKSPACE_SINCE: &str = "0.3.0";
+
 /// The tools with no recorded call yet: the git remotes' (M13), whose operations answer
-/// `E_INTERNAL` until their tasks land; the M13 plan's task C10 records their calls.
-const UNRECORDED: [&str; 5] = REMOTE_TOOLS;
+/// `E_INTERNAL` until their tasks land, and `rebase` (M5), which answers `E_INVALID_ARG` until
+/// the M5 plan's task W2 lands; the M13 plan's task C10 and the M5 plan's task W8 record their
+/// calls.
+const UNRECORDED: [&str; 6] = [
+    "remote_list",
+    "fetch",
+    "push",
+    "sync",
+    "sync_status",
+    "rebase",
+];
 
 /// The release tool `name` first shipped in.
 fn since(name: &str) -> &'static str {
     if REMOTE_TOOLS.contains(&name) {
         return REMOTE_SINCE;
+    }
+    if WORKSPACE_TOOLS.contains(&name) {
+        return WORKSPACE_SINCE;
     }
     SINCE
 }

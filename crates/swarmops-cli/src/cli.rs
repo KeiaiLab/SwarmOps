@@ -176,6 +176,13 @@ the land replays (status: replayed) without writing anything; one from another h
 E_INVALID_ARG. Without a key, the same land run again finds its change on the ref already: \
 E_NOTHING_TO_LAND.";
 
+/// `rebase --onto`'s help.
+const ONTO_HELP: &str = "The ref to rebase onto: main or release/<name>";
+
+/// `rebase --key`'s help.
+const REBASE_KEY_HELP: &str = "A uuid v7 that makes a retry safe: the same rebase onto the same \
+head replays (status: replayed)";
+
 /// `land --resolve`'s short help.
 const RESOLVE_HELP: &str =
     "Resolve the conflicts a report named: resolutions as JSON in FILE, or - for stdin";
@@ -351,6 +358,35 @@ pub enum Command {
         max_attempts: u32,
         /// The most bytes of hunk text an E_CONFLICT report carries; past them it leaves the
         /// texts out (truncated) and keeps every line position and blob id.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
+        max_conflict_bytes: u64,
+        #[arg(long, value_name = "FILE", help = RESOLVE_HELP, long_help = RESOLVE_LONG_HELP)]
+        resolve: Option<String>,
+    },
+    /// Merge a change three-way onto a ref's head and record the result there as one changeset,
+    /// moving no ref.
+    ///
+    /// The change is HEAD with its first-parent chain since the base, merged as land merges it;
+    /// the new changeset's parent is the ref's head, and the ref stays where it is. Build and
+    /// test that changeset, then land it with --expect-target set to the head it was rebased
+    /// onto: the landed tree is then the tested one. A conflict is E_CONFLICT (exit 3), as a
+    /// land's, and nothing is recorded.
+    Rebase {
+        /// The changeset to rebase: the change's head.
+        #[arg(value_name = "HEAD")]
+        head: String,
+        /// Where the change starts: a first-parent ancestor of HEAD (default: the merge base of
+        /// HEAD and the ref's head, along first parents).
+        #[arg(long, value_name = "REV")]
+        base: Option<String>,
+        #[arg(long, value_name = "REF", default_value = "main", help = ONTO_HELP)]
+        onto: String,
+        /// The new changeset's message (default: HEAD's).
+        #[arg(short, long, value_name = "MSG")]
+        message: Option<String>,
+        #[arg(long, value_name = "UUID", help = REBASE_KEY_HELP)]
+        key: Option<String>,
+        /// The most bytes of hunk text an E_CONFLICT report carries.
         #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_CONFLICT_BYTES)]
         max_conflict_bytes: u64,
         #[arg(long, value_name = "FILE", help = RESOLVE_HELP, long_help = RESOLVE_LONG_HELP)]
@@ -947,6 +983,7 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["schema"] => "schema",
         ["commit"] => "commit",
         ["land"] => "land",
+        ["rebase"] => "rebase",
         ["resolve"] => "resolve_rev",
         ["blob", "put"] => "blob_put",
         ["blob", "has"] => "blob_has",
@@ -1103,10 +1140,10 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 33);
+        assert_eq!(ops.len(), 34);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 33, "two subcommands name one op");
+        assert_eq!(ops.len(), 34, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["git"]), None);

@@ -1612,6 +1612,15 @@ const NOT_RAISED: &[(&str, &str)] = &[
         "E_REMOTE_NOT_FOUND",
         "needs remotes.toml: the M13 remote suites raise it",
     ),
+    ("E_WS_EXISTS", "M5, raised by W4"),
+    ("E_WS_NOT_FOUND", "M5, raised by W4"),
+    ("E_WS_LOCKED", "M5, raised by W5"),
+    ("E_WS_DIRTY", "M5, raised by W5"),
+    ("E_PATH_NOT_EMPTY", "M5, raised by W5"),
+    ("E_UNRESOLVED_CONFLICTS", "M5, raised by W7"),
+    ("E_MARKERS_PRESENT", "M5, raised by W7"),
+    ("E_WS_UNPORTABLE", "M5, raised by W5"),
+    ("E_CHECK_FAILED", "M5, raised by W7"),
 ];
 
 /// Every error code M1 can raise reaches the CLI with its exit code (operations spec §8: each
