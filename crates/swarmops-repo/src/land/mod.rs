@@ -56,6 +56,16 @@
 //!
 //! When the last attempt lost its race, the land fails with [`RepoError::RetryExhausted`]. A lost
 //! attempt leaves nothing in the journal: the objects it flushed stay, unreferenced, for GC.
+//!
+//! A land with [`LandRequest::expect_target`] (M5) makes one attempt. After step 3, a target that
+//! does not name the expected changeset ends it with [`RepoError::CasMismatch`], before the
+//! merge; so does a publish that loses its race, which never merges again. Its replay check
+//! runs first, so a land whose key landed its change replays it whatever the target names.
+//!
+//! Steps 1 to 4 are the land's preparation, which a rebase shares ([`crate::rebase`]): step 1
+//! starts a land (`Repo::start`), and steps 2 to 4 prepare an attempt's merge
+//! (`Started::prepare`, `Prepared`). A land writes and publishes what they prepared (steps 5
+//! and 6); a rebase commits it.
 
 mod key;
 mod publish;
@@ -71,7 +81,7 @@ use swarmops_core::{
 };
 use swarmops_merge::diff3::merge_content;
 use swarmops_merge::tree_merge::FileConflict;
-use swarmops_store::ObjectStore;
+use swarmops_store::{ObjectStore, Recovered};
 
 use crate::commit::Draft;
 use crate::error::RepoError;
@@ -126,8 +136,13 @@ pub struct LandRequest {
     /// makes a changeset it cannot encode: [`RepoError::Codec`], before anything is written.
     pub lander_metadata: Vec<(String, Vec<u8>)>,
     /// How many attempts the land makes at most before [`RepoError::RetryExhausted`]; 0 counts as
-    /// 1. The operations layer takes 1 to 32.
+    /// 1. The operations layer takes 1 to 32. A land with `expect_target` makes one.
     pub max_attempts: u32,
+    /// Publish only while the target names this changeset (M5): one attempt, merged onto it and
+    /// published by compare-and-swap; a target that names another, when the attempt reads it or
+    /// when it publishes, is [`RepoError::CasMismatch`], and nothing is recorded. `None`: the
+    /// land merges onto whatever the target names, and retries.
+    pub expect_target: Option<ChangesetId>,
     /// What to make of some paths of the merge, decided against a head of the target, which
     /// each attempt applies to its merge before its conflict check ([`Resolutions`]); `None`:
     /// none.
@@ -136,7 +151,8 @@ pub struct LandRequest {
 
 impl LandRequest {
     /// A land of `head` onto `target` by `lander`: its base the merge base, no key, the head's
-    /// message, no metadata of the lander's, 8 attempts at most, and no resolutions.
+    /// message, no metadata of the lander's, 8 attempts at most, no expected target, and no
+    /// resolutions.
     pub fn new(head: ChangesetId, target: &str, lander: Signature) -> LandRequest {
         LandRequest {
             head,
@@ -147,6 +163,7 @@ impl LandRequest {
             lander,
             lander_metadata: Vec::new(),
             max_attempts: MAX_ATTEMPTS,
+            expect_target: None,
             resolutions: None,
         }
     }
@@ -272,7 +289,61 @@ impl<O: ObjectStore> Repo<O> {
     /// Its resolutions are read before the first attempt: [`RepoError::NotFound`] for an
     /// `against` the store does not hold, [`RepoError::MissingBlob`] for a blob one names by id
     /// that it does not hold.
-    pub fn land(&self, mut req: LandRequest) -> Result<LandOutcome, RepoError> {
+    pub fn land(&self, req: LandRequest) -> Result<LandOutcome, RepoError> {
+        // 1. The request, checked in the snapshot the first attempt reads in.
+        let Started {
+            mut landing,
+            read,
+            theirs,
+        } = self.start(req)?;
+        let seed = match &landing.req.key {
+            Some(key) => key.as_bytes().to_vec(),
+            None => landing.req.head.0.0.to_vec(),
+        };
+        let expected = landing.req.expect_target;
+        let max_attempts = match expected {
+            Some(_) => 1,
+            None => landing.req.max_attempts.max(1),
+        };
+
+        // 2. The attempts, each from what the target names.
+        let (mut read, mut theirs) = (Some(read), theirs);
+        let mut lost = Recovered::default();
+        for attempt in 1..=max_attempts {
+            // The first attempt reads in the snapshot the request was checked in.
+            let read = if let Some(read) = read.take() {
+                read
+            } else {
+                thread::sleep(backoff(attempt, &seed));
+                let read = self.snapshot()?;
+                theirs = target_head(&read, &landing.req.target)?;
+                read
+            };
+            match landing.attempt(read, theirs, attempt)? {
+                Attempt::Done(outcome) => return Ok(outcome),
+                Attempt::Moved { actual, recovered } => (theirs, lost) = (actual, recovered),
+            }
+        }
+
+        // 3. Every attempt lost: an exact land's one, or all of them.
+        if let Some(expected) = expected {
+            return Err(RepoError::CasMismatch {
+                target: landing.req.target,
+                actual: theirs,
+                expected,
+                recovered: Box::new(lost),
+            });
+        }
+        Err(RepoError::RetryExhausted {
+            attempts: max_attempts,
+            actual: theirs,
+        })
+    }
+
+    /// Starts a land of `req` (step 1 of [the module documentation](self)): checks the request in
+    /// a snapshot of its own, in which it reads the target's head, the change's head and base, and
+    /// the resolutions. A rebase starts so too ([`crate::rebase`]).
+    pub(crate) fn start(&self, mut req: LandRequest) -> Result<Started<'_, O>, RepoError> {
         swarmops_store::check_ref_name(&req.target).map_err(ref_error)?;
         let read = self.snapshot()?;
         let theirs = target_head(&read, &req.target)?;
@@ -296,12 +367,7 @@ impl<O: ObjectStore> Repo<O> {
         let resolving = (req.resolutions.take())
             .map(|resolutions| Resolving::new(self, &read, resolutions, head.changeset.root))
             .transpose()?;
-        let seed = match &req.key {
-            Some(key) => key.as_bytes().to_vec(),
-            None => req.head.0.0.to_vec(),
-        };
-        let max_attempts = req.max_attempts.max(1);
-        let mut land = Landing {
+        let landing = Landing {
             repo: self,
             walk: TargetWalk::new(base.generation),
             req,
@@ -312,25 +378,10 @@ impl<O: ObjectStore> Repo<O> {
             auto_merged: BTreeSet::new(),
             resolving,
         };
-        let (mut read, mut theirs) = (Some(read), theirs);
-        for attempt in 1..=max_attempts {
-            // The first attempt reads in the snapshot the request was checked in.
-            let read = if let Some(read) = read.take() {
-                read
-            } else {
-                thread::sleep(backoff(attempt, &seed));
-                let read = self.snapshot()?;
-                theirs = target_head(&read, &land.req.target)?;
-                read
-            };
-            match land.attempt(read, theirs, attempt)? {
-                Attempt::Done(outcome) => return Ok(outcome),
-                Attempt::Moved(actual) => theirs = actual,
-            }
-        }
-        Err(RepoError::RetryExhausted {
-            attempts: max_attempts,
-            actual: theirs,
+        Ok(Started {
+            landing,
+            read,
+            theirs,
         })
     }
 
@@ -369,8 +420,74 @@ fn stored<O: ObjectStore>(
 enum Attempt {
     /// The land is done: landed now, or found landed before.
     Done(LandOutcome),
-    /// The target names this changeset, not the head the attempt read: try again from it.
-    Moved(ChangesetId),
+    /// The target names `actual`, not the head the attempt read: try again from it.
+    Moved {
+        /// What the target names.
+        actual: ChangesetId,
+        /// What the publish's write transaction repaired first, if the publish found it moved.
+        recovered: Recovered,
+    },
+}
+
+/// A land started ([`Repo::start`]): its request checked, the snapshot it was checked in, and
+/// the target's head there.
+pub(crate) struct Started<'r, O: ObjectStore> {
+    /// The land, before its first attempt.
+    landing: Landing<'r, O>,
+    /// The snapshot the request was checked in.
+    read: RepoRead<'r, O>,
+    /// What the target names there.
+    theirs: ChangesetId,
+}
+
+impl<'r, O: ObjectStore> Started<'r, O> {
+    /// The base the change is taken from.
+    pub(crate) fn base(&self) -> ChangesetId {
+        self.landing.base.id
+    }
+
+    /// What the target names in the snapshot.
+    pub(crate) fn theirs(&self) -> ChangesetId {
+        self.theirs
+    }
+
+    /// The snapshot the request was checked in.
+    pub(crate) fn read(&self) -> &RepoRead<'r, O> {
+        &self.read
+    }
+
+    /// One attempt's preparation onto the target's head in the snapshot (steps 2 to 4 of [the
+    /// module documentation](self)), with the snapshot, for a caller that records the merge.
+    pub(crate) fn prepare(mut self) -> Result<(RepoRead<'r, O>, Prep), RepoError> {
+        let prep = self.landing.prepare(&self.read, self.theirs)?;
+        Ok((self.read, prep))
+    }
+}
+
+/// What an attempt's preparation came to (steps 2 to 4 of [the module documentation](self)).
+pub(crate) enum Prep {
+    /// The key's walk found the land made before, on the target's head `.0`: a replay, its
+    /// `attempts` not yet counted.
+    Replay(ChangesetId, LandOutcome),
+    /// Nothing to land onto the target's head `.0`, for this reason.
+    Nothing(ChangesetId, NothingToLandReason),
+    /// The change merged onto the target's head. Boxed, as the merge would otherwise make every
+    /// preparation this large.
+    Merged(Box<Prepared>),
+}
+
+/// A change merged three-way onto the target's head, without conflicts: what a land writes and
+/// publishes as `L`, and a rebase commits as `H'`.
+pub(crate) struct Prepared {
+    /// The merge: what turns the target's head's tree into the merged one (never empty), the
+    /// contents it merged, and the paths it merged into new content.
+    pub(crate) draft: MergeOutcome,
+    /// The target's head it was merged onto.
+    pub(crate) theirs: StoredChangeset,
+    /// The base the change was taken from.
+    pub(crate) base: ChangesetId,
+    /// The chain the change squashes, oldest first: after the base, ending at the head.
+    pub(crate) chain: Vec<ChangesetId>,
 }
 
 /// What a lost attempt made, for the next to merge again: the incremental re-merge.
@@ -405,35 +522,60 @@ struct Landing<'r, O: ObjectStore> {
 
 impl<O: ObjectStore> Landing<'_, O> {
     /// One attempt (steps 2 to 6 of [the module documentation](self)), in `read`, whose target
-    /// names `theirs`.
+    /// names `theirs`: its preparation, then the write and the publish of what it merged.
     fn attempt(
         &mut self,
         read: RepoRead<'_, O>,
         theirs: ChangesetId,
         attempt: u32,
     ) -> Result<Attempt, RepoError> {
+        // 1. Steps 2 to 4; a finding without a merge is settled under the lock.
+        let prepared = match self.prepare(&read, theirs)? {
+            Prep::Replay(seen, replay) => {
+                let replay = LandOutcome {
+                    attempts: attempt,
+                    ..replay
+                };
+                return self.settled(seen, Ok(replay));
+            }
+            Prep::Nothing(seen, reason) => {
+                return self.settled(seen, Err(RepoError::NothingToLand(reason)));
+            }
+            Prep::Merged(prepared) => *prepared,
+        };
+
+        // 2. Steps 5 and 6. The snapshot is not read past the land's own write.
+        drop(read);
+        self.publish(prepared, attempt)
+    }
+
+    /// Steps 2 to 4 of [the module documentation](self), in `read`, whose target names
+    /// `theirs`: what the land has to do there, or the merge to record.
+    fn prepare(&mut self, read: &RepoRead<'_, O>, theirs: ChangesetId) -> Result<Prep, RepoError> {
+        // 1. A head on the target's chain.
         if read.is_ancestor(self.req.head, theirs)? {
-            let on_target = RepoError::NothingToLand(NothingToLandReason::OnTarget);
-            return self.settled(theirs, Err(on_target));
+            return Ok(Prep::Nothing(theirs, NothingToLandReason::OnTarget));
         }
-        let squashed = self.squashed()?;
-        let theirs = stored(&read, theirs)?;
+        let chain = self.squashed()?;
+        let theirs = stored(read, theirs)?;
+
+        // 2. The key's walk: a replay, or a key reused.
         if let Some(key) = &self.req.key {
-            match self.walk.find_key(&read, &theirs, key, self.req.head)? {
+            match self.walk.find_key(read, &theirs, key, self.req.head)? {
                 Some(KeyFound::Replay(found)) => {
                     let replay = LandOutcome {
                         status: LandStatus::Replayed,
                         landed: found.id,
                         rebased_onto: found.parent,
                         base: self.base.id,
-                        attempts: attempt,
+                        attempts: 0,
                         relocated: false,
                         squashed_from: found.squashed_from,
                         files_changed: found.files_changed,
                         auto_merged: Vec::new(),
                         warnings: Vec::new(),
                     };
-                    return self.settled(theirs.id, Ok(replay));
+                    return Ok(Prep::Replay(theirs.id, replay));
                 }
                 Some(KeyFound::Reused(landed)) => {
                     return Err(RepoError::KeyReused {
@@ -444,22 +586,50 @@ impl<O: ObjectStore> Landing<'_, O> {
                 None => {}
             }
         }
+
+        // 3. An exact land onto another head than the one it expects: nothing to merge.
+        if let Some(expected) = self.req.expect_target
+            && theirs.id != expected
+        {
+            return Err(RepoError::CasMismatch {
+                target: self.req.target.clone(),
+                actual: theirs.id,
+                expected,
+                recovered: Box::default(),
+            });
+        }
+
+        // 4. The merge, its resolutions, and its conflicts.
         let mut merged = self.merge(&theirs)?;
         let stale = match &self.resolving {
-            Some(resolving) => resolving.apply(&read, theirs.changeset.root, &mut merged)?,
+            Some(resolving) => resolving.apply(read, theirs.changeset.root, &mut merged)?,
             None => Vec::new(),
         };
         if !merged.conflicts.is_empty() || !stale.is_empty() {
-            return Err(self.conflict(&read, &theirs, merged, stale)?);
+            return Err(self.conflict(read, &theirs, merged, stale)?);
         }
         if merged.delta.is_empty() {
-            let no_changes = RepoError::NothingToLand(NothingToLandReason::NoChanges);
-            return self.settled(theirs.id, Err(no_changes));
+            return Ok(Prep::Nothing(theirs.id, NothingToLandReason::NoChanges));
         }
-        // The snapshot is not read past the land's own write.
-        drop(read);
-        self.auto_merged.extend(merged.auto_merged);
-        let publication = self.write(&theirs, merged.delta, merged.new_blobs, &squashed)?;
+        Ok(Prep::Merged(Box::new(Prepared {
+            draft: merged,
+            theirs,
+            base: self.base.id,
+            chain,
+        })))
+    }
+
+    /// Steps 5 and 6 of [the module documentation](self): writes `L` from `prepared`, then
+    /// publishes it.
+    fn publish(&mut self, prepared: Prepared, attempt: u32) -> Result<Attempt, RepoError> {
+        let Prepared {
+            draft,
+            theirs,
+            chain,
+            ..
+        } = prepared;
+        self.auto_merged.extend(draft.auto_merged);
+        let publication = self.write(&theirs, draft.delta, draft.new_blobs, &chain)?;
         match self.repo.publish(&publication)? {
             Published::Landed {
                 id,
@@ -476,13 +646,13 @@ impl<O: ObjectStore> Landing<'_, O> {
                     base: self.base.id,
                     attempts: attempt,
                     relocated,
-                    squashed_from: squashed,
+                    squashed_from: chain,
                     files_changed: publication.changeset.delta.len(),
                     auto_merged: std::mem::take(&mut self.auto_merged).into_iter().collect(),
                     warnings,
                 }))
             }
-            Published::Moved { actual } => {
+            Published::Moved { actual, recovered } => {
                 self.prior = Some(Prior {
                     onto: theirs.changeset.root,
                     root: publication.changeset.root,
@@ -490,7 +660,7 @@ impl<O: ObjectStore> Landing<'_, O> {
                         .map(|entry| entry.path.clone())
                         .collect(),
                 });
-                Ok(Attempt::Moved(actual))
+                Ok(Attempt::Moved { actual, recovered })
             }
         }
     }
@@ -626,7 +796,10 @@ impl<O: ObjectStore> Landing<'_, O> {
     ) -> Result<Attempt, RepoError> {
         let now = self.repo.target_under_lock(&self.req.target)?;
         if now != seen {
-            return Ok(Attempt::Moved(now));
+            return Ok(Attempt::Moved {
+                actual: now,
+                recovered: Recovered::default(),
+            });
         }
         found.map(Attempt::Done)
     }

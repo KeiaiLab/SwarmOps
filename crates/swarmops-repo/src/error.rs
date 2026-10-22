@@ -214,6 +214,26 @@ pub enum RepoError {
         /// What the target named when the last attempt found it moved.
         actual: ChangesetId,
     },
+    /// A land with `expect_target` ([`crate::LandRequest::expect_target`]) found its target
+    /// naming another changeset than the one it expected: before it merged, or when its one
+    /// publish lost the race. Nothing was recorded; rebase the change onto what the target names,
+    /// check it, and land it again.
+    #[error(
+        "ref {target} names {actual}, not {expected}, which the land expected: nothing was \
+         recorded"
+    )]
+    CasMismatch {
+        /// The land's target.
+        target: String,
+        /// What it names.
+        actual: ChangesetId,
+        /// What the land expected it to name.
+        expected: ChangesetId,
+        /// What the publish's write transaction repaired before the move was refused, of what
+        /// earlier writers left, as [`RepoError::RefMoved`] carries it; nothing when the land
+        /// found the target moved before it merged. Boxed, as for [`RepoError::RefMoved`].
+        recovered: Box<Recovered>,
+    },
     /// A land's idempotency key landed another change already: the changeset `landed` on the
     /// target carries it, squashed from another head. Nothing was recorded; a land of another
     /// change takes a key of its own.
