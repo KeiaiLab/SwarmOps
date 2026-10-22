@@ -982,6 +982,30 @@ pub mod sweep {
         assert_eq!(outcome(&f, &ctx), reference(Scenario::Update).outcome);
     }
 
+    /// The same cut update, then the agent makes the plain file `src/a.rs` (already written with
+    /// its new bytes) executable: the next open refuses that edit with `E_WS_DIRTY`, names only
+    /// it, and keeps its mode; `tools/run`, left without its bit by the cut, is the update's own.
+    #[cfg(unix)]
+    pub fn update_cut_then_an_agent_mode_edit() {
+        // 1. The update, its host failing at the first `set_mode`.
+        let f = Fixture::new();
+        prepare(&f, Scenario::Update);
+        let host = TraceHost::new(Arc::new(RealHost), Trace::default()).failing("set_mode");
+        let ctx = f.ctx_on(Arc::new(host));
+        assert!(act(&ctx, Scenario::Update).is_err());
+        let dir = f.beside(WS);
+
+        // 2. The agent's edit: the mode of a file the cut update wrote.
+        set_exec(&dir, "src/a.rs", true);
+
+        // 3. Refused, naming that file alone, and its mode kept.
+        let refused = Workspace::open(&f.ctx(), Locate::Name(WS.to_owned())).unwrap_err();
+        assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
+        assert!(refused.message.contains("\"src/a.rs\""), "{refused:?}");
+        assert!(!refused.message.contains("\"tools/run\""), "{refused:?}");
+        assert!(tree_of(&dir).contains(&exec("src/a.rs", "a2\n")));
+    }
+
     /// The scenario's operation, once, through `ctx`.
     fn act(ctx: &Ctx<'_>, scenario: Scenario) -> Result<(), OpError> {
         let main = ctx
