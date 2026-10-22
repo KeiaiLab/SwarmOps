@@ -35,7 +35,10 @@
 //!    export oids, its rendering checked against its own: [`ExportError::Bug`] otherwise); a
 //!    loose one is read back, and written again if it is damaged (an export cut short leaves
 //!    loose objects, and a power loss can empty them); a packed one is trusted, and a tree there
-//!    not descended.
+//!    not descended. The names of each tree written or read back are checked against what a
+//!    case-insensitive or a Windows checkout holds: paths that differ only in case, and names
+//!    Windows cannot hold, get one warning per kind naming the first five. They do not stop the
+//!    export.
 //! 7. Every object written or read back loose is made durable ([`GitSink::sync`]).
 //! 8. The native commits' oids are recorded in the external id index, each naming its changeset
 //!    (W8 holds: the snapshot's changesets are committed); an imported changeset keeps its
@@ -57,6 +60,7 @@
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use swarmops_core::bytes::to_u64;
+use swarmops_core::portable::check_component;
 use swarmops_core::{BlobId, Changeset, ChangesetId, EntryTarget, Tree, TreeEntry, TreeId};
 use swarmops_repo::{LocalRepo, RepoError, RepoRead, StoreError};
 use swarmops_store::{ExternalEntry, FsObjectStore, SYSTEM_GIT, TailRepair, check_ref_name};
@@ -73,6 +77,9 @@ use crate::{
 /// How many first parents of the branch's commit step 4 reads in the repository, looking for the
 /// export of the head or of an ancestor of it, before it says the branch moved.
 const BRANCH_WALK: usize = 1_000;
+
+/// How many paths a warning about the exported trees names: the first ones the walk meets.
+const NAMED_PATHS: usize = 5;
 
 /// What to export, and into which branch ([`export()`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -139,7 +146,9 @@ pub struct ExportReport {
     /// taken ([`swarmops_repo::Repo::snapshot_committed`]).
     pub recovered: TailRepair,
     /// What did not stop the export, one line each: commits rewritten, a damaged loose object
-    /// written again, an external id entry that was no use, a forced divergence.
+    /// written again, an external id entry that was no use, a forced divergence, paths of the
+    /// trees written that differ from another only in case, names of them a Windows checkout
+    /// cannot hold.
     pub warnings: Vec<String>,
 }
 
@@ -332,6 +341,7 @@ pub fn export(
     }
     let commits = run.commits(report.base)?;
     run.write(&commits)?;
+    run.warn_unportable();
     if !run.pending.is_empty() {
         let pending = std::mem::take(&mut run.pending);
         run.sink.sync(&pending)?;
@@ -436,7 +446,40 @@ struct Run<'a, 'r> {
     commits_written: u64,
     objects_written: u64,
     objects_checked: u64,
+    /// Paths of the trees written or read back that differ from a sibling only in ASCII case.
+    case_twins: Paths,
+    /// Paths of those trees whose name a Windows checkout cannot hold.
+    unportable: Paths,
     warnings: Vec<String>,
+}
+
+/// Paths a warning names: how many, and the first [`NAMED_PATHS`].
+#[derive(Default)]
+struct Paths {
+    count: u64,
+    first: Vec<String>,
+}
+
+impl Paths {
+    fn push(&mut self, path: String) {
+        self.count += 1;
+        if self.first.len() < NAMED_PATHS {
+            self.first.push(path);
+        }
+    }
+
+    /// The warning `what` says of these paths, if there are any: `"2 paths <what>: a, b"`.
+    fn warning(&self, what: &str) -> Option<String> {
+        if self.count == 0 {
+            return None;
+        }
+        let noun = if self.count == 1 { "path" } else { "paths" };
+        let named = self.first.join(", ");
+        Some(format!(
+            "{} {noun} of the exported trees {what}: {named}",
+            self.count
+        ))
+    }
 }
 
 impl<'a, 'r> Run<'a, 'r> {
@@ -460,7 +503,46 @@ impl<'a, 'r> Run<'a, 'r> {
             commits_written: 0,
             objects_written: 0,
             objects_checked: 0,
+            case_twins: Paths::default(),
+            unportable: Paths::default(),
             warnings: Vec::new(),
+        }
+    }
+
+    /// The warnings for what [`Run::names`] found: one line per kind.
+    fn warn_unportable(&mut self) {
+        let case = (self.case_twins).warning(
+            "differ from another path only in case, and a case-insensitive checkout holds one \
+             of each",
+        );
+        let windows = (self.unportable).warning(
+            "have a name a Windows checkout cannot hold (a device name, a character it refuses, \
+             or a trailing dot or space)",
+        );
+        self.warnings.extend(case);
+        self.warnings.extend(windows);
+    }
+
+    /// Notes the names of `tree`, at `path` (`""` for a root), that a case-insensitive or a
+    /// Windows checkout cannot hold. The export writes them all the same.
+    fn names(&mut self, tree: &Tree, path: &str) {
+        // 1. Names Windows refuses, each checked alone.
+        for entry in tree.entries() {
+            if check_component(&entry.name).is_err() {
+                self.unportable.push(joined(path, &entry.name));
+            }
+        }
+
+        // 2. Names equal in any ASCII case are next to each other once sorted by their lower
+        // case: `README`, `readme`. Each one after the first of its kind is noted.
+        let mut names: Vec<&str> = (tree.entries().iter())
+            .map(|entry| entry.name.as_str())
+            .collect();
+        names.sort_by_key(|name| name.to_ascii_lowercase());
+        for pair in names.windows(2) {
+            if pair[0].eq_ignore_ascii_case(pair[1]) {
+                self.case_twins.push(joined(path, pair[1]));
+            }
         }
     }
 
@@ -769,8 +851,8 @@ impl<'a, 'r> Run<'a, 'r> {
         if against == Some(root) {
             return Ok(());
         }
-        let mut stack = vec![(root, against)];
-        while let Some((tree, against)) = stack.pop() {
+        let mut stack = vec![(root, against, String::new())];
+        while let Some((tree, against, path)) = stack.pop() {
             let oid = self.tree_git_oid(tree)?;
             if !self.seen.insert(oid) {
                 continue;
@@ -780,6 +862,7 @@ impl<'a, 'r> Run<'a, 'r> {
                 continue;
             }
             let held = self.read.tree(tree)?;
+            self.names(&held, &path);
             if stored == Stored::Loose {
                 self.check(RawKind::Tree, oid, |run| run.rendered_tree(&held))?;
             } else {
@@ -803,7 +886,7 @@ impl<'a, 'r> Run<'a, 'r> {
                             Some(EntryTarget::Dir(theirs)) => Some(theirs),
                             _ => None,
                         };
-                        stack.push((sub, sub_against));
+                        stack.push((sub, sub_against, joined(&path, &entry.name)));
                     }
                     EntryTarget::Leaf(_, blob) => self.blob(blob)?,
                 }
@@ -997,6 +1080,14 @@ struct Walk {
     marks: HashMap<ChangesetId, Mark>,
     heap: BinaryHeap<(u64, ChangesetId)>,
     wanted: usize,
+}
+
+/// The path of `name` in the directory at `path` (`""` for a root).
+fn joined(path: &str, name: &str) -> String {
+    if path.is_empty() {
+        return name.to_owned();
+    }
+    format!("{path}/{name}")
 }
 
 /// The entry named `name` of `tree`, whose entries are sorted by their names' bytes.

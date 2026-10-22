@@ -19,6 +19,7 @@ use std::time::Duration;
 use gix::objs::{Exists as _, Find as _};
 use gix::prelude::Write as _;
 use rayon::prelude::*;
+use swarmops_store::{FsOps as _, RealFs};
 
 use crate::gix_source::{from_gix, not_the_object, open_repository, raw_kind, reason, to_gix};
 use crate::{
@@ -35,6 +36,24 @@ const LOCK_TIMEOUT: Duration = Duration::from_millis(100);
 /// git directory, in the order the syncs ended.
 #[cfg(feature = "test-hooks")]
 pub type SyncedPaths = Arc<Mutex<Vec<PathBuf>>>;
+
+/// Whether the repository's ref names fold ASCII case: its `core.ignorecase`, which git sets
+/// when it makes a repository on a case-insensitive volume (APFS's default, NTFS).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Case {
+    /// `Main` and `main` are two refs.
+    Sensitive,
+    /// `Main` and `main` are one file.
+    Ignored,
+}
+
+/// What a path [`Files::sync_all`] syncs is: a directory syncs through the store's own directory
+/// sync, a file through a handle of its own.
+#[derive(Clone, Copy)]
+enum Node {
+    File,
+    Dir,
+}
 
 /// A [`GitSink`] over a git repository on disk, through gix (`=0.89.0`, its `sha1` feature alone).
 ///
@@ -65,6 +84,8 @@ pub struct GixSink {
     /// The fan-out directories this sink made, by their byte, whose names in `objects/` are not
     /// durable until a sync of an object in them syncs `objects/`.
     made: BTreeSet<u8>,
+    /// Whether its branch names fold case.
+    case: Case,
     /// What the lock's retry loop runs between two attempts.
     #[cfg(feature = "test-hooks")]
     lock_retry: Option<Box<dyn FnMut() + Send>>,
@@ -99,6 +120,13 @@ impl GixSink {
         let git_dir = repo.common_dir().to_owned();
         let objects = repo.objects.store_ref().path().to_owned();
         let loose = gix::odb::loose::Store::at(objects.clone(), gix::hash::Kind::Sha1);
+
+        // `core.ignorecase`, false when unset, as git reads it.
+        let ignores_case = repo.config_snapshot().boolean("core.ignorecase");
+        let case = match ignores_case {
+            Some(true) => Case::Ignored,
+            _ => Case::Sensitive,
+        };
         Ok(GixSink {
             repo,
             files: Files {
@@ -109,6 +137,7 @@ impl GixSink {
             },
             loose,
             made: BTreeSet::new(),
+            case,
             #[cfg(feature = "test-hooks")]
             lock_retry: None,
         })
@@ -188,6 +217,12 @@ impl GixSink {
                 });
             }
         };
+
+        // A case-insensitive volume finds another ref's loose file under the name (`Main` for
+        // `main`): no ref of this name.
+        if self.files.finds_other(full)? {
+            return Ok(None);
+        }
         match reference.target() {
             gix::refs::TargetRef::Object(id) => Ok(Some(from_gix(&id.to_owned()))),
             gix::refs::TargetRef::Symbolic(_) => Err(SinkError::RefConflict {
@@ -198,7 +233,8 @@ impl GixSink {
 
     /// Refuses the branch `full` when another ref is in the way: one whose name is a directory of
     /// `full`'s (its loose file, `packed-refs`, or a file that is no ref), or one under `full/`.
-    /// git refuses both, and the filesystem alone would not see a packed one.
+    /// git refuses both, and the filesystem alone would not see a packed one. When the
+    /// repository ignores case, the names are compared in any ASCII case.
     fn refuse_conflicts(&self, full: &str) -> Result<(), SinkError> {
         let mut at = "refs/heads/".len();
         while let Some(slash) = full[at..].find('/') {
@@ -225,10 +261,60 @@ impl GixSink {
             // Something under the name that does not read as a ref is in the way all the same.
             Err(_) => Some(full.to_owned()),
         });
-        match found {
+        if let Some(name) = found {
+            return Err(SinkError::RefConflict { name });
+        }
+        if self.case == Case::Sensitive {
+            return Ok(());
+        }
+
+        // The same two checks over every branch, in any case: `Feat` is `feat/x`'s directory.
+        let folded_prefix = |long: &str, short: &str| {
+            long.as_bytes().get(short.len()) == Some(&b'/')
+                && long
+                    .get(..short.len())
+                    .is_some_and(|head| head.eq_ignore_ascii_case(short))
+        };
+        let in_the_way = (self.heads()?)
+            .into_iter()
+            .find(|name| folded_prefix(full, name) || folded_prefix(name, full));
+        match in_the_way {
             Some(name) => Err(SinkError::RefConflict { name }),
             None => Ok(()),
         }
+    }
+
+    /// Refuses the branch `name` (`full`, its ref) when the repository ignores case and another
+    /// branch differs from it only in ASCII case: on that volume both are one file, and a move
+    /// of one moves the other.
+    fn refuse_case_twin(&self, name: &str, full: &str) -> Result<(), SinkError> {
+        if self.case == Case::Sensitive {
+            return Ok(());
+        }
+        let twin = (self.heads()?)
+            .into_iter()
+            .any(|other| other != full && other.eq_ignore_ascii_case(full));
+        if twin {
+            return Err(SinkError::BadBranch {
+                name: name.to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The full name of every branch, loose or packed. One that does not read as a ref is
+    /// passed over: [`GixSink::refuse_conflicts`]'s exact checks see it.
+    fn heads(&self) -> Result<Vec<String>, SinkError> {
+        let listing = |error: gix::Error| SinkError::Read {
+            what: "refs/heads/".to_owned(),
+            reason: reason(&error),
+        };
+        let platform = self.repo.references().map_err(listing)?;
+        let refs = platform.prefixed("refs/heads/").map_err(listing)?;
+        Ok(refs
+            .filter_map(Result::ok)
+            .map(|reference| reference.name().as_bstr().to_string())
+            .collect())
     }
 
     /// Takes the lock file `lock` (relative to the git directory), as git does: created
@@ -369,7 +455,7 @@ impl GitSink for GixSink {
         let mut fan_outs = BTreeSet::new();
         for &oid in &oids.iter().copied().collect::<BTreeSet<GitOid>>() {
             if self.is_loose(oid)? {
-                paths.push(self.files.loose(oid));
+                paths.push((self.files.loose(oid), Node::File));
                 fan_outs.insert(oid.0[0]);
             } else if !self.has(oid) {
                 return Err(SinkError::Missing { oid });
@@ -379,11 +465,11 @@ impl GitSink for GixSink {
         paths.extend(
             fan_outs
                 .iter()
-                .map(|byte| objects.join(format!("{byte:02x}"))),
+                .map(|byte| (objects.join(format!("{byte:02x}")), Node::Dir)),
         );
         let made = fan_outs.iter().any(|byte| self.made.contains(byte));
         if made {
-            paths.push(objects.clone());
+            paths.push((objects.clone(), Node::Dir));
         }
         self.files.sync_all(&paths)?;
         self.made.retain(|byte| !fan_outs.contains(byte));
@@ -418,6 +504,7 @@ impl GitSink for GixSink {
         if !self.has(new) {
             return Err(SinkError::Missing { oid: new });
         }
+        self.refuse_case_twin(name, &full)?;
         self.refuse_conflicts(&full)?;
         let (lock, path) = self.files.ref_paths(&full);
         let dir = path.parent().expect("a branch's file is in refs/heads/");
@@ -434,13 +521,15 @@ impl GitSink for GixSink {
             };
         }
         // The rename is durable once the ref's directory is synced, and each directory the move
-        // made once its parent is.
+        // made once it and its parent are. They are synced at once, in no order: the move is
+        // durable when all of them are, and only then does this return.
         let mut dirs = BTreeSet::from([dir.to_owned()]);
         for made in made {
             dirs.extend(made.parent().map(Path::to_owned));
             dirs.insert(made);
         }
-        self.files.sync_all(&dirs.into_iter().collect::<Vec<_>>())?;
+        let dirs: Vec<(PathBuf, Node)> = (dirs.into_iter()).map(|dir| (dir, Node::Dir)).collect();
+        self.files.sync_all(&dirs)?;
         Ok(BranchUpdate::Applied)
     }
 }
@@ -466,6 +555,38 @@ impl Files {
     fn ref_paths(&self, full: &str) -> (PathBuf, PathBuf) {
         let path = self.git_dir.join(full);
         (self.git_dir.join(format!("{full}.lock")), path)
+    }
+
+    /// Whether the volume finds the loose file of the ref `full` under another name, as a
+    /// case-insensitive one opens `refs/heads/Main` for `refs/heads/main`: a file is there, and
+    /// some component of `full` is not in its directory's listing by its exact name.
+    fn finds_other(&self, full: &str) -> Result<bool, SinkError> {
+        // 1. No loose file under the name: nothing found for another.
+        let path = self.git_dir.join(full);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(self.failed_read(&path, &error)),
+        }
+
+        // 2. Each component looked for by its exact name.
+        let mut dir = self.git_dir.clone();
+        for component in full.split('/') {
+            let listing = fs::read_dir(&dir).map_err(|error| self.failed_read(&dir, &error))?;
+            let held = (listing.filter_map(Result::ok)).any(|entry| entry.file_name() == component);
+            if !held {
+                return Ok(true);
+            }
+            dir.push(component);
+        }
+        Ok(false)
     }
 
     fn failed_read(&self, path: &Path, error: &io::Error) -> SinkError {
@@ -526,11 +647,23 @@ impl Files {
 
     /// fsyncs each of `paths`, files and directories: every one, whatever the others return, on
     /// rayon's global pool when there are several (fsyncs made at once share ext4's journal
-    /// commits, as the store's flush does); the first failure, in `paths`' order.
-    fn sync_all(&self, paths: &[PathBuf]) -> Result<(), SinkError> {
-        let sync = |path: &PathBuf| {
-            let file = File::open(path).map_err(|error| self.failed_write(path, &error))?;
-            self.sync_file(&file, path)
+    /// commits, as the store's flush does), in no order; the first failure, in `paths`' order.
+    /// A directory syncs as the store syncs its own ([`RealFs`]'s `fsync_dir`, what each
+    /// platform needs). A file syncs through a handle of its own: read-only on Unix, where
+    /// fsync needs no write access and gix writes loose objects mode 0444; with write access
+    /// on Windows, whose flush needs it.
+    fn sync_all(&self, paths: &[(PathBuf, Node)]) -> Result<(), SinkError> {
+        let sync = |(path, node): &(PathBuf, Node)| match node {
+            Node::Dir => {
+                (RealFs.fsync_dir(path)).map_err(|error| self.failed_write(path, &error))?;
+                #[cfg(feature = "test-hooks")]
+                self.record(path);
+                Ok(())
+            }
+            Node::File => {
+                let file = open_to_sync(path).map_err(|error| self.failed_write(path, &error))?;
+                self.sync_file(&file, path)
+            }
         };
         let results: Vec<Result<(), SinkError>> = if paths.len() <= 1 {
             paths.iter().map(sync).collect()
@@ -545,12 +678,31 @@ impl Files {
         file.sync_all()
             .map_err(|error| self.failed_write(path, &error))?;
         #[cfg(feature = "test-hooks")]
+        self.record(path);
+        Ok(())
+    }
+
+    /// Records `path`, synced, when the sink records its syncs.
+    #[cfg(feature = "test-hooks")]
+    fn record(&self, path: &Path) {
         if let Some(synced) = &self.synced {
             let mut synced = synced.lock().unwrap_or_else(PoisonError::into_inner);
             synced.push(self.relative(path));
         }
-        Ok(())
     }
+}
+
+/// The file at `path`, open to be synced: read-only on Unix (fsync and F_FULLFSYNC need no
+/// write access, and a loose object is mode 0444).
+#[cfg(not(windows))]
+fn open_to_sync(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+/// The file at `path`, open to be synced: with write access, which Windows's flush needs.
+#[cfg(windows)]
+fn open_to_sync(path: &Path) -> io::Result<File> {
+    OpenOptions::new().write(true).open(path)
 }
 
 /// The full name of the branch `name`, `refs/heads/<name>`, when git takes that as a ref name
