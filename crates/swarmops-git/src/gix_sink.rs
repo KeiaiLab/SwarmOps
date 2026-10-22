@@ -217,6 +217,12 @@ impl GixSink {
                 });
             }
         };
+
+        // A case-insensitive volume finds another ref's loose file under the name (`Main` for
+        // `main`): no ref of this name.
+        if self.files.finds_other(full)? {
+            return Ok(None);
+        }
         match reference.target() {
             gix::refs::TargetRef::Object(id) => Ok(Some(from_gix(&id.to_owned()))),
             gix::refs::TargetRef::Symbolic(_) => Err(SinkError::RefConflict {
@@ -549,6 +555,38 @@ impl Files {
     fn ref_paths(&self, full: &str) -> (PathBuf, PathBuf) {
         let path = self.git_dir.join(full);
         (self.git_dir.join(format!("{full}.lock")), path)
+    }
+
+    /// Whether the volume finds the loose file of the ref `full` under another name, as a
+    /// case-insensitive one opens `refs/heads/Main` for `refs/heads/main`: a file is there, and
+    /// some component of `full` is not in its directory's listing by its exact name.
+    fn finds_other(&self, full: &str) -> Result<bool, SinkError> {
+        // 1. No loose file under the name: nothing found for another.
+        let path = self.git_dir.join(full);
+        match fs::symlink_metadata(&path) {
+            Ok(_) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(false);
+            }
+            Err(error) => return Err(self.failed_read(&path, &error)),
+        }
+
+        // 2. Each component looked for by its exact name.
+        let mut dir = self.git_dir.clone();
+        for component in full.split('/') {
+            let listing = fs::read_dir(&dir).map_err(|error| self.failed_read(&dir, &error))?;
+            let held = (listing.filter_map(Result::ok)).any(|entry| entry.file_name() == component);
+            if !held {
+                return Ok(true);
+            }
+            dir.push(component);
+        }
+        Ok(false)
     }
 
     fn failed_read(&self, path: &Path, error: &io::Error) -> SinkError {

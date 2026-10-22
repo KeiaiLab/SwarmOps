@@ -136,9 +136,21 @@ fn a_branch_in_the_way_in_another_case_is_a_ref_conflict_when_the_repository_ign
     assert_eq!(ref_files(&destination.dir), BTreeSet::from([feat]));
 }
 
-/// On a repository that keeps case, `Main` and `main` are two branches.
+/// Whether the volume temp dirs are made on tells names apart by case: a file made as `probe` is
+/// not found as `PROBE`.
+fn case_sensitive() -> bool {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("probe"), b"").unwrap();
+    !dir.path().join("PROBE").exists()
+}
+
+/// On a repository that keeps case, `Main` and `main` are two branches. Only a volume that tells
+/// names apart by case holds such a repository: on another (APFS by default) the two are one file.
 #[test]
 fn a_case_sensitive_repository_keeps_both_branches() {
+    if !case_sensitive() {
+        return;
+    }
     let (_dir, repo) = store_with(&["a.txt"]);
     let destination = git::empty_repository();
     let upper = export_to(&repo, &destination.dir, "Main").expect("export to Main");
