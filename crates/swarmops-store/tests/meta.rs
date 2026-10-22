@@ -2074,7 +2074,7 @@ fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_un
     // A symlink to itself: a read of it fails with ELOOP.
     std::os::unix::fs::symlink("journal.ckpt", layout.journal_ckpt()).unwrap();
     match Index::open(&layout, Arc::new(RealFs)) {
-        Err(StoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}"),
+        Err(StoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "ELOOP: {e}"),
         other => panic!("an unreadable checkpoint: expected its I/O error, got {other:?}"),
     }
 }
