@@ -287,7 +287,8 @@ Not measured; each becomes a `just perf` case.
 ### Non-goals in M14
 
 Partial clone filters, git's bundle URI and server-side user hooks (SwarmOps has no user hooks),
-signed pushes, git LFS, and a web interface.
+signed pushes, git LFS, submodules (a pushed gitlink is refused, as the import's lossy class refuses
+it today), and a web interface.
 
 ## Topology 2: local SwarmOps, remote GitHub
 
@@ -327,13 +328,17 @@ GitHub to move the branch from the value the last fetch saw to the export; a bra
 meanwhile is refused by GitHub as git's own push would be, and `so push` fails with a divergence
 error (proposed: `E_REMOTE_DIVERGED`, exit 3) and the hint `so sync origin`. A rejection by a
 branch rule or ruleset comes back with GitHub's message in `details` (proposed: `E_REMOTE_REJECTED`).
+`so push` never forces a branch; a branch that must be rewritten is rewritten with git.
 
 **Sync lands, the client side.** `so sync origin` is the engine in
 [What the three share](#what-the-three-share): GitHub cannot land, so the store lands its unpublished
 changes on GitHub's head and pushes by compare-and-swap. Changes GitHub already holds drop out: a
 pull request merged with a merge commit continues the export's history; one merged by squash or by
 rebase leaves the store's change with nothing to land on top of GitHub's head, and the sync drops
-it rather than land it twice. Today's `E_GIT_IMPORT_DIVERGED` after a squash merge becomes a state
+it rather than land it twice. A change is recognised in GitHub's history by its
+`SwarmOps-Changeset:` trailer, which a rebase keeps and a squash keeps only when GitHub's squash
+message keeps the commit bodies; otherwise by the change applying to the remote's head as a no-op.
+The rule is M13's to fix and test. Today's `E_GIT_IMPORT_DIVERGED` after a squash merge becomes a state
 `sync` resolves.
 
 **Incremental and byte-identical.** A fetch requests only what the mirror lacks; the import takes
@@ -526,7 +531,7 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | 📋 M12 | all | macOS and Windows builds, tests and releases | | Each platform passes `just check` in CI and ships in a release |
 | 📋 M13 | 2 | Packs; git fetch and push as a client; the store's git mirror; `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, their MCP tools | M3, M4, M8 | Topology 2's acceptance criteria 1 to 6 pass |
 | 📋 M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks | | As the README states it |
-| 📋 M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach | M13, for gc's roots, if it lands first | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag |
+| 📋 M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag |
 | 📋 M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass |
 | 📋 M7 | — | Blame and review | M6's `FORMAT` (annotations) | As the README states it |
 | 📋 M9 | — | Simulation and a benchmark gate | | As the README states it |
