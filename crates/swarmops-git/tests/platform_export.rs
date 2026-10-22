@@ -16,6 +16,12 @@ use tempfile::TempDir;
 /// Who moves the store's refs in these tests.
 const ACTOR: &str = "test/exporter";
 
+/// The words of the warning for paths that differ only in case.
+const CASE_WARNING: &str = "differ from another path only in case";
+
+/// The words of the warning for names a Windows checkout cannot hold.
+const WINDOWS_WARNING: &str = "a Windows checkout cannot hold";
+
 /// A fresh store whose `main` names one changeset holding `files`, each with its own bytes.
 fn store_with(files: &[&str]) -> (TempDir, LocalRepo) {
     let (dir, _root, repo) = new_repo();
@@ -72,6 +78,16 @@ fn ref_files(git_dir: &Path) -> BTreeSet<PathBuf> {
         }
     }
     files
+}
+
+/// The one warning of `report` that holds `words`.
+#[track_caller]
+fn warning<'r>(report: &'r ExportReport, words: &str) -> &'r str {
+    let found: Vec<&String> = (report.warnings.iter())
+        .filter(|line| line.contains(words))
+        .collect();
+    assert_eq!(found.len(), 1, "{:?}", report.warnings);
+    found[0]
 }
 
 /// On a repository that ignores case, `main` is the file `Main` is: the export refuses it, and
@@ -134,6 +150,55 @@ fn a_case_sensitive_repository_keeps_both_branches() {
     let sink = gix(&destination.dir);
     assert_eq!(sink.branch("Main"), Ok(Some(upper.head_oid)));
     assert_eq!(sink.branch("main"), Ok(Some(lower.head_oid)));
+}
+
+/// Six paths that differ from another only in case, one in a subdirectory: one warning, which
+/// counts them and names the first five. The export still moves the branch.
+#[test]
+fn a_tree_with_paths_that_differ_only_in_case_warns() {
+    let files = [
+        "A", "a", "B", "b", "C", "c", "D", "d", "E", "e", "sub/F", "sub/f", "fine.txt",
+    ];
+    let (_dir, repo) = store_with(&files);
+    let destination = git::empty_repository();
+    let report = export_to(&repo, &destination.dir, "main").expect("export");
+    assert!(report.branch_moved);
+
+    let line = warning(&report, CASE_WARNING);
+    assert!(line.starts_with("6 paths"), "{line}");
+    let named: Vec<&str> = (files.iter().copied())
+        .filter(|path| line.contains(&format!(" {path},")) || line.ends_with(&format!(" {path}")))
+        .collect();
+    assert_eq!(named.len(), 5, "{line}");
+    assert!(!line.contains("fine.txt"), "{line}");
+    assert!(
+        !report.warnings.iter().any(|w| w.contains(WINDOWS_WARNING)),
+        "{:?}",
+        report.warnings
+    );
+}
+
+/// A device name, a forbidden character and a trailing dot, at any depth: one warning naming
+/// each. A name that only starts like a device is fine.
+#[test]
+fn a_tree_with_a_windows_device_name_warns() {
+    let files = ["con.txt", "sub/NUL", "what?", "dot.", "console.txt"];
+    let (_dir, repo) = store_with(&files);
+    let destination = git::empty_repository();
+    let report = export_to(&repo, &destination.dir, "main").expect("export");
+    assert!(report.branch_moved);
+
+    let line = warning(&report, WINDOWS_WARNING);
+    assert!(line.starts_with("4 paths"), "{line}");
+    for path in ["con.txt", "sub/NUL", "what?", "dot."] {
+        assert!(line.contains(path), "{path}: {line}");
+    }
+    assert!(!line.contains("console.txt"), "{line}");
+    assert!(
+        !report.warnings.iter().any(|w| w.contains(CASE_WARNING)),
+        "{:?}",
+        report.warnings
+    );
 }
 
 /// gix writes a loose object mode 0444. The sink syncs it through a read-only handle: a handle
