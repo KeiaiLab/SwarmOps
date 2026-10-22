@@ -2,9 +2,9 @@
 // page's Content-Security-Policy.
 //
 //   scripts/install.sh       -> out/install.sh            (get.swarmops.cc/install.sh)
-//   site/<icons, manifest>   -> out/                       (until site/ is retired)
-//   site/explainers/         -> out/explainers/            (their own CSP rule in _headers)
 //   docs/assets/             -> out/assets/docs/           (images the docs link to)
+//
+// The icons, the manifest and /explainers/ are files in public/, which `next build` copies.
 //
 // CSP: a static export cannot use nonces, so every page gets a <meta http-equiv> policy that
 // allows its own inline scripts by sha256 and nothing else inline. _headers keeps a looser
@@ -16,21 +16,6 @@ import * as path from 'node:path';
 const WEB = path.resolve(import.meta.dirname, '..');
 const REPO = path.resolve(WEB, '..');
 const OUT = path.join(WEB, 'out');
-
-// Files served from site/ today that the new site keeps at the same address.
-const SITE_FILES = [
-  'favicon.svg',
-  'favicon.ico',
-  'logo.svg',
-  'apple-touch-icon.png',
-  'icon-192.png',
-  'icon-512.png',
-  'icon-maskable-512.png',
-  'og-image.png',
-  'site.webmanifest',
-  'THIRD-PARTY-NOTICES.txt',
-  'explainers',
-];
 
 // Pages with their own policy in _headers (inline script by design), left as they are.
 const OWN_POLICY_DIRS = ['explainers/'];
@@ -86,9 +71,6 @@ function policyFor(html) {
 function main() {
   // 1. Repository files served beside the pages.
   copy(path.join(REPO, 'scripts/install.sh'), path.join(OUT, 'install.sh'));
-  for (const name of SITE_FILES) {
-    copy(path.join(REPO, 'site', name), path.join(OUT, name));
-  }
   copy(path.join(REPO, 'docs/assets'), path.join(OUT, 'assets/docs'));
 
   // 2. One policy per page, first in <head> so it covers every script after it.
@@ -105,7 +87,7 @@ function main() {
     writeFileSync(file, html.replace('<head>', `<head>${meta}`));
   }
 
-  console.log(`postbuild: ${SITE_FILES.length + 2} copies, ${pages.length} pages with a CSP meta policy`);
+  console.log(`postbuild: 2 copies, ${pages.length} pages with a CSP meta policy`);
 }
 
 main();

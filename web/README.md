@@ -1,8 +1,7 @@
 # swarmops.cc, the website
 
 A static site, built with Next.js 16 (`output: "export"`), Fumadocs for `/docs`, Tailwind 4 and
-shadcn/ui components. Every page is HTML in `out/`; there is no server runtime. Production still
-serves `site/` until the deploy moves to this directory.
+shadcn/ui components. Every page is HTML in `out/`; there is no server runtime.
 
 ```sh
 just web-install   # npm ci: the only step that needs the network
@@ -38,8 +37,10 @@ appears without an edit here.
 
 ## Security and budget
 
-`scripts/postbuild.mjs` copies `../scripts/install.sh` to `out/install.sh` (get.swarmops.cc
-serves it), the icons and `/explainers/` from `../site/`, and `../docs/assets/`. It then writes a
+`next build` copies `public/` into `out/`: the icons, `site.webmanifest`, `og-image.png`,
+`/explainers/`, `THIRD-PARTY-NOTICES.txt`, `.well-known/security.txt`, `_headers`, `_redirects`
+and `install.sh`. `scripts/postbuild.mjs` copies `../scripts/install.sh` over `out/install.sh`
+(get.swarmops.cc serves it) and `../docs/assets/` to `out/assets/docs/`. It then writes a
 `<meta http-equiv="Content-Security-Policy">` into every page, which allows that page's inline
 scripts by sha256 and no other inline script. `public/_headers` keeps the site-wide headers
 (HSTS, `frame-ancestors 'none'`, the noindex rules for pages.dev and get.swarmops.cc); its

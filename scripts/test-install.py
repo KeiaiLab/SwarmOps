@@ -13,8 +13,8 @@ below, under sh, and under dash and busybox sh where they are installed. A case'
 fake `uname`, `ldd` and `getconf`, which play other systems, then links to the tools the
 installer runs, so that a case can leave curl or sha256sum out. Nothing reaches the network:
 the installer is given the server's URLs, and every proxy variable names that server, which
-refuses whatever is not its own. Also checks that site/install.sh, the copy get.swarmops.cc serves,
-is scripts/install.sh byte for byte. Prints a summary; exit 1 on a failure.
+refuses whatever is not its own. Also checks that web/public/install.sh, the copy
+get.swarmops.cc serves, is scripts/install.sh byte for byte. Prints a summary; exit 1 on a failure.
 """
 
 import enum
@@ -37,9 +37,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "scripts" / "install.sh"
-# The copy the website serves at https://get.swarmops.cc/install.sh. When the site moves to Zola,
-# its sync copies scripts/install.sh into the site instead, and this check moves with the copy.
-SITE_COPY = ROOT / "site" / "install.sh"
+# The copy the website serves at https://get.swarmops.cc/install.sh: `next build` copies
+# web/public/ into the site.
+SITE_COPY = ROOT / "web" / "public" / "install.sh"
 
 # The fake release's versions: a good one; one whose SHA256SUMS line for x86_64 is wrong; one
 # whose SHA256SUMS has no line for x86_64; and one whose download the server holds until the
@@ -757,7 +757,7 @@ def main() -> int:
 
     # 1. The website's copy is the installer, byte for byte.
     if SITE_COPY.read_bytes() != INSTALLER.read_bytes():
-        failures.append("site/install.sh is not scripts/install.sh: copy it again")
+        failures.append("web/public/install.sh is not scripts/install.sh: copy it again")
 
     # 2. The shells: sh at least.
     shells = found_shells()

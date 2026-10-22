@@ -303,7 +303,7 @@ files, and the operations guide says how to
   <a href="https://swarmops.cc/explainers/store">Interactive version</a>
   (<a href="https://swarmops.cc/explainers/store-light">light</a>), drawn with
   <a href="https://github.com/wheresryan22/anatomy">Anatomy</a> (MIT,
-  <a href="site/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
+  <a href="web/public/THIRD-PARTY-NOTICES.txt">notice</a>).</sub>
 </p>
 
 ## Install
