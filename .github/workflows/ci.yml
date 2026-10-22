@@ -1,5 +1,12 @@
-# The gate: `just check`, the same recipe every session runs, on a hosted runner. `tests-pass`
-# is the one check to require: it fails unless every other job here succeeded.
+# The gate: `just check`, the same recipe every session runs. `tests-pass` is the one check to
+# require: it fails unless every other job here succeeded.
+#
+# Where jobs run: on the maintainers' own host, through self-hosted runners labelled
+# `swarmops-local`, for every push and for pull requests from branches of this repository; a
+# persistent target directory per runner (the runner's CARGO_TARGET_DIR) makes each build
+# incremental, so no build cache travels through GitHub. A pull request from a fork runs on
+# ubuntu-24.04 instead: a public repository's self-hosted runner must never run a stranger's code,
+# and GitHub also holds those runs for a maintainer's approval.
 #
 # Hardening: every action is pinned to a full commit SHA (its version in the trailing comment;
 # Dependabot updates both), the token has no permissions unless a job asks for one,
@@ -28,7 +35,7 @@ defaults:
 jobs:
   check:
     name: just check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     # The default is 360 minutes: a hung test would spend them all from the plan's budget.
@@ -49,7 +56,9 @@ jobs:
           tool: just@1.58.0,cargo-nextest@0.9.146,cargo-deny@0.20.2
           # Only the action's checksummed release binaries, never a cargo-binstall fallback.
           fallback: none
+      # Hosted runners only: a self-hosted runner keeps its target directory between runs.
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        if: ${{ runner.environment == 'github-hosted' }}
         with:
           # The scheduled slow suite restores this cache under the same key.
           shared-key: check
@@ -63,6 +72,14 @@ jobs:
           # The dependencies a failing run built are as good as a passing run's.
           cache-on-failure: true
       - run: just check
+      # A self-hosted runner builds into its own CARGO_TARGET_DIR: bring the report to target/.
+      - name: Collect the JUnit report
+        if: ${{ !cancelled() && runner.environment == 'self-hosted' }}
+        run: |
+          if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -f "$CARGO_TARGET_DIR/nextest/ci/junit.xml" ]; then
+            mkdir -p target/nextest/ci
+            cp "$CARGO_TARGET_DIR/nextest/ci/junit.xml" target/nextest/ci/
+          fi
       - name: Upload the JUnit report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -75,7 +92,7 @@ jobs:
 
   zizmor:
     name: zizmor
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     timeout-minutes: 10
@@ -105,7 +122,7 @@ jobs:
     name: tests-pass
     if: always()
     needs: [check, zizmor]
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
     permissions: {}
     timeout-minutes: 5
     steps:
