@@ -957,3 +957,26 @@ reconsiders the flag below 4×), so a `--durability fast` flag is not justified 
 Not in `just perf`, so not refreshed: M0's per-write percentiles (`fsync_percentiles`), the M1.5
 comparison (`just bench-compare`), and the M1.6 publish pair and M4's re-merge bench above, which
 stay not measured.
+
+## Git remotes (M13): the three Topology 2 targets
+
+Measured 2026-10-22 on this host (WSL2, full fsync) with `cargo nextest run --release -p
+swarmops-cli --run-ignored ignored-only -E 'test(/^remote_perf::/)'`, the `remote_perf` cases
+of `just perf`, against the test kit's loopback smart-HTTP server. One run, taken under heavy
+contention: the load average (1, 5, 15 min) was 35.6, 35.6, 45.2 at the start and 8.9, 8.4, 19.4
+at the end, other builds sharing the host's disk. Fixture: a linear `main` of N commits, one of
+64 files changed in each, made by `git fast-import`. The pilot's repository is timed by the
+pilot task, not here.
+
+| Target | Result | Verdict |
+| --- | --- | --- |
+| `so clone` at most 1.1x `git clone --bare` plus `git import`, 12,000 commits | 292.3 s against 0.39 s + 225.9 s = 226.3 s: 1.29x | missed |
+| the same on the committed fixtures `linear`, `merges`, `roots` | 0.33, 0.41, 0.29 s against 0.11, 0.12, 0.11 s: 2.99x, 3.42x, 2.67x | missed (fixed costs dominate at 5 to 20 commits) |
+| a one-commit `fetch` at most 1.5x on 12,000 commits as on 1,000 (`meta.elapsed_ms`, median of 5) | 94 ms and 128 ms: 1.36x | met |
+| a one-commit `push`, same | 72 ms and 278 ms: 3.86x | missed |
+| a `sync` of one land onto a remote that gained one commit, under 1 s on 12,000 commits | 8.76 s | missed |
+
+Each missed target is an issue and a line for `docs/goals.md`, handed to the fan-in task; none
+blocks the milestone (the plan's decision 22). The run's log is
+`target/perf/remote.log`; the load was not controlled, so the ratios of the clone and the sync
+may move on a quiet host, and a rerun is due before the numbers become goals.
