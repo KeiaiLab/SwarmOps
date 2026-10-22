@@ -29,7 +29,7 @@ default: check
 # the workspace run in target/nextest/ci/.
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
 # offline, and checks that site/install.sh is the same file.
-# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer.
+# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer, Markdown.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
@@ -44,6 +44,8 @@ check:
     cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
     python3 -I scripts/third-party-licenses.py --check
     python3 -I scripts/test-install.py
+    python3 -I scripts/check-docs.py selftest
+    python3 -I scripts/check-docs.py
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,
