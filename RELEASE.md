@@ -60,8 +60,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
   archives with `actions/attest-build-provenance`, which needs `id-token: write` and
   `attestations: write` there too, and step 9 below gains
   `gh attestation verify <archive> --repo KeiaiLab/SwarmOps`.
-- **Linux today (x86_64 and aarch64, glibc 2.34 or newer); macOS and Windows are the next
-  milestone, M12.** The aarch64 binaries are
+- **Linux today (x86_64 and aarch64, glibc 2.34 or newer); macOS and Windows are milestone M12,
+  developed separately.** The aarch64 binaries are
   cross-compiled and only smoke-tested, under QEMU; the test suite runs on x86_64
   ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)). There is no
   macOS, Windows or static (musl) build.

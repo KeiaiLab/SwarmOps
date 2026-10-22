@@ -138,12 +138,16 @@ reaches test builds too: a `pub` item under `#[cfg(test)]` that the crate root r
   the same way, from `git merge-file`: its `generate.sh` rewrites `expected.json` only by hand or
   with `SWARMOPS_REGEN_FIXTURES=1`, and runs the git 2.43 that `SWARMOPS_GIT` names (else `git`
   on `PATH`).
+  The remote suites (M13) are the exception: the remote suites run git ≥ 2.39 in `just check`, as
+  the product does, against the test kit's loopback `git http-backend` and its stand-in for ssh,
+  never the network; git's `http-backend` must be installed with it (`git --exec-path`).
 - **Test-only code stays out of release builds.** Test doubles live in test code or behind the
   `test-hooks` cargo feature (the store's `CrashAtFs`, `FailAtFs` and `OrderCheckFs`, which no
   build without the feature can name), and a release build honours no test hook. The hooks are
-  five environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT`,
+  six environment variables named `SWARMOPS_TEST_*` (`SWARMOPS_TEST_CRASH_AT`,
   `SWARMOPS_TEST_FS_CALLS`, `SWARMOPS_TEST_FAIL_AT`, `SWARMOPS_TEST_ORDER_CHECK`,
-  `SWARMOPS_TEST_NOW`), read only under
+  `SWARMOPS_TEST_NOW`, and `SWARMOPS_TEST_GITHUB_HOSTS`, which makes a push count other hosts as
+  GitHub's for its limits), read only under
   `#[cfg(feature = "test-hooks")]`. A test that needs them is marked
   `#[cfg(feature = "test-hooks")]`, or, for a whole file, its `mod` line in `tests/all.rs`
   is (the CLI's `crash` and `faults` modules), so that a plain `cargo test` skips it; the

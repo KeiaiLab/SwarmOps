@@ -721,6 +721,27 @@ The dry run deleted its branch from its stand-in, and read GitHub's refs with th
 `git ls-remote` must print only `stable`, at `$START` or at a commit the usual landings put there
 since.
 
+## The M13 pilot: a store and GitHub
+
+The pilot of the git remotes (M13) ran SwarmOps against a private GitHub repository on
+2026-10-22, with the commands of [GitHub as a remote](guides/github-remote.md):
+
+- Two agents, each through its own MCP server, landed 13 changes into a store cloned from GitHub
+  over HTTPS (the token named by `--token-env`, never in a URL or an argument) and over ssh.
+- `so push` sent the work to review branches. GitHub merged the pull requests by squash, by rebase
+  and by merge commit, and after each `so sync origin --no-push` the store's `main` stood at
+  GitHub's head with every landed change kept once: the squashed and rebased changes recognised by
+  their trailer lines (GitHub's default squash message keeps them, after a `* ` bullet per commit),
+  the merged ones by ancestry.
+- `so sync origin` pushed directly to an unprotected branch. With the branch moved on GitHub after
+  a fetch, `so push` refused with `E_REMOTE_DIVERGED` and sent nothing, and `so sync` then landed
+  the change on top.
+- No pushed commit was rewritten, GitHub linked every agent commit to an account through
+  `authors.toml`'s address, and the repository's push workflow ran on each pushed commit.
+- The live round-trip test passed against the same repository in 56 s; a clean `so clone` of the
+  11-commit repository took 2.0 s against 1.0 s for `git clone --bare` plus `so git import`
+  ([perf.md](perf.md#the-pilots-repository-2026-10-22)).
+
 ## Appendix: the scripted session
 
 `mcp_session.py` speaks MCP to `swarmops mcp` over stdin and stdout, one JSON-RPC message a line.

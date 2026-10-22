@@ -23,10 +23,11 @@ versions CI already builds where git takes part.
 
 ## Where we are
 
-v0.1.0 (2026-10-20, [CHANGELOG](../CHANGELOG.md)) and `stable` have no network code: every command
-reads and writes this host's store, and `git import` and `git export` read and write a git
-repository on this host ([README](../README.md#swarmops-and-git), the "Offline, on one host" and
-"Sync between hosts" rows). Git's own transport carries everything that crosses hosts.
+v0.1.0 (2026-10-20) read and wrote only this host's store and git repositories. v0.2.0 (M13,
+[CHANGELOG](../CHANGELOG.md)) serves topology 2: a store clones, fetches, pushes and syncs a git
+remote itself, through the user's own git, which carries everything that crosses hosts
+([README](../README.md#swarmops-and-git), the "Offline, on one host" and "Sync between hosts"
+rows). Topologies 1 and 3 are not served yet.
 
 ### Topology 1 today: local git, remote SwarmOps
 
@@ -49,26 +50,26 @@ and the land, and a push to the branch that exports write meets `E_GIT_IMPORT_DI
 
 ### Topology 2 today: local SwarmOps, remote GitHub
 
-Works through a bare clone that git moves, as the [daily loop](operate/daily-loop.md) runs it:
+Served since M13 (v0.2.0), as [GitHub as a remote](guides/github-remote.md) and the
+[daily loop](operate/daily-loop.md) run it:
 
 ```sh
-git clone --bare git@github.com:acme/acme.git "$GIT_SIDE"
-git -C "$GIT_SIDE" fetch origin stable:stable
-so git import "$GIT_SIDE" --ref stable --into main          # step 1: take in what git gained
+so clone git@github.com:acme/acme.git --into "$SWARMOPS_REPO" --branch stable
 # agents commit and land into main
-so git export "$GIT_SIDE" --ref main --branch review         # step 4: send it for review
-git -C "$GIT_SIDE" push origin review                        # CI runs on the push
-git -C "$GIT_SIDE" push origin review:stable                 # step 5: after review and green CI
+so push origin main:review                   # CI runs on the push; a pull request from review
+so sync origin --no-push                     # after GitHub merged it, by any method
 ```
 
-What holds: commits imported from git export back byte for byte; runs of either command take only
-what is new; CI on GitHub runs on the pushed branch as on any push
-([Git round trip](guides/git-round-trip.md)). What is missing: the store speaks no git protocol, so
-git and a person move every commit across; a squash merge on GitHub writes a commit the store never
-exported, and the next import fails with `E_GIT_IMPORT_DIVERGED`
-([daily loop, step 5](operate/daily-loop.md#5-review-then-move-the-trunk)); commits made in the
-store carry an agent's `swarmops.local` address and no signature, which branch rules that require
-signed or known authors refuse.
+What holds: commits fetched from GitHub keep their ids through any number of round trips; a push
+is a compare-and-swap against what the last fetch saw, never forced; after a merge commit, a squash
+or a rebase on GitHub, `so sync` recognises the changes GitHub holds and drops them, so the squash
+merge that `git import` met with `E_GIT_IMPORT_DIVERGED` is now a state sync resolves; commits made
+in the store can carry an address GitHub links to an account (`authors.toml`). What is missing:
+signatures, so a branch that requires signed commits refuses the store's commits; pull requests
+opened from SwarmOps; and three of the four performance targets
+([Topology 2](#topology-2-local-swarmops-remote-github)). The round trip through a bare clone, with
+`git import`, `git export` and a hand-run `git push`, still works
+([Git round trip](guides/git-round-trip.md)).
 
 ### Topology 3 today: local SwarmOps, remote SwarmOps
 
@@ -81,11 +82,11 @@ Native sync is M11, planned.
 
 | Needed | Topology | State on `stable` | Planned in |
 | --- | --- | --- | --- |
-| Packs sent and received over a connection | 1, 2 | Not built: the import reads a repository on disk through gix, packs included, and the export writes loose objects ([known limitations](known-limitations.md#git-import-and-export)) | M13 |
-| Git's fetch and push protocols, as a client | 2 | Not built | M13 |
+| Packs sent and received over a connection | 1, 2 | Built for topology 2 (M13): the user's git moves them between the remote and the store's mirror; SwarmOps writes no pack, and the export writes loose objects ([known limitations](known-limitations.md#git-import-and-export)) | M13 (done), M14 |
+| Git's fetch and push protocols, as a client | 2 | Built (M13), by running the user's git | M13 (done) |
 | Git's fetch and push protocols, as a server | 1 | Not built | M14 |
 | A server entry over ssh | 1, 3 | Not built; M11 plans `ssh <host> swarmops serve --stdio` ([architecture](architecture.md#crates-and-layering)) | M14, reused by M11 |
-| Remotes, remote state and `sync` | 2, 3 | Not built | M13 (git remotes), M11 (store remotes) |
+| Remotes, remote state and `sync` | 2, 3 | Built for git remotes (M13): `remotes.toml`, the mirror's refs, `so sync` | M13 (done), M11 (store remotes) |
 | Ref names beyond `main` and `release/<name>`, and tags | 1, 3 | Not built ([README](../README.md#swarmops-and-git), "Refs beyond one compare-and-swap") | M6's next `FORMAT` |
 | Access control and identities for remote callers | 1, 3 | `E_AUTH` and `E_POLICY_DENIED` are in the schema and raised by nothing ([known limitations](known-limitations.md#serving-requests)) | M14 |
 | A server that refuses `{"file": "<path>"}` content and never passes on a host path | 1, 3 | Recorded as M11's work ([known limitations](known-limitations.md#serving-requests)) | M14, M11 |
@@ -102,11 +103,11 @@ for byte, and the same store gives the same commits every time
 ([architecture, Git export](architecture.md#git-export)). The mirror holds nothing the store and
 the remotes cannot give again: deleted, it is rebuilt by the next fetch and export. Its refs record
 each remote's last known state (`refs/remotes/<remote>/<branch>`), so topology 2 needs no new ref
-name or journal record, and waits for no new store `FORMAT`; whether the mirror's directory itself
-takes a `FORMAT` step is for M13's plan.
+name or journal record, and waits for no new store `FORMAT`. Built in M13 (`git/mirror.git`): it
+takes no `FORMAT` step, but a marker of its own, `git/MIRROR`.
 
-**Remotes (M13).** `so remote add <name> <url>` records a remote in the store (a file such as
-`remotes.toml` in the store's directory); store-facing types keep carrying no path and no URL,
+**Remotes (M13, built).** `so remote add <name> <url>` records a remote in the store's
+`remotes.toml`; store-facing types keep carrying no path and no URL,
 since `fetch`, `push` and `sync` are client-side operations, like `git import` today
 ([architecture](architecture.md#crates-and-layering)). The URL's scheme picks the protocol:
 
@@ -116,7 +117,7 @@ since `fetch`, `push` and `sync` are client-side operations, like `git import` t
 | `git@github.com:org/repo.git`, `ssh://host/path` | git over ssh | 2, or 1 seen from git |
 | `so://host/path` | SwarmOps' own, over ssh | 3 |
 
-**One sync engine (M13, extended by M11).** Unpublished lands are the store's changesets on `main`
+**One sync engine (M13, built; extended by M11).** Unpublished lands are the store's changesets on `main`
 above the remote's last known head. `so sync <remote>` fetches, lands each unpublished change onto
 the remote's head with M4's three-way merge, in order, and pushes the result by compare-and-swap
 against the head it fetched; a remote that moved meanwhile makes it fetch and land again, up to the
@@ -362,6 +363,35 @@ a store ref that a `sync` makes.
 retryable error (proposed: `E_REMOTE_UNREACHABLE`, exit 4) and change nothing; lands made meanwhile
 wait as unpublished, and `sync status` counts them.
 
+### As built: where M13 departed from this plan
+
+M13 is delivered (v0.2.0). This section's plan stays as it was written; M13 built it with these
+departures, each a decision of its design:
+
+- **The transport is the user's git**, run as a child process for fetch, push and `ls-remote`,
+  not git's protocols written in SwarmOps: credential helpers, proxies and ssh settings apply as
+  the user configured them, SwarmOps adds no network crate and writes no pack, and the tests run
+  git's own `http-backend`. gix stays on the disk side (import, export, the mirror).
+- **A fetch imports the followed branch only.** Every branch and tag is fetched into the mirror;
+  only the branch `main` follows is imported, and another branch when a push names it. Tags are
+  never imported.
+- **Credentials** are git's (helpers, ssh keys), or a token in an environment variable the remote
+  names (`--token-env`); no `GH_TOKEN` or `GITHUB_TOKEN` is picked up unasked.
+- **`sync` moves `main` before it pushes**, so a refused push leaves `main` landed on the remote's
+  head (`details.main_moved`, and `op undo` takes it back); `sync --no-push` serves branches that
+  take pull requests only. A change GitHub holds is recognised by any of three trailer lines
+  (`SwarmOps-Changeset`, `SwarmOps-Squashed-From`, `SwarmOps-Land-Key`), indented or bulleted as a
+  squash message lists them, or by merging as no change.
+- **The per-identity address** is the store's `authors.toml`, keyed by agent family; it changes
+  what new changesets record, and not the export's rendering (version 1 of `git_oid`).
+- **`E_REMOTE_REJECTED` exits 5** (a rule or a credential), and the MCP tools are `remote_list`,
+  `fetch`, `push`, `sync` and `sync_status`; `clone` and `remote add|remove` are CLI only.
+- **The targets**: fetch met its 1.5×; push (3.86×), sync (8.76 s) and clone (1.29×) missed theirs,
+  recorded in [perf.md](perf.md#git-remotes-m13-the-three-topology-2-targets) and the
+  [known limitations](known-limitations.md#git-remotes), and none blocked the milestone.
+- **Criterion 4** passed in the live run against a private scratch repository, and the pilot
+  ([pilot.md](pilot.md#the-m13-pilot-a-store-and-github)); the weekly live job runs it again.
+
 ### What it builds on
 
 M3's import and M8's export, unchanged in their contracts; M4's `land` for sync; the external ids
@@ -404,8 +434,8 @@ real repositories are today (`SWARMOPS_HOST_REPOS=1`).
 
 ### Targets
 
-Not measured; each becomes a `just perf` case against a loopback remote, so the network does not
-count.
+Each is a `just perf` case against a loopback remote, so the network does not count; M13's first
+run, on a loaded host, is in [perf.md](perf.md#git-remotes-m13-the-three-topology-2-targets).
 
 | Target | How it is measured |
 | --- | --- |
@@ -514,9 +544,9 @@ Several upstreams merging with each other, partial replicas and a caching tier.
 Milestone ids are never renumbered. Two are new: M13 (topology 2) and M14 (topology 1); M11
 (topology 3) takes `so clone`, `so remote` and `so sync`.
 
-**Settled:** M0 to M4 and M8 are delivered, in v0.1.0; M12 comes next. **Provisional:** the order
-from M5 on is settled once the pilot has run ([README](../README.md#roadmap)); until then the order
-below is the plan:
+**Settled:** M0 to M4 and M8 are delivered, in v0.1.0, and M13 in v0.2.0, ahead of M12, which is
+developed separately. **Provisional:** the order from M5 on is settled once the pilot has run
+([README](../README.md#roadmap)); until then the order below is the plan:
 
 ```text
 order   M12 → M13 → M5 → M6 → M14 → M7 → M9 → M11
@@ -529,7 +559,7 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | --- | --- | --- | --- | --- |
 | ✅ M0–M4, M8 | all | The core, diff and history, git import, landing, git export; v0.1.0 | | Delivered ([CHANGELOG](../CHANGELOG.md)) |
 | 📋 M12 | all | macOS and Windows builds, tests and releases | | Each platform passes `just check` in CI and ships in a release |
-| 📋 M13 | 2 | Packs; git fetch and push as a client; the store's git mirror; `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, their MCP tools | M3, M4, M8 | Topology 2's acceptance criteria 1 to 6 pass |
+| ✅ M13 | 2 | The user's git as the transport; the store's git mirror; `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status`, their MCP tools; `authors.toml`; v0.2.0 | M3, M4, M8 | Topology 2's acceptance criteria 1 to 6 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | 📋 M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks | | As the README states it |
 | 📋 M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag |
 | 📋 M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass |
@@ -559,10 +589,11 @@ this host's repositories).
 **M12.** No item; SwarmOps is Linux only, and the release binaries print an `ld.so` line on glibc
 2.34 to 2.38 (unscheduled).
 
-**M13 and M14.** An export and an import onto a native head read the whole history below it; an
-export writes loose objects; an export leaves no reflog entry; a crash while an export moves its
-branch leaves the branch's lock ([Git import and export](known-limitations.md#git-import-and-export)).
-Each meets the mirror; whether M13 or M14 takes them is decided in their plans.
+**M13 (delivered) and M14.** An export and an import onto a native head read the whole history
+below it, and so do a fetch, a push and a sync, which missed their targets; an export writes loose
+objects; an export leaves no reflog entry ([Git import and export](known-limitations.md#git-import-and-export),
+[Git remotes](known-limitations.md#git-remotes)). M13 took the stale git lock files in its own
+mirror; the rest are open for M14 or later.
 
 **M5.** Concurrent `init` on one directory is unsupported; a store is found by `--repo` or
 `SWARMOPS_REPO` alone.

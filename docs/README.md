@@ -20,6 +20,7 @@ features, each with an example.
 | [Parallel agents](guides/parallel-agents.md) | Run many agents on one repository, and see how that compares with agents in git worktrees. |
 | [Claude Code](guides/claude-code.md) | Give Claude Code agents the store through MCP. |
 | [Git round trip](guides/git-round-trip.md) | Import a git repository, and export the work back for review and CI. |
+| [GitHub as a remote](guides/github-remote.md) | Clone, fetch, push and sync with GitHub; pull requests, tokens in CI, commit authors, a sync that stops. |
 | [MCP integration](develop/mcp.md) | Connect any MCP client: registration, the stdio exchange, identity, every tool and its command, limits and failures. |
 | [CLI scripting](develop/cli-scripting.md) | Drive SwarmOps from scripts: the envelope, exit codes, jq recipes, retries and idempotency keys. |
 

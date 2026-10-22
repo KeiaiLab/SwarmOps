@@ -15,19 +15,21 @@ what it lets an attacker do, and the commit you tested. A fix lands on `stable`,
 
 ## Supported versions
 
-SwarmOps 0.1.0 is released as the tag `v0.1.0`, with its archives; no crate is published.
-Security fixes go to the main line, the `stable` branch, and nowhere else.
+SwarmOps 0.1.0 and 0.2.0 are released as the tags `v0.1.0` and `v0.2.0`, with their archives; no
+crate is published. Security fixes go to the main line, the `stable` branch, and nowhere else.
 
 | Version | Supported |
 | --- | --- |
 | `stable` (the main line) | yes |
-| `0.1.0` (released; fixes go to `stable`) | no |
+| `0.2.0`, `0.1.0` (released; fixes go to `stable`) | no |
 | anything else | no |
 
 ## What is in scope
 
 The trust model is M1's: SwarmOps runs on one host, as a library linked into each `swarmops`
-process, with no daemon and no network service. Every agent and person that runs `swarmops`
+process, with no daemon and no network service. Since M13, `clone`, `fetch`, `push` and `sync`
+reach a git remote, through the user's own git as a child process: SwarmOps opens no connection
+itself. Every agent and person that runs `swarmops`
 against a store is a trusted local user acting for the same owner, and the store directory's
 filesystem permissions are the access boundary. Within that model, these are vulnerabilities:
 
@@ -95,6 +97,22 @@ filesystem permissions are the access boundary. Within that model, these are vul
   repository at a path that the request names, on the caller's host, so the export is a trust
   boundary. A request that makes SwarmOps write outside that repository, move a branch other than
   the one it names, or write through a name that git does not take as a branch is a vulnerability.
+- **The git remotes (M13): credentials and the child's environment.** SwarmOps stores no
+  credential: `remotes.toml` holds a token's variable name (`token_env`), never its value, and a URL
+  with a password in it is refused. The token reaches git only through the child's environment, as
+  an HTTP header scoped to the remote's URL, never as an argument or in a file, and is removed, with
+  its base64 forms, from whatever git prints before it enters an error. The child runs
+  without a shell, its arguments after `--end-of-options`, with `GIT_TERMINAL_PROMPT=0`,
+  `GIT_ALLOW_PROTOCOL` set to the remote URL's scheme alone (`file://`, `ext::` and local paths are
+  refused as remotes), an empty hooks directory, and the variables that point git at another
+  repository or trace its traffic removed; the user's credential helpers, ssh agent, `GIT_SSH_COMMAND`
+  and proxy variables pass through, as they do for the user's own `git fetch`. A token or
+  credential that reaches a file under the store, an argument, an envelope or an error; a git
+  child that runs a hook or a command a remote or a fetched repository chose; or a mirror write
+  outside `git/mirror.git`, is a vulnerability. What the remote sends is imported as the git
+  import above takes any repository. A `SwarmOps-` trailer line in a remote commit is trusted as
+  proof that the remote holds a change (the known limitations' "A trailer line is taken as
+  proof"): anyone who can push to the remote is trusted with its content.
 - **The SwarmOps supply chain.** A dependency or a CI workflow that could change what we build
   or run. `cargo deny check` (advisories, licenses, bans, sources) runs over every lockfile the
   project builds: the workspace's and the fuzz crate's in every `just check`, and

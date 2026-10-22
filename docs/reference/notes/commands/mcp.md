@@ -45,10 +45,10 @@ are not served. The results of `server/discover` and `tools/list` may be kept fo
 
 ### Tools
 
-`tools/list` gives 18 tools, one per operation, named as the envelope's `op` is: `repo_info`,
+`tools/list` gives 23 tools, one per operation, named as the envelope's `op` is: `repo_info`,
 `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`,
-`ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has` and
-`verify`. A tool's input schema is its request type's JSON Schema (`swarmops schema <Req>`), with
+`ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has`,
+`verify`, `remote_list`, `fetch`, `push`, `sync` and `sync_status`. A tool's input schema is its request type's JSON Schema (`swarmops schema <Req>`), with
 every reference inlined so that it stands alone. Its annotations say what it does to the store:
 
 | Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
