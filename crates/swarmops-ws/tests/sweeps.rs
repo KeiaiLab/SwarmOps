@@ -37,6 +37,14 @@ fn an_update_killed_before_the_mode_finishes_on_the_next_open() {
     sweep::update_cut_before_the_mode();
 }
 
+/// After that cut update, an agent that makes a plain file the update wrote executable is
+/// refused with `E_WS_DIRTY`, not overwritten.
+#[cfg(unix)]
+#[test]
+fn a_mode_edit_after_a_cut_update_is_refused() {
+    sweep::update_cut_then_an_agent_mode_edit();
+}
+
 /// A commit killed at any call replays the same changeset, once.
 #[test]
 fn a_killed_commit_replays_once() {

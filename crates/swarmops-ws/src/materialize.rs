@@ -391,14 +391,18 @@ pub(crate) fn holds(
     Ok(blob_id(&host.read_file(abs)?) == item.blob)
 }
 
-/// Whether the host's `meta` at `abs` is a file holding `item`'s bytes, whatever its mode: what a
-/// write killed between the file and its executable bit leaves.
+/// Whether the host's `meta` at `abs` is a file holding executable `item`'s bytes without its
+/// executable bit: what a write killed between the file and its bit leaves, and nothing else
+/// (a plain item with the bit is an agent's edit).
 fn bytes_held(
     host: &dyn HostFs,
     abs: &Utf8Path,
     meta: HostMeta,
     item: &Item,
 ) -> Result<bool, OpError> {
+    if item.kind != FileKind::Exec || meta.mode & EXEC_BITS != 0 {
+        return Ok(false);
+    }
     if meta.kind != HostKind::File || meta.size != item.size {
         return Ok(false);
     }
