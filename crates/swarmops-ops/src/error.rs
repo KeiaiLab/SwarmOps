@@ -104,6 +104,12 @@ pub(crate) fn repo_error(e: RepoError, during: During<'_>) -> OpError {
         .with_hint("swarmops blob put <file>"),
         RepoError::RefName(name) => ref_name_invalid(name, message),
         RepoError::RefMoved { name, actual, .. } => ref_moved(&name, actual),
+        RepoError::CasMismatch {
+            target,
+            actual,
+            expected,
+            ..
+        } => target_moved(&target, actual, expected),
         RepoError::OpNotFound { op: number, last } => {
             let last = last.map_or(Value::Null, Value::from);
             error(ErrorCode::OpNotFound, message)
@@ -407,6 +413,22 @@ fn ref_moved(name: &str, actual: Option<ChangesetId>) -> OpError {
         ),
     };
     let mut error = cas_mismatch(name, actual, message);
+    error.details.insert("committed".to_owned(), false.into());
+    error
+}
+
+/// A land with `expect_target` (M5) that found its target `name` naming `actual`, not
+/// `expected`, so that it landed nothing: `E_CAS_MISMATCH` `{name, actual, expected, committed}`,
+/// `committed` always `false`, as a commit whose ref moved maps; the hint only reads.
+fn target_moved(name: &str, actual: ChangesetId, expected: ChangesetId) -> OpError {
+    let message = format!(
+        "ref {name} names {actual}, not {expected}, so this land landed nothing: rebase the \
+         change onto {actual}, check it, and land it again with --expect-target {actual}"
+    );
+    let mut error = cas_mismatch(name, Some(actual), message);
+    error
+        .details
+        .insert("expected".to_owned(), expected.to_string().into());
     error.details.insert("committed".to_owned(), false.into());
     error
 }
@@ -1528,6 +1550,48 @@ mod tests {
         let said = "ref main does not exist, so it does not name this commit's parent";
         assert!(gone.message.starts_with(said), "{gone:?}");
         assert!(gone.message.contains("recorded nothing"), "{gone:?}");
+    }
+
+    /// A land whose target no longer names its `expect_target` (M5) maps as a commit whose ref
+    /// moved does: one code, `E_CAS_MISMATCH` (exit 4, retryable), `committed: false`, the same
+    /// read-only hint; its details add what the land expected.
+    #[test]
+    fn cas_mismatch_and_ref_moved_map_to_one_code() {
+        let other = ChangesetId(swarmops_core::ObjectId([9; 32]));
+
+        // 1. Both errors, one code.
+        let moved = repo_error(
+            RepoError::RefMoved {
+                name: "main".into(),
+                actual: Some(id()),
+                recovered: Box::default(),
+            },
+            During::Op,
+        );
+        let mismatch = repo_error(
+            RepoError::CasMismatch {
+                target: "main".into(),
+                actual: id(),
+                expected: other,
+                recovered: Box::default(),
+            },
+            During::Op,
+        );
+        for error in [&moved, &mismatch] {
+            assert_eq!(error.code, ErrorCode::CasMismatch.as_str(), "{error:?}");
+            assert_eq!((error.exit, error.retryable), (4, true), "{error:?}");
+            assert_eq!(error.hint, Some(format!("swarmops show {}", id())));
+        }
+
+        // 2. The mismatch's details, and a message that says nothing landed.
+        let want = details([
+            ("name", "main".into()),
+            ("actual", id().to_string().into()),
+            ("expected", other.to_string().into()),
+            ("committed", false.into()),
+        ]);
+        assert_eq!(mismatch.details, want);
+        assert!(mismatch.message.contains("landed nothing"), "{mismatch:?}");
     }
 
     /// An `undo` that found a ref moved since its operation wrote nothing: `E_CAS_MISMATCH` (exit

@@ -22,7 +22,9 @@
 //! nothing ([`Repo::merge_with`]; the [`merge`] module). A land merges a change that way onto a
 //! ref's head and publishes the result as one changeset, with the ref's move to it, in one write
 //! transaction; a lost race re-merges and tries again, and a keyed land run again replays
-//! ([`Repo::land`]; the [`land`] module).
+//! ([`Repo::land`]; the [`land`] module). A rebase merges a change the same way and records the
+//! result as one changeset on the ref's head, moving no ref ([`Repo::rebase`]; the [`rebase`]
+//! module).
 //!
 //! [`LocalRepo`] is the repository on the local filesystem: the loose object files and the
 //! native metadata store of `swarmops-store`, which own durability. The operations take and
@@ -71,6 +73,7 @@ pub use oplog::{OpRecord, Operation, UndoOutcome};
 pub use path_history::PathEvent;
 pub use raw::{MAX_RAW_BATCH, RawBatch, RawBatchOutcome, RawChangeset, RawOutcome};
 pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, TreePage};
+pub use rebase::{RebaseOutcome, RebaseRequest, RebaseStatus};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
 pub use verify::{MismatchCause, VerifyProblem, VerifyReport};

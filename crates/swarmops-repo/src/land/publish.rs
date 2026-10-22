@@ -6,7 +6,7 @@
 //! chooses replaces its rule (Task 5), and keeps its types.
 
 use swarmops_core::{Changeset, ChangesetId, RepoPath};
-use swarmops_store::{CasResult, ChangesetMeta, ObjectStore, StoreError};
+use swarmops_store::{CasResult, ChangesetMeta, ObjectStore, Recovered, StoreError};
 
 use crate::error::RepoError;
 use crate::repo::{Repo, post_commit_warning, ref_error};
@@ -51,6 +51,9 @@ pub enum Published {
     Moved {
         /// What the target names.
         actual: ChangesetId,
+        /// What the write transaction's recovery repaired before the move was refused, of what
+        /// earlier writers left: those repairs stay made.
+        recovered: Recovered,
     },
 }
 
@@ -84,7 +87,10 @@ impl<O: ObjectStore> Repo<O> {
             // Returning drops the write: the queued insert with it, no frame, the lock released.
             CasResult::Mismatch {
                 actual: Some(actual),
-            } => return Ok(Published::Moved { actual }),
+            } => {
+                let recovered = write.recovered();
+                return Ok(Published::Moved { actual, recovered });
+            }
             CasResult::Mismatch { actual: None } => {
                 return Err(RepoError::NotFound(p.target.clone()));
             }

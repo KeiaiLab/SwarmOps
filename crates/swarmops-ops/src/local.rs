@@ -310,6 +310,11 @@ const MAX_LAND_KEY: usize = 64;
 ///   parent (`actual` null when the ref does not exist), so that the commit recorded nothing.
 ///   The message says to commit the change again on top of `actual` (`--parent <actual>
 ///   --advance <name>`), and the hint only reads, as for a ref move's below.
+/// - `E_CAS_MISMATCH` (retryable) `{name, actual, expected, committed}`, `committed` always
+///   `false`: `CasMismatch`, a land with `expect_target` whose target named `actual`, not
+///   `expected`, before it merged or when its one publish lost the race, so that it landed
+///   nothing. The message says to rebase the change onto `actual`, check it and land it again;
+///   the hint only reads, as for `RefMoved`.
 /// - `E_CAS_MISMATCH` (retryable) `{name, actual, op}`: `UndoBlocked`, an `undo` of operation
 ///   `op` that found ref `name` at `actual` (null when it does not exist), moved since the
 ///   operation, so that the undo wrote nothing. The message says to undo the operations that
@@ -992,6 +997,101 @@ impl<'a> Recording<'a> {
         Ok(head)
     }
 
+    /// A land's or a rebase's change, resolved in one snapshot: its `head`, its `base`, the
+    /// changeset `expected` names (a land's `expect_target`), and the `against` of its
+    /// resolutions; the head of ref `onto` is recorded as it names it. The resolutions' contents
+    /// are read once the revisions resolved, as a commit's are. The land and the rebase read the
+    /// ref again in their own snapshots.
+    fn change(
+        &self,
+        head: &Rev,
+        base: Option<&Rev>,
+        expected: Option<&Rev>,
+        onto: &str,
+        resolutions: Option<ShapedResolutions>,
+    ) -> Result<ResolvedChange, OpError> {
+        // 1. The revisions.
+        let read = self.snapshot()?;
+        let head = self.resolve(&read, head)?;
+        let resolve = |rev: Option<&Rev>| rev.map(|rev| self.resolve(&read, rev)).transpose();
+        let base = resolve(base)?;
+        let expected = resolve(expected)?;
+        let against = resolve(resolutions.as_ref().map(|shaped| &shaped.against))?;
+        self.head(&read, onto)?;
+        drop(read);
+
+        // 2. The resolutions' contents.
+        let resolutions = match (resolutions, against) {
+            (Some(shaped), Some(against)) => Some(shaped.resolutions(against)?),
+            _ => None,
+        };
+        Ok(ResolvedChange {
+            head,
+            base,
+            expected,
+            resolutions,
+        })
+    }
+
+    /// `rebase` (M5) of `req` as `who`, its ref name checked ([`crate::rebase`]): a keyed
+    /// rebase's key is a uuid v7, as a commit's, and it signs at the key's time; the recorded
+    /// changeset's metadata is a commit's (`agent`, `commit_key`, `run_id`).
+    pub(crate) fn rebase_change(
+        &self,
+        who: &Identity,
+        req: RebaseReq,
+    ) -> Result<swarmops_repo::RebaseOutcome, OpError> {
+        let RebaseReq {
+            head,
+            base,
+            onto,
+            message,
+            idempotency_key,
+            max_conflict_bytes,
+            resolutions,
+        } = req;
+
+        // 1. The request's own rules, before anything is resolved or read.
+        let key = idempotency_key
+            .as_deref()
+            .map(CommitKey::parse)
+            .transpose()?;
+        let resolutions = resolutions.map(shaped_resolutions).transpose()?;
+
+        // 2. The change, resolved in one snapshot.
+        let ResolvedChange {
+            head,
+            base,
+            resolutions,
+            ..
+        } = self.change(&head, base.as_ref(), None, &onto, resolutions)?;
+
+        // 3. Its metadata and signature, as a commit's.
+        let signature = native_signature(who, key.as_ref().map(|key| key.secs));
+        let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
+        if let Some(key) = &key {
+            metadata.push((COMMIT_KEY.to_owned(), key.text.clone().into_bytes()));
+        }
+        if let Some(run_id) = who.run_id() {
+            metadata.push(("run_id".to_owned(), run_id.as_bytes().to_vec()));
+        }
+        content::check_metadata(&metadata)?;
+
+        // 4. The rebase.
+        let rebase = swarmops_repo::RebaseRequest {
+            base,
+            message: message.map(String::into_bytes),
+            metadata,
+            resolutions,
+            ..swarmops_repo::RebaseRequest::new(head, &onto, signature)
+        };
+        let outcome = (self.ops.repo)
+            .rebase(rebase)
+            .map_err(|e| merge_error(e, max_conflict_bytes))?;
+        self.resolved.record_recovered(outcome.recovered);
+        Ok(outcome)
+    }
+
     /// The replay of a commit keyed `key` whose parent, the changeset it would build on, is
     /// `parent`, when that is the changeset an earlier request with the key made (its
     /// `commit_key`, read in `read`, the snapshot `parent` was resolved in; one object read): the
@@ -1191,13 +1291,6 @@ impl StoreOps for Recording<'_> {
             expect_target,
             resolutions,
         } = req;
-        // An exact land, onto the head the change was rebased on, is the M5 plan's task W2.
-        if expect_target.is_some() {
-            return Err(error(
-                ErrorCode::InvalidArg,
-                "land's expect_target is not built yet (the M5 plan's task W2)",
-            ));
-        }
         // The request's own rules are checked before anything is resolved or read.
         if let Some(key) = &idempotency_key {
             land_key(key)?;
@@ -1210,25 +1303,22 @@ impl StoreOps for Recording<'_> {
             .with_details(details([("max_attempts", max_attempts.into())])));
         }
         let resolutions = resolutions.map(shaped_resolutions).transpose()?;
-        // The revisions resolve in one snapshot, and the target's head is recorded as it names
-        // it; the land reads the target again in each attempt's own snapshot.
-        let read = self.snapshot()?;
-        let head = self.resolve(&read, &head)?;
-        let base = match &base {
-            Some(rev) => Some(self.resolve(&read, rev)?),
-            None => None,
-        };
-        let against = match &resolutions {
-            Some(shaped) => Some(self.resolve(&read, &shaped.against)?),
-            None => None,
-        };
-        self.head(&read, &target)?;
-        drop(read);
-        // Their contents are read once the revisions resolved, as a commit's are.
-        let resolutions = match (resolutions, against) {
-            (Some(shaped), Some(against)) => Some(shaped.resolutions(against)?),
-            _ => None,
-        };
+
+        // 1. The change and the head it expects the target to name, resolved in one snapshot.
+        let ResolvedChange {
+            head,
+            base,
+            expected,
+            resolutions,
+        } = self.change(
+            &head,
+            base.as_ref(),
+            expect_target.as_ref(),
+            &target,
+            resolutions,
+        )?;
+
+        // 2. The land itself.
         let mut lander_metadata = Vec::new();
         if let Some(run_id) = who.run_id() {
             let run_id = run_id.as_bytes().to_vec();
@@ -1240,17 +1330,16 @@ impl StoreOps for Recording<'_> {
             message: message.map(String::into_bytes),
             lander_metadata,
             max_attempts,
+            expect_target: expected,
             resolutions,
             ..LandRequest::new(head, &target, native_signature(who, None))
         };
         let outcome = self.ops.repo.land(land).map_err(|e| {
-            let message = e.to_string();
-            match e {
-                RepoError::Conflict(conflicts) => {
-                    crate::error::conflict(&conflicts, message, max_conflict_bytes)
-                }
-                e => op(e),
+            // An exact land refused under the lock reports what the write repaired first.
+            if let RepoError::CasMismatch { recovered, .. } = &e {
+                self.resolved.record_recovered(**recovered);
             }
+            merge_error(e, max_conflict_bytes)
         })?;
         Ok(LandResp {
             status: match outcome.status {
@@ -2144,6 +2233,30 @@ fn land_key(key: &str) -> Result<(), OpError> {
     )
     .with_details(details([("idempotency_key", key.into())]))
     .with_hint("make a new uuid v7 for each land, and give it again only to retry that land"))
+}
+
+/// A land's or a rebase's error `e` as an [`OpError`]: a conflict's report carries at most
+/// `max_conflict_bytes` of hunk text.
+fn merge_error(e: RepoError, max_conflict_bytes: u64) -> OpError {
+    let message = e.to_string();
+    match e {
+        RepoError::Conflict(conflicts) => {
+            crate::error::conflict(&conflicts, message, max_conflict_bytes)
+        }
+        e => op(e),
+    }
+}
+
+/// A land's or a rebase's change, resolved ([`Recording::change`]).
+struct ResolvedChange {
+    /// Its head.
+    head: ChangesetId,
+    /// Its base, if the request names one.
+    base: Option<ChangesetId>,
+    /// What a land expects its target to name, if it does.
+    expected: Option<ChangesetId>,
+    /// Its resolutions, read.
+    resolutions: Option<Resolutions>,
 }
 
 /// A land's resolutions as the request gives them, their shape checked before anything is
@@ -3978,5 +4091,256 @@ mod tests {
             (LandStatus::Landed, actual.as_str(), 1)
         );
         assert_eq!(main(), Some(again.landed));
+    }
+
+    /// The tests of `rebase` and of `land`'s `expect_target` (M5).
+    mod exact {
+        use std::sync::Mutex;
+
+        use serde_json::json;
+        use swarmops_api::{ChangeInput, ContentInput, RebaseStatus};
+        use swarmops_store::RealFs;
+        use swarmops_testkit::fs::{Call, Watch, Watched};
+
+        use super::super::*;
+        use super::ops_on;
+
+        /// A uuid v7 whose time is 2023-06-30 03:34:18.518 UTC.
+        const KEY: &str = "01890a5d-ac96-774b-bcce-b302099a8057";
+
+        /// The key's time in whole seconds.
+        const KEY_SECS: u64 = 1_688_096_058;
+
+        /// A store with `main` at `t0`, an agent's change `head` on it, and `main` moved on to
+        /// `t1`; the ops over it and the agent.
+        fn moved_on() -> (
+            tempfile::TempDir,
+            Utf8PathBuf,
+            LocalOps,
+            Identity,
+            [String; 3],
+        ) {
+            let dir = tempfile::tempdir().unwrap();
+            let root = Utf8PathBuf::from_path_buf(dir.path().join("store")).unwrap();
+            let (ops, _) = LocalOps::init(&root, "acme").unwrap();
+            let who = Identity::parse("agent/worker-17").unwrap();
+            let t0 = put(&ops, &who, None, "a", Some("main"));
+            let head = put(&ops, &who, Some(&t0), "b", None);
+            let t1 = put(&ops, &who, Some(&t0), "c", Some("main"));
+            (dir, root, ops, who, [t0, head, t1])
+        }
+
+        /// Commits a put of `path` on `parent`, advancing `advance`; the changeset's id.
+        fn put(
+            ops: &LocalOps,
+            who: &Identity,
+            parent: Option<&str>,
+            path: &str,
+            advance: Option<&str>,
+        ) -> String {
+            let req = CommitReq {
+                parent: parent.map(Rev::from),
+                changes: vec![ChangeInput {
+                    path: path.to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline(format!("{path}\n"))),
+                    mode: None,
+                }],
+                message: path.to_owned(),
+                advance: advance.map(str::to_owned),
+                idempotency_key: None,
+                allow_empty: false,
+            };
+            ops.commit(who, req).unwrap().changeset
+        }
+
+        /// A rebase of `fields` over the defaults.
+        fn rebase(fields: Value) -> RebaseReq {
+            serde_json::from_value(fields).unwrap()
+        }
+
+        /// A land of `fields` over the defaults.
+        fn land(fields: Value) -> LandReq {
+            serde_json::from_value(fields).unwrap()
+        }
+
+        /// `show` of `id`.
+        fn show(ops: &LocalOps, id: &str) -> ChangesetDetail {
+            let req = ShowReq {
+                rev: Rev::from(id),
+                max_changes: 10,
+            };
+            ops.show(req).unwrap()
+        }
+
+        /// A rebase records `H'` on `main`'s head, moving no ref, and a land of it with
+        /// `expect_target` set to that head publishes its tree: `L`'s root, read through `show`,
+        /// is the rebase's `root`. `H'` is no land: no lander, no land key.
+        #[test]
+        fn a_land_with_expect_target_publishes_the_rebased_tree() {
+            let (_dir, _root, ops, who, [t0, head, t1]) = moved_on();
+
+            // 1. The rebase.
+            let rebased = ops.rebase(&who, rebase(json!({"head": head}))).unwrap();
+            assert_eq!(rebased.status, RebaseStatus::Rebased);
+            assert_eq!(
+                (rebased.onto.as_str(), rebased.base.as_str()),
+                (t1.as_str(), t0.as_str())
+            );
+            let shown = show(&ops, &rebased.changeset);
+            assert_eq!(
+                (shown.parents.clone(), shown.root.clone()),
+                (vec![t1.clone()], rebased.root.clone())
+            );
+            assert_eq!((shown.lander, shown.land_key), (None, None));
+            assert_eq!(shown.squashed_from, [head]);
+            let main = || ops.repo_info(InfoReq {}).unwrap().main;
+            assert_eq!(main(), Some(t1.clone()));
+
+            // 2. The exact land.
+            let fields = json!({"head": rebased.changeset, "base": t1, "expect_target": t1});
+            let landed = ops.land(&who, land(fields)).unwrap();
+            assert_eq!((landed.status, landed.attempts), (LandStatus::Landed, 1));
+            assert_eq!(show(&ops, &landed.landed).root, rebased.root);
+            assert_eq!(main(), Some(landed.landed));
+        }
+
+        /// A keyed rebase signs at its key's time and records the key as `commit_key`: the same
+        /// request again is the same changeset, `replayed`.
+        #[test]
+        fn a_keyed_rebase_signs_at_its_key_s_time_and_replays() {
+            let (_dir, _root, ops, who, [_, head, _]) = moved_on();
+            let keyed = || rebase(json!({"head": head, "idempotency_key": KEY}));
+
+            let first = ops.rebase(&who, keyed()).unwrap();
+            let shown = show(&ops, &first.changeset);
+            assert_eq!(shown.created_at, KEY_SECS * 1000);
+            assert_eq!(shown.metadata.get("commit_key"), Some(&KEY.to_owned()));
+
+            let again = ops.rebase(&who, keyed()).unwrap();
+            assert_eq!(
+                (again.status, again.changeset),
+                (RebaseStatus::Replayed, first.changeset)
+            );
+        }
+
+        /// A rebase's own rules are checked before anything is read: `onto` is `main` or
+        /// `release/<x>`, a key is a uuid v7.
+        #[test]
+        fn a_rebase_checks_its_request_first() {
+            let (_dir, _root, ops, who, [_, head, _]) = moved_on();
+            let refused = |fields| ops.rebase(&who, rebase(fields)).unwrap_err();
+
+            let onto = refused(json!({"head": head, "onto": "feature"}));
+            assert_eq!(onto.code.as_str(), "E_REF_NAME_INVALID", "{onto:?}");
+            let key = refused(json!({"head": head, "idempotency_key": "key-1"}));
+            assert_eq!(key.code.as_str(), "E_INVALID_ARG", "{key:?}");
+            assert_eq!(
+                key.details.get("idempotency_key"),
+                Some(&Value::from("key-1"))
+            );
+        }
+
+        /// A rebase that conflicts is `E_CONFLICT` (exit 3) with the report a land of the same
+        /// change gives.
+        #[test]
+        fn a_rebase_that_conflicts_reports_as_a_land_does() {
+            // The change adds `c` with other content than main's `c` on t1.
+            let (_dir, _root, ops, who, [t0, _, _]) = moved_on();
+            let edit = CommitReq {
+                parent: Some(Rev::from(t0.as_str())),
+                changes: vec![ChangeInput {
+                    path: "c".to_owned(),
+                    op: ChangeOp::Put,
+                    content: Some(ContentInput::Inline("ours\n".to_owned())),
+                    mode: None,
+                }],
+                message: "ours".to_owned(),
+                advance: None,
+                idempotency_key: None,
+                allow_empty: false,
+            };
+            let head = ops.commit(&who, edit).unwrap().changeset;
+
+            let rebased = ops.rebase(&who, rebase(json!({"head": head}))).unwrap_err();
+            let landed = ops.land(&who, land(json!({"head": head}))).unwrap_err();
+            assert_eq!(
+                (rebased.code.as_str(), rebased.exit),
+                ("E_CONFLICT", 3),
+                "{rebased:?}"
+            );
+            assert_eq!(rebased.details.get("report"), landed.details.get("report"));
+        }
+
+        /// A land whose target no longer names `expect_target` is `E_CAS_MISMATCH` (exit 4,
+        /// retryable) `{name, actual, expected, committed: false}`, and records nothing.
+        #[test]
+        fn a_land_onto_a_moved_target_is_a_cas_mismatch() {
+            let (_dir, _root, ops, who, [t0, head, t1]) = moved_on();
+            let fields = json!({"head": head, "base": t0, "expect_target": t0});
+
+            let error = ops.land(&who, land(fields)).unwrap_err();
+            assert_eq!(
+                (error.code.as_str(), error.exit, error.retryable),
+                ("E_CAS_MISMATCH", 4, true),
+                "{error:?}"
+            );
+            let want = json!({"name": "main", "actual": t1, "expected": t0, "committed": false});
+            assert_eq!(Value::Object(error.details.clone()), want);
+            assert_eq!(ops.repo_info(InfoReq {}).unwrap().main, Some(t1));
+        }
+
+        /// Moves main once, as another lander would, at the land's first flush of objects
+        /// (outside the lock): a commit on main's head through a handle of its own.
+        struct Race {
+            root: Utf8PathBuf,
+            /// The changeset it moved main to, once it has.
+            raced: Mutex<Option<String>>,
+        }
+
+        impl Watch for Race {
+            fn before(&self, call: &Call<'_>) -> io::Result<()> {
+                let at = call.path().strip_prefix(&self.root).unwrap_or(call.path());
+                let mut raced = self.raced.lock().unwrap();
+                if call.method == "fsync_dir" && at.starts_with("objects") && raced.is_none() {
+                    let other = Identity::parse("agent/worker-9").unwrap();
+                    let ops = LocalOps::open(&self.root).unwrap();
+                    *raced = Some(put(&ops, &other, None, "race", Some("main")));
+                }
+                Ok(())
+            }
+        }
+
+        /// An exact land that loses its race to the target publishes nothing and merges no second
+        /// time: `E_CAS_MISMATCH` naming what the race left, whatever `max_attempts` says; the
+        /// journal holds the race's frame alone.
+        #[test]
+        fn an_exact_land_that_loses_its_race_is_a_cas_mismatch() {
+            let (_dir, root, ops, who, [_, head, t1]) = moved_on();
+            let rebased = ops.rebase(&who, rebase(json!({"head": head}))).unwrap();
+            let race = std::sync::Arc::new(Race {
+                root: root.clone(),
+                raced: Mutex::new(None),
+            });
+            let racing = ops_on(&root, Watched(std::sync::Arc::clone(&race), RealFs));
+            let frames = || {
+                let page = ops.op_log(OpLogReq {
+                    before: None,
+                    limit: 1,
+                    max_changesets: 1,
+                });
+                page.unwrap().ops[0].op
+            };
+            let before = frames();
+
+            let fields = json!({"head": rebased.changeset, "base": t1, "expect_target": t1, "max_attempts": 8});
+            let error = racing.land(&who, land(fields)).unwrap_err();
+            let actual = race.raced.lock().unwrap().clone().expect("the race ran");
+            assert_eq!(error.code.as_str(), "E_CAS_MISMATCH", "{error:?}");
+            let want =
+                json!({"name": "main", "actual": actual, "expected": t1, "committed": false});
+            assert_eq!(Value::Object(error.details.clone()), want);
+            assert_eq!(frames(), before + 1, "the race's frame alone");
+        }
     }
 }
