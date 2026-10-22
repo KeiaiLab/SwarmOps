@@ -9,6 +9,7 @@ use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
 };
 use swarmops_api::remote::{DEFAULT_REMOTE, DEFAULT_SYNC_STATUS_LIMIT};
+use swarmops_api::{DEFAULT_BLOB_GET_MAX_BYTES, DEFAULT_CHECK_TIMEOUT_S, DEFAULT_WS_STATUS_LIMIT};
 use swarmops_api::{
     DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
     DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS, DEFAULT_OP_LOG_LIMIT,
@@ -182,6 +183,10 @@ const ONTO_HELP: &str = "The ref to rebase onto: main or release/<name>";
 /// `rebase --key`'s help.
 const REBASE_KEY_HELP: &str = "A uuid v7 that makes a retry safe: the same rebase onto the same \
 head replays (status: replayed)";
+
+/// `land --expect-target`'s help.
+const EXPECT_TARGET_HELP: &str = "Publish only while the ref names this changeset, a full id: \
+one attempt, and a ref that moved is E_CAS_MISMATCH with nothing written";
 
 /// `land --resolve`'s short help.
 const RESOLVE_HELP: &str =
@@ -362,6 +367,8 @@ pub enum Command {
         max_conflict_bytes: u64,
         #[arg(long, value_name = "FILE", help = RESOLVE_HELP, long_help = RESOLVE_LONG_HELP)]
         resolve: Option<String>,
+        #[arg(long, value_name = "ID", help = EXPECT_TARGET_HELP)]
+        expect_target: Option<String>,
     },
     /// Merge a change three-way onto a ref's head and record the result there as one changeset,
     /// moving no ref.
@@ -396,6 +403,13 @@ pub enum Command {
     /// holds.
     #[command(subcommand)]
     Blob(BlobCommand),
+    /// Work in a directory of your own: a workspace holds a sparse copy of a changeset's tree.
+    ///
+    /// Edit its files with any tool, build and test there, then commit, rebase and land with one
+    /// command each. A command inside a workspace finds it and its store; --ws NAME or --ws-path
+    /// DIR names another.
+    #[command(subcommand)]
+    Ws(WsCommand),
     /// Name the changeset REV names, and whether REV is a ref's name.
     Resolve {
         /// The revision: a ref name, a full changeset id or a unique prefix of 12 or more of its
@@ -621,6 +635,319 @@ pub enum BlobCommand {
         #[arg(value_name = "ID", required = true)]
         ids: Vec<String>,
     },
+    /// Print the blobs the IDs name, each with its size and content as cat gives a file's.
+    Get {
+        /// Blob ids, 64 hex digits each.
+        #[arg(value_name = "ID", required = true)]
+        ids: Vec<String>,
+        /// The most content bytes to print; the blobs past it are left out (truncated).
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_BLOB_GET_MAX_BYTES)]
+        max_bytes: u64,
+    },
+}
+
+/// `ws`'s operations (M5).
+#[derive(Subcommand, Debug)]
+pub enum WsCommand {
+    /// Make a workspace NAME in a directory of its own, and bootstrap it.
+    ///
+    /// The directory holds the tree of --base under the --prefix paths (--all: the whole tree),
+    /// and .swarmws/, its private state. The same command again is the same workspace
+    /// (created: false). A new workspace gets the files .worktreeinclude lists from --from, and
+    /// runs the repository's bootstrap command (.swarmops/workspaces.json) unless
+    /// SWARMOPS_WS_BOOTSTRAP=skip. It needs an identity.
+    Create {
+        /// The workspace's name: 1 to 64 of a-z, 0-9, `.`, `_` and `-`, not starting with `.`.
+        name: String,
+        /// The directory to make it in (default: NAME in the working directory).
+        #[arg(long, value_name = "DIR")]
+        path: Option<String>,
+        /// The changeset or ref whose tree it holds.
+        #[arg(long, value_name = "REV", default_value = "main")]
+        base: String,
+        /// A repository path whose subtree to write out; give it again for more.
+        #[arg(long = "prefix", value_name = "P", conflicts_with = "all")]
+        prefixes: Vec<String>,
+        /// Write out the whole tree.
+        #[arg(long)]
+        all: bool,
+        /// A directory whose .worktreeinclude names files to copy in (default: none).
+        #[arg(long, value_name = "DIR")]
+        from: Option<String>,
+        #[command(flatten)]
+        after: WsAfter,
+    },
+    /// What changed in a workspace against its head, and how far its target has moved.
+    Status {
+        #[command(flatten)]
+        at: WsAt,
+        /// Only these repository paths, and what is below them.
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+        /// Hash every file instead of trusting unchanged stats.
+        #[arg(long)]
+        full: bool,
+        /// The most changes to print.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_WS_STATUS_LIMIT)]
+        limit: usize,
+        /// Where the previous page stopped.
+        #[arg(long, value_name = "C")]
+        cursor: Option<String>,
+    },
+    /// A workspace's edits against its head, as diff gives a diff.
+    Diff {
+        #[command(flatten)]
+        at: WsAt,
+        /// Only these repository paths, and what is below them.
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+        /// What to say of each file.
+        #[arg(long, value_enum, default_value_t = DiffFormatArg::Names)]
+        format: DiffFormatArg,
+        /// The unchanged lines around each change in a unified hunk.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_CONTEXT)]
+        context: u32,
+        /// The most files to print.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_LIMIT)]
+        limit: usize,
+        /// Where the previous page stopped.
+        #[arg(long, value_name = "C")]
+        cursor: Option<String>,
+        /// The most bytes of unified text.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_DIFF_MAX_BYTES)]
+        max_bytes: u64,
+    },
+    /// Record a workspace's edits as one changeset on its head.
+    Commit {
+        #[command(flatten)]
+        at: WsAt,
+        /// The changeset's message.
+        #[arg(short, long)]
+        message: String,
+        /// Only these repository paths (default: every change).
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+        /// The kind to record for a path, where the volume cannot hold the executable bit:
+        /// PATH=file, PATH=exec or PATH=symlink; repeatable.
+        #[arg(long = "mode", value_name = "PATH=KIND", value_parser = path_mode)]
+        modes: Vec<(String, ModeArg)>,
+        #[command(flatten)]
+        after: WsAfter,
+    },
+    /// Move a workspace's chain onto its target's head, and its files with it.
+    ///
+    /// On a conflict the workspace holds markers: edit them, ws resolve, then ws rebase
+    /// --continue. --abort leaves the rebase and restores the conflicting paths.
+    Rebase {
+        #[command(flatten)]
+        at: WsAt,
+        #[arg(long, value_name = "REF", default_value = "main", help = ONTO_HELP)]
+        onto: String,
+        /// Commit the workspace's edits first, with this message (default: edits are E_WS_DIRTY).
+        #[arg(short, long, value_name = "MSG")]
+        message: Option<String>,
+        /// Rebase again once the conflicts are resolved.
+        #[arg(long = "continue", conflicts_with = "abort")]
+        resume: bool,
+        /// Leave the rebase.
+        #[arg(long)]
+        abort: bool,
+        #[command(flatten)]
+        after: WsAfter,
+    },
+    /// Mark conflicting paths of a rebase resolved.
+    Resolve {
+        #[command(flatten)]
+        at: WsAt,
+        /// The paths resolved.
+        #[arg(value_name = "PATH", required_unless_present = "all")]
+        paths: Vec<String>,
+        /// Every conflicting path.
+        #[arg(long, conflicts_with = "paths")]
+        all: bool,
+        /// Take one side's content instead of the file's.
+        #[arg(long, value_enum)]
+        take: Option<SideArg>,
+        /// Resolve a file that still holds a conflict marker line.
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        after: WsAfter,
+    },
+    /// Land a workspace's chain on its target; with --check, rebase, check and land the checked
+    /// tree.
+    ///
+    /// Without --check the chain lands as it is (--mode merge). With it the workspace is rebased
+    /// onto the target, the command runs in the workspace (the ARGV after --, else the
+    /// repository's check in .swarmops/workspaces.json), and only the tree it ran on is
+    /// published (--mode exact); a target that moved means rebase and check again, up to
+    /// --max-attempts. --mode exact without --check publishes the tree of the last ws rebase.
+    Land {
+        #[command(flatten)]
+        at: WsAt,
+        /// The landed changeset's message, and the message to commit edits with first.
+        #[arg(short, long, value_name = "MSG")]
+        message: Option<String>,
+        #[arg(long, value_name = "KEY", help = LAND_KEY_HELP, long_help = LAND_KEY_LONG_HELP)]
+        key: Option<String>,
+        /// The ref to land on (default: the workspace's target).
+        #[arg(long, value_name = "REF")]
+        target: Option<String>,
+        /// Run a check on the rebased tree before it lands.
+        #[arg(long)]
+        check: bool,
+        /// The most seconds the check runs before it is killed.
+        #[arg(long, value_name = "S", requires = "check", default_value_t = DEFAULT_CHECK_TIMEOUT_S)]
+        check_timeout: u64,
+        /// merge or exact (default: exact with --check, else merge).
+        #[arg(long, value_enum)]
+        mode: Option<LandModeArg>,
+        /// How many times to rebase, check and land before E_CAS_RETRY_EXHAUSTED: 1 to 32.
+        #[arg(long, value_name = "N", default_value_t = DEFAULT_MAX_ATTEMPTS)]
+        max_attempts: u32,
+        /// The check's command and arguments, after --.
+        #[arg(last = true, value_name = "ARGV", requires = "check")]
+        argv: Vec<String>,
+        #[command(flatten)]
+        after: WsAfter,
+    },
+    /// Write out more of a workspace's tree: the paths join its prefixes.
+    Materialize {
+        #[command(flatten)]
+        at: WsAt,
+        /// The repository paths to write out.
+        #[arg(value_name = "PATH", required = true)]
+        paths: Vec<String>,
+        #[command(flatten)]
+        after: WsAfter,
+    },
+    /// Restore paths of a workspace from its head, every changed one without a PATH: the
+    /// edits are lost.
+    Discard {
+        #[command(flatten)]
+        at: WsAt,
+        /// The repository paths to restore.
+        #[arg(value_name = "PATH")]
+        paths: Vec<String>,
+        #[command(flatten)]
+        after: WsAfter,
+    },
+    /// List the store's workspaces.
+    List {
+        /// Also open each, and report one whose directory is gone as an orphan.
+        #[arg(long)]
+        check: bool,
+    },
+    /// Describe one workspace: its directory, base, head and prefixes.
+    Info {
+        #[command(flatten)]
+        at: WsAt,
+    },
+    /// Remove a workspace's directory, then its entry.
+    ///
+    /// Edits or commits not landed are E_WS_DIRTY without --force (delete anyway) or --rescue
+    /// (commit the edits as a rescue changeset first).
+    Delete {
+        /// The workspace, by name.
+        name: String,
+        /// Delete it even with edits or unlanded commits.
+        #[arg(long)]
+        force: bool,
+        /// Commit its edits as a rescue changeset first.
+        #[arg(long)]
+        rescue: bool,
+    },
+    /// The Claude Code hooks: read the hook's JSON on stdin, print what the hook expects.
+    ///
+    /// worktree-create makes the session's workspace and prints its path on stdout;
+    /// worktree-remove keeps uncommitted edits as a rescue changeset and deletes the
+    /// workspace; config prints the settings entries that register both. Errors go to stderr as
+    /// an envelope, with its exit code.
+    Hook {
+        /// Which hook.
+        #[arg(value_enum)]
+        verb: HookVerb,
+    },
+}
+
+/// The workspace a `ws` command works on.
+#[derive(Args, Debug, Default, Clone)]
+pub struct WsAt {
+    /// The workspace, by its name in the store's registry (default: the one around the working
+    /// directory).
+    #[arg(long = "ws", value_name = "NAME", conflicts_with = "ws_path")]
+    pub name: Option<String>,
+    /// The workspace's directory.
+    #[arg(long, value_name = "DIR")]
+    pub ws_path: Option<String>,
+}
+
+/// Whether a workspace mutation's result carries the status after it.
+#[derive(Args, Debug, Default, Clone, Copy)]
+pub struct WsAfter {
+    /// page: the first page of the status follows the result; none: it is left out.
+    #[arg(long, value_enum, default_value_t = StatusAfterArg::Page)]
+    pub status_after: StatusAfterArg,
+}
+
+/// `--status-after`.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatusAfterArg {
+    /// The first page of the status.
+    #[default]
+    Page,
+    /// No status.
+    None,
+}
+
+/// `ws resolve --take`.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideArg {
+    /// The workspace's own content.
+    Ours,
+    /// The target's content.
+    Theirs,
+}
+
+/// `ws land --mode`.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandModeArg {
+    /// Merge onto the target's head, wherever it has moved.
+    Merge,
+    /// Publish only the tree the workspace was rebased to.
+    Exact,
+}
+
+/// A kind of file, as `ws commit --mode` gives it.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModeArg {
+    /// A regular file.
+    File,
+    /// An executable file.
+    Exec,
+    /// A symlink.
+    Symlink,
+}
+
+/// Which hook `ws hook` serves.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookVerb {
+    /// The `WorktreeCreate` hook.
+    WorktreeCreate,
+    /// The `WorktreeRemove` hook.
+    WorktreeRemove,
+    /// The settings entries that register both.
+    Config,
+}
+
+/// `ws commit --mode`: PATH=KIND.
+fn path_mode(text: &str) -> Result<(String, ModeArg), String> {
+    let Some((path, kind)) = text.rsplit_once('=') else {
+        return Err("expected PATH=KIND, such as bin/run=exec".to_owned());
+    };
+    let kind = ModeArg::from_str(kind, true)
+        .map_err(|_| format!("{kind:?} is not a kind: file, exec or symlink"))?;
+    Ok((path.to_owned(), kind))
 }
 
 /// `diff`'s arguments.
@@ -987,6 +1314,20 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["resolve"] => "resolve_rev",
         ["blob", "put"] => "blob_put",
         ["blob", "has"] => "blob_has",
+        ["blob", "get"] => "blob_get",
+        ["ws", "create"] => "ws_create",
+        ["ws", "status"] => "ws_status",
+        ["ws", "diff"] => "ws_diff",
+        ["ws", "commit"] => "ws_commit",
+        ["ws", "rebase"] => "ws_rebase",
+        ["ws", "resolve"] => "ws_resolve",
+        ["ws", "land"] => "ws_land",
+        ["ws", "materialize"] => "ws_materialize",
+        ["ws", "discard"] => "ws_discard",
+        ["ws", "list"] => "ws_list",
+        ["ws", "info"] => "ws_info",
+        ["ws", "delete"] => "ws_delete",
+        ["ws", "hook"] => "ws_hook",
         ["cat"] => "read_file",
         ["ls"] => "read_tree",
         ["show"] => "show",
@@ -1056,6 +1397,7 @@ fn command() -> clap::Command {
         .arg_required_else_help(false)
         .mut_subcommand("ref", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("blob", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("ws", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("git", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("op", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("remote", |cmd| cmd.arg_required_else_help(false))
@@ -1140,12 +1482,13 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 34);
+        assert_eq!(ops.len(), 48);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 34, "two subcommands name one op");
+        assert_eq!(ops.len(), 48, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
+        assert_eq!(op_name(&["ws"]), None);
         assert_eq!(op_name(&["git"]), None);
         assert_eq!(op_name(&["op"]), None);
         assert_eq!(op_name(&["remote"]), None);

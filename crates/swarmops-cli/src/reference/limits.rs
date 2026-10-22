@@ -299,6 +299,7 @@ static CONTRACT: [Limit; 10] = [
             "op undo",
             "git import",
             "clone",
+            "ws create",
             "sync",
             "mcp",
         ],

@@ -289,7 +289,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 12,
+  "id": 13,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -304,12 +304,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 12,
+  "id": 13,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"land\",\"api\":1,\"result\":{\"status\":\"landed\",\"landed\":\"[landed]\",\"rebased_onto\":\"[theirs]\",\"target\":\"main\",\"base\":\"[c1]\",\"attempts\":1,\"relocated\":false,\"files_changed\":1,\"squashed_from\":[\"[head]\"]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[head]\":\"[head]\",\"main\":\"[theirs]\"},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[head]\":\"[head]\",\"main\":\"[theirs]\"}},\"ok\":true,\"op\":\"land\",\"result\":{\"attempts\":1,\"base\":\"[c1]\",\"files_changed\":1,\"landed\":\"[landed]\",\"rebased_onto\":\"[theirs]\",\"relocated\":false,\"squashed_from\":[\"[head]\"],\"status\":\"landed\",\"target\":\"main\"}}",
         "type": "text"
       }
     ],

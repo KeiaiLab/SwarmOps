@@ -18,8 +18,6 @@
 //! tests ask for. Until the `swarmops_ws` bodies land, each tool answers `E_INVALID_ARG` naming
 //! the task that builds it.
 
-use std::sync::Arc;
-
 use camino::Utf8Path;
 use serde_json::{Value, json};
 use swarmops_api::{
@@ -27,9 +25,9 @@ use swarmops_api::{
     WsListReq, WsMaterializeReq, WsRebaseReq, WsResolveReq, WsStatusReq,
 };
 use swarmops_ws::Ctx as WsCtx;
-use swarmops_ws::{RealFs, RealHost};
 
 use super::{Named, Operate, Refuse};
+use crate::commands::ws::{context, create_bootstrapped};
 
 /// The workspace tools, in the order `tools/list` gives them, after the store's.
 pub(super) static WS_TOOLS: [WsSpec; 11] = [
@@ -41,7 +39,8 @@ pub(super) static WS_TOOLS: [WsSpec; 11] = [
         description: "Makes a workspace: a directory holding a sparse copy of a changeset's tree \
                       (base, main by default) under the prefixes given, for building and testing \
                       a change on disk. The same call again is the same workspace (created \
-                      false).",
+                      false). A new workspace gets the files .worktreeinclude lists in `from` \
+                      and runs the repository's bootstrap command (.swarmops/workspaces.json).",
     },
     WsSpec {
         tool: WsTool::Status,
@@ -197,48 +196,46 @@ impl WsTool {
 /// and none reads the environment.
 pub(super) fn operate_ws<O: Operate>(tool: WsTool, how: O) -> O::Done {
     match tool {
-        WsTool::Create => how
-            .workspace(|store, root, who, req| swarmops_ws::create(&ws_ctx(store, root, who), req)),
-        WsTool::Status => how
-            .workspace(|store, root, who, req| swarmops_ws::status(&ws_ctx(store, root, who), req)),
-        WsTool::Diff => {
-            how.workspace(|store, root, who, req| swarmops_ws::diff(&ws_ctx(store, root, who), req))
-        }
-        WsTool::Commit => how
-            .workspace(|store, root, who, req| swarmops_ws::commit(&ws_ctx(store, root, who), req)),
-        WsTool::Rebase => how
-            .workspace(|store, root, who, req| swarmops_ws::rebase(&ws_ctx(store, root, who), req)),
-        WsTool::Resolve => how.workspace(|store, root, who, req| {
+        WsTool::Create => how.workspace(|store, root, who, bootstrap, req| {
+            create_bootstrapped(&ws_ctx(store, root, who), req, bootstrap)
+        }),
+        WsTool::Status => how.workspace(|store, root, who, _, req| {
+            swarmops_ws::status(&ws_ctx(store, root, who), req)
+        }),
+        WsTool::Diff => how.workspace(|store, root, who, _, req| {
+            swarmops_ws::diff(&ws_ctx(store, root, who), req)
+        }),
+        WsTool::Commit => how.workspace(|store, root, who, _, req| {
+            swarmops_ws::commit(&ws_ctx(store, root, who), req)
+        }),
+        WsTool::Rebase => how.workspace(|store, root, who, _, req| {
+            swarmops_ws::rebase(&ws_ctx(store, root, who), req)
+        }),
+        WsTool::Resolve => how.workspace(|store, root, who, _, req| {
             swarmops_ws::resolve(&ws_ctx(store, root, who), req)
         }),
-        WsTool::Land => {
-            how.workspace(|store, root, who, req| swarmops_ws::land(&ws_ctx(store, root, who), req))
-        }
-        WsTool::Materialize => how.workspace(|store, root, who, req| {
+        WsTool::Land => how.workspace(|store, root, who, _, req| {
+            swarmops_ws::land(&ws_ctx(store, root, who), req)
+        }),
+        WsTool::Materialize => how.workspace(|store, root, who, _, req| {
             swarmops_ws::materialize(&ws_ctx(store, root, who), req)
         }),
-        WsTool::Discard => how.workspace(|store, root, who, req| {
+        WsTool::Discard => how.workspace(|store, root, who, _, req| {
             swarmops_ws::discard(&ws_ctx(store, root, who), req)
         }),
-        WsTool::List => {
-            how.workspace(|store, root, who, req| swarmops_ws::list(&ws_ctx(store, root, who), req))
-        }
-        WsTool::Info => {
-            how.workspace(|store, root, who, req| swarmops_ws::info(&ws_ctx(store, root, who), req))
-        }
+        WsTool::List => how.workspace(|store, root, who, _, req| {
+            swarmops_ws::list(&ws_ctx(store, root, who), req)
+        }),
+        WsTool::Info => how.workspace(|store, root, who, _, req| {
+            swarmops_ws::info(&ws_ctx(store, root, who), req)
+        }),
     }
 }
 
 /// The workspace context of one call: the store opened for it, the root it was opened at, the
 /// server's identity if it has one, and the host's two file layers.
 fn ws_ctx<'a>(store: &'a dyn StoreOps, root: &Utf8Path, who: Option<&Identity>) -> WsCtx<'a> {
-    WsCtx {
-        store,
-        store_root: root.to_owned(),
-        who: who.cloned(),
-        fs: Arc::new(RealFs),
-        host: Arc::new(RealHost),
-    }
+    context(store, root, who)
 }
 
 // The workspace requests have no rules of this server's beyond their types: the workspace
@@ -312,7 +309,8 @@ mod tests {
             | WsTool::Rebase
             | WsTool::Resolve
             | WsTool::Land => r#"the store has no workspace named "probe""#,
-            WsTool::Create => "ws create needs an identity",
+            // `from` is checked before anything is made: the probe's sample is not a path.
+            WsTool::Create => "is relative: give an absolute one",
             WsTool::Materialize => "ws materialize needs at least one path",
         }
     }

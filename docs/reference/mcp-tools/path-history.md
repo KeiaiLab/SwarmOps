@@ -99,7 +99,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 15,
+  "id": 16,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -113,12 +113,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 15,
+  "id": 16,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"path_history\",\"api\":1,\"result\":{\"path\":\"src/lib.rs\",\"entries\":[{\"changeset\":\"[landed]\",\"op\":\"put\",\"kind\":\"file\",\"id\":\"[id6]\",\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"change f\"},{\"changeset\":\"[c1]\",\"op\":\"put\",\"kind\":\"file\",\"id\":\"[id7]\",\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"first\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"path_history\",\"result\":{\"entries\":[{\"author_agent\":\"agent/worker-17\",\"changeset\":\"[landed]\",\"created_at\":\"[created_at]\",\"id\":\"[id6]\",\"kind\":\"file\",\"op\":\"put\",\"title\":\"change f\"},{\"author_agent\":\"agent/worker-17\",\"changeset\":\"[c1]\",\"created_at\":\"[created_at]\",\"id\":\"[id7]\",\"kind\":\"file\",\"op\":\"put\",\"title\":\"first\"}],\"path\":\"src/lib.rs\",\"truncated\":false}}",
         "type": "text"
       }
     ],

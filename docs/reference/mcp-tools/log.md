@@ -99,7 +99,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 14,
+  "id": 15,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -113,12 +113,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 14,
+  "id": 15,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"log\",\"api\":1,\"result\":{\"entries\":[{\"id\":\"[landed]\",\"parents\":[\"[theirs]\"],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"change f\"},{\"id\":\"[theirs]\",\"parents\":[\"[c1]\"],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"add docs\"},{\"id\":\"[c1]\",\"parents\":[],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"first\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"log\",\"result\":{\"entries\":[{\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"id\":\"[landed]\",\"parents\":[\"[theirs]\"],\"title\":\"change f\"},{\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"id\":\"[theirs]\",\"parents\":[\"[c1]\"],\"title\":\"add docs\"},{\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"id\":\"[c1]\",\"parents\":[],\"title\":\"first\"}],\"truncated\":false}}",
         "type": "text"
       }
     ],

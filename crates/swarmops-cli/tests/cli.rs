@@ -1569,6 +1569,18 @@ fn cat_truncates_to_max_bytes() {
     assert_eq!(default["result"]["truncated"], true);
 }
 
+/// Codes [`error_codes_reach_the_cli`] cannot raise through the binary on this platform, and why.
+#[cfg(not(windows))]
+const NOT_RAISED_HERE: &[(&str, &str)] = &[(
+    "E_WS_UNPORTABLE",
+    "needs a case-insensitive volume or Windows, which refuses `con.txt`: the ws crate's tests raise \
+     it on a simulated volume, and `ws_cases` raises it through the binary on Windows",
+)];
+
+/// The platform's codes that the binary raises: none.
+#[cfg(windows)]
+const NOT_RAISED_HERE: &[(&str, &str)] = &[];
+
 /// Codes [`error_codes_reach_the_cli`] cannot raise through the binary, and why.
 const NOT_RAISED: &[(&str, &str)] = &[
     (
@@ -1612,15 +1624,6 @@ const NOT_RAISED: &[(&str, &str)] = &[
         "E_REMOTE_NOT_FOUND",
         "needs remotes.toml: the M13 remote suites raise it",
     ),
-    ("E_WS_EXISTS", "M5, raised by W4"),
-    ("E_WS_NOT_FOUND", "M5, raised by W4"),
-    ("E_WS_LOCKED", "M5, raised by W5"),
-    ("E_WS_DIRTY", "M5, raised by W5"),
-    ("E_PATH_NOT_EMPTY", "M5, raised by W5"),
-    ("E_UNRESOLVED_CONFLICTS", "M5, raised by W7"),
-    ("E_MARKERS_PRESENT", "M5, raised by W7"),
-    ("E_WS_UNPORTABLE", "M5, raised by W5"),
-    ("E_CHECK_FAILED", "M5, raised by W7"),
 ];
 
 /// Every error code M1 can raise reaches the CLI with its exit code (operations spec §8: each
@@ -1628,7 +1631,7 @@ const NOT_RAISED: &[(&str, &str)] = &[
 #[test]
 fn error_codes_reach_the_cli() {
     // Each code listed is one the table has.
-    for (code, _) in NOT_RAISED {
+    for (code, _) in NOT_RAISED.iter().chain(NOT_RAISED_HERE) {
         let known = ErrorCode::ALL.iter().any(|known| known.as_str() == *code);
         assert!(known, "{code} is not an error code");
     }
@@ -1670,6 +1673,21 @@ fn error_codes_reach_the_cli() {
         assert_eq!(s.run(&args).code(), code, "{args:?}");
         raised.push(code);
     }
+    // The workspaces' (M5): each raised through `so ws`, the lock one with the lock held here.
+    let (ws_cases, locked) = ws_cases(&mut s, &store, &c1);
+    for (code, args) in ws_cases {
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        assert_eq!(s.run(&args).code(), code, "{args:?}");
+        raised.push(code);
+    }
+    {
+        let held = swarmops_ws::lock::acquire(&locked.dir).expect("take the workspace's lock");
+        let args: Vec<&str> = locked.args.iter().map(String::as_str).collect();
+        let busy = s.run(&args);
+        assert_eq!((busy.code(), busy.exit), ("E_WS_LOCKED", 4), "{args:?}");
+        raised.push("E_WS_LOCKED");
+        drop(held);
+    }
     // Last, as it damages the store: verify finds the blob gone.
     let blob = hash_object(ObjectKind::Blob, b"pub fn f() {}\n");
     fs::remove_file(Layout::new(Utf8PathBuf::from(&store)).object_path(blob)).unwrap();
@@ -1707,7 +1725,7 @@ fn error_codes_reach_the_cli() {
     // Each code is raised here or listed as not raised, never both.
     for code in ErrorCode::ALL {
         let code = code.as_str();
-        let listed = NOT_RAISED.iter().any(|(c, _)| *c == code);
+        let listed = (NOT_RAISED.iter().chain(NOT_RAISED_HERE)).any(|(c, _)| *c == code);
         assert_ne!(raised.contains(&code), listed, "{code}");
     }
     insta::assert_json_snapshot!(s.transcript());
@@ -1929,6 +1947,166 @@ fn land_cases(s: &mut Session, store: &str, c1: &str) -> Vec<(&'static str, Vec<
             on(&["land", &ours, "--target", "release/conflict"]),
         ),
     ]
+}
+
+/// The workspace whose lock the test holds, and the command that then meets it.
+struct Locked {
+    dir: camino::Utf8PathBuf,
+    args: Vec<String>,
+}
+
+/// w2, a workspace on a ref of its own which then moves on the file w2 edits: a rebase of it
+/// conflicts, and the workspace stands rebasing with markers in the file.
+fn ws_conflict(s: &mut Session, store: &str, c1: &str, tmp: &str) {
+    let on = |args: &[&str]| -> Vec<String> {
+        ["--repo", store, "--as", AGENT]
+            .iter()
+            .chain(args)
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    };
+    let w2 = format!("{tmp}/w2");
+    let mut ok = |args: &[&str]| {
+        let line = on(args);
+        let line: Vec<&str> = line.iter().map(String::as_str).collect();
+        let done = s.run(&line);
+        assert_eq!(done.exit, 0, "{args:?}: {}", done.json);
+    };
+    ok(&["ref", "set", "release/ws", c1, "--create"]);
+    ok(&[
+        "ws",
+        "create",
+        "w2",
+        "--path",
+        &w2,
+        "--base",
+        "release/ws",
+        "--all",
+    ]);
+    fs::write(format!("{w2}/src/lib.rs"), "pub fn mine() {}\n").unwrap();
+    ok(&["ws", "commit", "--ws", "w2", "-m", "mine"]);
+    let moved_on = json!([{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn moved_on() {}\n"}}]);
+    let changes = s.file("ws-moved-on.json", &moved_on.to_string());
+    let mut ok = |args: &[&str]| {
+        let line = on(args);
+        let line: Vec<&str> = line.iter().map(String::as_str).collect();
+        let done = s.run(&line);
+        assert_eq!(done.exit, 0, "{args:?}: {}", done.json);
+    };
+    ok(&[
+        "commit",
+        "-m",
+        "moved on",
+        "--parent",
+        c1,
+        "--changes",
+        &changes,
+        "--advance",
+        "release/ws",
+    ]);
+    let conflict = {
+        let line = on(&["ws", "rebase", "--ws", "w2", "--onto", "release/ws"]);
+        let line: Vec<&str> = line.iter().map(String::as_str).collect();
+        s.run(&line)
+    };
+    assert_eq!(
+        (conflict.code(), conflict.exit),
+        ("E_CONFLICT", 3),
+        "{}",
+        conflict.json
+    );
+}
+
+/// The failing commands of the workspaces (M5), each with the code it must raise, and the
+/// command that meets a held lock. The workspaces they need are made here, `main` of `store`
+/// being `c1`; two goldens of `E_INVALID_ARG` (H5's refusals, `details.missing` `rebase` and
+/// `check`) are recorded on the way.
+fn ws_cases(s: &mut Session, store: &str, c1: &str) -> (Vec<(&'static str, Vec<String>)>, Locked) {
+    let tmp = s.tmp();
+    let on = |args: &[&str]| -> Vec<String> {
+        ["--repo", store, "--as", AGENT]
+            .iter()
+            .chain(args)
+            .map(|arg| (*arg).to_owned())
+            .collect()
+    };
+
+    // 1. w1: a workspace of `src`, dirty; w3: clean with one commit, never rebased.
+    let w1 = format!("{tmp}/w1");
+    let w3 = format!("{tmp}/w3");
+    let mut ok = |args: &[&str]| {
+        let line = on(args);
+        let line: Vec<&str> = line.iter().map(String::as_str).collect();
+        let done = s.run(&line);
+        assert_eq!(done.exit, 0, "{args:?}: {}", done.json);
+    };
+    ok(&["ws", "create", "w1", "--path", &w1, "--prefix", "src"]);
+    fs::write(format!("{w1}/src/lib.rs"), "pub fn edited() {}\n").unwrap();
+    ok(&["ws", "create", "w3", "--path", &w3, "--all"]);
+    fs::write(format!("{w3}/third.txt"), "third\n").unwrap();
+    ok(&["ws", "commit", "--ws", "w3", "-m", "third"]);
+
+    ws_conflict(s, store, c1, &tmp);
+
+    let mut cases = vec![
+        (
+            "E_WS_EXISTS",
+            on(&["ws", "create", "w1", "--path", &format!("{tmp}/elsewhere")]),
+        ),
+        ("E_WS_NOT_FOUND", on(&["ws", "info", "--ws", "nope"])),
+        ("E_WS_DIRTY", on(&["ws", "delete", "w1"])),
+        (
+            "E_PATH_NOT_EMPTY",
+            on(&["ws", "create", "w4", "--path", &format!("{tmp}/store")]),
+        ),
+        (
+            "E_UNRESOLVED_CONFLICTS",
+            on(&[
+                "ws",
+                "rebase",
+                "--ws",
+                "w2",
+                "--onto",
+                "release/ws",
+                "--continue",
+            ]),
+        ),
+        (
+            "E_MARKERS_PRESENT",
+            on(&["ws", "resolve", "--ws", "w2", "src/lib.rs"]),
+        ),
+        (
+            "E_INVALID_ARG",
+            on(&["ws", "land", "--ws", "w3", "--mode", "exact"]),
+        ),
+        (
+            "E_INVALID_ARG",
+            on(&["ws", "land", "--ws", "w3", "--check"]),
+        ),
+        (
+            "E_CHECK_FAILED",
+            on(&["ws", "land", "--ws", "w3", "--check", "--", "false"]),
+        ),
+    ];
+
+    // 3. On Windows, a changeset whose path the platform cannot hold: a workspace of it is
+    //    unportable. Written for that lane; the volume here holds the name.
+    #[cfg(windows)]
+    {
+        let reserved = s.commit(store, Some(c1), "con.txt", "x\n", "reserved");
+        let path = format!("{tmp}/w5");
+        let args = on(&[
+            "ws", "create", "w5", "--path", &path, "--base", &reserved, "--all",
+        ]);
+        cases.push(("E_WS_UNPORTABLE", args));
+    }
+    #[cfg(not(windows))]
+    let _ = &mut cases;
+    let locked = Locked {
+        dir: camino::Utf8PathBuf::from(&w1),
+        args: on(&["ws", "discard", "--ws", "w1"]),
+    };
+    (cases, locked)
 }
 
 /// `op log` lists the store's operations newest first, each with its kind, the changesets it

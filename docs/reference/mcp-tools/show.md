@@ -78,7 +78,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 13,
+  "id": 14,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -92,12 +92,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 13,
+  "id": 14,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"show\",\"api\":1,\"result\":{\"id\":\"[landed]\",\"seq\":3,\"parents\":[\"[theirs]\"],\"root\":\"[id5]\",\"author\":{\"agent\":\"agent/worker-17\"},\"lander\":{\"agent\":\"agent/worker-17\"},\"created_at\":\"[created_at]\",\"message\":\"change f\",\"land_key\":\"land-7\",\"squashed_from\":[\"[head]\"],\"changes\":[{\"path\":\"src/lib.rs\",\"op\":\"put\",\"kind\":\"file\",\"blob\":\"[id6]\"}],\"files_changed\":1,\"changes_truncated\":false,\"metadata\":{\"agent\":\"agent/worker-17\",\"land_key\":\"land-7\",\"lander\":\"agent/worker-17\",\"squashed_from\":\"[head]\"},\"signatures\":{\"author\":{\"name\":\"agent/worker-17\",\"email\":\"worker-17@agent.swarmops.local\",\"secs\":\"[secs]\",\"offset_secs\":0},\"committer\":{\"name\":\"agent/worker-17\",\"email\":\"worker-17@agent.swarmops.local\",\"secs\":\"[secs]\",\"offset_secs\":0}}},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[landed]\":\"[landed]\"},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\"}},\"ok\":true,\"op\":\"show\",\"result\":{\"author\":{\"agent\":\"agent/worker-17\"},\"changes\":[{\"blob\":\"[id6]\",\"kind\":\"file\",\"op\":\"put\",\"path\":\"src/lib.rs\"}],\"changes_truncated\":false,\"created_at\":\"[created_at]\",\"files_changed\":1,\"id\":\"[landed]\",\"land_key\":\"land-7\",\"lander\":{\"agent\":\"agent/worker-17\"},\"message\":\"change f\",\"metadata\":{\"agent\":\"agent/worker-17\",\"land_key\":\"land-7\",\"lander\":\"agent/worker-17\",\"squashed_from\":\"[head]\"},\"parents\":[\"[theirs]\"],\"root\":\"[id5]\",\"seq\":4,\"signatures\":{\"author\":{\"email\":\"worker-17@agent.swarmops.local\",\"name\":\"agent/worker-17\",\"offset_secs\":0,\"secs\":\"[secs]\"},\"committer\":{\"email\":\"worker-17@agent.swarmops.local\",\"name\":\"agent/worker-17\",\"offset_secs\":0,\"secs\":\"[secs]\"}},\"squashed_from\":[\"[head]\"]}}",
         "type": "text"
       }
     ],
@@ -145,7 +145,7 @@ Its entry in `tools/list` carries no `_meta`.
           "[theirs]"
         ],
         "root": "[id5]",
-        "seq": 3,
+        "seq": 4,
         "signatures": {
           "author": {
             "email": "worker-17@agent.swarmops.local",

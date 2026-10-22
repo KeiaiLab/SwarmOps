@@ -231,6 +231,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 ## See also
 
 - [Quick start: How do I read it back?](../../guides/quick-start.md#4-how-do-i-read-it-back)
+- [`swarmops blob get`](blob-get.md)
 - [`swarmops resolve`](resolve.md)
 - [`swarmops cat`](cat.md)
 - [`swarmops ls`](ls.md)

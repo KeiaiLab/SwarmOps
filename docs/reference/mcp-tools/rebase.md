@@ -265,7 +265,59 @@ Its entry in `tools/list` carries no `_meta`.
 
 ### MCP
 
-No recorded example yet.
+```json
+{
+  "id": 12,
+  "jsonrpc": "2.0",
+  "method": "tools/call",
+  "params": {
+    "arguments": {
+      "head": "[head]"
+    },
+    "name": "rebase"
+  }
+}
+```
+
+```json
+{
+  "id": 12,
+  "jsonrpc": "2.0",
+  "result": {
+    "content": [
+      {
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[head]\":\"[head]\",\"main\":\"[theirs]\"}},\"ok\":true,\"op\":\"rebase\",\"result\":{\"base\":\"[c1]\",\"changeset\":\"[rebased]\",\"files_changed\":1,\"onto\":\"[theirs]\",\"root\":\"[id5]\",\"status\":\"rebased\"}}",
+        "type": "text"
+      }
+    ],
+    "isError": false,
+    "structuredContent": {
+      "api": 1,
+      "meta": {
+        "auth": "trust",
+        "elapsed_ms": "[elapsed_ms]",
+        "repo": "[tmp]/store",
+        "resolved": {
+          "[head]": "[head]",
+          "main": "[theirs]"
+        }
+      },
+      "ok": true,
+      "op": "rebase",
+      "result": {
+        "base": "[c1]",
+        "changeset": "[rebased]",
+        "files_changed": 1,
+        "onto": "[theirs]",
+        "root": "[id5]",
+        "status": "rebased"
+      }
+    }
+  }
+}
+```
+
+The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
 ## Return information
 

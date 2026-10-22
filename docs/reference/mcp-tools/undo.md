@@ -72,12 +72,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 20,
+  "id": 21,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
     "arguments": {
-      "op": 6
+      "op": 7
     },
     "name": "undo"
   }
@@ -86,12 +86,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 20,
+  "id": 21,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"undo\",\"api\":1,\"result\":{\"undone\":6,\"op\":7,\"ref_moves\":[{\"name\":\"release/v1\",\"new\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}],\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"undo\",\"result\":{\"already_applied\":false,\"op\":8,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}],\"undone\":7}}",
         "type": "text"
       }
     ],
@@ -108,7 +108,7 @@ Its entry in `tools/list` carries no `_meta`.
       "op": "undo",
       "result": {
         "already_applied": false,
-        "op": 7,
+        "op": 8,
         "ref_moves": [
           {
             "actor": "agent/worker-17",
@@ -117,7 +117,7 @@ Its entry in `tools/list` carries no `_meta`.
             "new": "[c1]"
           }
         ],
-        "undone": 6
+        "undone": 7
       }
     }
   }

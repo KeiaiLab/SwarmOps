@@ -34,6 +34,7 @@ use clap::CommandFactory;
 use serde_json::Value;
 use swarmops_api::ErrorCode;
 
+use super::mcp_ws::WS_TOOLS;
 use super::{
     CAPABILITIES_KEY, Effect, HANDSHAKE, INSTRUCTIONS, INTERNAL_ERROR, INVALID_PARAMS,
     INVALID_REQUEST, LATEST, MAX_REQUEST_BYTES, METHOD_NOT_FOUND, PARSE_ERROR, PREVIOUS,
@@ -76,17 +77,8 @@ const WORKSPACE_TOOLS: [&str; 1] = ["rebase"];
 const WORKSPACE_SINCE: &str = "0.3.0";
 
 /// The tools with no recorded call yet: the git remotes' (M13), whose operations answer
-/// `E_INTERNAL` until their tasks land, and `rebase` (M5), which answers `E_INVALID_ARG` until
-/// the M5 plan's task W2 lands; the M13 plan's task C10 and the M5 plan's task W8 record their
-/// calls.
-const UNRECORDED: [&str; 6] = [
-    "remote_list",
-    "fetch",
-    "push",
-    "sync",
-    "sync_status",
-    "rebase",
-];
+/// `E_INTERNAL` until their tasks land; the M13 plan's task C10 records their calls.
+const UNRECORDED: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
 
 /// The release tool `name` first shipped in.
 fn since(name: &str) -> &'static str {
@@ -383,7 +375,9 @@ fn tools_table(out: &mut String, commands: &[Vec<String>]) {
         .iter()
         .filter(|path| {
             let op = op_name(path).unwrap_or_default();
-            !TOOLS.iter().any(|spec| spec.name == op)
+            let stored = TOOLS.iter().any(|spec| spec.name == op);
+            let in_workspace = WS_TOOLS.iter().any(|spec| spec.name == op);
+            !stored && !in_workspace
         })
         .map(|path| format!("[`{BIN} {}`]({})", path.join(" "), command_link(path)))
         .collect();

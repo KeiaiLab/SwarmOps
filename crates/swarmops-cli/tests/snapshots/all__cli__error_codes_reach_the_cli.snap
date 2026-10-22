@@ -942,6 +942,579 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws create w1 --path [tmp]/w1 --prefix src",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ws_create",
+      "api": 1,
+      "result": {
+        "name": "w1",
+        "path": "[tmp]/w1",
+        "base": "[c1]",
+        "head": "[c1]",
+        "prefixes": [
+          "src"
+        ],
+        "created": true,
+        "status_after": {
+          "name": "w1",
+          "base": "[c1]",
+          "head": "[c1]",
+          "main": "[c1]",
+          "behind_by": 0,
+          "state": "clean",
+          "changes": [],
+          "truncated": false
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws create w3 --path [tmp]/w3 --all",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ws_create",
+      "api": 1,
+      "result": {
+        "name": "w3",
+        "path": "[tmp]/w3",
+        "base": "[c1]",
+        "head": "[c1]",
+        "all": true,
+        "created": true,
+        "status_after": {
+          "name": "w3",
+          "base": "[c1]",
+          "head": "[c1]",
+          "main": "[c1]",
+          "behind_by": 0,
+          "state": "clean",
+          "changes": [],
+          "truncated": false
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws commit --ws w3 -m third",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ws_commit",
+      "api": 1,
+      "result": {
+        "changeset": "[id13]",
+        "parent": "[c1]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false,
+        "status_after": {
+          "name": "w3",
+          "base": "[c1]",
+          "head": "[id13]",
+          "main": "[c1]",
+          "behind_by": 0,
+          "state": "clean",
+          "changes": [],
+          "truncated": false
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set release/ws [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "release/ws",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws create w2 --path [tmp]/w2 --base release/ws --all",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ws_create",
+      "api": 1,
+      "result": {
+        "name": "w2",
+        "path": "[tmp]/w2",
+        "base": "[c1]",
+        "head": "[c1]",
+        "all": true,
+        "created": true,
+        "status_after": {
+          "name": "w2",
+          "base": "[c1]",
+          "head": "[c1]",
+          "main": "[c1]",
+          "behind_by": 0,
+          "state": "clean",
+          "changes": [],
+          "truncated": false
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "release/ws": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws commit --ws w2 -m mine",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ws_commit",
+      "api": 1,
+      "result": {
+        "changeset": "[id14]",
+        "parent": "[c1]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false,
+        "status_after": {
+          "name": "w2",
+          "base": "[c1]",
+          "head": "[id14]",
+          "main": "[c1]",
+          "behind_by": 0,
+          "state": "clean",
+          "changes": [],
+          "truncated": false
+        }
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "release/ws": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m 'moved on' --parent [c1] --changes [tmp]/ws-moved-on.json --advance release/ws",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[id15]",
+        "parent": "[c1]",
+        "root": "[id16]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "release/ws",
+          "old": "[c1]",
+          "new": "[id15]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws rebase --ws w2 --onto release/ws",
+    "exit": 3,
+    "stdout": {
+      "ok": false,
+      "op": "ws_rebase",
+      "api": 1,
+      "error": {
+        "code": "E_CONFLICT",
+        "message": "1 path(s) of the change conflict with the target's head [id15]: nothing was recorded",
+        "retryable": false,
+        "exit": 3,
+        "details": {
+          "report": {
+            "base": "[c1]",
+            "files": [
+              {
+                "base_blob": "[id10]",
+                "hunks": [
+                  {
+                    "base": {
+                      "first": 1,
+                      "last": 1,
+                      "text": "pub fn f() {}\n"
+                    },
+                    "id": 0,
+                    "ours": {
+                      "first": 1,
+                      "last": 1,
+                      "text": "pub fn mine() {}\n"
+                    },
+                    "theirs": {
+                      "first": 1,
+                      "last": 1,
+                      "text": "pub fn moved_on() {}\n"
+                    }
+                  }
+                ],
+                "kind": "content",
+                "ours_blob": "[id17]",
+                "path": "src/lib.rs",
+                "theirs_agent": "agent/worker-17",
+                "theirs_blob": "[id18]",
+                "theirs_changeset": "[id15]"
+              }
+            ],
+            "kinds": [
+              "content"
+            ],
+            "ours": "[id14]",
+            "theirs": "[id15]",
+            "truncated": false
+          }
+        },
+        "hint": "swarmops cat [id15]:src/lib.rs, then swarmops land [id14] --resolve <file> with each path's resolution and against = [id15]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[id14]": "[id14]",
+          "release/ws": "[id15]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws create w1 --path [tmp]/elsewhere",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_create",
+      "api": 1,
+      "error": {
+        "code": "E_WS_EXISTS",
+        "message": "a workspace named \"w1\" exists already, at [tmp]/w1, made by agent/worker-17",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "name": "w1",
+          "path": "[tmp]/w1"
+        },
+        "hint": "swarmops ws list"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws info --ws nope",
+    "exit": 6,
+    "stdout": {
+      "ok": false,
+      "op": "ws_info",
+      "api": 1,
+      "error": {
+        "code": "E_WS_NOT_FOUND",
+        "message": "the store has no workspace named \"nope\"",
+        "retryable": false,
+        "exit": 6,
+        "details": {
+          "name": "nope"
+        },
+        "hint": "swarmops ws list"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws delete w1",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_delete",
+      "api": 1,
+      "error": {
+        "code": "E_WS_DIRTY",
+        "message": "the workspace holds edits this would overwrite: [\"src/lib.rs\"]",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "paths": [
+            "src/lib.rs"
+          ]
+        },
+        "hint": "swarmops ws commit -m <message>, or swarmops ws delete w1 --rescue"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws create w4 --path [tmp]/store",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_create",
+      "api": 1,
+      "error": {
+        "code": "E_PATH_NOT_EMPTY",
+        "message": "[tmp]/store holds something already: a workspace is made in an empty directory",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "path": "[tmp]/store"
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws rebase --ws w2 --onto release/ws --continue",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_rebase",
+      "api": 1,
+      "error": {
+        "code": "E_UNRESOLVED_CONFLICTS",
+        "message": "unresolved conflicts: [\"src/lib.rs\"]",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "paths": [
+            "src/lib.rs"
+          ]
+        },
+        "hint": "edit them, then swarmops ws resolve <path>…"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws resolve --ws w2 src/lib.rs",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_resolve",
+      "api": 1,
+      "error": {
+        "code": "E_MARKERS_PRESENT",
+        "message": "conflict markers are still in [\"src/lib.rs\"]",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "paths": [
+            "src/lib.rs"
+          ]
+        },
+        "hint": "edit them out, or swarmops ws resolve --force <path>"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws land --ws w3 --mode exact",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "ws_land",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "an exact land needs the workspace rebased onto its target since its last commit",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "missing": "rebase"
+        },
+        "hint": "swarmops ws rebase, check the workspace, then swarmops ws land --mode exact"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws land --ws w3 --check",
+    "exit": 2,
+    "stdout": {
+      "ok": false,
+      "op": "ws_land",
+      "api": 1,
+      "error": {
+        "code": "E_INVALID_ARG",
+        "message": "--check names no command, and the repository's .swarmops/workspaces.json has no check.argv",
+        "retryable": false,
+        "exit": 2,
+        "details": {
+          "missing": "check"
+        },
+        "hint": "swarmops ws land --check -- <command> [args…]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[id13]": "[id13]",
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws land --ws w3 --check -- false",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_land",
+      "api": 1,
+      "error": {
+        "code": "E_CHECK_FAILED",
+        "message": "the check exited with 1: nothing landed, the workspace stands on the rebased changeset",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "changeset": "[id13]",
+          "exit_code": 1,
+          "log": ".swarmws/checks/1.log",
+          "stage": "check",
+          "stderr_tail": "",
+          "stdout_tail": "",
+          "timed_out": false
+        },
+        "hint": "see .swarmws/checks/1.log; fix, ws commit, then ws land --check again"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[id13]": "[id13]",
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws discard --ws w1",
+    "exit": 4,
+    "stdout": {
+      "ok": false,
+      "op": "ws_discard",
+      "api": 1,
+      "error": {
+        "code": "E_WS_LOCKED",
+        "message": "another mutation of this workspace held its lock for 5 s",
+        "retryable": true,
+        "exit": 4,
+        "details": {},
+        "hint": "run the command again once the other one has finished"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store verify",
     "exit": 1,
     "stdout": {
@@ -954,7 +1527,7 @@ expression: s.transcript()
         "retryable": false,
         "exit": 1,
         "details": {
-          "changesets_checked": 4,
+          "changesets_checked": 7,
           "findings": [
             {
               "changeset": "[c1]",
@@ -962,7 +1535,7 @@ expression: s.transcript()
               "object": "[id10]"
             }
           ],
-          "objects_checked": 16,
+          "objects_checked": 27,
           "problems": [
             "object [id10] is missing; changeset [c1] references it"
           ]

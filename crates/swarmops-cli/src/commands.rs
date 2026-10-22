@@ -45,7 +45,7 @@ use swarmops_api::RebaseReq;
 use swarmops_api::ResolutionsInput;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::remote::DEFAULT_PUSH_SOURCE;
-use swarmops_api::{BlobHasReq, BlobPutReq};
+use swarmops_api::{BlobGetReq, BlobHasReq, BlobPutReq};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
     DiffReq, Envelope, ErrorCode, GitExportReq, GitImportReq, InfoReq, LineRange, LogReq, Meta,
@@ -60,6 +60,7 @@ use swarmops_api::{
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Recording, Resolved, shell_word};
+use swarmops_ws::workspace::Locate;
 
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
@@ -68,6 +69,8 @@ use crate::cli::{
 use crate::context::{self, Env};
 use crate::mcp;
 use crate::output::{self, Format, Printed};
+
+pub(crate) mod ws;
 
 /// The client file `blob put -` reads: this process's stdin, through the path it is open at.
 const STDIN: &str = "/dev/stdin";
@@ -171,6 +174,7 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         land @ Command::Land { .. } => run_land(ctx, op, land),
         rebase @ Command::Rebase { .. } => run_rebase(ctx, op, rebase),
         Command::Blob(command) => run_blob(ctx, op, command),
+        Command::Ws(command) => ws::run(ctx, op, command),
         Command::Resolve { rev } => resolve_rev(ctx, op, rev),
         Command::Cat {
             target,
@@ -293,6 +297,7 @@ fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         max_attempts,
         max_conflict_bytes,
         resolve,
+        expect_target,
     } = command
     else {
         unreachable!("run passes land its own command alone");
@@ -309,7 +314,7 @@ fn run_land(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
                 idempotency_key: key,
                 max_attempts,
                 max_conflict_bytes,
-                expect_target: None,
+                expect_target: expect_target.map(Rev::from),
                 resolutions: resolve.as_deref().map(read_resolutions).transpose()?,
             };
             Ok((who, req))
@@ -370,6 +375,11 @@ fn run_blob(ctx: &Ctx<'_>, op: &'static str, command: BlobCommand) -> Printed {
         BlobCommand::Has { ids } => {
             ctx.on_store(op, || Ok(BlobHasReq { ids }), |ops, req| ops.blob_has(req))
         }
+        BlobCommand::Get { ids, max_bytes } => ctx.on_store(
+            op,
+            || Ok(BlobGetReq { ids, max_bytes }),
+            |ops, req| ops.blob_get(req),
+        ),
     }
 }
 
@@ -414,7 +424,11 @@ fn follow_journal(
     from_start: bool,
     interval: Duration,
 ) -> Printed {
-    let named = context::store_named(ctx.global.repo.as_deref(), ctx.env);
+    let named = context::store_for(
+        ctx.global.repo.as_deref(),
+        ctx.env,
+        context::here().map(Locate::Cwd).as_ref(),
+    );
     if let Ok(Some(store)) = &named {
         ctx.used.repo.replace(Some(store.clone()));
     }
@@ -634,8 +648,21 @@ impl Ctx<'_> {
         prepare: impl FnOnce() -> Result<P, OpError>,
         call: impl FnOnce(Recording<'_>, &Utf8Path, P) -> Result<T, OpError>,
     ) -> Envelope<T> {
-        // 1. The store the user named, kept for meta.repo.
-        let named = context::store_named(self.global.repo.as_deref(), self.env);
+        let start = context::here().map(Locate::Cwd);
+        self.envelope_found_from(op, start.as_ref(), prepare, call)
+    }
+
+    /// [`Ctx::envelope_at_root`], the store looked for from `start` when the user named none: a
+    /// workspace there names it (`.swarmws/workspace.json`'s `repo`, M5 design §2.5).
+    pub(crate) fn envelope_found_from<P, T>(
+        &self,
+        op: &str,
+        start: Option<&Locate>,
+        prepare: impl FnOnce() -> Result<P, OpError>,
+        call: impl FnOnce(Recording<'_>, &Utf8Path, P) -> Result<T, OpError>,
+    ) -> Envelope<T> {
+        // 1. The store the user named, or a workspace's, kept for meta.repo.
+        let named = context::store_for(self.global.repo.as_deref(), self.env, start);
         if let Ok(Some(store)) = &named {
             self.used.repo.replace(Some(store.clone()));
         }
