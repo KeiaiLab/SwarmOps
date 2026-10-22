@@ -12,6 +12,85 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+- A one-line installer, `curl -fsSL https://get.swarmops.cc/install.sh | bash` (`scripts/install.sh`,
+  served as `web/public/install.sh`): it installs `swarmops` and `so` from a release, checked against
+  its `SHA256SUMS`, into `~/.local/bin` (`/usr/local/bin` as root); `--version` pins a release,
+  `--dir` picks the directory, a second run updates, and `--uninstall` removes the binaries and
+  no store. `just check` runs its offline tests, `scripts/test-install.py`.
+- `docs/goals.md`: the project's goals, each with its metric, its target and where that target
+  is written, the value `docs/perf.md` has measured (or that none exists yet) and the milestone
+  that delivers it, with non-goals and engineering principles.
+- `docs/policies/clean-room.md`: how third-party designs reach the code, only as functional
+  requirements in the project's own words, with a provenance record per feature and text, code
+  and licence checks before each release.
+- A Markdown check in `just check` (`scripts/check-docs.py`): relative links and anchors resolve
+  as GitHub reads them, and no public page carries a host path or tool attribution.
+- Usage documentation, every example run against a real store: an install guide that leads with
+  the installer (pinning, fleets, updates, uninstalling, hand checks, source builds, the
+  installer's errors); a quick start from install to `verify`; Concepts; guides to commit and
+  land, to history and undo, to parallel agents, to Claude Code and to the git round trip; a
+  troubleshooting page from symptom to command for every `E_*` code; `MAINTAINERS.md` and
+  `SUPPORT.md`.
+- `docs/reference/cli.md` and `docs/reference/errors.md`: every command's usage, arguments,
+  options and defaults, and every error code's exit, retryable flag and description, generated
+  from the code and kept current by a test (`SWARMOPS_REGEN_REFERENCE=1` rewrites them).
+- The README is rewritten around the core features, each with an example run, and
+  `docs/README.md` maps the documentation by task.
+- Two developer guides: MCP integration (`docs/develop/mcp.md`: registration, the stdio exchange,
+  protocol versions, identity, every tool with its command, size limits, failure modes) and CLI
+  scripting (`docs/develop/cli-scripting.md`: the envelope, exit codes, jq recipes, retry rules,
+  idempotency keys, a commit-and-land loop).
+- The operations guide is split into task pages under `docs/operate/`; `docs/operations.md` is now
+  their index, and its old section links still resolve.
+- The new website, `web/`: a Next.js static export with shadcn/ui and Fumadocs that renders
+  `docs/**/*.md` and `CHANGELOG.md` at `/docs` (sidebar groups, static search, code copy, a
+  per-page Content-Security-Policy) and the product pages (home, `/product`, features, how it
+  works, SwarmOps and git, the roadmap); `just web-install`, `just web-build` and `just web-check`,
+  and a CI workflow.
+- `docs/reference/commands/`: one page per command (25) with its syntax, arguments, a recorded
+  example, its result's fields and its errors; `docs/reference/cli.md` is now the grouped index.
+  Generated from the code and the golden steps, and checked by a test.
+- Golden examples for blob put/has, op log/undo, derive, land, git import/export and every MCP tool,
+  taken from real runs.
+- Docs: the command pages of init, info, whoami, schema, derive, commit, land, blob put and blob has
+  carry a Details section: behaviour, option interactions, patterns, failures and measured
+  performance.
+- Docs: the read commands' reference pages (resolve, cat, ls, show, log, history, diff) gain a
+  hand-written Details section: option interactions, paging and cursors, errors and their causes,
+  agent patterns, caveats and measured costs.
+- Reference: the ref list, ref set, ref delete, op log, op undo and verify pages gain a Details
+  section (behaviour, outcomes per ref state, caveats, patterns).
+- The reference pages of git import, git export and mcp have hand-written Details: behaviour,
+  options, patterns, failure cases.
+- Docs: one reference page per MCP tool (input schema, annotations, a recorded call, its CLI
+  command) and an index with protocol versions, server instructions, identity rules and size limits,
+  generated from the server's tool table.
+- Site: command reference pages show their metadata as a card, arguments as collapsible entries, CLI
+  and MCP examples as tabs and error codes as badges linking to the error list; the command index is
+  one grouped table with a filter, and command and MCP tool pages link to each other.
+- Site: every docs page has a "View as Markdown" link to its source file, served beside the page at
+  its URL plus `.md` (text/markdown); llms.txt now links those files.
+- Docs: the README keeps its core features, install, quick start, the comparison with git and the
+  roadmap; the MCP and command details now live on the MCP integration page and the command pages.
+- swarmops.cc is now served from `web/`. The site workflow deploys `web/out` to Cloudflare Pages:
+  production from `stable`, previews from `feat/**`. While the Cloudflare secrets are unset, it
+  leaves a notice and deploys nothing. `site/` is retired: its icons, figures, notices,
+  `security.txt` and the installer copy moved to `web/public/`, and `/guides/<name>` redirects (308)
+  to `/docs/guides/<name>`.
+- `docs/roadmap.md`: the detailed roadmap. Its goal is version control that works together with
+  GitHub, in three topologies: local git with a SwarmOps remote, a store with a GitHub remote, and
+  stores syncing with each other. For each it gives what works today, with the real commands, and
+  the plan: commands, protocol, ref mapping, identity, offline behaviour, acceptance criteria and
+  targets. Two milestones are added, M13 (git remotes from a store) and M14 (git clients against a
+  store), and M11 takes `so clone` and `so sync`. `docs/goals.md` gains G15 to G17, and the site's
+  roadmap page summarises the new page, topologies first.
+- `docs/reference/limits.md` lists every contract limit with its constant, value, the commands that
+  enforce it and its error, plus the defaults, the schema bounds and, separately, the internal
+  values. `docs/reference/schema-types.md` covers the 91 API types with their fields and values.
+  Both pages are generated from the code and have drift tests.
+
 ## [0.1.0] - 2026-10-20
 
 ### Added

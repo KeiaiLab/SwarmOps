@@ -43,7 +43,7 @@ trim_trailing_whitespace = false
 indent_style = unset
 indent_size = unset
 
-[site/explainers/*.{html,svg}]
+[web/public/explainers/*.{html,svg}]
 insert_final_newline = unset
 
 [docs/assets/store-*.svg]

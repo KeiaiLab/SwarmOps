@@ -36,3 +36,7 @@ cargo deny --locked check
 cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
 # THIRD-PARTY-LICENSES, the notices the release archives carry, still matches Cargo.lock.
 python3 -I scripts/third-party-licenses.py --check
+# The public Markdown: its links and anchors resolve, and it carries no host path or tool
+# attribution; the selftest first shows that each rule still finds what it is for.
+python3 -I scripts/check-docs.py selftest
+python3 -I scripts/check-docs.py

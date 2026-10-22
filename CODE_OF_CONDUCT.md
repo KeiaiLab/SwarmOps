@@ -23,13 +23,8 @@ discussions and every other project space, and to people and agents alike.
 ## Reporting and enforcement
 
 Report a problem privately, never in a public issue, pull request or discussion. The channel is
-GitHub's reported content: in the **⋯** menu of the issue, pull request, discussion or comment,
-choose **Report content**, pick a reason, then **Report to repository admins**. Only the
-repository's maintainers see the report. GitHub offers this for public repositories only, and
-SwarmOps' repository is private while SwarmOps is pre-release: it will be turned on when the
-repository goes public. Until then, the people who can see the repository report to a
-maintainer directly, outside the issue tracker. A security problem goes through
-[SECURITY.md](SECURITY.md) instead.
+email to the maintainers at <maintainers@swarmops.cc>; only the maintainers read that address.
+A security problem goes through [SECURITY.md](SECURITY.md) instead.
 
 Maintainers keep reports confidential, review each one, and may remove, edit or reject
 contributions and restrict or ban participants, following the Covenant's

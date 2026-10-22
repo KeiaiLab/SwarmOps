@@ -1,0 +1,328 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m t0 --changes [tmp]/t0.json --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[t0]",
+        "root": "[id1]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "new": "[t0]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m head --changes [tmp]/head.json --parent [t0]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[head]",
+        "parent": "[t0]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[t0]": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-18 commit -m theirs --changes [tmp]/theirs.json --parent [t0] --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[theirs]",
+        "parent": "[t0]",
+        "root": "[id3]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "old": "[t0]",
+          "new": "[theirs]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[t0]": "[t0]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land [head] --key land-7",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "land",
+      "api": 1,
+      "result": {
+        "status": "landed",
+        "landed": "[landed]",
+        "rebased_onto": "[theirs]",
+        "target": "main",
+        "base": "[t0]",
+        "attempts": 1,
+        "relocated": false,
+        "files_changed": 1,
+        "squashed_from": [
+          "[head]"
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[head]": "[head]",
+          "main": "[theirs]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land [head] --key land-7",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "land",
+      "api": 1,
+      "result": {
+        "status": "replayed",
+        "landed": "[landed]",
+        "rebased_onto": "[theirs]",
+        "target": "main",
+        "base": "[t0]",
+        "attempts": 1,
+        "relocated": false,
+        "files_changed": 1,
+        "squashed_from": [
+          "[head]"
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[head]": "[head]",
+          "main": "[landed]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m ours --changes [tmp]/ours.json --parent [landed]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[ours]",
+        "parent": "[landed]",
+        "root": "[id4]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[landed]": "[landed]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-18 commit -m theirs2 --changes [tmp]/theirs2.json --parent [landed] --advance main",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[theirs2]",
+        "parent": "[landed]",
+        "root": "[id5]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "advanced": {
+          "name": "main",
+          "old": "[landed]",
+          "new": "[theirs2]",
+          "already_applied": false
+        },
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[landed]": "[landed]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land [ours]",
+    "exit": 3,
+    "stdout": {
+      "ok": false,
+      "op": "land",
+      "api": 1,
+      "error": {
+        "code": "E_CONFLICT",
+        "message": "1 path(s) of the change conflict with the target's head [theirs2]: nothing was recorded",
+        "retryable": false,
+        "exit": 3,
+        "details": {
+          "report": {
+            "base": "[landed]",
+            "files": [
+              {
+                "base_blob": "[id6]",
+                "hunks": [
+                  {
+                    "base": {
+                      "first": 2,
+                      "last": 2,
+                      "text": "2\n"
+                    },
+                    "id": 0,
+                    "ours": {
+                      "first": 2,
+                      "last": 2,
+                      "text": "ours\n"
+                    },
+                    "theirs": {
+                      "first": 2,
+                      "last": 2,
+                      "text": "theirs\n"
+                    }
+                  }
+                ],
+                "kind": "content",
+                "ours_blob": "[id7]",
+                "path": "f.txt",
+                "theirs_agent": "agent/worker-18",
+                "theirs_blob": "[id8]",
+                "theirs_changeset": "[theirs2]"
+              }
+            ],
+            "kinds": [
+              "content"
+            ],
+            "ours": "[ours]",
+            "theirs": "[theirs2]",
+            "truncated": false
+          }
+        },
+        "hint": "swarmops cat [theirs2]:f.txt, then swarmops land [ours] --resolve <file> with each path's resolution and against = [theirs2]"
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[ours]": "[ours]",
+          "main": "[theirs2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 land [ours] --resolve [tmp]/res.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "land",
+      "api": 1,
+      "result": {
+        "status": "landed",
+        "landed": "[resolved]",
+        "rebased_onto": "[theirs2]",
+        "target": "main",
+        "base": "[landed]",
+        "attempts": 1,
+        "relocated": false,
+        "files_changed": 1,
+        "squashed_from": [
+          "[ours]"
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[ours]": "[ours]",
+          "[theirs2]": "[theirs2]",
+          "main": "[theirs2]"
+        },
+        "auth": "trust"
+      }
+    }
+  }
+]

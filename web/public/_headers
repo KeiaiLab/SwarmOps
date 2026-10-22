@@ -1,0 +1,52 @@
+# Cloudflare Pages response headers (https://developers.cloudflare.com/pages/configuration/headers/).
+# Every page also carries its own <meta http-equiv="Content-Security-Policy"> (scripts/postbuild.mjs)
+# that allows its inline scripts by sha256 only. A browser enforces both policies, so the meta one
+# binds; this header adds what a meta policy cannot set (frame-ancestors) and covers non-HTML files.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
+  Cross-Origin-Opener-Policy: same-origin
+  Strict-Transport-Security: max-age=31536000
+  Content-Security-Policy: default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
+/explainers/*
+  ! Content-Security-Policy
+  Content-Security-Policy: default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'
+
+# Next.js writes content-hashed file names under /_next/static/: a new build gets new names.
+/_next/static/*
+  Cache-Control: public, max-age=31536000, immutable
+/*.png
+  Cache-Control: public, max-age=86400
+/*.svg
+  Cache-Control: public, max-age=86400
+/*.ico
+  Cache-Control: public, max-age=86400
+# The static search index (fumadocs, Orama), a JSON file without an extension.
+/api/search
+  Content-Type: application/json; charset=utf-8
+  Cache-Control: public, max-age=300
+# The installer, also served at get.swarmops.cc: read as text in a browser, and an update reaches
+# `curl | bash` within minutes.
+# Each docs page's source, beside it (scripts/markdown-twins.mjs).
+/*.md
+  Content-Type: text/markdown; charset=utf-8
+/install.sh
+  Content-Type: text/plain; charset=utf-8
+  Cache-Control: public, max-age=300
+
+# Search engines skip the pages.dev addresses; custom domains do not match these hosts.
+https://:project.pages.dev/*
+  X-Robots-Tag: noindex
+https://:version.:project.pages.dev/*
+  X-Robots-Tag: noindex
+# get.swarmops.cc serves the installer; the site itself is indexed at swarmops.cc only.
+https://get.swarmops.cc/*
+  X-Robots-Tag: noindex
+
+# One canonical for the dark and the light figure page, which differ only in theme.
+/explainers/store
+  Link: <https://swarmops.cc/explainers/store>; rel="canonical"
+/explainers/store-light
+  Link: <https://swarmops.cc/explainers/store>; rel="canonical"

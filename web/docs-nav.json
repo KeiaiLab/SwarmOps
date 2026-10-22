@@ -1,0 +1,46 @@
+{
+  "$comment": "Sidebar groups of /docs. Paths are from the repository root. A page joins the first group that lists it in `files` or holds it under one of its `dirs`; a page no group names joins `fallback`, so a new file under docs/ appears without an edit here. `files` also sets the order; the rest of a group follows alphabetically.",
+  "groups": [
+    {
+      "key": "get-started",
+      "title": "Get started",
+      "description": "Install, first commits, the ideas",
+      "files": ["docs/guides/install.md", "docs/guides/quick-start.md", "docs/concepts.md"],
+      "dirs": []
+    },
+    {
+      "key": "develop",
+      "title": "Develop",
+      "description": "Agents and scripts on a store",
+      "files": [],
+      "dirs": ["docs/develop/", "docs/guides/"]
+    },
+    {
+      "key": "operate",
+      "title": "Operate",
+      "description": "Run, back up, verify and repair stores",
+      "files": ["docs/operations.md", "docs/troubleshooting.md"],
+      "dirs": ["docs/operate/"]
+    },
+    {
+      "key": "reference",
+      "title": "Reference",
+      "description": "Commands, MCP tools, errors, types",
+      "files": [],
+      "dirs": ["docs/reference/"]
+    },
+    {
+      "key": "project",
+      "title": "Project",
+      "description": "Design, limits, performance, changes",
+      "files": [
+        "docs/architecture.md",
+        "docs/known-limitations.md",
+        "docs/perf.md",
+        "CHANGELOG.md"
+      ],
+      "dirs": ["docs/policies/"]
+    }
+  ],
+  "fallback": "project"
+}

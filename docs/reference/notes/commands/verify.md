@@ -1,0 +1,115 @@
+`verify` reads the whole store once and reports what it finds damaged. It succeeds on a sound
+store and fails with `E_STORE_CORRUPT` (exit 1) on a damaged one, the whole report in the
+error's `details`. It takes no lock, writes nothing and needs no identity, so it can run while
+agents commit and land: it reads the store's files in an order that keeps a commit made
+meanwhile from looking like damage.
+
+### What each check covers
+
+Without `--deep`, `verify` checks the structure:
+
+- **The metadata.** The lock file; the changeset index against the journal, record by record,
+  and the sorted views against the index columns; every frame of the journal.
+- **The refs.** Each ref file reads as one and names a changeset the store holds.
+- **Every changeset,** in the order it was recorded: its object, its metadata record against the
+  object (parents, delta hash, generation), its parents, every tree under its root, and its root
+  against its first parent's root with its delta applied.
+- **The external id index** (the git import and export's map of git commits to changesets): each
+  entry reads as one, names a changeset the store holds, and, for git, matches the changeset's
+  `git.oid`.
+- **The blobs:** each blob a tree names exists. Its bytes are not read.
+
+`--deep` also re-hashes every object file, referenced or not, and checks every derived value
+the store holds (the first-parent skip lists, the last touches of paths, and the git export's
+oid memos) against what the objects give, as well as the external id entries of changesets
+made in the store against their export. A shallow check reads the changeset and tree objects it
+walks, and checks those, so it misses a damaged blob; `--deep` finds it.
+
+### Reading the report
+
+`objects_checked` counts the objects examined (deep: every object file; shallow: the changeset and
+tree objects read and the blobs looked for), `changesets_checked` the changesets. `problems` has
+one line per problem, for a person; `findings` the same problems at the same indexes, for a
+program, each with its `kind` and the ids it names:
+
+| `kind` | What is damaged | Names |
+| --- | --- | --- |
+| `corrupt_object` | An object whose content does not hash to its id, or does not decode | `object` |
+| `missing_object` | An object a changeset references that the store lacks or holds as another kind | `object`, `changeset` |
+| `missing_parent` | A parent a changeset names that the store does not hold | `changeset`, `parent` |
+| `root_mismatch` | A changeset whose root is not its first parent's root with its delta applied | `changeset` |
+| `dangling_ref` | A ref that names no changeset in the store | `ref` |
+| `corrupt_ref` | A ref file that does not read as one | `ref` |
+| `index_mismatch` | A changeset record that disagrees with the journal, the sorted views or its object | `seq`, `cause` |
+| `journal_corrupt` | A journal frame that does not read; nothing after it is read | `offset` |
+| `meta_corrupt` | A metadata file that does not read as one, so what depends on it goes unchecked | — |
+| `external_id_corrupt` | An external id entry that is not one | `system`, `key` |
+| `external_id_dangling` | An external id entry that names a changeset the store does not hold | `system`, `key`, `changeset` |
+| `external_id_mismatch` | An external id entry whose changeset stands for another commit | `system`, `key`, `changeset` |
+| `derived_mismatch` | A derived value that is not the one the objects give (deep only) | `derivation`, `changeset` or `object`, `key` |
+
+An object is reported once, against the first changeset that references it. `cause` of an
+`index_mismatch` says what would mend it: `journal` (rebuild the index from the journal),
+`sorted_view` (rebuild the sorted views from the index columns) or `object` (derive the record
+from its object again). `kind` is a string, so a client can read kinds newer than its own list.
+
+### What to do with a failure
+
+The hint says the next step. After a shallow check it is `swarmops verify --deep`, which finds
+damaged bytes too. After a deep check it says to restore the damaged objects, records or refs
+from a backup: there is no repair command yet. A `derived_mismatch` is the one exception: the
+value is a cache, and removing its file under `meta/derived/<derivation>/`, or all of
+`meta/derived/`, has it derived again
+([Making room](../../../operate/making-room.md#3-remove-the-derived-values)).
+
+Not every failure is a report. A directory that is not a store fails with `E_NOT_A_REPO`
+(exit 6) before any check. A file that `verify` cannot read past fails the command with the
+store's own error instead, such as `E_STORE_CORRUPT` with `details.store_file` naming the file,
+and no `findings`. For
+example, on a store whose `meta/refs/main` is not a ref file, `verify` reports a `corrupt_ref`
+finding, while `verify --deep` fails with `E_STORE_CORRUPT`, `details.store_file:
+meta/refs/main` and the hint `swarmops verify`.
+
+### Patterns
+
+Check a store on a schedule and keep the findings:
+
+```sh
+swarmops verify --deep > verify.json || jq -c '.error | {code, findings: .details.findings, store_file: .details.store_file}' verify.json
+```
+
+A report fills `findings`; a failure to read fills `store_file` instead.
+
+Run `verify --deep` after a crash or a power loss, on every backup, before an upgrade, and on a
+schedule ([When to run it](../../../operate/verify-and-repair.md#when-to-run-it)).
+
+### Caveats
+
+- **No cap on the report.** A store damaged in many places gives a report as long as its damage,
+  and through MCP twice that, since a tool result holds its envelope twice.
+- **Memory.** `verify` holds the journal and the index in memory; a deep check of a store with
+  derived values also holds the first-parent forest and every `last_modified` value.
+- **What it skips.** Temp files of interrupted writes (`objects/tmp/`) and object files that are
+  symlinks are passed over.
+
+These are listed, with their targets, in
+[Known limitations: Verification and repair](../../../known-limitations.md#verification-and-repair).
+
+### Through MCP
+
+The MCP tool is `verify`, with `deep`. A damaged store fails the call the same way, with
+`E_STORE_CORRUPT` and the report in `details`.
+
+### Performance
+
+The performance ledger's v0.1.0 run checked a store of 32,101 changesets and 128,306 objects with
+`verify --deep` in 1,758 ms
+([v0.1.0 run](../../../perf.md#v010--just-perf-in-a-quiet-window-2026-10-21)).
+[Verify and repair](../../../operate/verify-and-repair.md#check-a-store) gives the times on
+SwarmOps' own history, shallow and deep.
+
+### Guides
+
+- [Verify and repair](../../../operate/verify-and-repair.md)
+- [Reading and repairing history: Check the store](../../../guides/history-and-undo.md#check-the-store)
+- [Backup and restore: Restore a store](../../../operate/backup-and-restore.md#restore-a-store)

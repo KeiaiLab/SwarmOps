@@ -84,8 +84,8 @@ jobs:
         with:
           persist-credentials: false
       # Audits the workflows and dependabot.yml, online audits included (impostor commits,
-      # known-vulnerable actions) with the job's read-only token. The findings go to the log:
-      # code scanning is not available to a private repository on this plan. The image is the
+      # known-vulnerable actions) with the job's read-only token. The findings go to the log and
+      # fail the job; uploaded to code scanning, they would not. The image is the
       # zizmor release the action pins as `latest`, by digest (1.30.1 at v0.6.4). The auditor
       # persona, because the regular one lets an explicit `persist-credentials: true`, a
       # workflow-level write grant and a missing version comment through; this tree is clean.
