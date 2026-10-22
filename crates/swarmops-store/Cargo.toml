@@ -23,7 +23,7 @@ workspace = true
 test-hooks = ["swarmops-testkit/test-hooks"]
 
 [dependencies]
-swarmops-core = { path = "../swarmops-core", version = "0.2.0" }
+swarmops-core = { path = "../swarmops-core", version = "0.3.0" }
 blake3.workspace = true
 camino.workspace = true
 crc32fast.workspace = true
@@ -35,7 +35,7 @@ zstd.workspace = true
 
 [dev-dependencies]
 # The integration tests' and benches' support; no unit test uses it (it depends on this crate).
-swarmops-testkit = { path = "../swarmops-testkit", version = "0.2.0" }
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.3.0" }
 criterion.workspace = true
 proptest.workspace = true
 

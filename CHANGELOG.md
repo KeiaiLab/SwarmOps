@@ -5,13 +5,16 @@ Notable changes to SwarmOps. The format follows
 [the versioning policy](docs/policies/versioning-and-stability.md) (Semantic Versioning, read the
 pre-1.0 way).
 
-SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, and 0.2.0 the second, with the git remotes
-(M13); no crate is published (`publish = false`). The 0.1.0 section holds every change up to it,
-grouped by milestone of the design (umbrella spec §13).
+SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the git remotes
+(M13), and 0.3.0 the third, with the workspaces (M5); no crate is published
+(`publish = false`). The 0.1.0 section holds every change up to it, grouped by milestone of the
+design (umbrella spec §13).
 From here, **Unreleased** collects the changes on `stable` that no release holds yet, until the
 next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
+
+## [0.3.0] - 2026-10-22
 
 ### Added
 
@@ -1363,6 +1366,7 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.2.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.3.0...stable
+[0.3.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0
