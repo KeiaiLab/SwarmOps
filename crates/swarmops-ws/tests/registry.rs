@@ -457,8 +457,17 @@ fn a_crash_during_create_or_delete_leaves_the_entry_or_nothing() {
             found.is_none() || found.as_ref() == Some(&mine),
             "k={k}: {cut:?}"
         );
-        let again = store.registry().create(&mine).unwrap();
+        let (recorder, calls) = swarmops_testkit::fs::RecordingFs::new();
+        let recorder = recorder.naming_paths_in(store.root.clone().into_std_path_buf());
+        let again = over(&store.root, Arc::new(recorder)).create(&mine).unwrap();
         assert!(matches!(again, Linked::New | Linked::Existing(_)), "k={k}");
+
+        //    Linked or found, the entry's name and the registry's are durable before the answer.
+        let calls = calls();
+        assert!(
+            calls.ends_with(&["fsync_dir workspaces".to_owned(), "fsync_dir .".to_owned()]),
+            "k={k}: {calls:?}"
+        );
         assert_eq!(
             store.registry().read("worker").unwrap(),
             Some(mine),
