@@ -1,0 +1,89 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 blob put [tmp]/payload.txt",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "blob_put",
+      "api": 1,
+      "result": {
+        "blob": "[blob]",
+        "size": 12,
+        "written": true
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 blob put -",
+    "stdin": "named by id\n",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "blob_put",
+      "api": 1,
+      "result": {
+        "blob": "[blob]",
+        "size": 12,
+        "written": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store blob has [blob] [missing]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "blob_has",
+      "api": 1,
+      "result": {
+        "present": [
+          "[blob]"
+        ]
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

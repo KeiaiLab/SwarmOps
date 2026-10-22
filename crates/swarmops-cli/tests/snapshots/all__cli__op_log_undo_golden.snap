@@ -1,0 +1,262 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c1 --changes [tmp]/c1.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[id1]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c2 --changes [tmp]/c2.json --parent [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[id2]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "old": "[c1]",
+        "new": "[c2]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store op log",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "op_log",
+      "api": 1,
+      "result": {
+        "ops": [
+          {
+            "op": 3,
+            "kind": "ref_move",
+            "changesets": [],
+            "changesets_total": 0,
+            "ref_moves": [
+              {
+                "name": "main",
+                "old": "[c1]",
+                "new": "[c2]",
+                "actor": "agent/worker-17",
+                "at": "[at]"
+              }
+            ]
+          },
+          {
+            "op": 2,
+            "kind": "commit",
+            "changesets": [
+              {
+                "id": "[c2]",
+                "agent": "agent/worker-17",
+                "created_at": "[created_at]",
+                "title": "c2"
+              }
+            ],
+            "changesets_total": 1,
+            "ref_moves": []
+          },
+          {
+            "op": 1,
+            "kind": "ref_move",
+            "changesets": [],
+            "changesets_total": 0,
+            "ref_moves": [
+              {
+                "name": "main",
+                "new": "[c1]",
+                "actor": "agent/worker-17",
+                "at": "[at]"
+              }
+            ]
+          },
+          {
+            "op": 0,
+            "kind": "commit",
+            "changesets": [
+              {
+                "id": "[c1]",
+                "agent": "agent/worker-17",
+                "created_at": "[created_at]",
+                "title": "c1"
+              }
+            ],
+            "changesets_total": 1,
+            "ref_moves": []
+          }
+        ],
+        "truncated": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 op undo 3",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "undo",
+      "api": 1,
+      "result": {
+        "undone": 3,
+        "op": 4,
+        "ref_moves": [
+          {
+            "name": "main",
+            "old": "[c2]",
+            "new": "[c1]",
+            "actor": "agent/worker-17",
+            "at": "[at]"
+          }
+        ],
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store op log -n 1",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "op_log",
+      "api": 1,
+      "result": {
+        "ops": [
+          {
+            "op": 4,
+            "kind": "ref_move",
+            "changesets": [],
+            "changesets_total": 0,
+            "ref_moves": [
+              {
+                "name": "main",
+                "old": "[c2]",
+                "new": "[c1]",
+                "actor": "agent/worker-17",
+                "at": "[at]"
+              }
+            ]
+          }
+        ],
+        "truncated": true
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]
