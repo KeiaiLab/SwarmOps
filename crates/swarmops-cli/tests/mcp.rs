@@ -15,6 +15,7 @@
 //! handshake (a session that `initialize` opens).
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
@@ -202,6 +203,113 @@ fn mcp_discover_snapshot() {
     server.finish_clean();
     pin_server_version(&mut discovered);
     insta::assert_json_snapshot!(discovered);
+}
+
+/// The golden exchange of `swarmops mcp`: a 2025-11-25 session opened with `initialize` and the
+/// initialized notification, the tools listed, and one tool called.
+#[test]
+fn mcp_session_golden() {
+    let store = Store::init();
+    let mut golden = Golden::start(&store);
+    golden.initialize();
+    let listed = golden.request("tools/list", json!({}));
+    assert_eq!(
+        listed["result"]["tools"].as_array().unwrap().len(),
+        TOOLS.len()
+    );
+    let info = golden.ok("repo_info", json!({}));
+    assert_eq!(info["result"]["changesets"], 0, "{info}");
+    golden.name_at(&info, "/result/repo_id", "repo_id");
+    insta::assert_json_snapshot!(golden.transcript());
+}
+
+/// A golden call of every tool, each succeeding, in a session on one store: blobs stored and
+/// found, commits, main created, reads of every kind, a land onto what main gained, a ref made,
+/// deleted and the deletion undone, the operations listed, and the store verified.
+#[test]
+fn mcp_tool_calls_golden() {
+    let store = Store::init();
+    let mut golden = Golden::start(&store);
+    golden.initialize();
+    let info = golden.ok("repo_info", json!({}));
+    golden.name_at(&info, "/result/repo_id", "repo_id");
+
+    // 1. A blob, then a first commit that names it, and main created there.
+    let put = golden.ok("blob_put", json!({"content": {"inline": "# acme\n"}}));
+    let blob = golden.name_at(&put, "/result/blob", "blob");
+    golden.ok("blob_has", json!({"ids": [blob]}));
+    let first = json!({
+        "message": "first",
+        "changes": [
+            {"path": "README.md", "op": "put", "content": {"blob": blob}},
+            {"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn f() {}\n"}},
+        ],
+    });
+    let c1 = golden.ok("commit", first);
+    let c1 = golden.name_at(&c1, "/result/changeset", "c1");
+    golden.ok(
+        "ref_set",
+        json!({"name": "main", "new": c1, "create": true}),
+    );
+
+    // 2. Reads of main.
+    golden.ok("resolve_rev", json!({"rev": "main"}));
+    golden.ok("read_file", json!({"rev": "main", "path": "README.md"}));
+    golden.ok("read_tree", json!({"rev": "main"}));
+
+    // 3. A change on c1, a publish on main since, and the land of the change.
+    let change = json!({
+        "message": "change f",
+        "parent": c1,
+        "changes": [{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn g() {}\n"}}],
+    });
+    let head = golden.ok("commit", change);
+    let head = golden.name_at(&head, "/result/changeset", "head");
+    let publish = json!({
+        "message": "add docs",
+        "parent": c1,
+        "advance": "main",
+        "changes": [{"path": "docs.md", "op": "put", "content": {"inline": "docs\n"}}],
+    });
+    let theirs = golden.ok("commit", publish);
+    golden.name_at(&theirs, "/result/changeset", "theirs");
+    let landed = golden.ok("land", json!({"head": head, "idempotency_key": "land-7"}));
+    let landed = golden.name_at(&landed, "/result/landed", "landed");
+
+    // 4. The history: the land's changeset, main's log, a path's history, a diff.
+    golden.ok("show", json!({"rev": landed}));
+    golden.ok("log", json!({"rev": "main"}));
+    golden.ok("path_history", json!({"path": "src/lib.rs"}));
+    golden.ok("diff", json!({"from": c1, "to": "main", "format": "stat"}));
+
+    // 5. A ref made and deleted; the deletion, the newest operation, undone.
+    golden.ok(
+        "ref_set",
+        json!({"name": "release/v1", "new": c1, "create": true}),
+    );
+    golden.ok(
+        "ref_delete",
+        json!({"name": "release/v1", "expected_old": c1}),
+    );
+    let ops = golden.ok("op_log", json!({"limit": 2}));
+    let deleted = &ops["result"]["ops"][0];
+    assert_eq!(deleted["ref_moves"][0]["name"], "release/v1", "{ops}");
+    let op = deleted["op"].as_u64().expect("an operation number");
+    golden.ok("undo", json!({"op": op}));
+    golden.ok("ref_list", json!({}));
+    golden.ok("verify", json!({}));
+
+    // Every tool has its call.
+    let transcript = golden.transcript();
+    for (tool, _) in TOOLS {
+        let called = transcript["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|step| step["request"]["params"]["name"] == tool);
+        assert!(called, "no call of {tool}");
+    }
+    insta::assert_json_snapshot!(transcript);
 }
 
 /// `resolve_rev` is listed as a read whose description names the CLI command it stands for,
@@ -2364,4 +2472,217 @@ fn without_elapsed(text: &str) -> String {
         .expect("an elapsed_ms");
     let digits = text[at..].bytes().take_while(u8::is_ascii_digit).count();
     format!("{}0{}", &text[..at], &text[at + digits..])
+}
+
+// ---------------------------------------------------------------------------------------------
+// Golden transcripts.
+// ---------------------------------------------------------------------------------------------
+
+/// The keys whose numbers are times or durations, replaced by `[<key>]` in snapshots.
+const TIME_KEYS: [&str; 4] = ["elapsed_ms", "created_at", "secs", "at"];
+
+/// A server whose exchange a golden snapshot pins: the command line that started it, then each
+/// message the client sent (`request`) with the server's reply (`response`, none for a
+/// notification), with what changes from run to run replaced by stable names: ids as `[c1]` or
+/// `[id3]`, the temp dir as `[tmp]`, times and `elapsed_ms` by their key, the server's version
+/// as `[version]`.
+struct Golden {
+    server: Server,
+    /// The command line after `swarmops`.
+    args: String,
+    steps: Vec<Value>,
+    names: Names,
+}
+
+impl Golden {
+    /// `swarmops mcp --repo <store> --as AGENT`.
+    fn start(store: &Store) -> Golden {
+        let args = ["--repo", store.path(), "--as", AGENT];
+        let server = Server::start(&args, &[]);
+
+        // The words have no character a shell would read, so they join as they are.
+        let plain = |arg: &&str| {
+            arg.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_./".contains(&b))
+        };
+        assert!(args.iter().all(plain), "{args:?}");
+
+        let mut names = Names::default();
+        names.add(store.tmp().to_str().expect("UTF-8 temp paths"), "[tmp]");
+        Golden {
+            server,
+            args: format!("mcp {}", args.join(" ")),
+            steps: Vec::new(),
+            names,
+        }
+    }
+
+    /// Sends request `method` with `params`: its reply, recorded with the request.
+    fn request(&mut self, method: &str, params: Value) -> Value {
+        let reply = self.server.request(method, params.clone());
+        let mut sent = json!({
+            "jsonrpc": "2.0",
+            "id": self.server.last_id,
+            "method": method,
+        });
+        sent["params"] = params;
+        self.steps
+            .push(json!({"request": sent, "response": reply.clone()}));
+        reply
+    }
+
+    /// Opens a 2025-11-25 session, as [`Server::initialize`] does, the server's version pinned.
+    fn initialize(&mut self) {
+        let params =
+            json!({"protocolVersion": PREVIOUS, "capabilities": {}, "clientInfo": client_info()});
+        let init = self.request("initialize", params);
+        assert_eq!(init["result"]["protocolVersion"], PREVIOUS, "{init}");
+
+        // The version every release bumps, which no contract rests on.
+        let step = self.steps.last_mut().expect("the step just recorded");
+        let version = &mut step["response"]["result"]["serverInfo"]["version"];
+        assert_eq!(*version, env!("CARGO_PKG_VERSION"), "{init}");
+        *version = json!("[version]");
+
+        // The notification, which gets no reply.
+        let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        self.server.send(&initialized);
+        self.steps.push(json!({"request": initialized}));
+    }
+
+    /// The envelope of a `tools/call` of `tool`, which must succeed.
+    fn ok(&mut self, tool: &str, arguments: Value) -> Value {
+        let mut params = json!({"name": tool});
+        params["arguments"] = arguments;
+        let reply = self.request("tools/call", params);
+        let call = check_tool_result(tool, reply["result"].clone());
+        assert_eq!(call.envelope["ok"], true, "{tool}: {}", call.envelope);
+        call.envelope
+    }
+
+    /// Names the string at `pointer` in `envelope` `[name]`; the string.
+    fn name_at(&mut self, envelope: &Value, pointer: &str, name: &str) -> String {
+        let value = envelope
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("no string at {pointer}: {envelope}"))
+            .to_owned();
+        self.names.add(&value, &format!("[{name}]"));
+        value
+    }
+
+    /// Ends the session cleanly; the transcript, redacted: `{args, steps}`.
+    fn transcript(mut self) -> Value {
+        self.server.finish_clean();
+        let steps = self.names.redact(Value::Array(self.steps));
+        json!({"args": self.names.redact_str(&self.args), "steps": steps})
+    }
+}
+
+/// What changes from run to run, and the stable names that replace it in snapshots, as the CLI
+/// tests' transcripts name it.
+#[derive(Default)]
+struct Names {
+    /// Each value a test named, and its name.
+    named: Vec<(String, String)>,
+    /// Hex runs of 32 or more digits no test named, in the order they were met: `[id<n>]`.
+    found: Vec<String>,
+}
+
+impl Names {
+    fn add(&mut self, value: &str, name: &str) {
+        assert!(!value.is_empty(), "name {name} stands for nothing");
+        self.named.push((value.to_owned(), name.to_owned()));
+
+        // Longest first, so that an id is replaced before a prefix of it.
+        self.named
+            .sort_by_key(|(value, _)| std::cmp::Reverse(value.len()));
+    }
+
+    /// `json` with each string and key redacted ([`Names::redact_str`]) and each time key's
+    /// number replaced by `[<key>]`.
+    fn redact(&mut self, json: Value) -> Value {
+        match json {
+            Value::String(text) => Value::String(self.redact_str(&text)),
+            Value::Array(items) => {
+                Value::Array(items.into_iter().map(|j| self.redact(j)).collect())
+            }
+            Value::Object(members) => {
+                let members = members.into_iter().map(|(key, value)| {
+                    let value = match value {
+                        Value::Number(_) if TIME_KEYS.contains(&key.as_str()) => {
+                            Value::String(format!("[{key}]"))
+                        }
+                        value => self.redact(value),
+                    };
+                    (self.redact_str(&key), value)
+                });
+                Value::Object(members.collect())
+            }
+            other => other,
+        }
+    }
+
+    /// `text` with each named value replaced by its name, each time key's number in JSON text (a
+    /// tool result's text block) by `"[<key>]"`, then each other run of 32 or more lowercase hex
+    /// digits by `[id<n>]`.
+    fn redact_str(&mut self, text: &str) -> String {
+        // 1. Named values, and times.
+        let mut text = text.to_owned();
+        for (value, name) in &self.named {
+            text = text.replace(value.as_str(), name);
+        }
+        for key in TIME_KEYS {
+            text = redact_number(&text, key);
+        }
+
+        // 2. Hex runs: each new one numbered in the order met.
+        let mut out = String::with_capacity(text.len());
+        let mut run = String::new();
+        for c in text.chars().chain(std::iter::once('\0')) {
+            if c.is_ascii_digit() || ('a'..='f').contains(&c) {
+                run.push(c);
+                continue;
+            }
+            if run.len() >= 32 {
+                let n = if let Some(at) = self.found.iter().position(|seen| *seen == run) {
+                    at + 1
+                } else {
+                    self.found.push(run.clone());
+                    self.found.len()
+                };
+                let _ = write!(out, "[id{n}]");
+            } else {
+                out.push_str(&run);
+            }
+            run.clear();
+            if c != '\0' {
+                out.push(c);
+            }
+        }
+        out
+    }
+}
+
+/// `text`, compact JSON, with the number of each `"<key>":` replaced by `"[<key>]"`: for example
+/// `"elapsed_ms":3` becomes `"elapsed_ms":"[elapsed_ms]"`.
+fn redact_number(text: &str, key: &str) -> String {
+    let pattern = format!("\"{key}\":");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(&pattern) {
+        let after = at + pattern.len();
+        let digits = rest[after..].bytes().take_while(u8::is_ascii_digit).count();
+        out.push_str(&rest[..after]);
+
+        // A key whose value is no number stays as it is.
+        if digits == 0 {
+            rest = &rest[after..];
+            continue;
+        }
+        let _ = write!(out, "\"[{key}]\"");
+        rest = &rest[after + digits..];
+    }
+    out.push_str(rest);
+    out
 }

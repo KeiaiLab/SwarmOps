@@ -1,0 +1,1211 @@
+---
+source: crates/swarmops-cli/tests/mcp.rs
+expression: golden.transcript()
+---
+{
+  "args": "mcp --repo [tmp]/store --as agent/worker-17",
+  "steps": [
+    {
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "swarmops-tests",
+            "version": "0"
+          },
+          "protocolVersion": "2025-11-25"
+        }
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {}
+          },
+          "instructions": "SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. Each tool is one store operation, and its result is the SwarmOps envelope {ok, op, api, result | error, meta}, as structuredContent and again as JSON text. A failed operation sets isError and gives error {code, message, retryable, exit, details, hint}: retryable says whether the operation can succeed when it is run again, as it is or after re-reading what the hint names, and a hint is often a swarmops command, whose operation is the tool of the same name (ref list is ref_list, cat read_file, ls read_tree, info repo_info). commit records a changeset; with advance it also moves that ref to it in the same transaction, if the ref still names parent: check result.advanced. ref_set and ref_delete change a ref by compare-and-swap, so their expected_old, like commit's parent with advance, is the full 64-hex changeset id the ref held when you read it (from ref_list, show, log or a commit's result). A ref name or a relative revision is read when the call runs instead of pinning the id you read: the ref's own name always matches, so the compare-and-swap protects nothing, and main~1 on ref main never matches; an id prefix stops resolving once another changeset shares it; the server refuses all three. To publish a changeset, land it: land merges it three-way onto main and moves main in one step, and on E_CONFLICT details.report says what to resolve. A read may show a commit that a failed sync then takes back; a mutation that names it fails under the lock instead of building on it. op_log lists the store's transactions, newest first; undo restores the refs one moved while they still hold what it set. Clients limit long tool results: ask for little, as each tool's description says. A {\"file\": path} content is read by this server, not by your client: give an absolute path (a relative one, or the server's own stdin or stdout, is refused). Every change is recorded for the agent the server runs as.",
+          "protocolVersion": "2025-11-25",
+          "serverInfo": {
+            "name": "swarmops",
+            "title": "SwarmOps",
+            "version": "[version]"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "tools/list",
+        "params": {}
+      },
+      "response": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "result": {
+          "tools": [
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "What the store is and holds: its id and name, the changeset main points at, and how many changesets and refs it has.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`info`: describe the store. It has no options yet.",
+                "title": "InfoReq",
+                "type": "object"
+              },
+              "name": "repo_info",
+              "title": "Describe the store"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "The full id of the changeset a revision names (a ref name, a full id or a unique prefix of 12 or more hex digits, then any ~N suffixes), resolved as every tool resolves one, and its kind: ref when the revision is exactly a ref's name, whose target moves with the ref, changeset otherwise. Its CLI command is swarmops resolve.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`resolve_rev` (CLI `resolve`): the changeset a revision names, as every operation resolves it.",
+                "properties": {
+                  "rev": {
+                    "description": "The revision to resolve. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rev"
+                ],
+                "title": "ResolveRevReq",
+                "type": "object"
+              },
+              "name": "resolve_rev",
+              "title": "Resolve a revision"
+            },
+            {
+              "_meta": {
+                "anthropic/maxResultSizeChars": 200000
+              },
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Reads one file at a revision, without a checkout, as UTF-8 text or base64, from offset or the lines a range names; pass max_bytes of 32768 or less (less for a binary file), since clients limit long tool results and this one holds the content twice, and read on from next_offset while the result is truncated.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or\na range of its lines.",
+                "properties": {
+                  "lines": {
+                    "anyOf": [
+                      {
+                        "description": "A range of a file's lines, numbered from 1: `first` to `last`, both included.",
+                        "properties": {
+                          "first": {
+                            "description": "The range's first line: at least 1.",
+                            "format": "uint64",
+                            "minimum": 1,
+                            "type": "integer"
+                          },
+                          "last": {
+                            "description": "The range's last line: at least `first`.",
+                            "format": "uint64",
+                            "minimum": 1,
+                            "type": "integer"
+                          }
+                        },
+                        "required": [
+                          "first",
+                          "last"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Read these lines instead, numbered from 1, both ends included: a line ends after its\nnewline, and a last line without one is a line too. The lines of the range that exist\ncome back, none past the file's last. Give this or `offset`, not both (`E_INVALID_ARG`)."
+                  },
+                  "max_bytes": {
+                    "default": 1048576,
+                    "description": "The most content bytes to return; more comes back truncated, with the `next_offset` to\nread on from.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "offset": {
+                    "default": 0,
+                    "description": "Where to start reading, in bytes from the file's start: a truncated read's `next_offset`\nreads on from where it stopped. An offset past the end gives empty content. Give this or\n`lines`, not both (`E_INVALID_ARG`).",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "path": {
+                    "description": "The file's repository path.",
+                    "type": "string"
+                  },
+                  "rev": {
+                    "description": "The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rev",
+                  "path"
+                ],
+                "title": "ReadFileReq",
+                "type": "object"
+              },
+              "name": "read_file",
+              "title": "Read a file"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Lists one directory at a revision, without a checkout, a page of entries at a time, each file with its size, and with depth the directories below it too; pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a\ntime; with `depth`, the directories below it too.",
+                "properties": {
+                  "cursor": {
+                    "description": "Resume a listing: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the entry it names.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "depth": {
+                    "default": 1,
+                    "description": "How many levels to list: 1 for the directory's own entries, 2 for theirs too, and so on, up\nto 64 (0 or more than 64 is `E_INVALID_ARG`).",
+                    "format": "uint32",
+                    "maximum": 64,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "limit": {
+                    "default": 250,
+                    "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "path": {
+                    "description": "The directory's repository path; omitted for the root.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "rev": {
+                    "description": "The revision to read at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rev"
+                ],
+                "title": "ReadTreeReq",
+                "type": "object"
+              },
+              "name": "read_tree",
+              "title": "List a directory"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "One changeset in full: its parents, author, message, changes and signatures; pass max_changes of 100 or less, since clients limit long tool results.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`show`: one changeset in full.",
+                "properties": {
+                  "max_changes": {
+                    "default": 400,
+                    "description": "The most entries of `changes` to return: at least 1 (0 is `E_INVALID_ARG`).",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "rev": {
+                    "description": "The changeset to show. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "rev"
+                ],
+                "title": "ShowReq",
+                "type": "object"
+              },
+              "name": "show",
+              "title": "Show a changeset"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "History along first parents, newest first, from main unless rev says otherwise; pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`log`: history along first parents, a page at a time.",
+                "properties": {
+                  "cursor": {
+                    "description": "Resume a log: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page continues from the first parent of the\nchangeset it names, and `rev` is not used.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "default": 50,
+                    "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "paths": {
+                    "description": "Only the changesets that change one of these paths: a file (its content or kind, or\nwhether it is there), or a directory and anything below it; one trailing `/` is taken.\nOmitted or empty for every changeset.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "rev": {
+                    "anyOf": [
+                      {
+                        "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Where to start; `main` when omitted."
+                  }
+                },
+                "title": "LogReq",
+                "type": "object"
+              },
+              "name": "log",
+              "title": "List history"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "The changesets that changed a file, or anything below a directory, newest first along first parents from main unless rev says otherwise, each with what the path holds after it (the CLI command is history); pass a limit of 100 or less and page on with the cursor, since clients limit long tool results.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`path_history` (CLI `history`): the changesets that changed what a path holds, newest first,\nfollowing first parents, a page at a time.",
+                "properties": {
+                  "cursor": {
+                    "description": "Resume a history: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page continues from the first parent of the\nchangeset it names, and `rev` is not used.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "default": 50,
+                    "description": "The most entries to return: at least 1 (0 is `E_INVALID_ARG`).",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "path": {
+                    "description": "The repository path: a file, whose history is that of its content and kind, or a\ndirectory, whose history is that of everything below it. One trailing `/` is taken.",
+                    "type": "string"
+                  },
+                  "rev": {
+                    "anyOf": [
+                      {
+                        "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Where to start; `main` when omitted."
+                  }
+                },
+                "required": [
+                  "path"
+                ],
+                "title": "PathHistoryReq",
+                "type": "object"
+              },
+              "name": "path_history",
+              "title": "List a path's history"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "The files that differ between two revisions, in path order: with format names (the default) each one's path and status, with stat also its line counts, with unified also its hunks; pass a limit of 100 or less, keep max_bytes at 32768 or less for unified, and page on with the cursor, since clients limit long tool results.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`diff`: the files that differ between two revisions, in path order, a page at a time.",
+                "properties": {
+                  "context": {
+                    "default": 3,
+                    "description": "The unchanged lines around each change in a `unified` hunk.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "cursor": {
+                    "description": "Resume a diff: the previous page's `cursor`. Pass it back exactly as returned; do not\nconstruct it (cursors are opaque). This page starts after the file it names.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "format": {
+                    "default": "names",
+                    "description": "What to say of each file: `names` its path and status; `stat` also whether it is binary\nand, for text, the lines it inserts and deletes; `unified` also its kinds, its blobs and,\nfor text, its hunks. What `diff` says of each file.",
+                    "oneOf": [
+                      {
+                        "const": "names",
+                        "description": "Its path and status.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "stat",
+                        "description": "Also whether it is binary and, for text, the lines it inserts and deletes.",
+                        "type": "string"
+                      },
+                      {
+                        "const": "unified",
+                        "description": "Also its kinds, its blobs and, for text, its hunks.",
+                        "type": "string"
+                      }
+                    ]
+                  },
+                  "from": {
+                    "description": "The revision to diff from: the old side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  },
+                  "limit": {
+                    "default": 500,
+                    "description": "The most files to return: at least 1 (0 is `E_INVALID_ARG`).",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "max_bytes": {
+                    "default": 32768,
+                    "description": "The most bytes a `unified` page's files take, as the JSON array `files` they print as: at\nleast 1 (0 is `E_INVALID_ARG`). The page stops before the first file that would take it\npast this, but always holds one file, whose hunks are cut to the first ones that fit\n(`hunks_truncated`) when they alone would pass it. A `names` or `stat` page is held by\n`limit` alone.",
+                    "format": "uint64",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "paths": {
+                    "description": "Only the files at or below these repository paths (a file's path takes that file; one\ntrailing `/` is taken); every file when empty or omitted.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "to": {
+                    "description": "The revision to diff to: the new side. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "title": "DiffReq",
+                "type": "object"
+              },
+              "name": "diff",
+              "title": "Diff two revisions"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "The store's operations, newest first: each write transaction, numbered as undo takes it, with its kind, the changesets it recorded and the refs it moved; pass a limit of 20 or less and page on with before, since clients limit long tool results.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`op_log` (CLI `op log`): the store's operations, newest first, a page at a time. An operation\nis one write transaction: a frame of the journal, numbered from 0 in commit order.",
+                "properties": {
+                  "before": {
+                    "description": "Start below this operation: the page holds the ones numbered less than it, so the last\n`op` of a page reads on from there. When omitted, from the newest.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "limit": {
+                    "default": 50,
+                    "description": "The most operations to return: at least 1 (0 is `E_INVALID_ARG`).",
+                    "format": "uint",
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "max_changesets": {
+                    "default": 20,
+                    "description": "The most changesets to list for each operation; `changesets_total` counts them all.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "title": "OpLogReq",
+                "type": "object"
+              },
+              "name": "op_log",
+              "title": "List operations"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Every ref, the changeset it points at, and how many moves it has had.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ref list`: list every ref. It has no options yet.",
+                "title": "RefListReq",
+                "type": "object"
+              },
+              "name": "ref_list",
+              "title": "List refs"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Moves a ref, or creates one, by compare-and-swap: give create, or expected_old, the full 64-hex changeset id the ref held when you read it; a ref name or a relative revision is refused, since it is read when the call runs instead of pinning the id you read, and so is an id prefix, which stops resolving once another changeset shares it.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ref set`: move a ref, or create one, by compare-and-swap. Give exactly one of\n`expected_old` and `create`; both or neither is `E_INVALID_ARG`.",
+                "properties": {
+                  "create": {
+                    "default": false,
+                    "description": "To create the ref. If it exists at another target, the move fails with `E_CAS_MISMATCH`;\nif it already holds `new`, nothing is written and the response is a replay\n(`already_applied`). Give this or `expected_old`, not both.",
+                    "type": "boolean"
+                  },
+                  "expected_old": {
+                    "anyOf": [
+                      {
+                        "pattern": "^[0-9a-fA-F]{64}$",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "To move an existing ref: the target the caller last saw, by its full changeset id; if the\nref holds another, the move fails with `E_CAS_MISMATCH`. A ref name or a relative\nrevision is read from the store when the move runs instead of pinning the id the caller\nread: the ref's own name always matches, so the compare-and-swap protects nothing, and\n`main~1` on `main` never matches. An id prefix pins the id the caller read only until\nanother changeset shares it; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all\nthree (`E_INVALID_ARG`), and the CLI's `--expect` help warns against them. Give this or\n`create`, not both."
+                  },
+                  "name": {
+                    "description": "The ref: `main` or `release/<name>`.",
+                    "type": "string"
+                  },
+                  "new": {
+                    "description": "The revision to point it at. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "new"
+                ],
+                "title": "RefSetReq",
+                "type": "object"
+              },
+              "name": "ref_set",
+              "title": "Move a ref"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Removes a ref by compare-and-swap, if it still holds expected_old, the full 64-hex changeset id it held when you read it; a ref name or a relative revision is refused, since it is read when the call runs instead of pinning the id you read, and so is an id prefix, which stops resolving once another changeset shares it.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`ref delete`: remove a ref by compare-and-swap.",
+                "properties": {
+                  "expected_old": {
+                    "description": "The target the caller last saw, by its full changeset id; if the ref holds another, the\ndelete fails with `E_CAS_MISMATCH`. A ref name or a relative revision is read from the\nstore when the delete runs instead of pinning the id the caller read: the ref's own name\nalways matches, so the compare-and-swap protects nothing, and `main~1` on `main` never\nmatches. An id prefix pins the id the caller read only until another changeset shares\nit; then it is `E_AMBIGUOUS_ID`. `swarmops mcp` refuses all three (`E_INVALID_ARG`), and\nthe CLI's `--expect` help warns against them.",
+                    "pattern": "^[0-9a-fA-F]{64}$",
+                    "type": "string"
+                  },
+                  "name": {
+                    "description": "The ref.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "expected_old"
+                ],
+                "title": "RefDeleteReq",
+                "type": "object"
+              },
+              "name": "ref_delete",
+              "title": "Delete a ref"
+            },
+            {
+              "annotations": {
+                "destructiveHint": true,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Moves every ref an operation of op_log moved back to what it named before, by compare-and-swap in one transaction: all of them or none. A ref moved since stops it (E_CAS_MISMATCH, nothing written: undo the later operations first); an undo run again is a replay (already_applied). Changesets are never removed.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by\ncompare-and-swap, in one transaction: all of them or none. Changesets are never removed.",
+                "properties": {
+                  "op": {
+                    "description": "The operation to undo: its `op` in the operation log.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "title": "UndoReq",
+                "type": "object"
+              },
+              "name": "undo",
+              "title": "Undo an operation"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Records a changeset from an explicit change list, on parent or else on main's head. With advance it also moves that ref to the changeset in the same transaction, only if the ref still names parent, which must then be the full 64-hex id you read; otherwise it records nothing (E_CAS_MISMATCH, details.committed false). Check result.advanced: a server that does not know advance moves no ref. An idempotency_key, a uuid v7 new for each commit, makes a retry safe: the same call again replays it (result.replayed) instead of recording it twice. A {\"file\": path} content is read by this server: give an absolute path.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`commit`: record a changeset from an explicit change list. It moves no ref, unless\n`advance` names one.",
+                "properties": {
+                  "advance": {
+                    "description": "Also move this ref (`main` or `release/<name>`) to the new changeset, in the same\ntransaction as the changeset itself, so that both are recorded or neither. The move\nhappens only if the ref still names the changeset's parent (for a root commit, only if the\nref does not exist yet): it is always a one-step fast-forward. Otherwise nothing is\nrecorded and the commit fails with `E_CAS_MISMATCH` (`details.committed: false`,\n`details.actual` what the ref names). Give as `parent` the full id the ref held when you\nread it: without `parent` the commit builds on the ref's head when it runs, so the move\ncatches a race from there on, not a change made since you read the ref (M1 has no\nmerge). `swarmops mcp` refuses `advance` without a full 64-hex `parent` (`E_INVALID_ARG`).\nA store that does not know this field ignores it and moves no ref: its response has no\n`advanced`.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "allow_empty": {
+                    "default": false,
+                    "description": "Record the changeset even if it changes nothing.",
+                    "type": "boolean"
+                  },
+                  "changes": {
+                    "description": "What to change, relative to the parent. The contents hold at most 1 GiB together, by the\nsizes they declare (inline text's length, the bytes base64 decodes to, a client file's\nlength; a `blob` named by id counts nothing): more is `E_TOO_LARGE` with `scope`\n`commit`, refused before any content is read. Store large contents with `blob_put` first,\nand name them by id.",
+                    "items": {
+                      "description": "One change of a commit.",
+                      "properties": {
+                        "content": {
+                          "anyOf": [
+                            {
+                              "description": "A `put`'s content, as an object with one key.",
+                              "oneOf": [
+                                {
+                                  "additionalProperties": false,
+                                  "description": "UTF-8 text, verbatim.",
+                                  "properties": {
+                                    "inline": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "inline"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "description": "Bytes in standard, padded base64.",
+                                  "properties": {
+                                    "base64": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "base64"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                                  "properties": {
+                                    "blob": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "blob"
+                                  ],
+                                  "type": "object"
+                                },
+                                {
+                                  "additionalProperties": false,
+                                  "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+                                  "properties": {
+                                    "file": {
+                                      "type": "string"
+                                    }
+                                  },
+                                  "required": [
+                                    "file"
+                                  ],
+                                  "type": "object"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The new content, at most 512 MiB (more is `E_TOO_LARGE` with `scope` `put`); a `put` needs\nit, a `delete` takes none."
+                        },
+                        "mode": {
+                          "anyOf": [
+                            {
+                              "description": "The kind of entry a `put` writes.",
+                              "oneOf": [
+                                {
+                                  "const": "file",
+                                  "description": "A regular file (git mode 100644).",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "exec",
+                                  "description": "An executable file (git mode 100755).",
+                                  "type": "string"
+                                },
+                                {
+                                  "const": "symlink",
+                                  "description": "A symlink; the content is the link's target.",
+                                  "type": "string"
+                                }
+                              ]
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ],
+                          "description": "The kind of entry a `put` writes; `file` when omitted."
+                        },
+                        "op": {
+                          "description": "Whether to write the path or remove it. What a change does to its path, in a commit's change list and a changeset's changes alike.",
+                          "oneOf": [
+                            {
+                              "const": "put",
+                              "description": "Write the content at the path, creating or replacing the entry.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "delete",
+                              "description": "Remove the path.",
+                              "type": "string"
+                            }
+                          ]
+                        },
+                        "path": {
+                          "description": "The repository path: `/`-separated, relative to the root.",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "op"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "idempotency_key": {
+                    "description": "Makes a retry of this commit safe: a uuid v7 (anything else is `E_INVALID_ARG`). The\ncommit takes the key's time, to the second, as its signature time and records the key as\n`commit_key` metadata, so the same request on the same parent makes the same changeset,\nwhich the store holds already: the response says `replayed`, and nothing is written.\nWith `advance`, a ref whose head carries the key is a replay too. Give `parent` by its full\nid: without it, a retry after the head moved commits again, on the new head.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "message": {
+                    "description": "The commit message.",
+                    "type": "string"
+                  },
+                  "parent": {
+                    "anyOf": [
+                      {
+                        "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "The changeset to commit on top of. An explicit `parent` always wins; when it is omitted,\nthe current head of the ref `advance` names is used, else of `main`, if that ref exists,\nand otherwise the commit is a root commit. `null` is the same as omitting it. Once `main`\nexists, a root commit needs an `advance` naming a ref that does not exist yet (a known M1\nlimitation)."
+                  }
+                },
+                "required": [
+                  "changes",
+                  "message"
+                ],
+                "title": "CommitReq",
+                "type": "object"
+              },
+              "name": "commit",
+              "title": "Commit a changeset"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Merges head (with its first-parent chain since base) three-way onto target, main by default, and publishes the result as one changeset in one transaction; on E_CONFLICT, details.report lists each conflict: resolve them with resolutions, against the report's theirs, its full 64-hex id (a path the target changed since comes back in the report's stale). Give idempotency_key to make a retry safe.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`land`: merge a change three-way onto a target ref and publish it there as one new\nchangeset, in one transaction (operations spec §3). The change is `head` with its\nfirst-parent chain after `base`, squashed: the landed changeset's parent is the target's\nhead, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in\n`details.report`; nothing is recorded then.",
+                "properties": {
+                  "base": {
+                    "anyOf": [
+                      {
+                        "description": "A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                        "type": "string"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "Where the change starts: a first-parent ancestor of `head`, whose own changes are not part\nof it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the\nmerge base of `head` and the target's head, along first parents."
+                  },
+                  "head": {
+                    "description": "The changeset to land: the change's head. A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                    "type": "string"
+                  },
+                  "idempotency_key": {
+                    "description": "Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land\nwith a key first looks down the target's first parents, to `base`, for a changeset that\nlanded with the same key: one squashed from this `head` is the replay, which writes\nnothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used\nfor another change.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "max_attempts": {
+                    "default": 8,
+                    "description": "How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32.",
+                    "format": "uint32",
+                    "maximum": 32,
+                    "minimum": 1,
+                    "type": "integer"
+                  },
+                  "max_conflict_bytes": {
+                    "default": 32768,
+                    "description": "The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left\nout (`truncated`), and the line positions and blob ids stay.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "message": {
+                    "description": "The landed changeset's message; `head`'s when omitted.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "resolutions": {
+                    "anyOf": [
+                      {
+                        "description": "A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change\nonto the target, decided against one of the target's heads.",
+                        "properties": {
+                          "against": {
+                            "description": "The target's head the resolutions were decided against: the conflict report's `theirs`,\nby its full 64-hex id. A resolution applies while the target holds its path as this\nchangeset does (the same file, the same directory, or nothing). A revision as the caller wrote it, for the store to resolve: a ref name (`main`,\n`release/1.2`), a full 64-hex changeset id or a unique prefix of at least 12 hex digits,\noptionally followed by `~N` for the N-th first-parent ancestor.",
+                            "type": "string"
+                          },
+                          "files": {
+                            "additionalProperties": {
+                              "description": "What a land makes of one path, and of every path below it: exactly one of `take`, `content`\nand `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the\nmerge as it merged.",
+                              "properties": {
+                                "content": {
+                                  "anyOf": [
+                                    {
+                                      "description": "A `put`'s content, as an object with one key.",
+                                      "oneOf": [
+                                        {
+                                          "additionalProperties": false,
+                                          "description": "UTF-8 text, verbatim.",
+                                          "properties": {
+                                            "inline": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "inline"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        {
+                                          "additionalProperties": false,
+                                          "description": "Bytes in standard, padded base64.",
+                                          "properties": {
+                                            "base64": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "base64"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        {
+                                          "additionalProperties": false,
+                                          "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                                          "properties": {
+                                            "blob": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "blob"
+                                          ],
+                                          "type": "object"
+                                        },
+                                        {
+                                          "additionalProperties": false,
+                                          "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+                                          "properties": {
+                                            "file": {
+                                              "type": "string"
+                                            }
+                                          },
+                                          "required": [
+                                            "file"
+                                          ],
+                                          "type": "object"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ],
+                                  "description": "One file of new content, given as a commit's change gives it (inline, base64, a client\nfile, or a stored blob by id), within a commit's limits; nothing below it."
+                                },
+                                "delete": {
+                                  "description": "Nothing there: no file at the path, nor below it.",
+                                  "type": "boolean"
+                                },
+                                "mode": {
+                                  "anyOf": [
+                                    {
+                                      "description": "The kind of entry a `put` writes.",
+                                      "oneOf": [
+                                        {
+                                          "const": "file",
+                                          "description": "A regular file (git mode 100644).",
+                                          "type": "string"
+                                        },
+                                        {
+                                          "const": "exec",
+                                          "description": "An executable file (git mode 100755).",
+                                          "type": "string"
+                                        },
+                                        {
+                                          "const": "symlink",
+                                          "description": "A symlink; the content is the link's target.",
+                                          "type": "string"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ],
+                                  "description": "The kind of the file `content` makes, only beside it; when omitted, the kind of the file\nours holds there, else theirs', else a regular file."
+                                },
+                                "take": {
+                                  "anyOf": [
+                                    {
+                                      "description": "One side of a land's merge.",
+                                      "oneOf": [
+                                        {
+                                          "const": "ours",
+                                          "description": "The change: its head.",
+                                          "type": "string"
+                                        },
+                                        {
+                                          "const": "theirs",
+                                          "description": "The target: its head when the land merges.",
+                                          "type": "string"
+                                        }
+                                      ]
+                                    },
+                                    {
+                                      "type": "null"
+                                    }
+                                  ],
+                                  "description": "What one side holds there: `ours`, the change's head, or `theirs`, the target's head."
+                                }
+                              },
+                              "type": "object"
+                            },
+                            "description": "What to make of each path, by its repository path.",
+                            "type": "object"
+                          }
+                        },
+                        "required": [
+                          "against",
+                          "files"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "description": "What to make of the paths an `E_CONFLICT` report named, decided without a checkout\n(operations spec §3, resolution path (b)). Each resolution applies to its path while the\ntarget holds there what `against` held, whether the path conflicts or not; a path the\ntarget changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report\nthat names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses\nan `against` that is not a full 64-hex id (`E_INVALID_ARG`)."
+                  },
+                  "target": {
+                    "default": "main",
+                    "description": "The ref to land on: `main` or `release/<name>`, which must exist.",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "head"
+                ],
+                "title": "LandReq",
+                "type": "object"
+              },
+              "name": "land",
+              "title": "Land a change"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": false,
+                "openWorldHint": false,
+                "readOnlyHint": false
+              },
+              "description": "Stores content as a blob, outside any commit, and gives its id: a commit's change then names it as {\"blob\": id} content instead of carrying its bytes, the way to commit a large file. A {\"file\": path} content is read by this server: give an absolute path. A hint's swarmops blob put is this tool.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's\nchange list can name it by its id (`{\"blob\": id}`) instead of carrying its bytes. The blob is\ndurable once the call returns; until a commit names it, nothing references it.",
+                "properties": {
+                  "content": {
+                    "description": "The content: inline, base64 or a client file, at most 512 MiB (more is `E_TOO_LARGE` with\n`scope` `put`). A `blob` names content the store holds already, and is `E_INVALID_ARG`\nhere. A `put`'s content, as an object with one key.",
+                    "oneOf": [
+                      {
+                        "additionalProperties": false,
+                        "description": "UTF-8 text, verbatim.",
+                        "properties": {
+                          "inline": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "inline"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "description": "Bytes in standard, padded base64.",
+                        "properties": {
+                          "base64": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "base64"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "description": "A blob the store holds already, by its id (64 hex digits), as `blob_put` returns it: the\ncommit neither sends nor reads its bytes. An id the store holds no blob under (none, or\na tree's or a changeset's) is `E_INVALID_ARG`, and nothing is written. `blob_put` takes\nthe other forms only.",
+                        "properties": {
+                          "blob": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "blob"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "description": "A file on the client's machine. The client reads it and sends its bytes, so the store is\nnever asked to read a path.",
+                        "properties": {
+                          "file": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "file"
+                        ],
+                        "type": "object"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "content"
+                ],
+                "title": "BlobPutReq",
+                "type": "object"
+              },
+              "name": "blob_put",
+              "title": "Store a blob"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Of the blob ids given, the ones the store holds blobs under: the contents a commit can name by id without storing them again.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`blob_has` (CLI `blob has`): which of some blobs the store holds.",
+                "properties": {
+                  "ids": {
+                    "description": "The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "ids"
+                ],
+                "title": "BlobHasReq",
+                "type": "object"
+              },
+              "name": "blob_has",
+              "title": "Find stored blobs"
+            },
+            {
+              "annotations": {
+                "destructiveHint": false,
+                "idempotentHint": true,
+                "openWorldHint": false,
+                "readOnlyHint": true
+              },
+              "description": "Checks the whole store's consistency; deep re-hashes every object and checks the derived values against the objects too.",
+              "inputSchema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "description": "`verify`: check the whole store's consistency.",
+                "properties": {
+                  "deep": {
+                    "default": false,
+                    "description": "Re-hash every object, and check every derived value of the built-in derivations (the\nfirst-parent skip lists, the last touches of paths) against the objects. When `false`,\nverify checks structure only: parents, that referenced objects exist, the index against\nthe journal, and refs.",
+                    "type": "boolean"
+                  }
+                },
+                "title": "VerifyReq",
+                "type": "object"
+              },
+              "name": "verify",
+              "title": "Verify the store"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "repo_info"
+        }
+      },
+      "response": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"repo_info\",\"api\":1,\"result\":{\"repo_id\":\"[repo_id]\",\"name\":\"store\",\"store_version\":1,\"changesets\":0,\"refs\":0},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "repo_info",
+            "result": {
+              "changesets": 0,
+              "name": "store",
+              "refs": 0,
+              "repo_id": "[repo_id]",
+              "store_version": 1
+            }
+          }
+        }
+      }
+    }
+  ]
+}
