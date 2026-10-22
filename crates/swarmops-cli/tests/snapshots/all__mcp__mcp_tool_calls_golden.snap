@@ -1,0 +1,1188 @@
+---
+source: crates/swarmops-cli/tests/mcp.rs
+expression: transcript
+---
+{
+  "args": "mcp --repo [tmp]/store --as agent/worker-17",
+  "steps": [
+    {
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "initialize",
+        "params": {
+          "capabilities": {},
+          "clientInfo": {
+            "name": "swarmops-tests",
+            "version": "0"
+          },
+          "protocolVersion": "2025-11-25"
+        }
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {
+          "capabilities": {
+            "tools": {}
+          },
+          "instructions": "SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. Each tool is one store operation, and its result is the SwarmOps envelope {ok, op, api, result | error, meta}, as structuredContent and again as JSON text. A failed operation sets isError and gives error {code, message, retryable, exit, details, hint}: retryable says whether the operation can succeed when it is run again, as it is or after re-reading what the hint names, and a hint is often a swarmops command, whose operation is the tool of the same name (ref list is ref_list, cat read_file, ls read_tree, info repo_info). commit records a changeset; with advance it also moves that ref to it in the same transaction, if the ref still names parent: check result.advanced. ref_set and ref_delete change a ref by compare-and-swap, so their expected_old, like commit's parent with advance, is the full 64-hex changeset id the ref held when you read it (from ref_list, show, log or a commit's result). A ref name or a relative revision is read when the call runs instead of pinning the id you read: the ref's own name always matches, so the compare-and-swap protects nothing, and main~1 on ref main never matches; an id prefix stops resolving once another changeset shares it; the server refuses all three. To publish a changeset, land it: land merges it three-way onto main and moves main in one step, and on E_CONFLICT details.report says what to resolve. A read may show a commit that a failed sync then takes back; a mutation that names it fails under the lock instead of building on it. op_log lists the store's transactions, newest first; undo restores the refs one moved while they still hold what it set. Clients limit long tool results: ask for little, as each tool's description says. A {\"file\": path} content is read by this server, not by your client: give an absolute path (a relative one, or the server's own stdin or stdout, is refused). Every change is recorded for the agent the server runs as.",
+          "protocolVersion": "2025-11-25",
+          "serverInfo": {
+            "name": "swarmops",
+            "title": "SwarmOps",
+            "version": "[version]"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "jsonrpc": "2.0",
+        "method": "notifications/initialized"
+      }
+    },
+    {
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "repo_info"
+        }
+      },
+      "response": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"repo_info\",\"api\":1,\"result\":{\"repo_id\":\"[repo_id]\",\"name\":\"store\",\"store_version\":1,\"changesets\":0,\"refs\":0},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "repo_info",
+            "result": {
+              "changesets": 0,
+              "name": "store",
+              "refs": 0,
+              "repo_id": "[repo_id]",
+              "store_version": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "content": {
+              "inline": "# acme\n"
+            }
+          },
+          "name": "blob_put"
+        }
+      },
+      "response": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"blob_put\",\"api\":1,\"result\":{\"blob\":\"[blob]\",\"size\":7,\"written\":true},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "blob_put",
+            "result": {
+              "blob": "[blob]",
+              "size": 7,
+              "written": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "ids": [
+              "[blob]"
+            ]
+          },
+          "name": "blob_has"
+        }
+      },
+      "response": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"blob_has\",\"api\":1,\"result\":{\"present\":[\"[blob]\"]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "blob_has",
+            "result": {
+              "present": [
+                "[blob]"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "changes": [
+              {
+                "content": {
+                  "blob": "[blob]"
+                },
+                "op": "put",
+                "path": "README.md"
+              },
+              {
+                "content": {
+                  "inline": "pub fn f() {}\n"
+                },
+                "op": "put",
+                "path": "src/lib.rs"
+              }
+            ],
+            "message": "first"
+          },
+          "name": "commit"
+        }
+      },
+      "response": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"commit\",\"api\":1,\"result\":{\"changeset\":\"[c1]\",\"root\":\"[id1]\",\"files_changed\":2,\"blobs_written\":1,\"replayed\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "commit",
+            "result": {
+              "blobs_written": 1,
+              "changeset": "[c1]",
+              "files_changed": 2,
+              "replayed": false,
+              "root": "[id1]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "create": true,
+            "name": "main",
+            "new": "[c1]"
+          },
+          "name": "ref_set"
+        }
+      },
+      "response": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"ref_set\",\"api\":1,\"result\":{\"name\":\"main\",\"new\":\"[c1]\",\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[c1]": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "ref_set",
+            "result": {
+              "already_applied": false,
+              "name": "main",
+              "new": "[c1]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "rev": "main"
+          },
+          "name": "resolve_rev"
+        }
+      },
+      "response": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"resolve_rev\",\"api\":1,\"result\":{\"id\":\"[c1]\",\"kind\":\"ref\"},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "resolve_rev",
+            "result": {
+              "id": "[c1]",
+              "kind": "ref"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "path": "README.md",
+            "rev": "main"
+          },
+          "name": "read_file"
+        }
+      },
+      "response": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"read_file\",\"api\":1,\"result\":{\"blob\":\"[blob]\",\"size\":7,\"kind\":\"file\",\"encoding\":\"utf8\",\"content\":\"# acme\\n\",\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "read_file",
+            "result": {
+              "blob": "[blob]",
+              "content": "# acme\n",
+              "encoding": "utf8",
+              "kind": "file",
+              "size": 7,
+              "truncated": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "rev": "main"
+          },
+          "name": "read_tree"
+        }
+      },
+      "response": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"read_tree\",\"api\":1,\"result\":{\"entries\":[{\"name\":\"README.md\",\"kind\":\"file\",\"size\":7,\"id\":\"[blob]\"},{\"name\":\"src\",\"kind\":\"dir\",\"id\":\"[id2]\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "read_tree",
+            "result": {
+              "entries": [
+                {
+                  "id": "[blob]",
+                  "kind": "file",
+                  "name": "README.md",
+                  "size": 7
+                },
+                {
+                  "id": "[id2]",
+                  "kind": "dir",
+                  "name": "src"
+                }
+              ],
+              "truncated": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "changes": [
+              {
+                "content": {
+                  "inline": "pub fn g() {}\n"
+                },
+                "op": "put",
+                "path": "src/lib.rs"
+              }
+            ],
+            "message": "change f",
+            "parent": "[c1]"
+          },
+          "name": "commit"
+        }
+      },
+      "response": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"commit\",\"api\":1,\"result\":{\"changeset\":\"[head]\",\"parent\":\"[c1]\",\"root\":\"[id3]\",\"files_changed\":1,\"blobs_written\":1,\"replayed\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[c1]": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "commit",
+            "result": {
+              "blobs_written": 1,
+              "changeset": "[head]",
+              "files_changed": 1,
+              "parent": "[c1]",
+              "replayed": false,
+              "root": "[id3]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "advance": "main",
+            "changes": [
+              {
+                "content": {
+                  "inline": "docs\n"
+                },
+                "op": "put",
+                "path": "docs.md"
+              }
+            ],
+            "message": "add docs",
+            "parent": "[c1]"
+          },
+          "name": "commit"
+        }
+      },
+      "response": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"commit\",\"api\":1,\"result\":{\"changeset\":\"[theirs]\",\"parent\":\"[c1]\",\"root\":\"[id4]\",\"files_changed\":1,\"blobs_written\":1,\"advanced\":{\"name\":\"main\",\"old\":\"[c1]\",\"new\":\"[theirs]\",\"already_applied\":false},\"replayed\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[c1]": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "commit",
+            "result": {
+              "advanced": {
+                "already_applied": false,
+                "name": "main",
+                "new": "[theirs]",
+                "old": "[c1]"
+              },
+              "blobs_written": 1,
+              "changeset": "[theirs]",
+              "files_changed": 1,
+              "parent": "[c1]",
+              "replayed": false,
+              "root": "[id4]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "head": "[head]",
+            "idempotency_key": "land-7"
+          },
+          "name": "land"
+        }
+      },
+      "response": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"land\",\"api\":1,\"result\":{\"status\":\"landed\",\"landed\":\"[landed]\",\"rebased_onto\":\"[theirs]\",\"target\":\"main\",\"base\":\"[c1]\",\"attempts\":1,\"relocated\":false,\"files_changed\":1,\"squashed_from\":[\"[head]\"]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[head]\":\"[head]\",\"main\":\"[theirs]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[head]": "[head]",
+                "main": "[theirs]"
+              }
+            },
+            "ok": true,
+            "op": "land",
+            "result": {
+              "attempts": 1,
+              "base": "[c1]",
+              "files_changed": 1,
+              "landed": "[landed]",
+              "rebased_onto": "[theirs]",
+              "relocated": false,
+              "squashed_from": [
+                "[head]"
+              ],
+              "status": "landed",
+              "target": "main"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "rev": "[landed]"
+          },
+          "name": "show"
+        }
+      },
+      "response": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"show\",\"api\":1,\"result\":{\"id\":\"[landed]\",\"seq\":3,\"parents\":[\"[theirs]\"],\"root\":\"[id5]\",\"author\":{\"agent\":\"agent/worker-17\"},\"lander\":{\"agent\":\"agent/worker-17\"},\"created_at\":\"[created_at]\",\"message\":\"change f\",\"land_key\":\"land-7\",\"squashed_from\":[\"[head]\"],\"changes\":[{\"path\":\"src/lib.rs\",\"op\":\"put\",\"kind\":\"file\",\"blob\":\"[id6]\"}],\"files_changed\":1,\"changes_truncated\":false,\"metadata\":{\"agent\":\"agent/worker-17\",\"land_key\":\"land-7\",\"lander\":\"agent/worker-17\",\"squashed_from\":\"[head]\"},\"signatures\":{\"author\":{\"name\":\"agent/worker-17\",\"email\":\"worker-17@agent.swarmops.local\",\"secs\":\"[secs]\",\"offset_secs\":0},\"committer\":{\"name\":\"agent/worker-17\",\"email\":\"worker-17@agent.swarmops.local\",\"secs\":\"[secs]\",\"offset_secs\":0}}},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[landed]\":\"[landed]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[landed]": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "show",
+            "result": {
+              "author": {
+                "agent": "agent/worker-17"
+              },
+              "changes": [
+                {
+                  "blob": "[id6]",
+                  "kind": "file",
+                  "op": "put",
+                  "path": "src/lib.rs"
+                }
+              ],
+              "changes_truncated": false,
+              "created_at": "[created_at]",
+              "files_changed": 1,
+              "id": "[landed]",
+              "land_key": "land-7",
+              "lander": {
+                "agent": "agent/worker-17"
+              },
+              "message": "change f",
+              "metadata": {
+                "agent": "agent/worker-17",
+                "land_key": "land-7",
+                "lander": "agent/worker-17",
+                "squashed_from": "[head]"
+              },
+              "parents": [
+                "[theirs]"
+              ],
+              "root": "[id5]",
+              "seq": 3,
+              "signatures": {
+                "author": {
+                  "email": "worker-17@agent.swarmops.local",
+                  "name": "agent/worker-17",
+                  "offset_secs": 0,
+                  "secs": "[secs]"
+                },
+                "committer": {
+                  "email": "worker-17@agent.swarmops.local",
+                  "name": "agent/worker-17",
+                  "offset_secs": 0,
+                  "secs": "[secs]"
+                }
+              },
+              "squashed_from": [
+                "[head]"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "rev": "main"
+          },
+          "name": "log"
+        }
+      },
+      "response": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"log\",\"api\":1,\"result\":{\"entries\":[{\"id\":\"[landed]\",\"parents\":[\"[theirs]\"],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"change f\"},{\"id\":\"[theirs]\",\"parents\":[\"[c1]\"],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"add docs\"},{\"id\":\"[c1]\",\"parents\":[],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"first\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "log",
+            "result": {
+              "entries": [
+                {
+                  "author_agent": "agent/worker-17",
+                  "created_at": "[created_at]",
+                  "id": "[landed]",
+                  "parents": [
+                    "[theirs]"
+                  ],
+                  "title": "change f"
+                },
+                {
+                  "author_agent": "agent/worker-17",
+                  "created_at": "[created_at]",
+                  "id": "[theirs]",
+                  "parents": [
+                    "[c1]"
+                  ],
+                  "title": "add docs"
+                },
+                {
+                  "author_agent": "agent/worker-17",
+                  "created_at": "[created_at]",
+                  "id": "[c1]",
+                  "parents": [],
+                  "title": "first"
+                }
+              ],
+              "truncated": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "path": "src/lib.rs"
+          },
+          "name": "path_history"
+        }
+      },
+      "response": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"path_history\",\"api\":1,\"result\":{\"path\":\"src/lib.rs\",\"entries\":[{\"changeset\":\"[landed]\",\"op\":\"put\",\"kind\":\"file\",\"id\":\"[id6]\",\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"change f\"},{\"changeset\":\"[c1]\",\"op\":\"put\",\"kind\":\"file\",\"id\":\"[id7]\",\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"first\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "path_history",
+            "result": {
+              "entries": [
+                {
+                  "author_agent": "agent/worker-17",
+                  "changeset": "[landed]",
+                  "created_at": "[created_at]",
+                  "id": "[id6]",
+                  "kind": "file",
+                  "op": "put",
+                  "title": "change f"
+                },
+                {
+                  "author_agent": "agent/worker-17",
+                  "changeset": "[c1]",
+                  "created_at": "[created_at]",
+                  "id": "[id7]",
+                  "kind": "file",
+                  "op": "put",
+                  "title": "first"
+                }
+              ],
+              "path": "src/lib.rs",
+              "truncated": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "format": "stat",
+            "from": "[c1]",
+            "to": "main"
+          },
+          "name": "diff"
+        }
+      },
+      "response": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"diff\",\"api\":1,\"result\":{\"from\":\"[c1]\",\"to\":\"[landed]\",\"files\":[{\"path\":\"docs.md\",\"status\":\"added\",\"binary\":false,\"insertions\":1,\"deletions\":0},{\"path\":\"src/lib.rs\",\"status\":\"modified\",\"binary\":false,\"insertions\":1,\"deletions\":1}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\",\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[c1]": "[c1]",
+                "main": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "diff",
+            "result": {
+              "files": [
+                {
+                  "binary": false,
+                  "deletions": 0,
+                  "insertions": 1,
+                  "path": "docs.md",
+                  "status": "added"
+                },
+                {
+                  "binary": false,
+                  "deletions": 1,
+                  "insertions": 1,
+                  "path": "src/lib.rs",
+                  "status": "modified"
+                }
+              ],
+              "from": "[c1]",
+              "to": "[landed]",
+              "truncated": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "create": true,
+            "name": "release/v1",
+            "new": "[c1]"
+          },
+          "name": "ref_set"
+        }
+      },
+      "response": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"ref_set\",\"api\":1,\"result\":{\"name\":\"release/v1\",\"new\":\"[c1]\",\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[c1]": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "ref_set",
+            "result": {
+              "already_applied": false,
+              "name": "release/v1",
+              "new": "[c1]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "expected_old": "[c1]",
+            "name": "release/v1"
+          },
+          "name": "ref_delete"
+        }
+      },
+      "response": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"ref_delete\",\"api\":1,\"result\":{\"name\":\"release/v1\",\"old\":\"[c1]\",\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[c1]": "[c1]"
+              }
+            },
+            "ok": true,
+            "op": "ref_delete",
+            "result": {
+              "already_applied": false,
+              "name": "release/v1",
+              "old": "[c1]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "limit": 2
+          },
+          "name": "op_log"
+        }
+      },
+      "response": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"op_log\",\"api\":1,\"result\":{\"ops\":[{\"op\":6,\"kind\":\"ref_move\",\"changesets\":[],\"changesets_total\":0,\"ref_moves\":[{\"name\":\"release/v1\",\"old\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}]},{\"op\":5,\"kind\":\"ref_move\",\"changesets\":[],\"changesets_total\":0,\"ref_moves\":[{\"name\":\"release/v1\",\"new\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}]}],\"truncated\":true},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "op_log",
+            "result": {
+              "ops": [
+                {
+                  "changesets": [],
+                  "changesets_total": 0,
+                  "kind": "ref_move",
+                  "op": 6,
+                  "ref_moves": [
+                    {
+                      "actor": "agent/worker-17",
+                      "at": "[at]",
+                      "name": "release/v1",
+                      "old": "[c1]"
+                    }
+                  ]
+                },
+                {
+                  "changesets": [],
+                  "changesets_total": 0,
+                  "kind": "ref_move",
+                  "op": 5,
+                  "ref_moves": [
+                    {
+                      "actor": "agent/worker-17",
+                      "at": "[at]",
+                      "name": "release/v1",
+                      "new": "[c1]"
+                    }
+                  ]
+                }
+              ],
+              "truncated": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 20,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "op": 6
+          },
+          "name": "undo"
+        }
+      },
+      "response": {
+        "id": 20,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"undo\",\"api\":1,\"result\":{\"undone\":6,\"op\":7,\"ref_moves\":[{\"name\":\"release/v1\",\"new\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}],\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "undo",
+            "result": {
+              "already_applied": false,
+              "op": 7,
+              "ref_moves": [
+                {
+                  "actor": "agent/worker-17",
+                  "at": "[at]",
+                  "name": "release/v1",
+                  "new": "[c1]"
+                }
+              ],
+              "undone": 6
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 21,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "ref_list"
+        }
+      },
+      "response": {
+        "id": 21,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"ref_list\",\"api\":1,\"result\":{\"refs\":[{\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "ref_list",
+            "result": {
+              "refs": [
+                {
+                  "name": "main",
+                  "target": "[landed]",
+                  "version": 3
+                },
+                {
+                  "name": "release/v1",
+                  "target": "[c1]",
+                  "version": 1
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 22,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "verify"
+        }
+      },
+      "response": {
+        "id": 22,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"ok\":true,\"op\":\"verify\",\"api\":1,\"result\":{\"objects_checked\":14,\"changesets_checked\":4,\"problems\":[],\"findings\":[]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "verify",
+            "result": {
+              "changesets_checked": 4,
+              "findings": [],
+              "objects_checked": 14,
+              "problems": []
+            }
+          }
+        }
+      }
+    }
+  ]
+}
