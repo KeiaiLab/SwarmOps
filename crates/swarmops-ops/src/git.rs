@@ -20,16 +20,17 @@
 use std::path::Path;
 
 use swarmops_api::{
-    GitExportReq, GitExportResp, GitImportReq, GitImportResp, Identity, LossyClass, LossyCommitOut,
-    OpError,
+    ErrorCode, GitExportReq, GitExportResp, GitImportReq, GitImportResp, Identity, LossyClass,
+    LossyCommitOut, OpError,
 };
+use swarmops_git::mirror::inside_store_git;
 use swarmops_git::{
     ExportError, ExportReport, ExportRequest, GixSink, GixSource, ImportError, ImportReport,
     ImportRequest,
 };
 use swarmops_store::{Recovered, TailRepair, check_ref_name};
 
-use crate::error::{git_export_error, git_import_error};
+use crate::error::{details, error, git_export_error, git_import_error};
 use crate::local::{LocalOps, Recording, Resolved};
 
 impl LocalOps {
@@ -53,7 +54,8 @@ impl Recording<'_> {
     /// for `who`'s agent. A client-side operation, not a [`StoreOps`](swarmops_api::StoreOps)
     /// one: `git_path` is opened on this host, relative to the working directory. The target is
     /// checked first, then the repository opened, so a target that is no ref name is
-    /// `E_REF_NAME_INVALID` whatever the path holds. What the import's writes repaired before
+    /// `E_REF_NAME_INVALID` whatever the path holds; a path inside a store's `git/`, the mirror,
+    /// is then `E_INVALID_ARG` `store_mirror`. What the import's writes repaired before
     /// their own work, of what earlier writers left, is recorded in the request's [`Resolved`]
     /// (`meta.recovered`), on success. [`LocalOps`]' documentation gives the errors.
     pub fn git_import(&self, who: &Identity, req: GitImportReq) -> Result<GitImportResp, OpError> {
@@ -67,6 +69,7 @@ impl Recording<'_> {
         if check_ref_name(&target_ref).is_err() {
             return Err(failed(ImportError::RefName(target_ref)));
         }
+        refuse_mirror(&git_path)?;
         let source = GixSource::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
         let mut request = ImportRequest::new(git_ref.as_str(), target_ref, who.agent());
         request.lossy = lossy.into_iter().map(import_class).collect();
@@ -83,7 +86,8 @@ impl Recording<'_> {
     /// (the M8 plan's decision 8): it writes the git repository and two caches of the store, the
     /// derived values and the external id entries, and no journal frame. The source ref is
     /// checked as a ref name first, then the repository opened, so a source that is no ref name is
-    /// `E_REF_NAME_INVALID` whatever the path holds. The head the source ref named, read in a
+    /// `E_REF_NAME_INVALID` whatever the path holds; a path inside a store's `git/`, the mirror,
+    /// is then `E_INVALID_ARG` `store_mirror`. The head the source ref named, read in a
     /// committed snapshot, is recorded in the request's [`Resolved`] under the ref's name (on
     /// success, and on a divergence, which names it), and what the snapshot's tail check repaired
     /// as its `meta.recovered`, on success. [`LocalOps`]' documentation gives the errors.
@@ -98,6 +102,7 @@ impl Recording<'_> {
         if check_ref_name(&source_ref).is_err() {
             return Err(failed(ExportError::RefName(source_ref.clone())));
         }
+        refuse_mirror(&git_path)?;
         let mut sink = GixSink::open(Path::new(&git_path)).map_err(|e| failed(e.into()))?;
         let request = ExportRequest {
             source_ref: source_ref.clone(),
@@ -114,6 +119,22 @@ impl Recording<'_> {
         self.resolved.record_recovered(recovered(report.recovered));
         Ok(export_response(report))
     }
+}
+
+/// Refuses a `git_path` inside a store's `git/`, the mirror only the remote commands write under
+/// its lock (storage spec §2, M13): `E_INVALID_ARG` `reason: "store_mirror"`, so that a person's
+/// command never races the mirror's lock.
+fn refuse_mirror(git_path: &str) -> Result<(), OpError> {
+    if !inside_store_git(Path::new(git_path)) {
+        return Ok(());
+    }
+    let message = "the repository is a store's git mirror, which only the remote commands write";
+    let refused = error(ErrorCode::InvalidArg, message)
+        .with_details(details([("reason", "store_mirror".into())]))
+        .with_hint(
+            "so fetch, so push and so sync read and write the mirror; give another repository",
+        );
+    Err(refused)
 }
 
 /// What a committed snapshot's tail check repaired ([`TailRepair`]), as the record of repairs
