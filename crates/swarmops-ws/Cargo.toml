@@ -29,6 +29,8 @@ swarmops-merge = { path = "../swarmops-merge", version = "0.1.0" }
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 # The parallel hashing and writing of a workspace's files.
 rayon.workspace = true
+# The contents `blob_get` returns in base64, decoded before they are written out.
+base64.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 camino.workspace = true
