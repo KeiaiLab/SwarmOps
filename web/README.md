@@ -47,6 +47,8 @@ scripts by sha256 and no other inline script. `public/_headers` keeps the site-w
 (HSTS, `frame-ancestors 'none'`, the noindex rules for pages.dev and get.swarmops.cc); its
 looser `script-src` lets the per-page policy bind.
 
+`scripts/markdown-twins.mjs` then copies each docs page's source file beside its page (`/docs/guides/install.md`, served as text/markdown by `_headers`) and points llms.txt at those copies; a docs page without exactly one "View as Markdown" link fails the build.
+
 `scripts/check-site.mjs` fails on a missing docs page, a broken link or anchor, a link inside a
 link, a script, stylesheet or font from another origin, an inline script the page's policy does
 not allow, product pages over the first-load JS budget, or a missing served file.

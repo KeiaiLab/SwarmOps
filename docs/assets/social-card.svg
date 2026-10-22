@@ -2,7 +2,7 @@
   <title id="t">SwarmOps</title>
   <desc id="d">The SwarmOps logo beside its name and tagline: a git replacement for coding-agent swarms.</desc>
   <!-- The social preview (GitHub's 1280x640, and the website's og:image). Rendered to
-       docs/assets/social-card.png and site/og-image.png by scripts/site/render-images.cjs. -->
+       docs/assets/social-card.png and web/public/og-image.png by scripts/site/render-images.cjs. -->
   <defs>
     <radialGradient id="glow" cx="22%" cy="50%" r="60%">
       <stop offset="0" stop-color="#7c5cff" stop-opacity=".30"/>

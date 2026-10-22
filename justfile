@@ -28,7 +28,7 @@ default: check
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
 # Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
-# offline, and checks that site/install.sh is the same file.
+# offline, and checks that web/public/install.sh is the same file.
 # The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer, Markdown.
 check:
     cargo fmt --all --check

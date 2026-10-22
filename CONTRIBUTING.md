@@ -95,8 +95,8 @@ A change is done when `just check` passes on it. It runs, in order:
    writes with `Cargo.lock`.
 8. `scripts/test-install.py`: the one-line installer, `scripts/install.sh`, run under sh (and
    dash and busybox sh where installed) against a fake release on 127.0.0.1, with no network;
-   and `site/install.sh`, the copy get.swarmops.cc serves, still the same file. After changing the
-   installer, copy it to `site/install.sh`.
+   and `web/public/install.sh`, the copy get.swarmops.cc serves, still the same file. After changing the
+   installer, copy it to `web/public/install.sh`.
 9. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
    anchors resolve as GitHub reads them, and it carries no host path or tool attribution.
 

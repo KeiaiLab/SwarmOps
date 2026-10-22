@@ -1,7 +1,7 @@
 /* swarmops.cc. Tailwind 4, Fumadocs' shadcn bridge (fumadocs colours read the shadcn variables
    below, so docs and product pages share one palette), no web fonts. Brand colours come from
    docs/assets/logo.svg: violet #7c5cff, amber #d97706; the light theme darkens both for contrast,
-   as site/styles.css does. */
+   as the retired site/styles.css does. */
 @import 'tailwindcss';
 @import 'fumadocs-ui/css/shadcn.css';
 @import 'fumadocs-ui/css/preset.css';

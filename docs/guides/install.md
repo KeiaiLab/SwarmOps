@@ -107,7 +107,7 @@ SWARMOPS_VERSION=0.1.0 sh install.sh       # on each host
 ```
 
 The script is the repository's `scripts/install.sh`. get.swarmops.cc serves its copy
-`site/install.sh`, and `just check` fails when the two differ. Each host still checks its download
+`web/public/install.sh`, and `just check` fails when the two differ. Each host still checks its download
 against the release's `SHA256SUMS`.
 
 ## How do I update?

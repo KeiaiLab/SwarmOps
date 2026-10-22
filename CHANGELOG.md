@@ -15,7 +15,7 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 ### Added
 
 - A one-line installer, `curl -fsSL https://get.swarmops.cc/install.sh | bash` (`scripts/install.sh`,
-  served as `site/install.sh`): it installs `swarmops` and `so` from a release, checked against
+  served as `web/public/install.sh`): it installs `swarmops` and `so` from a release, checked against
   its `SHA256SUMS`, into `~/.local/bin` (`/usr/local/bin` as root); `--version` pins a release,
   `--dir` picks the directory, a second run updates, and `--uninstall` removes the binaries and
   no store. `just check` runs its offline tests, `scripts/test-install.py`.
@@ -48,7 +48,7 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   `docs/**/*.md` and `CHANGELOG.md` at `/docs` (sidebar groups, static search, code copy, a
   per-page Content-Security-Policy) and the product pages (home, `/product`, features, how it
   works, SwarmOps and git, the roadmap); `just web-install`, `just web-build` and `just web-check`,
-  and a CI workflow. swarmops.cc still serves `site/` until the cutover.
+  and a CI workflow.
 - `docs/reference/commands/`: one page per command (25) with its syntax, arguments, a recorded example, its result's fields and its errors; `docs/reference/cli.md` is now the grouped index. Generated from the code and the golden steps, and checked by a test.
 - Golden examples for blob put/has, op log/undo, derive, land, git import/export and every MCP tool, taken from real runs.
 - Docs: the command pages of init, info, whoami, schema, derive, commit, land, blob put and blob has carry a Details section: behaviour, option interactions, patterns, failures and measured performance.
@@ -57,6 +57,9 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - The reference pages of git import, git export and mcp have hand-written Details: behaviour, options, patterns, failure cases.
 - Docs: one reference page per MCP tool (input schema, annotations, a recorded call, its CLI command) and an index with protocol versions, server instructions, identity rules and size limits, generated from the server's tool table.
 - Site: command reference pages show their metadata as a card, arguments as collapsible entries, CLI and MCP examples as tabs and error codes as badges linking to the error list; the command index is one grouped table with a filter, and command and MCP tool pages link to each other.
+- Site: every docs page has a "View as Markdown" link to its source file, served beside the page at its URL plus `.md` (text/markdown); llms.txt now links those files.
+- Docs: the README keeps its core features, install, quick start, the comparison with git and the roadmap; the MCP and command details now live on the MCP integration page and the command pages.
+- swarmops.cc is now served from `web/`. The site workflow deploys `web/out` to Cloudflare Pages: production from `stable`, previews from `feat/**`. While the Cloudflare secrets are unset, it leaves a notice and deploys nothing. `site/` is retired: its icons, figures, notices, `security.txt` and the installer copy moved to `web/public/`, and `/guides/<name>` redirects (308) to `/docs/guides/<name>`.
 
 ## [0.1.0] - 2026-10-20
 

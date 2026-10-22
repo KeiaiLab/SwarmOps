@@ -28,7 +28,7 @@ const PRODUCT_PAGES = /^(index|product(\/.*)?|roadmap)\.html$/;
 const EXCLUDED_DOCS = ['superpowers/', 'reference/notes/', 'examples/'];
 const OWN_POLICY_DIRS = ['explainers/'];
 
-const REQUIRED_FILES = ['robots.txt', 'sitemap.xml', 'llms.txt', '_headers', 'install.sh', '404.html'];
+const REQUIRED_FILES = ['robots.txt', 'sitemap.xml', 'llms.txt', '_headers', 'install.sh', '404.html', '_redirects', '.well-known/security.txt'];
 const NOINDEX_HOST = 'https://get.swarmops.cc/*';
 
 /** The base64 sha256 of a script's text, as CSP hashes it. */

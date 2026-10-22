@@ -12,7 +12,7 @@
 # it writes only the install directory and a temporary directory, and edits no shell startup
 # file. Every step is a function and the last line calls them, so a download cut short runs
 # nothing.
-# scripts/test-install.py tests it offline; site/install.sh is the copy get.swarmops.cc serves.
+# scripts/test-install.py tests it offline; web/public/install.sh is the copy get.swarmops.cc serves.
 
 set -eu
 

@@ -99,9 +99,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
    date what says nothing is released yet: README's status badge, status line, maturity row and
    install section, the README's documentation table, `docs/operations.md`'s install section,
    SECURITY.md's supported versions, CHANGELOG.md's introduction, the
-   versioning policy's first paragraph, this file's first line, `site/index.html`'s status texts
-   (the page's description, the pill, the comparison's Maturity row, the roadmap's sub line and its
-   In development item) and the issue template's contact text (`.github/ISSUE_TEMPLATE/config.yml`).
+   versioning policy's first paragraph, this file's first line, the Maturity row of `web/content/product/vs-git.md`
+   and the issue template's contact text (`.github/ISSUE_TEMPLATE/config.yml`).
 5. **Bump the version** in `[workspace.package]` of `Cargo.toml` and in the
    `version = "X.Y.Z"` of every internal dependency in `crates/*/Cargo.toml`,
    `fuzz/Cargo.toml` and `bench/compare/Cargo.toml`; let `cargo check` update `Cargo.lock`.
