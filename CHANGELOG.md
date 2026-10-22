@@ -53,7 +53,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - The test kit serves git repositories without the network: git's own `http-backend` on loopback
   and a stand-in for ssh; the weekly git matrix runs the remote suites with git 2.39.5, 2.43.0
   and 2.56.0, built with curl, and a weekly job runs the live round trip with GitHub against a
-  scratch repository once a repository variable names it.
+  scratch repository once a repository variable names it; the live run reads its token in the
+  `github-live` environment.
 - `just perf` times the git remotes against the roadmap's targets (docs/perf.md, "Git remotes
   (M13)"): fetch met its target; push, sync and clone missed theirs.
 - A guide, [GitHub as a remote](docs/guides/github-remote.md); the daily loop now runs on
