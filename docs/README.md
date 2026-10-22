@@ -59,6 +59,7 @@ features, each with an example.
 
 | Document | Read it to |
 | --- | --- |
+| [Roadmap](roadmap.md) | See where SwarmOps is going: working with GitHub in three topologies, each with its commands, design, acceptance criteria and milestone. |
 | [Goals](goals.md) | See what SwarmOps sets out to do: each goal with its metric, target, measured value and milestone. |
 | [Clean-room development](policies/clean-room.md) | See how third-party designs reach the code: requirements only, with provenance and checks. |
 | [Architecture](architecture.md) | Understand the design: crates, data model, the store on disk, the write and read paths, durability, concurrency, the contract. |
