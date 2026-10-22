@@ -34,7 +34,7 @@ pub use fs_ops::{
 };
 #[cfg(feature = "test-hooks")]
 pub use fs_ops::{CrashAtFs, FailAt, FailAtFs, FailMode, InjectedError};
-pub use layout::{Layout, is_native_linux_fs};
+pub use layout::Layout;
 pub use meta::refs::check_ref_name;
 pub use meta::{
     BadRecord, CasResult, ChangesetMeta, CommitInfo, DerivedSlot, DerivedStore, Frame, Index,
@@ -44,3 +44,4 @@ pub use meta::{
 };
 #[cfg(feature = "test-hooks")]
 pub use order_check::OrderCheckFs;
+pub use volume::is_supported_store_fs;

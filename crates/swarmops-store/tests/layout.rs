@@ -4,7 +4,7 @@ use camino::Utf8Path;
 use swarmops_core::{ObjectKind, hash_object};
 use swarmops_store::Layout;
 #[cfg(target_os = "linux")]
-use swarmops_store::is_native_linux_fs;
+use swarmops_store::is_supported_store_fs;
 
 #[test]
 fn layout_paths_follow_the_store_spec() {
@@ -36,7 +36,7 @@ fn layout_paths_follow_the_store_spec() {
 fn mnt_paths_are_not_native_linux_fs() {
     for windows_drive in ["/mnt/c", "/mnt/c/Users/me/store", "/mnt/d/repos"] {
         assert!(
-            !is_native_linux_fs(Utf8Path::new(windows_drive)),
+            !is_supported_store_fs(Utf8Path::new(windows_drive)),
             "{windows_drive}"
         );
     }
@@ -47,6 +47,6 @@ fn mnt_paths_are_not_native_linux_fs() {
         "/mntx/store",
         "/srv/mnt/c",
     ] {
-        assert!(is_native_linux_fs(Utf8Path::new(native)), "{native}");
+        assert!(is_supported_store_fs(Utf8Path::new(native)), "{native}");
     }
 }

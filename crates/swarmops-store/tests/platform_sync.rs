@@ -5,6 +5,8 @@ use std::fs;
 use std::io::Write;
 
 use swarmops_store::{FsOps, RealFs};
+#[cfg(target_os = "macos")]
+use {camino::Utf8Path, swarmops_store::is_supported_store_fs};
 
 /// The directory probe (P2): a sync of a directory just made, with an entry just made in it,
 /// returns. On macOS it is `F_FULLFSYNC` on a directory descriptor (assumption AP1).
@@ -42,4 +44,28 @@ fn sync_data_of_a_file_another_handle_wrote() {
     let missing = temp.path().join("missing");
     RealFs.sync_data(&missing).expect_err("no file to sync");
     assert!(!missing.exists(), "the sync made a file");
+}
+
+/// macOS (P4): a path on a volume other than APFS or journaled HFS+ is refused, here devfs
+/// under `/dev`, judged by its nearest existing directory before anything is made there.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_store_on_a_volume_macos_does_not_support_is_refused() {
+    let store = Utf8Path::new("/dev/swarmops-store/repo");
+
+    assert!(!is_supported_store_fs(Utf8Path::new("/dev")));
+    assert!(!is_supported_store_fs(store));
+    assert!(!store.exists(), "the check made the path");
+}
+
+/// macOS (P4): a temporary directory is on the runner's APFS boot volume, and so is a path
+/// below it that does not exist yet.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_store_on_apfs_is_accepted() {
+    let temp = tempfile::tempdir().expect("create a temporary directory");
+    let root = Utf8Path::from_path(temp.path()).expect("a UTF-8 temporary directory");
+
+    assert!(is_supported_store_fs(root));
+    assert!(is_supported_store_fs(&root.join("not/made/yet")));
 }
