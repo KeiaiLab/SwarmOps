@@ -626,8 +626,9 @@ left).
   no branches and prunes the mirror's tracking refs, and a clone ends with no `main`. Nothing is
   forced (a later push leases on the pruned value and fails), and the next good fetch restores
   them. *Unscheduled. Found: M13 Task C10.*
-- **Tested on Linux only.** The remote suites run with git 2.39.5, 2.43.0 and 2.56.0 on x86_64
-  Linux; macOS and Windows, and git for Windows' `http-backend`, are M12's. *Target: M12.*
+- **Tested on Linux only.** The remote suites ran with git 2.43.0 on x86_64 Linux; the weekly run
+  adds git 2.39.5 and 2.56.0 once its host has curl's headers. macOS and Windows, and git for
+  Windows' `http-backend`, are M12's. *Target: M12.*
 
 ## Platforms
 
