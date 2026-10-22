@@ -1242,7 +1242,9 @@ subcommand, choose how:
 | `--human` | A short text rendering instead of JSON. |
 
 Without `--json` or `--human`, `SWARMOPS_FORMAT` decides: `json` or `human`. Of `--json` and
-`--human`, the one given last wins. The exit code is the same in every format.
+`--human`, the one given last wins. The exit code is the same in every format. When the
+command line itself is invalid, a format flag after the bad value can go unread:
+`so log -n many --human` prints JSON.
 
 Compact JSON, as a script reads it:
 
@@ -1339,7 +1341,7 @@ so log -n many
 then its details as `details.<key>` lines, `retryable: true` when it is, and the hint. The text
 is for a person to read; a program reads the JSON.
 
-Only `--help`, `--version` and the `help` subcommand print plain text. A run that meets one of
+Of the commands here, only `--help`, `--version` and the `help` subcommand print plain text. A run that meets one of
 the store's four documented aborts prints no envelope: the process aborts, saying why on stderr.
 
 ### Commands and their operation names
@@ -1375,7 +1377,7 @@ The exit code is the envelope's `error.exit`, and 0 on success.
 | 3 | A conflict with what a change lands on. | None here: `land`, `git import` and `git export` raise it. |
 | 4 | Retryable: running it again can succeed, after re-reading what the error names. | `E_CAS_MISMATCH` |
 | 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED` |
-| 6 | Something it names does not exist. | `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND`, `E_OP_NOT_FOUND`, `E_NOT_A_REPO`, `E_REF_NOT_FOUND` |
+| 6 | Something it names does not exist. | `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND`, `E_OP_NOT_FOUND`, `E_NOT_A_REPO` |
 
 `so schema` gives every request and response type, and the README's
 [Output and exit codes](../../README.md#output-and-exit-codes) lists the codes of every command.
