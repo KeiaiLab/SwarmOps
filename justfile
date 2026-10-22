@@ -135,3 +135,19 @@ bench-compare *args:
 fuzz target="codec_roundtrip":
     mkdir -p fuzz/corpus-new/{{target}}
     cd fuzz && cargo +nightly fuzz run {{target}} corpus-new/{{target}} corpus/{{target}} -- -max_total_time=60 -timeout=30
+
+# The website, web/: a Next.js static export (Fumadocs for /docs) that renders docs/**/*.md and
+# CHANGELOG.md, written to web/out/. `npm ci` needs the npm registry, so these recipes stay out of
+# `just check`; the build itself is offline once installed. .github/workflows/site.yml runs all three.
+# Installs the website's dependencies, exactly as web/package-lock.json pins them.
+web-install:
+    cd web && npm ci --no-audit --no-fund
+
+# Builds the website into web/out/: pages, search index, per-page CSP, the copied installer.
+web-build:
+    cd web && npm run build
+
+# Checks web/out/: every docs page, internal links and anchors, no third-party origin, the CSP
+# hashes, the first-load JS budget and the files served beside the pages.
+web-check:
+    cd web && npm run check
