@@ -49,6 +49,13 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   per-page Content-Security-Policy) and the product pages (home, `/product`, features, how it
   works, SwarmOps and git, the roadmap); `just web-install`, `just web-build` and `just web-check`,
   and a CI workflow. swarmops.cc still serves `site/` until the cutover.
+- `docs/roadmap.md`: the detailed roadmap. Its goal is version control that works together with
+  GitHub, in three topologies: local git with a SwarmOps remote, a store with a GitHub remote, and
+  stores syncing with each other. For each it gives what works today, with the real commands, and
+  the plan: commands, protocol, ref mapping, identity, offline behaviour, acceptance criteria and
+  targets. Two milestones are added, M13 (git remotes from a store) and M14 (git clients against a
+  store), and M11 takes `so clone` and `so sync`. `docs/goals.md` gains G15 to G17, and the site's
+  roadmap page summarises the new page, topologies first.
 
 ## [0.1.0] - 2026-10-20
 
