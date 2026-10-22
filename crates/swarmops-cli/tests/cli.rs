@@ -1569,18 +1569,6 @@ fn cat_truncates_to_max_bytes() {
     assert_eq!(default["result"]["truncated"], true);
 }
 
-/// Codes [`error_codes_reach_the_cli`] cannot raise through the binary on this platform, and why.
-#[cfg(not(windows))]
-const NOT_RAISED_HERE: &[(&str, &str)] = &[(
-    "E_WS_UNPORTABLE",
-    "needs a case-insensitive volume or Windows, which refuses `con.txt`: the ws crate's tests raise \
-     it on a simulated volume, and `ws_cases` raises it through the binary on Windows",
-)];
-
-/// The platform's codes that the binary raises: none.
-#[cfg(windows)]
-const NOT_RAISED_HERE: &[(&str, &str)] = &[];
-
 /// Codes [`error_codes_reach_the_cli`] cannot raise through the binary, and why.
 const NOT_RAISED: &[(&str, &str)] = &[
     (
@@ -1631,7 +1619,7 @@ const NOT_RAISED: &[(&str, &str)] = &[
 #[test]
 fn error_codes_reach_the_cli() {
     // Each code listed is one the table has.
-    for (code, _) in NOT_RAISED.iter().chain(NOT_RAISED_HERE) {
+    for (code, _) in NOT_RAISED {
         let known = ErrorCode::ALL.iter().any(|known| known.as_str() == *code);
         assert!(known, "{code} is not an error code");
     }
@@ -1725,7 +1713,7 @@ fn error_codes_reach_the_cli() {
     // Each code is raised here or listed as not raised, never both.
     for code in ErrorCode::ALL {
         let code = code.as_str();
-        let listed = (NOT_RAISED.iter().chain(NOT_RAISED_HERE)).any(|(c, _)| *c == code);
+        let listed = NOT_RAISED.iter().any(|(c, _)| *c == code);
         assert_ne!(raised.contains(&code), listed, "{code}");
     }
     insta::assert_json_snapshot!(s.transcript());
@@ -2089,7 +2077,18 @@ fn ws_cases(s: &mut Session, store: &str, c1: &str) -> (Vec<(&'static str, Vec<S
         ),
     ];
 
-    // 3. On Windows, a changeset whose path the platform cannot hold: a workspace of it is
+    // 3. A changeset with a top-level `.swarmws`, the workspace's own directory: a workspace of
+    //    it is unportable on every platform (`reserved_name`).
+    let reserved = s.commit(store, Some(c1), ".swarmws/x", "x\n", "reserved");
+    let path = format!("{tmp}/w6");
+    cases.push((
+        "E_WS_UNPORTABLE",
+        on(&[
+            "ws", "create", "w6", "--path", &path, "--base", &reserved, "--all",
+        ]),
+    ));
+
+    // 4. On Windows, a changeset whose path the platform cannot hold: a workspace of it is
     //    unportable. Written for that lane; the volume here holds the name.
     #[cfg(windows)]
     {
@@ -2100,8 +2099,6 @@ fn ws_cases(s: &mut Session, store: &str, c1: &str) -> (Vec<(&'static str, Vec<S
         ]);
         cases.push(("E_WS_UNPORTABLE", args));
     }
-    #[cfg(not(windows))]
-    let _ = &mut cases;
     let locked = Locked {
         dir: camino::Utf8PathBuf::from(&w1),
         args: on(&["ws", "discard", "--ws", "w1"]),

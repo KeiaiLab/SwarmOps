@@ -1243,6 +1243,31 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m reserved --changes [tmp]/reserved.json --parent [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[reserved]",
+        "parent": "[c1]",
+        "root": "[id19]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store --as agent/worker-17 ws create w1 --path [tmp]/elsewhere",
     "exit": 1,
     "stdout": {
@@ -1492,6 +1517,36 @@ expression: s.transcript()
     }
   },
   {
+    "args": "--repo [tmp]/store --as agent/worker-17 ws create w6 --path [tmp]/w6 --base [reserved] --all",
+    "exit": 1,
+    "stdout": {
+      "ok": false,
+      "op": "ws_create",
+      "api": 1,
+      "error": {
+        "code": "E_WS_UNPORTABLE",
+        "message": "the tree holds paths this workspace's volume cannot hold (reserved_name): [\".swarmws/x\"]",
+        "retryable": false,
+        "exit": 1,
+        "details": {
+          "paths": [
+            ".swarmws/x"
+          ],
+          "reason": "reserved_name"
+        },
+        "hint": null
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[reserved]": "[reserved]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
     "args": "--repo [tmp]/store --as agent/worker-17 ws discard --ws w1",
     "exit": 4,
     "stdout": {
@@ -1527,7 +1582,7 @@ expression: s.transcript()
         "retryable": false,
         "exit": 1,
         "details": {
-          "changesets_checked": 7,
+          "changesets_checked": 8,
           "findings": [
             {
               "changeset": "[c1]",
@@ -1535,7 +1590,7 @@ expression: s.transcript()
               "object": "[id10]"
             }
           ],
-          "objects_checked": 27,
+          "objects_checked": 31,
           "problems": [
             "object [id10] is missing; changeset [c1] references it"
           ]
