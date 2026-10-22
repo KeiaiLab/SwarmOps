@@ -25,6 +25,19 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 - `docs/policies/clean-room.md`: how third-party designs reach the code, only as functional
   requirements in the project's own words, with a provenance record per feature and text, code
   and licence checks before each release.
+- A Markdown check in `just check` (`scripts/check-docs.py`): relative links and anchors resolve
+  as GitHub reads them, and no public page carries a host path or tool attribution.
+- Usage documentation, every example run against a real store: an install guide that leads with
+  the installer (pinning, fleets, updates, uninstalling, hand checks, source builds, the
+  installer's errors); a quick start from install to `verify`; Concepts; guides to commit and
+  land, to history and undo, to parallel agents, to Claude Code and to the git round trip; a
+  troubleshooting page from symptom to command for every `E_*` code; `MAINTAINERS.md` and
+  `SUPPORT.md`.
+- `docs/reference/cli.md` and `docs/reference/errors.md`: every command's usage, arguments,
+  options and defaults, and every error code's exit, retryable flag and description, generated
+  from the code and kept current by a test (`SWARMOPS_REGEN_REFERENCE=1` rewrites them).
+- The README is rewritten around the core features, each with an example run, and
+  `docs/README.md` maps the documentation by task.
 
 ## [0.1.0] - 2026-10-20
 

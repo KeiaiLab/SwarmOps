@@ -395,11 +395,13 @@ specs, in Korean. The maintainers keep them privately, and
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Symptoms, their causes and the commands that fix them. |
 | [CLI reference](docs/reference/cli.md) | Every command, its arguments and its output. |
 | [Error reference](docs/reference/errors.md) | Every `E_*` code, its exit code and what to do. |
+| [Goals](docs/goals.md) | What SwarmOps sets out to do, each goal with its metric, target, measured value and milestone. |
 | [docs/architecture.md](docs/architecture.md) | The design in English: crates, data model, the store on disk, the write and read paths, durability, concurrency, the contract. |
 | [docs/known-limitations.md](docs/known-limitations.md) | What is still open, and which milestone takes each item. |
 | [docs/perf.md](docs/perf.md) | Every measurement, and the decisions taken on them. |
 | [docs/pilot.md](docs/pilot.md) | The runbook of the first real use, on this repository: import, one agent session, export, CI, what to measure, the success criteria and the rollback. |
 | [bench/compare/README.md](bench/compare/README.md) | The harness that measures the native metadata store against embedded databases. |
+| [docs/policies/clean-room.md](docs/policies/clean-room.md) | How third-party designs reach the code: requirements only, with provenance and checks. |
 | [docs/policies/versioning-and-stability.md](docs/policies/versioning-and-stability.md) | What stays compatible, and how a breaking change is made. |
 | [docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md) | The Rust version and the platforms SwarmOps supports. |
 | [SUPPORT.md](SUPPORT.md) | Where to ask a question or report a problem. |

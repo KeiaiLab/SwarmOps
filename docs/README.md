@@ -47,6 +47,8 @@ features, each with an example.
 
 | Document | Read it to |
 | --- | --- |
+| [Goals](goals.md) | See what SwarmOps sets out to do: each goal with its metric, target, measured value and milestone. |
+| [Clean-room development](policies/clean-room.md) | See how third-party designs reach the code: requirements only, with provenance and checks. |
 | [Architecture](architecture.md) | Understand the design: crates, data model, the store on disk, the write and read paths, durability, concurrency, the contract. |
 | [Known limitations](known-limitations.md) | See what is still open, and which milestone takes each item. |
 | [Performance](perf.md) | See every measurement, and the decisions taken on them. |
