@@ -21,6 +21,7 @@
 //! `StoreOps` over the same types later, resolving identities and file contents the same way.
 
 mod authors;
+mod blob_get;
 mod conflict;
 pub mod content;
 mod error;
@@ -28,6 +29,7 @@ mod git;
 pub mod identity;
 mod local;
 mod push;
+mod rebase;
 mod remote;
 mod sync;
 

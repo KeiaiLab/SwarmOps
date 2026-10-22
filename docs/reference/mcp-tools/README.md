@@ -25,6 +25,7 @@ In `tools/list`'s order.
 | [`undo`](undo.md) | Undo an operation | [`swarmops op undo`](../commands/op-undo.md) | moves refs | yes |
 | [`commit`](commit.md) | Commit a changeset | [`swarmops commit`](../commands/commit.md) | adds to it | yes |
 | [`land`](land.md) | Land a change | [`swarmops land`](../commands/land.md) | adds a changeset and moves the target | yes |
+| [`rebase`](rebase.md) | Rebase a change | [`swarmops rebase`](../commands/rebase.md) | adds to it | yes |
 | [`blob_put`](blob-put.md) | Store a blob | [`swarmops blob put`](../commands/blob-put.md) | adds to it | yes |
 | [`blob_has`](blob-has.md) | Find stored blobs | [`swarmops blob has`](../commands/blob-has.md) | no | no |
 | [`verify`](verify.md) | Verify the store | [`swarmops verify`](../commands/verify.md) | no | no |
@@ -99,7 +100,7 @@ Both are the server's, never a call's; no tool argument names either.
 
 - The store is `--repo`, else `SWARMOPS_REPO`, opened anew for each call, so that a call sees what other processes committed. A store that is not there is each call's `E_NOT_A_REPO`, and the server serves on.
 - The identity is `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI. Every change is recorded for it.
-- These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `sync`.
+- These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `rebase`, `blob_put`, `sync`.
 - These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `remote_list`, `fetch`, `push`, `sync_status`.
 - The output flags (`--json`, `--human`, `--pretty`) do not apply.
 

@@ -47,6 +47,7 @@ pub mod oplog;
 pub mod path_history;
 pub mod raw;
 pub mod read;
+pub mod rebase;
 pub mod repo;
 mod tree_edit;
 pub mod verify;

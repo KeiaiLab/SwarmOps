@@ -86,6 +86,7 @@ fn a_land_request_takes_its_defaults() {
             idempotency_key: None,
             max_attempts: 8,
             max_conflict_bytes: 32_768,
+            expect_target: None,
             resolutions: None,
         }
     );

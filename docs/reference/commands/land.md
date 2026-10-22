@@ -304,6 +304,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 
 - [Operating SwarmOps: Agents commit and land](../../operations.md#2-agents-commit-and-land)
 - [`swarmops commit`](commit.md)
+- [`swarmops rebase`](rebase.md)
 - [`swarmops blob put`](blob-put.md)
 - [`swarmops blob has`](blob-has.md)
 - [CLI reference](../cli.md)

@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 116 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 152 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -10,8 +10,11 @@ The 116 request, response and value types of the API, as `swarmops schema` print
 | --- | --- | --- |
 | [`Advanced`](#advanced) | object | `commit` with `advance`: the ref's move, made in the commit's own transaction. |
 | [`Attribution`](#attribution) | object | Whom a changeset is attributed to. |
+| [`BlobGetReq`](#blobgetreq) | object | `blob_get` (M5): blobs by id, for a client that writes them out (a workspace's materialisation). |
+| [`BlobGetResp`](#blobgetresp) | object | `blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under. |
 | [`BlobHasReq`](#blobhasreq) | object | `blob_has` (CLI `blob has`): which of some blobs the store holds. |
 | [`BlobHasResp`](#blobhasresp) | object | `blob_has`: the blobs the store holds, of those asked for. |
+| [`BlobOut`](#blobout) | object | One blob's content, encoded as a file's is. |
 | [`BlobPutReq`](#blobputreq) | object | `blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's change list can name it by its id (`{"blob": id}`) instead of carrying its bytes. |
 | [`BlobPutResp`](#blobputresp) | object | `blob_put`: the blob stored. |
 | [`BranchUpdate`](#branchupdate) | object | A remote branch a fetch saw move, appear or go. |
@@ -57,6 +60,7 @@ The 116 request, response and value types of the API, as `swarmops schema` print
 | [`IdentityInfo`](#identityinfo) | object | `whoami`: the identity the caller's mutations carry. |
 | [`InfoReq`](#inforeq) | object | `info`: describe the store. |
 | [`InitReq`](#initreq) | object | `init`: create a store. |
+| [`LandMode`](#landmode) | enumeration | How a workspace lands. |
 | [`LandReq`](#landreq) | object | `land`: merge a change three-way onto a target ref and publish it there as one new changeset, in one transaction. |
 | [`LandResp`](#landresp) | object | `land`: where the change landed. |
 | [`LandStatus`](#landstatus) | enumeration | How a land ended. |
@@ -85,6 +89,9 @@ The 116 request, response and value types of the API, as `swarmops schema` print
 | [`PushStatus`](#pushstatus) | enumeration | What a push did to the remote branch. |
 | [`ReadFileReq`](#readfilereq) | object | `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or a range of its lines. |
 | [`ReadTreeReq`](#readtreereq) | object | `read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a time; with `depth`, the directories below it too. |
+| [`RebaseReq`](#rebasereq) | object | `rebase` (M5): merge a change three-way onto a ref's head and record the result as one changeset whose parent is that head, moving no ref. |
+| [`RebaseResp`](#rebaseresp) | object | `rebase`: the changeset that holds the change merged onto the ref's head. |
+| [`RebaseStatus`](#rebasestatus) | enumeration | How a rebase ended. |
 | [`RecoveredOut`](#recoveredout) | object | What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's metadata files, with no paths. |
 | [`RefDeleteReq`](#refdeletereq) | object | `ref delete`: remove a ref by compare-and-swap. |
 | [`RefListReq`](#reflistreq) | object | `ref list`: list every ref. |
@@ -111,6 +118,7 @@ The 116 request, response and value types of the API, as `swarmops schema` print
 | [`Side`](#side) | enumeration | One side of a land's merge. |
 | [`SignatureOut`](#signatureout) | object | A git signature: who, and when. |
 | [`Signatures`](#signatures) | object | A changeset's git signatures: git-fidelity data for import and export. |
+| [`StatusAfter`](#statusafter) | enumeration | Whether a workspace mutation's response carries the workspace's status after it. |
 | [`SyncMode`](#syncmode) | enumeration | Whether `sync` sends what it landed. |
 | [`SyncReq`](#syncreq) | object | `sync`: fetch a remote, land `main`'s unpublished changes onto the remote's head, move `main` there and push it. |
 | [`SyncResp`](#syncresp) | object | `sync`: what it landed, dropped and sent, and where `main` and the remote stand. |
@@ -124,6 +132,34 @@ The 116 request, response and value types of the API, as `swarmops schema` print
 | [`VerifyFinding`](#verifyfinding) | object | One problem `verify` found, as a program reads it: what kind of damage it is, and what it names. |
 | [`VerifyReport`](#verifyreport) | object | `verify`: what the consistency check found. |
 | [`VerifyReq`](#verifyreq) | object | `verify`: check the whole store's consistency. |
+| [`WsChange`](#wschange) | object | One changed path of a workspace. |
+| [`WsChangeKind`](#wschangekind) | enumeration | What changed at a workspace path. |
+| [`WsCheckInput`](#wscheckinput) | object | The check a workspace's land runs. |
+| [`WsCommitReq`](#wscommitreq) | object | `ws_commit` (client-side): record a workspace's edits as one changeset on its head. |
+| [`WsCommitResp`](#wscommitresp) | object | `ws_commit`: the changeset recorded. |
+| [`WsCreateReq`](#wscreatereq) | object | `ws_create` (M5, client-side): make a workspace, a directory holding a sparse copy of a changeset's tree. |
+| [`WsDeleteReq`](#wsdeletereq) | object | `ws_delete` (client-side, CLI only): remove a workspace's directory, then its entry. |
+| [`WsDeleteResp`](#wsdeleteresp) | object | `ws_delete`: what the deleted workspace left in the store. |
+| [`WsDiffReq`](#wsdiffreq) | object | `ws_diff` (client-side): a workspace's edits against its head, as the store's diff gives a diff (`from` the head, `to` `ws:<name>`). |
+| [`WsDiscardReq`](#wsdiscardreq) | object | `ws_discard` (client-side): restore paths from the workspace's head. |
+| [`WsDiscardResp`](#wsdiscardresp) | object | `ws_discard`: the paths restored. |
+| [`WsInfo`](#wsinfo) | object | A workspace: where it is and what it holds. |
+| [`WsInfoReq`](#wsinforeq) | object | `ws_info` (client-side): one workspace. |
+| [`WsLandReq`](#wslandreq) | object | `ws_land` (client-side): land a workspace's chain on its target; with a check, rebase, run the check there, and publish only the tree the check ran on. |
+| [`WsLandResp`](#wslandresp) | object | `ws_land`: the land, and how many attempts it took. |
+| [`WsList`](#wslist) | object | `ws_list`: the workspaces, by name. |
+| [`WsListReq`](#wslistreq) | object | `ws_list` (client-side): the store's workspaces, from its registry. |
+| [`WsMaterializeReq`](#wsmaterializereq) | object | `ws_materialize` (client-side): write out more of the tree. |
+| [`WsMaterializeResp`](#wsmaterializeresp) | object | `ws_materialize`: what was written. |
+| [`WsRebaseAction`](#wsrebaseaction) | enumeration | What a workspace's rebase does. |
+| [`WsRebaseReq`](#wsrebasereq) | object | `ws_rebase` (client-side): move a workspace's chain onto its target's head, as `rebase` records it, and its files with it. |
+| [`WsRebaseResp`](#wsrebaseresp) | object | `ws_rebase`: where the workspace stands now. |
+| [`WsRebasing`](#wsrebasing) | object | A workspace's rebase in progress. |
+| [`WsResolveReq`](#wsresolvereq) | object | `ws_resolve` (client-side): mark conflicting paths of a rebase resolved. |
+| [`WsResolveResp`](#wsresolveresp) | object | `ws_resolve`: the paths resolved and those left. |
+| [`WsState`](#wsstate) | enumeration | A workspace's state. |
+| [`WsStatus`](#wsstatus) | object | A workspace's status: its changes against its head, a page at a time, and how far its target has moved since its base. |
+| [`WsStatusReq`](#wsstatusreq) | object | `ws_status` (client-side): what changed in a workspace against its head. |
 
 ## Advanced
 
@@ -150,6 +186,29 @@ Kind: object. `swarmops schema Attribution` prints its JSON Schema.
 | `on_behalf_of` | `string` or `null` | no | Whom the agent acted for; recorded once the review model exists, so omitted in M1. |
 | `run_id` | `string` or `null` | no | The run it was written in: the changeset's `run_id` metadata, when present. |
 
+## BlobGetReq
+
+`blob_get` (M5): blobs by id, for a client that writes them out (a workspace's materialisation). Not an MCP tool.
+
+Kind: object. `swarmops schema BlobGetReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ids` | array of `string` | yes | The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`. |
+| `max_bytes` | `integer` (uint64) | no | The most bytes of content to return: the blobs past it are left for the next request (`truncated`). Default: `67108864`. |
+
+## BlobGetResp
+
+`blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under.
+
+Kind: object. `swarmops schema BlobGetResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `blobs` | array of [`BlobOut`](#blobout) | yes | The blobs, each whole. |
+| `missing` | array of `string` | yes | The ids the store holds no blob under. |
+| `truncated` | `boolean` | yes | Whether blobs were left out to keep within `max_bytes`. |
+
 ## BlobHasReq
 
 `blob_has` (CLI `blob has`): which of some blobs the store holds.
@@ -169,6 +228,19 @@ Kind: object. `swarmops schema BlobHasResp` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `present` | array of `string` | yes | The ids of `ids` that the store holds a blob under, in lowercase hex, in the order first given, each once; an id of another kind of object (a tree, a changeset) is not among them. |
+
+## BlobOut
+
+One blob's content, encoded as a file's is.
+
+Kind: object. `swarmops schema BlobOut` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `content` | `string` | yes | The bytes. |
+| `encoding` | [`ContentEncoding`](#contentencoding) | yes | How `content` encodes the bytes: `utf8` for text, `base64` otherwise. |
+| `id` | `string` | yes | The blob's id. |
+| `size` | `integer` (uint64) | yes | Its size in bytes. |
 
 ## BlobPutReq
 
@@ -610,6 +682,15 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_REMOTE_REJECTED"` | The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted). |
 | `"E_REMOTE_UNREACHABLE"` | The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). Nothing changed in the store; running the command again can succeed. |
 | `"E_REMOTE_NOT_FOUND"` | The store records no remote of that name (`details.remote`). |
+| `"E_WS_EXISTS"` | `ws create` found a workspace of that name already, made by other arguments (`details.name`, `details.path` of the existing one). |
+| `"E_WS_NOT_FOUND"` | No workspace by that name, or at that path (`details.name` when named). |
+| `"E_WS_LOCKED"` | Another mutation held the workspace's lock for the whole wait (`details.holder`, when it is known); running the operation again can succeed. |
+| `"E_WS_DIRTY"` | The workspace holds edits the operation would overwrite or lose (`details.paths`, the first 20); the hint names the command that commits or discards them. |
+| `"E_PATH_NOT_EMPTY"` | `ws create` was given a directory that holds something already (`details.path`). |
+| `"E_UNRESOLVED_CONFLICTS"` | A rebase still has conflicting paths no one resolved (`details.paths`). |
+| `"E_MARKERS_PRESENT"` | `ws resolve` found a conflict marker line still in a file (`details.paths`). |
+| `"E_WS_UNPORTABLE"` | The tree holds paths the workspace's volume cannot hold: `details.reason` says why (`case_collision`, `windows_name`, `reserved_name`) and `details.paths` names them. Nothing was written. |
+| `"E_CHECK_FAILED"` | A workspace's check or bootstrap command failed or ran past its time (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its output, `log`, `changeset`). Nothing was landed. |
 
 ## FetchReq
 
@@ -838,6 +919,17 @@ Kind: object. `swarmops schema InitReq` prints its JSON Schema.
 | `name` | `string` | yes | The repository's name: at most 255 bytes of UTF-8. |
 | `path` | `string` | yes | The directory to create the store in. |
 
+## LandMode
+
+How a workspace lands.
+
+Kind: enumeration. `swarmops schema LandMode` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"merge"` | Merge onto the target's head, wherever it has moved. |
+| `"exact"` | Publish only onto the target's head the workspace was rebased onto, so that the landed tree is the rebased one. |
+
 ## LandReq
 
 `land`: merge a change three-way onto a target ref and publish it there as one new changeset, in one transaction. The change is `head` with its first-parent chain after `base`, squashed: the landed changeset's parent is the target's head, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in `details.report`; nothing is recorded then.
@@ -847,6 +939,7 @@ Kind: object. `swarmops schema LandReq` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `base` | [`Rev`](#rev) or `null` | no | Where the change starts: a first-parent ancestor of `head`, whose own changes are not part of it (anything else is `E_INVALID_ARG`). It need not be on the target. When omitted, the merge base of `head` and the target's head, along first parents. |
+| `expect_target` | [`Rev`](#rev) or `null` | no | Publish only while the target names this changeset (M5): one attempt, and a target that names another is `E_CAS_MISMATCH`, nothing written; `max_attempts` does not apply. With a `head` rebased onto it, the landed tree is the rebased tree. `swarmops mcp` refuses one that is not a full 64-hex id (`E_INVALID_ARG`). |
 | `head` | [`Rev`](#rev) | yes | The changeset to land: the change's head. |
 | `idempotency_key` | `string` or `null` | no | Makes a retry of this land safe: 1 to 64 letters, digits and `-`, such as a uuid v7. A land with a key first looks down the target's first parents, to `base`, for a changeset that landed with the same key: one squashed from this `head` is the replay, which writes nothing (`status` is `replayed`); one from another head is `E_INVALID_ARG`, a key used for another change. |
 | `max_attempts` | `integer` (uint32) | no | How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32. Default: `8`. At least 1. At most 32. |
@@ -1217,6 +1310,51 @@ Kind: object. `swarmops schema ReadTreeReq` prints its JSON Schema.
 | `path` | `string` or `null` | no | The directory's repository path; omitted for the root. |
 | `rev` | [`Rev`](#rev) | yes | The revision to read at. |
 
+## RebaseReq
+
+`rebase` (M5): merge a change three-way onto a ref's head and record the result as one changeset whose parent is that head, moving no ref. The merge, its conflicts and its resolutions are a land's: a conflict is the error `E_CONFLICT`, with the report in `details.report`, and nothing is recorded then.
+
+Kind: object. `swarmops schema RebaseReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | [`Rev`](#rev) or `null` | no | Where the change starts, as a land's `base`: a first-parent ancestor of `head`; when omitted, the merge base of `head` and the head of `onto`. |
+| `head` | [`Rev`](#rev) | yes | The changeset to rebase: the change's head. |
+| `idempotency_key` | `string` or `null` | no | Makes a retry safe: a uuid v7, as a commit's key. The same request on the same head of `onto` is the same changeset, replayed without writing. |
+| `max_conflict_bytes` | `integer` (uint64) | no | The most bytes of hunk text an `E_CONFLICT` report carries, as a land's. Default: `32768`. |
+| `message` | `string` or `null` | no | The recorded changeset's message; `head`'s when omitted. |
+| `onto` | `string` | no | The ref to rebase onto: `main` or `release/<name>`, which must exist. Default: `"main"`. |
+| `resolutions` | [`ResolutionsInput`](#resolutionsinput) or `null` | no | What to make of the paths a conflict report named, as a land's resolutions. |
+
+## RebaseResp
+
+`rebase`: the changeset that holds the change merged onto the ref's head. Ids are full.
+
+Kind: object. `swarmops schema RebaseResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `auto_merged` | array of `string` | no | The paths both sides changed that merged cleanly. Omitted when empty. |
+| `base` | `string` | yes | The changeset the change was taken from. |
+| `changeset` | `string` | yes | The changeset that holds the result: the recorded one, `head` when it is up to date, the ref's head when the change was absorbed. |
+| `files_changed` | `integer` (uint64) | yes | How many paths `changeset` changes against `onto`. |
+| `onto` | `string` | yes | The ref's head the change was merged onto: `changeset`'s parent when one was recorded. |
+| `root` | `string` | yes | The root tree of `changeset`. |
+| `status` | [`RebaseStatus`](#rebasestatus) | yes | How the rebase ended. |
+
+## RebaseStatus
+
+How a rebase ended.
+
+Kind: enumeration. `swarmops schema RebaseStatus` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"rebased"` | This request recorded the merged changeset. |
+| `"replayed"` | The same keyed request had recorded it already; nothing was written. |
+| `"up_to_date"` | The change already sits on the ref's head; nothing was written. |
+| `"absorbed"` | The ref's head holds the change already; nothing was written. |
+
 ## RecoveredOut
 
 What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's metadata files, with no paths.
@@ -1523,6 +1661,17 @@ Kind: object. `swarmops schema Signatures` prints its JSON Schema.
 | `author` | [`SignatureOut`](#signatureout) | yes | The git author. |
 | `committer` | [`SignatureOut`](#signatureout) | yes | The git committer; its time is `created_at`. |
 
+## StatusAfter
+
+Whether a workspace mutation's response carries the workspace's status after it.
+
+Kind: enumeration. `swarmops schema StatusAfter` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"page"` | The first page of the status, up to 100 changes. |
+| `"none"` | No status. |
+
 ## SyncMode
 
 Whether `sync` sends what it landed.
@@ -1698,3 +1847,371 @@ Kind: object. `swarmops schema VerifyReq` prints its JSON Schema.
 | Property | Type | Required | Description |
 | --- | --- | --- | --- |
 | `deep` | `boolean` | no | Re-hash every object, and check every derived value of the built-in derivations (the first-parent skip lists, the last touches of paths) against the objects. When `false`, verify checks structure only: parents, that referenced objects exist, the index against the journal, and refs. Default: `false`. |
+
+## WsChange
+
+One changed path of a workspace.
+
+Kind: object. `swarmops schema WsChange` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `kind` | [`WsChangeKind`](#wschangekind) | yes | What changed. |
+| `path` | `string` | yes | The repository path. |
+| `size` | `integer` (uint64) or `null` | no | The file's size now; omitted for a deleted path. |
+
+## WsChangeKind
+
+What changed at a workspace path.
+
+Kind: enumeration. `swarmops schema WsChangeKind` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"added"` | A file the head does not hold. |
+| `"modified"` | Its content changed. |
+| `"deleted"` | It is gone. |
+| `"type_changed"` | A file became a symlink, or the other way round. |
+| `"mode_changed"` | Its executable bit changed. |
+
+## WsCheckInput
+
+The check a workspace's land runs.
+
+Kind: object. `swarmops schema WsCheckInput` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `argv` | array of `string` or `null` | no | The command and its arguments, run without a shell in the workspace; when omitted, the repository's `.swarmops/workspaces.json` `check.argv`. |
+| `timeout_s` | `integer` (uint64) | no | The most seconds the command runs before it is killed. Default: `900`. |
+
+## WsCommitReq
+
+`ws_commit` (client-side): record a workspace's edits as one changeset on its head.
+
+Kind: object. `swarmops schema WsCommitReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `message` | `string` | yes | The changeset's message. |
+| `modes` | map of `string` to [`ModeInput`](#modeinput) | no | A kind to record for a path, where the volume cannot hold the executable bit. |
+| `paths` | array of `string` | no | Only these repository paths; paths outside the workspace's prefixes join them. |
+| `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsCommitResp
+
+`ws_commit`: the changeset recorded.
+
+Kind: object. `swarmops schema WsCommitResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `blobs_written` | `integer` (uint64) | yes | How many blobs the store did not hold and got. |
+| `changeset` | `string` | yes | The new changeset: the workspace's head now. |
+| `files_changed` | `integer` (uint64) | yes | How many paths it changes. |
+| `parent` | `string` | yes | Its parent: the head before. |
+| `replayed` | `boolean` | yes | A crashed commit's key replayed: the changeset was recorded before. |
+| `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+
+## WsCreateReq
+
+`ws_create` (M5, client-side): make a workspace, a directory holding a sparse copy of a changeset's tree. The same request again is the same workspace (`created` false).
+
+Kind: object. `swarmops schema WsCreateReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `all` | `boolean` | no | The whole tree instead of `prefixes`. |
+| `base` | [`Rev`](#rev) | no | The changeset whose tree it holds. Default: `"main"`. |
+| `from` | `string` or `null` | no | A directory on the caller's host whose `.worktreeinclude` names files to copy in; when omitted, nothing is copied. |
+| `name` | `string` | yes | The workspace's name: 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, not starting with `.`. |
+| `path` | `string` or `null` | no | The directory to make it in, on the caller's host; when omitted, one named after it. |
+| `prefixes` | array of `string` | no | The repository paths whose subtrees are written out. |
+| `session` | `string` or `null` | no | The hook's session, 16 hex digits; set by the Claude Code hook only. |
+| `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
+
+## WsDeleteReq
+
+`ws_delete` (client-side, CLI only): remove a workspace's directory, then its entry.
+
+Kind: object. `swarmops schema WsDeleteReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `force` | `boolean` | no | Delete it even with edits or unlanded commits. |
+| `rescue` | `boolean` | no | Commit its edits as a rescue changeset first. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsDeleteResp
+
+`ws_delete`: what the deleted workspace left in the store.
+
+Kind: object. `swarmops schema WsDeleteResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `deleted` | `string` | yes | The workspace's name. |
+| `head` | `string` | yes | Its head when it was deleted. |
+| `rescued` | `string` or `null` | no | The rescue changeset of its edits, when there were some. |
+
+## WsDiffReq
+
+`ws_diff` (client-side): a workspace's edits against its head, as the store's diff gives a diff (`from` the head, `to` `ws:<name>`).
+
+Kind: object. `swarmops schema WsDiffReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `context` | `integer` (uint32) | no | Unchanged lines around each change. Default: `3`. |
+| `cursor` | `string` or `null` | no | Where the previous page stopped. |
+| `format` | [`DiffFormat`](#diffformat) | no | How much each file says: as the store's diff. Default: `"names"`. |
+| `limit` | `integer` (uint) | no | The most files to return: at least 1. Default: `500`. At least 1. |
+| `max_bytes` | `integer` (uint64) | no | The most bytes of a `unified` page's files. Default: `32768`. |
+| `paths` | array of `string` | no | Only these repository paths, and what is below them. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsDiscardReq
+
+`ws_discard` (client-side): restore paths from the workspace's head.
+
+Kind: object. `swarmops schema WsDiscardReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `paths` | array of `string` | no | The repository paths to restore; every changed one when empty. |
+| `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsDiscardResp
+
+`ws_discard`: the paths restored.
+
+Kind: object. `swarmops schema WsDiscardResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `discarded` | array of `string` | yes | The paths restored. |
+| `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+
+## WsInfo
+
+A workspace: where it is and what it holds.
+
+Kind: object. `swarmops schema WsInfo` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `all` | `boolean` | no | Whether the whole tree is written out. |
+| `base` | `string` | yes | The target's changeset its chain starts from. |
+| `created` | `boolean` | no | Whether this request made it: false for one that existed. Default: `false`. |
+| `head` | `string` | yes | Its chain's last changeset; `base` when nothing is committed. |
+| `name` | `string` | yes | Its name. |
+| `orphan` | `boolean` | no | Whether its directory is gone while its entry stays (`ws_list` with `check`). |
+| `path` | `string` | yes | Its directory on the caller's host. |
+| `prefixes` | array of `string` | no | The repository paths written out. |
+| `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+
+## WsInfoReq
+
+`ws_info` (client-side): one workspace.
+
+Kind: object. `swarmops schema WsInfoReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsLandReq
+
+`ws_land` (client-side): land a workspace's chain on its target; with a check, rebase, run the check there, and publish only the tree the check ran on.
+
+Kind: object. `swarmops schema WsLandReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | [`WsCheckInput`](#wscheckinput) or `null` | no | The check to run on the rebased tree before it lands. |
+| `idempotency_key` | `string` or `null` | no | The land's key, a uuid v7; when omitted, the workspace makes one. |
+| `max_attempts` | `integer` (uint32) | no | How many times to rebase, check and land before `E_CAS_RETRY_EXHAUSTED`: 1 to 32. Default: `8`. At least 1. At most 32. |
+| `message` | `string` or `null` | no | The landed changeset's message, and the message to commit edits with first. |
+| `mode` | [`LandMode`](#landmode) or `null` | no | `merge` or `exact`; when omitted, `exact` with a check and `merge` without. |
+| `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
+| `target` | `string` or `null` | no | The ref to land on; the workspace's target when omitted. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsLandResp
+
+`ws_land`: the land, and how many attempts it took.
+
+Kind: object. `swarmops schema WsLandResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `attempts` | `integer` (uint32) | yes | How many rebase, check and land attempts it took. |
+| `land` | [`LandResp`](#landresp) | yes | The store's land. |
+| `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+
+## WsList
+
+`ws_list`: the workspaces, by name.
+
+Kind: object. `swarmops schema WsList` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `workspaces` | array of [`WsInfo`](#wsinfo) | yes | The workspaces. |
+
+## WsListReq
+
+`ws_list` (client-side): the store's workspaces, from its registry.
+
+Kind: object. `swarmops schema WsListReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `check` | `boolean` | no | Also open each workspace, and report one whose directory is gone as an orphan. |
+
+## WsMaterializeReq
+
+`ws_materialize` (client-side): write out more of the tree.
+
+Kind: object. `swarmops schema WsMaterializeReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `paths` | array of `string` | yes | The repository paths to add to its prefixes. |
+| `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsMaterializeResp
+
+`ws_materialize`: what was written.
+
+Kind: object. `swarmops schema WsMaterializeResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `bytes` | `integer` (uint64) | yes | How many bytes were written. |
+| `materialized` | array of `string` | yes | The prefixes added. |
+| `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+
+## WsRebaseAction
+
+What a workspace's rebase does.
+
+Kind: enumeration. `swarmops schema WsRebaseAction` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"start"` | Rebase the workspace's chain onto the target's head. |
+| `"continue"` | Rebase again with the resolved conflicts. |
+| `"abort"` | Leave the rebase: restore the conflicting paths from the head. |
+
+## WsRebaseReq
+
+`ws_rebase` (client-side): move a workspace's chain onto its target's head, as `rebase` records it, and its files with it.
+
+Kind: object. `swarmops schema WsRebaseReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `action` | [`WsRebaseAction`](#wsrebaseaction) | no | Start, continue after resolving, or abort. Default: `"start"`. |
+| `message` | `string` or `null` | no | Commit the workspace's edits first, with this message; without it, edits are `E_WS_DIRTY`. |
+| `onto` | `string` | no | The ref to rebase onto. Default: `"main"`. |
+| `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsRebaseResp
+
+`ws_rebase`: where the workspace stands now.
+
+Kind: object. `swarmops schema WsRebaseResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `changeset` | `string` | yes | The workspace's head now. |
+| `onto` | `string` | yes | The target's head it was rebased onto. |
+| `status` | [`RebaseStatus`](#rebasestatus) or `null` | no | How the rebase ended; `None` after an abort. |
+| `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+
+## WsRebasing
+
+A workspace's rebase in progress.
+
+Kind: object. `swarmops schema WsRebasing` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `conflicts` | array of `string` | yes | The paths that still conflict. |
+| `onto` | `string` | yes | The target's head it rebases onto. |
+
+## WsResolveReq
+
+`ws_resolve` (client-side): mark conflicting paths of a rebase resolved.
+
+Kind: object. `swarmops schema WsResolveReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `all` | `boolean` | no | Every conflicting path. |
+| `force` | `boolean` | no | Resolve a file that still holds a conflict marker line. |
+| `paths` | array of `string` | no | The paths resolved. |
+| `status_after` | [`StatusAfter`](#statusafter) | no | Whether the response carries the status after the mutation. Default: `"page"`. |
+| `take` | [`Side`](#side) or `null` | no | Take one side's content instead of the file's. |
+| `workspace` | `string` | yes | The workspace, by name. |
+
+## WsResolveResp
+
+`ws_resolve`: the paths resolved and those left.
+
+Kind: object. `swarmops schema WsResolveResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `remaining` | array of `string` | yes | The paths that still conflict. |
+| `resolved` | array of `string` | yes | The paths this request resolved. |
+| `status_after` | [`WsStatus`](#wsstatus) or `null` | no | The status after the mutation; omitted when the request said `none`. |
+
+## WsState
+
+A workspace's state.
+
+Kind: enumeration. `swarmops schema WsState` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"clean"` | No rebase in progress. |
+| `"rebasing"` | A rebase stopped on conflicts. |
+
+## WsStatus
+
+A workspace's status: its changes against its head, a page at a time, and how far its target has moved since its base.
+
+Kind: object. `swarmops schema WsStatus` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `base` | `string` | yes | The target's changeset its chain starts from. |
+| `behind_by` | `integer` (uint64) | yes | How many changesets the target holds past `base`, along first parents: at most 10,000. |
+| `changes` | array of [`WsChange`](#wschange) | yes | The changes, by path. |
+| `cursor` | `string` or `null` | no | Where this page stopped. |
+| `head` | `string` | yes | Its chain's last changeset. |
+| `main` | `string` | yes | The head of the workspace's target ref (`main`, or `release/<name>`), read first. |
+| `name` | `string` | yes | The workspace's name. |
+| `rebasing` | [`WsRebasing`](#wsrebasing) or `null` | no | The rebase in progress, when `state` is `rebasing`. |
+| `state` | [`WsState`](#wsstate) | yes | Whether the workspace is rebasing. |
+| `truncated` | `boolean` | yes | Whether more changes follow: give `cursor` to read them. |
+
+## WsStatusReq
+
+`ws_status` (client-side): what changed in a workspace against its head.
+
+Kind: object. `swarmops schema WsStatusReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `cursor` | `string` or `null` | no | Where the previous page stopped. |
+| `full` | `boolean` | no | Hash every file instead of trusting unchanged stats. |
+| `limit` | `integer` (uint) | no | The most changes to return: at least 1. Default: `500`. At least 1. |
+| `paths` | array of `string` | no | Only these repository paths, and what is below them. |
+| `workspace` | `string` | yes | The workspace, by name. |

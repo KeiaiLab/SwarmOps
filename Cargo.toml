@@ -48,6 +48,15 @@ base64 = "0.22.1"
 # (serde_spanned, toml_writer) are.
 toml = { version = "1.1.6", default-features = false, features = ["parse", "display", "serde", "std"] }
 clap = { version = "4.6.7", features = ["derive"] }
+# The workspaces' untracked walk (swarmops-ws only, M5 decision 6): gitignore-aware and
+# parallel, with globset beside it; both "Unlicense OR MIT", which deny.toml's MIT admits.
+ignore = "0.4.33"
+# The keys a workspace gives its store calls (swarmops-ws only): uuid v7, as `--key` takes;
+# "Apache-2.0 OR MIT".
+uuid = { version = "1.28.0", features = ["v7"] }
+# A check's process group, killed when it runs past its time (swarmops-ws only, Unix): `kill(2)`
+# with a negative pid through a safe API. The version tempfile already brings in; no new package.
+rustix = { version = "1.1.5", default-features = false, features = ["std", "process"] }
 insta = { version = "1.49.0", features = ["json"] }
 assert_cmd = "2.2.2"
 

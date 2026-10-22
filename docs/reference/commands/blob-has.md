@@ -124,6 +124,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 
 - [`swarmops commit`](commit.md)
 - [`swarmops land`](land.md)
+- [`swarmops rebase`](rebase.md)
 - [`swarmops blob put`](blob-put.md)
 - [CLI reference](../cli.md)
 - [Error codes](../errors.md)

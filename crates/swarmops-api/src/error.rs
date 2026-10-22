@@ -204,6 +204,32 @@ error_codes! {
     RemoteUnreachable => "E_REMOTE_UNREACHABLE", EXIT_RETRYABLE, true;
     /// The store records no remote of that name (`details.remote`).
     RemoteNotFound => "E_REMOTE_NOT_FOUND", EXIT_NOT_FOUND, false;
+    // The workspaces (M5): client-side operations on a directory of the caller's host.
+    /// `ws create` found a workspace of that name already, made by other arguments
+    /// (`details.name`, `details.path` of the existing one).
+    WsExists => "E_WS_EXISTS", EXIT_ERROR, false;
+    /// No workspace by that name, or at that path (`details.name` when named).
+    WsNotFound => "E_WS_NOT_FOUND", EXIT_NOT_FOUND, false;
+    /// Another mutation held the workspace's lock for the whole wait (`details.holder`, when it
+    /// is known); running the operation again can succeed.
+    WsLocked => "E_WS_LOCKED", EXIT_RETRYABLE, true;
+    /// The workspace holds edits the operation would overwrite or lose (`details.paths`, the
+    /// first 20); the hint names the command that commits or discards them.
+    WsDirty => "E_WS_DIRTY", EXIT_ERROR, false;
+    /// `ws create` was given a directory that holds something already (`details.path`).
+    PathNotEmpty => "E_PATH_NOT_EMPTY", EXIT_ERROR, false;
+    /// A rebase still has conflicting paths no one resolved (`details.paths`).
+    UnresolvedConflicts => "E_UNRESOLVED_CONFLICTS", EXIT_ERROR, false;
+    /// `ws resolve` found a conflict marker line still in a file (`details.paths`).
+    MarkersPresent => "E_MARKERS_PRESENT", EXIT_ERROR, false;
+    /// The tree holds paths the workspace's volume cannot hold: `details.reason` says why
+    /// (`case_collision`, `windows_name`, `reserved_name`) and `details.paths` names them.
+    /// Nothing was written.
+    WsUnportable => "E_WS_UNPORTABLE", EXIT_ERROR, false;
+    /// A workspace's check or bootstrap command failed or ran past its time
+    /// (`details.stage`: `check` or `bootstrap`; `exit_code`, `timed_out`, the tails of its
+    /// output, `log`, `changeset`). Nothing was landed.
+    CheckFailed => "E_CHECK_FAILED", EXIT_ERROR, false;
 }
 
 impl ErrorCode {

@@ -12,16 +12,17 @@
 //! operations spec's 64 KiB target for a default response (§9); `read_file`'s 1 MiB is the spec's
 //! own.
 //!
-//! No store-facing type carries a filesystem path. The four exceptions are client-side:
+//! No store-facing type carries a filesystem path. The exceptions are client-side:
 //! [`ContentInput::File`], which the client reads and sends as bytes, [`InitReq::path`],
-//! because `init` runs on the client and is not a [`StoreOps`] method, and
+//! because `init` runs on the client and is not a [`StoreOps`] method,
 //! [`GitImportReq::git_path`] and [`GitExportReq::git_path`], because `git import` reads its
 //! source repository, and `git export` writes its destination, on the caller's host, and
-//! neither is a [`StoreOps`] method (nor an MCP tool).
+//! neither is a [`StoreOps`] method (nor an MCP tool), and the workspace operations' (M5:
+//! [`WsCreateReq::path`], [`WsCreateReq::from`], [`WsInfo::path`]), which run on the caller's
+//! host and which no server receives.
 //!
 //! Not in M1 yet:
 //! - M2: `LogReq.first_parent`;
-//! - M5: `RepoInfo.workspaces`;
 //! - M7: `cr` and `annotations` on `ChangesetDetail` (`show`).
 
 use std::collections::BTreeMap;
@@ -1431,6 +1432,12 @@ pub struct LandReq {
     /// out (`truncated`), and the line positions and blob ids stay.
     #[serde(default = "default_max_conflict_bytes")]
     pub max_conflict_bytes: u64,
+    /// Publish only while the target names this changeset (M5): one attempt, and a target that
+    /// names another is `E_CAS_MISMATCH`, nothing written; `max_attempts` does not apply. With a
+    /// `head` rebased onto it, the landed tree is the rebased tree. `swarmops mcp` refuses one
+    /// that is not a full 64-hex id (`E_INVALID_ARG`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expect_target: Option<Rev>,
     /// What to make of the paths an `E_CONFLICT` report named, decided without a checkout
     /// (operations spec §3, resolution path (b)). Each resolution applies to its path while the
     /// target holds there what `against` held, whether the path conflicts or not; a path the
@@ -1757,6 +1764,606 @@ pub struct UndoResp {
     pub warnings: Vec<String>,
 }
 
+/// The default [`BlobGetReq::max_bytes`]: 64 MiB of blob content, the batch a workspace's
+/// materialisation reads at once.
+pub const DEFAULT_BLOB_GET_MAX_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The default [`WsStatusReq::limit`]: 500 changes.
+pub const DEFAULT_WS_STATUS_LIMIT: usize = 500;
+
+/// The default [`WsCheckInput::timeout_s`]: 900 s, as the operations spec's post-land hook.
+pub const DEFAULT_CHECK_TIMEOUT_S: u64 = 900;
+
+fn default_onto() -> String {
+    "main".to_owned()
+}
+
+fn default_main_rev() -> Rev {
+    Rev::from("main")
+}
+
+fn default_blob_get_max_bytes() -> u64 {
+    DEFAULT_BLOB_GET_MAX_BYTES
+}
+
+fn default_ws_status_limit() -> usize {
+    DEFAULT_WS_STATUS_LIMIT
+}
+
+fn default_check_timeout_s() -> u64 {
+    DEFAULT_CHECK_TIMEOUT_S
+}
+
+/// `rebase` (M5): merge a change three-way onto a ref's head and record the result as one
+/// changeset whose parent is that head, moving no ref. The merge, its conflicts and its
+/// resolutions are a land's (operations spec §3): a conflict is the error `E_CONFLICT`, with the
+/// report in `details.report`, and nothing is recorded then.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct RebaseReq {
+    /// The changeset to rebase: the change's head.
+    pub head: Rev,
+    /// Where the change starts, as a land's `base`: a first-parent ancestor of `head`; when
+    /// omitted, the merge base of `head` and the head of `onto`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base: Option<Rev>,
+    /// The ref to rebase onto: `main` or `release/<name>`, which must exist.
+    #[serde(default = "default_onto")]
+    pub onto: String,
+    /// The recorded changeset's message; `head`'s when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Makes a retry safe: a uuid v7, as a commit's key. The same request on the same head of
+    /// `onto` is the same changeset, replayed without writing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// The most bytes of hunk text an `E_CONFLICT` report carries, as a land's.
+    #[serde(default = "default_max_conflict_bytes")]
+    pub max_conflict_bytes: u64,
+    /// What to make of the paths a conflict report named, as a land's resolutions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolutions: Option<ResolutionsInput>,
+}
+
+/// `rebase`: the changeset that holds the change merged onto the ref's head. Ids are full.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct RebaseResp {
+    /// How the rebase ended.
+    pub status: RebaseStatus,
+    /// The changeset that holds the result: the recorded one, `head` when it is up to date, the
+    /// ref's head when the change was absorbed.
+    pub changeset: String,
+    /// The root tree of `changeset`.
+    pub root: String,
+    /// The ref's head the change was merged onto: `changeset`'s parent when one was recorded.
+    pub onto: String,
+    /// The changeset the change was taken from.
+    pub base: String,
+    /// How many paths `changeset` changes against `onto`.
+    pub files_changed: u64,
+    /// The paths both sides changed that merged cleanly. Omitted when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub auto_merged: Vec<String>,
+}
+
+/// How a rebase ended.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum RebaseStatus {
+    /// This request recorded the merged changeset.
+    Rebased,
+    /// The same keyed request had recorded it already; nothing was written.
+    Replayed,
+    /// The change already sits on the ref's head; nothing was written.
+    UpToDate,
+    /// The ref's head holds the change already; nothing was written.
+    Absorbed,
+}
+
+/// `blob_get` (M5): blobs by id, for a client that writes them out (a workspace's
+/// materialisation). Not an MCP tool.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobGetReq {
+    /// The blob ids, 64 hex digits each; one that is not is `E_INVALID_ARG`.
+    pub ids: Vec<String>,
+    /// The most bytes of content to return: the blobs past it are left for the next request
+    /// (`truncated`).
+    #[serde(default = "default_blob_get_max_bytes")]
+    pub max_bytes: u64,
+}
+
+/// `blob_get`: the blobs found, in the order asked, and the ids the store holds no blob under.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobGetResp {
+    /// The blobs, each whole.
+    pub blobs: Vec<BlobOut>,
+    /// The ids the store holds no blob under.
+    pub missing: Vec<String>,
+    /// Whether blobs were left out to keep within `max_bytes`.
+    pub truncated: bool,
+}
+
+/// One blob's content, encoded as a file's is.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct BlobOut {
+    /// The blob's id.
+    pub id: String,
+    /// Its size in bytes.
+    pub size: u64,
+    /// How `content` encodes the bytes: `utf8` for text, `base64` otherwise.
+    pub encoding: ContentEncoding,
+    /// The bytes.
+    pub content: String,
+}
+
+/// Whether a workspace mutation's response carries the workspace's status after it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusAfter {
+    /// The first page of the status, up to 100 changes.
+    #[default]
+    Page,
+    /// No status.
+    None,
+}
+
+/// What a workspace's rebase does.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WsRebaseAction {
+    /// Rebase the workspace's chain onto the target's head.
+    #[default]
+    Start,
+    /// Rebase again with the resolved conflicts.
+    Continue,
+    /// Leave the rebase: restore the conflicting paths from the head.
+    Abort,
+}
+
+/// How a workspace lands.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum LandMode {
+    /// Merge onto the target's head, wherever it has moved.
+    Merge,
+    /// Publish only onto the target's head the workspace was rebased onto, so that the landed
+    /// tree is the rebased one.
+    Exact,
+}
+
+/// `ws_create` (M5, client-side): make a workspace, a directory holding a sparse copy of a
+/// changeset's tree. The same request again is the same workspace (`created` false).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsCreateReq {
+    /// The workspace's name: 1 to 64 of `a-z`, `0-9`, `.`, `_` and `-`, not starting with `.`.
+    pub name: String,
+    /// The directory to make it in, on the caller's host; when omitted, one named after it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The changeset whose tree it holds.
+    #[serde(default = "default_main_rev")]
+    pub base: Rev,
+    /// The repository paths whose subtrees are written out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefixes: Vec<String>,
+    /// The whole tree instead of `prefixes`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+    /// A directory on the caller's host whose `.worktreeinclude` names files to copy in; when
+    /// omitted, nothing is copied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    /// The hook's session, 16 hex digits; set by the Claude Code hook only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    /// Whether the response carries the status after the mutation.
+    #[serde(default)]
+    pub status_after: StatusAfter,
+}
+
+/// A workspace: where it is and what it holds.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsInfo {
+    /// Its name.
+    pub name: String,
+    /// Its directory on the caller's host.
+    pub path: String,
+    /// The target's changeset its chain starts from.
+    pub base: String,
+    /// Its chain's last changeset; `base` when nothing is committed.
+    pub head: String,
+    /// The repository paths written out.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prefixes: Vec<String>,
+    /// Whether the whole tree is written out.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+    /// Whether this request made it: false for one that existed.
+    #[serde(default)]
+    pub created: bool,
+    /// Whether its directory is gone while its entry stays (`ws_list` with `check`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub orphan: bool,
+    /// The status after the mutation; omitted when the request said `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_after: Option<WsStatus>,
+}
+
+/// `ws_status` (client-side): what changed in a workspace against its head.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsStatusReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// Only these repository paths, and what is below them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Hash every file instead of trusting unchanged stats.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub full: bool,
+    /// The most changes to return: at least 1.
+    #[serde(default = "default_ws_status_limit")]
+    #[schemars(range(min = 1))]
+    pub limit: usize,
+    /// Where the previous page stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// A workspace's status: its changes against its head, a page at a time, and how far its target
+/// has moved since its base.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsStatus {
+    /// The workspace's name.
+    pub name: String,
+    /// The target's changeset its chain starts from.
+    pub base: String,
+    /// Its chain's last changeset.
+    pub head: String,
+    /// The head of the workspace's target ref (`main`, or `release/<name>`), read first.
+    pub main: String,
+    /// How many changesets the target holds past `base`, along first parents: at most 10,000.
+    pub behind_by: u64,
+    /// Whether the workspace is rebasing.
+    pub state: WsState,
+    /// The changes, by path.
+    pub changes: Vec<WsChange>,
+    /// The rebase in progress, when `state` is `rebasing`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rebasing: Option<WsRebasing>,
+    /// Whether more changes follow: give `cursor` to read them.
+    pub truncated: bool,
+    /// Where this page stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// A workspace's state.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum WsState {
+    /// No rebase in progress.
+    Clean,
+    /// A rebase stopped on conflicts.
+    Rebasing,
+}
+
+/// One changed path of a workspace.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsChange {
+    /// The repository path.
+    pub path: String,
+    /// What changed.
+    pub kind: WsChangeKind,
+    /// The file's size now; omitted for a deleted path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// What changed at a workspace path.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum WsChangeKind {
+    /// A file the head does not hold.
+    Added,
+    /// Its content changed.
+    Modified,
+    /// It is gone.
+    Deleted,
+    /// A file became a symlink, or the other way round.
+    TypeChanged,
+    /// Its executable bit changed.
+    ModeChanged,
+}
+
+/// A workspace's rebase in progress.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsRebasing {
+    /// The target's head it rebases onto.
+    pub onto: String,
+    /// The paths that still conflict.
+    pub conflicts: Vec<String>,
+}
+
+/// `ws_diff` (client-side): a workspace's edits against its head, as the store's diff gives a
+/// diff (`from` the head, `to` `ws:<name>`).
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsDiffReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// Only these repository paths, and what is below them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// How much each file says: as the store's diff.
+    #[serde(default)]
+    pub format: DiffFormat,
+    /// Unchanged lines around each change.
+    #[serde(default = "default_diff_context")]
+    pub context: u32,
+    /// The most files to return: at least 1.
+    #[serde(default = "default_diff_limit")]
+    #[schemars(range(min = 1))]
+    pub limit: usize,
+    /// Where the previous page stopped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    /// The most bytes of a `unified` page's files.
+    #[serde(default = "default_diff_max_bytes")]
+    pub max_bytes: u64,
+}
+
+/// `ws_commit` (client-side): record a workspace's edits as one changeset on its head.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsCommitReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// The changeset's message.
+    pub message: String,
+    /// Only these repository paths; paths outside the workspace's prefixes join them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// A kind to record for a path, where the volume cannot hold the executable bit.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub modes: BTreeMap<String, ModeInput>,
+    /// Whether the response carries the status after the mutation.
+    #[serde(default)]
+    pub status_after: StatusAfter,
+}
+
+/// `ws_commit`: the changeset recorded.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsCommitResp {
+    /// The new changeset: the workspace's head now.
+    pub changeset: String,
+    /// Its parent: the head before.
+    pub parent: String,
+    /// How many paths it changes.
+    pub files_changed: u64,
+    /// How many blobs the store did not hold and got.
+    pub blobs_written: u64,
+    /// A crashed commit's key replayed: the changeset was recorded before.
+    pub replayed: bool,
+    /// The status after the mutation; omitted when the request said `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_after: Option<WsStatus>,
+}
+
+/// `ws_rebase` (client-side): move a workspace's chain onto its target's head, as `rebase`
+/// records it, and its files with it.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsRebaseReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// The ref to rebase onto.
+    #[serde(default = "default_onto")]
+    pub onto: String,
+    /// Start, continue after resolving, or abort.
+    #[serde(default)]
+    pub action: WsRebaseAction,
+    /// Commit the workspace's edits first, with this message; without it, edits are
+    /// `E_WS_DIRTY`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Whether the response carries the status after the mutation.
+    #[serde(default)]
+    pub status_after: StatusAfter,
+}
+
+/// `ws_rebase`: where the workspace stands now.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsRebaseResp {
+    /// How the rebase ended; `None` after an abort.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<RebaseStatus>,
+    /// The workspace's head now.
+    pub changeset: String,
+    /// The target's head it was rebased onto.
+    pub onto: String,
+    /// The status after the mutation; omitted when the request said `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_after: Option<WsStatus>,
+}
+
+/// `ws_resolve` (client-side): mark conflicting paths of a rebase resolved.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsResolveReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// The paths resolved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Every conflicting path.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all: bool,
+    /// Take one side's content instead of the file's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub take: Option<Side>,
+    /// Resolve a file that still holds a conflict marker line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+    /// Whether the response carries the status after the mutation.
+    #[serde(default)]
+    pub status_after: StatusAfter,
+}
+
+/// `ws_resolve`: the paths resolved and those left.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsResolveResp {
+    /// The paths this request resolved.
+    pub resolved: Vec<String>,
+    /// The paths that still conflict.
+    pub remaining: Vec<String>,
+    /// The status after the mutation; omitted when the request said `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_after: Option<WsStatus>,
+}
+
+/// The check a workspace's land runs.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsCheckInput {
+    /// The command and its arguments, run without a shell in the workspace; when omitted, the
+    /// repository's `.swarmops/workspaces.json` `check.argv`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+    /// The most seconds the command runs before it is killed.
+    #[serde(default = "default_check_timeout_s")]
+    pub timeout_s: u64,
+}
+
+/// `ws_land` (client-side): land a workspace's chain on its target; with a check, rebase, run
+/// the check there, and publish only the tree the check ran on.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsLandReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// The landed changeset's message, and the message to commit edits with first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The land's key, a uuid v7; when omitted, the workspace makes one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+    /// The ref to land on; the workspace's target when omitted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// The check to run on the rebased tree before it lands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<WsCheckInput>,
+    /// `merge` or `exact`; when omitted, `exact` with a check and `merge` without.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<LandMode>,
+    /// How many times to rebase, check and land before `E_CAS_RETRY_EXHAUSTED`: 1 to 32.
+    #[serde(default = "default_max_attempts")]
+    #[schemars(range(min = 1, max = MAX_LAND_ATTEMPTS))]
+    pub max_attempts: u32,
+    /// Whether the response carries the status after the mutation.
+    #[serde(default)]
+    pub status_after: StatusAfter,
+}
+
+/// `ws_land`: the land, and how many attempts it took.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsLandResp {
+    /// The store's land.
+    pub land: LandResp,
+    /// How many rebase, check and land attempts it took.
+    pub attempts: u32,
+    /// The status after the mutation; omitted when the request said `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_after: Option<WsStatus>,
+}
+
+/// `ws_materialize` (client-side): write out more of the tree.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsMaterializeReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// The repository paths to add to its prefixes.
+    pub paths: Vec<String>,
+    /// Whether the response carries the status after the mutation.
+    #[serde(default)]
+    pub status_after: StatusAfter,
+}
+
+/// `ws_materialize`: what was written.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsMaterializeResp {
+    /// The prefixes added.
+    pub materialized: Vec<String>,
+    /// How many bytes were written.
+    pub bytes: u64,
+    /// The status after the mutation; omitted when the request said `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_after: Option<WsStatus>,
+}
+
+/// `ws_discard` (client-side): restore paths from the workspace's head.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsDiscardReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// The repository paths to restore; every changed one when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
+    /// Whether the response carries the status after the mutation.
+    #[serde(default)]
+    pub status_after: StatusAfter,
+}
+
+/// `ws_discard`: the paths restored.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsDiscardResp {
+    /// The paths restored.
+    pub discarded: Vec<String>,
+    /// The status after the mutation; omitted when the request said `none`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_after: Option<WsStatus>,
+}
+
+/// `ws_list` (client-side): the store's workspaces, from its registry.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsListReq {
+    /// Also open each workspace, and report one whose directory is gone as an orphan.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub check: bool,
+}
+
+/// `ws_list`: the workspaces, by name.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsList {
+    /// The workspaces.
+    pub workspaces: Vec<WsInfo>,
+}
+
+/// `ws_info` (client-side): one workspace.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsInfoReq {
+    /// The workspace, by name.
+    pub workspace: String,
+}
+
+/// `ws_delete` (client-side, CLI only): remove a workspace's directory, then its entry.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsDeleteReq {
+    /// The workspace, by name.
+    pub workspace: String,
+    /// Delete it even with edits or unlanded commits.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+    /// Commit its edits as a rescue changeset first.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rescue: bool,
+}
+
+/// `ws_delete`: what the deleted workspace left in the store.
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
+pub struct WsDeleteResp {
+    /// The workspace's name.
+    pub deleted: String,
+    /// Its head when it was deleted.
+    pub head: String,
+    /// The rescue changeset of its edits, when there were some.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rescued: Option<String>,
+}
+
 /// One store's operations, implemented over a local store now and by a remote client later
 /// (operations spec §7).
 ///
@@ -1782,6 +2389,11 @@ pub trait StoreOps {
     /// nothing.
     fn land(&self, who: &Identity, req: LandReq) -> Result<LandResp, OpError>;
 
+    /// Merges a change three-way onto a ref's head and records the result as one changeset
+    /// whose parent is that head, moving no ref (CLI `rebase`, M5). A conflict is `E_CONFLICT`,
+    /// as a land's, and records nothing.
+    fn rebase(&self, who: &Identity, req: RebaseReq) -> Result<RebaseResp, OpError>;
+
     /// The changeset a revision names, and whether the revision is exactly a ref's name (CLI
     /// `resolve`).
     fn resolve_rev(&self, req: ResolveRevReq) -> Result<ResolvedRev, OpError>;
@@ -1793,6 +2405,9 @@ pub trait StoreOps {
 
     /// Which of the given blob ids the store holds blobs under (CLI `blob has`).
     fn blob_has(&self, req: BlobHasReq) -> Result<BlobHasResp, OpError>;
+
+    /// Blobs by id, up to a byte budget, and the ids it holds none under (CLI `blob get`, M5).
+    fn blob_get(&self, req: BlobGetReq) -> Result<BlobGetResp, OpError>;
 
     /// Reads one file at a revision (CLI `cat`).
     fn read_file(&self, req: ReadFileReq) -> Result<FileContent, OpError>;

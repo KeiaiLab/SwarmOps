@@ -56,6 +56,14 @@ REVIEWED = {
             "text", "MIT", "fast-hex's, which its AVX2 decoder is modified from",
         ),
     },
+    # src/unicode_tables/ is generated from the Unicode Character Database, whose terms of use
+    # LICENSE-UNICODE carries: the tables of the gitignore patterns' regular expressions
+    # (globset, through regex-automata), from M5's workspace scan.
+    ("regex-syntax", "0.8.11"): {
+        "src/unicode_tables/LICENSE-UNICODE": (
+            "text", "Unicode-DFS-2016", "the Unicode data its Unicode tables are generated from",
+        ),
+    },
     # zstd/ is zstd's C library, which zstd-sys compiles with zstd's default features (its
     # dictionary builder and legacy decoders among them), under BSD-3-Clause or GPL-2.0 at the
     # user's option. Its files carry that dual-license header, but for the dictionary builder's
@@ -110,6 +118,15 @@ SIGNATURES = (
         (),
     ),
     ("Unicode-3.0", ("unicode license v3",), ()),
+    (
+        "Unicode-DFS-2016",
+        (
+            "unicode, inc. license agreement - data files and software",
+            "permission is hereby granted, free of charge, to any person obtaining a copy of the"
+            " unicode data files",
+        ),
+        (),
+    ),
     ("CC0-1.0", ("cc0 1.0 universal",), ()),
     ("Unlicense", ("this is free and unencumbered software released into the public domain",), ()),
     ("MPL-2.0", ("mozilla public license version 2.0",), ()),

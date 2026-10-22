@@ -56,7 +56,7 @@ type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 /// The tools, one per `StoreOps` operation and then one per client-side operation of the git
 /// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
 /// are.
-const TOOLS: [(&str, &str); 23] = [
+const TOOLS: [(&str, &str); 35] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -72,6 +72,7 @@ const TOOLS: [(&str, &str); 23] = [
     ("undo", "UndoReq"),
     ("commit", "CommitReq"),
     ("land", "LandReq"),
+    ("rebase", "RebaseReq"),
     ("blob_put", "BlobPutReq"),
     ("blob_has", "BlobHasReq"),
     ("verify", "VerifyReq"),
@@ -80,12 +81,42 @@ const TOOLS: [(&str, &str); 23] = [
     ("push", "PushReq"),
     ("sync", "SyncReq"),
     ("sync_status", "SyncStatusReq"),
+    ("ws_create", "WsCreateReq"),
+    ("ws_status", "WsStatusReq"),
+    ("ws_diff", "WsDiffReq"),
+    ("ws_commit", "WsCommitReq"),
+    ("ws_rebase", "WsRebaseReq"),
+    ("ws_resolve", "WsResolveReq"),
+    ("ws_land", "WsLandReq"),
+    ("ws_materialize", "WsMaterializeReq"),
+    ("ws_discard", "WsDiscardReq"),
+    ("ws_list", "WsListReq"),
+    ("ws_info", "WsInfoReq"),
 ];
 
 /// The tools [`mcp_tool_calls_golden`] does not call: the git remotes' (M13), whose operations
-/// answer `E_INTERNAL` until their tasks land. The M13 plan's task C10 records their calls, and
-/// empties this list.
-const UNCALLED: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
+/// answer `E_INTERNAL` until their tasks land, and the workspaces' (M5), which answer
+/// `E_INVALID_ARG` until theirs do. The M13 plan's task C10 and the M5 plan's task W8 record
+/// their calls, and empty this list.
+const UNCALLED: [&str; 17] = [
+    "remote_list",
+    "fetch",
+    "push",
+    "sync",
+    "sync_status",
+    "rebase",
+    "ws_create",
+    "ws_status",
+    "ws_diff",
+    "ws_commit",
+    "ws_rebase",
+    "ws_resolve",
+    "ws_land",
+    "ws_materialize",
+    "ws_discard",
+    "ws_list",
+    "ws_info",
+];
 
 /// How long a test waits for one reply, or for the server to exit once its stdin is closed.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -2421,9 +2452,13 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     assert_eq!(fields(schema), fields(original), "{name}");
     assert_no_references(name, schema);
     let (read_only, destructive, idempotent, open_world) = match name {
-        "commit" | "blob_put" => (false, false, false, false),
-        "land" => (false, false, true, false),
-        "ref_set" | "ref_delete" | "undo" => (false, true, true, false),
+        "commit" | "rebase" | "blob_put" | "ws_commit" => (false, false, false, false),
+        // A land, and the workspaces' that find their work done when run again (M5).
+        "land" | "ws_create" | "ws_rebase" | "ws_resolve" | "ws_land" | "ws_materialize" => {
+            (false, false, true, false)
+        }
+        // A workspace's discard (M5) overwrites edits as these overwrite refs.
+        "ref_set" | "ref_delete" | "undo" | "ws_discard" => (false, true, true, false),
         // The git remotes' (M13): a fetch or a push run again moves nothing new; a sync run
         // again after the remote moved lands again; all three reach the remote.
         "fetch" | "push" => (false, false, true, true),

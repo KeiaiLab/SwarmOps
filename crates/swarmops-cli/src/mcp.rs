@@ -147,6 +147,7 @@ use std::path::Path;
 use std::str;
 use std::time::Instant;
 
+use camino::Utf8Path;
 use serde::de::{
     self, DeserializeOwned, DeserializeSeed, Deserializer, IgnoredAny, MapAccess, SeqAccess,
     Visitor,
@@ -155,6 +156,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use serde_json::{Map, Number, Value, json};
 use swarmops_api::LandReq;
+use swarmops_api::RebaseReq;
 use swarmops_api::ResolveRevReq;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
@@ -173,6 +175,8 @@ use crate::cli::Global;
 use crate::commands::{self, Ctx, Used};
 use crate::context::{self, Env};
 use crate::output::{self, Format, Printed};
+
+use self::mcp_ws::{WS_TOOLS, operate_ws};
 
 /// MCP's latest revision, served without a handshake.
 pub const LATEST: &str = "2026-07-28";
@@ -260,7 +264,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 23] = [
+static TOOLS: [Spec; 24] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -449,6 +453,20 @@ static TOOLS: [Spec; 23] = [
         result_chars: None,
     },
     Spec {
+        tool: Tool::Rebase,
+        name: "rebase",
+        request: "RebaseReq",
+        title: "Rebase a change",
+        description: "Merges head (with its first-parent chain since base) three-way onto onto's \
+                      head, main by default, as land merges it, and records the result as one \
+                      changeset there without moving any ref: build and test that changeset, \
+                      then land it with expect_target set to result.onto, so that the landed \
+                      tree is the one you tested. Pass head, base and resolutions' against as \
+                      full 64-hex ids, and an idempotency_key to make a retry safe.",
+        effect: Effect::Adds,
+        result_chars: None,
+    },
+    Spec {
         tool: Tool::BlobPut,
         name: "blob_put",
         request: "BlobPutReq",
@@ -608,19 +626,27 @@ impl<'a> Server<'a> {
     /// [`Server::new`], whose message lines hold at most `max_line` bytes.
     fn with_max_line(global: &'a Global, env: Env<'a>, max_line: u64) -> Server<'a> {
         let all = schema_for_all();
-        let tools = TOOLS
-            .iter()
-            .map(|spec| ToolDef {
-                name: spec.name,
-                title: spec.title,
-                description: spec.description,
-                input_schema: tool_input_schema(spec, &all),
-                annotations: spec.effect.annotations(),
-                meta: spec
-                    .result_chars
-                    .map(|chars| json!({RESULT_CHARS_KEY: chars})),
-            })
-            .collect();
+
+        // The store's tools, then the workspaces' (M5).
+        let store_tools = TOOLS.iter().map(|spec| ToolDef {
+            name: spec.name,
+            title: spec.title,
+            description: spec.description,
+            input_schema: tool_input_schema(spec, &all),
+            annotations: spec.effect.annotations(),
+            meta: spec
+                .result_chars
+                .map(|chars| json!({RESULT_CHARS_KEY: chars})),
+        });
+        let ws_tools = WS_TOOLS.iter().map(|spec| ToolDef {
+            name: spec.name,
+            title: spec.title,
+            description: spec.description,
+            input_schema: plain_schema(spec.request, &all[spec.request]),
+            annotations: spec.tool.annotations(),
+            meta: None,
+        });
+        let tools = store_tools.chain(ws_tools).collect();
         Server {
             global,
             env,
@@ -877,12 +903,18 @@ impl<'a> Server<'a> {
                 "Invalid params: tools/call names the tool to call",
             );
         };
-        let Some(spec) = TOOLS.iter().find(|spec| spec.name == name) else {
-            return error(
-                Some(reply.id),
-                INVALID_PARAMS,
-                format!("Unknown tool: {name}"),
-            );
+        let store_tool = TOOLS.iter().find(|spec| spec.name == name);
+        let ws_tool = WS_TOOLS.iter().find(|spec| spec.name == name);
+        let spec: &'static dyn Named = match (store_tool, ws_tool) {
+            (Some(spec), _) => spec,
+            (None, Some(spec)) => spec,
+            (None, None) => {
+                return error(
+                    Some(reply.id),
+                    INVALID_PARAMS,
+                    format!("Unknown tool: {name}"),
+                );
+            }
         };
         let arguments = match params.arguments {
             None => NO_ARGUMENTS,
@@ -902,7 +934,11 @@ impl<'a> Server<'a> {
             reply,
             arguments,
         };
-        operate(spec.tool, call)
+        match (store_tool, ws_tool) {
+            (Some(store_tool), _) => operate(store_tool.tool, call),
+            (None, Some(ws_tool)) => operate_ws(ws_tool.tool, call),
+            (None, None) => unreachable!("an unknown tool is answered above"),
+        }
     }
 }
 
@@ -1201,6 +1237,14 @@ trait Operate {
         self,
         call: impl FnOnce(&dyn RemoteOps, &Identity, R) -> Result<T, OpError>,
     ) -> Self::Done;
+
+    /// Runs a workspace operation (M5): the request `R`, then `call` on the store, with the
+    /// root it was opened at and the server's identity if it has one; a workspace mutation
+    /// without one acts as the workspace's `created_by`.
+    fn workspace<R: Refuse, T: Serialize>(
+        self,
+        call: impl FnOnce(&dyn StoreOps, &Utf8Path, Option<&Identity>, R) -> Result<T, OpError>,
+    ) -> Self::Done;
 }
 
 /// The client-side operations a tool runs (M13's git remotes): no [`StoreOps`] has them, and
@@ -1261,6 +1305,7 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
         Tool::Undo => how.mutate(|ops, who, req| ops.undo(who, req)),
         Tool::Commit => how.mutate(|ops, who, req| ops.commit(who, req)),
         Tool::Land => how.mutate(|ops, who, req| ops.land(who, req)),
+        Tool::Rebase => how.mutate(|ops, who, req| ops.rebase(who, req)),
         Tool::BlobPut => how.mutate(|ops, who, req| ops.blob_put(who, req)),
         Tool::BlobHas => how.read(|ops, req| ops.blob_has(req)),
         Tool::Verify => how.read(|ops, req: VerifyReq| {
@@ -1289,7 +1334,7 @@ fn operate_local<O: Operate>(tool: LocalTool, how: O) -> O::Done {
 /// `reply`.
 struct Call<'s, 'a> {
     server: &'s Server<'a>,
-    spec: &'static Spec,
+    spec: &'static dyn Named,
     reply: Reply<'s>,
     arguments: &'s str,
 }
@@ -1380,6 +1425,46 @@ impl Operate for Call<'_, '_> {
             |ops, (who, req)| call(&ops, &who, req),
         )
     }
+
+    /// The arguments as the request, then the server's identity if it has one, then `call` on
+    /// the store with the root it was opened at.
+    fn workspace<R: Refuse, T: Serialize>(
+        self,
+        call: impl FnOnce(&dyn StoreOps, &Utf8Path, Option<&Identity>, R) -> Result<T, OpError>,
+    ) -> String {
+        let Call {
+            server,
+            spec,
+            reply,
+            arguments,
+        } = self;
+        let (agent, env) = (server.global.agent.as_deref(), server.env);
+        let ctx = Ctx {
+            global: server.global,
+            env: server.env,
+            format: Format::Json { pretty: false },
+            started: Instant::now(),
+            used: Used::default(),
+        };
+        let op = spec.name();
+
+        // The store opened anew for the call, as for every tool; a panic is E_INTERNAL.
+        let prepare = || {
+            let req = request_of(spec, arguments)?;
+            Ok((context::identity(agent, env)?, req))
+        };
+        let run = |ops: Recording<'_>, root: &Utf8Path, (who, req): (Option<Identity>, R)| {
+            call(&ops, root, who.as_ref(), req)
+        };
+        match panic::catch_unwind(AssertUnwindSafe(|| ctx.envelope_at_root(op, prepare, run))) {
+            Ok(envelope) => reply.tool_result(&envelope),
+            Err(payload) => {
+                let bug = commands::panicked(&*payload);
+                let envelope = commands::failed_envelope(op, bug, &ctx.used, ctx.started);
+                reply.tool_result(&envelope)
+            }
+        }
+    }
 }
 
 /// Runs tool `spec` for `server` as a command runs ([`Ctx::envelope_on_store`]): `prepare`
@@ -1387,7 +1472,7 @@ impl Operate for Call<'_, '_> {
 /// The tool result that holds the envelope, answered as `reply`.
 fn run<P, T: Serialize>(
     server: &Server<'_>,
-    spec: &Spec,
+    spec: &dyn Named,
     reply: Reply<'_>,
     prepare: impl FnOnce() -> Result<P, OpError>,
     call: impl FnOnce(&dyn StoreOps, P) -> Result<T, OpError>,
@@ -1399,7 +1484,7 @@ fn run<P, T: Serialize>(
         started: Instant::now(),
         used: Used::default(),
     };
-    let op = spec.name;
+    let op = spec.name();
     match panic::catch_unwind(AssertUnwindSafe(|| {
         ctx.envelope_on_store(op, prepare, call)
     })) {
@@ -1418,7 +1503,7 @@ fn run<P, T: Serialize>(
 /// envelope, answered as `reply`.
 fn run_local<P, T: Serialize>(
     server: &Server<'_>,
-    spec: &Spec,
+    spec: &dyn Named,
     reply: Reply<'_>,
     prepare: impl FnOnce() -> Result<P, OpError>,
     call: impl FnOnce(Recording<'_>, P) -> Result<T, OpError>,
@@ -1430,7 +1515,7 @@ fn run_local<P, T: Serialize>(
         started: Instant::now(),
         used: Used::default(),
     };
-    let op = spec.name;
+    let op = spec.name();
     match panic::catch_unwind(AssertUnwindSafe(|| {
         ctx.envelope_on_local(op, prepare, call)
     })) {
@@ -1447,20 +1532,21 @@ fn run_local<P, T: Serialize>(
 /// type and nothing else: `E_INVALID_ARG` when they do not fit it (a field of it named twice
 /// included), or break a rule of this server's ([`Refuse`]). Fields the type does not know are
 /// ignored, as the API's types always ignore them, and kept nowhere.
-fn request_of<R: Refuse>(spec: &Spec, arguments: &str) -> Result<R, OpError> {
+fn request_of<R: Refuse>(spec: &dyn Named, arguments: &str) -> Result<R, OpError> {
     let req: R = serde_json::from_str(arguments).map_err(|e| {
         OpError::new(
             ErrorCode::InvalidArg,
             output::printable(&format!(
                 "the arguments are not a {}: {}",
-                spec.request,
+                spec.request(),
                 unplaced(&e)
             )),
         )
         .with_hint(format!(
             "the {} tool's inputSchema gives its arguments; swarmops schema {} gives the \
              request type, without the rules this server adds",
-            spec.name, spec.request
+            spec.name(),
+            spec.request()
         ))
     })?;
     req.refuse()?;
@@ -1596,6 +1682,9 @@ fn unreadable(file: &str) -> Option<&'static str> {
 /// resolution's `path` and the `file`.
 impl Refuse for LandReq {
     fn refuse(&self) -> Result<(), OpError> {
+        if let Some(expected) = &self.expect_target {
+            full_rev("expect_target", expected)?;
+        }
         let Some(resolutions) = &self.resolutions else {
             return Ok(());
         };
@@ -1646,6 +1735,43 @@ fn concrete_against(against: &Rev) -> Result<(), OpError> {
         )),
     )
     .with_details(Map::from_iter([("against".to_owned(), Value::from(rev))])))
+}
+
+/// A rebase (M5) names its change by full ids: `head`, `base` and the resolutions' `against`,
+/// since the changeset it records is the one a land with `expect_target` publishes, and a ref
+/// name or a relative revision read when the call runs would rebase another change than the
+/// one the caller read.
+impl Refuse for RebaseReq {
+    fn refuse(&self) -> Result<(), OpError> {
+        full_rev("head", &self.head)?;
+        if let Some(base) = &self.base {
+            full_rev("base", base)?;
+        }
+        match &self.resolutions {
+            Some(resolutions) => concrete_against(&resolutions.against),
+            None => Ok(()),
+        }
+    }
+}
+
+/// `E_INVALID_ARG` unless `rev`, request field `field`, is a full changeset id
+/// ([`is_full_id`]): a ref name or a relative revision is read when the call runs instead of
+/// pinning the changeset the caller read, and an id prefix stops resolving once another
+/// changeset shares it.
+fn full_rev(field: &str, rev: &Rev) -> Result<(), OpError> {
+    let rev = rev.as_str();
+    if is_full_id(rev) {
+        return Ok(());
+    }
+    Err(OpError::new(
+        ErrorCode::InvalidArg,
+        output::printable(&format!(
+            "{field} {rev:?} is not a full changeset id: a ref name or a relative revision is \
+             read when the call runs instead of pinning the changeset you read, and an id \
+             prefix stops resolving once another changeset shares it; pass its 64-hex id"
+        )),
+    )
+    .with_details(Map::from_iter([(field.to_owned(), Value::from(rev))])))
 }
 
 /// A move names the target it expects by its full id ([`concrete_expectation`]), unless it
@@ -1804,13 +1930,22 @@ const PLAIN_OBJECT: [&str; 6] = [
 /// ([`concrete_expectation`]).
 fn tool_input_schema(spec: &Spec, all: &Value) -> Value {
     let mut request = all[spec.request].clone();
-    if matches!(spec.tool, Tool::RefSet | Tool::RefDelete)
-        && let Some(expected) = request.pointer_mut("/properties/expected_old")
-    {
+    let pinned = match spec.tool {
+        Tool::RefSet | Tool::RefDelete => Some("/properties/expected_old"),
+        Tool::Land => Some("/properties/expect_target"),
+        _ => None,
+    };
+    if let Some(expected) = pinned.and_then(|at| request.pointer_mut(at)) {
         full_id(expected);
     }
-    let Value::Object(schema) = standalone(&request) else {
-        panic!("the schema of {} is not an object", spec.request)
+    plain_schema(spec.request, &request)
+}
+
+/// `request`, the schema of request type `name`, standing alone ([`standalone`]) and kept a
+/// plain object ([`PLAIN_OBJECT`]): a tool's `inputSchema`.
+fn plain_schema(name: &str, request: &Value) -> Value {
+    let Value::Object(schema) = standalone(request) else {
+        panic!("the schema of {name} is not an object")
     };
     Value::Object(
         schema
@@ -1969,6 +2104,25 @@ struct Spec {
     result_chars: Option<u32>,
 }
 
+/// What a call of a tool needs of its table's entry, whichever table it is in ([`TOOLS`],
+/// [`WS_TOOLS`]): the tool's name and its request type's.
+trait Named: Sync {
+    /// The tool's name: the operation's, as the envelope's `op` gives it.
+    fn name(&self) -> &'static str;
+    /// The operation's request type, as `schema_for_all` names it.
+    fn request(&self) -> &'static str;
+}
+
+impl Named for Spec {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn request(&self) -> &'static str {
+        self.request
+    }
+}
+
 /// The operations, one tool each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Tool {
@@ -1987,6 +2141,7 @@ enum Tool {
     Undo,
     Commit,
     Land,
+    Rebase,
     BlobPut,
     BlobHas,
     Verify,
@@ -2009,11 +2164,11 @@ enum LocalTool {
 enum Effect {
     /// It only reads.
     Reads,
-    /// It adds to the store and changes nothing there (`commit`, `blob_put`); run again, a
-    /// `commit` adds again, another changeset signed at its own time, unless the call carries
-    /// an `idempotency_key`, which makes the same call again a replay (a `blob_put` of the same
-    /// content finds it stored, and says so in its result). A `commit` without a key is not
-    /// idempotent, so the tool does not say it is.
+    /// It adds to the store and changes nothing there (`commit`, `rebase`, `blob_put`); run
+    /// again, a `commit` adds again, another changeset signed at its own time, unless the call
+    /// carries an `idempotency_key`, which makes the same call again a replay (a `blob_put` of
+    /// the same content finds it stored, and says so in its result). A `commit` without a key
+    /// is not idempotent, so the tool does not say it is.
     Adds,
     /// It moves or deletes refs by compare-and-swap, changing what they name (`ref_set`,
     /// `ref_delete`, `undo`); run again with the same arguments, it finds them as it asked
@@ -2195,80 +2350,46 @@ struct TextContent<'a> {
 #[path = "reference/mcp_page.rs"]
 mod mcp_page;
 
-#[cfg(test)]
-mod tests {
-    use std::cell::RefCell;
-    use std::collections::BTreeSet;
-    use std::ffi::OsString;
+#[path = "mcp_ws.rs"]
+mod mcp_ws;
 
-    use camino::Utf8Path;
+/// The test doubles of the tool tables' tests: a way to run a tool's operation that records
+/// which store operation it calls ([`probe::Probe`]), on a store that records and fails each
+/// call ([`probe::Recorder`]). Shared with the workspace tools' tests ([`mcp_ws`]).
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::RefCell;
+
     use swarmops_api::ResolvedRev;
     use swarmops_api::{
-        BlobHasResp, BlobPutResp, ChangeInput, ChangeOp, ChangesetDetail, CommitResp, ContentInput,
-        DeriveReq, DeriveResp, FileContent, LogPage, OpLogPage, PathHistoryPage, RefListResp,
-        RefSetResp, RepoInfo, TreeListing, UndoResp, VerifyReport,
+        BlobHasResp, BlobPutResp, ChangesetDetail, CommitResp, DeriveReq, DeriveResp, FileContent,
+        LogPage, OpLogPage, PathHistoryPage, RefListResp, RefSetResp, RepoInfo, TreeListing,
+        UndoResp, VerifyReport,
     };
-    use swarmops_ops::LocalOps;
 
     use super::*;
 
-    /// Each operation's request type has exactly one tool, and each tool runs exactly the
-    /// `StoreOps` method of its name, or the client-side operation of its name ([`RemoteOps`]),
-    /// on the request type it advertises: a new operation, or a tool wired to the wrong one,
-    /// fails here.
-    #[test]
-    fn the_tools_are_the_store_operations() {
-        // `init`, `git import` and `git export` run on the client and are no `StoreOps`
-        // operations, so they have no tool, and neither have `clone` and `remote add|remove`,
-        // which would let an agent point the store at a URL of its choosing; `derive` is
-        // maintenance, which `swarmops derive` runs beside the store, and no agent's work.
-        let client_side = [
-            "InitReq",
-            "GitImportReq",
-            "GitExportReq",
-            "CloneReq",
-            "RemoteAddReq",
-            "RemoteRemoveReq",
-        ];
-        let all = schema_for_all();
-        let requests: Vec<&str> = all
-            .as_object()
-            .unwrap()
-            .keys()
-            .map(String::as_str)
-            .filter(|name| {
-                name.ends_with("Req") && !client_side.contains(name) && *name != "DeriveReq"
-            })
-            .collect();
-        let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
-        advertised.sort_unstable();
-        assert_eq!(
-            advertised, requests,
-            "one tool per operation's request type"
-        );
-
-        for spec in &TOOLS {
-            let called = RefCell::new(Vec::new());
-            operate(spec.tool, Probe { called: &called });
-            assert_eq!(
-                called.into_inner(),
-                [(spec.name, spec.request)],
-                "the {} tool",
-                spec.name
-            );
-        }
-        let names: BTreeSet<&str> = TOOLS.iter().map(|spec| spec.name).collect();
-        assert_eq!(names.len(), TOOLS.len(), "two tools share a name");
+    /// Runs a tool's operation on a [`Recorder`], with a request read from [`sample`].
+    pub(crate) struct Probe<'a> {
+        called: &'a RefCell<Vec<(&'static str, &'static str)>>,
+        /// What each workspace operation's call ended with: its error's message, or `ok`.
+        outcome: &'a RefCell<Vec<String>>,
     }
 
-    /// Runs a tool's operation on a [`Recorder`], with a request read from [`sample`].
-    struct Probe<'a> {
-        called: &'a RefCell<Vec<(&'static str, &'static str)>>,
+    impl<'a> Probe<'a> {
+        /// A probe recording the store's calls in `called`, and the workspace operations' outcomes
+        /// in `outcome`.
+        pub(crate) fn new(
+            called: &'a RefCell<Vec<(&'static str, &'static str)>>,
+            outcome: &'a RefCell<Vec<String>>,
+        ) -> Probe<'a> {
+            Probe { called, outcome }
+        }
     }
 
     /// Arguments that every operation's request type reads: each takes the fields it knows,
     /// these fill the ones it needs, and it ignores the rest.
-    fn sample() -> Value {
+    pub(crate) fn sample() -> Value {
         json!({
             "rev": "main",
             "head": "main",
@@ -2284,6 +2405,8 @@ mod tests {
             "ids": [],
             "op": 0,
             "remote": "origin",
+            "workspace": "probe",
+            "paths": [],
         })
     }
 
@@ -2323,6 +2446,20 @@ mod tests {
             let who = Identity::parse("test/probe").unwrap();
             let _ = call(&Recorder(self.called), &who, req);
         }
+
+        fn workspace<R: Refuse, T: Serialize>(
+            self,
+            call: impl FnOnce(&dyn StoreOps, &Utf8Path, Option<&Identity>, R) -> Result<T, OpError>,
+        ) {
+            let req = serde_json::from_value(sample()).expect("every request reads the sample");
+            let root = tempfile::tempdir().expect("a temporary store root");
+            let root = Utf8Path::from_path(root.path()).expect("a UTF-8 temporary directory");
+            let outcome = match call(&Recorder(self.called), root, None, req) {
+                Ok(_) => "ok".to_owned(),
+                Err(e) => e.message,
+            };
+            self.outcome.borrow_mut().push(outcome);
+        }
     }
 
     /// The client-side operations, recorded as the store's are.
@@ -2350,10 +2487,14 @@ mod tests {
 
     /// A store that records which operation was called, by its name and the type of request
     /// it took (which its signature fixes), and fails it.
-    struct Recorder<'a>(&'a RefCell<Vec<(&'static str, &'static str)>>);
+    pub(crate) struct Recorder<'a>(pub(crate) &'a RefCell<Vec<(&'static str, &'static str)>>);
 
     impl Recorder<'_> {
-        fn called<T>(&self, op: &'static str, request: &'static str) -> Result<T, OpError> {
+        pub(crate) fn called<T>(
+            &self,
+            op: &'static str,
+            request: &'static str,
+        ) -> Result<T, OpError> {
             self.0.borrow_mut().push((op, request));
             Err(OpError::new(ErrorCode::Internal, "a probe"))
         }
@@ -2432,9 +2573,90 @@ mod tests {
             self.called("blob_has", "BlobHasReq")
         }
 
+        fn rebase(&self, _: &Identity, _: RebaseReq) -> Result<swarmops_api::RebaseResp, OpError> {
+            self.called("rebase", "RebaseReq")
+        }
+
+        fn blob_get(
+            &self,
+            _: swarmops_api::BlobGetReq,
+        ) -> Result<swarmops_api::BlobGetResp, OpError> {
+            self.called("blob_get", "BlobGetReq")
+        }
+
         fn derive(&self, _: DeriveReq) -> Result<DeriveResp, OpError> {
             self.called("derive", "DeriveReq")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+    use std::collections::BTreeSet;
+    use std::ffi::OsString;
+
+    use camino::Utf8Path;
+    use swarmops_api::{ChangeInput, ChangeOp, ContentInput};
+    use swarmops_ops::LocalOps;
+
+    use super::probe::Probe;
+    use super::*;
+
+    /// Each operation's request type has exactly one tool, and each tool runs exactly the
+    /// `StoreOps` method of its name, or the client-side operation of its name ([`RemoteOps`]),
+    /// on the request type it advertises: a new operation, or a tool wired to the wrong one,
+    /// fails here.
+    #[test]
+    fn the_tools_are_the_store_operations() {
+        // `init`, `git import` and `git export` run on the client and are no `StoreOps`
+        // operations, so they have no tool, and neither have `clone` and `remote add|remove`,
+        // which would let an agent point the store at a URL of its choosing; the workspaces'
+        // operations (M5) are tools of their own table, `WS_TOOLS`, but `ws_delete`, which
+        // removes a directory tree. `derive` is maintenance, which `swarmops derive` runs beside
+        // the store, and no agent's work; `blob_get` is a client's primitive, raw bytes that a
+        // workspace writes out.
+        let client_side = [
+            "InitReq",
+            "GitImportReq",
+            "GitExportReq",
+            "CloneReq",
+            "RemoteAddReq",
+            "RemoteRemoveReq",
+        ];
+        let no_tool = ["DeriveReq", "BlobGetReq"];
+        let all = schema_for_all();
+        let requests: Vec<&str> = all
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .filter(|name| {
+                name.ends_with("Req")
+                    && !name.starts_with("Ws")
+                    && !client_side.contains(name)
+                    && !no_tool.contains(name)
+            })
+            .collect();
+        let mut advertised: Vec<&str> = TOOLS.iter().map(|spec| spec.request).collect();
+        advertised.sort_unstable();
+        assert_eq!(
+            advertised, requests,
+            "one tool per operation's request type"
+        );
+
+        for spec in &TOOLS {
+            let called = RefCell::new(Vec::new());
+            operate(spec.tool, Probe::new(&called, &RefCell::new(Vec::new())));
+            assert_eq!(
+                called.into_inner(),
+                [(spec.name, spec.request)],
+                "the {} tool",
+                spec.name
+            );
+        }
+        let names: BTreeSet<&str> = TOOLS.iter().map(|spec| spec.name).collect();
+        assert_eq!(names.len(), TOOLS.len(), "two tools share a name");
     }
 
     /// A move's `expected_old` must be 64 hex digits, of either case as the resolver takes

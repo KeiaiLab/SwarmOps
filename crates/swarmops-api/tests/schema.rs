@@ -18,6 +18,7 @@ use swarmops_api::{
 
 /// Requests and the input types inside them.
 const REQUESTS: &[&str] = &[
+    "BlobGetReq",
     "BlobHasReq",
     "BlobPutReq",
     "ChangeInput",
@@ -39,6 +40,7 @@ const REQUESTS: &[&str] = &[
     "PushReq",
     "ReadFileReq",
     "ReadTreeReq",
+    "RebaseReq",
     "RefDeleteReq",
     "RefListReq",
     "RefSetReq",
@@ -53,13 +55,28 @@ const REQUESTS: &[&str] = &[
     "SyncStatusReq",
     "UndoReq",
     "VerifyReq",
+    "WsCheckInput",
+    "WsCommitReq",
+    "WsCreateReq",
+    "WsDeleteReq",
+    "WsDiffReq",
+    "WsDiscardReq",
+    "WsInfoReq",
+    "WsLandReq",
+    "WsListReq",
+    "WsMaterializeReq",
+    "WsRebaseReq",
+    "WsResolveReq",
+    "WsStatusReq",
 ];
 
 /// Responses and the output types inside them.
 const RESPONSES: &[&str] = &[
     "Advanced",
     "Attribution",
+    "BlobGetResp",
     "BlobHasResp",
+    "BlobOut",
     "BlobPutResp",
     "BranchUpdate",
     "ChangeOut",
@@ -97,6 +114,7 @@ const RESPONSES: &[&str] = &[
     "PathHistoryPage",
     "PublishedChange",
     "PushResp",
+    "RebaseResp",
     "RecoveredOut",
     "RefListResp",
     "RefMoveOut",
@@ -117,6 +135,18 @@ const RESPONSES: &[&str] = &[
     "UndoResp",
     "VerifyFinding",
     "VerifyReport",
+    "WsChange",
+    "WsCommitResp",
+    "WsDeleteResp",
+    "WsDiscardResp",
+    "WsInfo",
+    "WsLandResp",
+    "WsList",
+    "WsMaterializeResp",
+    "WsRebaseResp",
+    "WsRebasing",
+    "WsResolveResp",
+    "WsStatus",
 ];
 
 /// Enums and newtypes, which have no object fields of their own.
@@ -131,17 +161,23 @@ const SCALARS: &[&str] = &[
     "EntryKindOut",
     "ErrorCode",
     "FileKind",
+    "LandMode",
     "LandStatus",
     "LineOp",
     "LossyClass",
     "ModeInput",
     "OperationKind",
     "PushStatus",
+    "RebaseStatus",
     "Rev",
     "RevKind",
     "Side",
+    "StatusAfter",
     "SyncMode",
     "SyncStatusKind",
+    "WsChangeKind",
+    "WsRebaseAction",
+    "WsState",
 ];
 
 #[test]
@@ -241,6 +277,10 @@ fn store_ops_signatures<S: StoreOps + ?Sized>() {
     let _: fn(&S, swarmops_api::BlobHasReq) -> Result<swarmops_api::BlobHasResp, OpError> =
         S::blob_has;
     let _: fn(&S, swarmops_api::DeriveReq) -> Result<swarmops_api::DeriveResp, OpError> = S::derive;
+    let _: fn(&S, &Identity, swarmops_api::RebaseReq) -> Result<swarmops_api::RebaseResp, OpError> =
+        S::rebase;
+    let _: fn(&S, swarmops_api::BlobGetReq) -> Result<swarmops_api::BlobGetResp, OpError> =
+        S::blob_get;
 }
 
 #[test]
@@ -252,7 +292,8 @@ fn every_operation_takes_a_request_and_returns_a_response() {
 /// table: from the operations spec (§0 exit codes, §1 and §4 names and retryability) where it
 /// names the code, from the M1 plan and rulings for `E_UNSUPPORTED_FS`, `E_BUSY` and
 /// `E_INTERNAL`, from the M4 plan for `E_NOTHING_TO_UNDO` and `E_OP_NOT_FOUND`, from the M13
-/// plan for the four `E_REMOTE_*` codes, and by the `E_<NAME>` convention for `E_TYPE_CONFLICT`,
+/// plan for the four `E_REMOTE_*` codes, from the M5 plan for `E_WS_UNPORTABLE` and
+/// `E_CHECK_FAILED` (the other seven M5 codes are the operations spec's), and by the `E_<NAME>` convention for `E_TYPE_CONFLICT`,
 /// `E_UNKNOWN_PARENT` and `E_IO`. A new variant does not compile here until its row is added.
 fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
     match code {
@@ -297,6 +338,15 @@ fn spec_row(code: ErrorCode) -> (&'static str, i32, bool) {
         ErrorCode::RemoteRejected => ("E_REMOTE_REJECTED", 5, false),
         ErrorCode::RemoteUnreachable => ("E_REMOTE_UNREACHABLE", 4, true),
         ErrorCode::RemoteNotFound => ("E_REMOTE_NOT_FOUND", 6, false),
+        ErrorCode::WsExists => ("E_WS_EXISTS", 1, false),
+        ErrorCode::WsNotFound => ("E_WS_NOT_FOUND", 6, false),
+        ErrorCode::WsLocked => ("E_WS_LOCKED", 4, true),
+        ErrorCode::WsDirty => ("E_WS_DIRTY", 1, false),
+        ErrorCode::PathNotEmpty => ("E_PATH_NOT_EMPTY", 1, false),
+        ErrorCode::UnresolvedConflicts => ("E_UNRESOLVED_CONFLICTS", 1, false),
+        ErrorCode::MarkersPresent => ("E_MARKERS_PRESENT", 1, false),
+        ErrorCode::WsUnportable => ("E_WS_UNPORTABLE", 1, false),
+        ErrorCode::CheckFailed => ("E_CHECK_FAILED", 1, false),
     }
 }
 

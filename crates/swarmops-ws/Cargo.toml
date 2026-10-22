@@ -1,0 +1,56 @@
+[package]
+name = "swarmops-ws"
+description = "SwarmOps workspaces: a sparse copy of a changeset's tree on disk, its status, commits, rebase and land, over StoreOps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+# The integration tests are one test binary, `tests/all.rs` (see `[[test]]`).
+autotests = false
+
+[lints]
+workspace = true
+
+[features]
+# The store's test hooks, for the crash doubles of the workspace's durable files (`CrashAtFs`),
+# and the test kit's, so that this crate's tests run under the order checker. Off unless asked
+# for, as the repository's, the operations' and the CLI's.
+test-hooks = ["swarmops-store/test-hooks", "swarmops-testkit/test-hooks"]
+
+[dependencies]
+swarmops-api = { path = "../swarmops-api", version = "0.1.0" }
+swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
+# The conflict markers: the three-way content merge, rendered as diff3 markers.
+swarmops-merge = { path = "../swarmops-merge", version = "0.1.0" }
+# `FsOps` only: the workspace's durable files (`workspace.json`, the intents, the registry)
+# are written through the store's file primitives; never the store's data.
+swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+# The parallel hashing and writing of a workspace's files.
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+camino.workspace = true
+# The index's checksum and the hook's session digest.
+blake3.workspace = true
+tempfile.workspace = true
+# The untracked walk of `ws status`.
+ignore.workspace = true
+# The keys of the store calls a workspace makes.
+uuid.workspace = true
+
+# A check's process group, killed on its timeout.
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
+
+[dev-dependencies]
+# `LocalOps`: the store the tests open.
+swarmops-ops = { path = "../swarmops-ops", version = "0.1.0" }
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
+proptest.workspace = true
+tempfile.workspace = true
+
+# One integration-test binary, one link: each file of `tests/` is a module of `tests/all.rs`.
+[[test]]
+name = "all"
