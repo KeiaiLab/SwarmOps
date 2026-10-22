@@ -20,12 +20,25 @@ features, each with an example.
 | [Parallel agents](guides/parallel-agents.md) | Run many agents on one repository, and see how that compares with agents in git worktrees. |
 | [Claude Code](guides/claude-code.md) | Give Claude Code agents the store through MCP. |
 | [Git round trip](guides/git-round-trip.md) | Import a git repository, and export the work back for review and CI. |
+| [MCP integration](develop/mcp.md) | Connect any MCP client: registration, the stdio exchange, identity, every tool and its command, limits and failures. |
+| [CLI scripting](develop/cli-scripting.md) | Drive SwarmOps from scripts: the envelope, exit codes, jq recipes, retries and idempotency keys. |
 
 ## Operate
 
 | Document | Read it to |
 | --- | --- |
-| [Operations](operations.md) | Run SwarmOps for a swarm: a store, agents through MCP, the daily loop with git, checks, backup and restore, upgrades, limits and what to monitor. |
+| [Operations](operations.md) | Find the task page for running SwarmOps for a swarm. |
+| [Install and upgrade](operate/install-and-upgrade.md) | Install, upgrade and remove SwarmOps on a host. |
+| [Stores](operate/stores.md) | Create a store, place it on a supported filesystem, and set identities. |
+| [Agents](operate/agents.md) | Give agents the store through MCP. |
+| [The daily loop](operate/daily-loop.md) | Move work between the store and git every day. |
+| [Build and test](operate/build-and-test.md) | Build and test a change on disk before it lands. |
+| [One writer per trunk](operate/one-writer-per-trunk.md) | Keep one writer on the git side of each trunk. |
+| [Verify and repair](operate/verify-and-repair.md) | Check a store and act on what the check finds. |
+| [Backup and restore](operate/backup-and-restore.md) | Back a store up and bring it back. |
+| [Making room](operate/making-room.md) | See what a store keeps and how to free space. |
+| [Monitoring](operate/monitoring.md) | Know what to watch on a running store. |
+| [Limits](operate/limits.md) | Know the limits a store and a request enforce. |
 | [Troubleshooting](troubleshooting.md) | Go from a symptom to its cause and the command that fixes it. |
 | [Pilot](pilot.md) | Follow the runbook of the first real use, on this repository. |
 | [Support](../SUPPORT.md) | Find where to ask a question or report a problem. |

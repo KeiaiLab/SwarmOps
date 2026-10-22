@@ -38,6 +38,17 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   from the code and kept current by a test (`SWARMOPS_REGEN_REFERENCE=1` rewrites them).
 - The README is rewritten around the core features, each with an example run, and
   `docs/README.md` maps the documentation by task.
+- Two developer guides: MCP integration (`docs/develop/mcp.md`: registration, the stdio exchange,
+  protocol versions, identity, every tool with its command, size limits, failure modes) and CLI
+  scripting (`docs/develop/cli-scripting.md`: the envelope, exit codes, jq recipes, retry rules,
+  idempotency keys, a commit-and-land loop).
+- The operations guide is split into task pages under `docs/operate/`; `docs/operations.md` is now
+  their index, and its old section links still resolve.
+- The new website, `web/`: a Next.js static export with shadcn/ui and Fumadocs that renders
+  `docs/**/*.md` and `CHANGELOG.md` at `/docs` (sidebar groups, static search, code copy, a
+  per-page Content-Security-Policy) and the product pages (home, `/product`, features, how it
+  works, SwarmOps and git, the roadmap); `just web-install`, `just web-build` and `just web-check`,
+  and a CI workflow. swarmops.cc still serves `site/` until the cutover.
 
 ## [0.1.0] - 2026-10-20
 
