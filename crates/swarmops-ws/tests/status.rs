@@ -1,11 +1,11 @@
-//! `ws status`: the scan, the index, the racy rule, the ignore
+//! `ws status` and `ws discard` without paths: the scan, the index, the racy rule, the ignore
 //! files, and how far the target has moved.
 
 use swarmops_api::WsChangeKind::{Added, Deleted, ModeChanged, Modified, TypeChanged};
-use swarmops_api::{WsState, WsStatusReq};
+use swarmops_api::{StatusAfter, WsDiscardReq, WsState, WsStatusReq};
 use swarmops_ws::state::SWARMWS_DIR;
 
-use crate::fixture::{Fixture, Put, Watched, change, changes, remove, write};
+use crate::fixture::{Fixture, Put, Watched, change, changes, remove, tree_of, write};
 
 /// The index's path in workspace `dir`.
 fn index_of(dir: &camino::Utf8Path) -> camino::Utf8PathBuf {
@@ -302,6 +302,66 @@ fn behind_by_reads_pages_until_base_and_stops_at_the_cap() {
     let page = swarmops_ws::status(&f.ctx_over(&longer), page_of("w")).unwrap();
     assert_eq!(page.behind_by, 10_000);
     assert_eq!((longer.count("resolve_rev"), longer.count("log")), (1, 100));
+}
+
+/// `ws discard` without paths restores every change status finds: edits, deletions, kinds and
+/// modes back as the head holds them, additions removed; ignored files stay.
+#[cfg(unix)]
+#[test]
+fn discard_without_paths_restores_every_change() {
+    use crate::fixture::{set_exec, symlink};
+
+    // 1. A workspace, as created.
+    let f = Fixture::new();
+    let base = f.commit(
+        None,
+        &[
+            Put::File(".gitignore", "*.log\n"),
+            Put::File("src/a.txt", "a\n"),
+            Put::File("src/b.txt", "b\n"),
+            Put::File("src/c.txt", "c\n"),
+            Put::Exec("src/run.sh", "#!/bin/sh\n"),
+            Put::Link("src/l", "a.txt"),
+        ],
+    );
+    f.create("w", &base, &[]);
+    let ctx = f.ctx();
+    let dir = f.beside("w");
+    let created = tree_of(&dir);
+
+    // 2. One change of each kind, and an ignored file.
+    write(&dir, "src/new/n.txt", "new\n");
+    write(&dir, "src/a.txt", "edited\n");
+    remove(&dir, "src/b.txt");
+    symlink(&dir, "src/c.txt", "a.txt");
+    set_exec(&dir, "src/run.sh", false);
+    remove(&dir, "src/l");
+    write(&dir, "build.log", "kept\n");
+
+    // 3. Discarded, each named; the tree is as created but for the ignored file.
+    let req = WsDiscardReq {
+        workspace: "w".to_owned(),
+        paths: Vec::new(),
+        status_after: StatusAfter::Page,
+    };
+    let done = swarmops_ws::discard(&ctx, req).unwrap();
+    assert_eq!(
+        done.discarded,
+        [
+            "src/a.txt",
+            "src/b.txt",
+            "src/c.txt",
+            "src/l",
+            "src/new/n.txt",
+            "src/run.sh"
+        ]
+    );
+    assert_eq!(done.status_after.unwrap().changes, []);
+    let mut expected = created;
+    expected.push(crate::fixture::file("build.log", "kept\n"));
+    expected.sort();
+    assert_eq!(tree_of(&dir), expected);
+    assert_eq!(changes(&ctx, "w", true), []);
 }
 
 /// After any sequence of edits, renames over a file, same-size writes and deletions, the status

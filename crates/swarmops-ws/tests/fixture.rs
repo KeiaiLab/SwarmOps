@@ -310,6 +310,8 @@ pub struct Watched<'a> {
     inner: &'a dyn StoreOps,
     /// The calls made, in order.
     calls: Mutex<Vec<&'static str>>,
+    /// The requests `commit` got, and the changesets it recorded, in order.
+    commits: Mutex<Vec<(CommitReq, Option<String>)>>,
     /// `commit` records the changeset, then fails as a process killed right after it would.
     pub crash_after_commit: AtomicBool,
     /// `log` answers this many made-up changesets, none of them the store's, instead of the
@@ -323,6 +325,7 @@ impl<'a> Watched<'a> {
         Watched {
             inner,
             calls: Mutex::new(Vec::new()),
+            commits: Mutex::new(Vec::new()),
             crash_after_commit: AtomicBool::new(false),
             fake_history: None,
         }
@@ -336,6 +339,11 @@ impl<'a> Watched<'a> {
     /// How many calls of `op` were made.
     pub fn count(&self, op: &str) -> usize {
         self.calls().iter().filter(|call| **call == op).count()
+    }
+
+    /// The requests `commit` got, each with the changeset the store recorded for it, if any.
+    pub fn commits(&self) -> Vec<(CommitReq, Option<String>)> {
+        self.commits.lock().unwrap().clone()
     }
 
     /// Forgets the calls made so far.
@@ -382,7 +390,10 @@ impl StoreOps for Watched<'_> {
 
     fn commit(&self, who: &Identity, req: CommitReq) -> Result<CommitResp, OpError> {
         self.saw("commit");
-        let done = self.inner.commit(who, req)?;
+        let done = self.inner.commit(who, req.clone());
+        let made = done.as_ref().ok().map(|done| done.changeset.clone());
+        self.commits.lock().unwrap().push((req, made));
+        let done = done?;
         if self.crash_after_commit.swap(false, Ordering::SeqCst) {
             return Err(OpError::new(ErrorCode::Io, "killed after the commit"));
         }
