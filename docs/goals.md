@@ -6,8 +6,8 @@ and the work going back to git so that CI and deployments run as before. It is b
 first and then, offline-first, for several. This page states what SwarmOps sets out to do, how
 each goal is measured, where its target is written down, what has been measured so far, and which
 milestone delivers it. [docs/perf.md](perf.md) holds every measurement,
-[docs/known-limitations.md](known-limitations.md) what is still open, and the
-[README's roadmap](../README.md#roadmap) the milestones.
+[docs/known-limitations.md](known-limitations.md) what is still open, and
+[docs/roadmap.md](roadmap.md) the milestones, in detail.
 
 ## Who it is for
 
@@ -18,13 +18,14 @@ milestone delivers it. [docs/perf.md](perf.md) holds every measurement,
   retry can help; it does not parse prose. It reaches the store through the CLI or an MCP server.
 - **Teams that keep git.** The store imports a git history and exports the landed work back to
   git, so a repository's CI, review and deployment keep their source of truth until the team
-  decides otherwise.
+  decides otherwise. Planned: the store fetches from and pushes to GitHub itself, and people
+  keep stock git against a store ([docs/roadmap.md](roadmap.md)).
 
 ## Goals
 
 "Stated in" names the public document that states the target. "Measured" cites a section of
-[docs/perf.md](perf.md), or says that no measurement exists yet. The milestones are the README's;
-the order of those from M5 on is settled once the pilot has run.
+[docs/perf.md](perf.md), or says that no measurement exists yet. The milestones are those of
+[docs/roadmap.md](roadmap.md); the order of those from M5 on is settled once the pilot has run.
 
 | # | Goal | Metric | Target | Stated in | Measured | Milestone |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -40,15 +41,20 @@ the order of those from M5 on is settled once the pilot has run.
 | G10 | Integrity tools | Repair, cleanup and detection | fsck and repair, gc, unsupported-filesystem detection, bounded reads, the next store `FORMAT` | README, "Roadmap"; known-limitations, "Verification and repair" | Not built; `verify --deep` checked 128,306 objects in 1,758 ms ("v0.1.0 — `just perf` in a quiet window") | M6 |
 | G11 | Review | Change requests and a landing gate | Blame, change requests, their classification, approvals and a landing gate | README, "Roadmap" and "SwarmOps and git" | Not built | M7 |
 | G12 | Simulation and a benchmark gate | Regressions caught before they land | The store under a deterministic simulator and random kills; `just bench` fails on a regression over 20 % | README, "Roadmap"; perf.md (its first paragraph) | No gate yet (known-limitations, "No benchmark gate") | M9 |
-| G13 | Several hosts, offline-first | Sync between hosts without an always-on server | A full store on every host; `fetch`, `push` and `sync status` against one upstream, over ssh | README, "Roadmap" | Today through a git remote, one writing host at a time (M8) | M11 |
+| G13 | Several hosts, offline-first (topology 3: local SwarmOps, remote SwarmOps) | Sync between hosts without an always-on server | A full store on every host; `so clone so://…`, `fetch`, `push`, `sync` and `sync status` against one upstream, over ssh; every confirmed land upstream exactly once | README, "Roadmap"; docs/roadmap.md, "Topology 3" | Today through a git remote, one writing host at a time (M8) | M11 |
 | G14 | Safety | `unsafe`, fuzzing, supply chain | No `unsafe` code; four fuzz targets; `cargo deny` over every lockfile; workflows pinned and checked | CONTRIBUTING, "The rules"; SECURITY.md | Holds in every `just check` and in the weekly scheduled run | Every milestone |
+| G15 | Works together with GitHub | The three topologies' acceptance criteria (G16, G17, G13) | All pass in CI with git 2.39.5, 2.43.0 and 2.56.0, and topology 2's in an opt-in run against GitHub | docs/roadmap.md, "Goal" | Not yet measured: no topology is served natively; topology 2 runs through a hand-moved bare clone (docs/roadmap.md, "Where we are") | M13, M14, M11 |
+| G16 | Topology 1: local git, remote SwarmOps | Stock git's clone, fetch, pull and push against `swarmops serve`; ids after a round trip; a no-op fetch's cost | Every listed git command passes over ssh and HTTP; the same id at every ref and `git fsck --strict` clean; a no-op fetch and a clone at most 2× git's own server | docs/roadmap.md, "Topology 1" | Not yet measured; not built | M14 |
+| G17 | Topology 2: local SwarmOps, remote GitHub | `so clone`, `fetch`, `push` and `sync` against a git remote; commits rewritten; CI on GitHub; cost of one new commit | `rewritten` 0 over any number of round trips; GitHub's `push` workflow runs unchanged; one commit's fetch or push at most 1.5× as costly on 12,000 commits as on 1,000 | docs/roadmap.md, "Topology 2" | Not yet measured; not built | M13 |
 
 ## Non-goals
 
 - **A general-purpose git replacement.** Parity with git is not a v1 goal: no user hooks,
   signing, submodules or LFS.
 - **A cluster.** SwarmOps is one program with no daemon and no external database. It does not
-  scale horizontally, and a network server is a follow-up after v1, not a milestone.
+  scale horizontally, and an always-on RPC server is a follow-up after v1, not a milestone.
+  The planned `swarmops serve` (M14, M11) runs per connection, under ssh or as a CGI program, so
+  it adds no daemon.
 - **Writes without a lock.** Object writes take no lock; metadata writes take one, which orders
   every commit and ref move.
 - **Speed bought with durability.** No fast mode exists unless a measurement in
