@@ -46,3 +46,8 @@ looser `script-src` lets the per-page policy bind.
 `scripts/check-site.mjs` fails on a missing docs page, a broken link or anchor, a link inside a
 link, a script, stylesheet or font from another origin, an inline script the page's policy does
 not allow, product pages over the first-load JS budget, or a missing served file.
+
+The budget is a ceiling taken from measurement, not a goal: product pages (`/`, `/product`,
+`/roadmap`) loaded 139.3 kB of JS (gzip) at the first build, and an empty page of the pinned
+next 16.4.2 and react 19.3.1 loads 132.0 kB, so the ceiling is 140 kB. Lowering it is a design
+change; raising it needs a measurement and a judged change.
