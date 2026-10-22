@@ -811,6 +811,32 @@ fn token_is_never_in_arguments_or_output() {
 }
 
 #[test]
+fn mirror_path_is_never_in_output() {
+    let setup = Setup::new();
+    let http = setup.server.http(HttpAuth::Anonymous);
+    let cli = setup.cli(&[]);
+
+    // 1. A held ref lock: git names the lock file, under the mirror, in its stderr.
+    let refs = setup.mirror().join("refs/remotes/origin");
+    fs::create_dir_all(&refs).expect("the refs directory");
+    fs::write(refs.join("main.lock"), "").expect("the lock");
+    let error = setup
+        .fetch(&cli, &http.url(REPO), &Credential::default())
+        .expect_err("the lock fails the fetch");
+
+    // 2. The error holds the mirror's path in no form, given or canonical.
+    let text = format!("{error:?}");
+    let given = setup.mirror().display().to_string();
+    let canonical = fs::canonicalize(setup.mirror())
+        .expect("the mirror")
+        .display()
+        .to_string();
+    assert!(text.contains("main.lock"), "{text}");
+    assert!(!text.contains(&given), "{text}");
+    assert!(!text.contains(&canonical), "{text}");
+}
+
+#[test]
 fn token_header_is_scoped_to_the_remote_url() {
     let setup = Setup::new();
     let http = setup.server.http(token_auth());

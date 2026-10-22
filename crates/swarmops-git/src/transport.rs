@@ -134,7 +134,9 @@ impl GitCli {
         let mut command = self.base_command();
         command.args(args);
 
-        // 1. The mirror: git's repository, and hooks from an empty directory.
+        // 1. The mirror: git's repository, and hooks from an empty directory. Its path, given
+        //    and canonical, is redacted like a token: git names it in errors (a held ref lock).
+        let mut secrets = Secrets::default();
         let mut config: Vec<(String, OsString)> = CONFIG
             .iter()
             .map(|(key, value)| ((*key).to_owned(), OsString::from(value)))
@@ -142,6 +144,10 @@ impl GitCli {
         if let Some(mirror) = call.mirror {
             command.env("GIT_DIR", mirror).current_dir(mirror);
             config.push(("core.hooksPath".to_owned(), mirror.join(HOOKS_NONE).into()));
+            secrets.add(mirror.to_string_lossy().into_owned());
+            if let Ok(canonical) = mirror.canonicalize() {
+                secrets.add(canonical.to_string_lossy().into_owned());
+            }
         }
 
         // 2. The transports git may use: the remote's scheme alone, or none.
@@ -149,7 +155,6 @@ impl GitCli {
         command.env("GIT_ALLOW_PROTOCOL", allowed);
 
         // 3. The remote's token, as a header scoped to its URL (a redirect elsewhere drops it).
-        let mut secrets = Secrets::default();
         let remote_token = call
             .remote
             .and_then(|(url, cred)| Some((url, self.token(cred)?)));
@@ -159,7 +164,9 @@ impl GitCli {
             let header = format!("Authorization: Basic {encoded}");
             let key = format!("http.{}.extraHeader", url.as_str());
             config.push((key, header.clone().into()));
-            secrets = Secrets(vec![header, encoded, token]);
+            secrets.add(header);
+            secrets.add(encoded);
+            secrets.add(token);
         }
 
         // 4. The configuration, in the environment (never in the arguments, which others see).
@@ -860,12 +867,18 @@ struct Child {
     secrets: Secrets,
 }
 
-/// The forms of a token that are replaced in git's output: the header line, its base64 and the
-/// token, longest first.
+/// What is replaced in git's output: the token's forms (the header line, its base64 and the
+/// token) and the mirror's path, given and canonical; longest first.
 #[derive(Default)]
 struct Secrets(Vec<String>);
 
 impl Secrets {
+    /// Adds `secret`, keeping the longest first, so that no shorter form cuts a longer one.
+    fn add(&mut self, secret: String) {
+        let at = self.0.partition_point(|kept| kept.len() >= secret.len());
+        self.0.insert(at, secret);
+    }
+
     /// `text` with every form replaced by `<redacted>`.
     fn redact(&self, text: &str) -> String {
         let mut text = text.to_owned();
