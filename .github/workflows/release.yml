@@ -10,6 +10,15 @@
 # the archives the build jobs made and uploads them with `gh`. No job restores a cache, so what a
 # release ships is built from the tagged commit and Cargo.lock alone, never from a cache another
 # run could have written. No secret is used but each job's own token.
+#
+# Where jobs run: on the maintainers' own host, through the self-hosted runners labelled
+# `swarmops-local` that run CI. A tag push is a maintainer's, never a fork's. The release gate
+# builds into a target directory of its own under the job's temporary directory, not the runner's
+# CARGO_TARGET_DIR that CI's runs reuse, and deletes it at the end. The build jobs run inside an
+# ubuntu:24.04 container pinned by digest, the image whose glibc README's install section is
+# measured against; they install the cross compiler, QEMU and the pinned toolchain there and build
+# into the container's own filesystem, which goes with the container. The digest and the
+# rustup-init release are moved by hand: Dependabot does not read them.
 name: Release
 
 on:
@@ -30,7 +39,7 @@ defaults:
 jobs:
   version:
     name: tag, version and notes
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     timeout-minutes: 5
@@ -124,11 +133,12 @@ jobs:
           retention-days: 14
 
   # The release gate: `just check`, as ci.yml's `check` job runs it (the same tool versions: move
-  # them together), on the tagged commit. Without CI's cache, so its build is a clean one.
+  # them together), on the tagged commit. Without CI's cache or the runner's target directory, so
+  # its build is a clean one.
   check:
     name: just check
     needs: version
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     timeout-minutes: 60
@@ -146,24 +156,34 @@ jobs:
           tool: just@1.58.0,cargo-nextest@0.9.146,cargo-deny@0.20.2
           fallback: none
       - run: just check
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/release-target
       - name: Upload the JUnit report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: junit-release-check
-          path: target/nextest/ci/junit.xml
+          path: ${{ runner.temp }}/release-target/nextest/ci/junit.xml
           if-no-files-found: ignore
           overwrite: true
           retention-days: 14
+      # Several gigabytes the runner's next job would otherwise delete.
+      - name: Delete the clean build
+        if: ${{ always() }}
+        run: rm -rf -- "$RUNNER_TEMP/release-target"
 
   # `swarmops` and `so` for one target, `cargo build --release --locked` on the pinned toolchain
   # without the `test-hooks` feature, smoke-run, then packed into
   # `swarmops-<version>-<target>.tar.gz` (both binaries, LICENSE, THIRD-PARTY-LICENSES, README.md,
-  # CHANGELOG.md) with its SHA-256.
+  # CHANGELOG.md) with its SHA-256. Inside ubuntu:24.04 (glibc 2.39) as root: the steps install
+  # what they need with apt, and the last one gives the runner's user back what they wrote into
+  # the mounted workspace and temporary directory.
   build:
     name: build ${{ matrix.target }}
     needs: version
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    container:
+      image: ubuntu:24.04@sha256:68ee22004a9109b44973313b02ff7b1de250f1de0f5ecb628d73f579aaff33ac
     permissions:
       contents: read
     timeout-minutes: 30
@@ -188,22 +208,42 @@ jobs:
       AR_aarch64_unknown_linux_gnu: aarch64-linux-gnu-ar
       # The newest glibc a binary may need: README's install section promises it.
       GLIBC_FLOOR: "2.34"
+      # The toolchain and the build stay in the container's own filesystem, out of the mounted
+      # home, workspace and temporary directory, and away from the runner's CARGO_TARGET_DIR.
+      RUSTUP_HOME: /opt/rustup
+      CARGO_HOME: /opt/cargo
+      CARGO_TARGET_DIR: /opt/target
+      DEBIAN_FRONTEND: noninteractive
+      # rustup-init, the release the steps install, by the SHA-256 static.rust-lang.org gives.
+      RUSTUP_RELEASE: 1.29.2
+      RUSTUP_SHA256: 5be191e8c70a5007074254cb74d78dbfdd25cd5a61c27de7b8e5410122ec24f4
     steps:
+      # git before the checkout, which otherwise downloads the tree without its history: the
+      # archive is dated at the tagged commit.
+      - name: Install the compilers, QEMU and the tools the steps run
+        env:
+          PACKAGES: ${{ matrix.packages }}
+        run: |
+          read -ra packages <<<"$PACKAGES"
+          apt-get update
+          apt-get install --yes --no-install-recommends build-essential ca-certificates curl \
+            file git jq "${packages[@]}"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Install the toolchain rust-toolchain.toml pins, for the target
         run: |
+          init="$RUNNER_TEMP/rustup-init"
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o "$init" \
+            "https://static.rust-lang.org/rustup/archive/$RUSTUP_RELEASE/x86_64-unknown-linux-gnu/rustup-init"
+          echo "$RUSTUP_SHA256  $init" | sha256sum --check --strict -
+          chmod +x "$init"
+          "$init" -y --no-modify-path --profile minimal --default-toolchain none
+          rm -f -- "$init"
+          export PATH="$CARGO_HOME/bin:$PATH"
+          echo "$CARGO_HOME/bin" >>"$GITHUB_PATH"
           rustup toolchain install --no-self-update
           rustup target add "$TARGET_TRIPLE"
-      - name: Install the cross compiler and QEMU
-        if: matrix.packages
-        env:
-          PACKAGES: ${{ matrix.packages }}
-        run: |
-          read -ra packages <<<"$PACKAGES"
-          sudo apt-get update
-          sudo apt-get install --yes --no-install-recommends "${packages[@]}"
       # GNU ld, which aarch64-linux-gnu-gcc runs by default, flags no version need WEAK, nor
       # does Ubuntu's LLD 18, so the binaries they link need glibc 2.39 (the smoke test says
       # why the flag matters). The aarch64 build is linked by the toolchain's own rust-lld,
@@ -230,7 +270,7 @@ jobs:
       - name: Smoke-test the binaries
         run: |
           read -ra run_with <<<"$RUN_WITH"
-          bin="target/$TARGET_TRIPLE/release"
+          bin="$CARGO_TARGET_DIR/$TARGET_TRIPLE/release"
           file "$bin/swarmops" "$bin/so"
           for name in swarmops so; do
             # The glibc a binary needs is the newest of readelf's version needs
@@ -308,10 +348,10 @@ jobs:
           name="swarmops-$VERSION-$TARGET_TRIPLE"
           stage="$RUNNER_TEMP/stage"
           mkdir -p "$stage/$name" dist
-          install -m 0755 "target/$TARGET_TRIPLE/release/swarmops" \
-            "target/$TARGET_TRIPLE/release/so" "$stage/$name/"
+          install -m 0755 "$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/swarmops" \
+            "$CARGO_TARGET_DIR/$TARGET_TRIPLE/release/so" "$stage/$name/"
           install -m 0644 LICENSE THIRD-PARTY-LICENSES README.md CHANGELOG.md "$stage/$name/"
-          mtime=$(git log -1 --format=%ct)
+          mtime=$(git -c safe.directory="$PWD" log -1 --format=%ct)
           tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$mtime" \
             -C "$stage" -cf - "$name" | gzip -9 --no-name >"dist/$name.tar.gz"
           tar -tvzf "dist/$name.tar.gz"
@@ -331,11 +371,18 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
+      # Root wrote the checkout, dist/ and the staging directory; the runner's user deletes them
+      # before its next job.
+      - name: Give the runner's user back the workspace
+        if: ${{ always() }}
+        run: |
+          owner=$(stat -c %u:%g "$(dirname "$RUNNER_TEMP")")
+          chown -R "$owner" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
   publish:
     name: publish the release
     needs: [version, check, build]
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: write # `gh release create`: the release, its notes and its assets
     timeout-minutes: 10
