@@ -1,0 +1,124 @@
+---
+source: crates/swarmops-cli/tests/remote_acceptance.rs
+expression: golden
+---
+{
+  "Http": [
+    {
+      "code": "E_REMOTE_NOT_FOUND",
+      "details": {
+        "remote": "upstream"
+      },
+      "exit": 6,
+      "hint": "swarmops remote list names the remotes; swarmops remote add records one",
+      "message": "the store records no remote \"upstream\"",
+      "retryable": false
+    },
+    {
+      "code": "E_REMOTE_DIVERGED",
+      "details": {
+        "branch": "main",
+        "reason": "remote_moved",
+        "remote": "origin"
+      },
+      "exit": 3,
+      "hint": "swarmops fetch origin",
+      "message": "main on \"origin\" moved since the last fetch: nothing was sent",
+      "retryable": false
+    },
+    {
+      "code": "E_REMOTE_REJECTED",
+      "details": {
+        "git_exit": 1,
+        "reason": "declined",
+        "refs": [
+          {
+            "message": "pre-receive hook declined",
+            "ref": "refs/heads/main"
+          }
+        ],
+        "remote": "origin",
+        "remote_messages": [
+          "main is protected: open a pull request"
+        ],
+        "stderr_tail": "[stderr_tail]"
+      },
+      "exit": 5,
+      "hint": "details.refs and details.remote_messages give the remote's reason",
+      "message": "the remote \"origin\" refused (declined)",
+      "retryable": false
+    },
+    {
+      "code": "E_REMOTE_UNREACHABLE",
+      "details": {
+        "cause": "connect",
+        "phase": "fetch",
+        "remote": "origin",
+        "stderr_tail": "[stderr_tail]"
+      },
+      "exit": 4,
+      "hint": "run it again once the network is back: nothing changed",
+      "message": "the remote \"origin\" did not answer (connect)",
+      "retryable": true
+    }
+  ],
+  "Ssh": [
+    {
+      "code": "E_REMOTE_NOT_FOUND",
+      "details": {
+        "remote": "upstream"
+      },
+      "exit": 6,
+      "hint": "swarmops remote list names the remotes; swarmops remote add records one",
+      "message": "the store records no remote \"upstream\"",
+      "retryable": false
+    },
+    {
+      "code": "E_REMOTE_DIVERGED",
+      "details": {
+        "branch": "main",
+        "reason": "remote_moved",
+        "remote": "origin"
+      },
+      "exit": 3,
+      "hint": "swarmops fetch origin",
+      "message": "main on \"origin\" moved since the last fetch: nothing was sent",
+      "retryable": false
+    },
+    {
+      "code": "E_REMOTE_REJECTED",
+      "details": {
+        "git_exit": 1,
+        "reason": "declined",
+        "refs": [
+          {
+            "message": "pre-receive hook declined",
+            "ref": "refs/heads/main"
+          }
+        ],
+        "remote": "origin",
+        "remote_messages": [
+          "main is protected: open a pull request"
+        ],
+        "stderr_tail": "[stderr_tail]"
+      },
+      "exit": 5,
+      "hint": "details.refs and details.remote_messages give the remote's reason",
+      "message": "the remote \"origin\" refused (declined)",
+      "retryable": false
+    },
+    {
+      "code": "E_REMOTE_UNREACHABLE",
+      "details": {
+        "cause": "ssh",
+        "phase": "fetch",
+        "remote": "origin",
+        "stderr_tail": "[stderr_tail]"
+      },
+      "exit": 4,
+      "hint": "run it again once the network is back: nothing changed",
+      "message": "the remote \"origin\" did not answer (ssh)",
+      "retryable": true
+    }
+  ]
+}

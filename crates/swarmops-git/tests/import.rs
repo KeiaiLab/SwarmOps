@@ -2203,3 +2203,140 @@ mod crafted_entries {
         assert_eq!(git_oid(&repo, parent), x);
     }
 }
+
+/// The objects-only import (M13: a fetch's import of the followed branch): every commit becomes a
+/// changeset with its external id, as an import into a ref makes it, but no ref is read for
+/// divergence and none moves, and it needs no agent.
+mod objects_only {
+    use super::*;
+
+    /// A request for `git_ref`, objects only.
+    fn objects_only(git_ref: &str) -> ImportRequest {
+        ImportRequest::objects_only(git_ref)
+    }
+
+    /// The refs of `repo`, with what each names.
+    fn refs(repo: &LocalRepo) -> Vec<(String, ChangesetId)> {
+        let listed = repo.list_refs().unwrap();
+        listed
+            .into_iter()
+            .map(|(name, state)| (name, state.target))
+            .collect()
+    }
+
+    /// No ref moves, not even one that has diverged from the source; every commit the tip
+    /// reaches is a changeset that holds it, named by the external id index; the report's
+    /// `ref_moved` is false and its head the tip's changeset.
+    #[test]
+    fn objects_only_import_moves_no_ref() {
+        let fixture = git::fixture("refs");
+        let manifest = manifest(&fixture);
+        let source = open(&fixture);
+        let (_dir, _root, repo) = new_repo();
+
+        // 1. main at a history the tip does not lead from: an import into it is diverged.
+        import(&repo, &source, &request("older")).unwrap();
+        let before = refs(&repo);
+        let rewritten = tip(manifest, "rewritten");
+
+        // 2. The objects-only import reads no ref, so it neither diverges nor moves main.
+        let report = import(&repo, &source, &objects_only("rewritten")).unwrap();
+        assert!(!report.ref_moved);
+        assert_eq!(report.old_head, None);
+        assert_eq!(report.git_head, oid(&rewritten));
+        assert_eq!(git_oid(&repo, report.head), oid(&rewritten));
+        assert_eq!(refs(&repo), before, "no ref moved");
+
+        // 3. Every commit the tip reaches is in the store under its external id.
+        for commit in reached(manifest, &rewritten) {
+            let entry = repo.external_id(SYSTEM_GIT, &oid(&commit).0).unwrap();
+            let entry = entry.unwrap_or_else(|| panic!("no entry for {commit}"));
+            assert_eq!(git_oid(&repo, entry.changeset), oid(&commit));
+        }
+        assert_eq!(repo.verify(true).unwrap().problems, []);
+    }
+
+    /// An import into `main` after an objects-only import of the same tip converts nothing: it
+    /// finds the tip by its external id and moves `main` there.
+    #[test]
+    fn objects_only_import_then_import_into_main_imports_nothing_new() {
+        let fixture = git::fixture("merges");
+        let source = open(&fixture);
+        let (_dir, root, repo) = new_repo();
+        let fetched = import(&repo, &source, &objects_only("HEAD")).unwrap();
+        assert!(fetched.imported > 0);
+        let object_count = objects(&root);
+
+        let into_main = import(&repo, &source, &request("HEAD")).unwrap();
+        assert_eq!(
+            (into_main.imported, into_main.skipped, into_main.ref_moved),
+            (0, 1, true)
+        );
+        assert_eq!(into_main.head, fetched.head);
+        assert_eq!(main_head(&repo), fetched.head);
+        assert_eq!(objects(&root), object_count, "no object converted again");
+    }
+
+    /// The same objects-only import run again takes nothing and writes nothing.
+    #[test]
+    fn objects_only_import_run_again_imports_nothing() {
+        let fixture = git::fixture("merges");
+        let source = open(&fixture);
+        let (_dir, root, repo) = new_repo();
+        let first = import(&repo, &source, &objects_only("HEAD")).unwrap();
+        let (log_len, before) = (journal_len(&root), files(&root));
+
+        let again = import(&repo, &source, &objects_only("HEAD")).unwrap();
+        assert_eq!(
+            (again.imported, again.skipped, again.ref_moved),
+            (0, 1, false)
+        );
+        assert_eq!(again.head, first.head);
+        assert_eq!(journal_len(&root), log_len);
+        assert_eq!(files(&root), before, "no file of the store changed");
+    }
+
+    /// The request names no target and no agent, and the import writes no reflog entry: an
+    /// empty store takes the history and still has no ref.
+    #[test]
+    fn objects_only_import_needs_no_agent() {
+        let fixture = git::fixture("linear");
+        let (_dir, _root, repo) = new_repo();
+        let req = objects_only("HEAD");
+        assert_eq!((req.target_ref.as_str(), req.actor.as_str()), ("", ""));
+        assert_ne!(req, ImportRequest::new("HEAD", "", ""), "a mode of its own");
+
+        let report = import(&repo, &open(&fixture), &req).unwrap();
+        assert!(report.imported > 0);
+        assert!(!report.ref_moved);
+        assert_eq!(refs(&repo), [], "no ref made");
+    }
+
+    /// A commit of a class the request does not allow is refused as an import into a ref
+    /// refuses it, before the frame that would hold it; allowed, it is recorded with its loss.
+    #[test]
+    fn objects_only_import_refuses_lossy_as_before() {
+        let fixture = git::fixture("gitlinks");
+        let (_dir, root, repo) = new_repo();
+        let before = files(&root);
+
+        // 1. Refused by name, nothing written.
+        let error = import(&repo, &open(&fixture), &objects_only("HEAD")).unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ImportError::Convert(ConvertError::Lossy { class: LossyClass::Gitlinks, path, .. })
+                    if path == b"lib/sub"
+            ),
+            "{error:?}"
+        );
+        assert_eq!(files(&root), before, "nothing written");
+
+        // 2. Allowed: recorded with the loss, still no ref.
+        let mut req = objects_only("HEAD");
+        req.lossy = [LossyClass::Gitlinks].into_iter().collect();
+        let report = import(&repo, &open(&fixture), &req).unwrap();
+        assert!(report.lossy_total > 0);
+        assert_eq!(refs(&repo), [], "no ref made");
+    }
+}

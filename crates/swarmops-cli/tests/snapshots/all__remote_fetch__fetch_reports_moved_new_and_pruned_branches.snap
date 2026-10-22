@@ -1,0 +1,34 @@
+---
+source: crates/swarmops-cli/tests/remote_fetch.rs
+expression: fetched
+---
+{
+  "branch": "main",
+  "branches": [
+    {
+      "branch": "fresh",
+      "new": "d07f2277ad3507a09b7a673c3fd9cf66caaf645a"
+    },
+    {
+      "branch": "gone",
+      "old": "416fbef7d67c5f717f268fcab87160e2f602a90d"
+    },
+    {
+      "branch": "main",
+      "new": "eff9632134a0a3609c3c7c363f2a7363450a0ecb",
+      "old": "1cfc8db15ae487a2b8334c8797262900042c790d"
+    }
+  ],
+  "branches_truncated": false,
+  "head": {
+    "changeset": "e16e95a78d556b11e4ff0223a0bf770140307832e782999fa159780a46e142a0",
+    "sha": "eff9632134a0a3609c3c7c363f2a7363450a0ecb"
+  },
+  "imported": 1,
+  "old_head": {
+    "changeset": "40ac62c47e5706b75412512fd5edfc5ae8713f19034c15ef9bce1ac6fef5cffa",
+    "sha": "1cfc8db15ae487a2b8334c8797262900042c790d"
+  },
+  "remote": "origin",
+  "tags_fetched": 1
+}

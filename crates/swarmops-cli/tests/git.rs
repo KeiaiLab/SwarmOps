@@ -1916,3 +1916,43 @@ mod sweeps {
         failure_sweep(1);
     }
 }
+
+/// A store's mirror, made as a fetch makes it (M13): `<store>/git/mirror.git`.
+fn store_mirror(store: &Store) -> String {
+    let root = camino::Utf8Path::new(store.path());
+    let mirror = swarmops_git::mirror::Mirror::open(root).expect("open the mirror");
+    let lock = mirror.lock().expect("the lock is free");
+    mirror.ensure(&lock).expect("make the mirror");
+    utf8(mirror.git_dir())
+}
+
+/// `git import` and `git export` refuse a repository inside a store's `git/`, the mirror only the
+/// remote commands write under its lock: `E_INVALID_ARG`, exit 2, `details.reason`
+/// `store_mirror`, and the mirror's refs as they were.
+#[test]
+fn git_import_and_export_refuse_the_mirror() {
+    let (store, _, _) = imported("linear");
+    let mirror = store_mirror(&store);
+    let failures = [import(&store, &mirror, &[]), export(&store, &mirror, &[])];
+    for failed in failures {
+        assert_eq!(failed.exit(), 2, "{failed}");
+        let error = failed.err("E_INVALID_ARG");
+        assert_eq!(error["details"]["reason"], "store_mirror", "{failed}");
+    }
+    let heads = std::path::Path::new(&mirror).join("refs/heads");
+    let refs = std::fs::read_dir(heads).expect("refs/heads");
+    assert_eq!(refs.count(), 0, "nothing is written");
+}
+
+/// `verify --deep` walks the store's own files only: a store with a mirror, `remotes.toml` and
+/// `authors.toml` verifies clean, as a v0.1.0 binary's verify does.
+#[test]
+fn verify_ignores_the_mirror() {
+    let (store, _, _) = imported("linear");
+    store_mirror(&store);
+    let root = std::path::Path::new(store.path());
+    let remotes = "[remote.origin]\nurl = \"https://example.com/a/b.git\"\nbranch = \"main\"\n";
+    std::fs::write(root.join("remotes.toml"), remotes).expect("write remotes.toml");
+    std::fs::write(root.join("authors.toml"), "[agents]\n").expect("write authors.toml");
+    store.assert_clean("a store with a mirror");
+}

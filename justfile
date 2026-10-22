@@ -79,10 +79,12 @@ bench:
 
 # Optimized, for a quiet window: the 32-process store-level contention test, the 32-process
 # CLI contention test at the spec's 32 x 1,000 commits (SWARMOPS_TEST_CLI_CONTENTION_COMMITS
-# sets another count), then every store bench. Prints only their summary lines (the
+# sets another count), the git remotes' cases (`remote_perf`, against a loopback remote), then
+# every store bench. Prints only their summary lines (the
 # store-level test's by their shape, without its per-child JSON lines) and the load average
 # between them; target/perf/ keeps the full output. docs/perf.md records what they print.
-# The M1 measurements in one go: both 32-process contention tests, then the store benches.
+# The M1 and M13 measurements in one go: both 32-process contention tests, the remote cases,
+# then the store benches.
 perf:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -100,6 +102,11 @@ perf:
     cargo nextest run --locked --release -p swarmops-cli --run-ignored ignored-only --test all \
         -E 'test(/^contention::/)' --no-capture 2>&1 | tee target/perf/contention.log \
         | grep --line-buffered '^contention: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
+        -E 'test(/^remote_perf::/)' --no-capture 2>&1 | tee target/perf/remote.log \
+        | grep --line-buffered '^remote-perf: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     cargo bench --locked -p swarmops-store --bench '*' -- --output-format bencher 2>&1 \

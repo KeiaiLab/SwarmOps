@@ -43,6 +43,7 @@ use swarmops_repo::{Resolution, Resolutions};
 use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{FsObjectStore, LogCut, Recovered};
 
+use crate::authors;
 use crate::content;
 use crate::error::{During, details, error, hint, one_line, op, repo_error, shell_word};
 
@@ -510,6 +511,36 @@ impl LocalOps {
     /// The store's path, as given to [`LocalOps::init`] or [`LocalOps::open`].
     pub fn store_path(&self) -> &Utf8Path {
         &self.store_path
+    }
+
+    /// The signature of a changeset that `who` records: the name and email `<store>/authors.toml`
+    /// gives `who`'s family (read now, every time: operations spec §5), else the agent name and
+    /// `<instance>@<family>.swarmops.local`, and `secs`, a keyed commit's key's time, or else the
+    /// current time ([`signing_time`]), in UTC. `E_STORE_CORRUPT` if `authors.toml` is.
+    pub(crate) fn native_signature(
+        &self,
+        who: &Identity,
+        secs: Option<i64>,
+    ) -> Result<Signature, OpError> {
+        let author = authors::author_of(self.store_path(), who.family())?;
+        let (name, email) = match author {
+            Some(author) => (
+                author.name.unwrap_or_else(|| who.agent().to_owned()),
+                author.email,
+            ),
+            None => (
+                who.agent().to_owned(),
+                format!("{}@{}.swarmops.local", who.instance(), who.family()),
+            ),
+        };
+
+        Ok(Signature {
+            name: name.into_bytes(),
+            email: email.into_bytes(),
+            secs: secs.unwrap_or_else(signing_time),
+            offset_secs: 0,
+            negative_zero: false,
+        })
     }
 
     /// The operations of one request: each revision they resolve is recorded in `resolved`,
@@ -1067,7 +1098,9 @@ impl<'a> Recording<'a> {
         } = self.change(&head, base.as_ref(), None, &onto, resolutions)?;
 
         // 3. Its metadata and signature, as a commit's.
-        let signature = native_signature(who, key.as_ref().map(|key| key.secs));
+        let signature = self
+            .ops
+            .native_signature(who, key.as_ref().map(|key| key.secs))?;
         let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
         if let Some(key) = &key {
             metadata.push((COMMIT_KEY.to_owned(), key.text.clone().into_bytes()));
@@ -1207,7 +1240,9 @@ impl StoreOps for Recording<'_> {
             .filter(|(_, change)| matches!(change.op, swarmops_repo::ChangeOp::PutBlob { .. }))
             .map(|(index, change)| (change.path.clone(), index))
             .collect();
-        let signature = native_signature(who, key.as_ref().map(|key| key.secs));
+        let signature = self
+            .ops
+            .native_signature(who, key.as_ref().map(|key| key.secs))?;
         // In ascending key order, as a changeset's metadata must be.
         let mut metadata = vec![("agent".to_owned(), who.agent().as_bytes().to_vec())];
         if let Some(key) = &key {
@@ -1332,7 +1367,7 @@ impl StoreOps for Recording<'_> {
             max_attempts,
             expect_target: expected,
             resolutions,
-            ..LandRequest::new(head, &target, native_signature(who, None))
+            ..LandRequest::new(head, &target, self.ops.native_signature(who, None)?)
         };
         let outcome = self.ops.repo.land(land).map_err(|e| {
             // An exact land refused under the lock reports what the write repaired first.
@@ -2086,19 +2121,6 @@ fn at_least_one(field: &str, value: usize) -> Result<(), OpError> {
 /// crash at (`swarmops_store::CRASH_AT_ENV`, `swarmops_store::FS_CALLS_ENV`). Unset, not an
 /// integer, or in a build without the feature (a release build among them): the clock's time.
 pub const NOW_ENV: &str = "SWARMOPS_TEST_NOW";
-
-/// The signature of a changeset that `who` records: the agent name, the email
-/// `<instance>@<family>.swarmops.local`, and `secs`, a keyed commit's key's time, or else the
-/// current time ([`signing_time`]), in UTC.
-fn native_signature(who: &Identity, secs: Option<i64>) -> Signature {
-    Signature {
-        name: who.agent().as_bytes().to_vec(),
-        email: format!("{}@{}.swarmops.local", who.instance(), who.family()).into_bytes(),
-        secs: secs.unwrap_or_else(signing_time),
-        offset_secs: 0,
-        negative_zero: false,
-    }
-}
 
 /// Now, in Unix seconds: [`NOW_ENV`]'s seconds if the test hook gives them ([`test_now`]),
 /// else the clock's.
