@@ -500,16 +500,19 @@ second is asked for a `blob_put` of `{"file": "notes.json"}`. Each file holds an
 line, then that one `tools/call`.
 
 What to do with each code is the same as at the CLI: [CLI scripting](cli-scripting.md#retry-rules)
-gives the retry rules, and the README's [Output and exit codes](../../README.md#output-and-exit-codes)
-the exit codes.
+gives the retry rules, and its [Exit codes](cli-scripting.md#exit-codes) the exit codes.
 
 ### The server exits
 
 The store runs in the server's process, so the server ends with it on any of the store's four
-documented aborts, such as a failed journal write whose cut-back fails too: the process aborts with
-SIGABRT, saying why on stderr, and the client sees the server exit and has to start it again. The
-server also exits 1 if reading stdin or writing stdout fails. The README's
-[Store, identity and lifetime](../../README.md#store-identity-and-lifetime) lists the four aborts.
+documented aborts: the process aborts with SIGABRT, saying why on stderr, and the client sees the
+server exit and has to start it again. The server also exits 1 if reading stdin or writing stdout
+fails. The four aborts, the first three of which any commit or ref move can meet:
+
+- a failed journal write or sync whose cut-back fails too;
+- a cut-back that fails while the repair before a write writes unlisted frames afresh;
+- frames that repair writes afresh which land anywhere but where they were and cannot be cut back;
+- an `init` that cannot take its `FORMAT` back, which no tool runs.
 
 ### Seeing what agents did
 

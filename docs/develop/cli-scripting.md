@@ -55,7 +55,7 @@ swarmops info
 | `meta.elapsed_ms` | How long the command took. |
 | `meta.resolved` | Every revision the command resolved: the string you gave and the full changeset id it named. |
 | `meta.auth` | The store's authentication mode (`trust`). |
-| `meta.recovered` | Present only after a `commit`, `ref set` or `ref delete` whose write first repaired what an earlier, crashed writer left: what it repaired. It is no warning. |
+| `meta.recovered` | Present only after a `commit`, `ref set` or `ref delete` whose write first repaired what an earlier, crashed writer left: what it repaired, on success and on `E_CAS_MISMATCH` alike. It is no warning. |
 
 A failure's `error`:
 
@@ -78,6 +78,9 @@ swarmops --as agent/worker-1 ref set main 0e5171a021aabc37bf6b92efa555514c389d58
 
 `swarmops schema` prints the JSON Schema of every request and response type and of the error
 codes; `swarmops schema <Type>` prints one.
+
+Hints and messages name the program `swarmops`, whichever name ran it. Only a usage error's
+hint, the usage line, names it as you invoked it (`Usage: so …`).
 
 Two runs print no envelope. `derive --follow` prints one envelope a line for each run that derived
 something, and `mcp` speaks MCP on stdout. And a run that meets one of the store's four documented
