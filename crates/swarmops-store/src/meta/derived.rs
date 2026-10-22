@@ -36,6 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use camino::Utf8Path;
 use swarmops_core::ObjectId;
 use swarmops_core::bytes::{Reader, to_u64};
+use swarmops_core::portable::is_windows_device_name;
 
 use crate::error::{FileOp, StoreError};
 use crate::external_ids::from_hex;
@@ -73,7 +74,8 @@ const NAME_MAX: usize = 64;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct DerivedSlot<'a> {
     /// The derivation's name, its directory under `meta/derived/`: 1 to 64 bytes of `[a-z0-9_]`,
-    /// and not `tmp`, the directory of the temp files.
+    /// not `tmp`, the directory of the temp files, and not a Windows device name (storage-core
+    /// design, §2.1 P8).
     pub name: &'a str,
     /// The derivation's version, at least 1: a new version is a directory of its own, so that
     /// values an older one derived are never read.
@@ -124,7 +126,8 @@ impl DerivedSlot<'_> {
 fn check_derivation(name: &str, version: u32) -> Result<(), StoreError> {
     if !is_derived_name(name) {
         return Err(StoreError::BadCall(format!(
-            "derived value name {name:?}: not 1 to 64 bytes of [a-z0-9_], or tmp"
+            "derived value name {name:?}: not 1 to 64 bytes of [a-z0-9_], or tmp, or a Windows \
+             device name"
         )));
     }
     if version == 0 {
@@ -157,14 +160,16 @@ pub struct StoredValue {
     pub value: Vec<u8>,
 }
 
-/// Whether `name` is one a derivation takes: 1 to 64 bytes of `[a-z0-9_]`, and not `tmp`, which
-/// names the directory of the temp files.
+/// Whether `name` is one a derivation takes: 1 to 64 bytes of `[a-z0-9_]`, not `tmp`, which
+/// names the directory of the temp files, and not a Windows device name, which no directory on
+/// Windows can have (storage-core design, §2.1 P8).
 pub(crate) fn is_derived_name(name: &str) -> bool {
     (1..=NAME_MAX).contains(&name.len())
         && name
             .bytes()
             .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'_'))
         && name != "tmp"
+        && !is_windows_device_name(name)
 }
 
 /// The store of derived values under `meta/derived/` (see [the module documentation](self)):

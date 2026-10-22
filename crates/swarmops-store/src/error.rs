@@ -71,8 +71,10 @@ pub enum StoreError {
     /// A changeset names the same parent twice.
     #[error("parent changeset {0} is listed twice")]
     DuplicateParent(ChangesetId),
-    /// A ref name is not `main` or `release/<name>`.
-    #[error("invalid ref name {0:?}")]
+    /// A ref name the store does not take, carried as given: not `main` or `release/<name>`
+    /// ([`crate::check_ref_name`]), or a new name another platform could not hold as a file
+    /// (storage-core design, §2.1 P8). The message says which rule it breaks.
+    #[error("invalid ref name {0:?}: {rule}", rule = crate::meta::refs::broken_rule(.0))]
     RefName(String),
     /// A ref would point at a changeset that is not in the index.
     #[error("ref target {0} is not a changeset in the store")]

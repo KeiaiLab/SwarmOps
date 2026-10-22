@@ -895,9 +895,13 @@ impl MetaWrite<'_> {
 
     /// Queues a move of ref `name` from `expected` to `new` (`None` deletes it) by `actor`,
     /// if the ref names `expected` now: as its file says, or the last move this transaction
-    /// queued. Otherwise [`CasResult::Mismatch`], and nothing is queued.
+    /// queued. Otherwise [`CasResult::Mismatch`], and nothing is queued. A name no ref holds
+    /// names nothing, whatever file a case-insensitive volume finds under it.
     ///
-    /// A name that is not `main` or `release/<x>` is [`StoreError::RefName`]; a `new` that is
+    /// A name that is not `main` or `release/<x>` is [`StoreError::RefName`], and so is a new
+    /// name another platform could not hold as a file, for a move of it from nothing, which
+    /// would be recorded (storage-core design, §2.1 P8: one that differs from another ref's only
+    /// in case, a Windows device name, or one that ends in a dot); a `new` that is
     /// neither in the store nor queued, [`StoreError::UnknownRefTarget`]; an actor longer than
     /// 255 bytes, or a move that would not fit in the transaction's frame (65,535 records),
     /// [`StoreError::Limit`].
@@ -921,7 +925,11 @@ impl MetaWrite<'_> {
         {
             return Err(StoreError::UnknownRefTarget(target));
         }
-        let current = self.current(name)?;
+        // A name no ref holds names nothing, though a case-insensitive volume finds another
+        // ref's file under it. Its file is read all the same: the calls are those of any move.
+        let (layout, fs) = (&self.store.layout, &self.store.fs);
+        let held = refs::check_move(layout, fs, name, expected, &self.moved)?;
+        let current = self.current(name)?.filter(|_| held);
         if current != expected {
             return Ok(CasResult::Mismatch { actual: current });
         }
