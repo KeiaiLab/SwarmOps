@@ -1955,6 +1955,10 @@ struct TextContent<'a> {
 }
 
 #[cfg(test)]
+#[path = "reference/mcp_page.rs"]
+mod mcp_page;
+
+#[cfg(test)]
 mod tests {
     use std::cell::RefCell;
     use std::collections::BTreeSet;
