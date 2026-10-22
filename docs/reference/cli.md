@@ -6,7 +6,7 @@ Every command of `swarmops` and `so`, its short form: the same program by a shor
 
 Every command but `mcp` prints one JSON envelope on stdout; its `op` names the operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every error code an envelope can carry, with its exit code.
 
-Each command's page gives its syntax, its arguments, an example recorded by the tests, what it returns and the errors it fails with. Its `yaml` metadata block says the same for programs: `group`, `mutates` (it can change what the store holds), `identity_required` (it refuses to run without `--as` or `SWARMOPS_AGENT`), `mcp_tool`, `envelope_op`, `exit_codes`, `errors` and `syntax`.
+Each command's page gives its syntax, its arguments, an example recorded by the tests, what it returns and the errors it fails with. Its `yaml` metadata block says the same for programs: `group`, `mutates` (it can change what the store holds, its changesets and refs, or make the store; a write to the store's caches alone does not count), `identity_required` (it refuses to run without `--as` or `SWARMOPS_AGENT`), `mcp_tool`, `envelope_op`, `exit_codes`, `errors` and `syntax`.
 
 ## Global options
 

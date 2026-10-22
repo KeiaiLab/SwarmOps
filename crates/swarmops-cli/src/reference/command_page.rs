@@ -141,7 +141,8 @@ enum Returns {
 }
 
 /// What the code says of a command beyond its grammar. `mutates`: it can change what the store
-/// holds; `identity`: it refuses to run without one (`--as` or `SWARMOPS_AGENT`).
+/// holds, its changesets and refs, or make the store; a write to the store's caches alone does
+/// not count. `identity`: it refuses to run without one (`--as` or `SWARMOPS_AGENT`).
 struct Meta {
     path: &'static str,
     group: Group,
@@ -288,7 +289,7 @@ const META: [Meta; 25] = [
     meta(
         "derive",
         Group::Store,
-        true,
+        false,
         false,
         Returns::Type("DeriveResp"),
     ),
@@ -1119,6 +1120,34 @@ const RETURN_SITES: [(&str, &str, &str); 23] = [
 /// The calls that refuse a command without an identity.
 const IDENTITY_CALL: &str = "context::mutator(";
 
+/// The code's rule that ties `mutates` to `identity`: a command that changes the store needs an
+/// identity, so the two columns agree but for [`STORE_MAKER`] and [`SERVER`].
+const CHANGE_RULE: (&str, &str) = (
+    "../swarmops-ops/src/identity.rs",
+    "this operation changes the store, so it needs the caller's identity",
+);
+
+/// The commands that write only the store's caches: no change under [`CHANGE_RULE`].
+const CACHE_ONLY: [(&str, &str); 2] = [
+    (
+        "derive",
+        "It writes only the store's cache of derived values, so it needs",
+    ),
+    (
+        "git export",
+        "It needs no identity: it writes no journal frame, only",
+    ),
+];
+
+/// Where [`CACHE_ONLY`]'s phrases are.
+const CACHE_ONLY_SOURCE: &str = "../swarmops-ops/src/local.rs";
+
+/// The command that makes a store, so changes it with no identity, and where its code says so.
+const STORE_MAKER: (&str, &str, &str) = ("init", "src/commands.rs", "`init`: a store in");
+
+/// The command that serves the MCP tools: it mutates when one of them does.
+const SERVER: &str = "mcp";
+
 /// META names each command once, in the grammar's order, and each column the code can tell
 /// agrees with it.
 #[test]
@@ -1154,6 +1183,29 @@ fn meta_matches_the_code() {
             })
             .unwrap();
         assert!(meta.identity, "{}: refused without an identity", meta.path);
+    }
+
+    // 4. The mutates column of the rows no tool checks: the change rule, cache writes aside.
+    let (rule_file, rule) = CHANGE_RULE;
+    assert!(source(rule_file).contains(rule), "{rule_file}: no {rule:?}");
+    let local = source(CACHE_ONLY_SOURCE);
+    for (path, phrase) in CACHE_ONLY {
+        assert!(local.contains(phrase), "{CACHE_ONLY_SOURCE}: no {phrase:?}");
+        assert!(!lookup(path).mutates, "{path}: writes only caches");
+    }
+    let (maker, maker_file, maker_doc) = STORE_MAKER;
+    assert!(
+        source(maker_file).contains(maker_doc),
+        "{maker_file}: no {maker_doc:?}"
+    );
+    assert!(lookup(maker).mutates, "{maker}: makes a store");
+    let serves_writes = golden.tools.values().any(|reads| !reads);
+    assert_eq!(lookup(SERVER).mutates, serves_writes, "{SERVER}: mutates");
+    for meta in &META {
+        if meta.path == maker || meta.path == SERVER {
+            continue;
+        }
+        assert_eq!(meta.mutates, meta.identity, "{}: mutates", meta.path);
     }
 }
 

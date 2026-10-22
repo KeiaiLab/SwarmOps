@@ -11,7 +11,7 @@ title: "swarmops derive"
 description: "Derive the eager derived values of new changesets, ahead of any reader."
 group: "store"
 since: "0.1.0"
-mutates: true
+mutates: false
 identity_required: false
 mcp_tool: ""
 envelope_op: "derive"
