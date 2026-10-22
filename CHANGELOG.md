@@ -49,6 +49,8 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   per-page Content-Security-Policy) and the product pages (home, `/product`, features, how it
   works, SwarmOps and git, the roadmap); `just web-install`, `just web-build` and `just web-check`,
   and a CI workflow. swarmops.cc still serves `site/` until the cutover.
+- `docs/reference/commands/`: one page per command (25) with its syntax, arguments, a recorded example, its result's fields and its errors; `docs/reference/cli.md` is now the grouped index. Generated from the code and the golden steps, and checked by a test.
+- Golden examples for blob put/has, op log/undo, derive, land, git import/export and every MCP tool, taken from real runs.
 
 ## [0.1.0] - 2026-10-20
 
