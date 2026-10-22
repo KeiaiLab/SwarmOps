@@ -3,8 +3,8 @@
 //! The M5 plan's task W5 wrote the form with paths: each named path is made what the head
 //! holds there, a file or every file below a directory, whatever the agent did to it (an edit,
 //! a removal, a mode, a file or a symlink put where a directory was); a file the head lacks is
-//! removed. Untracked files below a named directory are left. Task W6 writes the form without
-//! paths (every change status finds); until then it fails with `E_INVALID_ARG` naming it.
+//! removed. Untracked files below a named directory are left. Task W6 wrote the form without
+//! paths: every change status finds, an added file removed (an ignored one is no change).
 
 use std::collections::BTreeSet;
 
@@ -14,25 +14,28 @@ use crate::hostfs::{HostFs, HostKind};
 use crate::materialize::{
     self, Item, Put, Tree, covered, dirty, holds, host_failed, items_under, normalize,
 };
+use crate::scan::Want;
 use crate::workspace::{Locate, Workspace, open_locked};
-use crate::{Ctx, after};
+use crate::{Ctx, after, status};
 
 /// `ws_discard` in the workspace `req` names.
 pub fn discard(ctx: &Ctx<'_>, req: WsDiscardReq) -> Result<WsDiscardResp, OpError> {
-    // 1. The named paths, within the workspace's prefixes.
+    // 1. The named paths, else every changed one, within the workspace's prefixes.
     let WsDiscardReq {
         workspace,
         paths,
         status_after,
     } = req;
-    if paths.is_empty() {
-        return Err(OpError::new(
-            ErrorCode::InvalidArg,
-            "ws discard without paths is not built yet (the M5 plan's task W6)",
-        ));
-    }
-    let named = normalize(paths)?;
+    let asked = if paths.is_empty() {
+        None
+    } else {
+        Some(normalize(paths)?)
+    };
     let (ws, _held) = open_locked(ctx, &Locate::Name(workspace))?;
+    let named = match asked {
+        Some(named) => named,
+        None => changed(ctx, &ws)?,
+    };
     if let Some(outside) =
         (named.iter()).find(|path| !ws.file.all && !covered(path, &ws.file.prefixes))
     {
@@ -67,6 +70,12 @@ pub fn discard(ctx: &Ctx<'_>, req: WsDiscardReq) -> Result<WsDiscardResp, OpErro
         discarded: discarded.into_iter().collect(),
         status_after: after::attach(ctx, &ws, status_after),
     })
+}
+
+/// Every path workspace `ws`'s status finds changed, as discard takes paths.
+fn changed(ctx: &Ctx<'_>, ws: &Workspace) -> Result<Vec<String>, OpError> {
+    let changes = status::changes_of(ctx, ws, &Want::default())?;
+    normalize(changes.into_iter().map(|change| change.path).collect())
 }
 
 /// Removes the file or symlink the agent added at `path`, which the head lacks; a directory is
