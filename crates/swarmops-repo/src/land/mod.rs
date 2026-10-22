@@ -56,7 +56,12 @@
 //!
 //! When the last attempt lost its race, the land fails with [`RepoError::RetryExhausted`]. A lost
 //! attempt leaves nothing in the journal: the objects it flushed stay, unreferenced, for GC.
+//!
+//! The detached land ([`Repo::land_detached`], operations spec §3, the detached form) is the
+//! first attempt without the key walk and the publication: the same chain walk (step 2), merge
+//! (step 4), conflict report and writer of `L` (step 5), then `L`'s insert alone, moving no ref.
 
+mod detached;
 mod key;
 mod publish;
 mod resolve;
@@ -67,18 +72,20 @@ use std::thread;
 use std::time::Duration;
 
 use swarmops_core::{
-    Changeset, ChangesetId, Hashed, ObjectId, ObjectKind, RepoPath, Signature, TreeId,
+    BlobId, Changeset, ChangesetId, DeltaEntry, Hashed, ObjectId, ObjectKind, RepoPath, Signature,
+    TreeId,
 };
 use swarmops_merge::diff3::merge_content;
 use swarmops_merge::tree_merge::FileConflict;
 use swarmops_store::ObjectStore;
 
-use crate::commit::Draft;
+use crate::commit::{Draft, WrittenChangeset};
 use crate::error::RepoError;
 use crate::merge::MergeOutcome;
 use crate::read::{RepoRead, StoredChangeset};
 use crate::repo::{Repo, ref_error};
 
+pub use detached::{DetachedLand, DetachedOutcome};
 use key::{KeyFound, TargetWalk};
 pub use publish::{Publication, Published};
 use resolve::Resolving;
@@ -495,30 +502,12 @@ impl<O: ObjectStore> Landing<'_, O> {
         }
     }
 
-    /// The chain the land squashes, from the base (exclusive) to the head, oldest first, walked
-    /// the first time an attempt needs it, by the changesets' objects, which name their parents
-    /// by their hashes (an index record's parents are what a damaged index says: a first-parent
-    /// walk never takes them, [`RepoRead::walk_step`]): [`RepoError::MergeChangeset`] for a
-    /// changeset of it with two parents or more.
+    /// The chain the land squashes ([`chain`]), walked the first time an attempt needs it.
     fn squashed(&mut self) -> Result<Vec<ChangesetId>, RepoError> {
         if let Some(squashed) = &self.squashed {
             return Ok(squashed.clone());
         }
-        let (head, base) = (self.head.id, self.base.id);
-        let mut chain = Vec::new();
-        let mut at = head;
-        while at != base {
-            let parents = self.repo.changeset_object(at)?.parents;
-            if parents.len() > 1 {
-                return Err(RepoError::MergeChangeset(at));
-            }
-            chain.push(at);
-            // The base is a first-parent ancestor of the head: a root comes after it, if at all.
-            at = *parents
-                .first()
-                .ok_or(RepoError::BaseNotAncestor { base, head })?;
-        }
-        chain.reverse();
+        let chain = chain(self.repo, self.base.id, self.head.id)?;
         self.squashed = Some(chain.clone());
         Ok(chain)
     }
@@ -537,12 +526,7 @@ impl<O: ObjectStore> Landing<'_, O> {
                 return Ok(again);
             }
         }
-        let roots = [
-            self.base.changeset.root,
-            self.head.changeset.root,
-            theirs.changeset.root,
-        ];
-        self.repo.merge_roots(roots, &merge_content)
+        merge_chain(self.repo, &self.base, &self.head, theirs)
     }
 
     /// The error of a merge onto `theirs` that conflicts, or whose resolutions of `stale` did not
@@ -555,19 +539,12 @@ impl<O: ObjectStore> Landing<'_, O> {
         merged: MergeOutcome,
         stale: Vec<RepoPath>,
     ) -> Result<RepoError, RepoError> {
-        let paths: Vec<RepoPath> = (merged.conflicts.iter())
-            .map(|conflict| conflict.path.clone())
-            .collect();
-        let last_touched = self.walk.last_touched(read, theirs, &paths)?;
-        Ok(RepoError::Conflict(Box::new(MergeConflicts {
+        let sides = Sides {
             base: self.base.id,
             ours: self.head.id,
-            theirs: theirs.id,
-            conflicts: merged.conflicts,
-            auto_merged: merged.auto_merged,
-            last_touched,
-            stale,
-        })))
+            theirs,
+        };
+        conflict_report(&mut self.walk, read, sides, merged, stale)
     }
 
     /// Writes the changeset the land publishes, `L`, and flushes it (step 5): `delta` applied to
@@ -575,38 +552,27 @@ impl<O: ObjectStore> Landing<'_, O> {
     fn write(
         &self,
         theirs: &StoredChangeset,
-        delta: Vec<swarmops_core::DeltaEntry>,
-        new_blobs: BTreeMap<swarmops_core::BlobId, Vec<u8>>,
+        delta: Vec<DeltaEntry>,
+        new_blobs: BTreeMap<BlobId, Vec<u8>>,
         squashed: &[ChangesetId],
     ) -> Result<Publication, RepoError> {
-        let contents: BTreeMap<ObjectId, Hashed> = (new_blobs.into_values())
-            .map(|bytes| {
-                let blob = Hashed::new(ObjectKind::Blob, bytes);
-                (blob.id(), blob)
-            })
-            .collect();
         let head = &self.head.changeset;
-        let draft = Draft {
-            onto: Some(theirs.changeset.root),
-            changes: delta,
-            contents,
-            parents: vec![theirs.id],
-            author: head.author.clone(),
-            committer: self.req.lander.clone(),
-            message: self
-                .req
-                .message
-                .clone()
-                .unwrap_or_else(|| head.message.clone()),
-            metadata: metadata(&self.req, head, squashed),
-            allow_empty: false,
+        let recorded = Recorded {
+            key: self.req.key.as_deref(),
+            lander: &self.req.lander,
+            extra: &self.req.lander_metadata,
+            squashed,
         };
-        // The merge puts only what theirs lacks, and deletes only what it holds: a delta that
-        // changes nothing is the change the target holds already.
-        let written = self.repo.write_changeset(draft).map_err(|e| match e {
-            RepoError::EmptyChanges => RepoError::NothingToLand(NothingToLandReason::NoChanges),
-            other => other,
-        })?;
+        let squash = Squash {
+            theirs,
+            head,
+            delta,
+            new_blobs,
+            lander: self.req.lander.clone(),
+            message: self.req.message.clone(),
+            metadata: metadata(head, recorded),
+        };
+        let written = write_squash(self.repo, squash)?;
         Ok(Publication {
             target: self.req.target.clone(),
             onto: theirs.id,
@@ -632,25 +598,179 @@ impl<O: ObjectStore> Landing<'_, O> {
     }
 }
 
-/// The metadata of the changeset a land of `req` makes on the chain `squashed`, whose head is
-/// `head`, sorted by key: the head's `agent` and `run_id`, the land's key, the lander, the
-/// lander's own metadata and the chain.
-fn metadata(
-    req: &LandRequest,
-    head: &Changeset,
-    squashed: &[ChangesetId],
-) -> Vec<(String, Vec<u8>)> {
+/// What a land records of itself in the changeset it makes, beside what it copies from the head.
+#[derive(Clone, Copy)]
+struct Recorded<'a> {
+    /// The land's key, recorded as `land_key`.
+    key: Option<&'a str>,
+    /// Who lands, whose name is recorded as `lander`.
+    lander: &'a Signature,
+    /// The lander's own metadata.
+    extra: &'a [(String, Vec<u8>)],
+    /// The chain recorded as `squashed_from`, oldest first.
+    squashed: &'a [ChangesetId],
+}
+
+/// The metadata of the changeset a land makes of the change whose head is `head`, sorted by key:
+/// the head's `agent` and `run_id`, the land's key, the lander, the lander's own metadata and the
+/// chain, as `recorded` gives them.
+fn metadata(head: &Changeset, recorded: Recorded<'_>) -> Vec<(String, Vec<u8>)> {
     let mut metadata: Vec<(String, Vec<u8>)> = (head.metadata.iter())
         .filter(|(key, _)| COPIED.contains(&key.as_str()))
         .cloned()
         .collect();
-    if let Some(key) = &req.key {
+    if let Some(key) = recorded.key {
         metadata.push((LAND_KEY.to_owned(), key.as_bytes().to_vec()));
     }
-    metadata.push((LANDER.to_owned(), req.lander.name.clone()));
-    metadata.extend(req.lander_metadata.iter().cloned());
-    let chain: Vec<String> = squashed.iter().map(ToString::to_string).collect();
+    metadata.push((LANDER.to_owned(), recorded.lander.name.clone()));
+    metadata.extend(recorded.extra.iter().cloned());
+    let chain: Vec<String> = (recorded.squashed.iter())
+        .map(ToString::to_string)
+        .collect();
     metadata.push((SQUASHED_FROM.to_owned(), chain.join(" ").into_bytes()));
     metadata.sort_by(|a, b| a.0.cmp(&b.0));
     metadata
+}
+
+/// The chain a land squashes, from `base` (exclusive) to `head`, oldest first, walked by the
+/// changesets' objects, which name their parents by their hashes (an index record's parents are
+/// what a damaged index says: a first-parent walk never takes them, [`RepoRead::walk_step`]):
+/// [`RepoError::MergeChangeset`] for a changeset of it with two parents or more. The land's step
+/// 2 and the detached land's.
+fn chain<O: ObjectStore>(
+    repo: &Repo<O>,
+    base: ChangesetId,
+    head: ChangesetId,
+) -> Result<Vec<ChangesetId>, RepoError> {
+    let mut chain = Vec::new();
+    let mut at = head;
+    while at != base {
+        let parents = repo.changeset_object(at)?.parents;
+        if parents.len() > 1 {
+            return Err(RepoError::MergeChangeset(at));
+        }
+        chain.push(at);
+        // The base is a first-parent ancestor of the head: a root comes after it, if at all.
+        at = *parents
+            .first()
+            .ok_or(RepoError::BaseNotAncestor { base, head })?;
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+/// The whole merge of a change, `base` to `head`, onto `theirs` (step 4's first attempt): the
+/// one merge the land and the detached land make.
+fn merge_chain<O: ObjectStore>(
+    repo: &Repo<O>,
+    base: &StoredChangeset,
+    head: &StoredChangeset,
+    theirs: &StoredChangeset,
+) -> Result<MergeOutcome, RepoError> {
+    let roots = [
+        base.changeset.root,
+        head.changeset.root,
+        theirs.changeset.root,
+    ];
+    repo.merge_roots(roots, &merge_content)
+}
+
+/// The three sides of a merge a conflict report names.
+#[derive(Clone, Copy)]
+struct Sides<'a> {
+    /// The base the change was taken from.
+    base: ChangesetId,
+    /// The change's head.
+    ours: ChangesetId,
+    /// The changeset the change was merged onto.
+    theirs: &'a StoredChangeset,
+}
+
+/// The error of a merge onto `sides.theirs` that conflicts, or whose resolutions of `stale` did
+/// not apply: its conflicts, with who last touched each path on `theirs`' first-parent chain since
+/// the base, from `walk`, and the stale paths.
+fn conflict_report<O: ObjectStore>(
+    walk: &mut TargetWalk,
+    read: &RepoRead<'_, O>,
+    sides: Sides<'_>,
+    merged: MergeOutcome,
+    stale: Vec<RepoPath>,
+) -> Result<RepoError, RepoError> {
+    let paths: Vec<RepoPath> = (merged.conflicts.iter())
+        .map(|conflict| conflict.path.clone())
+        .collect();
+    let last_touched = walk.last_touched(read, sides.theirs, &paths)?;
+    Ok(RepoError::Conflict(Box::new(MergeConflicts {
+        base: sides.base,
+        ours: sides.ours,
+        theirs: sides.theirs.id,
+        conflicts: merged.conflicts,
+        auto_merged: merged.auto_merged,
+        last_touched,
+        stale,
+    })))
+}
+
+/// The changeset a land makes, `L`, to write (step 5).
+struct Squash<'a> {
+    /// The changeset `L` is made on, its one parent.
+    theirs: &'a StoredChangeset,
+    /// The change's head, whose author and message `L` takes.
+    head: &'a Changeset,
+    /// The merge's delta, applied to `theirs`' tree.
+    delta: Vec<DeltaEntry>,
+    /// The merged contents among `L`'s blobs.
+    new_blobs: BTreeMap<BlobId, Vec<u8>>,
+    /// Who lands: `L`'s committer.
+    lander: Signature,
+    /// `L`'s message; `None`: the head's.
+    message: Option<Vec<u8>>,
+    /// `L`'s metadata, sorted ([`metadata`]).
+    metadata: Vec<(String, Vec<u8>)>,
+}
+
+/// Writes `L` and flushes it (step 5): its blobs, trees and object are durable on return, before
+/// anything names them (I1). A delta that changes nothing is [`NothingToLandReason::NoChanges`].
+/// The one writer of `L`, the land's and the detached land's.
+fn write_squash<O: ObjectStore>(
+    repo: &Repo<O>,
+    squash: Squash<'_>,
+) -> Result<WrittenChangeset, RepoError> {
+    let Squash {
+        theirs,
+        head,
+        delta,
+        new_blobs,
+        lander,
+        message,
+        metadata,
+    } = squash;
+
+    // 1. The merged contents, as blob objects hashed once.
+    let contents: BTreeMap<ObjectId, Hashed> = (new_blobs.into_values())
+        .map(|bytes| {
+            let blob = Hashed::new(ObjectKind::Blob, bytes);
+            (blob.id(), blob)
+        })
+        .collect();
+
+    // 2. L on theirs, the head's author, the lander its committer.
+    let draft = Draft {
+        onto: Some(theirs.changeset.root),
+        changes: delta,
+        contents,
+        parents: vec![theirs.id],
+        author: head.author.clone(),
+        committer: lander,
+        message: message.unwrap_or_else(|| head.message.clone()),
+        metadata,
+        allow_empty: false,
+    };
+
+    // 3. The merge puts only what theirs lacks, and deletes only what it holds: a delta that
+    // changes nothing is the change theirs holds already.
+    repo.write_changeset(draft).map_err(|e| match e {
+        RepoError::EmptyChanges => RepoError::NothingToLand(NothingToLandReason::NoChanges),
+        other => other,
+    })
 }
