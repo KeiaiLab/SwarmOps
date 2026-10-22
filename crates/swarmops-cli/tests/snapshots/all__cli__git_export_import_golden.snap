@@ -1,0 +1,249 @@
+---
+source: crates/swarmops-cli/tests/cli.rs
+expression: s.transcript()
+---
+[
+  {
+    "args": "init [tmp]/store",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id]",
+        "name": "store",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c1 --changes [tmp]/c1.json",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c1]",
+        "root": "[id1]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c1] --create",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "new": "[c1]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store git export [git]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "git_export",
+      "api": 1,
+      "result": {
+        "exported": 1,
+        "objects_written": 3,
+        "head_changeset": "[c1]",
+        "head_sha": "[id2]",
+        "branch": "main",
+        "branch_moved": true,
+        "incremental": false,
+        "rewritten": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 commit -m c2 --changes [tmp]/c2.json --parent [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "commit",
+      "api": 1,
+      "result": {
+        "changeset": "[c2]",
+        "parent": "[c1]",
+        "root": "[id3]",
+        "files_changed": 1,
+        "blobs_written": 1,
+        "replayed": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store --as agent/worker-17 ref set main [c2] --expect [c1]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "ref_set",
+      "api": 1,
+      "result": {
+        "name": "main",
+        "old": "[c1]",
+        "new": "[c2]",
+        "already_applied": false
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "[c1]": "[c1]",
+          "[c2]": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/store git export [git]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "git_export",
+      "api": 1,
+      "result": {
+        "exported": 1,
+        "objects_written": 4,
+        "head_changeset": "[c2]",
+        "head_sha": "[id4]",
+        "branch": "main",
+        "old_sha": "[id2]",
+        "branch_moved": true,
+        "incremental": true,
+        "rewritten": 0
+      },
+      "meta": {
+        "repo": "[tmp]/store",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {
+          "main": "[c2]"
+        },
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "init [tmp]/copy",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "repo_init",
+      "api": 1,
+      "result": {
+        "repo_id": "[repo_id:copy]",
+        "name": "copy",
+        "store_version": 1,
+        "changesets": 0,
+        "refs": 0
+      },
+      "meta": {
+        "repo": "[tmp]/copy",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/copy --as agent/worker-17 git import [git]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "git_import",
+      "api": 1,
+      "result": {
+        "imported": 2,
+        "skipped": 0,
+        "head_changeset": "[imported]",
+        "git_head_sha": "[id4]",
+        "target_ref": "main",
+        "ref_moved": true,
+        "lossy": [],
+        "lossy_total": 0
+      },
+      "meta": {
+        "repo": "[tmp]/copy",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  },
+  {
+    "args": "--repo [tmp]/copy --as agent/worker-17 git import [git]",
+    "exit": 0,
+    "stdout": {
+      "ok": true,
+      "op": "git_import",
+      "api": 1,
+      "result": {
+        "imported": 0,
+        "skipped": 1,
+        "head_changeset": "[imported]",
+        "git_head_sha": "[id4]",
+        "target_ref": "main",
+        "ref_moved": false,
+        "old_head": "[imported]",
+        "lossy": [],
+        "lossy_total": 0
+      },
+      "meta": {
+        "repo": "[tmp]/copy",
+        "elapsed_ms": "[elapsed_ms]",
+        "resolved": {},
+        "auth": "trust"
+      }
+    }
+  }
+]

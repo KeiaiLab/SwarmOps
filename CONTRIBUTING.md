@@ -93,6 +93,12 @@ A change is done when `just check` passes on it. It runs, in order:
    matches `Cargo.lock`, the licenses `deny.toml` allows and the crates' own license files. After
    a dependency change, run `python3 -I scripts/third-party-licenses.py` and commit the file it
    writes with `Cargo.lock`.
+8. `scripts/test-install.py`: the one-line installer, `scripts/install.sh`, run under sh (and
+   dash and busybox sh where installed) against a fake release on 127.0.0.1, with no network;
+   and `web/public/install.sh`, the copy get.swarmops.cc serves, still the same file. After changing the
+   installer, copy it to `web/public/install.sh`.
+9. `scripts/check-docs.py`, its `selftest` first: the public Markdown's relative links and
+   anchors resolve as GitHub reads them, and it carries no host path or tool attribution.
 
 The third lockfile, `bench/compare/Cargo.lock`, which `just check` does not build, is checked
 where it is built, by `just bench-compare` and the weekly scheduled run, with a policy of its
@@ -267,10 +273,11 @@ review them like any other change.
   `Cargo.toml`, so its Dependabot pull request fails until
   `cargo update --manifest-path fuzz/Cargo.toml -p <crate>` is pushed to it.
 
-The repository is private on GitHub's Free plan, which offers no branch protection or rulesets
-for it, so nothing stops a push that would fail. The rule is still the rule: land on `stable`
-only what passed `just check` locally and has `tests-pass` green for the same commit. When the
-plan allows it, `tests-pass` becomes the one required check.
+A ruleset on `stable` makes `tests-pass` the one required check and blocks force pushes and
+deleting the branch. A push to `stable` is refused unless `tests-pass` is already green for the
+commit it moves `stable` to: push a local merge to its `feat/**` branch first, and push `stable`
+once CI has passed there. The rule stays: land on `stable` only what passed `just check` locally
+and has `tests-pass` green for the same commit.
 
 ## Commits
 

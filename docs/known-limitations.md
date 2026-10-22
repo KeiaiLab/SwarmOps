@@ -459,7 +459,7 @@ left).
   `serve` first) must refuse such content, and a client must turn it into bytes before the
   request leaves. Through MCP a relative path, a path that is the server's own stdin or stdout,
   and anything that is not a regular file (a FIFO, a socket, a device or a directory, or a
-  symlink to one) are refused before anything is read. *Target: M11 (`serve`). Found: M1
+  symlink to one) are refused before anything is read. *Target: M14 (`serve`, reused by M11). Found: M1
   Task 4b; M1.5 Task 9 review (M11's `serve`).*
 - **Four error codes are not raised yet.** `E_REF_NOT_FOUND` (no operation looks a ref up by
   name), `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` (tokens, `policy.toml` and gc's
@@ -470,7 +470,7 @@ left).
   and the directory's absolute path, which an `E_IO` then carries; the names are random, so it
   is not met in practice. The other errors that name the store's own path answer for the path a
   command was given (operations spec §0). A server that takes requests from another host must
-  not pass either on as it is. *Target: M11 (`serve`). Found: the M1.6 consolidated review
+  not pass either on as it is. *Target: M14 (`serve`, reused by M11). Found: the M1.6 consolidated review
   (error contract).*
 - **A request takes the memory its type holds.** The MCP server reads of a message line, at
   most 64 MiB, only the members it serves, and a tool's arguments only as their request type,

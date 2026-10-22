@@ -33,7 +33,7 @@ use crate::support;
 const AGENT: &str = "agent/worker-17";
 
 /// The keys whose numbers are times or durations, replaced by `[<key>]` in snapshots.
-const TIME_KEYS: &[&str] = &["elapsed_ms", "created_at", "secs"];
+const TIME_KEYS: &[&str] = &["elapsed_ms", "created_at", "secs", "at"];
 
 /// A store path under `/mnt/`, where WSL mounts Windows drives: `init` and every open refuse it
 /// by its name, so it need not exist, and nothing is made there.
@@ -2454,6 +2454,205 @@ fn a_conflicting_land_resolved_with_a_file_lands() {
     assert_eq!(not_resolutions["error"]["details"], json!({"resolve": "-"}));
     let hint = not_resolutions["error"]["hint"].as_str().unwrap();
     assert!(hint.contains("swarmops schema ResolutionsInput"), "{hint}");
+}
+
+// ---------------------------------------------------------------------------------------------
+// Golden steps of the commands the tests above show no success of.
+// ---------------------------------------------------------------------------------------------
+
+/// `blob put` stores a file's bytes, or stdin's, as a blob before a commit names it, and says
+/// whether it wrote them; `blob has` lists which of the ids given the store holds.
+#[test]
+fn blob_put_has_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+
+    // 1. A file's bytes are written; the same bytes from stdin are there already.
+    let content = "named by id\n";
+    let file = s.file("payload.txt", content);
+    let put = s.run(&["--repo", &store, "--as", AGENT, "blob", "put", &file]);
+    assert_eq!(put.exit, 0, "{}", put.json);
+    let blob = s.name_at(&put, "/result/blob", "blob");
+    let again = s.run_stdin(
+        content,
+        &["--repo", &store, "--as", AGENT, "blob", "put", "-"],
+    );
+    assert_eq!(again["result"]["written"], false, "{}", again.json);
+
+    // 2. Of two ids, the stored one is present; it needs no identity.
+    let missing = hash_object(ObjectKind::Blob, b"never stored\n").to_hex();
+    s.name(&missing, "missing");
+    let has = s.run(&["--repo", &store, "blob", "has", &blob, &missing]);
+    assert_eq!(has["result"], json!({"present": [blob]}));
+
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// `op log` lists the store's operations newest first, with the changesets each recorded and
+/// the refs it moved; `op undo` moves a move back, in an operation of its own.
+#[test]
+fn op_log_undo_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+
+    // 1. Four operations: a commit, main's creation, a commit, main's move to it.
+    let c1 = s.commit(&store, None, "a.txt", "a\n", "c1");
+    let create = [
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c1, "--create",
+    ];
+    assert_eq!(s.run(&create).exit, 0);
+    let c2 = s.commit(&store, Some(&c1), "b.txt", "b\n", "c2");
+    let mv = [
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c2, "--expect", &c1,
+    ];
+    assert_eq!(s.run(&mv).exit, 0);
+
+    // 2. The log, then the undo of the move (operation 3), then the newest operation.
+    let log = s.run(&["--repo", &store, "op", "log"]);
+    assert_eq!(log["result"]["ops"][0]["op"], 3, "{}", log.json);
+    let undo = s.run(&["--repo", &store, "--as", AGENT, "op", "undo", "3"]);
+    assert_eq!(undo.exit, 0, "{}", undo.json);
+    let newest = s.run(&["--repo", &store, "op", "log", "-n", "1"]);
+    assert_eq!(newest["result"]["ops"][0]["op"], 4, "{}", newest.json);
+
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// `derive` derives the eager values of what the journal records and says where to go on
+/// (`next`); after that frame nothing is left.
+#[test]
+fn derive_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+    let c1 = s.commit(&store, None, "f.txt", "1\n", "c1");
+    s.commit(&store, Some(&c1), "f.txt", "2\n", "c2");
+
+    // Once from the first frame, then after the frame it gave as next.
+    let first = s.run(&["--repo", &store, "derive"]);
+    assert_eq!(
+        first["result"],
+        json!({"derived": 2, "cached": 0, "next": 1})
+    );
+    let rest = s.run(&["--repo", &store, "derive", "--after", "1"]);
+    assert_eq!(rest["result"], json!({"derived": 0, "cached": 0}));
+
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// `land`, each way it ends: a change merged onto what main gained since, with `--key`; the
+/// same land again, a replay; a land that conflicts, exit 3 with the report; and that land
+/// again with `--resolve`, a file of resolutions against the report's `theirs`.
+#[test]
+fn land_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+
+    // 1. main at t0; a change on t0, and another agent's publish on main since.
+    let t0 = s.file(
+        "t0.json",
+        &json!([{"path": "f.txt", "op": "put", "content": {"inline": "1\n2\n3\n"}}]).to_string(),
+    );
+    let base = s.run(&[
+        "--repo",
+        &store,
+        "--as",
+        AGENT,
+        "commit",
+        "-m",
+        "t0",
+        "--changes",
+        &t0,
+        "--advance",
+        "main",
+    ]);
+    let t0 = s.name_at(&base, "/result/changeset", "t0");
+    let head = s.commit(&store, Some(&t0), "b.txt", "b\n", "head");
+    publish_as_other(&mut s, &store, &t0, ("c.txt", "c\n"), "theirs");
+
+    // 2. The land, then the same land again.
+    let land: [&str; 8] = [
+        "--repo", &store, "--as", AGENT, "land", &head, "--key", "land-7",
+    ];
+    let landed = s.run(&land);
+    assert_eq!(landed.exit, 0, "{}", landed.json);
+    let l1 = s.name_at(&landed, "/result/landed", "landed");
+    let replayed = s.run(&land);
+    assert_eq!(
+        replayed["result"]["status"], "replayed",
+        "{}",
+        replayed.json
+    );
+
+    // 3. A change to f.txt's line 2, which another agent changed on main too: a conflict.
+    let ours = s.commit(&store, Some(&l1), "f.txt", "1\nours\n3\n", "ours");
+    let theirs = publish_as_other(&mut s, &store, &l1, ("f.txt", "1\ntheirs\n3\n"), "theirs2");
+    let conflict: [&str; 6] = ["--repo", &store, "--as", AGENT, "land", &ours];
+    let refused = s.run(&conflict);
+    assert_eq!((refused.exit, refused.code()), (3, "E_CONFLICT"));
+
+    // 4. Resolved from a file: the line both sides changed, as one.
+    let resolutions = json!({
+        "against": theirs,
+        "files": {"f.txt": {"content": {"inline": "1\nours and theirs\n3\n"}}},
+    });
+    let res = s.file("res.json", &resolutions.to_string());
+    let resolved = s.run(&[&conflict[..], &["--resolve", &res][..]].concat());
+    assert_eq!(resolved.exit, 0, "{}", resolved.json);
+    assert_eq!(resolved["result"]["rebased_onto"], theirs.as_str());
+    s.name_at(&resolved, "/result/landed", "resolved");
+
+    insta::assert_json_snapshot!(s.transcript());
+}
+
+/// `git export` writes main's history into a git repository, made here without git, and
+/// `git import` brings that repository's history into a second store; each run again writes
+/// only what is new.
+#[test]
+fn git_export_import_golden() {
+    let mut s = Session::new();
+    let store = s.store();
+    let init = s.run(&["init", &store]);
+    s.name_at(&init, "/result/repo_id", "repo_id");
+    let git = swarmops_testkit::git::empty_repository();
+    let repo = git.dir.to_str().expect("UTF-8 temp paths").to_owned();
+    s.name(&repo, "git");
+
+    // 1. main at c1, exported; then main at c2, exported again: c2 alone is written.
+    let c1 = s.commit(&store, None, "README.md", "# acme\n", "c1");
+    let create = [
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c1, "--create",
+    ];
+    assert_eq!(s.run(&create).exit, 0);
+    let first = s.run(&["--repo", &store, "git", "export", &repo]);
+    assert_eq!(first.exit, 0, "{}", first.json);
+    let c2 = s.commit(&store, Some(&c1), "src/lib.rs", "pub fn f() {}\n", "c2");
+    let mv = [
+        "--repo", &store, "--as", AGENT, "ref", "set", "main", &c2, "--expect", &c1,
+    ];
+    assert_eq!(s.run(&mv).exit, 0);
+    let second = s.run(&["--repo", &store, "git", "export", &repo]);
+    assert_eq!(second.exit, 0, "{}", second.json);
+
+    // 2. A second store imports the repository; run again, it writes nothing.
+    let copy = format!("{}/copy", s.tmp());
+    let made = s.run(&["init", &copy]);
+    s.name_at(&made, "/result/repo_id", "repo_id:copy");
+    let import = ["--repo", &copy, "--as", AGENT, "git", "import", &repo];
+    let imported = s.run(&import);
+    assert_eq!(imported.exit, 0, "{}", imported.json);
+    s.name_at(&imported, "/result/head_changeset", "imported");
+    let again = s.run(&import);
+    assert_eq!(again.exit, 0, "{}", again.json);
+
+    insta::assert_json_snapshot!(s.transcript());
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -1,8 +1,8 @@
 // Renders the website's raster images from their SVG sources:
-//   site/favicon.svg        -> site/favicon.ico (16, 32, 48 px)
-//   docs/assets/logo.svg    -> site/icon-192.png, site/icon-512.png,
-//                              site/apple-touch-icon.png, site/icon-maskable-512.png
-//   docs/assets/social-card.svg -> docs/assets/social-card.png, site/og-image.png
+//   web/public/favicon.svg        -> web/public/favicon.ico (16, 32, 48 px)
+//   docs/assets/logo.svg    -> web/public/icon-192.png, web/public/icon-512.png,
+//                              web/public/apple-touch-icon.png, web/public/icon-maskable-512.png
+//   docs/assets/social-card.svg -> docs/assets/social-card.png, web/public/og-image.png
 //
 // It needs @resvg/resvg-js, which the repository does not vendor. Install it anywhere and
 // point RESVG_JS at the package directory, for example:
@@ -72,18 +72,18 @@ const FAVICON_16 = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
   <path d="M17 17c0 11 6 17 15 17M47 17c0 11-6 17-15 17" fill="none" stroke="#fff" stroke-width="8" stroke-linecap="round"/>
   <path d="M32 30v18" stroke="#ffc861" stroke-width="10" stroke-linecap="round"/>
 </svg>`;
-const favicon = read("site/favicon.svg");
-write("site/favicon.ico", ico([
+const favicon = read("web/public/favicon.svg");
+write("web/public/favicon.ico", ico([
   { size: 16, data: png(FAVICON_16, 16) },
   ...[32, 48].map((size) => ({ size, data: png(favicon, size) })),
 ]));
 
 const logo = read("docs/assets/logo.svg");
-write("site/icon-192.png", png(framed(logo, 192, 0.92), 192));
-write("site/icon-512.png", png(framed(logo, 512, 0.92), 512));
-write("site/apple-touch-icon.png", png(framed(logo, 180, 0.74, BG), 180));
-write("site/icon-maskable-512.png", png(framed(logo, 512, 0.62, BG), 512));
+write("web/public/icon-192.png", png(framed(logo, 192, 0.92), 192));
+write("web/public/icon-512.png", png(framed(logo, 512, 0.92), 512));
+write("web/public/apple-touch-icon.png", png(framed(logo, 180, 0.74, BG), 180));
+write("web/public/icon-maskable-512.png", png(framed(logo, 512, 0.62, BG), 512));
 
 const card = png(read("docs/assets/social-card.svg"), 1280);
 write("docs/assets/social-card.png", card);
-write("site/og-image.png", card);
+write("web/public/og-image.png", card);
