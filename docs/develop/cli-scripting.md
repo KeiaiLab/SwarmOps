@@ -79,8 +79,9 @@ swarmops --as agent/worker-1 ref set main 0e5171a021aabc37bf6b92efa555514c389d58
 `swarmops schema` prints the JSON Schema of every request and response type and of the error
 codes; `swarmops schema <Type>` prints one.
 
-Hints and messages name the program `swarmops`, whichever name ran it. Only a usage error's
-hint, the usage line, names it as you invoked it (`Usage: so …`).
+Hints and messages name the program `swarmops`, whichever name ran it, with two exceptions that
+name it as you invoked it: a usage error's hint, the usage line (`Usage: so …`), and the message
+for a missing subcommand (`'so' requires a subcommand but one was not provided`).
 
 Two runs print no envelope. `derive --follow` prints one envelope a line for each run that derived
 something, and `mcp` speaks MCP on stdout. And a run that meets one of the store's four documented
