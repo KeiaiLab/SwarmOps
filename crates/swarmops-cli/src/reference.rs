@@ -1,6 +1,14 @@
-//! The generated reference pages, `docs/reference/cli.md` and `docs/reference/errors.md`:
-//! rendered from the command grammar ([`Cli`]'s clap tree) and from the error table
-//! ([`ErrorCode`] and its schema), so that the pages cannot drift from the code.
+//! The generated reference pages, `docs/reference/cli.md`, one page per command in
+//! `docs/reference/commands/` and `docs/reference/errors.md`: rendered from the command grammar
+//! ([`Cli`]'s clap tree), the golden CLI steps and from the error table ([`ErrorCode`] and its
+//! schema), so that the pages cannot drift from the code.
+//!
+//! ```text
+//! clap grammar ───┬─▶ cli.md                 the grouped index (cli_page)
+//! golden steps ───┼─▶ commands/<name>.md     one page per command (command_page)
+//! notes/commands ─┘
+//! error table ─────▶ errors.md
+//! ```
 //!
 //! `reference_pages_match` fails when a committed page is not its rendering;
 //! `SWARMOPS_REGEN_REFERENCE=1` with the ignored `regen_reference` writes them again:
@@ -17,7 +25,10 @@ use std::path::PathBuf;
 use clap::{Arg, ArgAction, CommandFactory};
 use swarmops_api::{ErrorCode, schema_for_all};
 
-use crate::cli::{Cli, op_name, usage};
+use crate::cli::{Cli, op_name};
+
+mod cli_page;
+mod command_page;
 
 /// The variable that makes `regen_reference` write the pages.
 const REGEN_VAR: &str = "SWARMOPS_REGEN_REFERENCE";
@@ -151,24 +162,26 @@ const EXITS: &[(i32, &str)] = &[
     (6, "Something the request names does not exist."),
 ];
 
-/// One generated page: its file name in `docs/reference/` and its text.
+/// One generated page: its path in `docs/reference/` and its text.
 struct Page {
-    name: &'static str,
+    name: String,
     text: String,
 }
 
 /// Every generated page.
 fn pages() -> Vec<Page> {
-    vec![
+    let mut pages = vec![
         Page {
-            name: "cli.md",
-            text: cli_page(),
+            name: "cli.md".to_owned(),
+            text: cli_page::render(),
         },
         Page {
-            name: "errors.md",
+            name: "errors.md".to_owned(),
             text: errors_page(),
         },
-    ]
+    ];
+    pages.extend(command_page::pages());
+    pages
 }
 
 /// `docs/reference/`, from this crate's directory.
@@ -176,7 +189,7 @@ fn reference_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/reference")
 }
 
-// ---- cli.md ----
+// ---- The grammar ----
 
 /// A leaf command: its subcommand path and its clap command.
 struct Leaf {
@@ -221,11 +234,6 @@ fn all_leaves() -> Vec<Leaf> {
     out
 }
 
-/// The page's anchor of a command: `swarmops git import` → `swarmops-git-import`.
-fn command_anchor(path: &[String]) -> String {
-    slug(&format!("{BIN} {}", path.join(" ")))
-}
-
 /// GitHub's anchor of a heading: lower case, spaces to `-`, other punctuation dropped.
 fn slug(heading: &str) -> String {
     let kept = heading
@@ -236,147 +244,14 @@ fn slug(heading: &str) -> String {
     kept.replace(' ', "-")
 }
 
-/// Renders `cli.md`.
-fn cli_page() -> String {
-    let root = grammar();
-    let leaves = all_leaves();
-    let mut out = String::new();
-
-    // 1. Title and how to read the page.
-    let _ = writeln!(out, "{GENERATED}\n");
-    let _ = writeln!(out, "# CLI reference\n");
-    let _ = writeln!(
-        out,
-        "Every command of `{BIN}` and `so`, its short form: the same program by a shorter name. \
-         This page is generated from the command line's own definition, so it says what \
-         `{BIN} <command> --help` says. `-h` prints the short help and `--help` the long help \
-         that this page gives.\n"
-    );
-    let _ = writeln!(
-        out,
-        "Every command but `mcp` prints one JSON envelope on stdout; its `op` names the \
-         operation the command runs (`cat` runs `read_file`). [Errors](errors.md) lists every \
-         error code an envelope can carry, with its exit code.\n"
-    );
-
-    // 2. The commands at a glance.
-    let _ = writeln!(out, "## Commands\n");
-    let _ = writeln!(out, "| Command | Operation | What it does |");
-    let _ = writeln!(out, "| --- | --- | --- |");
-    for leaf in &leaves {
-        let name = leaf.path.join(" ");
-        let about = cell(&sentence(&about_short(&leaf.cmd)));
-        let op = op_name(&leaf.path).unwrap_or_default();
-        let anchor = command_anchor(&leaf.path);
-        let _ = writeln!(out, "| [`{name}`](#{anchor}) | `{op}` | {about} |");
-    }
-    out.push('\n');
-
-    // 3. The flags every command takes.
-    let _ = writeln!(out, "## Global options\n");
-    let _ = writeln!(
-        out,
-        "Every command takes these, before or after its subcommand.\n"
-    );
-    let globals: Vec<&Arg> = root
-        .get_arguments()
-        .filter(|arg| arg.is_global_set())
-        .collect();
-    options_table(&mut out, &globals);
-    long_helps(&mut out, &globals);
-    let _ = writeln!(
-        out,
-        "`-h` prints a command's short help and `--help` its long help, as plain text, not an \
-         envelope. `{BIN} --version` prints the version.\n"
-    );
-
-    // 4. One section per command.
-    for leaf in &leaves {
-        command_section(&mut out, leaf);
-    }
-    trim_end(out)
-}
-
 /// The command's one-line help.
 fn about_short(cmd: &clap::Command) -> String {
     cmd.get_about().map(ToString::to_string).unwrap_or_default()
 }
 
-/// One command's section: what it does, its usage, its arguments and options, its example.
-fn command_section(out: &mut String, leaf: &Leaf) {
-    let name = leaf.path.join(" ");
-    let op = op_name(&leaf.path).unwrap_or_default();
-    let _ = writeln!(out, "## {BIN} {name}\n");
-
-    // 1. What it does: the long help when there is one.
-    let about = leaf
-        .cmd
-        .get_long_about()
-        .or(leaf.cmd.get_about())
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    paragraphs(out, &sentence(&about));
-    let _ = writeln!(out, "Envelope `op`: `{op}`.\n");
-
-    // 2. The usage line clap prints in a usage error's hint.
-    let line = usage(Some(BIN), &leaf.path);
-    let line = line.strip_prefix("Usage: ").unwrap_or(&line);
-    let _ = writeln!(out, "```text\n{line}\n```\n");
-
-    // 3. Positional arguments, then options; the global flags are listed once, above.
-    let own: Vec<&Arg> = leaf
-        .cmd
-        .get_arguments()
-        .filter(|arg| !arg.is_global_set() && !is_builtin(arg))
-        .collect();
-    let positionals: Vec<&Arg> = own.iter().copied().filter(|a| a.is_positional()).collect();
-    let options: Vec<&Arg> = own.iter().copied().filter(|a| !a.is_positional()).collect();
-    if !positionals.is_empty() {
-        let _ = writeln!(out, "Arguments:\n");
-        arguments_table(out, &positionals);
-    }
-    if !options.is_empty() {
-        let _ = writeln!(out, "Options:\n");
-        options_table(out, &options);
-    }
-    required_groups(out, &leaf.cmd);
-    long_helps(out, &own);
-
-    // 4. Where a worked example with real output is.
-    if let Some((_, text, link)) = EXAMPLES.iter().find(|(path, _, _)| *path == name) {
-        let _ = writeln!(out, "Example: [{text}]({link}).\n");
-    }
-}
-
-/// The groups of options a command needs one of: `ref set` takes `--expect` or `--create`.
-fn required_groups(out: &mut String, cmd: &clap::Command) {
-    for group in cmd.get_groups().filter(|group| group.is_required_set()) {
-        let forms: Vec<String> = group
-            .get_args()
-            .filter_map(|id| cmd.get_arguments().find(|arg| arg.get_id() == id))
-            .map(|arg| format!("`{}`", option_form(arg)))
-            .collect();
-        let _ = writeln!(out, "Exactly one of {} is required.\n", forms.join(" or "));
-    }
-}
-
 /// Whether `arg` is clap's own `--help` or `--version`.
 fn is_builtin(arg: &Arg) -> bool {
     matches!(arg.get_id().as_str(), "help" | "version")
-}
-
-/// The table of positional arguments.
-fn arguments_table(out: &mut String, args: &[&Arg]) {
-    let _ = writeln!(out, "| Argument | Required | Description | Default |");
-    let _ = writeln!(out, "| --- | --- | --- | --- |");
-    for arg in args {
-        let name = format!("`{}`", value_names(arg).join(" "));
-        let required = yes_no(arg.is_required_set());
-        let help = cell(&arg_help(arg));
-        let default = default_cell(arg);
-        let _ = writeln!(out, "| {name} | {required} | {help} | {default} |");
-    }
-    out.push('\n');
 }
 
 /// The table of options.
@@ -699,12 +574,40 @@ fn first_difference(want: &str, got: &str) -> String {
     "only line endings differ".to_owned()
 }
 
-/// Each committed page is what the code renders.
+/// The pages in `docs/reference/commands/` that the code does not render: a renamed or
+/// removed command's.
+fn stale_command_pages(pages: &[Page]) -> Vec<String> {
+    let dir = reference_dir().join(command_page::DIR);
+    let Ok(entries) = fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+
+    // Every file there is a page the code renders, by its path in `docs/reference/`.
+    let mut stale: Vec<String> = entries
+        .map(|entry| entry.expect("a directory entry"))
+        .map(|entry| {
+            format!(
+                "{}/{}",
+                command_page::DIR,
+                entry.file_name().to_string_lossy()
+            )
+        })
+        .filter(|name| !pages.iter().any(|page| page.name == *name))
+        .collect();
+    stale.sort();
+    stale
+}
+
+/// Each committed page is what the code renders, and no other page is in
+/// `docs/reference/commands/`.
 #[test]
 fn reference_pages_match() {
     let dir = reference_dir();
-    for page in pages() {
-        let path = dir.join(page.name);
+    let pages = pages();
+
+    // 1. Each page, as rendered.
+    for page in &pages {
+        let path = dir.join(&page.name);
         let committed = fs::read_to_string(&path).unwrap_or_default();
         assert!(
             committed == page.text,
@@ -714,6 +617,13 @@ fn reference_pages_match() {
             first_difference(&page.text, &committed)
         );
     }
+
+    // 2. Nothing else among the command pages.
+    let stale = stale_command_pages(&pages);
+    assert!(
+        stale.is_empty(),
+        "docs/reference/{stale:?}: no command renders these; run `{REGEN_CMD}`"
+    );
 }
 
 /// Writes the pages again. Writes nothing unless `SWARMOPS_REGEN_REFERENCE=1` is set, so that
@@ -726,9 +636,18 @@ fn regen_reference() {
         return;
     }
     let dir = reference_dir();
-    fs::create_dir_all(&dir).unwrap();
-    for page in pages() {
-        fs::write(dir.join(page.name), page.text).unwrap();
+    let pages = pages();
+
+    // 1. The pages no command renders any more go.
+    for name in stale_command_pages(&pages) {
+        fs::remove_file(dir.join(name)).unwrap();
+    }
+
+    // 2. Every page, written again.
+    for page in pages {
+        let path = dir.join(&page.name);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, page.text).unwrap();
     }
 }
 
