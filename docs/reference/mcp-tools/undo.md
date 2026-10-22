@@ -126,6 +126,15 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+`op` is an operation's number from `op_log`.
+It moves every ref that operation moved back to what it named before, by compare-and-swap in
+one transaction: all of them or none.
+A ref moved since stops it (`E_CAS_MISMATCH`, nothing written): undo the later operations first.
+An undo run again is a replay (`already_applied`).
+Changesets are never removed.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `undo`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops op undo`](../commands/op-undo.md#return-information) returns.

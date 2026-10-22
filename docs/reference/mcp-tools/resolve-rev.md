@@ -117,6 +117,17 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+`rev` is a ref name, a full 64-hex changeset id or a unique prefix of 12 or more hex digits, then
+any `~N` suffixes, resolved as every tool resolves one.
+`kind` is `ref` when the revision is exactly a ref's name, whose target moves with the ref, and
+`changeset` otherwise.
+
+Its `id` is the full id that `ref_set` and `ref_delete` take as `expected_old`, and `commit` as
+`parent` with `advance`: read the ref's head here, then name that id, so that the
+compare-and-swap protects what you read.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `resolve_rev`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops resolve`](../commands/resolve.md#return-information) returns.

@@ -145,6 +145,20 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+Give `create` to make a new ref, or `expected_old` to move one: the full 64-hex changeset id the
+ref held when you read it, from `ref_list`, `show`, `log` or a commit's result.
+The server refuses a ref name, a relative revision such as `main~1` and an id prefix there
+(`E_INVALID_ARG`): a ref name or a relative revision is read when the call runs, so the
+compare-and-swap would protect nothing, and a prefix stops resolving once another changeset
+shares it.
+The input schema says the same with a 64-hex `pattern`.
+The CLI's `ref set --expect` still takes any revision.
+
+A ref that no longer holds `expected_old` is `E_CAS_MISMATCH`, and nothing moves: read the ref
+again and decide.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `ref_set`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops ref set`](../commands/ref-set.md#return-information) returns.

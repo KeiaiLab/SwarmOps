@@ -333,6 +333,20 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+It merges `head`, with its first-parent chain since `base`, three-way onto `target` (`main` by
+default) and publishes the result as one changeset in one transaction.
+
+On `E_CONFLICT`, `details.report` lists each conflict.
+Resolve them in `resolutions`, decided `against` the report's `theirs`, its full 64-hex id: the
+server refuses a ref name, a relative revision or a prefix there (`E_INVALID_ARG`).
+A path the target changed since comes back in the report's `stale`.
+A resolution's `{"file": path}` content follows the rules of [`commit`](../mcp-tools/commit.md).
+
+Give an `idempotency_key` to make a retry safe; run again with the same arguments, a land adds
+nothing.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `land`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops land`](../commands/land.md#return-information) returns.

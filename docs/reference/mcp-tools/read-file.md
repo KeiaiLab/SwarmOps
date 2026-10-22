@@ -175,6 +175,17 @@ Its entry in `tools/list` carries `_meta: {"anthropic/maxResultSizeChars": 20000
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+Pass `max_bytes` of 32768 or less (less for a binary file, which comes back as base64): the
+operation's own default is 1 MiB, and a result holds the content twice.
+While the result is truncated, call again with `offset` set to its `next_offset`.
+`lines` reads a range of lines, numbered from 1, both ends included, instead of an `offset`;
+giving both is `E_INVALID_ARG`.
+
+`read_file` is the one tool that raises Claude Code's result size limit for itself, through its
+`_meta` in `tools/list`: see [Result size limits](../../develop/mcp.md#result-size-limits).
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `read_file`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops cat`](../commands/cat.md#return-information) returns.

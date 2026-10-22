@@ -171,6 +171,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+Pass `max_changes` of 100 or less: a changeset's change list can be long, and a result holds the
+envelope twice.
+The result gives the changeset's parents, author, message, changes and signatures.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `show`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops show`](../commands/show.md#return-information) returns.

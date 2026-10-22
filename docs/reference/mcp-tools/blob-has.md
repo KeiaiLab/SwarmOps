@@ -121,6 +121,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+Of the blob ids given, it returns those the store holds a blob under: content a commit can name
+by id without storing it again.
+Each id is 64 hex digits; a shorter one is `E_INVALID_ARG`.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `blob_has`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops blob has`](../commands/blob-has.md#return-information) returns.

@@ -113,6 +113,14 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+Without `deep`, it checks structure: parents, that referenced objects exist, the index against
+the journal, and refs.
+With `deep: true` it also re-hashes every object and checks the derived values against the
+objects.
+A store with problems is `E_STORE_CORRUPT`, as `swarmops verify` is.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `verify`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops verify`](../commands/verify.md#return-information) returns.

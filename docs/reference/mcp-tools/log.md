@@ -172,6 +172,13 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+History runs along first parents, newest first, from `main` unless `rev` names another start.
+Pass a `limit` of 100 or less and page on with the `cursor` the result gives.
+Each entry's id is a full changeset id, which `ref_set`, `ref_delete` and `commit` with `advance`
+take.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `log`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops log`](../commands/log.md#return-information) returns.

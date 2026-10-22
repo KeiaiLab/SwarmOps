@@ -112,6 +112,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+Every ref, the changeset it points at and how many moves it has had.
+A ref's `target` is the full id to pass as `expected_old` to `ref_set` or `ref_delete`, or as
+`parent` to a `commit` with `advance`.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `ref_list`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops ref list`](../commands/ref-list.md#return-information) returns.

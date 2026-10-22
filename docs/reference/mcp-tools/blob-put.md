@@ -171,6 +171,15 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+It stores content as a blob, outside any commit, and gives its id; a commit's change then names
+it as `{"blob": id}` instead of carrying its bytes, the way to commit a large file.
+`written` is false when the store held the blob already, or a concurrent writer placed it first.
+A `{"file": path}` content follows the rules of [`commit`](../mcp-tools/commit.md): an absolute path to a
+regular file.
+A hint that names `swarmops blob put` means this tool.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `blob_put`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops blob put`](../commands/blob-put.md#return-information) returns.

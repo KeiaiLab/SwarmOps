@@ -126,6 +126,13 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+`expected_old` is the full 64-hex changeset id the ref held when you read it; the server refuses
+a ref name, a relative revision and an id prefix there (`E_INVALID_ARG`), for the reasons
+[`ref_set`](../mcp-tools/ref-set.md) gives.
+A ref that no longer holds it is `E_CAS_MISMATCH`, and the ref stays.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `ref_delete`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops ref delete`](../commands/ref-delete.md#return-information) returns.

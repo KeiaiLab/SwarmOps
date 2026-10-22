@@ -166,6 +166,13 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+It lists the changesets that changed a file, or anything below a directory, newest first along
+first parents from `main` unless `rev` says otherwise, each with what the path holds after it.
+Pass a `limit` of 100 or less and page on with the `cursor`.
+Its CLI command is `history`.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `path_history`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops history`](../commands/history.md#return-information) returns.

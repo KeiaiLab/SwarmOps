@@ -162,6 +162,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 The server ran as `swarmops mcp --repo [tmp]/store --as agent/worker-17`, after `initialize`. Recorded by the MCP tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time, the version.
 
+## Details
+
+Each entry is one write transaction of the store, newest first, numbered as `undo` takes it, with
+its kind, the changesets it recorded and the refs it moved.
+Pass a `limit` of 20 or less and page on with `before`.
+
 ## Return information
 
 A tool result: the envelope, whose `op` is `op_log`, as `structuredContent` and again as the text of its one `content` block. `isError` is true exactly when the envelope's `ok` is false. On success the envelope's `result` is what [`swarmops op log`](../commands/op-log.md#return-information) returns.
