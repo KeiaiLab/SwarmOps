@@ -5332,3 +5332,178 @@ mod resolve_rev {
         );
     }
 }
+
+/// `<store>/authors.toml` (operations spec §5): the email new changesets are signed with.
+mod authors {
+    use swarmops_api::LandReq;
+
+    use super::*;
+
+    const NATIVE: &str = "worker-17@agent.swarmops.local";
+    const LINKED: &str = "123456+keiailab-bot@users.noreply.github.com";
+
+    fn write_authors(root: &Utf8Path, body: &str) {
+        fs::write(root.join("authors.toml"), body).expect("write authors.toml");
+    }
+
+    /// An `authors.toml` giving the `agent` family `email`.
+    fn file_for_agent(email: &str) -> String {
+        format!("version = 1\n\n[[author]]\nfamily = \"agent\"\nemail = \"{email}\"\n")
+    }
+
+    /// The author signature `show` reports for `rev`.
+    fn email_of(ops: &LocalOps, rev: &str) -> String {
+        ops.show(show(rev)).unwrap().signatures.author.email
+    }
+
+    #[test]
+    fn without_authors_toml_signatures_are_unchanged() {
+        let (_dir, _root, ops) = new_store();
+        let c = commit(&ops, None, vec![text("f", "1")]);
+
+        assert_eq!(email_of(&ops, &c), NATIVE);
+    }
+
+    #[test]
+    fn authors_toml_sets_the_email_of_new_commits() {
+        let (_dir, root, ops) = new_store();
+        write_authors(&root, &file_for_agent(LINKED));
+        let c = commit(&ops, None, vec![text("f", "1")]);
+
+        let signatures = ops.show(show(&c)).unwrap().signatures;
+        assert_eq!(signatures.author.email, LINKED);
+        assert_eq!(signatures.author.name, "agent/worker-17");
+        assert_eq!(signatures.committer.email, LINKED);
+    }
+
+    #[test]
+    fn a_name_in_authors_toml_replaces_the_agent_name() {
+        let (_dir, root, ops) = new_store();
+        let body = format!("{}name = \"KeiaiLab Bot\"\n", file_for_agent(LINKED));
+        write_authors(&root, &body);
+        let c = commit(&ops, None, vec![text("f", "1")]);
+
+        let author = ops.show(show(&c)).unwrap().signatures.author;
+        assert_eq!(
+            (author.name.as_str(), author.email.as_str()),
+            ("KeiaiLab Bot", LINKED)
+        );
+    }
+
+    #[test]
+    fn an_entry_for_another_family_changes_nothing() {
+        let (_dir, root, ops) = new_store();
+        write_authors(
+            &root,
+            &file_for_agent(LINKED).replace("\"agent\"", "\"claude\""),
+        );
+        let c = commit(&ops, None, vec![text("f", "1")]);
+
+        assert_eq!(email_of(&ops, &c), NATIVE);
+    }
+
+    #[test]
+    fn authors_toml_sets_the_lander_of_new_lands() {
+        let (_dir, root, ops) = new_store();
+        let writer = agent();
+        let lander = Identity::parse("agent/lander-1").unwrap();
+        let t0 = ops
+            .commit(
+                &writer,
+                CommitReq {
+                    advance: Some("main".to_owned()),
+                    ..commit_req(None, vec![text("a", "a\n")])
+                },
+            )
+            .unwrap()
+            .changeset;
+        let c1 = commit(&ops, Some(&t0), vec![text("b", "b\n")]);
+        write_authors(&root, &file_for_agent(LINKED));
+
+        let req: LandReq = serde_json::from_value(json!({"head": c1})).unwrap();
+        let merged = ops.land(&lander, req).unwrap().landed;
+
+        let signatures = ops.show(show(&merged)).unwrap().signatures;
+        assert_eq!(signatures.committer.email, LINKED);
+        assert_eq!(signatures.committer.name, "agent/lander-1");
+        // The author is the change's, signed before the file existed.
+        assert_eq!(signatures.author.email, NATIVE);
+    }
+
+    #[test]
+    fn old_changesets_export_as_before() {
+        let (_dir, root, ops) = new_store();
+        let old = commit(&ops, None, vec![text("f", "1")]);
+        write_authors(&root, &file_for_agent(LINKED));
+        let new = commit(&ops, Some(&old), vec![text("f", "2")]);
+
+        // The old changeset keeps its id and its signature; the new one has the file's.
+        assert_eq!(email_of(&ops, &old), NATIVE);
+        assert_eq!(email_of(&ops, &new), LINKED);
+        assert_ne!(old, new);
+    }
+
+    #[test]
+    fn authors_toml_with_an_angle_bracket_is_store_corrupt() {
+        for bad in [
+            "a<b@x.org",
+            "a>b@x.org",
+            "a\\nb@x.org",
+            "a\\u0000b@x.org",
+            "",
+        ] {
+            let (_dir, root, ops) = new_store();
+            write_authors(&root, &file_for_agent(bad));
+            let err = expect_err(
+                ops.commit(&agent(), commit_req(None, vec![text("f", "1")])),
+                ErrorCode::StoreCorrupt,
+            );
+            assert_eq!(err.details["store_file"], "authors.toml", "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_store_corrupt() {
+        for body in ["not toml [", "version = 2\n", "version = 1\nextra = 1\n"] {
+            let (_dir, root, ops) = new_store();
+            write_authors(&root, body);
+            let err = expect_err(
+                ops.commit(&agent(), commit_req(None, vec![text("f", "1")])),
+                ErrorCode::StoreCorrupt,
+            );
+            assert_eq!(err.details["store_file"], "authors.toml", "{body:?}");
+        }
+    }
+
+    #[test]
+    fn two_entries_for_one_family_is_store_corrupt() {
+        let (_dir, root, ops) = new_store();
+        let one = file_for_agent(LINKED);
+        let two = one.replace("version = 1\n", "");
+        write_authors(&root, &format!("{one}{two}"));
+
+        let err = expect_err(
+            ops.commit(&agent(), commit_req(None, vec![text("f", "1")])),
+            ErrorCode::StoreCorrupt,
+        );
+        assert_eq!(err.details["store_file"], "authors.toml");
+    }
+
+    #[test]
+    fn authors_toml_edited_between_commits_applies_to_the_next() {
+        let (_dir, root, ops) = new_store();
+        let c1 = commit(&ops, None, vec![text("f", "1")]);
+
+        write_authors(&root, &file_for_agent(LINKED));
+        let c2 = commit(&ops, Some(&c1), vec![text("f", "2")]);
+
+        write_authors(&root, &file_for_agent("second@x.org"));
+        let c3 = commit(&ops, Some(&c2), vec![text("f", "3")]);
+
+        fs::remove_file(root.join("authors.toml")).unwrap();
+        let c4 = commit(&ops, Some(&c3), vec![text("f", "4")]);
+
+        let emails: Vec<String> = [&c1, &c2, &c3, &c4].map(|c| email_of(&ops, c)).into();
+        assert_eq!(emails, [NATIVE, LINKED, "second@x.org", NATIVE]);
+    }
+}
