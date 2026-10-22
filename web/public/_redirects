@@ -1,0 +1,9 @@
+# Cloudflare Pages redirects (https://developers.cloudflare.com/pages/configuration/redirects/).
+# The first site's guides, at the addresses it published: each is now a docs page built from
+# docs/guides/<name>.md. 308 keeps the method and tells search engines the move is permanent.
+/guides/parallel-agents        /docs/guides/parallel-agents  308
+/guides/parallel-agents.html   /docs/guides/parallel-agents  308
+/guides/claude-code            /docs/guides/claude-code      308
+/guides/claude-code.html       /docs/guides/claude-code      308
+/guides/git-round-trip         /docs/guides/git-round-trip   308
+/guides/git-round-trip.html    /docs/guides/git-round-trip   308
