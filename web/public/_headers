@@ -29,6 +29,9 @@
   Cache-Control: public, max-age=300
 # The installer, also served at get.swarmops.cc: read as text in a browser, and an update reaches
 # `curl | bash` within minutes.
+# Each docs page's source, beside it (scripts/markdown-twins.mjs).
+/*.md
+  Content-Type: text/markdown; charset=utf-8
 /install.sh
   Content-Type: text/plain; charset=utf-8
   Cache-Control: public, max-age=300
