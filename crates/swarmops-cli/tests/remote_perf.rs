@@ -17,7 +17,7 @@ use swarmops_testkit::git;
 use swarmops_testkit::remote::{GitServer, HttpAuth, HttpServer};
 use tempfile::TempDir;
 
-use crate::support::{Run, Store, run};
+use crate::support::{Run, Store, run_within};
 
 /// The agent the commands that need an identity run as.
 const AGENT: &str = "agent/worker-17";
@@ -27,6 +27,10 @@ const REPO: &str = "repo";
 
 /// The remote's name in the store.
 const ORIGIN: &str = "origin";
+
+/// How long one command may take on the long history: a loaded host imports 12,000 commits in
+/// minutes.
+const SLOW_RUN: Duration = Duration::from_secs(3_600);
 
 /// The long history of the roadmap's targets.
 const LONG: usize = 12_000;
@@ -127,7 +131,14 @@ impl Remote {
 
     /// Runs `args` with this remote's git environment.
     fn run(&self, args: &[&str]) -> Run {
-        run(args, &self.vars())
+        run_within(args, &self.vars(), SLOW_RUN)
+    }
+
+    /// `args` on `store` as [`AGENT`], with this remote's git environment and [`SLOW_RUN`] to end.
+    fn on(&self, store: &Store, args: &[&str]) -> Run {
+        let mut line = vec!["--repo", store.path(), "--as", AGENT];
+        line.extend_from_slice(args);
+        run_within(&line, &self.vars(), SLOW_RUN)
     }
 
     /// A store that has cloned the remote: the remote added, `main` fetched and set.
@@ -136,7 +147,7 @@ impl Remote {
         let url = self.url();
         let line = ["remote", "add", ORIGIN, url.as_str(), "--branch", "main"];
         store.read(&line).ok();
-        let head = fetch(&store);
+        let head = fetch(self, &store);
         let line = ["ref", "set", "main", head.as_str(), "--create"];
         store.run_as(AGENT, &line, &[]).ok();
         store
@@ -198,8 +209,8 @@ fn which(name: &str) -> String {
 }
 
 /// `fetch origin` on `store`: the changeset of the remote's head.
-fn fetch(store: &Store) -> String {
-    let fetched = store.read(&["fetch", ORIGIN]).ok();
+fn fetch(remote: &Remote, store: &Store) -> String {
+    let fetched = remote.on(store, &["fetch", ORIGIN]).ok();
     fetched["head"]["changeset"]
         .as_str()
         .expect("a head")
@@ -278,7 +289,7 @@ fn clone_cost(label: &str, remote: &Remote) {
     let mut imported = None;
     let import = timed(|| {
         let line = ["git", "import", source.as_str()];
-        imported = Some(store.run_as(AGENT, &line, &[]));
+        imported = Some(remote.on(&store, &line));
     });
     let imported = imported.expect("ran").ok();
     assert_eq!(
@@ -308,7 +319,7 @@ fn fetch_and_push(commits: usize) -> (u32, u32) {
     let mut got = Vec::new();
     for n in 0..ROUNDS {
         remote.commit(n);
-        let fetched = store.read(&["fetch", ORIGIN]);
+        let fetched = remote.on(&store, &["fetch", ORIGIN]);
         got.push(elapsed_ms(&fetched));
         let head = fetched.ok()["head"]["changeset"]
             .as_str()
@@ -330,7 +341,7 @@ fn fetch_and_push(commits: usize) -> (u32, u32) {
     let mut sent = Vec::new();
     for n in 0..ROUNDS {
         land(&store, &format!("local{n}.txt"), &format!("local {n}\n"));
-        let pushed = store.read(&["push", ORIGIN]);
+        let pushed = remote.on(&store, &["push", ORIGIN]);
         sent.push(elapsed_ms(&pushed));
     }
     (median(got), median(sent))
@@ -392,7 +403,7 @@ fn sync_of_one_land_on_12000_commits() {
 
     // 2. The sync, timed by the client.
     let mut synced = None;
-    let took = timed(|| synced = Some(store.run_as(AGENT, &["sync", ORIGIN], &[])));
+    let took = timed(|| synced = Some(remote.on(&store, &["sync", ORIGIN])));
     synced.expect("ran").ok();
     println!(
         "remote-perf: sync of one land: {:.3} s on {LONG} commits (target under 1 s)",
