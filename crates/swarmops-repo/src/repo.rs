@@ -375,6 +375,14 @@ impl<O: ObjectStore> RepoRead<'_, O> {
 }
 
 impl<O: ObjectStore> Repo<O> {
+    /// The store's filesystem handle, rooted at the store, for the files that live beside its
+    /// objects and metadata (a store's `remotes.toml`). A write through it goes through the
+    /// same [`FsOps`] as the store's own, so the test hooks and the fault doubles see it, and a
+    /// failure names its file relative to the store's root.
+    pub fn store_fs(&self) -> StoreFs {
+        StoreFs::new(Arc::clone(&self.fs), self.layout.root())
+    }
+
     /// Stores `objects`, each a kind and its canonical payload, in one batch, and returns their
     /// ids in input order; an object the store holds already is not written again
     /// ([`ObjectStore::put_batch`]). The payloads are stored as given: nothing here checks that a

@@ -1569,38 +1569,60 @@ fn cat_truncates_to_max_bytes() {
     assert_eq!(default["result"]["truncated"], true);
 }
 
+/// Codes [`error_codes_reach_the_cli`] cannot raise through the binary, and why.
+const NOT_RAISED: &[(&str, &str)] = &[
+    (
+        "E_AMBIGUOUS_ID",
+        "needs two changesets sharing a 12-digit prefix (ops tests)",
+    ),
+    (
+        "E_UNKNOWN_PARENT",
+        "a parent is resolved first, so it is E_REV_NOT_FOUND",
+    ),
+    ("E_REF_NOT_FOUND", "no M1 operation looks a ref up by name"),
+    (
+        "E_IO_TRANSIENT",
+        "needs a journal append that fails: tests/faults.rs raises it",
+    ),
+    ("E_BUSY", "needs the store's lock held for its 10 s wait"),
+    ("E_INTERNAL", "a caught panic: the binary's unit tests"),
+    (
+        "E_CAS_RETRY_EXHAUSTED",
+        "needs the target moved before every attempt: the ops unit tests raise it",
+    ),
+    ("E_AUTH", "tokens arrive after M1"),
+    ("E_POLICY_DENIED", "policies arrive after M1"),
+    (
+        "E_MAINTENANCE_BUSY",
+        "the maintenance lease arrives after M1",
+    ),
+    (
+        "E_REMOTE_DIVERGED",
+        "needs a remote: the M13 remote suites raise it",
+    ),
+    (
+        "E_REMOTE_REJECTED",
+        "needs a remote: the M13 remote suites raise it",
+    ),
+    (
+        "E_REMOTE_UNREACHABLE",
+        "needs a remote: the M13 remote suites raise it",
+    ),
+    (
+        "E_REMOTE_NOT_FOUND",
+        "needs remotes.toml: the M13 remote suites raise it",
+    ),
+];
+
 /// Every error code M1 can raise reaches the CLI with its exit code (operations spec §8: each
 /// `E_` code at least once), and the golden snapshot pins each one's message, details and hint.
 #[test]
 fn error_codes_reach_the_cli() {
-    /// Codes this test cannot raise through the binary, and why.
-    const NOT_RAISED: &[(&str, &str)] = &[
-        (
-            "E_AMBIGUOUS_ID",
-            "needs two changesets sharing a 12-digit prefix (ops tests)",
-        ),
-        (
-            "E_UNKNOWN_PARENT",
-            "a parent is resolved first, so it is E_REV_NOT_FOUND",
-        ),
-        ("E_REF_NOT_FOUND", "no M1 operation looks a ref up by name"),
-        (
-            "E_IO_TRANSIENT",
-            "needs a journal append that fails: tests/faults.rs raises it",
-        ),
-        ("E_BUSY", "needs the store's lock held for its 10 s wait"),
-        ("E_INTERNAL", "a caught panic: the binary's unit tests"),
-        (
-            "E_CAS_RETRY_EXHAUSTED",
-            "needs the target moved before every attempt: the ops unit tests raise it",
-        ),
-        ("E_AUTH", "tokens arrive after M1"),
-        ("E_POLICY_DENIED", "policies arrive after M1"),
-        (
-            "E_MAINTENANCE_BUSY",
-            "the maintenance lease arrives after M1",
-        ),
-    ];
+    // Each code listed is one the table has.
+    for (code, _) in NOT_RAISED {
+        let known = ErrorCode::ALL.iter().any(|known| known.as_str() == *code);
+        assert!(known, "{code} is not an error code");
+    }
     let mut s = Session::new();
     let store = s.store();
     let init = s.run(&["init", &store]);

@@ -64,8 +64,24 @@ const INDEX: &str = "README.md";
 /// The hand-written notes' folder in `docs/reference/`.
 const NOTES_DIR: &str = "notes/mcp-tools";
 
-/// The release every tool first shipped in.
+/// The release every tool first shipped in, but [`REMOTE_TOOLS`].
 const SINCE: &str = "0.1.0";
+
+/// The git remotes' tools (M13), and the release they first shipped in.
+const REMOTE_TOOLS: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
+const REMOTE_SINCE: &str = "0.2.0";
+
+/// The tools with no recorded call yet: the git remotes' (M13), whose operations answer
+/// `E_INTERNAL` until their tasks land; the M13 plan's task C10 records their calls.
+const UNRECORDED: [&str; 5] = REMOTE_TOOLS;
+
+/// The release tool `name` first shipped in.
+fn since(name: &str) -> &'static str {
+    if REMOTE_TOOLS.contains(&name) {
+        return REMOTE_SINCE;
+    }
+    SINCE
+}
 
 /// Where insta keeps the integration tests' snapshots, from this crate's root.
 const SNAPSHOTS: &str = "tests/snapshots";
@@ -170,15 +186,13 @@ fn leaves(cmd: &clap::Command, prefix: &[String], out: &mut Vec<Vec<String>>) {
         let mut path = prefix.to_vec();
         path.push(sub.get_name().to_owned());
 
-        // A group (`ref`, `op`, …) names no operation itself: its subcommands do.
+        // A command that names an operation, before its own subcommands: `sync`, then
+        // `sync status`. A group (`ref`, `op`, …) and clap's own `help` name none.
+        if op_name(&path).is_some() {
+            out.push(path.clone());
+        }
         if sub.has_subcommands() {
             leaves(sub, &path, out);
-            continue;
-        }
-
-        // clap's own `help` names no operation.
-        if op_name(&path).is_some() {
-            out.push(path);
         }
     }
 }
@@ -372,12 +386,15 @@ fn changes(effect: Effect) -> &'static str {
         Effect::Adds => "adds to it",
         Effect::Moves => "moves refs",
         Effect::Lands => "adds a changeset and moves the target",
+        Effect::Fetches => "adds what a git remote holds, or sends it there",
+        Effect::Syncs => "lands onto a git remote's head, moves main and pushes",
     }
 }
 
-/// Whether a tool of `effect` needs the server's identity: every tool but those that only read.
+/// Whether a tool of `effect` needs the server's identity: every tool but those that only read,
+/// and `fetch` and `push`, which move no ref of the store and record no agent.
 fn needs_identity(effect: Effect) -> bool {
-    effect != Effect::Reads
+    !matches!(effect, Effect::Reads | Effect::Fetches)
 }
 
 /// The protocol revisions, and how a client opens each.
@@ -564,18 +581,23 @@ fn tool_page(spec: &Spec, golden: &Golden, commands: &[Vec<String>], all: &Value
         command_link(command)
     );
 
-    // 3. A recorded call.
+    // 3. A recorded call, when there is one yet (UNRECORDED).
     let _ = writeln!(out, "## Examples\n");
     let _ = writeln!(out, "### MCP\n");
-    let call = golden
-        .call_of(spec.name)
-        .unwrap_or_else(|| panic!("{TOOL_CALLS}: no {TOOLS_CALL} of {}", spec.name));
-    exchange(&mut out, call);
-    let _ = writeln!(
-        out,
-        "The server ran as `{BIN} {}`, after `initialize`. {PLACEHOLDERS}\n",
-        golden.args
-    );
+    match golden.call_of(spec.name) {
+        Some(call) => {
+            exchange(&mut out, call);
+            let _ = writeln!(
+                out,
+                "The server ran as `{BIN} {}`, after `initialize`. {PLACEHOLDERS}\n",
+                golden.args
+            );
+        }
+        None if UNRECORDED.contains(&spec.name) => {
+            let _ = writeln!(out, "No recorded example yet.\n");
+        }
+        None => panic!("{TOOL_CALLS}: no {TOOLS_CALL} of {}", spec.name),
+    }
 
     // 4. The hand-written note, then what comes back and how it fails.
     details(&mut out, spec.name);
@@ -595,7 +617,7 @@ fn metadata(out: &mut String, spec: &Spec, command: &[String]) {
     let fields = [
         ("title", quoted(spec.name)),
         ("description", quoted(&sentence(spec.title))),
-        ("since", quoted(SINCE)),
+        ("since", quoted(since(spec.name))),
         ("mutates", (spec.effect != Effect::Reads).to_string()),
         ("identity_required", needs_identity(spec.effect).to_string()),
         (
@@ -818,6 +840,17 @@ fn effect_text(effect: Effect) -> &'static str {
             "It adds a changeset onto a ref's head and moves the ref to it, keeping all the ref \
              held. Run again with the same arguments, it finds its change on the ref and adds \
              nothing: `replayed` with an `idempotency_key`, `E_NOTHING_TO_LAND` without."
+        }
+        Effect::Fetches => {
+            "It moves history between the store and a git remote, and moves no ref of the store: \
+             a push moves the remote's branch only from what the last fetch saw, to a descendant \
+             of it. Run again, it fetches or sends nothing new. It reaches the remote, beyond the \
+             store."
+        }
+        Effect::Syncs => {
+            "It lands main's unpublished changes onto a git remote's head, moves main there and \
+             pushes. Run again after the remote moved, it lands again. It reaches the remote, \
+             beyond the store."
         }
     }
 }
@@ -1154,7 +1187,13 @@ fn every_tool_has_a_command_an_example_and_its_hints() {
             .count();
         assert_eq!(runs, 1, "{}: commands that run it", spec.name);
 
-        // 2. One recorded call that succeeded.
+        // 2. One recorded call that succeeded; none yet for the git remotes' tools, whose
+        //    calls the M13 plan's task C10 records once they run (it empties UNRECORDED).
+        if UNRECORDED.contains(&spec.name) {
+            let recorded = golden.call_of(spec.name).is_some();
+            assert!(!recorded, "{}: recorded, so out of UNRECORDED", spec.name);
+            continue;
+        }
         let call = golden
             .call_of(spec.name)
             .unwrap_or_else(|| panic!("{}: no golden call", spec.name));
@@ -1181,8 +1220,16 @@ fn identity_follows_operate() {
     let path = format!("{}/src/mcp.rs", env!("CARGO_MANIFEST_DIR"));
     let source = fs::read_to_string(&path).unwrap();
     for spec in &TOOLS {
-        let mutates = format!("Tool::{:?} => how.mutate(", spec.tool);
-        let reads = format!("Tool::{:?} => how.read(", spec.tool);
+        let (mutates, reads) = match spec.tool {
+            Tool::Local(tool) => (
+                format!("LocalTool::{tool:?} => how.mutate_local("),
+                format!("LocalTool::{tool:?} => how.read_local("),
+            ),
+            tool => (
+                format!("Tool::{tool:?} => how.mutate("),
+                format!("Tool::{tool:?} => how.read("),
+            ),
+        };
         let found = (source.contains(&mutates), source.contains(&reads));
         assert_eq!(
             found,

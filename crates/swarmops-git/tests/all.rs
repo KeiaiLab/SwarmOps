@@ -10,6 +10,8 @@ mod export;
 mod export_oid;
 mod git_dir;
 mod import;
+mod limits;
+mod mirror;
 mod raw;
 mod round_trip;
 mod sink;
@@ -17,6 +19,8 @@ mod source;
 mod support;
 #[cfg(feature = "test-hooks")]
 mod sweeps;
+mod sync;
+mod transport;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's

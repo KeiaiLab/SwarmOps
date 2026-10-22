@@ -205,6 +205,35 @@ expression: s.redact(&all)
       "title": "BlobPutResp",
       "type": "object"
     },
+    "BranchUpdate": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A remote branch a fetch saw move, appear or go.",
+      "properties": {
+        "branch": {
+          "description": "The branch, by its short name.",
+          "type": "string"
+        },
+        "new": {
+          "description": "The commit it names now; omitted for a branch the remote deleted.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "old": {
+          "description": "The commit it named before; omitted for a branch that appeared.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "branch"
+      ],
+      "title": "BranchUpdate",
+      "type": "object"
+    },
     "ChangeInput": {
       "$defs": {
         "ChangeOp": {
@@ -729,6 +758,389 @@ expression: s.redact(&all)
         "title"
       ],
       "title": "ChangesetSummary",
+      "type": "object"
+    },
+    "CloneReq": {
+      "$defs": {
+        "LossyClass": {
+          "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+          "oneOf": [
+            {
+              "const": "gitlinks",
+              "description": "A submodule's entry (git mode 160000): dropped.",
+              "type": "string"
+            },
+            {
+              "const": "paths",
+              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "modes",
+              "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+              "type": "string"
+            },
+            {
+              "const": "tree_order",
+              "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+              "type": "string"
+            },
+            {
+              "const": "empty_trees",
+              "description": "An entry naming an empty tree: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "nonstandard",
+              "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`clone`: a new store in a directory of the caller's host, holding a git remote's history,\nwith the remote recorded and its followed branch imported into `main`. It needs an\nidentity, as `git import` does: it moves `main`.",
+      "properties": {
+        "branch": {
+          "description": "The remote branch `main` follows; by default the remote's default branch.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lossy": {
+          "default": [],
+          "description": "The classes of content the import of this remote's commits may drop or normalize, as\n`git import`'s `lossy`.",
+          "items": {
+            "$ref": "#/$defs/LossyClass"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "The repository's name; by default the URL's last path component without `.git`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "description": "The directory to create the store in, on the caller's host: absent or empty. A\ndirectory holding a store with this remote at this URL continues an interrupted clone.",
+          "type": "string"
+        },
+        "remote": {
+          "default": "origin",
+          "description": "The name to record the remote under: `origin` by default.",
+          "type": "string"
+        },
+        "token_env": {
+          "description": "The environment variable that holds a token for the remote, by its name; the token is\nnever stored.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "The remote's URL: `https://host/path`, `ssh://[user@]host/path` or the scp form\n`user@host:path`. A URL with a password, another scheme, or one that starts with `-` is\nrefused; plain `http://` only to a loopback address.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "url",
+        "path"
+      ],
+      "title": "CloneReq",
+      "type": "object"
+    },
+    "CloneResp": {
+      "$defs": {
+        "BranchUpdate": {
+          "description": "A remote branch a fetch saw move, appear or go.",
+          "properties": {
+            "branch": {
+              "description": "The branch, by its short name.",
+              "type": "string"
+            },
+            "new": {
+              "description": "The commit it names now; omitted for a branch the remote deleted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old": {
+              "description": "The commit it named before; omitted for a branch that appeared.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "type": "object"
+        },
+        "FetchResp": {
+          "description": "`fetch`: where the followed branch stands, and what moved.",
+          "properties": {
+            "branch": {
+              "description": "The followed branch.",
+              "type": "string"
+            },
+            "branches": {
+              "description": "The remote branches that moved, appeared or went, at most 1,000.",
+              "items": {
+                "$ref": "#/$defs/BranchUpdate"
+              },
+              "type": "array"
+            },
+            "branches_truncated": {
+              "description": "Whether more branches moved than `branches` lists.",
+              "type": "boolean"
+            },
+            "head": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RemoteHead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The followed branch's head after the fetch; omitted when the remote has no such branch."
+            },
+            "imported": {
+              "description": "How many changesets the import of the followed branch added.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "old_head": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/RemoteHead"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The followed branch's head as the last fetch saw it; omitted when none did."
+            },
+            "remote": {
+              "description": "The remote, by its name.",
+              "type": "string"
+            },
+            "tags_fetched": {
+              "description": "How many tags the fetch brought into the mirror (they are never imported).",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "warnings": {
+              "description": "What the fetch has to say that did not stop it. Omitted when there is nothing.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "remote",
+            "branch",
+            "imported",
+            "branches",
+            "branches_truncated",
+            "tags_fetched"
+          ],
+          "type": "object"
+        },
+        "LossyClass": {
+          "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+          "oneOf": [
+            {
+              "const": "gitlinks",
+              "description": "A submodule's entry (git mode 160000): dropped.",
+              "type": "string"
+            },
+            {
+              "const": "paths",
+              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "modes",
+              "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+              "type": "string"
+            },
+            {
+              "const": "tree_order",
+              "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+              "type": "string"
+            },
+            {
+              "const": "empty_trees",
+              "description": "An entry naming an empty tree: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "nonstandard",
+              "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+              "type": "string"
+            }
+          ]
+        },
+        "RemoteHead": {
+          "description": "A remote branch's head: its commit, and the changeset that commit is in the store.",
+          "properties": {
+            "changeset": {
+              "description": "The changeset id of that commit in the store.",
+              "type": "string"
+            },
+            "sha": {
+              "description": "The commit's git id, 40 lowercase hex digits.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha",
+            "changeset"
+          ],
+          "type": "object"
+        },
+        "RemoteInfo": {
+          "description": "A remote the store records.",
+          "properties": {
+            "branch": {
+              "description": "The remote branch `main` follows.",
+              "type": "string"
+            },
+            "lossy": {
+              "description": "The classes of content the import of this remote's commits may drop or normalize.",
+              "items": {
+                "$ref": "#/$defs/LossyClass"
+              },
+              "type": "array"
+            },
+            "name": {
+              "description": "The remote's name.",
+              "type": "string"
+            },
+            "token_env": {
+              "description": "The environment variable that holds a token for the remote, by its name; omitted when\nthe remote names none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "description": "The remote's URL, as it was given.",
+              "type": "string"
+            },
+            "warnings": {
+              "description": "What adding the remote has to say that did not stop it, such as\n`default_branch_unknown` (the remote named no default branch, so `branch` is `main`).\nOmitted when there is nothing.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "url",
+            "branch",
+            "lossy"
+          ],
+          "type": "object"
+        },
+        "RepoInfo": {
+          "description": "`init` and `info`: what the store is and holds.",
+          "properties": {
+            "changesets": {
+              "description": "How many changesets the store holds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "main": {
+              "description": "The changeset `main` points at; omitted until `main` exists.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "name": {
+              "description": "The name given at `init`.",
+              "type": "string"
+            },
+            "refs": {
+              "description": "How many refs the store holds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "repo_id": {
+              "description": "The store's id, fixed at `init`.",
+              "type": "string"
+            },
+            "store_version": {
+              "description": "The store format version.",
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "repo_id",
+            "name",
+            "store_version",
+            "changesets",
+            "refs"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`clone`: the store made, the remote recorded, its fetch, and where `main` stands.",
+      "properties": {
+        "fetch": {
+          "$ref": "#/$defs/FetchResp",
+          "description": "The clone's fetch."
+        },
+        "imported": {
+          "description": "How many changesets the import into `main` added.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "main": {
+          "description": "The changeset `main` names; omitted when the remote is empty.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remote": {
+          "$ref": "#/$defs/RemoteInfo",
+          "description": "The remote recorded."
+        },
+        "repo": {
+          "$ref": "#/$defs/RepoInfo",
+          "description": "The new store."
+        }
+      },
+      "required": [
+        "repo",
+        "remote",
+        "fetch",
+        "imported"
+      ],
+      "title": "CloneResp",
       "type": "object"
     },
     "CommitReq": {
@@ -1942,6 +2354,60 @@ expression: s.redact(&all)
       ],
       "title": "DiffStatus"
     },
+    "DropReason": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "How a sync found that the remote holds a change already.",
+      "oneOf": [
+        {
+          "const": "trailer",
+          "description": "A commit the remote's head reaches names it in a `SwarmOps-Changeset`,\n`SwarmOps-Squashed-From` or `SwarmOps-Land-Key` line.",
+          "type": "string"
+        },
+        {
+          "const": "no_op",
+          "description": "It merges onto the remote's head as no change.",
+          "type": "string"
+        }
+      ],
+      "title": "DropReason"
+    },
+    "DroppedChange": {
+      "$defs": {
+        "DropReason": {
+          "description": "How a sync found that the remote holds a change already.",
+          "oneOf": [
+            {
+              "const": "trailer",
+              "description": "A commit the remote's head reaches names it in a `SwarmOps-Changeset`,\n`SwarmOps-Squashed-From` or `SwarmOps-Land-Key` line.",
+              "type": "string"
+            },
+            {
+              "const": "no_op",
+              "description": "It merges onto the remote's head as no change.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "An unpublished change a sync dropped, since the remote holds it already. It stays in the\nstore, and an undo of the sync's ref move brings it back on `main`.",
+      "properties": {
+        "by": {
+          "$ref": "#/$defs/DropReason",
+          "description": "How the sync found it on the remote."
+        },
+        "changeset": {
+          "description": "The change.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeset",
+        "by"
+      ],
+      "title": "DroppedChange",
+      "type": "object"
+    },
     "EntryKindOut": {
       "$schema": "https://json-schema.org/draft/2020-12/schema",
       "description": "What a tree entry is.",
@@ -2408,9 +2874,170 @@ expression: s.redact(&all)
           "const": "E_GIT_WRITE",
           "description": "`git export` could not write the repository; `details.reason` says what failed: `io` (the\nfilesystem refused a write; `details.path` names the file, relative to the git\ndirectory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists:\nanother git process holds it, or an earlier export died holding it, and git itself says\nto remove it once no git process runs; `details.path` names it) or `ref_name_conflict`\n(an existing ref stands where the branch's name needs a directory, or the other way\nround; `details.branch`). Running the export again after the cause is gone writes what\nis still missing.",
           "type": "string"
+        },
+        {
+          "const": "E_REMOTE_DIVERGED",
+          "description": "A push or a sync found the remote branch elsewhere than it can move from: `details.reason`\nsays why (`remote_moved`: it moved since the last fetch, and the push's compare-and-swap\nsent nothing; `not_fast_forward`; `behind`: the store ref is behind the remote;\n`diverged`; `lossy_history`; `no_common_base`: the sync found no changeset both hold),\nwith `remote`, `branch` and, where known, `expected` and `main_moved`. Nothing was sent;\nthe hint names the fetch or the sync to run.",
+          "type": "string"
+        },
+        {
+          "const": "E_REMOTE_REJECTED",
+          "description": "The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or\na rule of the remote's) or `unclassified` (a failure git's messages do not explain, never\nretried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`,\n`stderr_tail`, the token redacted).",
+          "type": "string"
+        },
+        {
+          "const": "E_REMOTE_UNREACHABLE",
+          "description": "The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,\n`ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,\n`ssh`). Nothing changed in the store; running the command again can succeed.",
+          "type": "string"
+        },
+        {
+          "const": "E_REMOTE_NOT_FOUND",
+          "description": "The store records no remote of that name (`details.remote`).",
+          "type": "string"
         }
       ],
       "title": "ErrorCode"
+    },
+    "FetchReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`fetch`: bring a remote's branches and tags into the store's mirror, and its followed\nbranch's commits into the store as changesets. No ref of the store moves, so it needs no\nidentity.",
+      "properties": {
+        "remote": {
+          "description": "The remote, by its name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "remote"
+      ],
+      "title": "FetchReq",
+      "type": "object"
+    },
+    "FetchResp": {
+      "$defs": {
+        "BranchUpdate": {
+          "description": "A remote branch a fetch saw move, appear or go.",
+          "properties": {
+            "branch": {
+              "description": "The branch, by its short name.",
+              "type": "string"
+            },
+            "new": {
+              "description": "The commit it names now; omitted for a branch the remote deleted.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "old": {
+              "description": "The commit it named before; omitted for a branch that appeared.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "branch"
+          ],
+          "type": "object"
+        },
+        "RemoteHead": {
+          "description": "A remote branch's head: its commit, and the changeset that commit is in the store.",
+          "properties": {
+            "changeset": {
+              "description": "The changeset id of that commit in the store.",
+              "type": "string"
+            },
+            "sha": {
+              "description": "The commit's git id, 40 lowercase hex digits.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha",
+            "changeset"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`fetch`: where the followed branch stands, and what moved.",
+      "properties": {
+        "branch": {
+          "description": "The followed branch.",
+          "type": "string"
+        },
+        "branches": {
+          "description": "The remote branches that moved, appeared or went, at most 1,000.",
+          "items": {
+            "$ref": "#/$defs/BranchUpdate"
+          },
+          "type": "array"
+        },
+        "branches_truncated": {
+          "description": "Whether more branches moved than `branches` lists.",
+          "type": "boolean"
+        },
+        "head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteHead"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The followed branch's head after the fetch; omitted when the remote has no such branch."
+        },
+        "imported": {
+          "description": "How many changesets the import of the followed branch added.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old_head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteHead"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The followed branch's head as the last fetch saw it; omitted when none did."
+        },
+        "remote": {
+          "description": "The remote, by its name.",
+          "type": "string"
+        },
+        "tags_fetched": {
+          "description": "How many tags the fetch brought into the mirror (they are never imported).",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "warnings": {
+          "description": "What the fetch has to say that did not stop it. Omitted when there is nothing.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "remote",
+        "branch",
+        "imported",
+        "branches",
+        "branches_truncated",
+        "tags_fetched"
+      ],
+      "title": "FetchResp",
+      "type": "object"
     },
     "FileConflictOut": {
       "$defs": {
@@ -3258,6 +3885,28 @@ expression: s.redact(&all)
         "lossy_total"
       ],
       "title": "GitImportResp",
+      "type": "object"
+    },
+    "HeadMove": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A head before and after a sync.",
+      "properties": {
+        "new": {
+          "description": "What it names now.",
+          "type": "string"
+        },
+        "old": {
+          "description": "What it named before; omitted when it did not exist.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "new"
+      ],
+      "title": "HeadMove",
       "type": "object"
     },
     "HunkOut": {
@@ -4985,6 +5634,168 @@ expression: s.redact(&all)
       "title": "PathHistoryReq",
       "type": "object"
     },
+    "PublishedChange": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "An unpublished change a sync landed onto the remote's head.",
+      "properties": {
+        "changeset": {
+          "description": "The change as `main` held it.",
+          "type": "string"
+        },
+        "landed_as": {
+          "description": "The changeset it was landed as, on the remote's head.",
+          "type": "string"
+        },
+        "sha": {
+          "description": "The commit `landed_as` exports to.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "changeset",
+        "landed_as",
+        "sha"
+      ],
+      "title": "PublishedChange",
+      "type": "object"
+    },
+    "PushReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`push`: send a store ref to a remote branch by compare-and-swap, never forcing: the remote\nmoves only from the head the last fetch saw to a descendant of it. A push is an export, so\nit needs no identity.",
+      "properties": {
+        "branch": {
+          "description": "The remote branch; by default the remote's followed branch for `main`, and the same\nname for `release/<name>`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remote": {
+          "description": "The remote, by its name.",
+          "type": "string"
+        },
+        "source_ref": {
+          "default": "main",
+          "description": "The store ref to send: `main` (the default) or `release/<name>`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "remote"
+      ],
+      "title": "PushReq",
+      "type": "object"
+    },
+    "PushResp": {
+      "$defs": {
+        "PushStatus": {
+          "description": "What a push did to the remote branch.",
+          "oneOf": [
+            {
+              "const": "pushed",
+              "description": "The branch moved to the export of the ref's head.",
+              "type": "string"
+            },
+            {
+              "const": "up_to_date",
+              "description": "The branch named it already: nothing was sent.",
+              "type": "string"
+            },
+            {
+              "const": "created",
+              "description": "The branch did not exist, and the push created it.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`push`: where the remote branch stands.",
+      "properties": {
+        "branch": {
+          "description": "The remote branch.",
+          "type": "string"
+        },
+        "head_changeset": {
+          "description": "The changeset at the store ref's head.",
+          "type": "string"
+        },
+        "new": {
+          "description": "The commit the branch names now: the export of `head_changeset`.",
+          "type": "string"
+        },
+        "objects_written": {
+          "description": "How many git objects the push's export wrote into the mirror.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "old": {
+          "description": "The commit the branch named before; omitted when it did not exist.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "remote": {
+          "description": "The remote, by its name.",
+          "type": "string"
+        },
+        "rewritten": {
+          "description": "How many of the exported commits have another id than the commit they were imported\nfrom, as `git export`'s `rewritten`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/$defs/PushStatus",
+          "description": "What the push did."
+        },
+        "warnings": {
+          "description": "What the push has to say that did not stop it. Omitted when there is nothing.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "remote",
+        "branch",
+        "status",
+        "new",
+        "head_changeset",
+        "objects_written",
+        "rewritten"
+      ],
+      "title": "PushResp",
+      "type": "object"
+    },
+    "PushStatus": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a push did to the remote branch.",
+      "oneOf": [
+        {
+          "const": "pushed",
+          "description": "The branch moved to the export of the ref's head.",
+          "type": "string"
+        },
+        {
+          "const": "up_to_date",
+          "description": "The branch named it already: nothing was sent.",
+          "type": "string"
+        },
+        {
+          "const": "created",
+          "description": "The branch did not exist, and the push created it.",
+          "type": "string"
+        }
+      ],
+      "title": "PushStatus"
+    },
     "ReadFileReq": {
       "$defs": {
         "LineRange": {
@@ -5453,6 +6264,338 @@ expression: s.redact(&all)
         "already_applied"
       ],
       "title": "RefSetResp",
+      "type": "object"
+    },
+    "RemoteAddReq": {
+      "$defs": {
+        "LossyClass": {
+          "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+          "oneOf": [
+            {
+              "const": "gitlinks",
+              "description": "A submodule's entry (git mode 160000): dropped.",
+              "type": "string"
+            },
+            {
+              "const": "paths",
+              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "modes",
+              "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+              "type": "string"
+            },
+            {
+              "const": "tree_order",
+              "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+              "type": "string"
+            },
+            {
+              "const": "empty_trees",
+              "description": "An entry naming an empty tree: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "nonstandard",
+              "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`remote add`: record a git remote in the store. It needs no identity: it writes the store's\nremote configuration and its mirror, no store object.",
+      "properties": {
+        "branch": {
+          "description": "The remote branch `main` follows; by default the remote's default branch, which asks\nthe remote (a network call).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lossy": {
+          "default": [],
+          "description": "The classes of content the import of this remote's commits may drop or normalize.",
+          "items": {
+            "$ref": "#/$defs/LossyClass"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "The remote's name: lowercase letters, digits, `.`, `_` and `-`, 1 to 63 of them,\nstarting with a letter or a digit, not ending in `.`, and not `status`.",
+          "type": "string"
+        },
+        "token_env": {
+          "description": "The environment variable that holds a token for the remote, by its name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "The remote's URL, as a clone's `url` is.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "url"
+      ],
+      "title": "RemoteAddReq",
+      "type": "object"
+    },
+    "RemoteHead": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A remote branch's head: its commit, and the changeset that commit is in the store.",
+      "properties": {
+        "changeset": {
+          "description": "The changeset id of that commit in the store.",
+          "type": "string"
+        },
+        "sha": {
+          "description": "The commit's git id, 40 lowercase hex digits.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "changeset"
+      ],
+      "title": "RemoteHead",
+      "type": "object"
+    },
+    "RemoteInfo": {
+      "$defs": {
+        "LossyClass": {
+          "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+          "oneOf": [
+            {
+              "const": "gitlinks",
+              "description": "A submodule's entry (git mode 160000): dropped.",
+              "type": "string"
+            },
+            {
+              "const": "paths",
+              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "modes",
+              "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+              "type": "string"
+            },
+            {
+              "const": "tree_order",
+              "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+              "type": "string"
+            },
+            {
+              "const": "empty_trees",
+              "description": "An entry naming an empty tree: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "nonstandard",
+              "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "A remote the store records.",
+      "properties": {
+        "branch": {
+          "description": "The remote branch `main` follows.",
+          "type": "string"
+        },
+        "lossy": {
+          "description": "The classes of content the import of this remote's commits may drop or normalize.",
+          "items": {
+            "$ref": "#/$defs/LossyClass"
+          },
+          "type": "array"
+        },
+        "name": {
+          "description": "The remote's name.",
+          "type": "string"
+        },
+        "token_env": {
+          "description": "The environment variable that holds a token for the remote, by its name; omitted when\nthe remote names none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "url": {
+          "description": "The remote's URL, as it was given.",
+          "type": "string"
+        },
+        "warnings": {
+          "description": "What adding the remote has to say that did not stop it, such as\n`default_branch_unknown` (the remote named no default branch, so `branch` is `main`).\nOmitted when there is nothing.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "url",
+        "branch",
+        "lossy"
+      ],
+      "title": "RemoteInfo",
+      "type": "object"
+    },
+    "RemoteList": {
+      "$defs": {
+        "LossyClass": {
+          "description": "A class of git content that a changeset cannot hold as git has it (storage spec §7). A\ncommit holding one is refused unless the import's `lossy` allows its class; an allowed class\nis dropped or normalized, a directory a drop leaves empty is dropped with it, and the\nchangeset's `git.lossy` metadata names the classes, since it no longer renders back to the\ncommit's own git id.",
+          "oneOf": [
+            {
+              "const": "gitlinks",
+              "description": "A submodule's entry (git mode 160000): dropped.",
+              "type": "string"
+            },
+            {
+              "const": "paths",
+              "description": "A name that is not UTF-8, or is `.` or `..`: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "modes",
+              "description": "A mode written other than git's own `100644`, `100755`, `120000` and `40000`, such as\n`100664` or a zero-padded `040000`: a regular file's becomes a file or an executable by\nits owner's execute bit, and `040000` a directory.",
+              "type": "string"
+            },
+            {
+              "const": "tree_order",
+              "description": "A tree whose entries are not in git's order, or that names one entry twice: put in order,\nthe first of a name kept.",
+              "type": "string"
+            },
+            {
+              "const": "empty_trees",
+              "description": "An entry naming an empty tree: dropped.",
+              "type": "string"
+            },
+            {
+              "const": "nonstandard",
+              "description": "A commit whose bytes the changeset cannot keep: a signature line, time or header line that\nrenders back differently, no blank line before the message, or a parent listed twice\n(kept once).",
+              "type": "string"
+            }
+          ]
+        },
+        "RemoteInfo": {
+          "description": "A remote the store records.",
+          "properties": {
+            "branch": {
+              "description": "The remote branch `main` follows.",
+              "type": "string"
+            },
+            "lossy": {
+              "description": "The classes of content the import of this remote's commits may drop or normalize.",
+              "items": {
+                "$ref": "#/$defs/LossyClass"
+              },
+              "type": "array"
+            },
+            "name": {
+              "description": "The remote's name.",
+              "type": "string"
+            },
+            "token_env": {
+              "description": "The environment variable that holds a token for the remote, by its name; omitted when\nthe remote names none.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "url": {
+              "description": "The remote's URL, as it was given.",
+              "type": "string"
+            },
+            "warnings": {
+              "description": "What adding the remote has to say that did not stop it, such as\n`default_branch_unknown` (the remote named no default branch, so `branch` is `main`).\nOmitted when there is nothing.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "name",
+            "url",
+            "branch",
+            "lossy"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`remote list`: every remote, in the order they were added.",
+      "properties": {
+        "remotes": {
+          "description": "The remotes; empty when the store has none.",
+          "items": {
+            "$ref": "#/$defs/RemoteInfo"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "remotes"
+      ],
+      "title": "RemoteList",
+      "type": "object"
+    },
+    "RemoteListReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`remote list`: the remotes the store records.",
+      "title": "RemoteListReq",
+      "type": "object"
+    },
+    "RemoteRemoveReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`remote remove`: forget a remote, and the mirror's refs of it. No changeset is removed.",
+      "properties": {
+        "name": {
+          "description": "The remote's name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "title": "RemoteRemoveReq",
+      "type": "object"
+    },
+    "RemoteRemoveResp": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`remote remove`: the remote forgotten.",
+      "properties": {
+        "name": {
+          "description": "The remote's name.",
+          "type": "string"
+        },
+        "removed_refs": {
+          "description": "How many of the mirror's refs of the remote were removed.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "removed_refs"
+      ],
+      "title": "RemoteRemoveResp",
       "type": "object"
     },
     "RepoInfo": {
@@ -6014,6 +7157,416 @@ expression: s.redact(&all)
         "committer"
       ],
       "title": "Signatures",
+      "type": "object"
+    },
+    "SyncMode": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "Whether `sync` sends what it landed.",
+      "oneOf": [
+        {
+          "const": "publish",
+          "description": "Land onto the remote's head, move `main`, and push it.",
+          "type": "string"
+        },
+        {
+          "const": "local",
+          "description": "The same without the push: for a branch that takes pull requests only.",
+          "type": "string"
+        }
+      ],
+      "title": "SyncMode"
+    },
+    "SyncReq": {
+      "$defs": {
+        "SyncMode": {
+          "description": "Whether `sync` sends what it landed.",
+          "oneOf": [
+            {
+              "const": "publish",
+              "description": "Land onto the remote's head, move `main`, and push it.",
+              "type": "string"
+            },
+            {
+              "const": "local",
+              "description": "The same without the push: for a branch that takes pull requests only.",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`sync`: fetch a remote, land `main`'s unpublished changes onto the remote's head, move\n`main` there and push it. It moves `main`, so it needs an identity.",
+      "properties": {
+        "max_attempts": {
+          "default": 8,
+          "description": "How many times to fetch and land again when the remote or `main` moved meanwhile: 1 to\n32.",
+          "format": "uint32",
+          "maximum": 32,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "$ref": "#/$defs/SyncMode",
+          "default": "publish",
+          "description": "`publish` (the default) pushes; `local` stops before the push."
+        },
+        "remote": {
+          "description": "The remote, by its name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "remote"
+      ],
+      "title": "SyncReq",
+      "type": "object"
+    },
+    "SyncResp": {
+      "$defs": {
+        "DropReason": {
+          "description": "How a sync found that the remote holds a change already.",
+          "oneOf": [
+            {
+              "const": "trailer",
+              "description": "A commit the remote's head reaches names it in a `SwarmOps-Changeset`,\n`SwarmOps-Squashed-From` or `SwarmOps-Land-Key` line.",
+              "type": "string"
+            },
+            {
+              "const": "no_op",
+              "description": "It merges onto the remote's head as no change.",
+              "type": "string"
+            }
+          ]
+        },
+        "DroppedChange": {
+          "description": "An unpublished change a sync dropped, since the remote holds it already. It stays in the\nstore, and an undo of the sync's ref move brings it back on `main`.",
+          "properties": {
+            "by": {
+              "$ref": "#/$defs/DropReason",
+              "description": "How the sync found it on the remote."
+            },
+            "changeset": {
+              "description": "The change.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeset",
+            "by"
+          ],
+          "type": "object"
+        },
+        "HeadMove": {
+          "description": "A head before and after a sync.",
+          "properties": {
+            "new": {
+              "description": "What it names now.",
+              "type": "string"
+            },
+            "old": {
+              "description": "What it named before; omitted when it did not exist.",
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "new"
+          ],
+          "type": "object"
+        },
+        "PublishedChange": {
+          "description": "An unpublished change a sync landed onto the remote's head.",
+          "properties": {
+            "changeset": {
+              "description": "The change as `main` held it.",
+              "type": "string"
+            },
+            "landed_as": {
+              "description": "The changeset it was landed as, on the remote's head.",
+              "type": "string"
+            },
+            "sha": {
+              "description": "The commit `landed_as` exports to.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "changeset",
+            "landed_as",
+            "sha"
+          ],
+          "type": "object"
+        },
+        "SyncStatusKind": {
+          "description": "What a sync did.",
+          "oneOf": [
+            {
+              "const": "up_to_date",
+              "description": "`main` and the remote held the same: nothing moved.",
+              "type": "string"
+            },
+            {
+              "const": "pushed",
+              "description": "The landed changes were pushed.",
+              "type": "string"
+            },
+            {
+              "const": "fast_forwarded",
+              "description": "`main` had nothing unpublished and moved to the remote's head.",
+              "type": "string"
+            },
+            {
+              "const": "landed_locally",
+              "description": "`main` moved onto the remote's head and nothing was pushed (`mode: local`).",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`sync`: what it landed, dropped and sent, and where `main` and the remote stand.",
+      "properties": {
+        "attempts": {
+          "description": "How many attempts it took.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch": {
+          "description": "The followed branch.",
+          "type": "string"
+        },
+        "dropped": {
+          "description": "The changes the remote held already.",
+          "items": {
+            "$ref": "#/$defs/DroppedChange"
+          },
+          "type": "array"
+        },
+        "main": {
+          "$ref": "#/$defs/HeadMove",
+          "description": "`main`'s changeset before and after."
+        },
+        "published": {
+          "description": "The changes landed onto the remote's head, oldest first.",
+          "items": {
+            "$ref": "#/$defs/PublishedChange"
+          },
+          "type": "array"
+        },
+        "remote": {
+          "description": "The remote, by its name.",
+          "type": "string"
+        },
+        "remote_head": {
+          "$ref": "#/$defs/HeadMove",
+          "description": "The remote branch's commit before and after."
+        },
+        "status": {
+          "$ref": "#/$defs/SyncStatusKind",
+          "description": "What the sync did."
+        },
+        "warnings": {
+          "description": "What the sync has to say that did not stop it. Omitted when there is nothing.",
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "remote",
+        "branch",
+        "status",
+        "attempts",
+        "published",
+        "dropped",
+        "main",
+        "remote_head"
+      ],
+      "title": "SyncResp",
+      "type": "object"
+    },
+    "SyncStatus": {
+      "$defs": {
+        "ChangesetSummary": {
+          "description": "One changeset of a log.",
+          "properties": {
+            "author_agent": {
+              "description": "The agent that wrote it, as `show` gives `author.agent`.",
+              "type": "string"
+            },
+            "created_at": {
+              "description": "When it was recorded: the committer signature's time, in Unix milliseconds.",
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "id": {
+              "description": "The changeset's id.",
+              "type": "string"
+            },
+            "parents": {
+              "description": "The parents' ids, mainline parent first.",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": {
+              "description": "The message's first line.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "parents",
+            "author_agent",
+            "created_at",
+            "title"
+          ],
+          "type": "object"
+        },
+        "RemoteHead": {
+          "description": "A remote branch's head: its commit, and the changeset that commit is in the store.",
+          "properties": {
+            "changeset": {
+              "description": "The changeset id of that commit in the store.",
+              "type": "string"
+            },
+            "sha": {
+              "description": "The commit's git id, 40 lowercase hex digits.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "sha",
+            "changeset"
+          ],
+          "type": "object"
+        }
+      },
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`sync status`: what is unpublished, and how far behind `main` is.",
+      "properties": {
+        "ahead": {
+          "description": "How many changes on `main` are above the base: unpublished.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "base": {
+          "description": "The newest changeset on `main`'s first-parent chain that the remote's head reaches;\nomitted when there is none.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "behind": {
+          "description": "How many changesets on the remote's first-parent chain are above the base.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "branch": {
+          "description": "The followed branch.",
+          "type": "string"
+        },
+        "fetched": {
+          "description": "Whether a fetch ever saw the followed branch.",
+          "type": "boolean"
+        },
+        "remote": {
+          "description": "The remote, by its name.",
+          "type": "string"
+        },
+        "remote_head": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemoteHead"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "The followed branch's head as the last fetch saw it; omitted when none did."
+        },
+        "truncated": {
+          "description": "Whether a count or the list stopped at its bound.",
+          "type": "boolean"
+        },
+        "unpublished": {
+          "description": "The unpublished changes, newest first, at most `limit`.",
+          "items": {
+            "$ref": "#/$defs/ChangesetSummary"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "remote",
+        "branch",
+        "fetched",
+        "ahead",
+        "behind",
+        "unpublished",
+        "truncated"
+      ],
+      "title": "SyncStatus",
+      "type": "object"
+    },
+    "SyncStatusKind": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "What a sync did.",
+      "oneOf": [
+        {
+          "const": "up_to_date",
+          "description": "`main` and the remote held the same: nothing moved.",
+          "type": "string"
+        },
+        {
+          "const": "pushed",
+          "description": "The landed changes were pushed.",
+          "type": "string"
+        },
+        {
+          "const": "fast_forwarded",
+          "description": "`main` had nothing unpublished and moved to the remote's head.",
+          "type": "string"
+        },
+        {
+          "const": "landed_locally",
+          "description": "`main` moved onto the remote's head and nothing was pushed (`mode: local`).",
+          "type": "string"
+        }
+      ],
+      "title": "SyncStatusKind"
+    },
+    "SyncStatusReq": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "description": "`sync status`: how `main` and a remote's followed branch stand, as the last fetch saw the\nremote. It reads only the store and its mirror: no network, no lock.",
+      "properties": {
+        "limit": {
+          "default": 50,
+          "description": "The most unpublished changesets to list.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "remote": {
+          "description": "The remote, by its name.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "remote"
+      ],
+      "title": "SyncStatusReq",
       "type": "object"
     },
     "TreeEntryOut": {

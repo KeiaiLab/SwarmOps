@@ -67,7 +67,11 @@
 //! One tool per [`StoreOps`] operation, named as the envelope's `op` is: `repo_info`,
 //! `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`,
 //! `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has` and
-//! `verify`, in `tools/list`'s order. A tool's `inputSchema` is its request type's JSON Schema, as
+//! `verify`, in `tools/list`'s order; then the git remotes' client-side operations (M13), which
+//! no [`StoreOps`] has: `remote_list`, `fetch`, `push`, `sync` and `sync_status`, run on the
+//! store's own operations ([`operate_local`]) and taking a remote by its name only, never a URL
+//! or a path. `clone` and `remote add|remove` have no tool, so that an agent cannot point the
+//! store at a URL of its choosing. A tool's `inputSchema` is its request type's JSON Schema, as
 //! `swarmops schema <type>` prints it, with each `$ref` replaced by the definition it names so that
 //! the schema stands alone: a keyword beside the reference wins over the definition's, but for
 //! `description`, where the reference's comes first and the definition's after it. It is kept a
@@ -78,7 +82,8 @@
 //! with one (`RefSetReq`'s exactly one of `expected_old` and `create`) is the description's and
 //! the server's own check. The `expected_old` of `ref_set` and `ref_delete` is a string of the
 //! full-id pattern ([`full_id_pattern`]), not any revision. A tool's annotations say whether it
-//! changes the store and how; none reaches beyond the store (`openWorldHint: false`).
+//! changes the store and how; none reaches beyond the store (`openWorldHint: false`) but
+//! `fetch`, `push` and `sync`, which reach a git remote.
 //!
 //! `derive` alone has no tool: `swarmops derive` runs it beside the store as maintenance,
 //! deriving values ahead of readers as the journal grows, which is no agent's work.
@@ -157,6 +162,11 @@ use swarmops_api::{
     OpLogReq, PathHistoryReq, ReadFileReq, ReadTreeReq, RefDeleteReq, RefListReq, RefSetReq, Rev,
     ShowReq, StoreOps, UndoReq, VerifyReq, schema_for_all,
 };
+use swarmops_api::{
+    FetchReq, FetchResp, PushReq, PushResp, RemoteList, RemoteListReq, SyncReq, SyncResp,
+    SyncStatus, SyncStatusReq,
+};
+use swarmops_ops::Recording;
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 
 use crate::cli::Global;
@@ -250,7 +260,7 @@ const READ_FILE_RESULT_CHARS: u32 = 200_000;
 const RESULT_CHARS_KEY: &str = "anthropic/maxResultSizeChars";
 
 /// The tools, in the order `tools/list` gives them.
-static TOOLS: [Spec; 18] = [
+static TOOLS: [Spec; 23] = [
     Spec {
         tool: Tool::RepoInfo,
         name: "repo_info",
@@ -468,6 +478,63 @@ static TOOLS: [Spec; 18] = [
         title: "Verify the store",
         description: "Checks the whole store's consistency; deep re-hashes every object and \
                       checks the derived values against the objects too.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Local(LocalTool::RemoteList),
+        name: "remote_list",
+        request: "RemoteListReq",
+        title: "List git remotes",
+        description: "The git remotes the store records: each one's name, URL, followed branch \
+                      and the token variable it names, if any. Adding and removing remotes is \
+                      the CLI's.",
+        effect: Effect::Reads,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Local(LocalTool::Fetch),
+        name: "fetch",
+        request: "FetchReq",
+        title: "Fetch a git remote",
+        description: "Fetches a git remote, by its name, into the store's mirror, and its \
+                      followed branch's commits into the store as changesets; main never moves. \
+                      Run again with nothing new, it imports nothing.",
+        effect: Effect::Fetches,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Local(LocalTool::Push),
+        name: "push",
+        request: "PushReq",
+        title: "Push to a git remote",
+        description: "Sends a store ref (main by default) to a git remote's branch by \
+                      compare-and-swap, never by force: the remote moves only from what the last \
+                      fetch saw. A remote that moved since is E_REMOTE_DIVERGED and nothing is \
+                      sent: fetch or sync, then push again. Run again, it sends nothing.",
+        effect: Effect::Fetches,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Local(LocalTool::Sync),
+        name: "sync",
+        request: "SyncReq",
+        title: "Sync with a git remote",
+        description: "Fetches a git remote, lands main's unpublished changes onto its head (those \
+                      the remote holds already are dropped), moves main there and pushes it; \
+                      with mode local it pushes nothing. A conflict is E_CONFLICT with the \
+                      report a land gives, and nothing moves.",
+        effect: Effect::Syncs,
+        result_chars: None,
+    },
+    Spec {
+        tool: Tool::Local(LocalTool::SyncStatus),
+        name: "sync_status",
+        request: "SyncStatusReq",
+        title: "Show sync status",
+        description: "How main and a git remote's followed branch stand, as the last fetch saw \
+                      the remote: how many changes are unpublished and how far behind main is, \
+                      offline; pass a limit of 100 or less.",
         effect: Effect::Reads,
         result_chars: None,
     },
@@ -1121,6 +1188,57 @@ trait Operate {
         self,
         call: impl FnOnce(&dyn StoreOps, &Identity, R) -> Result<T, OpError>,
     ) -> Self::Done;
+
+    /// Runs a client-side read: the request `R`, then `call` on the store's own operations.
+    fn read_local<R: Refuse, T: Serialize>(
+        self,
+        call: impl FnOnce(&dyn RemoteOps, R) -> Result<T, OpError>,
+    ) -> Self::Done;
+
+    /// Runs a client-side mutation: the request `R`, then `call` on the store's own operations
+    /// as the server's identity.
+    fn mutate_local<R: Refuse, T: Serialize>(
+        self,
+        call: impl FnOnce(&dyn RemoteOps, &Identity, R) -> Result<T, OpError>,
+    ) -> Self::Done;
+}
+
+/// The client-side operations a tool runs (M13's git remotes): no [`StoreOps`] has them, and
+/// they take a remote by its name only. The store's [`Recording`] has them; [`operate_local`]
+/// ties each tool to its method through this trait.
+trait RemoteOps {
+    /// `remote list`.
+    fn remote_list(&self, req: RemoteListReq) -> Result<RemoteList, OpError>;
+    /// `fetch`.
+    fn fetch(&self, req: FetchReq) -> Result<FetchResp, OpError>;
+    /// `push`.
+    fn push(&self, req: PushReq) -> Result<PushResp, OpError>;
+    /// `sync`, as `who`.
+    fn sync(&self, who: &Identity, req: SyncReq) -> Result<SyncResp, OpError>;
+    /// `sync status`.
+    fn sync_status(&self, req: SyncStatusReq) -> Result<SyncStatus, OpError>;
+}
+
+impl RemoteOps for Recording<'_> {
+    fn remote_list(&self, req: RemoteListReq) -> Result<RemoteList, OpError> {
+        Recording::remote_list(self, req)
+    }
+
+    fn fetch(&self, req: FetchReq) -> Result<FetchResp, OpError> {
+        Recording::fetch(self, req)
+    }
+
+    fn push(&self, req: PushReq) -> Result<PushResp, OpError> {
+        Recording::push(self, req)
+    }
+
+    fn sync(&self, who: &Identity, req: SyncReq) -> Result<SyncResp, OpError> {
+        Recording::sync(self, who, req)
+    }
+
+    fn sync_status(&self, req: SyncStatusReq) -> Result<SyncStatus, OpError> {
+        Recording::sync_status(self, req)
+    }
 }
 
 /// Runs `tool`'s operation as `how` runs operations: the one place where a tool meets the
@@ -1150,6 +1268,20 @@ fn operate<O: Operate>(tool: Tool, how: O) -> O::Done {
             ops.verify(req)
                 .and_then(|report| commands::clean(report, deep))
         }),
+        Tool::Local(tool) => operate_local(tool, how),
+    }
+}
+
+/// Runs the client-side `tool`'s operation as `how` runs operations: the one place where such a
+/// tool meets the [`RemoteOps`] method it stands for, on the store's own operations ([`Recording`],
+/// which [`Ctx::envelope_on_local`] hands), so that [`StoreOps`] does not widen.
+fn operate_local<O: Operate>(tool: LocalTool, how: O) -> O::Done {
+    match tool {
+        LocalTool::RemoteList => how.read_local(|ops, req| ops.remote_list(req)),
+        LocalTool::Fetch => how.read_local(|ops, req| ops.fetch(req)),
+        LocalTool::Push => how.read_local(|ops, req| ops.push(req)),
+        LocalTool::Sync => how.mutate_local(|ops, who, req| ops.sync(who, req)),
+        LocalTool::SyncStatus => how.read_local(|ops, req| ops.sync_status(req)),
     }
 }
 
@@ -1203,6 +1335,51 @@ impl Operate for Call<'_, '_> {
             |ops, (who, req)| call(ops, &who, req),
         )
     }
+
+    /// The arguments as the request, then `call` on the store's own operations.
+    fn read_local<R: Refuse, T: Serialize>(
+        self,
+        call: impl FnOnce(&dyn RemoteOps, R) -> Result<T, OpError>,
+    ) -> String {
+        let Call {
+            server,
+            spec,
+            reply,
+            arguments,
+        } = self;
+        run_local(
+            server,
+            spec,
+            reply,
+            || request_of(spec, arguments),
+            |ops, req| call(&ops, req),
+        )
+    }
+
+    /// The arguments as the request, then the server's identity, then `call` on the store's
+    /// own operations as that identity.
+    fn mutate_local<R: Refuse, T: Serialize>(
+        self,
+        call: impl FnOnce(&dyn RemoteOps, &Identity, R) -> Result<T, OpError>,
+    ) -> String {
+        let Call {
+            server,
+            spec,
+            reply,
+            arguments,
+        } = self;
+        let (agent, env) = (server.global.agent.as_deref(), server.env);
+        run_local(
+            server,
+            spec,
+            reply,
+            || {
+                let req = request_of(spec, arguments)?;
+                Ok((context::mutator(agent, env)?, req))
+            },
+            |ops, (who, req)| call(&ops, &who, req),
+        )
+    }
 }
 
 /// Runs tool `spec` for `server` as a command runs ([`Ctx::envelope_on_store`]): `prepare`
@@ -1225,6 +1402,37 @@ fn run<P, T: Serialize>(
     let op = spec.name;
     match panic::catch_unwind(AssertUnwindSafe(|| {
         ctx.envelope_on_store(op, prepare, call)
+    })) {
+        Ok(envelope) => reply.tool_result(&envelope),
+        Err(payload) => {
+            let bug = commands::panicked(&*payload);
+            let envelope = commands::failed_envelope(op, bug, &ctx.used, ctx.started);
+            reply.tool_result(&envelope)
+        }
+    }
+}
+
+/// Runs the client-side tool `spec` for `server` as a client-side command runs
+/// ([`Ctx::envelope_on_local`]): `prepare` builds its input, then `call` runs on the store's own
+/// operations, opened; a panic in either is `E_INTERNAL`. The tool result that holds the
+/// envelope, answered as `reply`.
+fn run_local<P, T: Serialize>(
+    server: &Server<'_>,
+    spec: &Spec,
+    reply: Reply<'_>,
+    prepare: impl FnOnce() -> Result<P, OpError>,
+    call: impl FnOnce(Recording<'_>, P) -> Result<T, OpError>,
+) -> String {
+    let ctx = Ctx {
+        global: server.global,
+        env: server.env,
+        format: Format::Json { pretty: false },
+        started: Instant::now(),
+        used: Used::default(),
+    };
+    let op = spec.name;
+    match panic::catch_unwind(AssertUnwindSafe(|| {
+        ctx.envelope_on_local(op, prepare, call)
     })) {
         Ok(envelope) => reply.tool_result(&envelope),
         Err(payload) => {
@@ -1292,6 +1500,11 @@ impl Refuse for RefListReq {}
 impl Refuse for UndoReq {}
 impl Refuse for VerifyReq {}
 impl Refuse for BlobHasReq {}
+impl Refuse for RemoteListReq {}
+impl Refuse for FetchReq {}
+impl Refuse for PushReq {}
+impl Refuse for SyncReq {}
+impl Refuse for SyncStatusReq {}
 
 /// A commit that advances a ref names its parent by its full id ([`full_parent`]). A change's
 /// client file is read by this server, so its path must be absolute (the agent
@@ -1777,6 +1990,18 @@ enum Tool {
     BlobPut,
     BlobHas,
     Verify,
+    /// A client-side operation, on the store's own operations ([`operate_local`]).
+    Local(LocalTool),
+}
+
+/// The client-side operations, one tool each: the git remotes' (M13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalTool {
+    RemoteList,
+    Fetch,
+    Push,
+    Sync,
+    SyncStatus,
 }
 
 /// What a tool does to the store, which its annotations say.
@@ -1798,31 +2023,43 @@ enum Effect {
     /// (`land`); run again with the same arguments, it finds its change on the ref and adds
     /// nothing: `replayed` with an `idempotency_key`, `E_NOTHING_TO_LAND` without.
     Lands,
+    /// It moves bytes between the store and a git remote, and changes no ref of the store
+    /// (`fetch`, `push`): a push moves the remote's branch only from what the last fetch saw, to
+    /// a descendant of it. Run again, it fetches or sends nothing new. It reaches a remote, an
+    /// open world.
+    Fetches,
+    /// It lands onto a git remote's head, moves `main` and pushes (`sync`): run again after the
+    /// remote moved, it lands again. It reaches a remote, an open world.
+    Syncs,
 }
 
 impl Effect {
     /// The tool annotations of a tool with this effect.
     fn annotations(self) -> Value {
-        let (read_only, destructive, idempotent) = match self {
-            Effect::Reads => (true, false, true),
-            Effect::Adds => (false, false, false),
+        let (read_only, destructive, idempotent, open_world) = match self {
+            Effect::Reads => (true, false, true, false),
+            Effect::Adds => (false, false, false, false),
             // idempotentHint rests on concrete_expectation: the server refuses an expected_old
             // that is not a full id, so the same move again compares against the same changeset
             // and finds its work done (already_applied, nothing written) or the ref elsewhere
             // (E_CAS_MISMATCH). The ref's own name would match anew at every call and move the
             // ref again. An undo compares against what its operation's frame recorded, the same at
             // every call: run again, it finds the refs restored and writes nothing.
-            Effect::Moves => (false, true, true),
+            Effect::Moves => (false, true, true, false),
             // A land merges onto the ref's head and moves the ref to a changeset whose parent is
             // that head, so it only adds; run again, it finds its change there (a replay with its
             // key, E_NOTHING_TO_LAND without one) and writes nothing.
-            Effect::Lands => (false, false, true),
+            Effect::Lands => (false, false, true, false),
+            // A fetch or a push run again finds nothing new to move (the M13 plan's decision 30).
+            Effect::Fetches => (false, false, true, true),
+            // A sync run again after the remote moved lands again.
+            Effect::Syncs => (false, false, false, true),
         };
         json!({
             "readOnlyHint": read_only,
             "destructiveHint": destructive,
             "idempotentHint": idempotent,
-            "openWorldHint": false,
+            "openWorldHint": open_world,
         })
     }
 }
@@ -1976,14 +2213,23 @@ mod tests {
     use super::*;
 
     /// Each operation's request type has exactly one tool, and each tool runs exactly the
-    /// `StoreOps` method of its name, on the request type it advertises: a new operation, or a
-    /// tool wired to the wrong one, fails here.
+    /// `StoreOps` method of its name, or the client-side operation of its name ([`RemoteOps`]),
+    /// on the request type it advertises: a new operation, or a tool wired to the wrong one,
+    /// fails here.
     #[test]
     fn the_tools_are_the_store_operations() {
         // `init`, `git import` and `git export` run on the client and are no `StoreOps`
-        // operations, so they have no tool; `derive` is maintenance, which `swarmops derive` runs
-        // beside the store, and no agent's work.
-        let client_side = ["InitReq", "GitImportReq", "GitExportReq"];
+        // operations, so they have no tool, and neither have `clone` and `remote add|remove`,
+        // which would let an agent point the store at a URL of its choosing; `derive` is
+        // maintenance, which `swarmops derive` runs beside the store, and no agent's work.
+        let client_side = [
+            "InitReq",
+            "GitImportReq",
+            "GitExportReq",
+            "CloneReq",
+            "RemoteAddReq",
+            "RemoteRemoveReq",
+        ];
         let all = schema_for_all();
         let requests: Vec<&str> = all
             .as_object()
@@ -2037,6 +2283,7 @@ mod tests {
             "content": {"inline": "x"},
             "ids": [],
             "op": 0,
+            "remote": "origin",
         })
     }
 
@@ -2058,6 +2305,46 @@ mod tests {
             let req = serde_json::from_value(sample()).expect("every request reads the sample");
             let who = Identity::parse("test/probe").unwrap();
             let _ = call(&Recorder(self.called), &who, req);
+        }
+
+        fn read_local<R: Refuse, T: Serialize>(
+            self,
+            call: impl FnOnce(&dyn RemoteOps, R) -> Result<T, OpError>,
+        ) {
+            let req = serde_json::from_value(sample()).expect("every request reads the sample");
+            let _ = call(&Recorder(self.called), req);
+        }
+
+        fn mutate_local<R: Refuse, T: Serialize>(
+            self,
+            call: impl FnOnce(&dyn RemoteOps, &Identity, R) -> Result<T, OpError>,
+        ) {
+            let req = serde_json::from_value(sample()).expect("every request reads the sample");
+            let who = Identity::parse("test/probe").unwrap();
+            let _ = call(&Recorder(self.called), &who, req);
+        }
+    }
+
+    /// The client-side operations, recorded as the store's are.
+    impl RemoteOps for Recorder<'_> {
+        fn remote_list(&self, _: RemoteListReq) -> Result<RemoteList, OpError> {
+            self.called("remote_list", "RemoteListReq")
+        }
+
+        fn fetch(&self, _: FetchReq) -> Result<FetchResp, OpError> {
+            self.called("fetch", "FetchReq")
+        }
+
+        fn push(&self, _: PushReq) -> Result<PushResp, OpError> {
+            self.called("push", "PushReq")
+        }
+
+        fn sync(&self, _: &Identity, _: SyncReq) -> Result<SyncResp, OpError> {
+            self.called("sync", "SyncReq")
+        }
+
+        fn sync_status(&self, _: SyncStatusReq) -> Result<SyncStatus, OpError> {
+            self.called("sync_status", "SyncStatusReq")
         }
     }
 
@@ -2228,6 +2515,34 @@ mod tests {
                     "{}: {key} at the top of its inputSchema",
                     tool.name
                 );
+            }
+        }
+    }
+
+    /// The five remote tools (M13) are listed, each with a plain-object `inputSchema` that
+    /// takes a remote by its name: no URL and no path, so an agent cannot point the store at a
+    /// place of its choosing.
+    #[test]
+    fn the_remote_tools_have_plain_input_schemas() {
+        const REMOTE_TOOLS: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
+        let tools = listed();
+        for name in REMOTE_TOOLS {
+            // 1. Listed, as a plain object.
+            let tool = tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("no {name} tool"));
+            let schema = tool.input_schema.as_object().expect("a schema object");
+            assert_eq!(schema["type"], "object", "{name}");
+            for key in schema.keys() {
+                assert!(PLAIN_OBJECT.contains(&key.as_str()), "{name}: {key}");
+            }
+
+            // 2. No field names a place.
+            let properties = schema.get("properties").and_then(Value::as_object);
+            for field in properties.into_iter().flat_map(Map::keys) {
+                let place = ["url", "path", "git_path"].contains(&field.as_str());
+                assert!(!place, "{name}: {field}");
             }
         }
     }

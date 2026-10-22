@@ -9,6 +9,7 @@ mod derive;
 mod diff;
 mod history;
 mod land;
+mod land_detached;
 #[cfg(feature = "test-hooks")]
 mod landing_models;
 mod merge;
@@ -16,6 +17,7 @@ mod oplog;
 mod path_history;
 mod raw;
 mod read;
+mod store_fs;
 mod verify;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file

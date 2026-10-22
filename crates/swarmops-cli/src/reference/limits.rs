@@ -297,6 +297,8 @@ static CONTRACT: [Limit; 10] = [
             "ref delete",
             "op undo",
             "git import",
+            "clone",
+            "sync",
             "mcp",
         ],
         errors: &[ErrorCode::InvalidArg],

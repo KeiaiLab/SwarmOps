@@ -50,8 +50,29 @@ pub(super) const DIR: &str = "commands";
 /// The hand-written notes' folder in `docs/reference/`.
 const NOTES_DIR: &str = "notes/commands";
 
-/// The release every command first shipped in.
+/// The release every command first shipped in, but [`REMOTE_COMMANDS`].
 const SINCE: &str = "0.1.0";
+
+/// The git remotes' commands (M13), and the release they first shipped in.
+const REMOTE_COMMANDS: [&str; 8] = [
+    "clone",
+    "remote add",
+    "remote remove",
+    "remote list",
+    "fetch",
+    "push",
+    "sync",
+    "sync status",
+];
+const REMOTE_SINCE: &str = "0.2.0";
+
+/// The release the command at `path` first shipped in.
+fn since(path: &str) -> &'static str {
+    if REMOTE_COMMANDS.contains(&path) {
+        return REMOTE_SINCE;
+    }
+    SINCE
+}
 
 /// Where insta keeps the integration tests' snapshots, from this crate's root.
 const SNAPSHOTS: &str = "tests/snapshots";
@@ -84,12 +105,13 @@ pub(super) enum Group {
     Operations,
     Integrity,
     Git,
+    Remotes,
     Server,
 }
 
 impl Group {
     /// Every group, in the index's order.
-    pub(super) const ALL: [Group; 8] = [
+    pub(super) const ALL: [Group; 9] = [
         Group::Store,
         Group::Write,
         Group::Read,
@@ -97,6 +119,7 @@ impl Group {
         Group::Operations,
         Group::Integrity,
         Group::Git,
+        Group::Remotes,
         Group::Server,
     ];
 
@@ -110,6 +133,7 @@ impl Group {
             Group::Operations => "operations",
             Group::Integrity => "integrity",
             Group::Git => "git",
+            Group::Remotes => "remotes",
             Group::Server => "server",
         }
     }
@@ -124,6 +148,7 @@ impl Group {
             Group::Operations => "Operations",
             Group::Integrity => "Integrity",
             Group::Git => "Git",
+            Group::Remotes => "Git remotes",
             Group::Server => "Server",
         }
     }
@@ -153,7 +178,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 25] = [
+const META: [Meta; 33] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -284,6 +309,62 @@ const META: [Meta; 25] = [
         false,
         false,
         Returns::Type("GitExportResp"),
+    ),
+    meta(
+        "clone",
+        Group::Remotes,
+        true,
+        true,
+        Returns::Type("CloneResp"),
+    ),
+    meta(
+        "remote add",
+        Group::Remotes,
+        true,
+        false,
+        Returns::Type("RemoteInfo"),
+    ),
+    meta(
+        "remote remove",
+        Group::Remotes,
+        true,
+        false,
+        Returns::Type("RemoteRemoveResp"),
+    ),
+    meta(
+        "remote list",
+        Group::Remotes,
+        false,
+        false,
+        Returns::Type("RemoteList"),
+    ),
+    meta(
+        "fetch",
+        Group::Remotes,
+        true,
+        false,
+        Returns::Type("FetchResp"),
+    ),
+    meta(
+        "push",
+        Group::Remotes,
+        true,
+        false,
+        Returns::Type("PushResp"),
+    ),
+    meta(
+        "sync",
+        Group::Remotes,
+        true,
+        true,
+        Returns::Type("SyncResp"),
+    ),
+    meta(
+        "sync status",
+        Group::Remotes,
+        false,
+        false,
+        Returns::Type("SyncStatus"),
     ),
     meta("mcp", Group::Server, true, false, Returns::Protocol),
     meta(
@@ -675,7 +756,7 @@ fn metadata(out: &mut String, command: &Entry<'_>) {
         ("title", quoted(&format!("{BIN} {}", command.name))),
         ("description", quoted(&sentence(&about))),
         ("group", quoted(command.meta.group.key())),
-        ("since", quoted(SINCE)),
+        ("since", quoted(since(&command.name))),
         ("mutates", command.meta.mutates.to_string()),
         ("identity_required", command.meta.identity.to_string()),
         ("mcp_tool", quoted(command.tool.unwrap_or_default())),
@@ -1087,7 +1168,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 23] = [
+const RETURN_SITES: [(&str, &str, &str); 31] = [
     ("init", "src/commands.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1114,6 +1195,30 @@ const RETURN_SITES: [(&str, &str, &str); 23] = [
     ("verify", "../swarmops-api/src/ops.rs", "fn verify("),
     ("git import", "../swarmops-ops/src/git.rs", "fn git_import("),
     ("git export", "../swarmops-ops/src/git.rs", "fn git_export("),
+    ("clone", "src/commands.rs", "fn clone("),
+    (
+        "remote add",
+        "../swarmops-ops/src/remote.rs",
+        "fn remote_add(",
+    ),
+    (
+        "remote remove",
+        "../swarmops-ops/src/remote.rs",
+        "fn remote_remove(",
+    ),
+    (
+        "remote list",
+        "../swarmops-ops/src/remote.rs",
+        "fn remote_list(",
+    ),
+    ("fetch", "../swarmops-ops/src/remote.rs", "fn fetch("),
+    ("push", "../swarmops-ops/src/push.rs", "fn push("),
+    ("sync", "../swarmops-ops/src/sync.rs", "fn sync("),
+    (
+        "sync status",
+        "../swarmops-ops/src/sync.rs",
+        "fn sync_status(",
+    ),
     ("derive", "../swarmops-api/src/ops.rs", "fn derive("),
 ];
 
@@ -1141,6 +1246,33 @@ const CACHE_ONLY: [(&str, &str); 2] = [
 
 /// Where [`CACHE_ONLY`]'s phrases are.
 const CACHE_ONLY_SOURCE: &str = "../swarmops-ops/src/local.rs";
+
+/// The git remotes' commands that change the store's files with no identity (M13): each, the
+/// operation's file, and the phrase of its doc comment that says why it needs none. They are
+/// exceptions to [`CHANGE_RULE`]: a fetch's import moves no ref and records no agent, a push is
+/// an export, and `remote add|remove` write the remote configuration and the mirror.
+const NO_IDENTITY: [(&str, &str, &str); 4] = [
+    (
+        "fetch",
+        "../swarmops-ops/src/remote.rs",
+        "it moves no ref and records no agent",
+    ),
+    (
+        "push",
+        "../swarmops-ops/src/push.rs",
+        "It needs no identity: it is an export, as git export is",
+    ),
+    (
+        "remote add",
+        "../swarmops-ops/src/remote.rs",
+        "it writes remotes.toml and the mirror",
+    ),
+    (
+        "remote remove",
+        "../swarmops-ops/src/remote.rs",
+        "it writes remotes.toml and the mirror",
+    ),
+];
 
 /// The command that makes a store, so changes it with no identity, and where its code says so.
 const STORE_MAKER: (&str, &str, &str) = ("init", "src/commands.rs", "`init`: a store in");
@@ -1201,8 +1333,17 @@ fn meta_matches_the_code() {
     assert!(lookup(maker).mutates, "{maker}: makes a store");
     let serves_writes = golden.tools.values().any(|reads| !reads);
     assert_eq!(lookup(SERVER).mutates, serves_writes, "{SERVER}: mutates");
+    for (path, file, phrase) in NO_IDENTITY {
+        assert!(source(file).contains(phrase), "{file}: no {phrase:?}");
+        let meta = lookup(path);
+        assert!(
+            meta.mutates && !meta.identity,
+            "{path}: changes with no identity"
+        );
+    }
     for meta in &META {
-        if meta.path == maker || meta.path == SERVER {
+        let exempt = NO_IDENTITY.iter().any(|(path, _, _)| *path == meta.path);
+        if meta.path == maker || meta.path == SERVER || exempt {
             continue;
         }
         assert_eq!(meta.mutates, meta.identity, "{}: mutates", meta.path);

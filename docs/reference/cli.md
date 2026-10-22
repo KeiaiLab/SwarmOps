@@ -84,6 +84,28 @@ Bring history in from git, or send it back.
 - [`swarmops git import`](commands/git-import.md): Bring a git repository's history in: every commit --ref reaches that the store does not hold, then move --into to it.
 - [`swarmops git export`](commands/git-export.md): Send the store's history to git: write every commit of --ref's history that --branch's last export does not reach into the git repository at PATH, then move --branch to it.
 
+## Git remotes
+
+- [`swarmops clone`](commands/clone.md): Make a store from a git remote: fetch it, import its default branch into main, and record it as a remote.
+- [`swarmops fetch`](commands/fetch.md): Fetch a git remote into the store's mirror, and its followed branch into the store.
+- [`swarmops push`](commands/push.md): Send a store ref to a git remote's branch by compare-and-swap, never by force.
+- [`swarmops sync`](commands/sync.md): Land main's unpublished changes onto a git remote's head, and push them.
+
+### swarmops remote
+
+Add, remove or list the store's git remotes.
+
+- [`swarmops remote add`](commands/remote-add.md): Record a git remote in the store.
+- [`swarmops remote remove`](commands/remote-remove.md): Forget a git remote, and the mirror's refs of it; no changeset is removed.
+- [`swarmops remote list`](commands/remote-list.md): List the store's git remotes.
+
+### swarmops sync
+
+Land main's unpublished changes onto a git remote's head, and push them.
+
+- [`swarmops sync`](commands/sync.md): Land main's unpublished changes onto a git remote's head, and push them.
+- [`swarmops sync status`](commands/sync-status.md): Show how main and a git remote's followed branch stand, as the last fetch saw it.
+
 ## Server
 
 - [`swarmops mcp`](commands/mcp.md): Serve the store's operations to an agent as an MCP server on stdin and stdout.

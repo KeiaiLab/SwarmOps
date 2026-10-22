@@ -53,9 +53,10 @@ const SUPPORTED: [&str; 3] = [LATEST, PREVIOUS, EARLIEST];
 /// A command line that runs `swarmops mcp`: its arguments, and the variables it sets.
 type Startup<'a> = (&'a [&'a str], &'a [(&'a str, &'a str)]);
 
-/// The tools, one per `StoreOps` operation, in the order `tools/list` gives them, each with
-/// the request type its arguments are.
-const TOOLS: [(&str, &str); 18] = [
+/// The tools, one per `StoreOps` operation and then one per client-side operation of the git
+/// remotes (M13), in the order `tools/list` gives them, each with the request type its arguments
+/// are.
+const TOOLS: [(&str, &str); 23] = [
     ("repo_info", "InfoReq"),
     ("resolve_rev", "ResolveRevReq"),
     ("read_file", "ReadFileReq"),
@@ -74,7 +75,17 @@ const TOOLS: [(&str, &str); 18] = [
     ("blob_put", "BlobPutReq"),
     ("blob_has", "BlobHasReq"),
     ("verify", "VerifyReq"),
+    ("remote_list", "RemoteListReq"),
+    ("fetch", "FetchReq"),
+    ("push", "PushReq"),
+    ("sync", "SyncReq"),
+    ("sync_status", "SyncStatusReq"),
 ];
+
+/// The tools [`mcp_tool_calls_golden`] does not call: the git remotes' (M13), whose operations
+/// answer `E_INTERNAL` until their tasks land. The M13 plan's task C10 records their calls, and
+/// empties this list.
+const UNCALLED: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
 
 /// How long a test waits for one reply, or for the server to exit once its stdin is closed.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -299,7 +310,7 @@ fn mcp_tool_calls_golden() {
     golden.ok("ref_list", json!({}));
     golden.ok("verify", json!({}));
 
-    // Every tool has its call.
+    // Every tool has its call, but those of UNCALLED.
     let transcript = golden.transcript();
     for (tool, _) in TOOLS {
         let called = transcript["steps"]
@@ -307,7 +318,7 @@ fn mcp_tool_calls_golden() {
             .unwrap()
             .iter()
             .any(|step| step["request"]["params"]["name"] == tool);
-        assert!(called, "no call of {tool}");
+        assert_eq!(called, !UNCALLED.contains(&tool), "the call of {tool}");
     }
     insta::assert_json_snapshot!(transcript);
 }
@@ -2409,11 +2420,15 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
     };
     assert_eq!(fields(schema), fields(original), "{name}");
     assert_no_references(name, schema);
-    let (read_only, destructive, idempotent) = match name {
-        "commit" | "blob_put" => (false, false, false),
-        "land" => (false, false, true),
-        "ref_set" | "ref_delete" | "undo" => (false, true, true),
-        _ => (true, false, true),
+    let (read_only, destructive, idempotent, open_world) = match name {
+        "commit" | "blob_put" => (false, false, false, false),
+        "land" => (false, false, true, false),
+        "ref_set" | "ref_delete" | "undo" => (false, true, true, false),
+        // The git remotes' (M13): a fetch or a push run again moves nothing new; a sync run
+        // again after the remote moved lands again; all three reach the remote.
+        "fetch" | "push" => (false, false, true, true),
+        "sync" => (false, false, false, true),
+        _ => (true, false, true, false),
     };
     assert_eq!(
         tool["annotations"],
@@ -2421,7 +2436,7 @@ fn check_tool(name: &str, request: &str, tool: &Value, all: &Value) {
             "readOnlyHint": read_only,
             "destructiveHint": destructive,
             "idempotentHint": idempotent,
-            "openWorldHint": false,
+            "openWorldHint": open_world,
         }),
         "{name}"
     );

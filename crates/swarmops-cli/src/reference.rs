@@ -214,20 +214,17 @@ fn leaves(cmd: &clap::Command, prefix: &[String], out: &mut Vec<Leaf>) {
         let mut path = prefix.to_vec();
         path.push(sub.get_name().to_owned());
 
-        // A group (`ref`, `git`, …) names no operation itself: its subcommands do.
+        // A command that names an operation, before its own subcommands: `sync`, then
+        // `sync status`. A group (`ref`, `git`, …) and clap's own `help` name none.
+        if op_name(&path).is_some() {
+            out.push(Leaf {
+                path: path.clone(),
+                cmd: sub.clone(),
+            });
+        }
         if sub.has_subcommands() {
             leaves(sub, &path, out);
-            continue;
         }
-
-        // clap's own `help` subcommand names no operation.
-        if op_name(&path).is_none() {
-            continue;
-        }
-        out.push(Leaf {
-            path,
-            cmd: sub.clone(),
-        });
     }
 }
 

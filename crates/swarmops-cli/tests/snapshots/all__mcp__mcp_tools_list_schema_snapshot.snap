@@ -1119,6 +1119,170 @@ expression: listed
       },
       "name": "verify",
       "title": "Verify the store"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "The git remotes the store records: each one's name, URL, followed branch and the token variable it names, if any. Adding and removing remotes is the CLI's.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`remote list`: the remotes the store records.",
+        "title": "RemoteListReq",
+        "type": "object"
+      },
+      "name": "remote_list",
+      "title": "List git remotes"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Fetches a git remote, by its name, into the store's mirror, and its followed branch's commits into the store as changesets; main never moves. Run again with nothing new, it imports nothing.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`fetch`: bring a remote's branches and tags into the store's mirror, and its followed\nbranch's commits into the store as changesets. No ref of the store moves, so it needs no\nidentity.",
+        "properties": {
+          "remote": {
+            "description": "The remote, by its name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "remote"
+        ],
+        "title": "FetchReq",
+        "type": "object"
+      },
+      "name": "fetch",
+      "title": "Fetch a git remote"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Sends a store ref (main by default) to a git remote's branch by compare-and-swap, never by force: the remote moves only from what the last fetch saw. A remote that moved since is E_REMOTE_DIVERGED and nothing is sent: fetch or sync, then push again. Run again, it sends nothing.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`push`: send a store ref to a remote branch by compare-and-swap, never forcing: the remote\nmoves only from the head the last fetch saw to a descendant of it. A push is an export, so\nit needs no identity.",
+        "properties": {
+          "branch": {
+            "description": "The remote branch; by default the remote's followed branch for `main`, and the same\nname for `release/<name>`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "remote": {
+            "description": "The remote, by its name.",
+            "type": "string"
+          },
+          "source_ref": {
+            "default": "main",
+            "description": "The store ref to send: `main` (the default) or `release/<name>`.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "remote"
+        ],
+        "title": "PushReq",
+        "type": "object"
+      },
+      "name": "push",
+      "title": "Push to a git remote"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Fetches a git remote, lands main's unpublished changes onto its head (those the remote holds already are dropped), moves main there and pushes it; with mode local it pushes nothing. A conflict is E_CONFLICT with the report a land gives, and nothing moves.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`sync`: fetch a remote, land `main`'s unpublished changes onto the remote's head, move\n`main` there and push it. It moves `main`, so it needs an identity.",
+        "properties": {
+          "max_attempts": {
+            "default": 8,
+            "description": "How many times to fetch and land again when the remote or `main` moved meanwhile: 1 to\n32.",
+            "format": "uint32",
+            "maximum": 32,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "mode": {
+            "default": "publish",
+            "description": "`publish` (the default) pushes; `local` stops before the push. Whether `sync` sends what it landed.",
+            "oneOf": [
+              {
+                "const": "publish",
+                "description": "Land onto the remote's head, move `main`, and push it.",
+                "type": "string"
+              },
+              {
+                "const": "local",
+                "description": "The same without the push: for a branch that takes pull requests only.",
+                "type": "string"
+              }
+            ]
+          },
+          "remote": {
+            "description": "The remote, by its name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "remote"
+        ],
+        "title": "SyncReq",
+        "type": "object"
+      },
+      "name": "sync",
+      "title": "Sync with a git remote"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "How main and a git remote's followed branch stand, as the last fetch saw the remote: how many changes are unpublished and how far behind main is, offline; pass a limit of 100 or less.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "description": "`sync status`: how `main` and a remote's followed branch stand, as the last fetch saw the\nremote. It reads only the store and its mirror: no network, no lock.",
+        "properties": {
+          "limit": {
+            "default": 50,
+            "description": "The most unpublished changesets to list.",
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "remote": {
+            "description": "The remote, by its name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "remote"
+        ],
+        "title": "SyncStatusReq",
+        "type": "object"
+      },
+      "name": "sync_status",
+      "title": "Show sync status"
     }
   ],
   "ttlMs": 3600000

@@ -13,16 +13,23 @@
 //! - `git import` ([`LocalOps::git_import`], [`Recording::git_import`]) brings a git
 //!   repository's history into the store, reading the repository on the client's host: a
 //!   client-side operation, as `init` is, and so no `StoreOps` method.
+//! - The git remotes (M13): `clone` ([`LocalOps::clone_repo`]), `remote add|remove|list`,
+//!   `fetch`, `push`, `sync` and `sync status` ([`Recording::fetch`], [`Recording::push`],
+//!   [`Recording::sync`], …), client-side operations that spawn git against the store's mirror.
 //!
 //! The CLI calls these and prints each result in one envelope. A remote client will implement
 //! `StoreOps` over the same types later, resolving identities and file contents the same way.
 
+mod authors;
 mod conflict;
 pub mod content;
 mod error;
 mod git;
 pub mod identity;
 mod local;
+mod push;
+mod remote;
+mod sync;
 
 pub use error::shell_word;
 pub use local::{LocalOps, NOW_ENV, Recording, Resolved};

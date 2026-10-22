@@ -34,6 +34,12 @@
 //!   first, makes it durable and records its native commits' oids, then moves the branch by
 //!   compare-and-swap ([`ExportRequest`], [`ExportReport`]); run again, it writes only what is
 //!   new, and it refuses a branch that diverged ([`ExportError`], [`DivergedReason`]).
+//! - [`transport`]: the git remotes' transport (M13), the user's git spawned against a store's
+//!   mirror ([`transport::Transport`], [`transport::GitCli`]).
+//! - [`mirror`]: a store's git mirror and its lock ([`mirror::Mirror`], [`mirror::MirrorLock`]).
+//! - [`limits`]: GitHub's documented limits, checked before a push sends anything.
+//! - [`sync`](mod@sync): the sync engine: the unpublished changes, those a remote holds already,
+//!   and the rest landed onto the remote's head.
 //!
 //! Umbrella decision 3: gix is pinned (`=0.89.0`, its `sha1` feature alone, no default features)
 //! and seen by [`gix_source`] and [`gix_sink`] alone; the first also computes the SHA-1 behind
@@ -49,13 +55,17 @@ pub mod export_oid;
 pub mod gix_sink;
 pub mod gix_source;
 pub mod import;
+pub mod limits;
 pub mod lossy;
+pub mod mirror;
 pub mod native;
 pub mod oid;
 pub mod raw;
 pub mod render;
 pub mod sink;
 pub mod source;
+pub mod sync;
+pub mod transport;
 
 pub use convert::{ConvertError, Converted, Converter, GIT_LOSSY, GIT_OID};
 pub use export::{DivergedReason, ExportError, ExportReport, ExportRequest, export};
