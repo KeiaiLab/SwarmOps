@@ -19,6 +19,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   its `SHA256SUMS`, into `~/.local/bin` (`/usr/local/bin` as root); `--version` pins a release,
   `--dir` picks the directory, a second run updates, and `--uninstall` removes the binaries and
   no store. `just check` runs its offline tests, `scripts/test-install.py`.
+- `docs/goals.md`: the project's goals, each with its metric, its target and where that target
+  is written, the value `docs/perf.md` has measured (or that none exists yet) and the milestone
+  that delivers it, with non-goals and engineering principles.
+- `docs/policies/clean-room.md`: how third-party designs reach the code, only as functional
+  requirements in the project's own words, with a provenance record per feature and text, code
+  and licence checks before each release.
 
 ## [0.1.0] - 2026-10-20
 
