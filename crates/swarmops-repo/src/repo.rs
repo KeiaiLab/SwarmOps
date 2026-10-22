@@ -21,10 +21,11 @@
 //! acme
 //! ```
 //!
-//! Create writes it in step 5 below, after `meta/` and before `FORMAT`, replacing it
-//! atomically (a temp file in the store root, synced, renamed over it, the root synced), so a
-//! store with `FORMAT` always has it; a create that resumes after a crash writes it again,
-//! with a new id. Open requires it alongside `FORMAT`: after refusing a path that leads under
+//! Create writes it in step 4 below, before `meta/` and `FORMAT`, without replacing anything
+//! (storage spec §2, rule 1: a temp file in `objects/tmp/`, synced, linked no-clobber, the root
+//! synced), so a store with `FORMAT` always has it, and it never changes afterwards; a create
+//! that finds one (a create racing it, or one a crash stopped) takes its identity. Open
+//! requires it alongside `FORMAT`: after refusing a path that leads under
 //! `/mnt/` as create does ([`StoreError::UnsupportedFs`]) and checking `FORMAT`, it reads
 //! `REPO`, and refuses a store whose `REPO` is missing, longer than an id line and a 255-byte
 //! name (measured before it is read, so a crafted one of huge length is never read into
@@ -44,9 +45,12 @@
 //!    ([`RepoError::Exists`]).
 //! 3. It creates `objects/` with its 256 fan-out directories and `tmp/`, keeping those that
 //!    exist already, and makes them durable: one fsync of `objects/`, one of the store root.
-//! 4. It creates `meta/` with `MetaStore::create`, which is crash-atomic, or opens the whole one
+//! 4. It links `REPO` with a new repository id unless one is there (see above), syncs the store
+//!    root, and takes an exclusive lock on `REPO` (std `File::lock`) for the rest of the
+//!    create: a second create of the store waits there, and then finds `FORMAT`
+//!    ([`RepoError::Exists`]) or, after a crash, finishes the store itself.
+//! 5. It creates `meta/` with `MetaStore::create`, which is crash-atomic, or opens the whole one
 //!    a crashed create left behind.
-//! 5. It writes `REPO` atomically, with a new repository id (see above).
 //! 6. Last, it links `FORMAT` into place without replacing anything, from a temp file in
 //!    `objects/tmp/` that is synced first (so `FORMAT` is never seen half written), and syncs
 //!    the store root. If that sync fails, it takes `FORMAT` back (removed, the removal synced)
@@ -55,8 +59,10 @@
 //!    process aborts, as a crash between the link and the sync would leave it.
 //!
 //! A crash before the link leaves no `FORMAT`: open refuses the directory, and the next create
-//! picks up where the crashed one stopped. Two creates of one store at once are not supported.
+//! picks up where the crashed one stopped. Of two creates of one store at once, one makes it and
+//! the other fails with [`RepoError::Exists`], having replaced nothing.
 
+use std::fs::File;
 use std::hash::{BuildHasher, RandomState};
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -236,19 +242,41 @@ impl LocalRepo {
         }
         fs.create_dir_all(layout.objects_tmp().as_std_path())?;
         fs.fsync_dir(objects.as_std_path())?;
-        fs.fsync_dir(root.as_std_path())?;
-        // MetaStore::create renames a whole meta/ into place, so one that exists is whole.
-        let meta = if fs.exists(layout.meta_dir().as_std_path())? {
-            MetaStore::open_with_fs(&root, Arc::clone(fs.ops()))?
-        } else {
-            MetaStore::create_with_fs(&root, Arc::clone(fs.ops()))?
-        };
+
+        // 1. REPO, linked never replacing one there: the root's sync makes it and objects/
+        //    durable together.
         let identity = Identity {
             repo_id: new_repo_id(),
             name: name.to_owned(),
         };
         let repo_file = format!("{}\n{}", identity.repo_id, identity.name);
-        fs.atomic_replace(layout.repo_file().as_std_path(), repo_file.as_bytes())?;
+        let temp =
+            fs.write_durable_temp(layout.objects_tmp().as_std_path(), repo_file.as_bytes())?;
+        let claimed = fs.link_noclobber(&temp, layout.repo_file().as_std_path())?;
+        fs.fsync_dir(root.as_std_path())?;
+
+        // 2. One there already is a create's racing this one, or a crashed one's: its identity
+        //    is the store's, read before the lock (a Windows lock bars reads).
+        let identity = match claimed {
+            LinkOutcome::Placed => identity,
+            LinkOutcome::AlreadyExists => read_identity(&layout, &fs)?,
+        };
+
+        // 3. One create at a time from here; one that waited finds FORMAT, linked by the
+        //    create it waited for.
+        let _held = lock_repo(&layout, &fs)?;
+        if fs.exists(layout.format_file().as_std_path())? {
+            return Err(RepoError::Exists);
+        }
+
+        // 4. MetaStore::create renames a whole meta/ into place, so one that exists is whole.
+        let meta = if fs.exists(layout.meta_dir().as_std_path())? {
+            MetaStore::open_with_fs(&root, Arc::clone(fs.ops()))?
+        } else {
+            MetaStore::create_with_fs(&root, Arc::clone(fs.ops()))?
+        };
+
+        // 5. FORMAT, last: the store is complete.
         let temp = fs.write_durable_temp(layout.objects_tmp().as_std_path(), FORMAT)?;
         let format_file = layout.format_file();
         // Another create that finished first.
@@ -574,6 +602,16 @@ pub(crate) fn ref_error(e: StoreError) -> RepoError {
         StoreError::UnknownRefTarget(id) => RepoError::NotFound(id.to_string()),
         other => other.into(),
     }
+}
+
+/// The exclusive lock on `REPO` a create holds from its link of `REPO` to its end, so that two
+/// creates of one store run one after the other: std `File::lock`, released when the returned
+/// file closes (a crash releases it too). `REPO` is never replaced, so both lock one file.
+fn lock_repo(layout: &Layout, fs: &StoreFs) -> Result<File, RepoError> {
+    let path = layout.repo_file();
+    let file = File::open(&path).map_err(|e| fs.locate(FileOp::Open, &path, e))?;
+    file.lock().map_err(|e| fs.locate(FileOp::Lock, &path, e))?;
+    Ok(file)
 }
 
 /// What a create does when the sync of the store root that makes `FORMAT`'s name durable fails

@@ -564,10 +564,15 @@ fn create_on_existing_store_is_exists() {
     assert_eq!(reopened.info().unwrap(), info);
     assert!(reopened.changeset(id).unwrap().is_some());
 
-    // Without FORMAT, the store is one a create left half done: a create finishes it.
+    // Without FORMAT, the store is one a create left half done: a create finishes it, under
+    // the identity its REPO holds, which no create replaces.
     fs::remove_file(root.join("FORMAT")).unwrap();
     let resumed = LocalRepo::create(&root, "other").unwrap();
-    assert_eq!(resumed.info().unwrap().name, "other");
+    let identity = resumed.info().unwrap();
+    assert_eq!(
+        (identity.name.as_str(), identity.repo_id.as_str()),
+        ("test", info.repo_id.as_str())
+    );
     assert!(resumed.changeset(id).unwrap().is_some());
 }
 
@@ -1016,11 +1021,16 @@ fn create_makes_the_documented_fs_calls() {
         .map(str::to_owned)
         .to_vec();
     want.extend((0..=255u8).map(|byte| format!("create_dir_all objects/{byte:02x}")));
+    // Then REPO, linked never replacing one, made durable with objects/ by the root's sync;
+    // FORMAT checked again under REPO's lock.
     want.extend(
         [
             "create_dir_all objects/tmp",
             "fsync_dir objects",
+            "write_durable_temp objects/tmp",
+            "link_noclobber REPO",
             "fsync_dir .",
+            "exists FORMAT",
             "exists meta",
         ]
         .map(str::to_owned),
@@ -1056,12 +1066,11 @@ fn create_makes_the_documented_fs_calls() {
         "fsync_dir meta.tmp/meta",
     ];
     assert_eq!(calls[start..end], staged);
-    // Then the identity, and FORMAT last of all: linked into place, never half written.
+    // Then FORMAT last of all: linked into place, never half written.
     assert_eq!(
         calls[end..],
         [
             "rename_durable meta",
-            "atomic_replace REPO",
             "write_durable_temp objects/tmp",
             "link_noclobber FORMAT",
             "fsync_dir .",
