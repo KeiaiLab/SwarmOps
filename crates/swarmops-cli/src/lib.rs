@@ -33,6 +33,8 @@ mod commands;
 mod context;
 mod mcp;
 mod output;
+#[cfg(test)]
+mod reference;
 
 use std::ffi::OsString;
 use std::io::{self, IsTerminal as _, Write as _};
