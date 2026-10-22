@@ -939,7 +939,8 @@ impl Phase {
 }
 
 /// The error of a remote operation not written yet: `E_INTERNAL`, naming the M13 task that
-/// writes it (`C6`).
+/// writes it (`C6`). Every one is written now; its test keeps the shape.
+#[cfg(test)]
 pub(crate) fn planned(task: &str) -> OpError {
     error(ErrorCode::Internal, format!("planned in M13 ({task})"))
 }
@@ -1157,7 +1158,6 @@ fn git_lock_busy(message: String, file: String) -> OpError {
 
 /// The operations-spec error for the sync engine's failure `e`, in a sync of `remote`'s
 /// `branch`.
-#[allow(dead_code, reason = "the sync command (M13 C8b) uses it")]
 pub(crate) fn sync_error(e: SyncError, remote: &str, branch: &str) -> OpError {
     let message = e.to_string();
     match e {
