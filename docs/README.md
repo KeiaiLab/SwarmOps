@@ -50,6 +50,7 @@ features, each with an example.
 | --- | --- |
 | [CLI reference](reference/cli.md) | Look up a command, its arguments and its output. |
 | [Error reference](reference/errors.md) | Look up an `E_*` code, its exit code and what to do. |
+| [MCP tool reference](reference/mcp-tools/README.md) | Look up an MCP tool, its input schema, annotations, an example call and its CLI command. |
 | [Commands](../README.md#commands) | See every command in one table, with revisions, change lists, and output and exit codes. |
 | [MCP](../README.md#mcp) | Register the MCP server, and learn the rules an agent follows. |
 | [Versioning and stability](policies/versioning-and-stability.md) | Know what stays compatible, and how a breaking change is made. |

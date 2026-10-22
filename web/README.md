@@ -21,6 +21,8 @@ just web-check     # scripts/check-site.mjs over out/
 | `/roadmap` | `content/roadmap.md`, same front matter |
 | `/docs/**` | `../docs/**/*.md` and `../CHANGELOG.md`, as they are in the repository |
 
+Reference pages (docs/reference/commands/, docs/reference/mcp-tools/, docs/reference/cli.md) render through components/reference/: metadata Card, argument Accordion, CLI/MCP example Tabs, error Badges, and a filtered command table.
+
 A docs page keeps its repository path: `docs/guides/install.md` is `/docs/guides/install`,
 a `README.md` stands for its folder, `CHANGELOG.md` is `/docs/changelog`. Its title is its first
 `# ` heading, its description its first paragraph. `docs/superpowers/`, `docs/reference/notes/`

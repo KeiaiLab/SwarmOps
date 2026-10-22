@@ -51,6 +51,12 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   and a CI workflow. swarmops.cc still serves `site/` until the cutover.
 - `docs/reference/commands/`: one page per command (25) with its syntax, arguments, a recorded example, its result's fields and its errors; `docs/reference/cli.md` is now the grouped index. Generated from the code and the golden steps, and checked by a test.
 - Golden examples for blob put/has, op log/undo, derive, land, git import/export and every MCP tool, taken from real runs.
+- Docs: the command pages of init, info, whoami, schema, derive, commit, land, blob put and blob has carry a Details section: behaviour, option interactions, patterns, failures and measured performance.
+- Docs: the read commands' reference pages (resolve, cat, ls, show, log, history, diff) gain a hand-written Details section: option interactions, paging and cursors, errors and their causes, agent patterns, caveats and measured costs.
+- Reference: the ref list, ref set, ref delete, op log, op undo and verify pages gain a Details section (behaviour, outcomes per ref state, caveats, patterns).
+- The reference pages of git import, git export and mcp have hand-written Details: behaviour, options, patterns, failure cases.
+- Docs: one reference page per MCP tool (input schema, annotations, a recorded call, its CLI command) and an index with protocol versions, server instructions, identity rules and size limits, generated from the server's tool table.
+- Site: command reference pages show their metadata as a card, arguments as collapsible entries, CLI and MCP examples as tabs and error codes as badges linking to the error list; the command index is one grouped table with a filter, and command and MCP tool pages link to each other.
 
 ## [0.1.0] - 2026-10-20
 
