@@ -9,7 +9,8 @@ Commands and outputs here follow the
 - **Linux.** SwarmOps is built and tested on x86_64 Linux
   ([platforms](../policies/msrv-and-platforms.md)). The release builds run on x86_64 and aarch64
   Linux with glibc 2.34 or newer.
-- **git** on the host, for `clone`, `fetch` and `push`. `swarmops git import` and
+- **git** on the host, for `git clone` of this repository, and 2.39 or later for a store's git
+  remote: `swarmops clone`, `fetch`, `push` and `sync` run it. `swarmops git import` and
   `swarmops git export` read and write git repositories themselves.
 - For the installer: curl or wget, tar, and sha256sum or shasum.
 - For a build from a clone: rustup and a C compiler.
@@ -158,7 +159,7 @@ import each branch into its ref. The new store exports to the same commits. What
 over: changesets no ref reaches, the operation log (and so `undo`), and the changeset ids of the
 changesets made in the store, which come back as imported changesets with ids of their own.
 
-`GIT_SIDE` is the git side of the [daily loop](daily-loop.md#once-bring-the-repository-in):
+`GIT_SIDE` is the git side of the [daily loop](daily-loop.md#without-a-remote-a-bare-clone):
 
 ```sh
 NEW=~/.local/state/swarmops/repos/acme-next

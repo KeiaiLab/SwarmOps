@@ -6,7 +6,7 @@ Commands and outputs here follow the
 ## Before you start
 
 - The git side, `GIT_SIDE`, and the `field` helper of the [daily loop](daily-loop.md)
-  ([once](daily-loop.md#once-bring-the-repository-in), [step 2](daily-loop.md#2-agents-commit-and-land)).
+  ([a bare clone](daily-loop.md#without-a-remote-a-bare-clone), [step 2](daily-loop.md#2-agents-commit-and-land)).
 - The project's build and test command (here its `check.sh`).
 
 There are no workspaces yet (M5), so an agent that must build or test its change before it lands

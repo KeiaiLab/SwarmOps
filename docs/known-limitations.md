@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M8, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M13, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -11,9 +11,10 @@ are not in the repository. Code-level minors that change nothing a user or an ag
 
 Targets are milestones of the umbrella spec
 (§13): M1.6 the code-review follow-ups · M2 diff, history and derived data · M3 git import ·
-M4 merge and landing · M8 git export · M5 workspaces · M6 verify, crash safety and fuzzing ·
-M7 blame and review · M9 simulation and a benchmark gate · M11 remote sync, offline-first.
-M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0. M1.5, the hardening
+M4 merge and landing · M8 git export · M12 portability · M13 git remotes · M5 workspaces ·
+M6 verify, crash safety and fuzzing · M14 git clients against a store · M7 blame and review ·
+M9 simulation and a benchmark gate · M11 remote sync, offline-first.
+M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0. M1.5, the hardening
 milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
 closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
@@ -538,11 +539,15 @@ left).
   missing or damaged in that tree or history fails the import (`E_STORE_CORRUPT`, which `verify`
   lists) until it is restored. *Unscheduled: an authenticated cache. Found: the 2026-10-20
   security review's re-verification of the git export, and of the git import.*
-- **A crash while an export moves its branch leaves the branch's lock.** An export that dies
+- **A crash while an export moves its branch leaves the branch's lock.** A `git export` that dies
   between taking `refs/heads/<branch>.lock` and renaming it onto the branch leaves the lock file,
   as git does: every later export of that branch, and git itself, refuses the branch
   (`E_GIT_WRITE`, `details.reason` `ref_locked`) until the file is removed by hand, once no git
-  process runs. *Documented (storage spec §7). Found: M8 Task 5.*
+  process runs. The store's own git mirror (M13) does not keep them: under the mirror's lock no
+  one else writes it, so the first remote command after the crash removes git lock files older
+  than ten minutes, with a warning, and a newer one is the retryable `E_BUSY`
+  (`details.lock` `git_mirror_file`). *Documented (storage spec §7). Found: M8 Task 5; the
+  mirror's case closed by M13.*
 - **An export leaves no reflog entry.** The branch moves without a line in the repository's
   `logs/`, so `git reflog` does not show an export's moves. *Documented (storage spec §7). Found:
   M8 Task 5.*
@@ -572,6 +577,58 @@ left).
   already holds is reused as it is, so a later import without `--lossy` that reaches one an
   earlier import took with a loss reports `lossy_total` 0 and skips it rather than refusing.
   *Unscheduled (issue #8 item 3). Found: M3's consolidated review.*
+
+## Git remotes
+
+- **A fetch, a push or a sync reads the whole history below a native head.** Each imports or
+  exports onto the store's history, and so pays the cost the import and the export pay there
+  ("An export reads the whole history below its head", "An import onto a target reads the head's
+  whole tree", above): on 12,000 commits a one-commit push costs 3.9 times what it does on 1,000,
+  and a sync of one land takes 8.8 s, against roadmap targets of 1.5 times and 1 s
+  ([perf.md](perf.md#git-remotes-m13-the-three-topology-2-targets), one run on a loaded host).
+  *Unscheduled: an authenticated cache, as for the import and the export. Found: the M13 design's
+  risks; measured by M13 Task C11.*
+- **A squash that lost its trailer lines, then edited on the remote, stops sync.** Sync
+  recognises a change the remote holds by a `SwarmOps-Changeset`, `SwarmOps-Squashed-From` or
+  `SwarmOps-Land-Key` line in a remote commit, or by its merging as no change. A pull request
+  squashed with a message that dropped the commit bodies, whose lines someone then changed again on
+  the remote before the sync, matches neither: the sync stops with `E_CONFLICT` naming the change.
+  When the remote holds it, move `main` to the remote head's changeset
+  (`so ref set main <id> --expect <main>`) and sync again
+  ([GitHub as a remote](guides/github-remote.md#when-sync-stops)). *Documented (operations spec
+  §6). Found: the M13 design's risks.*
+- **A trailer line is taken as proof.** A remote commit that names a change on a `SwarmOps-` line
+  makes sync drop that change without checking the commit's content; anyone who can push to the
+  remote can write such a line. Every drop is listed in `dropped`, and the change stays in the
+  store. *Documented (the M13 design's decision 5). Found: the M13 design.*
+- **A remote whose history the import took with a loss cannot be pushed onto.** Commits fetched
+  with a `--lossy` class export as new commits (above, "A history imported with a loss exports as
+  new commits"), so a push onto such a branch fails with `E_REMOTE_DIVERGED` (`details.reason`
+  `lossy_history`) and sends nothing. Fetch and sync work; publishing onto that branch needs git.
+  *Documented (operations spec §6). Found: the M13 design's risks.*
+- **The mirror doubles the space a repository takes on disk.** It is a git repository of the
+  remote's history beside the store's own objects. *Unscheduled: packs only, or packs served from
+  the store's objects. Found: the M13 design's risks.*
+- **A credential helper that opens a window can wait for a person.** SwarmOps sets
+  `GIT_TERMINAL_PROMPT=0`, which git's own prompts obey; a helper with a window of its own does
+  not, and under an MCP server no one answers it. Agents' hosts use ssh keys or `--token-env`.
+  *Documented ([GitHub as a remote](guides/github-remote.md#credentials)). Found: the M13 design's
+  risks.*
+- **A long fetch inside an MCP call holds the agent's session.** The MCP server answers one request
+  at a time, so a `fetch` or `sync` of a large remote blocks that session until git ends.
+  *Unscheduled. Found: the M13 design's risks.*
+- **`authors.toml` changed between a keyed commit and its retry makes a different changeset.** The
+  file is read each time a changeset is signed, so a retry made after the file changed signs with
+  the new address: the retry records a second changeset rather than replaying the first.
+  *Documented (operations spec §5). Found: the M13 design's risks.*
+- **A server that cuts git's first HTTP response inside its headers looks like an empty remote.**
+  git then falls back to the old "dumb" HTTP protocol, finds no refs and succeeds: the fetch reports
+  no branches and prunes the mirror's tracking refs, and a clone ends with no `main`. Nothing is
+  forced (a later push leases on the pruned value and fails), and the next good fetch restores
+  them. *Unscheduled. Found: M13 Task C10.*
+- **Tested on Linux only.** The remote suites ran with git 2.43.0 on x86_64 Linux; the weekly run
+  adds git 2.39.5 and 2.56.0 once its host has curl's headers. macOS and Windows, and git for
+  Windows' `http-backend`, are M12's. *Target: M12.*
 
 ## Platforms
 
@@ -658,10 +715,19 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `journal.off` a writer cut is tested only at the journal's level. *Target: M6 (the metadata
   read paths through `FsOps`, umbrella spec §14). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
-- **Golden envelopes cover 27 of the 37 error codes.** `error_codes_reach_the_cli` pins the
-  envelope of 27; the other ten are in its `NOT_RAISED` list, each with why the test cannot raise
-  it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6, the six `E_GIT_*`
-  codes in M3). Found: the 2026-10-16 comparison.*
+- **Golden envelopes cover 31 of the 41 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 27, and `remote_error_codes_golden` the four `E_REMOTE_*` codes over smart HTTP and
+  ssh (M13); the other ten are in the first test's `NOT_RAISED` list, each with why the test cannot
+  raise it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6, the six
+  `E_GIT_*` codes in M3). Found: the 2026-10-16 comparison.*
+- **The git remotes' reference pages have no recorded example.** The pages of `clone`,
+  `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and of their five MCP tools,
+  say "No recorded example yet": no golden step runs them, since they need a remote. *Unscheduled.
+  Found: M13 Task C1.*
+- **The weekly live run with GitHub needs this host's runners.** The `github-live` job pushes to a
+  scratch repository whose own workflow runs on a self-hosted runner of the maintainers' host; with
+  that host down, the job fails its 15-minute wait for the workflow. *Documented. Found: M13 Task
+  C13.*
 - **The eight-committer race can meet `E_BUSY` on a loaded host.**
   `multiprocess::eight_processes_commit_concurrently_all_persist` races eight commits, which are
   what it measures, so it retries none: a lock wait that load stretches past 10 s fails it. Its

@@ -100,9 +100,17 @@ df --output=iused,iavail,ipcent "$SWARMOPS_REPO"
 3021323 241161717    2%
 ```
 
+### The git remote
+
+Each `push`'s and `sync`'s `status`, `rewritten` (0 unless the remote's history was fetched with a
+loss) and `dropped`; any `E_REMOTE_UNREACHABLE` (the network; retried), `E_REMOTE_REJECTED` (a
+credential or a rule of the remote's) or `E_REMOTE_DIVERGED`; how far `main` is ahead of the trunk
+(`swarmops sync status origin`, after a fetch); and any `git/mirror.git.broken-*` directory in the
+store, a mirror a fetch moved aside and made again, which SwarmOps never deletes.
+
 ### The git side
 
-Each export's `exported`, `branch_moved` and `rewritten` (0 unless the history
+With a bare clone instead of a remote, each export's `exported`, `branch_moved` and `rewritten` (0 unless the history
 was imported with a loss), any `E_GIT_IMPORT_DIVERGED` or `E_GIT_EXPORT_DIVERGED` (someone wrote
 the trunk, or an export waits for its review) or `E_GIT_WRITE`, how long the review branch has
 been ahead of the trunk (`git -C "$GIT_SIDE" log --oneline stable..review` lists what waits), and

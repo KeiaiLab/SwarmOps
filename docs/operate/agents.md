@@ -55,15 +55,17 @@ matters. Give the store's path absolute, as above.
 
 ## The tools agents get
 
-The server lists 18 tools, one per operation, each taking the operation's request as its
+The server lists 23 tools, one per operation, each taking the operation's request as its
 arguments and returning the envelope the CLI prints for it:
 
 | Reads | Writes |
 | --- | --- |
-| `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify` | `commit`, `land`, `blob_put`, `ref_set`, `ref_delete`, `undo` |
+| `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `remote_list`, `sync_status` | `commit`, `land`, `blob_put`, `ref_set`, `ref_delete`, `undo`, `fetch`, `push`, `sync` |
 
-`init`, `whoami`, `schema`, `git import`, `git export` and `derive` are commands only: you run
-them, not the agents.
+`init`, `whoami`, `schema`, `git import`, `git export`, `derive`, `clone` and `remote add|remove`
+are commands only: you run them, not the agents. The git remote tools take a remote by its name
+only, and run git with the server's environment: its ssh agent and token variables
+([GitHub as a remote](../guides/github-remote.md#through-mcp)).
 
 - The store and the identity are the server's: `--repo` (else `SWARMOPS_REPO`) and `--as` (else
   `SWARMOPS_AGENT`). No call can name others, and without an identity every write fails with

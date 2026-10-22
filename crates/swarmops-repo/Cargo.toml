@@ -21,9 +21,9 @@ workspace = true
 test-hooks = ["swarmops-store/test-hooks", "swarmops-testkit/test-hooks"]
 
 [dependencies]
-swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
-swarmops-merge = { path = "../swarmops-merge", version = "0.1.0" }
-swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+swarmops-core = { path = "../swarmops-core", version = "0.2.0" }
+swarmops-merge = { path = "../swarmops-merge", version = "0.2.0" }
+swarmops-store = { path = "../swarmops-store", version = "0.2.0" }
 # A land's backoff draws its jitter from a hash of its key and attempt, not from an RNG.
 blake3.workspace = true
 camino.workspace = true
@@ -32,7 +32,7 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
+swarmops-testkit = { path = "../swarmops-testkit", version = "0.2.0" }
 criterion.workspace = true
 proptest.workspace = true
 tempfile.workspace = true

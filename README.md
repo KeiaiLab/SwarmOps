@@ -32,14 +32,16 @@ processes on one host commit into one embedded store at once, and every command 
 JSON envelope. It is one Rust program, with no external database and no daemon, and it moves the
 work to and from git, so that CI and deployments keep running.
 
-It is pre-release, at milestone M8: usable by one agent, with a store that already takes commits
-from many processes at once; merging and landing, which a swarm needs, are built, but landing is
-not yet measured under a swarm's load ([roadmap](#roadmap)).
+It is pre-release, at milestone M13 (v0.2.0): usable by one agent, with a store that already takes
+commits from many processes at once; merging and landing, which a swarm needs, are built, but
+landing is not yet measured under a swarm's load; and a store clones, fetches, pushes and syncs
+with GitHub itself ([roadmap](#roadmap)).
 
 ## Core features
 
 The examples below ran one after another, with the binary built from this repository, against
-the store that the [quick start](#quick-start) makes; the git example makes one of its own. In
+the store that the [quick start](#quick-start) makes; the two git examples make stores of their
+own, the remote one against a local repository served through a stand-in for ssh. In
 the outputs, ids are cut to their first eight hex digits (`4a7bc757…`), a store's path to `…`,
 and a `…` line stands for lines left out. `--human` prints a short text rendering of the
 envelope instead of JSON.
@@ -155,7 +157,7 @@ exit 5
 
 ### An MCP server for agents
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 18 tools, one
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 23 tools, one
 per operation, each taking the operation's request and returning the envelope the CLI prints.
 Register it with Claude Code, one identity per agent process:
 
@@ -261,8 +263,45 @@ review is up to date at 416ef535…
 …
 ```
 
-[The git round trip](docs/guides/git-round-trip.md) is the guide, and the operations guide's
-[daily loop](docs/operations.md#the-daily-loop) runs it with review and CI.
+[The git round trip](docs/guides/git-round-trip.md) is the guide.
+
+### GitHub as a remote: clone, push and sync
+
+A store can reach a git remote itself: `clone` makes a store from a repository, `push` sends a
+store ref to a branch by compare-and-swap, never by force, and `sync` lands the store's unpublished
+changes on top of the remote's head and pushes them, recognising the changes a pull request merged
+by squash or rebase already brought. SwarmOps runs your own git (2.39 or later) for the transfer,
+with your credentials, and keeps the remote's commits in a git mirror inside the store:
+
+```sh
+so --human clone git@github.com:acme/shop.git --into "$SWARMOPS_REPO"
+so --human commit -m "Add notes" --changes notes.json --advance main
+so --human push origin main:review
+so --human push origin main:review
+```
+
+```text
+…
+remote.url: git@github.com:acme/shop.git
+remote.branch: main
+fetch.head.sha: aa3481f6…
+imported: 1
+main: a7558e3b…
+changeset: 48e0853b…
+…
+branch: review
+status: created
+new: ba4ab051…
+objects_written: 3
+rewritten: 0
+branch: review
+status: up_to_date
+…
+```
+
+The second push finds nothing to send and runs no git. [GitHub as a remote](docs/guides/github-remote.md)
+is the guide, and the operations guide's [daily loop](docs/operations.md#the-daily-loop) runs it
+with review and CI.
 
 <a id="the-store-on-disk"></a>
 
@@ -391,6 +430,7 @@ specs, in Korean. The maintainers keep them privately, and
 | [Parallel agents](docs/guides/parallel-agents.md) | Many agents on one repository, against agents in git worktrees. |
 | [Claude Code](docs/guides/claude-code.md) | Giving Claude Code agents the store through MCP. |
 | [Git round trip](docs/guides/git-round-trip.md) | Importing a git repository and exporting the work back for CI. |
+| [GitHub as a remote](docs/guides/github-remote.md) | Cloning, fetching, pushing and syncing with GitHub, pull requests, tokens and commit authors. |
 | [docs/operations.md](docs/operations.md) | Running SwarmOps: install, a store, agents through MCP, the daily loop between the store and git, checks, backup and restore, upgrades, limits and what to monitor. |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | Symptoms, their causes and the commands that fix them. |
 | [CLI reference](docs/reference/cli.md) | Every command, its arguments and its output. |
@@ -429,16 +469,16 @@ planned, each with its milestone.
 | Commits from many writers | ✅ M1: concurrent commits all succeed, short of a lock wait past 10 s or, since M1.6, a snapshot that meets a new commit in each of its 32 rounds (the retryable `E_BUSY`). | **Parity** with agents in separate git worktrees, on lost commits and lock failures. |
 | One ref by compare-and-swap | ✅ M1: `ref set --expect` or `--create`, `ref delete --expect`; setting a ref to the target it holds is a replay. ✅ M1.6: `commit --advance` moves a ref to the new changeset in the commit's own transaction, or records nothing. | **Parity** with `git update-ref <ref> <new> <old>`, plus the replay. |
 | Reading a path at a revision | ✅ M1: `cat REV:PATH` and `ls REV[:PATH]`, without a checkout. | **Parity** with `git show REV:PATH` and `git ls-tree`. |
-| Offline, on one host | ✅ M1: no network code; every operation runs against the host's own store. | **Parity.** |
+| Offline, on one host | ✅ M1: every operation runs against the host's own store. ✅ M13: only `clone`, `fetch`, `push` and `sync` reach a remote, through the user's git; every other command works without a network. | **Parity.** |
 | Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s, and two `fsync`s more when it moves a ref (`--advance`). | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
 | Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
 | Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, `git grep <tree>` and sparse checkouts. |
 | Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
 | Conflicts | Since M3, `E_GIT_IMPORT_DIVERGED` signals a conflict when a git import's target and the git history have diverged. ✅ M4: `land` merges three-way without a checkout and reports a conflict as `E_CONFLICT` with a JSON report: each conflicting file's kind, its hunks (each side's lines, numbered as `cat --lines` takes them, and their text) and the target's changeset and agent that last changed it. ✅ M4: `land --resolve` resolves them without a checkout, path by path (take a side, new content, or delete), against the report's `theirs`; a path the target changed since comes back stale. | **Parity** with `git merge-tree --write-tree`, which merges without a checkout and reports typed conflicts. Resolving without a checkout is one request here, where git takes plumbing (`git hash-object`, a temporary index, `git commit-tree`). |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
-| Sync between hosts | ✅ M8: through a git remote, one writing host at a time: the writer exports, then pushes with git, and the others fetch with git, then import; two hosts that both write stop on `E_GIT_EXPORT_DIVERGED` or `E_GIT_IMPORT_DIVERGED` rather than merge. 📋 M11: offline-first sync, a full store on every host, `fetch` and `push` against one upstream. | **Behind**: git clones, fetches and pushes over any transport, and bundles without one. |
-| Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. ✅ M3: git import. ✅ M8: git export. No user hooks, signing, submodules or LFS. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
-| Maturity | Pre-release: v0.1.0 is the first tag, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
+| Sync between hosts | ✅ M8: through a git remote, one writing host at a time, with `git import` and `git export`. ✅ M13: a store clones, fetches and pushes a git remote over HTTPS or ssh, by running the user's git; a push is a compare-and-swap, never forced, and `sync` lands the store's unpublished changes onto the remote's head, so several stores can write to one remote. 📋 M11: offline-first sync between stores, `so://`. | **Parity** with git's clone, fetch and push to a git remote over HTTPS and ssh, which SwarmOps runs; **behind** on transports, shallow and partial clones, and bundles. |
+| Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. ✅ M3: git import. ✅ M8: git export. ✅ M13: git remotes, and GitHub's pull requests merged by any method. No user hooks, signing, submodules or LFS, and no GitHub API calls. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
+| Maturity | Pre-release: v0.1.0 is the first tag, v0.2.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
 | Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4, after the pilot: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load. |
 
 No git baseline has been measured: these verdicts come from the design, the code, and git's own
@@ -462,7 +502,7 @@ design, acceptance criteria and targets. Command names of planned work are provi
 | Topology | Today | Planned |
 | --- | --- | --- |
 | 1. Local git, remote SwarmOps | Not served: a bare git repository that `git export` writes, whose pushes someone imports and lands | M14: `swarmops serve` over ssh and HTTP; stock `git clone`, `fetch`, `pull` and `push`; a push to `refs/land/main` lands |
-| 2. Local SwarmOps, remote GitHub | `git import` from a bare clone, `git export` back to it, and a hand-run `git push` (M3, M8) | M13: `so clone https://github.com/…`, `so fetch`, `so push`, `so sync`, with no hand-run git |
+| 2. Local SwarmOps, remote GitHub | ✅ M13: `so clone https://github.com/…`, `so fetch`, `so push`, `so sync`, with no hand-run git ([GitHub as a remote](docs/guides/github-remote.md)) | Signed commits; opening pull requests from SwarmOps |
 | 3. Local SwarmOps, remote SwarmOps | Through a git remote, one writing host at a time (M8) | M11: `so clone so://host/…` and `so sync`, offline-first |
 
 The milestones of the umbrella spec (§13), in the order they are built. ✅ delivered · 📋 planned.
@@ -478,7 +518,7 @@ The milestones of the umbrella spec (§13), in the order they are built. ✅ del
 | ✅ | M4 | Merge and landing, and the journal shown as an operation log with undo. Landing is a compare-and-swap loop that merges again, incrementally, when the target moves; its measurement under a swarm's load, and the landing model that measurement chooses, come next. |
 | ✅ | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |
 | 📋 | M12 | Portability: macOS and Windows builds, tests and releases. |
-| 📋 | M13 | Git remotes from a store (topology 2): packs over a connection, git's fetch and push as a client, the store's git mirror, `so clone`, `so remote`, `so fetch`, `so push`, `so sync` and their MCP tools. |
+| ✅ | M13 | Git remotes from a store (topology 2): the store's git mirror, the user's git run as the transport, `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status` and their MCP tools, commit addresses per agent family (`authors.toml`). |
 | 📋 | M5 | Workspaces, with an adapter for Claude Code's worktree hooks, so that an agent builds and tests a change on disk before it lands it. |
 | 📋 | M6 | Verify, crash safety and fuzzing: fsck and repair, gc, detection of unsupported filesystems, bounded reads of store files, a capped `verify` report, and the next store `FORMAT`, with branch names, tags and remote-tracking refs. |
 | 📋 | M14 | Git clients against a store (topology 1): `swarmops serve` over ssh and HTTP, run per connection; pushes by compare-and-swap or that land; access control. |
@@ -495,7 +535,8 @@ quiet host: landing by 32 and 50 processes through the binary against umbrella �
 and the landing model those numbers choose; whether a transaction can sync the journal once
 instead of twice; the import's and the export's timings on larger repositories. The order of
 the milestones from M5 on is settled once the pilot has run; until then the table is the plan.
-M13 and M14 are new, and where they go is part of that plan.
+M13 and M14 are new, and where they go is part of that plan. M13 came first, in 0.2.0, ahead of
+M12, which is developed separately.
 
 When it is usable (umbrella spec §1): by one agent from M1; by a swarm, landing through MCP,
 from M4; on an existing git repository, its history imported and its landed work exported back
@@ -509,7 +550,7 @@ milestone takes each item.
 ## MCP
 
 `swarmops mcp` serves the store's operations to an agent as an MCP server on stdin and stdout:
-18 tools, one per operation, each taking the operation's request and returning the envelope the
+23 tools, one per operation, each taking the operation's request and returning the envelope the
 CLI prints. [MCP integration](docs/develop/mcp.md) is the reference,
 [MCP tools](docs/reference/mcp-tools/README.md) has a page per tool, and
 [Claude Code](docs/guides/claude-code.md) is the guide.
@@ -541,6 +582,7 @@ for each: its syntax, its arguments, an example, what it returns and the errors 
 | Take an operation back | [`op log`](docs/reference/commands/op-log.md) · [`op undo`](docs/reference/commands/op-undo.md) |
 | Check and derive | [`verify`](docs/reference/commands/verify.md) · [`derive`](docs/reference/commands/derive.md) · [`schema`](docs/reference/commands/schema.md) |
 | Move work to and from git | [`git import`](docs/reference/commands/git-import.md) · [`git export`](docs/reference/commands/git-export.md) |
+| Work with a git remote | [`clone`](docs/reference/commands/clone.md) · [`remote add`](docs/reference/commands/remote-add.md) · [`remote remove`](docs/reference/commands/remote-remove.md) · [`remote list`](docs/reference/commands/remote-list.md) · [`fetch`](docs/reference/commands/fetch.md) · [`push`](docs/reference/commands/push.md) · [`sync`](docs/reference/commands/sync.md) · [`sync status`](docs/reference/commands/sync-status.md) |
 | Serve agents | [`mcp`](docs/reference/commands/mcp.md) |
 
 - <a id="publishing-a-change"></a>**Publishing a change**: commit on the head you read, then
@@ -567,16 +609,17 @@ those that read real repositories on this host run only with `SWARMOPS_HOST_REPO
 
 ### The `test-hooks` feature
 
-The crash and fault tests drive five test-only environment variables:
+The crash and fault tests drive six test-only environment variables:
 `SWARMOPS_TEST_CRASH_AT=<k>` aborts the process at its k-th store filesystem call,
 `SWARMOPS_TEST_FS_CALLS=<file>` makes it write how many calls it made,
 `SWARMOPS_TEST_FAIL_AT=<k>[:once|persistent[:eio|enospc]]` fails its k-th call with an injected
 I/O error (and with `persistent` every mutating call after it), `SWARMOPS_TEST_ORDER_CHECK=1`
 checks every write against the store's write-ordering rules and panics at one that breaks a rule,
-and `SWARMOPS_TEST_NOW=<unix seconds>` fixes the time it signs changesets at.
+`SWARMOPS_TEST_NOW=<unix seconds>` fixes the time it signs changesets at, and
+`SWARMOPS_TEST_GITHUB_HOSTS=<host[:port],…>` makes a push apply GitHub's limits to those hosts.
 They act only in a build with the cargo feature `test-hooks` (on `swarmops-store`,
 `swarmops-repo`, `swarmops-git`, `swarmops-ops`, `swarmops-cli` and `swarmops-testkit`, the tests'
-support; `swarmops-cli/test-hooks` turns on all of them but `swarmops-git`'s). The gates build the
+support; `swarmops-cli/test-hooks` turns on all of them). The gates build the
 tests with `--all-features`; a
 plain `cargo test` skips the tests that
 need the hooks. Every other build, `cargo build --release` included, ignores the variables, and

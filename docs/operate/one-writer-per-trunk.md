@@ -6,9 +6,13 @@ Commands and outputs here follow the
 ## Before you start
 
 - The git side, `GIT_SIDE`, and the `field` helper of the [daily loop](daily-loop.md)
-  ([once](daily-loop.md#once-bring-the-repository-in), [step 2](daily-loop.md#2-agents-commit-and-land)).
+  ([a bare clone](daily-loop.md#without-a-remote-a-bare-clone), [step 2](daily-loop.md#2-agents-commit-and-land)).
 
 ## The rule
+
+This rule is for the round trip through a bare clone, `git import` and `git export`. A store that
+reaches the remote itself does not need it: `swarmops sync` lands the store's changes on top of
+whatever people pushed to the trunk ([daily loop, step 1](daily-loop.md#1-take-in-what-git-gained)).
 
 Between an import and the next move of the trunk (step 5), only one side may change the trunk, the
 store (through the review branch) or git.

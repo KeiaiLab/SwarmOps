@@ -28,12 +28,13 @@ program, no external database, no daemon.
 
 M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening), M1.6 (the
 code-review follow-ups), M2 (diff, history and the derived-data engine), M3 (git import), M4
-(merge and landing, and the operation log with undo) and M8 (git export) are done, but for work
-of M1.6, M2, M3, M4 and M8 that waits until after the pilot. Since M1, SwarmOps is usable by one
-agent: its store takes commits from many processes at once, safely. Since M4, `land` merges an
-agent's change three-way onto a ref and publishes it, not yet measured under a swarm's load.
-Workspaces (M5) and review (M7) come later, in the order of umbrella §13.
-[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2, M3, M4 and M8
+(merge and landing, and the operation log with undo), M8 (git export) and M13 (git remotes) are
+done, but for work of M1.6, M2, M3, M4 and M8 that waits until after the pilot. Since M1,
+SwarmOps is usable by one agent: its store takes commits from many processes at once, safely.
+Since M4, `land` merges an agent's change three-way onto a ref and publishes it, not yet measured
+under a swarm's load. Since M13, a store clones, fetches, pushes and syncs a git remote such as
+GitHub itself. Workspaces (M5) and review (M7) come later, in the order of umbrella §13.
+[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2, M3, M4, M8 and M13
 leave open.
 
 ## Crates and layering
@@ -43,12 +44,12 @@ leave open.
 | `swarmops-core` | Object ids, repository paths and the canonical object codec. It does no I/O; its byte layouts are the hash contract. |
 | `swarmops-store` | The loose object files (`FsObjectStore`), the store's layout (`Layout`), the native metadata store (`MetaStore`): the journal, the writer lock, the changeset index and the ref files; and the cache of derived values beside it (`DerivedStore`). The object store's filesystem access, every metadata write and the derived values' reads and writes go through the `FsOps` seam, which the crash tests hook. |
 | `swarmops-merge` | Pure algorithms over trees and lines, with no I/O and no store: the tree diff (leaf-level changes, canonical deltas and three-way path entries) and the line diff (histogram hunks, by `imara-diff`) from M2, and the three-way merge from M4. `swarmops-repo` re-exports it as `swarmops_repo::merge`. |
-| `swarmops-git` | git's side of the import, from M3, and of the export, from M8: git's commit and tree bytes parsed into their fields and rendered back byte for byte (`raw`), the ids git gives objects (`GitOid`, `git_hash`), and `GitSource`, what the import reads from a repository: refs resolved to commits, and objects' bytes, each checked against its id. `GixSource` reads a repository on disk through gix, pinned and seen by that one module, so that git2 could replace it there. `Converter` turns git's commits, trees and blobs into a changeset's fields, trees and blobs, and checks that a commit it took without loss renders back to its own id (`render`); what a changeset cannot hold is refused by class (`LossyClass`) unless the import allows the class. `import` brings every commit a git ref reaches that a store does not hold into it, parents first and many to a journal frame, and moves a target ref to the tip's changeset; run again, it takes only what is new (below, "Git import"). The export, from M8, writes a store's history behind a ref into a git branch through `GitSink` (`GixSink` on disk), and `ExportOid` names the commit each changeset exports to (below, "Git export"). |
+| `swarmops-git` | git's side of the import, from M3, and of the export, from M8: git's commit and tree bytes parsed into their fields and rendered back byte for byte (`raw`), the ids git gives objects (`GitOid`, `git_hash`), and `GitSource`, what the import reads from a repository: refs resolved to commits, and objects' bytes, each checked against its id. `GixSource` reads a repository on disk through gix, pinned and seen by that one module, so that git2 could replace it there. `Converter` turns git's commits, trees and blobs into a changeset's fields, trees and blobs, and checks that a commit it took without loss renders back to its own id (`render`); what a changeset cannot hold is refused by class (`LossyClass`) unless the import allows the class. `import` brings every commit a git ref reaches that a store does not hold into it, parents first and many to a journal frame, and moves a target ref to the tip's changeset; run again, it takes only what is new (below, "Git import"). The export, from M8, writes a store's history behind a ref into a git branch through `GitSink` (`GixSink` on disk), and `ExportOid` names the commit each changeset exports to (below, "Git export"). From M13, the git remotes' library side (below, "Git remotes"): `Mirror`, the store's git mirror and its lock; `Transport`, whose one implementation `GitCli` runs the user's git against the mirror and classifies its failures; the sync engine (`sync`), which finds the unpublished changes, those the remote holds already, and lands the rest onto the remote's head; and GitHub's limits (`limits`). |
 | `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, `verify`, and the derivation engine, which derives values from the immutable objects when they are asked for and caches them in `meta/derived/` (`Repo::derived`), the eager ones also ahead of any reader as the journal grows (`Repo::derive_eager`, which `swarmops derive` runs). `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
-| `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. Beside them, `git import` and `git export`, client-side operations that no `StoreOps` has: they run `swarmops-git`'s import and export on a repository of the caller's host. |
+| `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. Beside them, `git import` and `git export`, client-side operations that no `StoreOps` has: they run `swarmops-git`'s import and export on a repository of the caller's host; and, from M13, the git remotes' client-side operations, `clone`, `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and the signing addresses of `authors.toml`. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
-| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, and builders of stores, repositories and runs of the binary. A dev-dependency of the store, the repository, the operations, the CLI and the git crate, and a dependency of the fuzz targets, which take it without its default features `cli`, `git` and `repo` (the runs of the binary, the git fixtures and the repository builders); no product build includes it. |
+| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, builders of stores, repositories and runs of the binary, and, from M13, git remotes without the network: git's own `http-backend` served on loopback and a stand-in for ssh. A dev-dependency of the store, the repository, the operations, the CLI and the git crate, and a dependency of the fuzz targets, which take it without its default features `cli`, `git` and `repo` (the runs of the binary, the git fixtures and the repository builders); no product build includes it. |
 
 Dependencies point one way, from the binary down to the codec, the test kit's dev edges aside:
 
@@ -81,7 +82,10 @@ Two rules shape the layers (umbrella §1, [CONTRIBUTING.md](../CONTRIBUTING.md#t
   `StoreOps` operation); `git import`'s source repository (`GitImportReq.git_path`), which the
   caller's process reads; and `git export`'s destination repository (`GitExportReq.git_path`),
   which the caller's process writes: neither `git import` nor `git export` is a `StoreOps`
-  operation or an MCP tool, and no server receives their requests (operations §0, §7). This is
+  operation or an MCP tool, and no server receives their requests (operations §0, §7). `clone`'s
+  directory (`CloneReq.path`) is a fifth, since `clone` includes `init`. A remote's URL is no path,
+  but it appears only in the requests that write `remotes.toml` (`CloneReq`, `RemoteAddReq`) and
+  in `RemoteInfo`; `fetch`, `push`, `sync` and `sync status` take a remote by its name. This is
   also why `swarmops-api` and `swarmops-repo` each have their own `ChangeOp`, `RepoInfo` and
   `VerifyReport`: the first are the wire format, the second the domain, and `swarmops-ops`
   converts between them.
@@ -145,6 +149,11 @@ A store is one directory (storage §2, §3):
   meta/derived/<name>/...    derived values, one file each: a cache beside the journal, never synced (M2)
   meta/derived/tmp/          where new derived values are staged
   meta/external_ids/         the external id index (M3): <system>/<2 hex>/<rest of the hex>, one 44-byte file per id
+  remotes.toml               the git remotes (M13): written whole, under git/lock, by remote add|remove and clone; no credential
+  authors.toml               optional (M13): an agent family's commit address and name; a person writes it
+  git/MIRROR                 "swarmops-git-mirror 1\n" (M13): the mirror's own layout version, apart from FORMAT
+  git/lock                   the mirror's lock (M13): one clone, remote add|remove, fetch, push or sync at a time
+  git/mirror.git/            the git mirror (M13): a bare git repository, a cache that SwarmOps alone writes
 ```
 
 Objects are compressed one at a time with zstd at level 3, with zstd's content checksum, when
@@ -502,6 +511,53 @@ protocol.
 It writes no journal frame: its store-side writes are derived values and external id entries, so
 it needs no identity.
 
+## Git remotes
+
+The git remotes (M13, umbrella §12 and §13, operations §6, storage §7) put a git mirror between a
+store and its remotes, and move packs with the user's own git:
+
+```text
+  the remote ◀──── git fetch / git push ────▶ git/mirror.git ◀── import, export (gix) ──▶ the store
+  (GitHub)        the user's git, spawned       refs/remotes/<remote>/*                   main
+                  with the user's credentials   refs/remote-tags/<remote>/*
+                                                refs/heads/push/<remote>/*
+```
+
+**The transport.** `GitCli` runs `git` (2.39 or later: `SWARMOPS_GIT`, else `PATH`) as a child
+process, without a shell, with its arguments after `--end-of-options` and its configuration in
+the environment (`GIT_CONFIG_COUNT`: `core.fsync=all`, an empty hooks directory, protocol version
+2), never in its arguments. The child's environment loses the variables that point git at another
+repository, git's tracing and the locale, and gains `GIT_DIR` (the mirror), `LC_ALL=C`,
+`GIT_TERMINAL_PROMPT=0` and `GIT_ALLOW_PROTOCOL` (the remote URL's scheme alone); credential
+helpers, `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND` and proxy variables pass through. A remote's
+`token_env` reaches git as an HTTP header scoped to the remote's URL, and is redacted, with its
+base64 form, from whatever git prints before it enters an error. A failure is classified by one
+table, from git's exit status, push's porcelain and git's messages under `LC_ALL=C`, into
+`E_REMOTE_UNREACHABLE` (retryable), `E_REMOTE_REJECTED` and `E_REMOTE_DIVERGED`; a failure the table
+does not know is `E_REMOTE_REJECTED` with the reason `unclassified`, never retried. SwarmOps has no
+network crate and writes no pack: gix stays on the disk side.
+
+**The mirror.** `git/mirror.git` is a cache that SwarmOps alone writes: fetched packs land in it,
+the import reads it (`GixSource`), and a push's export is written into it (`GixSink`). A remote's
+state is the mirror's `refs/remotes/<remote>/<branch>`, so the remotes need no new store ref and
+no new `FORMAT`. A mirror that is missing, has a marker this build does not know, or that gix
+cannot open is moved aside as `git/mirror.git.broken-<unix ms>` and made again; one held by a dead
+process's git lock files has those removed once they are older than ten minutes. `git/lock`
+serializes the commands that write the mirror; a held lock is `E_BUSY` at once. `meta/lock`, the
+store's writer lock, is never held across the network.
+
+**Fetch, push and sync.** `fetch` has git fetch every branch and tag into the mirror, then imports
+the followed branch's commits with no ref moved (`objects_only`). `push` exports a store ref onto
+a staging branch set to what the last fetch saw (`refs/heads/push/<remote>/<branch>`), so that the
+export only appends, and has git push it with `--force-with-lease` on that value: a compare-and-swap
+on the remote, never forced. `sync` fetches, finds `main`'s changes above the newest changeset the
+remote's head reaches, drops those the remote holds (a `SwarmOps-*` trailer line in a remote commit,
+or a merge onto the remote's head that changes nothing), lands the rest one by one onto the
+remote's head with `Repo::land_detached` (land's three-way merge, with no ref moved, the change's
+land key and squashed ids copied), moves `main` by compare-and-swap, then pushes. The import's
+and the export's contracts are unchanged: a commit fetched from git keeps its id through any
+number of round trips, and a changeset made in the store exports to the same commit every time.
+
 ## Durability
 
 Full fsync is the default and the only mode (umbrella §16, decision 5). An object is synced and
@@ -633,7 +689,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 {"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth, recovered}}
 ```
 
-A failure's `code` is one of 37 stable `E_*` codes, from one table that also fixes each code's
+A failure's `code` is one of 41 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
 found) and whether retrying can help. `hint` is often the next command to run.
 `swarmops schema` prints the JSON Schema of 152 types, and its snapshot test is where contract
@@ -664,7 +720,9 @@ and says when it cut the list.
 
 `swarmops mcp` (M1.5) serves the same operations to agents over the Model Context Protocol, on
 stdio: one tool per `StoreOps` operation but `derive`, maintenance that `swarmops derive` runs
-beside the store; a tool's input schema is the request type's JSON Schema, kept a plain object (a
+beside the store, and from M13 the five git remote operations that take a remote by its name
+(`remote_list`, `fetch`, `push`, `sync`, `sync_status`; `clone` and `remote add|remove` stay in
+the CLI); a tool's input schema is the request type's JSON Schema, kept a plain object (a
 rule across fields that the type's schema states with a top-level `oneOf` goes into the description
 and the server's own check) and with the `expected_old` of `ref_set` and `ref_delete` narrowed to a
 full changeset id, and its result is the envelope the CLI prints.
