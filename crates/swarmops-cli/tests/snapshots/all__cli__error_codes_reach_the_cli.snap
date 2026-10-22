@@ -488,7 +488,7 @@ expression: s.transcript()
     }
   },
   {
-    "args": "init /mnt/swarmops-cli-test/store",
+    "args": "init [unsupported_store]",
     "exit": 1,
     "stdout": {
       "ok": false,
@@ -496,16 +496,16 @@ expression: s.transcript()
       "api": 1,
       "error": {
         "code": "E_UNSUPPORTED_FS",
-        "message": "store path /mnt/swarmops-cli-test/store is not on a native Linux filesystem",
+        "message": "store path [unsupported_store] is not on a filesystem a store supports",
         "retryable": false,
         "exit": 1,
         "details": {
-          "path": "/mnt/swarmops-cli-test/store"
+          "path": "[unsupported_store]"
         },
-        "hint": "put the store on a native Linux filesystem, such as under ~/.local/state/swarmops/repos/; /mnt/* holds Windows drives under WSL"
+        "hint": "[unsupported_fs_hint]"
       },
       "meta": {
-        "repo": "/mnt/swarmops-cli-test/store",
+        "repo": "[unsupported_store]",
         "elapsed_ms": "[elapsed_ms]",
         "resolved": {},
         "auth": "trust"
