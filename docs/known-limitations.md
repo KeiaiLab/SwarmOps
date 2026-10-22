@@ -1,6 +1,6 @@
 # Known limitations
 
-What SwarmOps does not do yet, or does less well than it should, as of M13, and the milestone
+What SwarmOps does not do yet, or does less well than it should, as of M5, and the milestone
 meant to change it. The items come from the M1 and M1.5 reviews and the 2026-10-16 code review:
 the carry-overs their tasks handed to later milestones, the deferred minors that are still open,
 and the rulings of M1's final review, which left 14 questions to the maintainer (the table at the
@@ -14,8 +14,8 @@ Targets are milestones of the umbrella spec
 M4 merge and landing · M8 git export · M12 portability · M13 git remotes · M5 workspaces ·
 M6 verify, crash safety and fuzzing · M14 git clients against a store · M7 blame and review ·
 M9 simulation and a benchmark gate · M11 remote sync, offline-first.
-M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0. M1.5, the hardening
-milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
+M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0; M13 makes 0.2.0, and M5
+0.3.0. M1.5, the hardening milestone after M1, closed a few, and M1.6, the code-review follow-ups after it,
 closed more. "Deferred
 until after the pilot" marks a delivered milestone's task that waits until SwarmOps has been
 piloted on a real repository ([pilot.md](pilot.md)): the measurements that need a quiet host,
@@ -119,10 +119,6 @@ left).
   MCP server is one, a network server after v1 would be another) needs a way out. *Unscheduled
   (it was M10's; an RPC server is a follow-up after v1, umbrella spec §17). Found: M1 Task 7c;
   final review, question 10.*
-- **Concurrent `init` on one directory is unsupported.** The loser may overwrite the winner's
-  `REPO` file or fail; two concurrent creations of a metadata store on one root are unsupported
-  too. A no-clobber `REPO` link is the cheap hardening. *Target: M5 (with the workspace
-  registry). Found: M1 Task 2c; final review, question 1.*
 - **A read can give up under sustained commits.** A snapshot reads the refs and the frames again
   until they hold still, in at most 32 rounds; when a commit lands during every round, it fails
   with the retryable `E_BUSY` rather than wait. The bound does not make such a reader progress: each
@@ -630,6 +626,48 @@ left).
   adds git 2.39.5 and 2.56.0 once its host has curl's headers. macOS and Windows, and git for
   Windows' `http-backend`, are M12's. *Target: M12.*
 
+## Workspaces
+
+- **A power cut can leave a workspace's files torn.** Materialised files are not synced: the store
+  holds them durably, and `workspace.json`, the registry and the intent records are synced. After a
+  power cut a file written just before it can be torn; `ws status` shows it as an edit, and
+  `ws discard <path>` restores it from the head. *Documented (the M5 design's decision 4). Found:
+  M5 design.*
+- **A checked land takes two lock passes.** `ws land --check` commits the rebased changeset, runs
+  the check outside the lock, then publishes only if the target has not moved: on a busy target a
+  check of minutes may rebase and run again until `--max-attempts` (`E_CAS_RETRY_EXHAUSTED`,
+  retryable), and each lost race leaves one unlanded changeset in the journal. `--mode merge` with
+  `--check` lands onto a moved target, a weaker promise. Checked lands are not measured yet.
+  *Documented (the M5 design's decision 1). Found: M5 design, risk R1.*
+- **No virtual snapshot of uncommitted edits.** `ws:<name>` is the workspace's head: a store read
+  never sees edits that are not committed; `ws status` and `ws diff` show them. *Unscheduled.
+  Found: M5 design, decision 5.*
+- **Names that differ only in Unicode normalisation (NFC and NFD) are two paths.** The case check
+  of a case-insensitive volume folds ASCII only, and a volume that normalises names, such as
+  macOS's, can make two paths of the tree one file. *Target: M12. Found: M5 design.*
+- **On Windows, a timed-out check kills the check's process only.** On Unix the check runs in a
+  process group of its own and a timeout kills the group; Windows has no such group kill here, so
+  the check's children may outlive it. Windows is not built yet. *Target: M12. Found: M5 design,
+  risk R5.*
+- **Claude Code does not remove a subagent's workspace.** When a subagent or a workflow agent
+  finishes, Claude Code keeps its worktree and runs no `WorktreeRemove`, so the workspaces its hook
+  made stay until `so ws delete`; `so ws list --check` lists them. *Documented (Claude Code's hooks
+  reference, read 2026-10-22). Found: M5 Task W9.*
+- **A failed bootstrap is not run again.** When the repository's bootstrap command fails, the hook
+  fails and Claude Code may retry it: the retry finds the workspace (`created: false`) and returns
+  its path without running the bootstrap. *Documented. Found: M5 Task W9 review.*
+- **The registry is no gc root.** Workspaces' heads that have not landed are reachable from no ref;
+  whether gc keeps them is M6's decision, and until then `ws delete --rescue` prints the rescue
+  changeset's id. *Target: M6. Found: M5 design, risk R7.*
+- **Rough edges the reviews left.** A `ws land` cut while it publishes and run again can answer
+  `E_NOTHING_TO_LAND`, or `E_CAS_RETRY_EXHAUSTED` with a smaller `--max-attempts`, though the land
+  is durable and the workspace stands on it; a cut unchecked land run again with `--check` replays
+  the unchecked land; a `ws land -m` cut inside its own commit asks for `ws commit` first; the
+  `timeout_s` of `.swarmops/workspaces.json`'s `check` is not read (the request's, 900 s by
+  default, applies), and a `--check-timeout` too large for the clock aborts the command;
+  `blob get` takes `--max-bytes 0` as one blob, and caps neither the ids nor the bytes it holds.
+  *Unscheduled. Found: M5 Tasks W3, W7 and W10 reviews.*
+
 ## Platforms
 
 - **The filesystem check is by path name only.** A store under `/mnt/` is refused, but NFS, SMB and FUSE mounts, Docker Desktop's and virtiofs bind mounts among them, are neither
@@ -646,11 +684,10 @@ left).
 - **How a store path resolves.** A `..` after an existing file is taken lexically, and a
   dangling symlink is followed (both documented on the resolver). *Unscheduled. Found: M1
   Task 3.*
-- **A store is found by `--repo` or `SWARMOPS_REPO`, and nothing else.** There is no default
-  store location (`init` needs its directory; `~/.local/state/swarmops/repos/<name>/` is only the
-  convention the README follows) and no upward search for a `.swarmws` directory. *Target: M5
-  (the `.swarmws` search, with workspaces); a default location is unscheduled. Found: M1 Task 5;
-  umbrella spec §4; M1.5 final review.*
+- **No default store location.** A store is found by `--repo`, `SWARMOPS_REPO`, or, since M5, the
+  nearest `.swarmws/workspace.json` above the working directory; `init` needs its directory, and
+  `~/.local/state/swarmops/repos/<name>/` is only the convention the README follows.
+  *Unscheduled. Found: M1 Task 5; umbrella spec §4; M1.5 final review.*
 - **No migration between pre-release formats.** A store made before a format change may be
   refused afterwards and need creating again; it happened once during M1. *Documented (the
   versioning policy, before 1.0).*
@@ -715,10 +752,10 @@ These do not change what SwarmOps does, only how well the tests can see it.
   `journal.off` a writer cut is tested only at the journal's level. *Target: M6 (the metadata
   read paths through `FsOps`, umbrella spec §14). Found: M1.5 Task 3 review (M3); M1.5 final
   review (D5).*
-- **Golden envelopes cover 31 of the 41 error codes.** `error_codes_reach_the_cli` pins the
-  envelope of 27, and `remote_error_codes_golden` the four `E_REMOTE_*` codes over smart HTTP and
-  ssh (M13); the other ten are in the first test's `NOT_RAISED` list, each with why the test cannot
-  raise it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6, the six
+- **Golden envelopes cover 40 of the 50 error codes.** `error_codes_reach_the_cli` pins the
+  envelope of 36, the nine workspace codes (M5) among them, and `remote_error_codes_golden` the
+  four `E_REMOTE_*` codes over smart HTTP and ssh (M13); the other ten are in the first test's
+  `NOT_RAISED` list, each with why the test cannot raise it (the four codes above among them). *Unscheduled (`E_IO` joined in M1.6, the six
   `E_GIT_*` codes in M3). Found: the 2026-10-16 comparison.*
 - **The git remotes' reference pages have no recorded example.** The pages of `clone`,
   `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and of their five MCP tools,
@@ -759,7 +796,7 @@ each ruling is tracked above:
 
 | # | Question | Ruling | Entry |
 | --- | --- | --- | --- |
-| 1 | Concurrent `init` on one directory | unsupported, documented; revisit with workspaces | M5, "Concurrent `init`" |
+| 1 | Concurrent `init` on one directory | unsupported, documented; revisit with workspaces | closed in M5: `REPO` is linked no-clobber before `meta/`, under a lock held until `FORMAT`, so one `init` makes the store and the other fails with `E_EXISTS` |
 | 2 | Readers return state from frames not yet synced | allowed for local readers; committed snapshots for off-host readers (M8) | "Readers may return state" |
 | 3 | The lock's wait tail | `lock_timeout` stays 10 s; a FIFO hand-off later | M6, "bounded, not first-in, first-out" |
 | 4 | Commit latency against the spec's target | target restated without syncs; batching re-evaluated | M2 (its Task 4, after the pilot), "Full fsync is slow" |

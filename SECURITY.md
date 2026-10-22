@@ -91,8 +91,11 @@ filesystem permissions are the access boundary. Within that model, these are vul
   [GHSA-x862-c2wj-4mwr](https://github.com/GitoxideLabs/gitoxide/security/advisories/GHSA-x862-c2wj-4mwr),
   an allocation sized by a pack header's object count that aborts the process. An import that
   writes outside the store, follows a symlink out of a workspace, or exhausts memory on a
-  crafted repository is a vulnerability. Workspaces (M5), which write files to disk, are in
-  scope the same way.
+  crafted repository is a vulnerability.
+- **The workspaces (M5).** `swarmops ws` writes a changeset's files into a directory on the
+  caller's host, and the Claude Code hook runs the repository's bootstrap command there, as a build
+  would. A write outside the workspace's directory, a write through a symlink, or an update that
+  overwrites an edit the agent made is a vulnerability.
 - **The git export (M8).** `swarmops git export` writes git objects and one branch into a git
   repository at a path that the request names, on the caller's host, so the export is a trust
   boundary. A request that makes SwarmOps write outside that repository, move a branch other than

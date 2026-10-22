@@ -1,6 +1,6 @@
 # SwarmOps architecture
 
-An overview, in English, of how SwarmOps is built, as of M8. The design specs are the
+An overview, in English, of how SwarmOps is built, as of M5. The design specs are the
 authority. They are in Korean, and the maintainers keep them privately; this page is the
 public overview of:
 
@@ -28,13 +28,14 @@ program, no external database, no daemon.
 
 M0 (bootstrap), M1 (the single-agent core), M1.5 (hardening and opening), M1.6 (the
 code-review follow-ups), M2 (diff, history and the derived-data engine), M3 (git import), M4
-(merge and landing, and the operation log with undo), M8 (git export) and M13 (git remotes) are
-done, but for work of M1.6, M2, M3, M4 and M8 that waits until after the pilot. Since M1,
+(merge and landing, and the operation log with undo), M8 (git export), M13 (git remotes) and M5
+(workspaces) are done, but for work of M1.6, M2, M3, M4 and M8 that waits until after the pilot. Since M1,
 SwarmOps is usable by one agent: its store takes commits from many processes at once, safely.
 Since M4, `land` merges an agent's change three-way onto a ref and publishes it, not yet measured
 under a swarm's load. Since M13, a store clones, fetches, pushes and syncs a git remote such as
-GitHub itself. Workspaces (M5) and review (M7) come later, in the order of umbrella §13.
-[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2, M3, M4, M8 and M13
+GitHub itself. Since M5, an agent builds and tests its change in a workspace on disk and lands
+the tree it tested. Review (M7) comes later, in the order of umbrella §13.
+[known-limitations.md](known-limitations.md) lists what M1, M1.5, M1.6, M2, M3, M4, M8, M13 and M5
 leave open.
 
 ## Crates and layering
@@ -48,8 +49,9 @@ leave open.
 | `swarmops-repo` | The repository engine, the "server" of the design (storage §4): commits from change lists, reads at a revision without a checkout, revision resolution, first-parent history, ref moves by compare-and-swap, `verify`, and the derivation engine, which derives values from the immutable objects when they are asked for and caches them in `meta/derived/` (`Repo::derived`), the eager ones also ahead of any reader as the journal grows (`Repo::derive_eager`, which `swarmops derive` runs). `LocalRepo` is a `Repo` on the local filesystem. |
 | `swarmops-api` | The operation contract: serde and JSON Schema types for every request and response, `OpError` and its `ErrorCode` table, the `Envelope`, `Identity`, and the `StoreOps` trait. |
 | `swarmops-ops` | `LocalOps`, which implements `StoreOps` over a local store: it resolves revisions, identities and change-list contents, calls the repository, and maps every failure to an `E_*` code. Beside them, `git import` and `git export`, client-side operations that no `StoreOps` has: they run `swarmops-git`'s import and export on a repository of the caller's host; and, from M13, the git remotes' client-side operations, `clone`, `remote add|remove|list`, `fetch`, `push`, `sync` and `sync status`, and the signing addresses of `authors.toml`. |
+| `swarmops-ws` | The workspaces, from M5 (operations §2): a client-side engine over `dyn StoreOps` that writes a sparse copy of a changeset's tree into a directory (`HostFs`), finds edits by stat and an index (`index.bin`, a cache), commits them, rebases and lands them (`ws land --check` lands the tree its check ran on), and keeps its durable files (`workspace.json`, the intent records, the registry `<store>/workspaces/`) through the store's `FsOps`. It also holds the Claude Code hook adapter and the bootstrap. |
 | `swarmops-cli` | The `swarmops` binary and `so`, its short form (the same program): one subcommand per operation, exactly one envelope per run on stdout. |
-| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, builders of stores, repositories and runs of the binary, and, from M13, git remotes without the network: git's own `http-backend` served on loopback and a stand-in for ssh. A dev-dependency of the store, the repository, the operations, the CLI and the git crate, and a dependency of the fuzz targets, which take it without its default features `cli`, `git` and `repo` (the runs of the binary, the git fixtures and the repository builders); no product build includes it. |
+| `swarmops-testkit` | The support the tests share: `FsOps` doubles, power-loss images, the child-process runner with deadlines, builders of stores, repositories and runs of the binary, from M13, git remotes without the network: git's own `http-backend` served on loopback and a stand-in for ssh; and, from M5, a synthetic workspace tree and its edit driver. A dev-dependency of the store, the repository, the operations, the CLI, the git crate and the workspaces, and a dependency of the fuzz targets, which take it without its default features `cli`, `git` and `repo` (the runs of the binary, the git fixtures and the repository builders); no product build includes it. |
 
 Dependencies point one way, from the binary down to the codec, the test kit's dev edges aside:
 
@@ -61,9 +63,10 @@ swarmops-merge   core
 swarmops-repo    core, merge, store
 swarmops-git     core, repo, store
 swarmops-ops     api, core, git, repo, store
-swarmops-cli     api, ops            (its tests also use core, repo, store and testkit)
+swarmops-ws      api, core, merge, store (FsOps only)
+swarmops-cli     api, ops, ws        (its tests also use core, repo, store and testkit)
 swarmops-testkit core, store, repo   (repo behind its default feature `repo`; a dev-dependency
-                                      of store, repo, ops, cli and git, and fuzz/'s dependency)
+                                      of store, repo, ops, cli, git and ws, and fuzz/'s dependency)
 ```
 
 `fuzz/` is a cargo workspace of its own, with four cargo-fuzz targets over the codec and the
@@ -85,7 +88,10 @@ Two rules shape the layers (umbrella §1, [CONTRIBUTING.md](../CONTRIBUTING.md#t
   operation or an MCP tool, and no server receives their requests (operations §0, §7). `clone`'s
   directory (`CloneReq.path`) is a fifth, since `clone` includes `init`. A remote's URL is no path,
   but it appears only in the requests that write `remotes.toml` (`CloneReq`, `RemoteAddReq`) and
-  in `RemoteInfo`; `fetch`, `push`, `sync` and `sync status` take a remote by its name. This is
+  in `RemoteInfo`; `fetch`, `push`, `sync` and `sync status` take a remote by its name. The
+  workspace operations (M5) are client-side too, as `git import` is: their requests carry host
+  paths as strings (`WsCreateReq.path`, `.from`), and they reach the store only through
+  `StoreOps` (operations §0, §2). This is
   also why `swarmops-api` and `swarmops-repo` each have their own `ChangeOp`, `RepoInfo` and
   `VerifyReport`: the first are the wire format, the second the domain, and `swarmops-ops`
   converts between them.
@@ -169,7 +175,9 @@ journal but a cache beside it, with a header of their own (below). The external 
 storage §7) says which changeset an id of another system names, a git commit's oid say: an immutable
 file per id, written as an object is and only once the frame that records its changeset is durable.
 It is a cache outside the journal, not a projection of it, so it leaves `FORMAT 1` as it is. Later
-milestones add workspaces (M5) and reviews (M7) to `meta/`.
+milestones add reviews (M7) to `meta/`. The workspace registry (M5), `workspaces/<name>.json`,
+sits beside `meta/`: only the client-side workspace operations read and write it, no store
+operation does.
 
 How the files depend on one another:
 
@@ -689,7 +697,7 @@ plain text, and `mcp`, below, speaks MCP there instead):
 {"ok": …, "op": …, "api": 1, "result": … | "error": {code, message, retryable, exit, details, hint}, "meta": {repo, elapsed_ms, resolved, auth, recovered}}
 ```
 
-A failure's `code` is one of 41 stable `E_*` codes, from one table that also fixes each code's
+A failure's `code` is one of 50 stable `E_*` codes, from one table that also fixes each code's
 exit code (0 success, 1 error, 2 usage, 3 conflict, 4 retryable, 5 identity or policy, 6 not
 found) and whether retrying can help. `hint` is often the next command to run.
 `swarmops schema` prints the JSON Schema of 152 types, and its snapshot test is where contract

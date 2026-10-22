@@ -27,7 +27,9 @@ v0.1.0 (2026-10-20) read and wrote only this host's store and git repositories. 
 [CHANGELOG](../CHANGELOG.md)) serves topology 2: a store clones, fetches, pushes and syncs a git
 remote itself, through the user's own git, which carries everything that crosses hosts
 ([README](../README.md#swarmops-and-git), the "Offline, on one host" and "Sync between hosts"
-rows). Topologies 1 and 3 are not served yet.
+rows). Topologies 1 and 3 are not served yet. v0.3.0 (M5) adds workspaces: an agent builds and
+tests its change on disk and lands the tree it tested, through `so ws` or MCP, with Claude Code's
+worktree hooks ([Build and test a change](operate/build-and-test.md)).
 
 ### Topology 1 today: local git, remote SwarmOps
 
@@ -544,8 +546,8 @@ Several upstreams merging with each other, partial replicas and a caching tier.
 Milestone ids are never renumbered. Two are new: M13 (topology 2) and M14 (topology 1); M11
 (topology 3) takes `so clone`, `so remote` and `so sync`.
 
-**Settled:** M0 to M4 and M8 are delivered, in v0.1.0, and M13 in v0.2.0, ahead of M12, which is
-developed separately. **Provisional:** the order from M5 on is settled once the pilot has run
+**Settled:** M0 to M4 and M8 are delivered, in v0.1.0, M13 in v0.2.0 and M5 in v0.3.0, ahead of
+M12, which is developed separately. **Provisional:** the order from M6 on is settled once the pilot has run
 ([README](../README.md#roadmap)); until then the order below is the plan:
 
 ```text
@@ -560,7 +562,7 @@ needs   M13  ← M3, M4, M8                 packs, the mirror, the sync engine
 | ✅ M0–M4, M8 | all | The core, diff and history, git import, landing, git export; v0.1.0 | | Delivered ([CHANGELOG](../CHANGELOG.md)) |
 | 📋 M12 | all | macOS and Windows builds, tests and releases | | Each platform passes `just check` in CI and ships in a release |
 | ✅ M13 | 2 | The user's git as the transport; the store's git mirror; `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status`, their MCP tools; `authors.toml`; v0.2.0 | M3, M4, M8 | Topology 2's acceptance criteria 1 to 6 pass (delivered: [CHANGELOG](../CHANGELOG.md)) |
-| 📋 M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks | | As the README states it |
+| ✅ M5 | — | Workspaces, with an adapter for Claude Code's worktree hooks; `rebase`, `land --expect-target`, `blob get`; eleven MCP workspace tools; v0.3.0 | M4 | As the README states it (delivered: [CHANGELOG](../CHANGELOG.md)) |
 | 📋 M6 | 1, 3 | Verify, crash safety, fuzzing, gc, and FORMAT 2 with the ref names M11 and M14 need (remote-tracking refs, branches, tags); gc keeps what the mirror's refs reach | | As the README states it, plus a FORMAT 2 store holding a free-form branch and a tag |
 | 📋 M14 | 1 | `swarmops serve` over ssh and CGI; upload-pack and receive-pack; `refs/land/`; the access file | M13, M6 | Topology 1's acceptance criteria 1 to 5 pass |
 | 📋 M7 | — | Blame and review | M6's `FORMAT` (annotations) | As the README states it |
@@ -595,8 +597,11 @@ objects; an export leaves no reflog entry ([Git import and export](known-limitat
 [Git remotes](known-limitations.md#git-remotes)). M13 took the stale git lock files in its own
 mirror; the rest are open for M14 or later.
 
-**M5.** Concurrent `init` on one directory is unsupported; a store is found by `--repo` or
-`SWARMOPS_REPO` alone.
+**M5 (delivered).** Materialised files are not synced, so a power cut can leave them torn; a
+checked land takes two lock passes and may check again under a busy target; no virtual snapshot of
+uncommitted edits; Claude Code removes no subagent's workspace; the workspace latencies are not
+yet measured ([Workspaces](known-limitations.md#workspaces)). NFC and NFD names and the Windows
+check's kill wait for M12; whether gc keeps unlanded workspace heads is M6's.
 
 **M6.** A literal `SIGKILL` on a real device; the double and triple faults left in the journal's
 failure policy; a failed directory fsync retried, not taken back; a lock that is bounded, not

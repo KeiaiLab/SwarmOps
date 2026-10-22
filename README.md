@@ -32,10 +32,11 @@ processes on one host commit into one embedded store at once, and every command 
 JSON envelope. It is one Rust program, with no external database and no daemon, and it moves the
 work to and from git, so that CI and deployments keep running.
 
-It is pre-release, at milestone M13 (v0.2.0): usable by one agent, with a store that already takes
+It is pre-release, at milestone M5 (v0.3.0): usable by one agent, with a store that already takes
 commits from many processes at once; merging and landing, which a swarm needs, are built, but
-landing is not yet measured under a swarm's load; and a store clones, fetches, pushes and syncs
-with GitHub itself ([roadmap](#roadmap)).
+landing is not yet measured under a swarm's load; a store clones, fetches, pushes and syncs with
+GitHub itself; and an agent builds and tests its change in a workspace on disk, then lands the
+tree it tested ([roadmap](#roadmap)).
 
 ## Core features
 
@@ -133,6 +134,46 @@ landed e1b27d16… on main (onto 31528945…, attempt 1)
 
 [Commit and land](docs/guides/commit-and-land.md) is the guide.
 
+### Workspaces: build and test on disk, land the tested tree
+
+`so ws create` writes a changeset's tree, or the paths under `--prefix`, into a directory of its
+own; the agent edits, builds and tests there. `ws land --check` commits the edits, rebases them
+onto the target's head, runs the check in the workspace and publishes only if the target has not
+moved since, so the landed tree is the one the check ran on; a moved target means rebase and
+check again. A command run inside a workspace finds its store. In a store of its own:
+
+```sh
+so --as agent/worker-1 --human ws create worker-1 --all
+cd worker-1 && printf 'pub fn f() -> u32 {\n    4\n}\n' > src/lib.rs
+so --human ws status
+so --human ws land -m "f returns 4" --check -- ./check.sh
+```
+
+```text
+name: worker-1
+path: …/worker-1
+base: df17fa1a…
+head: df17fa1a…
+all: true
+created: true
+…
+changes[0].path: src/lib.rs
+changes[0].kind: modified
+changes[0].size: 28
+truncated: false
+land.status: landed
+land.landed: 0bb07898…
+land.rebased_onto: df17fa1a…
+…
+attempts: 1
+…
+```
+
+Claude Code's `WorktreeCreate` and `WorktreeRemove` hooks (`so ws hook config` prints the
+settings) give `claude --worktree` sessions and `isolation: worktree` subagents a workspace
+instead of a git worktree, and MCP has eleven workspace tools.
+[Build and test a change](docs/operate/build-and-test.md) is the guide.
+
 ### One JSON envelope per command
 
 Every command prints one JSON envelope on stdout (the few exceptions are under
@@ -157,8 +198,9 @@ exit 5
 
 ### An MCP server for agents
 
-`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 23 tools, one
-per operation, each taking the operation's request and returning the envelope the CLI prints.
+`swarmops mcp` serves the store to an agent as an MCP server on stdin and stdout: 35 tools, one
+per operation (24 store operations and 11 workspace operations), each taking the operation's
+request and returning the envelope the CLI prints.
 Register it with Claude Code, one identity per agent process:
 
 ```sh
@@ -472,13 +514,13 @@ planned, each with its milestone.
 | Offline, on one host | ✅ M1: every operation runs against the host's own store. ✅ M13: only `clone`, `fetch`, `push` and `sync` reach a remote, through the user's git; every other command works without a network. | **Parity.** |
 | Throughput of many writers | ✅ M1: writers take turns, each commit holding one store-wide lock across two journal `fdatasync`s, and two `fsync`s more when it moves a ref (`--advance`). | **Behind by design.** Agents in git worktrees serialize nothing, and git's defaults sync none of a commit's files. |
 | Refs beyond one compare-and-swap | ✅ M1: refs are `main` and `release/<name>` only, moved one per call. | **Behind**: no multi-ref transactions, tags, free-form branch names or symbolic refs. |
-| Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. 📋 M5: sparse workspaces. | **Behind**: git has batch reads, `git grep <tree>` and sparse checkouts. |
+| Breadth of reads | Today one file or one directory per call. ✅ M2: a file from a byte offset or by a range of lines, and a directory with the directories below it to a depth, each file with its size. ✅ M5: `blob get` reads blobs by id in batches, and sparse workspaces write a changeset's tree, or the paths under chosen prefixes, to disk. | **Behind**: git has `git grep <tree>`; **parity** with sparse checkouts for building and testing on disk. |
 | Storage on disk | ✅ M1: one file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. 📋 M6: gc, which removes leftovers but packs nothing. | **Behind by design**, in bytes and in files, against git's packs. |
 | Conflicts | Since M3, `E_GIT_IMPORT_DIVERGED` signals a conflict when a git import's target and the git history have diverged. ✅ M4: `land` merges three-way without a checkout and reports a conflict as `E_CONFLICT` with a JSON report: each conflicting file's kind, its hunks (each side's lines, numbered as `cat --lines` takes them, and their text) and the target's changeset and agent that last changed it. ✅ M4: `land --resolve` resolves them without a checkout, path by path (take a side, new content, or delete), against the report's `theirs`; a path the target changed since comes back stale. | **Parity** with `git merge-tree --write-tree`, which merges without a checkout and reports typed conflicts. Resolving without a checkout is one request here, where git takes plumbing (`git hash-object`, a temporary index, `git commit-tree`). |
 | Review | Nothing today. 📋 M7: change requests, their classification, approvals and a landing gate. | **Behind** today: git ships patch-review tools, and Gerrit and GitHub add review on top. M7 is **not yet comparable**. |
 | Sync between hosts | ✅ M8: through a git remote, one writing host at a time, with `git import` and `git export`. ✅ M13: a store clones, fetches and pushes a git remote over HTTPS or ssh, by running the user's git; a push is a compare-and-swap, never forced, and `sync` lands the store's unpublished changes onto the remote's head, so several stores can write to one remote. 📋 M11: offline-first sync between stores, `so://`. | **Parity** with git's clone, fetch and push to a git remote over HTTPS and ssh, which SwarmOps runs; **behind** on transports, shallow and partial clones, and bundles. |
 | Ecosystem | ✅ M1: the CLI and `swarmops schema`. ✅ M1.5: an MCP server. ✅ M3: git import. ✅ M8: git export. ✅ M13: git remotes, and GitHub's pull requests merged by any method. No user hooks, signing, submodules or LFS, and no GitHub API calls. | **Behind**, after v1 too: git parity is not a v1 goal, and git has MCP servers as well. |
-| Maturity | Pre-release: v0.1.0 is the first tag, v0.2.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
+| Maturity | Pre-release: v0.1.0 is the first tag, v0.3.0 the latest, and the first spec dates from 2026-10-15. | **Behind**: git has hosted itself since 2005. |
 | Landing | ✅ M4: `land` merges an agent's change onto `main` and publishes it as one changeset in one transaction, merging again and retrying by itself when `main` moves, and a retry with the same key replays it. 📋 M4, after the pilot: the landing model chosen by measurement. | **Ahead by design** of git alone, whose push refuses a moved branch and leaves the fetch, the merge and the retry to the pusher; not yet measured under a swarm's load. |
 
 No git baseline has been measured: these verdicts come from the design, the code, and git's own
@@ -519,7 +561,7 @@ The milestones of the umbrella spec (§13), in the order they are built. ✅ del
 | ✅ | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |
 | 📋 | M12 | Portability: macOS and Windows builds, tests and releases. |
 | ✅ | M13 | Git remotes from a store (topology 2): the store's git mirror, the user's git run as the transport, `so clone`, `so remote`, `so fetch`, `so push`, `so sync`, `so sync status` and their MCP tools, commit addresses per agent family (`authors.toml`). |
-| 📋 | M5 | Workspaces, with an adapter for Claude Code's worktree hooks, so that an agent builds and tests a change on disk before it lands it. |
+| ✅ | M5 | Workspaces, with an adapter for Claude Code's worktree hooks, so that an agent builds and tests a change on disk before it lands it: `so ws`, `rebase`, `land --expect-target`, `blob get` and eleven MCP workspace tools. |
 | 📋 | M6 | Verify, crash safety and fuzzing: fsck and repair, gc, detection of unsupported filesystems, bounded reads of store files, a capped `verify` report, and the next store `FORMAT`, with branch names, tags and remote-tracking refs. |
 | 📋 | M14 | Git clients against a store (topology 1): `swarmops serve` over ssh and HTTP, run per connection; pushes by compare-and-swap or that land; access control. |
 | 📋 | M7 | Blame and review. |
@@ -534,9 +576,9 @@ and the result exported back to git for its CI to run. Next come the measurement
 quiet host: landing by 32 and 50 processes through the binary against umbrella §15's targets,
 and the landing model those numbers choose; whether a transaction can sync the journal once
 instead of twice; the import's and the export's timings on larger repositories. The order of
-the milestones from M5 on is settled once the pilot has run; until then the table is the plan.
-M13 and M14 are new, and where they go is part of that plan. M13 came first, in 0.2.0, ahead of
-M12, which is developed separately.
+the milestones from M6 on is settled once the pilot has run; until then the table is the plan.
+M13 and M14 are new, and where they go is part of that plan. M13 came first, in 0.2.0, then M5,
+in 0.3.0, both ahead of M12, which is developed separately.
 
 When it is usable (umbrella spec §1): by one agent from M1; by a swarm, landing through MCP,
 from M4; on an existing git repository, its history imported and its landed work exported back
@@ -550,8 +592,8 @@ milestone takes each item.
 ## MCP
 
 `swarmops mcp` serves the store's operations to an agent as an MCP server on stdin and stdout:
-23 tools, one per operation, each taking the operation's request and returning the envelope the
-CLI prints. [MCP integration](docs/develop/mcp.md) is the reference,
+35 tools, one per operation (24 store operations and 11 workspace operations), each taking the
+operation's request and returning the envelope the CLI prints. [MCP integration](docs/develop/mcp.md) is the reference,
 [MCP tools](docs/reference/mcp-tools/README.md) has a page per tool, and
 [Claude Code](docs/guides/claude-code.md) is the guide.
 
@@ -576,13 +618,14 @@ for each: its syntax, its arguments, an example, what it returns and the errors 
 | Task | Commands |
 | --- | --- |
 | Make and describe a store | [`init`](docs/reference/commands/init.md) · [`info`](docs/reference/commands/info.md) · [`whoami`](docs/reference/commands/whoami.md) |
-| Publish a change | [`commit`](docs/reference/commands/commit.md) · [`land`](docs/reference/commands/land.md) · [`blob put`](docs/reference/commands/blob-put.md) · [`blob has`](docs/reference/commands/blob-has.md) |
+| Publish a change | [`commit`](docs/reference/commands/commit.md) · [`land`](docs/reference/commands/land.md) · [`rebase`](docs/reference/commands/rebase.md) · [`blob put`](docs/reference/commands/blob-put.md) · [`blob has`](docs/reference/commands/blob-has.md) · [`blob get`](docs/reference/commands/blob-get.md) |
 | Read | [`resolve`](docs/reference/commands/resolve.md) · [`cat`](docs/reference/commands/cat.md) · [`ls`](docs/reference/commands/ls.md) · [`show`](docs/reference/commands/show.md) · [`log`](docs/reference/commands/log.md) · [`history`](docs/reference/commands/history.md) · [`diff`](docs/reference/commands/diff.md) |
 | Move refs | [`ref list`](docs/reference/commands/ref-list.md) · [`ref set`](docs/reference/commands/ref-set.md) · [`ref delete`](docs/reference/commands/ref-delete.md) |
 | Take an operation back | [`op log`](docs/reference/commands/op-log.md) · [`op undo`](docs/reference/commands/op-undo.md) |
 | Check and derive | [`verify`](docs/reference/commands/verify.md) · [`derive`](docs/reference/commands/derive.md) · [`schema`](docs/reference/commands/schema.md) |
 | Move work to and from git | [`git import`](docs/reference/commands/git-import.md) · [`git export`](docs/reference/commands/git-export.md) |
 | Work with a git remote | [`clone`](docs/reference/commands/clone.md) · [`remote add`](docs/reference/commands/remote-add.md) · [`remote remove`](docs/reference/commands/remote-remove.md) · [`remote list`](docs/reference/commands/remote-list.md) · [`fetch`](docs/reference/commands/fetch.md) · [`push`](docs/reference/commands/push.md) · [`sync`](docs/reference/commands/sync.md) · [`sync status`](docs/reference/commands/sync-status.md) |
+| Build and test in a workspace | [`ws create`](docs/reference/commands/ws-create.md) · [`ws status`](docs/reference/commands/ws-status.md) · [`ws diff`](docs/reference/commands/ws-diff.md) · [`ws commit`](docs/reference/commands/ws-commit.md) · [`ws rebase`](docs/reference/commands/ws-rebase.md) · [`ws resolve`](docs/reference/commands/ws-resolve.md) · [`ws land`](docs/reference/commands/ws-land.md) · [`ws materialize`](docs/reference/commands/ws-materialize.md) · [`ws discard`](docs/reference/commands/ws-discard.md) · [`ws list`](docs/reference/commands/ws-list.md) · [`ws info`](docs/reference/commands/ws-info.md) · [`ws delete`](docs/reference/commands/ws-delete.md) · [`ws hook`](docs/reference/commands/ws-hook.md) |
 | Serve agents | [`mcp`](docs/reference/commands/mcp.md) |
 
 - <a id="publishing-a-change"></a>**Publishing a change**: commit on the head you read, then

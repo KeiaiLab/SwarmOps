@@ -13,6 +13,56 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+### Added
+
+#### M5: workspaces (2026-10-22)
+
+- `so ws` commands (`create`, `status`, `diff`, `commit`, `rebase`, `resolve`, `land`,
+  `materialize`, `discard`, `list`, `info`, `delete`, `hook`) and eleven MCP workspace tools; a
+  command run inside a workspace finds its store. With `rebase`, twelve new MCP tools: 35 in all.
+- Workspaces materialise a sparse tree on disk, write only what changed on update, never overwrite
+  an edit or write through a symlink, and refuse trees the volume cannot hold (paths that differ
+  only in case on a case-insensitive volume, names Windows refuses), naming the paths.
+- `so ws status`, `ws diff` and `ws commit`: changes found by stat and an index, hashed only when
+  needed; commits upload only the blobs the store lacks and replay after a crash.
+- `so ws land --check <command>` rebases the workspace onto the target, runs the command there,
+  and lands only if the target has not moved since, so the landed tree is the tree the command
+  checked; a moved target makes it rebase and check again, up to `--max-attempts`.
+- `rebase` merges a change onto a ref's head and records the result as one changeset there,
+  moving no ref (`so rebase`, MCP `rebase`).
+- `land --expect-target <id>` publishes only while the target names that changeset, in one
+  attempt; otherwise `E_CAS_MISMATCH`, nothing written. With a rebased head, the landed tree is
+  the tested tree.
+- `so blob get` reads blobs by id, in batches up to a byte budget; it is no MCP tool.
+- Claude Code: `so ws hook worktree-create` and `worktree-remove`, registered as the
+  `WorktreeCreate` and `WorktreeRemove` hooks, give `--worktree` sessions and `isolation: worktree`
+  subagents a SwarmOps workspace; uncommitted edits are kept as a rescue changeset when the
+  worktree is removed. `.worktreeinclude` files are copied, and the repository's bootstrap command
+  (`.swarmops/workspaces.json`) runs.
+- `SWARMOPS_WS_ROOT` places the workspaces the Claude Code hooks make; `SWARMOPS_WS_BOOTSTRAP=skip`
+  skips the copy of `.worktreeinclude` files and the repository's bootstrap command.
+- Nine error codes: `E_WS_EXISTS`, `E_WS_NOT_FOUND`, `E_WS_LOCKED` (exit 4, retryable),
+  `E_WS_DIRTY`, `E_PATH_NOT_EMPTY`, `E_UNRESOLVED_CONFLICTS`, `E_MARKERS_PRESENT`,
+  `E_WS_UNPORTABLE` and `E_CHECK_FAILED`, each pinned by a golden envelope: 50 codes in all.
+- Crash sweeps of a workspace's update, commit, rebase, land and checked land, and an
+  eight-process checked-land test in which one lander is killed and run again: every checked land
+  is on `main` once, with the tree its check recorded. The pilot's workspace step is a test of the
+  binary: a hook-made workspace in a directory that is no git repository lands through MCP.
+- `docs/goals.md`, G9: the workspace latency targets, none measured yet: `ws status` of 50,000
+  files under 100 ms warm (umbrella spec §15) and, proposed with M5, under 150 ms after 100 edits;
+  `ws create` of 10,000 files under 3 s; an update after a 10-file land under 100 ms; `ws commit`
+  at G2's target plus hashing; `ws land --check` under 1 s on 12,000 changesets without the check.
+- Docs: [Build and test a change](docs/operate/build-and-test.md) leads with workspaces and keeps
+  the git-worktree recipe, now landing the tested tree with `rebase` and `land --expect-target`;
+  the Claude Code guide's hooks section; the workspace codes in the troubleshooting page; a
+  "Workspaces" section in the known limitations.
+
+### Fixed
+
+- Two `init`s on one directory at once: one creates the store, the other fails with `E_EXISTS`.
+- A workspace update killed after it wrote an executable file and before it set the file's mode is
+  finished by the next open; it was refused as an edit of that file.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added
