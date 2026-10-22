@@ -49,6 +49,11 @@
 //!    else is [`ImportError::CasMismatch`]. A move is then flushed too, so that its frame does
 //!    not stay past the checkpoint either; that flush failing is a warning.
 //!
+//! An objects-only import ([`ImportRequest::objects_only`], a fetch's) has no target: step 1
+//! reads no ref, so the walk knows a commit by its external id alone, step 3 is skipped and so is
+//! step 4's seed, and step 6 flushes the metadata but moves no ref. Its report's `ref_moved` is
+//! false, its `old_head` `None`.
+//!
 //! A store failure stops the import (M3 plan decision 6): [`StoreError::Busy`] is retried three
 //! times, and any other failure, or a frame whose commit reports a failure after its commit
 //! point, ends it after the last frame that committed ([`ImportError::Store`],
@@ -124,6 +129,17 @@ pub struct ImportRequest {
     pub frame_changesets: usize,
     /// How many bytes of new trees and blobs the import gathers before it stores them.
     pub object_batch_bytes: usize,
+    /// Whether a target ref is read and moved: set by the constructor alone.
+    mode: Mode,
+}
+
+/// What an import does with refs ([`ImportRequest::new`], [`ImportRequest::objects_only`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    /// The target ref is read for divergence and moved to the tip's changeset.
+    IntoRef,
+    /// No ref is read or moved: the commits become changesets with their external ids only.
+    ObjectsOnly,
 }
 
 impl ImportRequest {
@@ -142,7 +158,24 @@ impl ImportRequest {
             actor: actor.into(),
             frame_changesets: DEFAULT_FRAME_CHANGESETS,
             object_batch_bytes: DEFAULT_OBJECT_BATCH_BYTES,
+            mode: Mode::IntoRef,
         }
+    }
+
+    /// A request to import what `git_ref` reaches without reading or moving any ref: no target,
+    /// no agent (`target_ref` and `actor` empty, and unused), no lossy class allowed, the frames
+    /// and batches of [`ImportRequest::new`]. A fetch imports a remote branch so: the remote's
+    /// state is the mirror's ref, and the store needs none.
+    pub fn objects_only(git_ref: impl Into<String>) -> ImportRequest {
+        ImportRequest {
+            mode: Mode::ObjectsOnly,
+            ..ImportRequest::new(git_ref, "", "")
+        }
+    }
+
+    /// Whether a target ref is read and moved.
+    fn moves_ref(&self) -> bool {
+        self.mode == Mode::IntoRef
     }
 }
 
@@ -162,10 +195,10 @@ pub struct ImportReport {
     pub git_head: GitOid,
     /// The target ref.
     pub target_ref: String,
-    /// What the target named before; `None` if it did not exist.
+    /// What the target named before; `None` if it did not exist, or for an objects-only import.
     pub old_head: Option<ChangesetId>,
     /// Whether this import moved the target (or created it); `false` when it named the tip's
-    /// changeset already.
+    /// changeset already, and for an objects-only import, which moves no ref.
     pub ref_moved: bool,
     /// The first [`MAX_LOSSY_LISTED`] commits recorded with a loss, in the order recorded.
     pub lossy: Vec<LossyCommit>,
@@ -321,8 +354,8 @@ const BUSY_RETRIES: usize = 3;
 const DIR_MODE: &[u8] = b"40000";
 
 /// Imports into `repo` every commit `source`'s `req.git_ref` reaches that `repo` does not hold,
-/// and moves `req.target_ref` to the tip's changeset: see [the module documentation](self) for
-/// the steps and their errors.
+/// and moves `req.target_ref` to the tip's changeset, unless the request is objects-only: see
+/// [the module documentation](self) for the steps and their errors.
 ///
 /// Where the target's head is native, or holds a git commit the tip does not lead from, the
 /// import derives the commit the head exports to from the store's objects itself, whether or not
@@ -334,7 +367,7 @@ pub fn import(
     source: &dyn GitSource,
     req: &ImportRequest,
 ) -> Result<ImportReport, ImportError> {
-    if check_ref_name(&req.target_ref).is_err() {
+    if req.moves_ref() && check_ref_name(&req.target_ref).is_err() {
         return Err(ImportError::RefName(req.target_ref.clone()));
     }
     let format = source.object_format();
@@ -454,6 +487,11 @@ impl Base {
     /// exist. For a native head, the commit it exports to, derived from the store's objects
     /// ([`Oids::export_of`]).
     fn of(oids: &mut Oids<'_>, req: &ImportRequest) -> Result<Option<Base>, ImportError> {
+        // An objects-only import reads no ref: it has no base.
+        if !req.moves_ref() {
+            return Ok(None);
+        }
+
         let at_start = |source| stopped(source, 0, None);
         let Some(state) = oids.read.get_ref(&req.target_ref).map_err(at_start)? else {
             return Ok(None);
@@ -1058,6 +1096,12 @@ impl<'a, 's> Run<'a, 's> {
         // The tip is known, or recorded by a frame: every commit the walk did not know is.
         let head = self.changesets(tip, &[tip])?[0];
         retry_busy(|| repo.flush_metadata()).map_err(|source| self.stopped(source))?;
+
+        // An objects-only import moves no ref.
+        if !req.moves_ref() {
+            return Ok(self.report(tip, head, None, false));
+        }
+
         let moved = retry_busy(|| repo.cas_ref(&req.target_ref, old_head, Some(head), &req.actor));
         let moved = moved.map_err(|source| self.stopped(source))?;
         absorb(&mut self.recovered, moved.recovered);
@@ -1079,19 +1123,31 @@ impl<'a, 's> Run<'a, 's> {
                  past the checkpoint until a later one"
             ));
         }
-        Ok(ImportReport {
+        Ok(self.report(tip, head, old_head, ref_moved))
+    }
+
+    /// The report of the import that recorded `head` for `tip`, the target moved from `old_head`
+    /// if `ref_moved`.
+    fn report(
+        self,
+        tip: GitOid,
+        head: ChangesetId,
+        old_head: Option<ChangesetId>,
+        ref_moved: bool,
+    ) -> ImportReport {
+        ImportReport {
             imported: self.imported,
             skipped: self.skipped,
             head,
             git_head: tip,
-            target_ref: req.target_ref.clone(),
+            target_ref: self.req.target_ref.clone(),
             old_head,
             ref_moved,
             lossy: self.lossy,
             lossy_total: self.lossy_total,
             warnings: self.warnings,
             recovered: self.recovered,
-        })
+        }
     }
 }
 
