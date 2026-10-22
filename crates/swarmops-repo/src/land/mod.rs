@@ -56,7 +56,12 @@
 //!
 //! When the last attempt lost its race, the land fails with [`RepoError::RetryExhausted`]. A lost
 //! attempt leaves nothing in the journal: the objects it flushed stay, unreferenced, for GC.
+//!
+//! The detached land ([`Repo::land_detached`], operations spec §3, the detached form) is the
+//! first attempt without the key walk and the publication: the same chain walk (step 2), merge
+//! (step 4), conflict report and writer of `L` (step 5), then `L`'s insert alone, moving no ref.
 
+mod detached;
 mod key;
 mod publish;
 mod resolve;
@@ -80,6 +85,7 @@ use crate::merge::MergeOutcome;
 use crate::read::{RepoRead, StoredChangeset};
 use crate::repo::{Repo, ref_error};
 
+pub use detached::{DetachedLand, DetachedOutcome};
 use key::{KeyFound, TargetWalk};
 pub use publish::{Publication, Published};
 use resolve::Resolving;
@@ -629,7 +635,8 @@ fn metadata(head: &Changeset, recorded: Recorded<'_>) -> Vec<(String, Vec<u8>)> 
 /// The chain a land squashes, from `base` (exclusive) to `head`, oldest first, walked by the
 /// changesets' objects, which name their parents by their hashes (an index record's parents are
 /// what a damaged index says: a first-parent walk never takes them, [`RepoRead::walk_step`]):
-/// [`RepoError::MergeChangeset`] for a changeset of it with two parents or more.
+/// [`RepoError::MergeChangeset`] for a changeset of it with two parents or more. The land's step
+/// 2 and the detached land's.
 fn chain<O: ObjectStore>(
     repo: &Repo<O>,
     base: ChangesetId,
@@ -652,7 +659,8 @@ fn chain<O: ObjectStore>(
     Ok(chain)
 }
 
-/// The whole merge of a change, `base` to `head`, onto `theirs` (step 4's first attempt).
+/// The whole merge of a change, `base` to `head`, onto `theirs` (step 4's first attempt): the
+/// one merge the land and the detached land make.
 fn merge_chain<O: ObjectStore>(
     repo: &Repo<O>,
     base: &StoredChangeset,
@@ -723,6 +731,7 @@ struct Squash<'a> {
 
 /// Writes `L` and flushes it (step 5): its blobs, trees and object are durable on return, before
 /// anything names them (I1). A delta that changes nothing is [`NothingToLandReason::NoChanges`].
+/// The one writer of `L`, the land's and the detached land's.
 fn write_squash<O: ObjectStore>(
     repo: &Repo<O>,
     squash: Squash<'_>,
