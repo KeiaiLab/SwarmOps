@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "build": "next build",
-    "postbuild": "node scripts/postbuild.mjs",
+    "postbuild": "node scripts/postbuild.mjs && node scripts/markdown-twins.mjs",
     "check": "node scripts/check-site.mjs",
     "dev": "next dev",
     "typecheck": "fumadocs-mdx && next typegen && tsc --noEmit",

@@ -6,6 +6,7 @@ import { DocsBody, DocsPage, EditOnGitHub } from 'fumadocs-ui/layouts/docs/page'
 import { getMDXComponents } from '@/components/mdx';
 import { DocsLanding } from '@/components/docs-landing';
 import { ReferenceBody } from '@/components/reference/reference-body';
+import { ViewMarkdown } from '@/components/view-markdown';
 import { githubUrl } from '@/lib/docs-paths';
 import { nodeText } from '@/lib/node-text';
 import { pageKind } from '@/lib/reference/pages';
@@ -38,6 +39,7 @@ export default async function Page({ params }: Props) {
 
   return (
     <DocsPage toc={toc} breadcrumb={{ includeRoot: true, includePage: true }}>
+      <ViewMarkdown url={page.url} source={repoPath(page.data)} />
       <DocsBody>
         {kind ? <ReferenceBody page={page} kind={kind} /> : <MDX components={getMDXComponents()} />}
       </DocsBody>
