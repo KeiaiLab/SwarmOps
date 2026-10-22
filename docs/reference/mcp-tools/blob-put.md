@@ -144,7 +144,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"blob_put\",\"api\":1,\"result\":{\"blob\":\"[blob]\",\"size\":7,\"written\":true},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"blob_put\",\"result\":{\"blob\":\"[blob]\",\"size\":7,\"written\":true}}",
         "type": "text"
       }
     ],

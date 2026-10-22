@@ -76,7 +76,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"repo_info\",\"api\":1,\"result\":{\"repo_id\":\"[repo_id]\",\"name\":\"store\",\"store_version\":1,\"changesets\":0,\"refs\":0},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"repo_info\",\"result\":{\"changesets\":0,\"name\":\"store\",\"refs\":0,\"repo_id\":\"[repo_id]\",\"store_version\":1}}",
         "type": "text"
       }
     ],

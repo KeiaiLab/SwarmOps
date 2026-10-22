@@ -53,6 +53,12 @@ Store content as a blob for a commit to name by its id, or ask which blobs the s
 - [`swarmops history`](commands/history.md): List the changesets that changed a path, newest first, along first parents.
 - [`swarmops diff`](commands/diff.md): List the files that differ between two revisions, a page at a time.
 
+### swarmops blob
+
+Store content as a blob for a commit to name by its id, or ask which blobs the store holds.
+
+- [`swarmops blob get`](commands/blob-get.md): Print the blobs the IDs name, each with its size and content as cat gives a file's.
+
 ## Refs
 
 ### swarmops ref
@@ -106,6 +112,26 @@ Land main's unpublished changes onto a git remote's head, and push them.
 
 - [`swarmops sync`](commands/sync.md): Land main's unpublished changes onto a git remote's head, and push them.
 - [`swarmops sync status`](commands/sync-status.md): Show how main and a git remote's followed branch stand, as the last fetch saw it.
+
+## Workspaces
+
+### swarmops ws
+
+Work in a directory of your own: a workspace holds a sparse copy of a changeset's tree.
+
+- [`swarmops ws create`](commands/ws-create.md): Make a workspace NAME in a directory of its own, and bootstrap it.
+- [`swarmops ws status`](commands/ws-status.md): What changed in a workspace against its head, and how far its target has moved.
+- [`swarmops ws diff`](commands/ws-diff.md): A workspace's edits against its head, as diff gives a diff.
+- [`swarmops ws commit`](commands/ws-commit.md): Record a workspace's edits as one changeset on its head.
+- [`swarmops ws rebase`](commands/ws-rebase.md): Move a workspace's chain onto its target's head, and its files with it.
+- [`swarmops ws resolve`](commands/ws-resolve.md): Mark conflicting paths of a rebase resolved.
+- [`swarmops ws land`](commands/ws-land.md): Land a workspace's chain on its target; with --check, rebase, check and land the checked tree.
+- [`swarmops ws materialize`](commands/ws-materialize.md): Write out more of a workspace's tree: the paths join its prefixes.
+- [`swarmops ws discard`](commands/ws-discard.md): Restore paths of a workspace from its head, every changed one without a PATH: the edits are lost.
+- [`swarmops ws list`](commands/ws-list.md): List the store's workspaces.
+- [`swarmops ws info`](commands/ws-info.md): Describe one workspace: its directory, base, head and prefixes.
+- [`swarmops ws delete`](commands/ws-delete.md): Remove a workspace's directory, then its entry.
+- [`swarmops ws hook`](commands/ws-hook.md): The Claude Code hooks: read the hook's JSON on stdin, print what the hook expects.
 
 ## Server
 

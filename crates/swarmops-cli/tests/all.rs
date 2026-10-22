@@ -19,6 +19,7 @@ mod git;
 mod github_live;
 mod landing;
 mod mcp;
+mod mcp_ws;
 mod multiprocess;
 mod power_loss;
 mod remote_acceptance;
@@ -27,6 +28,7 @@ mod remote_perf;
 mod remote_push;
 mod remote_sync;
 mod so;
+mod ws;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's

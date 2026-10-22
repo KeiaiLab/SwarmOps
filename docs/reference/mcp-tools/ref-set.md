@@ -116,7 +116,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"ref_set\",\"api\":1,\"result\":{\"name\":\"main\",\"new\":\"[c1]\",\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\"}},\"ok\":true,\"op\":\"ref_set\",\"result\":{\"already_applied\":false,\"name\":\"main\",\"new\":\"[c1]\"}}",
         "type": "text"
       }
     ],

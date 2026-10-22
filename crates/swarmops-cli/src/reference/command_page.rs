@@ -68,7 +68,23 @@ const REMOTE_COMMANDS: [&str; 8] = [
 const REMOTE_SINCE: &str = "0.2.0";
 
 /// The commands the workspaces brought (M5), and the release they first ship in.
-const WORKSPACE_COMMANDS: [&str; 1] = ["rebase"];
+const WORKSPACE_COMMANDS: [&str; 15] = [
+    "rebase",
+    "blob get",
+    "ws create",
+    "ws status",
+    "ws diff",
+    "ws commit",
+    "ws rebase",
+    "ws resolve",
+    "ws land",
+    "ws materialize",
+    "ws discard",
+    "ws list",
+    "ws info",
+    "ws delete",
+    "ws hook",
+];
 const WORKSPACE_SINCE: &str = "0.3.0";
 
 /// The release the command at `path` first shipped in.
@@ -114,12 +130,13 @@ pub(super) enum Group {
     Integrity,
     Git,
     Remotes,
+    Workspaces,
     Server,
 }
 
 impl Group {
     /// Every group, in the index's order.
-    pub(super) const ALL: [Group; 9] = [
+    pub(super) const ALL: [Group; 10] = [
         Group::Store,
         Group::Write,
         Group::Read,
@@ -128,6 +145,7 @@ impl Group {
         Group::Integrity,
         Group::Git,
         Group::Remotes,
+        Group::Workspaces,
         Group::Server,
     ];
 
@@ -142,6 +160,7 @@ impl Group {
             Group::Integrity => "integrity",
             Group::Git => "git",
             Group::Remotes => "remotes",
+            Group::Workspaces => "workspaces",
             Group::Server => "server",
         }
     }
@@ -157,6 +176,7 @@ impl Group {
             Group::Integrity => "Integrity",
             Group::Git => "Git",
             Group::Remotes => "Git remotes",
+            Group::Workspaces => "Workspaces",
             Group::Server => "Server",
         }
     }
@@ -186,7 +206,7 @@ struct Meta {
 
 /// Every command, in the grammar's order. `meta_matches_the_code` checks each column it can
 /// against the code.
-const META: [Meta; 34] = [
+const META: [Meta; 48] = [
     meta("init", Group::Store, true, false, Returns::Type("RepoInfo")),
     meta(
         "info",
@@ -232,6 +252,98 @@ const META: [Meta; 34] = [
         false,
         Returns::Type("BlobHasResp"),
     ),
+    meta(
+        "blob get",
+        Group::Read,
+        false,
+        false,
+        Returns::Type("BlobGetResp"),
+    ),
+    meta(
+        "ws create",
+        Group::Workspaces,
+        true,
+        true,
+        Returns::Type("WsInfo"),
+    ),
+    meta(
+        "ws status",
+        Group::Workspaces,
+        false,
+        false,
+        Returns::Type("WsStatus"),
+    ),
+    meta(
+        "ws diff",
+        Group::Workspaces,
+        false,
+        false,
+        Returns::Type("Diff"),
+    ),
+    meta(
+        "ws commit",
+        Group::Workspaces,
+        true,
+        false,
+        Returns::Type("WsCommitResp"),
+    ),
+    meta(
+        "ws rebase",
+        Group::Workspaces,
+        true,
+        false,
+        Returns::Type("WsRebaseResp"),
+    ),
+    meta(
+        "ws resolve",
+        Group::Workspaces,
+        true,
+        false,
+        Returns::Type("WsResolveResp"),
+    ),
+    meta(
+        "ws land",
+        Group::Workspaces,
+        true,
+        false,
+        Returns::Type("WsLandResp"),
+    ),
+    meta(
+        "ws materialize",
+        Group::Workspaces,
+        true,
+        false,
+        Returns::Type("WsMaterializeResp"),
+    ),
+    meta(
+        "ws discard",
+        Group::Workspaces,
+        true,
+        false,
+        Returns::Type("WsDiscardResp"),
+    ),
+    meta(
+        "ws list",
+        Group::Workspaces,
+        false,
+        false,
+        Returns::Type("WsList"),
+    ),
+    meta(
+        "ws info",
+        Group::Workspaces,
+        false,
+        false,
+        Returns::Type("WsInfo"),
+    ),
+    meta(
+        "ws delete",
+        Group::Workspaces,
+        true,
+        false,
+        Returns::Type("WsDeleteResp"),
+    ),
+    meta("ws hook", Group::Workspaces, true, false, Returns::Protocol),
     meta(
         "resolve",
         Group::Read,
@@ -1183,7 +1295,7 @@ fn source(path: &str) -> String {
 }
 
 /// Where each result type is returned: the file, and the function whose signature names it.
-const RETURN_SITES: [(&str, &str, &str); 32] = [
+const RETURN_SITES: [(&str, &str, &str); 45] = [
     ("init", "src/commands.rs", "fn init("),
     ("info", "../swarmops-api/src/ops.rs", "fn repo_info("),
     (
@@ -1196,6 +1308,51 @@ const RETURN_SITES: [(&str, &str, &str); 32] = [
     ("rebase", "../swarmops-api/src/ops.rs", "fn rebase("),
     ("blob put", "../swarmops-api/src/ops.rs", "fn blob_put("),
     ("blob has", "../swarmops-api/src/ops.rs", "fn blob_has("),
+    ("blob get", "../swarmops-api/src/ops.rs", "fn blob_get("),
+    (
+        "ws create",
+        "../swarmops-ws/src/create.rs",
+        "pub fn create(",
+    ),
+    (
+        "ws status",
+        "../swarmops-ws/src/status.rs",
+        "pub fn status(",
+    ),
+    ("ws diff", "../swarmops-ws/src/diff.rs", "pub fn diff("),
+    (
+        "ws commit",
+        "../swarmops-ws/src/commit.rs",
+        "pub fn commit(",
+    ),
+    (
+        "ws rebase",
+        "../swarmops-ws/src/rebase.rs",
+        "pub fn rebase(",
+    ),
+    (
+        "ws resolve",
+        "../swarmops-ws/src/resolve.rs",
+        "pub fn resolve(",
+    ),
+    ("ws land", "../swarmops-ws/src/land.rs", "pub fn land("),
+    (
+        "ws materialize",
+        "../swarmops-ws/src/materialize.rs",
+        "pub fn materialize(",
+    ),
+    (
+        "ws discard",
+        "../swarmops-ws/src/discard.rs",
+        "pub fn discard(",
+    ),
+    ("ws list", "../swarmops-ws/src/list.rs", "pub fn list("),
+    ("ws info", "../swarmops-ws/src/info.rs", "pub fn info("),
+    (
+        "ws delete",
+        "../swarmops-ws/src/delete.rs",
+        "pub fn delete(",
+    ),
     ("resolve", "../swarmops-api/src/ops.rs", "fn resolve_rev("),
     ("cat", "../swarmops-api/src/ops.rs", "fn read_file("),
     ("ls", "../swarmops-api/src/ops.rs", "fn read_tree("),
@@ -1290,6 +1447,27 @@ const NO_IDENTITY: [(&str, &str, &str); 4] = [
     ),
 ];
 
+/// The workspace commands that change the store or the workspace with no identity of their own:
+/// a mutation without one acts as the workspace's `created_by` (M5 design §2.6), where the
+/// workspace is opened. Exceptions to [`CHANGE_RULE`], but `ws create`, which records who made
+/// the workspace and so needs one.
+const WORKSPACE_ACTS_AS: [&str; 8] = [
+    "ws commit",
+    "ws rebase",
+    "ws resolve",
+    "ws land",
+    "ws materialize",
+    "ws discard",
+    "ws delete",
+    "ws hook",
+];
+
+/// Where [`WORKSPACE_ACTS_AS`]'s rule is, and its phrase.
+const WORKSPACE_ACTS_SOURCE: (&str, &str) = (
+    "../swarmops-ws/src/workspace.rs",
+    "its identity `ctx.who` or else its `created_by`",
+);
+
 /// The command that makes a store, so changes it with no identity, and where its code says so.
 const STORE_MAKER: (&str, &str, &str) = ("init", "src/commands.rs", "`init`: a store in");
 
@@ -1317,7 +1495,8 @@ fn meta_matches_the_code() {
 
     // 3. The identity column: one mutator call per command that needs one, and every
     //    command a step shows refused for want of one.
-    let calls = source("src/commands.rs").matches(IDENTITY_CALL).count();
+    let calls = source("src/commands.rs").matches(IDENTITY_CALL).count()
+        + source("src/commands/ws.rs").matches(IDENTITY_CALL).count();
     let needs = META.iter().filter(|meta| meta.identity).count();
     assert_eq!(calls, needs, "{IDENTITY_CALL} calls against identity rows");
     for step in &golden.steps {
@@ -1357,8 +1536,21 @@ fn meta_matches_the_code() {
             "{path}: changes with no identity"
         );
     }
+    let (acts_file, acts_phrase) = WORKSPACE_ACTS_SOURCE;
+    assert!(
+        source(acts_file).contains(acts_phrase),
+        "{acts_file}: no {acts_phrase:?}"
+    );
+    for path in WORKSPACE_ACTS_AS {
+        let meta = lookup(path);
+        assert!(
+            meta.mutates && !meta.identity,
+            "{path}: changes with no identity"
+        );
+    }
     for meta in &META {
-        let exempt = NO_IDENTITY.iter().any(|(path, _, _)| *path == meta.path);
+        let exempt = NO_IDENTITY.iter().any(|(path, _, _)| *path == meta.path)
+            || WORKSPACE_ACTS_AS.contains(&meta.path);
         if meta.path == maker || meta.path == SERVER || exempt {
             continue;
         }

@@ -268,7 +268,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"commit\",\"api\":1,\"result\":{\"changeset\":\"[c1]\",\"root\":\"[id1]\",\"files_changed\":2,\"blobs_written\":1,\"replayed\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"commit\",\"result\":{\"blobs_written\":1,\"changeset\":\"[c1]\",\"files_changed\":2,\"replayed\":false,\"root\":\"[id1]\"}}",
         "type": "text"
       }
     ],

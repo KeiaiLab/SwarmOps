@@ -68,7 +68,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 22,
+  "id": 36,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -80,12 +80,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 22,
+  "id": 36,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"verify\",\"api\":1,\"result\":{\"objects_checked\":14,\"changesets_checked\":4,\"problems\":[],\"findings\":[]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":9,\"findings\":[],\"objects_checked\":28,\"problems\":[]}}",
         "type": "text"
       }
     ],
@@ -101,9 +101,9 @@ Its entry in `tools/list` carries no `_meta`.
       "ok": true,
       "op": "verify",
       "result": {
-        "changesets_checked": 4,
+        "changesets_checked": 9,
         "findings": [],
-        "objects_checked": 14,
+        "objects_checked": 28,
         "problems": []
       }
     }

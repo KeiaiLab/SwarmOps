@@ -177,6 +177,7 @@ use crate::context::{self, Env};
 use crate::output::{self, Format, Printed};
 
 use self::mcp_ws::{WS_TOOLS, operate_ws};
+use swarmops_ws::hook::Bootstrap;
 
 /// MCP's latest revision, served without a handshake.
 pub const LATEST: &str = "2026-07-28";
@@ -1239,11 +1240,18 @@ trait Operate {
     ) -> Self::Done;
 
     /// Runs a workspace operation (M5): the request `R`, then `call` on the store, with the
-    /// root it was opened at and the server's identity if it has one; a workspace mutation
-    /// without one acts as the workspace's `created_by`.
+    /// root it was opened at, the server's identity if it has one (a workspace mutation without
+    /// one acts as the workspace's `created_by`) and whether a new workspace is bootstrapped
+    /// (`SWARMOPS_WS_BOOTSTRAP`).
     fn workspace<R: Refuse, T: Serialize>(
         self,
-        call: impl FnOnce(&dyn StoreOps, &Utf8Path, Option<&Identity>, R) -> Result<T, OpError>,
+        call: impl FnOnce(
+            &dyn StoreOps,
+            &Utf8Path,
+            Option<&Identity>,
+            Bootstrap,
+            R,
+        ) -> Result<T, OpError>,
     ) -> Self::Done;
 }
 
@@ -1430,7 +1438,13 @@ impl Operate for Call<'_, '_> {
     /// the store with the root it was opened at.
     fn workspace<R: Refuse, T: Serialize>(
         self,
-        call: impl FnOnce(&dyn StoreOps, &Utf8Path, Option<&Identity>, R) -> Result<T, OpError>,
+        call: impl FnOnce(
+            &dyn StoreOps,
+            &Utf8Path,
+            Option<&Identity>,
+            Bootstrap,
+            R,
+        ) -> Result<T, OpError>,
     ) -> String {
         let Call {
             server,
@@ -1451,10 +1465,16 @@ impl Operate for Call<'_, '_> {
         // The store opened anew for the call, as for every tool; a panic is E_INTERNAL.
         let prepare = || {
             let req = request_of(spec, arguments)?;
-            Ok((context::identity(agent, env)?, req))
+            Ok((
+                context::identity(agent, env)?,
+                context::bootstrap(env)?,
+                req,
+            ))
         };
-        let run = |ops: Recording<'_>, root: &Utf8Path, (who, req): (Option<Identity>, R)| {
-            call(&ops, root, who.as_ref(), req)
+        let run = |ops: Recording<'_>,
+                   root: &Utf8Path,
+                   (who, how, req): (Option<Identity>, Bootstrap, R)| {
+            call(&ops, root, who.as_ref(), how, req)
         };
         match panic::catch_unwind(AssertUnwindSafe(|| ctx.envelope_at_root(op, prepare, run))) {
             Ok(envelope) => reply.tool_result(&envelope),
@@ -2449,12 +2469,18 @@ pub(crate) mod probe {
 
         fn workspace<R: Refuse, T: Serialize>(
             self,
-            call: impl FnOnce(&dyn StoreOps, &Utf8Path, Option<&Identity>, R) -> Result<T, OpError>,
+            call: impl FnOnce(
+                &dyn StoreOps,
+                &Utf8Path,
+                Option<&Identity>,
+                Bootstrap,
+                R,
+            ) -> Result<T, OpError>,
         ) {
             let req = serde_json::from_value(sample()).expect("every request reads the sample");
             let root = tempfile::tempdir().expect("a temporary store root");
             let root = Utf8Path::from_path(root.path()).expect("a UTF-8 temporary directory");
-            let outcome = match call(&Recorder(self.called), root, None, req) {
+            let outcome = match call(&Recorder(self.called), root, None, Bootstrap::Run, req) {
                 Ok(_) => "ok".to_owned(),
                 Err(e) => e.message,
             };

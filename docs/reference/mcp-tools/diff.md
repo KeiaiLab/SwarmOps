@@ -138,7 +138,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 16,
+  "id": 17,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -154,12 +154,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 16,
+  "id": 17,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"diff\",\"api\":1,\"result\":{\"from\":\"[c1]\",\"to\":\"[landed]\",\"files\":[{\"path\":\"docs.md\",\"status\":\"added\",\"binary\":false,\"insertions\":1,\"deletions\":0},{\"path\":\"src/lib.rs\",\"status\":\"modified\",\"binary\":false,\"insertions\":1,\"deletions\":1}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\",\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\",\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"diff\",\"result\":{\"files\":[{\"binary\":false,\"deletions\":0,\"insertions\":1,\"path\":\"docs.md\",\"status\":\"added\"},{\"binary\":false,\"deletions\":1,\"insertions\":1,\"path\":\"src/lib.rs\",\"status\":\"modified\"}],\"from\":\"[c1]\",\"to\":\"[landed]\",\"truncated\":false}}",
         "type": "text"
       }
     ],

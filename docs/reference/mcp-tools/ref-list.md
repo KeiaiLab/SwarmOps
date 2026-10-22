@@ -59,7 +59,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 21,
+  "id": 22,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -71,12 +71,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 21,
+  "id": 22,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"ref_list\",\"api\":1,\"result\":{\"refs\":[{\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ref_list\",\"result\":{\"refs\":[{\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]}}",
         "type": "text"
       }
     ],

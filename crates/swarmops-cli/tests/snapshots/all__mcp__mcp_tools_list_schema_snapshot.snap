@@ -1519,7 +1519,7 @@ expression: listed
         "openWorldHint": false,
         "readOnlyHint": false
       },
-      "description": "Makes a workspace: a directory holding a sparse copy of a changeset's tree (base, main by default) under the prefixes given, for building and testing a change on disk. The same call again is the same workspace (created false).",
+      "description": "Makes a workspace: a directory holding a sparse copy of a changeset's tree (base, main by default) under the prefixes given, for building and testing a change on disk. The same call again is the same workspace (created false). A new workspace gets the files .worktreeinclude lists in `from` and runs the repository's bootstrap command (.swarmops/workspaces.json).",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "description": "`ws_create` (M5, client-side): make a workspace, a directory holding a sparse copy of a\nchangeset's tree. The same request again is the same workspace (`created` false).",

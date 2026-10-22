@@ -210,6 +210,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 ## See also
 
 - [Operating SwarmOps: Making room](../../operations.md#making-room)
+- [`swarmops blob get`](blob-get.md)
 - [`swarmops resolve`](resolve.md)
 - [`swarmops cat`](cat.md)
 - [`swarmops ls`](ls.md)

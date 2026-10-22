@@ -1,8 +1,9 @@
 //! What a command runs with besides its arguments: the store the user named, the caller's
 //! identity and the output format, each from a flag or else from the environment.
 //!
-//! - The store is `--repo <store>`, else `SWARMOPS_REPO` (umbrella spec §4; `.swarmws`
-//!   discovery arrives with workspaces). Neither is `E_NOT_A_REPO`, exit 6.
+//! - The store is `--repo <store>`, else `SWARMOPS_REPO` (umbrella spec §4), else the `repo` of
+//!   the nearest `.swarmws/workspace.json` at or above the working directory (M5, [`discovered`]).
+//!   None is `E_NOT_A_REPO`, exit 6.
 //! - The identity is `--as <family>/<instance>`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`,
 //!   as `swarmops_ops::identity` resolves it.
 //! - The format is `--json` or `--human`, whichever comes last, else `SWARMOPS_FORMAT`
@@ -17,9 +18,13 @@
 
 use std::ffi::OsString;
 
+use camino::{Utf8Path, Utf8PathBuf};
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, Identity, OpError};
 use swarmops_ops::identity::{require_identity, resolve_identity_from};
+use swarmops_ws::RealFs;
+use swarmops_ws::hook::Bootstrap;
+use swarmops_ws::workspace::{Locate, find};
 
 use crate::cli::Global;
 use crate::output::Format;
@@ -29,6 +34,15 @@ pub const REPO_ENV: &str = "SWARMOPS_REPO";
 
 /// The environment variable that picks the format when neither `--json` nor `--human` is given.
 pub const FORMAT_ENV: &str = "SWARMOPS_FORMAT";
+
+/// The environment variable that moves the directory the hooks make workspaces in.
+pub const WS_ROOT_ENV: &str = "SWARMOPS_WS_ROOT";
+
+/// The environment variable that, set to [`BOOTSTRAP_SKIP`], skips a new workspace's bootstrap.
+pub const WS_BOOTSTRAP_ENV: &str = "SWARMOPS_WS_BOOTSTRAP";
+
+/// What [`WS_BOOTSTRAP_ENV`] is set to in order to skip the bootstrap.
+pub const BOOTSTRAP_SKIP: &str = "skip";
 
 /// How a command reads environment variable `name`.
 pub type Env<'a> = &'a dyn Fn(&str) -> Option<OsString>;
@@ -40,6 +54,92 @@ pub fn store_named(flag: Option<&str>, env: Env<'_>) -> Result<Option<String>, O
         Some("") => Ok(None),
         Some(store) => Ok(Some(store.to_owned())),
         None => var(env, REPO_ENV),
+    }
+}
+
+/// The store a command runs on: [`store_named`], else the one a workspace names ([`discovered`])
+/// from `start`, the directory the lookup starts from. An explicit empty `--repo` names none and
+/// looks nowhere, as it does not fall back to `SWARMOPS_REPO`.
+pub fn store_for(
+    flag: Option<&str>,
+    env: Env<'_>,
+    start: Option<&Locate>,
+) -> Result<Option<String>, OpError> {
+    if let Some(named) = store_named(flag, env)? {
+        return Ok(Some(named));
+    }
+    if flag == Some("") {
+        return Ok(None);
+    }
+    match start {
+        Some(at) => discovered(at),
+        None => Ok(None),
+    }
+}
+
+/// The store the workspace `at` names, if there is one: its `workspace.json`'s `repo`. None for
+/// a place with no workspace; a `workspace.json` that cannot be read is its error.
+pub fn discovered(at: &Locate) -> Result<Option<String>, OpError> {
+    match find(at, None, &RealFs) {
+        Ok(found) => Ok(Some(found.file.repo)),
+        Err(e) if e.code == ErrorCode::WsNotFound.as_str() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+/// The working directory as a workspace lookup starts from it: none when it cannot be read or is
+/// not UTF-8, which no workspace's path is.
+pub fn here() -> Option<Utf8PathBuf> {
+    let dir = std::env::current_dir().ok()?;
+    Utf8PathBuf::from_path_buf(dir).ok()
+}
+
+/// Whether a new workspace's bootstrap runs: [`Bootstrap::Skip`] when [`WS_BOOTSTRAP_ENV`] is
+/// [`BOOTSTRAP_SKIP`].
+pub fn bootstrap(env: Env<'_>) -> Result<Bootstrap, OpError> {
+    match var(env, WS_BOOTSTRAP_ENV)?.as_deref() {
+        Some(BOOTSTRAP_SKIP) => Ok(Bootstrap::Skip),
+        _ => Ok(Bootstrap::Run),
+    }
+}
+
+/// The directory the hooks make workspaces in: `SWARMOPS_WS_ROOT`, else the per-OS state
+/// directory (`$XDG_STATE_HOME/swarmops/workspaces`, `~/.local/state/…` by default, on Linux),
+/// else `E_INVALID_ARG` for a host that names none.
+pub fn ws_root(env: Env<'_>) -> Result<Utf8PathBuf, OpError> {
+    if let Some(root) = var(env, WS_ROOT_ENV)? {
+        return Ok(Utf8PathBuf::from(root));
+    }
+    let state = state_dir(env)?;
+    Ok(state.join("swarmops").join("workspaces"))
+}
+
+/// The per-OS directory for state that is neither config nor cache.
+fn state_dir(env: Env<'_>) -> Result<Utf8PathBuf, OpError> {
+    let home = || {
+        var(env, "HOME")?.map(Utf8PathBuf::from).ok_or_else(|| {
+            OpError::new(
+                ErrorCode::InvalidArg,
+                format!("no directory for the workspaces: set {WS_ROOT_ENV}"),
+            )
+        })
+    };
+    if cfg!(windows) {
+        return var(env, "LOCALAPPDATA")?
+            .map(Utf8PathBuf::from)
+            .ok_or_else(|| {
+                OpError::new(
+                    ErrorCode::InvalidArg,
+                    format!("no directory for the workspaces: set {WS_ROOT_ENV}"),
+                )
+            });
+    }
+    if cfg!(target_os = "macos") {
+        return Ok(home()?.join("Library").join("Application Support"));
+    }
+    match var(env, "XDG_STATE_HOME")? {
+        Some(state) if Utf8Path::new(&state).is_absolute() => Ok(Utf8PathBuf::from(state)),
+        _ => Ok(home()?.join(".local").join("state")),
     }
 }
 

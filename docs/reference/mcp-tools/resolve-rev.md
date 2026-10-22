@@ -89,7 +89,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"resolve_rev\",\"api\":1,\"result\":{\"id\":\"[c1]\",\"kind\":\"ref\"},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[c1]\"},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[c1]\"}},\"ok\":true,\"op\":\"resolve_rev\",\"result\":{\"id\":\"[c1]\",\"kind\":\"ref\"}}",
         "type": "text"
       }
     ],

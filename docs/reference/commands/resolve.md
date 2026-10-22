@@ -180,6 +180,7 @@ Any command that opens a store may also fail with a store error, such as [`E_NOT
 ## See also
 
 - [Operating SwarmOps: One writer per trunk](../../operations.md#one-writer-per-trunk)
+- [`swarmops blob get`](blob-get.md)
 - [`swarmops cat`](cat.md)
 - [`swarmops ls`](ls.md)
 - [`swarmops show`](show.md)

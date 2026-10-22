@@ -122,7 +122,7 @@ Its entry in `tools/list` carries no `_meta`.
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"read_tree\",\"api\":1,\"result\":{\"entries\":[{\"name\":\"README.md\",\"kind\":\"file\",\"size\":7,\"id\":\"[blob]\"},{\"name\":\"src\",\"kind\":\"dir\",\"id\":\"[id2]\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[c1]\"},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[c1]\"}},\"ok\":true,\"op\":\"read_tree\",\"result\":{\"entries\":[{\"id\":\"[blob]\",\"kind\":\"file\",\"name\":\"README.md\",\"size\":7},{\"id\":\"[id2]\",\"kind\":\"dir\",\"name\":\"src\"}],\"truncated\":false}}",
         "type": "text"
       }
     ],

@@ -89,6 +89,12 @@ Resolve the conflicts an E\_CONFLICT report named, without a checkout: resolutio
 
 A resolution applies while the ref holds its path as THEIRS did, whether the path conflicts or not. A path the ref changed since is stale: the land fails with E\_CONFLICT again, its report naming the path in stale, as it does for each conflict left unresolved. Read the report's theirs, and resolve against it.
 
+### `--expect-target`
+
+Syntax: `--expect-target <ID>`.
+
+Publish only while the ref names this changeset, a full id: one attempt, and a ref that moved is E\_CAS\_MISMATCH with nothing written.
+
 ## Examples
 
 ### CLI

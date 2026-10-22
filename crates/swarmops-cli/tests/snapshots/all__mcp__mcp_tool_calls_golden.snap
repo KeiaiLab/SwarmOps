@@ -26,6 +26,7 @@ expression: transcript
           "capabilities": {
             "tools": {}
           },
+          "content": null,
           "instructions": "SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. Each tool is one store operation, and its result is the SwarmOps envelope {ok, op, api, result | error, meta}, as structuredContent and again as JSON text. A failed operation sets isError and gives error {code, message, retryable, exit, details, hint}: retryable says whether the operation can succeed when it is run again, as it is or after re-reading what the hint names, and a hint is often a swarmops command, whose operation is the tool of the same name (ref list is ref_list, cat read_file, ls read_tree, info repo_info). commit records a changeset; with advance it also moves that ref to it in the same transaction, if the ref still names parent: check result.advanced. ref_set and ref_delete change a ref by compare-and-swap, so their expected_old, like commit's parent with advance, is the full 64-hex changeset id the ref held when you read it (from ref_list, show, log or a commit's result). A ref name or a relative revision is read when the call runs instead of pinning the id you read: the ref's own name always matches, so the compare-and-swap protects nothing, and main~1 on ref main never matches; an id prefix stops resolving once another changeset shares it; the server refuses all three. To publish a changeset, land it: land merges it three-way onto main and moves main in one step, and on E_CONFLICT details.report says what to resolve. A read may show a commit that a failed sync then takes back; a mutation that names it fails under the lock instead of building on it. op_log lists the store's transactions, newest first; undo restores the refs one moved while they still hold what it set. Clients limit long tool results: ask for little, as each tool's description says. A {\"file\": path} content is read by this server, not by your client: give an absolute path (a relative one, or the server's own stdin or stdout, is refused). Every change is recorded for the agent the server runs as.",
           "protocolVersion": "2025-11-25",
           "serverInfo": {
@@ -40,6 +41,11 @@ expression: transcript
       "request": {
         "jsonrpc": "2.0",
         "method": "notifications/initialized"
+      },
+      "response": {
+        "result": {
+          "content": null
+        }
       }
     },
     {
@@ -58,7 +64,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"repo_info\",\"api\":1,\"result\":{\"repo_id\":\"[repo_id]\",\"name\":\"store\",\"store_version\":1,\"changesets\":0,\"refs\":0},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"repo_info\",\"result\":{\"changesets\":0,\"name\":\"store\",\"refs\":0,\"repo_id\":\"[repo_id]\",\"store_version\":1}}",
               "type": "text"
             }
           ],
@@ -104,7 +110,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"blob_put\",\"api\":1,\"result\":{\"blob\":\"[blob]\",\"size\":7,\"written\":true},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"blob_put\",\"result\":{\"blob\":\"[blob]\",\"size\":7,\"written\":true}}",
               "type": "text"
             }
           ],
@@ -148,7 +154,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"blob_has\",\"api\":1,\"result\":{\"present\":[\"[blob]\"]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"blob_has\",\"result\":{\"present\":[\"[blob]\"]}}",
               "type": "text"
             }
           ],
@@ -206,7 +212,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"commit\",\"api\":1,\"result\":{\"changeset\":\"[c1]\",\"root\":\"[id1]\",\"files_changed\":2,\"blobs_written\":1,\"replayed\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"commit\",\"result\":{\"blobs_written\":1,\"changeset\":\"[c1]\",\"files_changed\":2,\"replayed\":false,\"root\":\"[id1]\"}}",
               "type": "text"
             }
           ],
@@ -252,7 +258,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"ref_set\",\"api\":1,\"result\":{\"name\":\"main\",\"new\":\"[c1]\",\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\"}},\"ok\":true,\"op\":\"ref_set\",\"result\":{\"already_applied\":false,\"name\":\"main\",\"new\":\"[c1]\"}}",
               "type": "text"
             }
           ],
@@ -296,7 +302,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"resolve_rev\",\"api\":1,\"result\":{\"id\":\"[c1]\",\"kind\":\"ref\"},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[c1]\"}},\"ok\":true,\"op\":\"resolve_rev\",\"result\":{\"id\":\"[c1]\",\"kind\":\"ref\"}}",
               "type": "text"
             }
           ],
@@ -340,7 +346,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"read_file\",\"api\":1,\"result\":{\"blob\":\"[blob]\",\"size\":7,\"kind\":\"file\",\"encoding\":\"utf8\",\"content\":\"# acme\\n\",\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[c1]\"}},\"ok\":true,\"op\":\"read_file\",\"result\":{\"blob\":\"[blob]\",\"content\":\"# acme\\n\",\"encoding\":\"utf8\",\"kind\":\"file\",\"size\":7,\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -387,7 +393,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"read_tree\",\"api\":1,\"result\":{\"entries\":[{\"name\":\"README.md\",\"kind\":\"file\",\"size\":7,\"id\":\"[blob]\"},{\"name\":\"src\",\"kind\":\"dir\",\"id\":\"[id2]\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[c1]\"}},\"ok\":true,\"op\":\"read_tree\",\"result\":{\"entries\":[{\"id\":\"[blob]\",\"kind\":\"file\",\"name\":\"README.md\",\"size\":7},{\"id\":\"[id2]\",\"kind\":\"dir\",\"name\":\"src\"}],\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -452,7 +458,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"commit\",\"api\":1,\"result\":{\"changeset\":\"[head]\",\"parent\":\"[c1]\",\"root\":\"[id3]\",\"files_changed\":1,\"blobs_written\":1,\"replayed\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\"}},\"ok\":true,\"op\":\"commit\",\"result\":{\"blobs_written\":1,\"changeset\":\"[head]\",\"files_changed\":1,\"parent\":\"[c1]\",\"replayed\":false,\"root\":\"[id3]\"}}",
               "type": "text"
             }
           ],
@@ -510,7 +516,7 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"commit\",\"api\":1,\"result\":{\"changeset\":\"[theirs]\",\"parent\":\"[c1]\",\"root\":\"[id4]\",\"files_changed\":1,\"blobs_written\":1,\"advanced\":{\"name\":\"main\",\"old\":\"[c1]\",\"new\":\"[theirs]\",\"already_applied\":false},\"replayed\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\"}},\"ok\":true,\"op\":\"commit\",\"result\":{\"advanced\":{\"already_applied\":false,\"name\":\"main\",\"new\":\"[theirs]\",\"old\":\"[c1]\"},\"blobs_written\":1,\"changeset\":\"[theirs]\",\"files_changed\":1,\"parent\":\"[c1]\",\"replayed\":false,\"root\":\"[id4]\"}}",
               "type": "text"
             }
           ],
@@ -552,10 +558,9 @@ expression: transcript
         "method": "tools/call",
         "params": {
           "arguments": {
-            "head": "[head]",
-            "idempotency_key": "land-7"
+            "head": "[head]"
           },
-          "name": "land"
+          "name": "rebase"
         }
       },
       "response": {
@@ -564,7 +569,56 @@ expression: transcript
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"land\",\"api\":1,\"result\":{\"status\":\"landed\",\"landed\":\"[landed]\",\"rebased_onto\":\"[theirs]\",\"target\":\"main\",\"base\":\"[c1]\",\"attempts\":1,\"relocated\":false,\"files_changed\":1,\"squashed_from\":[\"[head]\"]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[head]\":\"[head]\",\"main\":\"[theirs]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[head]\":\"[head]\",\"main\":\"[theirs]\"}},\"ok\":true,\"op\":\"rebase\",\"result\":{\"base\":\"[c1]\",\"changeset\":\"[rebased]\",\"files_changed\":1,\"onto\":\"[theirs]\",\"root\":\"[id5]\",\"status\":\"rebased\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[head]": "[head]",
+                "main": "[theirs]"
+              }
+            },
+            "ok": true,
+            "op": "rebase",
+            "result": {
+              "base": "[c1]",
+              "changeset": "[rebased]",
+              "files_changed": 1,
+              "onto": "[theirs]",
+              "root": "[id5]",
+              "status": "rebased"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "head": "[head]",
+            "idempotency_key": "land-7"
+          },
+          "name": "land"
+        }
+      },
+      "response": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[head]\":\"[head]\",\"main\":\"[theirs]\"}},\"ok\":true,\"op\":\"land\",\"result\":{\"attempts\":1,\"base\":\"[c1]\",\"files_changed\":1,\"landed\":\"[landed]\",\"rebased_onto\":\"[theirs]\",\"relocated\":false,\"squashed_from\":[\"[head]\"],\"status\":\"landed\",\"target\":\"main\"}}",
               "type": "text"
             }
           ],
@@ -601,7 +655,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 13,
+        "id": 14,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -612,12 +666,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 13,
+        "id": 14,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"show\",\"api\":1,\"result\":{\"id\":\"[landed]\",\"seq\":3,\"parents\":[\"[theirs]\"],\"root\":\"[id5]\",\"author\":{\"agent\":\"agent/worker-17\"},\"lander\":{\"agent\":\"agent/worker-17\"},\"created_at\":\"[created_at]\",\"message\":\"change f\",\"land_key\":\"land-7\",\"squashed_from\":[\"[head]\"],\"changes\":[{\"path\":\"src/lib.rs\",\"op\":\"put\",\"kind\":\"file\",\"blob\":\"[id6]\"}],\"files_changed\":1,\"changes_truncated\":false,\"metadata\":{\"agent\":\"agent/worker-17\",\"land_key\":\"land-7\",\"lander\":\"agent/worker-17\",\"squashed_from\":\"[head]\"},\"signatures\":{\"author\":{\"name\":\"agent/worker-17\",\"email\":\"worker-17@agent.swarmops.local\",\"secs\":\"[secs]\",\"offset_secs\":0},\"committer\":{\"name\":\"agent/worker-17\",\"email\":\"worker-17@agent.swarmops.local\",\"secs\":\"[secs]\",\"offset_secs\":0}}},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[landed]\":\"[landed]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\"}},\"ok\":true,\"op\":\"show\",\"result\":{\"author\":{\"agent\":\"agent/worker-17\"},\"changes\":[{\"blob\":\"[id6]\",\"kind\":\"file\",\"op\":\"put\",\"path\":\"src/lib.rs\"}],\"changes_truncated\":false,\"created_at\":\"[created_at]\",\"files_changed\":1,\"id\":\"[landed]\",\"land_key\":\"land-7\",\"lander\":{\"agent\":\"agent/worker-17\"},\"message\":\"change f\",\"metadata\":{\"agent\":\"agent/worker-17\",\"land_key\":\"land-7\",\"lander\":\"agent/worker-17\",\"squashed_from\":\"[head]\"},\"parents\":[\"[theirs]\"],\"root\":\"[id5]\",\"seq\":4,\"signatures\":{\"author\":{\"email\":\"worker-17@agent.swarmops.local\",\"name\":\"agent/worker-17\",\"offset_secs\":0,\"secs\":\"[secs]\"},\"committer\":{\"email\":\"worker-17@agent.swarmops.local\",\"name\":\"agent/worker-17\",\"offset_secs\":0,\"secs\":\"[secs]\"}},\"squashed_from\":[\"[head]\"]}}",
               "type": "text"
             }
           ],
@@ -665,7 +719,7 @@ expression: transcript
                 "[theirs]"
               ],
               "root": "[id5]",
-              "seq": 3,
+              "seq": 4,
               "signatures": {
                 "author": {
                   "email": "worker-17@agent.swarmops.local",
@@ -690,7 +744,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 14,
+        "id": 15,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -701,12 +755,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 14,
+        "id": 15,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"log\",\"api\":1,\"result\":{\"entries\":[{\"id\":\"[landed]\",\"parents\":[\"[theirs]\"],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"change f\"},{\"id\":\"[theirs]\",\"parents\":[\"[c1]\"],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"add docs\"},{\"id\":\"[c1]\",\"parents\":[],\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"first\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"log\",\"result\":{\"entries\":[{\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"id\":\"[landed]\",\"parents\":[\"[theirs]\"],\"title\":\"change f\"},{\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"id\":\"[theirs]\",\"parents\":[\"[c1]\"],\"title\":\"add docs\"},{\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"id\":\"[c1]\",\"parents\":[],\"title\":\"first\"}],\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -759,7 +813,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 15,
+        "id": 16,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -770,12 +824,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 15,
+        "id": 16,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"path_history\",\"api\":1,\"result\":{\"path\":\"src/lib.rs\",\"entries\":[{\"changeset\":\"[landed]\",\"op\":\"put\",\"kind\":\"file\",\"id\":\"[id6]\",\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"change f\"},{\"changeset\":\"[c1]\",\"op\":\"put\",\"kind\":\"file\",\"id\":\"[id7]\",\"author_agent\":\"agent/worker-17\",\"created_at\":\"[created_at]\",\"title\":\"first\"}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"path_history\",\"result\":{\"entries\":[{\"author_agent\":\"agent/worker-17\",\"changeset\":\"[landed]\",\"created_at\":\"[created_at]\",\"id\":\"[id6]\",\"kind\":\"file\",\"op\":\"put\",\"title\":\"change f\"},{\"author_agent\":\"agent/worker-17\",\"changeset\":\"[c1]\",\"created_at\":\"[created_at]\",\"id\":\"[id7]\",\"kind\":\"file\",\"op\":\"put\",\"title\":\"first\"}],\"path\":\"src/lib.rs\",\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -822,7 +876,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 16,
+        "id": 17,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -835,12 +889,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 16,
+        "id": 17,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"diff\",\"api\":1,\"result\":{\"from\":\"[c1]\",\"to\":\"[landed]\",\"files\":[{\"path\":\"docs.md\",\"status\":\"added\",\"binary\":false,\"insertions\":1,\"deletions\":0},{\"path\":\"src/lib.rs\",\"status\":\"modified\",\"binary\":false,\"insertions\":1,\"deletions\":1}],\"truncated\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\",\"main\":\"[landed]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\",\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"diff\",\"result\":{\"files\":[{\"binary\":false,\"deletions\":0,\"insertions\":1,\"path\":\"docs.md\",\"status\":\"added\"},{\"binary\":false,\"deletions\":1,\"insertions\":1,\"path\":\"src/lib.rs\",\"status\":\"modified\"}],\"from\":\"[c1]\",\"to\":\"[landed]\",\"truncated\":false}}",
               "type": "text"
             }
           ],
@@ -885,7 +939,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 17,
+        "id": 18,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -898,12 +952,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 17,
+        "id": 18,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"ref_set\",\"api\":1,\"result\":{\"name\":\"release/v1\",\"new\":\"[c1]\",\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\"}},\"ok\":true,\"op\":\"ref_set\",\"result\":{\"already_applied\":false,\"name\":\"release/v1\",\"new\":\"[c1]\"}}",
               "type": "text"
             }
           ],
@@ -931,7 +985,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 18,
+        "id": 19,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -943,12 +997,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 18,
+        "id": 19,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"ref_delete\",\"api\":1,\"result\":{\"name\":\"release/v1\",\"old\":\"[c1]\",\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{\"[c1]\":\"[c1]\"},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[c1]\":\"[c1]\"}},\"ok\":true,\"op\":\"ref_delete\",\"result\":{\"already_applied\":false,\"name\":\"release/v1\",\"old\":\"[c1]\"}}",
               "type": "text"
             }
           ],
@@ -976,7 +1030,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 19,
+        "id": 20,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -987,12 +1041,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 19,
+        "id": 20,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"op_log\",\"api\":1,\"result\":{\"ops\":[{\"op\":6,\"kind\":\"ref_move\",\"changesets\":[],\"changesets_total\":0,\"ref_moves\":[{\"name\":\"release/v1\",\"old\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}]},{\"op\":5,\"kind\":\"ref_move\",\"changesets\":[],\"changesets_total\":0,\"ref_moves\":[{\"name\":\"release/v1\",\"new\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}]}],\"truncated\":true},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"op_log\",\"result\":{\"ops\":[{\"changesets\":[],\"changesets_total\":0,\"kind\":\"ref_move\",\"op\":7,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"old\":\"[c1]\"}]},{\"changesets\":[],\"changesets_total\":0,\"kind\":\"ref_move\",\"op\":6,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}]}],\"truncated\":true}}",
               "type": "text"
             }
           ],
@@ -1013,7 +1067,7 @@ expression: transcript
                   "changesets": [],
                   "changesets_total": 0,
                   "kind": "ref_move",
-                  "op": 6,
+                  "op": 7,
                   "ref_moves": [
                     {
                       "actor": "agent/worker-17",
@@ -1027,7 +1081,7 @@ expression: transcript
                   "changesets": [],
                   "changesets_total": 0,
                   "kind": "ref_move",
-                  "op": 5,
+                  "op": 6,
                   "ref_moves": [
                     {
                       "actor": "agent/worker-17",
@@ -1046,23 +1100,23 @@ expression: transcript
     },
     {
       "request": {
-        "id": 20,
+        "id": 21,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
           "arguments": {
-            "op": 6
+            "op": 7
           },
           "name": "undo"
         }
       },
       "response": {
-        "id": 20,
+        "id": 21,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"undo\",\"api\":1,\"result\":{\"undone\":6,\"op\":7,\"ref_moves\":[{\"name\":\"release/v1\",\"new\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}],\"already_applied\":false},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"undo\",\"result\":{\"already_applied\":false,\"op\":8,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}],\"undone\":7}}",
               "type": "text"
             }
           ],
@@ -1079,7 +1133,7 @@ expression: transcript
             "op": "undo",
             "result": {
               "already_applied": false,
-              "op": 7,
+              "op": 8,
               "ref_moves": [
                 {
                   "actor": "agent/worker-17",
@@ -1088,7 +1142,7 @@ expression: transcript
                   "new": "[c1]"
                 }
               ],
-              "undone": 6
+              "undone": 7
             }
           }
         }
@@ -1096,7 +1150,7 @@ expression: transcript
     },
     {
       "request": {
-        "id": 21,
+        "id": 22,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1105,12 +1159,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 21,
+        "id": 22,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"ref_list\",\"api\":1,\"result\":{\"refs\":[{\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ref_list\",\"result\":{\"refs\":[{\"name\":\"main\",\"target\":\"[landed]\",\"version\":3},{\"name\":\"release/v1\",\"target\":\"[c1]\",\"version\":1}]}}",
               "type": "text"
             }
           ],
@@ -1145,7 +1199,822 @@ expression: transcript
     },
     {
       "request": {
-        "id": 22,
+        "id": 23,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "name": "ws1",
+            "path": "[tmp]/ws1",
+            "prefixes": [
+              "src"
+            ]
+          },
+          "name": "ws_create"
+        }
+      },
+      "response": {
+        "id": 23,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\",\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_create\",\"result\":{\"base\":\"[landed]\",\"created\":true,\"head\":\"[landed]\",\"name\":\"ws1\",\"path\":\"[tmp]/ws1\",\"prefixes\":[\"src\"],\"status_after\":{\"base\":\"[landed]\",\"behind_by\":0,\"changes\":[],\"head\":\"[landed]\",\"main\":\"[landed]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[landed]": "[landed]",
+                "main": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "ws_create",
+            "result": {
+              "base": "[landed]",
+              "created": true,
+              "head": "[landed]",
+              "name": "ws1",
+              "path": "[tmp]/ws1",
+              "prefixes": [
+                "src"
+              ],
+              "status_after": {
+                "base": "[landed]",
+                "behind_by": 0,
+                "changes": [],
+                "head": "[landed]",
+                "main": "[landed]",
+                "name": "ws1",
+                "state": "clean",
+                "truncated": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 24,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "workspace": "ws1"
+          },
+          "name": "ws_status"
+        }
+      },
+      "response": {
+        "id": 24,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_status\",\"result\":{\"base\":\"[landed]\",\"behind_by\":0,\"changes\":[{\"kind\":\"modified\",\"path\":\"src/lib.rs\",\"size\":17}],\"head\":\"[landed]\",\"main\":\"[landed]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "ws_status",
+            "result": {
+              "base": "[landed]",
+              "behind_by": 0,
+              "changes": [
+                {
+                  "kind": "modified",
+                  "path": "src/lib.rs",
+                  "size": 17
+                }
+              ],
+              "head": "[landed]",
+              "main": "[landed]",
+              "name": "ws1",
+              "state": "clean",
+              "truncated": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 25,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "format": "unified",
+            "workspace": "ws1"
+          },
+          "name": "ws_diff"
+        }
+      },
+      "response": {
+        "id": 25,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ws_diff\",\"result\":{\"files\":[{\"binary\":false,\"deletions\":1,\"hunks\":[{\"lines\":[{\"op\":\"remove\",\"text\":\"pub fn g() {}\\n\"},{\"op\":\"add\",\"text\":\"pub fn mine() {}\\n\"}],\"new_lines\":1,\"new_start\":1,\"old_lines\":1,\"old_start\":1}],\"insertions\":1,\"new_blob\":\"[id8]\",\"new_kind\":\"file\",\"old_blob\":\"[id6]\",\"old_kind\":\"file\",\"path\":\"src/lib.rs\",\"status\":\"modified\"}],\"from\":\"[landed]\",\"to\":\"ws:ws1\",\"truncated\":false}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "ws_diff",
+            "result": {
+              "files": [
+                {
+                  "binary": false,
+                  "deletions": 1,
+                  "hunks": [
+                    {
+                      "lines": [
+                        {
+                          "op": "remove",
+                          "text": "pub fn g() {}\n"
+                        },
+                        {
+                          "op": "add",
+                          "text": "pub fn mine() {}\n"
+                        }
+                      ],
+                      "new_lines": 1,
+                      "new_start": 1,
+                      "old_lines": 1,
+                      "old_start": 1
+                    }
+                  ],
+                  "insertions": 1,
+                  "new_blob": "[id8]",
+                  "new_kind": "file",
+                  "old_blob": "[id6]",
+                  "old_kind": "file",
+                  "path": "src/lib.rs",
+                  "status": "modified"
+                }
+              ],
+              "from": "[landed]",
+              "to": "ws:ws1",
+              "truncated": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 26,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "message": "mine",
+            "status_after": "none",
+            "workspace": "ws1"
+          },
+          "name": "ws_commit"
+        }
+      },
+      "response": {
+        "id": 26,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_commit\",\"result\":{\"blobs_written\":1,\"changeset\":\"[id9]\",\"files_changed\":1,\"parent\":\"[landed]\",\"replayed\":false}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[landed]": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "ws_commit",
+            "result": {
+              "blobs_written": 1,
+              "changeset": "[id9]",
+              "files_changed": 1,
+              "parent": "[landed]",
+              "replayed": false
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 27,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "paths": [
+              "docs.md"
+            ],
+            "workspace": "ws1"
+          },
+          "name": "ws_materialize"
+        }
+      },
+      "response": {
+        "id": 27,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id9]\":\"[id9]\",\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_materialize\",\"result\":{\"bytes\":5,\"materialized\":[\"docs.md\"],\"status_after\":{\"base\":\"[landed]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id9]\",\"main\":\"[landed]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[id9]": "[id9]",
+                "main": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "ws_materialize",
+            "result": {
+              "bytes": 5,
+              "materialized": [
+                "docs.md"
+              ],
+              "status_after": {
+                "base": "[landed]",
+                "behind_by": 0,
+                "changes": [],
+                "head": "[id9]",
+                "main": "[landed]",
+                "name": "ws1",
+                "state": "clean",
+                "truncated": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 28,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "paths": [
+              "docs.md"
+            ],
+            "workspace": "ws1"
+          },
+          "name": "ws_discard"
+        }
+      },
+      "response": {
+        "id": 28,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id9]\":\"[id9]\",\"main\":\"[landed]\"}},\"ok\":true,\"op\":\"ws_discard\",\"result\":{\"discarded\":[\"docs.md\"],\"status_after\":{\"base\":\"[landed]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id9]\",\"main\":\"[landed]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[id9]": "[id9]",
+                "main": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "ws_discard",
+            "result": {
+              "discarded": [
+                "docs.md"
+              ],
+              "status_after": {
+                "base": "[landed]",
+                "behind_by": 0,
+                "changes": [],
+                "head": "[id9]",
+                "main": "[landed]",
+                "name": "ws1",
+                "state": "clean",
+                "truncated": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 29,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "advance": "main",
+            "changes": [
+              {
+                "content": {
+                  "inline": "pub fn theirs() {}\n"
+                },
+                "op": "put",
+                "path": "src/lib.rs"
+              }
+            ],
+            "message": "theirs",
+            "parent": "[landed]"
+          },
+          "name": "commit"
+        }
+      },
+      "response": {
+        "id": 29,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[landed]\":\"[landed]\"}},\"ok\":true,\"op\":\"commit\",\"result\":{\"advanced\":{\"already_applied\":false,\"name\":\"main\",\"new\":\"[id10]\",\"old\":\"[landed]\"},\"blobs_written\":1,\"changeset\":\"[id10]\",\"files_changed\":1,\"parent\":\"[landed]\",\"replayed\":false,\"root\":\"[id11]\"}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[landed]": "[landed]"
+              }
+            },
+            "ok": true,
+            "op": "commit",
+            "result": {
+              "advanced": {
+                "already_applied": false,
+                "name": "main",
+                "new": "[id10]",
+                "old": "[landed]"
+              },
+              "blobs_written": 1,
+              "changeset": "[id10]",
+              "files_changed": 1,
+              "parent": "[landed]",
+              "replayed": false,
+              "root": "[id11]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 30,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "workspace": "ws1"
+          },
+          "name": "ws_rebase"
+        }
+      },
+      "response": {
+        "id": 30,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"error\":{\"code\":\"E_CONFLICT\",\"details\":{\"report\":{\"base\":\"[landed]\",\"files\":[{\"base_blob\":\"[id6]\",\"hunks\":[{\"base\":{\"first\":1,\"last\":1,\"text\":\"pub fn g() {}\\n\"},\"id\":0,\"ours\":{\"first\":1,\"last\":1,\"text\":\"pub fn mine() {}\\n\"},\"theirs\":{\"first\":1,\"last\":1,\"text\":\"pub fn theirs() {}\\n\"}}],\"kind\":\"content\",\"ours_blob\":\"[id8]\",\"path\":\"src/lib.rs\",\"theirs_agent\":\"agent/worker-17\",\"theirs_blob\":\"[id12]\",\"theirs_changeset\":\"[id10]\"}],\"kinds\":[\"content\"],\"ours\":\"[id9]\",\"theirs\":\"[id10]\",\"truncated\":false}},\"exit\":3,\"hint\":\"swarmops cat [id10]:src/lib.rs, then swarmops land [id9] --resolve <file> with each path's resolution and against = [id10]\",\"message\":\"1 path(s) of the change conflict with the target's head [id10]: nothing was recorded\",\"retryable\":false},\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id9]\":\"[id9]\",\"[landed]\":\"[landed]\",\"main\":\"[id10]\"}},\"ok\":false,\"op\":\"ws_rebase\"}",
+              "type": "text"
+            }
+          ],
+          "isError": true,
+          "structuredContent": {
+            "api": 1,
+            "error": {
+              "code": "E_CONFLICT",
+              "details": {
+                "report": {
+                  "base": "[landed]",
+                  "files": [
+                    {
+                      "base_blob": "[id6]",
+                      "hunks": [
+                        {
+                          "base": {
+                            "first": 1,
+                            "last": 1,
+                            "text": "pub fn g() {}\n"
+                          },
+                          "id": 0,
+                          "ours": {
+                            "first": 1,
+                            "last": 1,
+                            "text": "pub fn mine() {}\n"
+                          },
+                          "theirs": {
+                            "first": 1,
+                            "last": 1,
+                            "text": "pub fn theirs() {}\n"
+                          }
+                        }
+                      ],
+                      "kind": "content",
+                      "ours_blob": "[id8]",
+                      "path": "src/lib.rs",
+                      "theirs_agent": "agent/worker-17",
+                      "theirs_blob": "[id12]",
+                      "theirs_changeset": "[id10]"
+                    }
+                  ],
+                  "kinds": [
+                    "content"
+                  ],
+                  "ours": "[id9]",
+                  "theirs": "[id10]",
+                  "truncated": false
+                }
+              },
+              "exit": 3,
+              "hint": "swarmops cat [id10]:src/lib.rs, then swarmops land [id9] --resolve <file> with each path's resolution and against = [id10]",
+              "message": "1 path(s) of the change conflict with the target's head [id10]: nothing was recorded",
+              "retryable": false
+            },
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[id9]": "[id9]",
+                "[landed]": "[landed]",
+                "main": "[id10]"
+              }
+            },
+            "ok": false,
+            "op": "ws_rebase"
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 31,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "paths": [
+              "src/lib.rs"
+            ],
+            "workspace": "ws1"
+          },
+          "name": "ws_resolve"
+        }
+      },
+      "response": {
+        "id": 31,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"main\":\"[id10]\"}},\"ok\":true,\"op\":\"ws_resolve\",\"result\":{\"remaining\":[],\"resolved\":[\"src/lib.rs\"],\"status_after\":{\"base\":\"[landed]\",\"behind_by\":1,\"changes\":[{\"kind\":\"modified\",\"path\":\"src/lib.rs\",\"size\":17}],\"head\":\"[id9]\",\"main\":\"[id10]\",\"name\":\"ws1\",\"rebasing\":{\"conflicts\":[],\"onto\":\"[id10]\"},\"state\":\"rebasing\",\"truncated\":false}}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[id10]": "[id10]",
+                "main": "[id10]"
+              }
+            },
+            "ok": true,
+            "op": "ws_resolve",
+            "result": {
+              "remaining": [],
+              "resolved": [
+                "src/lib.rs"
+              ],
+              "status_after": {
+                "base": "[landed]",
+                "behind_by": 1,
+                "changes": [
+                  {
+                    "kind": "modified",
+                    "path": "src/lib.rs",
+                    "size": 17
+                  }
+                ],
+                "head": "[id9]",
+                "main": "[id10]",
+                "name": "ws1",
+                "rebasing": {
+                  "conflicts": [],
+                  "onto": "[id10]"
+                },
+                "state": "rebasing",
+                "truncated": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 32,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "action": "continue",
+            "workspace": "ws1"
+          },
+          "name": "ws_rebase"
+        }
+      },
+      "response": {
+        "id": 32,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"[id13]\":\"[id13]\",\"[id9]\":\"[id9]\",\"[landed]\":\"[landed]\",\"main\":\"[id10]\"}},\"ok\":true,\"op\":\"ws_rebase\",\"result\":{\"changeset\":\"[id13]\",\"onto\":\"[id10]\",\"status\":\"rebased\",\"status_after\":{\"base\":\"[id10]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id13]\",\"main\":\"[id10]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[id10]": "[id10]",
+                "[id13]": "[id13]",
+                "[id9]": "[id9]",
+                "[landed]": "[landed]",
+                "main": "[id10]"
+              }
+            },
+            "ok": true,
+            "op": "ws_rebase",
+            "result": {
+              "changeset": "[id13]",
+              "onto": "[id10]",
+              "status": "rebased",
+              "status_after": {
+                "base": "[id10]",
+                "behind_by": 0,
+                "changes": [],
+                "head": "[id13]",
+                "main": "[id10]",
+                "name": "ws1",
+                "state": "clean",
+                "truncated": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 33,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "mode": "exact",
+            "workspace": "ws1"
+          },
+          "name": "ws_land"
+        }
+      },
+      "response": {
+        "id": 33,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"[id10]\":\"[id10]\",\"[id13]\":\"[id13]\",\"[id14]\":\"[id14]\",\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"ws_land\",\"result\":{\"attempts\":1,\"land\":{\"attempts\":1,\"base\":\"[id10]\",\"files_changed\":1,\"landed\":\"[id14]\",\"rebased_onto\":\"[id10]\",\"relocated\":false,\"squashed_from\":[\"[id13]\"],\"status\":\"landed\",\"target\":\"main\"},\"status_after\":{\"base\":\"[id14]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id14]\",\"main\":\"[id14]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "[id10]": "[id10]",
+                "[id13]": "[id13]",
+                "[id14]": "[id14]",
+                "main": "[id14]"
+              }
+            },
+            "ok": true,
+            "op": "ws_land",
+            "result": {
+              "attempts": 1,
+              "land": {
+                "attempts": 1,
+                "base": "[id10]",
+                "files_changed": 1,
+                "landed": "[id14]",
+                "rebased_onto": "[id10]",
+                "relocated": false,
+                "squashed_from": [
+                  "[id13]"
+                ],
+                "status": "landed",
+                "target": "main"
+              },
+              "status_after": {
+                "base": "[id14]",
+                "behind_by": 0,
+                "changes": [],
+                "head": "[id14]",
+                "main": "[id14]",
+                "name": "ws1",
+                "state": "clean",
+                "truncated": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 34,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {},
+          "name": "ws_list"
+        }
+      },
+      "response": {
+        "id": 34,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"ws_list\",\"result\":{\"workspaces\":[{\"base\":\"\",\"created\":false,\"head\":\"\",\"name\":\"ws1\",\"path\":\"[tmp]/ws1\"}]}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {}
+            },
+            "ok": true,
+            "op": "ws_list",
+            "result": {
+              "workspaces": [
+                {
+                  "base": "",
+                  "created": false,
+                  "head": "",
+                  "name": "ws1",
+                  "path": "[tmp]/ws1"
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 35,
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "params": {
+          "arguments": {
+            "workspace": "ws1"
+          },
+          "name": "ws_info"
+        }
+      },
+      "response": {
+        "id": 35,
+        "jsonrpc": "2.0",
+        "result": {
+          "content": [
+            {
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{\"main\":\"[id14]\"}},\"ok\":true,\"op\":\"ws_info\",\"result\":{\"base\":\"[id14]\",\"created\":false,\"head\":\"[id14]\",\"name\":\"ws1\",\"path\":\"[tmp]/ws1\",\"prefixes\":[\"docs.md\",\"src\"],\"status_after\":{\"base\":\"[id14]\",\"behind_by\":0,\"changes\":[],\"head\":\"[id14]\",\"main\":\"[id14]\",\"name\":\"ws1\",\"state\":\"clean\",\"truncated\":false}}}",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "structuredContent": {
+            "api": 1,
+            "meta": {
+              "auth": "trust",
+              "elapsed_ms": "[elapsed_ms]",
+              "repo": "[tmp]/store",
+              "resolved": {
+                "main": "[id14]"
+              }
+            },
+            "ok": true,
+            "op": "ws_info",
+            "result": {
+              "base": "[id14]",
+              "created": false,
+              "head": "[id14]",
+              "name": "ws1",
+              "path": "[tmp]/ws1",
+              "prefixes": [
+                "docs.md",
+                "src"
+              ],
+              "status_after": {
+                "base": "[id14]",
+                "behind_by": 0,
+                "changes": [],
+                "head": "[id14]",
+                "main": "[id14]",
+                "name": "ws1",
+                "state": "clean",
+                "truncated": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "request": {
+        "id": 36,
         "jsonrpc": "2.0",
         "method": "tools/call",
         "params": {
@@ -1154,12 +2023,12 @@ expression: transcript
         }
       },
       "response": {
-        "id": 22,
+        "id": 36,
         "jsonrpc": "2.0",
         "result": {
           "content": [
             {
-              "text": "{\"ok\":true,\"op\":\"verify\",\"api\":1,\"result\":{\"objects_checked\":14,\"changesets_checked\":4,\"problems\":[],\"findings\":[]},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+              "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"verify\",\"result\":{\"changesets_checked\":9,\"findings\":[],\"objects_checked\":28,\"problems\":[]}}",
               "type": "text"
             }
           ],
@@ -1175,9 +2044,9 @@ expression: transcript
             "ok": true,
             "op": "verify",
             "result": {
-              "changesets_checked": 4,
+              "changesets_checked": 9,
               "findings": [],
-              "objects_checked": 14,
+              "objects_checked": 28,
               "problems": []
             }
           }

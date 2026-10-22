@@ -95,28 +95,9 @@ const TOOLS: [(&str, &str); 35] = [
 ];
 
 /// The tools [`mcp_tool_calls_golden`] does not call: the git remotes' (M13), whose operations
-/// answer `E_INTERNAL` until their tasks land, and the workspaces' (M5), which answer
-/// `E_INVALID_ARG` until theirs do. The M13 plan's task C10 and the M5 plan's task W8 record
-/// their calls, and empty this list.
-const UNCALLED: [&str; 17] = [
-    "remote_list",
-    "fetch",
-    "push",
-    "sync",
-    "sync_status",
-    "rebase",
-    "ws_create",
-    "ws_status",
-    "ws_diff",
-    "ws_commit",
-    "ws_rebase",
-    "ws_resolve",
-    "ws_land",
-    "ws_materialize",
-    "ws_discard",
-    "ws_list",
-    "ws_info",
-];
+/// answer `E_INTERNAL` until their tasks land. The M13 plan's task C10 records their calls, and
+/// empties this list.
+const UNCALLED: [&str; 5] = ["remote_list", "fetch", "push", "sync", "sync_status"];
 
 /// How long a test waits for one reply, or for the server to exit once its stdin is closed.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(60);
@@ -315,6 +296,8 @@ fn mcp_tool_calls_golden() {
     });
     let theirs = golden.ok("commit", publish);
     golden.name_at(&theirs, "/result/changeset", "theirs");
+    let rebased = golden.ok("rebase", json!({"head": head}));
+    golden.name_at(&rebased, "/result/changeset", "rebased");
     let landed = golden.ok("land", json!({"head": head, "idempotency_key": "land-7"}));
     let landed = golden.name_at(&landed, "/result/landed", "landed");
 
@@ -339,6 +322,11 @@ fn mcp_tool_calls_golden() {
     let op = deleted["op"].as_u64().expect("an operation number");
     golden.ok("undo", json!({"op": op}));
     golden.ok("ref_list", json!({}));
+
+    // 6. A workspace: made, edited, diffed and committed; more of the tree written out and an
+    //    edit discarded; main moves on the same file, so the rebase conflicts; resolved,
+    //    continued, and landed exactly; then the listings.
+    workspace_calls(&mut golden, store.tmp(), &landed);
     golden.ok("verify", json!({}));
 
     // Every tool has its call, but those of UNCALLED.
@@ -352,6 +340,61 @@ fn mcp_tool_calls_golden() {
         assert_eq!(called, !UNCALLED.contains(&tool), "the call of {tool}");
     }
     insta::assert_json_snapshot!(transcript);
+}
+
+/// [`mcp_tool_calls_golden`]'s workspace: every workspace tool called, on `main` at `landed`.
+fn workspace_calls(golden: &mut Golden, tmp: &Path, landed: &str) {
+    // 1. Made under the `src` prefix; an edit there is seen, diffed and committed.
+    let dir = tmp.join("ws1");
+    let path = dir.to_str().expect("UTF-8 temp paths");
+    golden.ok(
+        "ws_create",
+        json!({"name": "ws1", "path": path, "prefixes": ["src"]}),
+    );
+    fs::write(dir.join("src/lib.rs"), "pub fn mine() {}\n").unwrap();
+    golden.ok("ws_status", json!({"workspace": "ws1"}));
+    golden.ok("ws_diff", json!({"workspace": "ws1", "format": "unified"}));
+    golden.ok(
+        "ws_commit",
+        json!({"workspace": "ws1", "message": "mine", "status_after": "none"}),
+    );
+
+    // 2. More of the tree written out; an edit there is lost on purpose.
+    golden.ok(
+        "ws_materialize",
+        json!({"workspace": "ws1", "paths": ["docs.md"]}),
+    );
+    fs::write(dir.join("docs.md"), "scribbles\n").unwrap();
+    golden.ok(
+        "ws_discard",
+        json!({"workspace": "ws1", "paths": ["docs.md"]}),
+    );
+
+    // 3. Main moves on the file the workspace changed: the rebase stops on a conflict.
+    let theirs = json!({
+        "message": "theirs",
+        "parent": landed,
+        "advance": "main",
+        "changes": [{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn theirs() {}\n"}}],
+    });
+    golden.ok("commit", theirs);
+    golden.err("ws_rebase", json!({"workspace": "ws1"}), "E_CONFLICT");
+
+    // 4. The file settled by hand, marked resolved, the rebase continued, the change landed.
+    fs::write(dir.join("src/lib.rs"), "pub fn both() {}\n").unwrap();
+    golden.ok(
+        "ws_resolve",
+        json!({"workspace": "ws1", "paths": ["src/lib.rs"]}),
+    );
+    golden.ok(
+        "ws_rebase",
+        json!({"workspace": "ws1", "action": "continue"}),
+    );
+    golden.ok("ws_land", json!({"workspace": "ws1", "mode": "exact"}));
+
+    // 5. What the store lists.
+    golden.ok("ws_list", json!({}));
+    golden.ok("ws_info", json!({"workspace": "ws1"}));
 }
 
 /// `resolve_rev` is listed as a read whose description names the CLI command it stands for,
@@ -2610,6 +2653,20 @@ impl Golden {
         call.envelope
     }
 
+    /// The envelope of a `tools/call` of `tool`, which must fail with `code`.
+    fn err(&mut self, tool: &str, arguments: Value, code: &str) -> Value {
+        let mut params = json!({"name": tool});
+        params["arguments"] = arguments;
+        let reply = self.request("tools/call", params);
+        let call = check_tool_result(tool, reply["result"].clone());
+        assert_eq!(
+            call.envelope["error"]["code"], code,
+            "{tool}: {}",
+            call.envelope
+        );
+        call.envelope
+    }
+
     /// Names the string at `pointer` in `envelope` `[name]`; the string.
     fn name_at(&mut self, envelope: &Value, pointer: &str, name: &str) -> String {
         let value = envelope
@@ -2624,8 +2681,30 @@ impl Golden {
     /// Ends the session cleanly; the transcript, redacted: `{args, steps}`.
     fn transcript(mut self) -> Value {
         self.server.finish_clean();
-        let steps = self.names.redact(Value::Array(self.steps));
+        let mut steps = self.names.redact(Value::Array(self.steps));
+        sort_result_texts(&mut steps);
         json!({"args": self.names.redact_str(&self.args), "steps": steps})
+    }
+}
+
+/// Writes each tool result's text block again with its members in the order of their redacted
+/// names. The text is the envelope as the server printed it, its `meta.resolved` members in the
+/// order of the ids they stand for, which differs from run to run: a call that resolves several
+/// revisions (the workspace tools do) would otherwise give a snapshot that changes with them.
+fn sort_result_texts(steps: &mut Value) {
+    for step in steps.as_array_mut().into_iter().flatten() {
+        let Some(blocks) = step["response"]["result"]["content"].as_array_mut() else {
+            continue;
+        };
+        for block in blocks {
+            let Some(text) = block["text"].as_str() else {
+                continue;
+            };
+            let Ok(envelope) = serde_json::from_str::<Value>(text) else {
+                continue;
+            };
+            block["text"] = Value::String(envelope.to_string());
+        }
     }
 }
 

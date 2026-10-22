@@ -88,7 +88,7 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 19,
+  "id": 20,
   "jsonrpc": "2.0",
   "method": "tools/call",
   "params": {
@@ -102,12 +102,12 @@ Its entry in `tools/list` carries no `_meta`.
 
 ```json
 {
-  "id": 19,
+  "id": 20,
   "jsonrpc": "2.0",
   "result": {
     "content": [
       {
-        "text": "{\"ok\":true,\"op\":\"op_log\",\"api\":1,\"result\":{\"ops\":[{\"op\":6,\"kind\":\"ref_move\",\"changesets\":[],\"changesets_total\":0,\"ref_moves\":[{\"name\":\"release/v1\",\"old\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}]},{\"op\":5,\"kind\":\"ref_move\",\"changesets\":[],\"changesets_total\":0,\"ref_moves\":[{\"name\":\"release/v1\",\"new\":\"[c1]\",\"actor\":\"agent/worker-17\",\"at\":\"[at]\"}]}],\"truncated\":true},\"meta\":{\"repo\":\"[tmp]/store\",\"elapsed_ms\":\"[elapsed_ms]\",\"resolved\":{},\"auth\":\"trust\"}}",
+        "text": "{\"api\":1,\"meta\":{\"auth\":\"trust\",\"elapsed_ms\":\"[elapsed_ms]\",\"repo\":\"[tmp]/store\",\"resolved\":{}},\"ok\":true,\"op\":\"op_log\",\"result\":{\"ops\":[{\"changesets\":[],\"changesets_total\":0,\"kind\":\"ref_move\",\"op\":7,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"old\":\"[c1]\"}]},{\"changesets\":[],\"changesets_total\":0,\"kind\":\"ref_move\",\"op\":6,\"ref_moves\":[{\"actor\":\"agent/worker-17\",\"at\":\"[at]\",\"name\":\"release/v1\",\"new\":\"[c1]\"}]}],\"truncated\":true}}",
         "type": "text"
       }
     ],
@@ -128,7 +128,7 @@ Its entry in `tools/list` carries no `_meta`.
             "changesets": [],
             "changesets_total": 0,
             "kind": "ref_move",
-            "op": 6,
+            "op": 7,
             "ref_moves": [
               {
                 "actor": "agent/worker-17",
@@ -142,7 +142,7 @@ Its entry in `tools/list` carries no `_meta`.
             "changesets": [],
             "changesets_total": 0,
             "kind": "ref_move",
-            "op": 5,
+            "op": 6,
             "ref_moves": [
               {
                 "actor": "agent/worker-17",
