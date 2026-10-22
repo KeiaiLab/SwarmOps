@@ -387,13 +387,21 @@ fn a_check_lists_value_files_and_reads_them_without_removing_any() {
     let dir = layout.derived_dir().join("depth/1");
     let hex = subject(1).to_hex();
     let fanout = dir.join(&hex[..2]);
+
+    // A case-insensitive volume (macOS's APFS by default) folds the capital name onto `empty`'s
+    // own file: that stray cannot exist there, so it is made only where it can.
+    let capital = fanout.join(hex[2..].to_uppercase());
+    let folds_case = fs::exists(&capital).unwrap();
     for stray in [
         fanout.join("abc"),
-        fanout.join(hex[2..].to_uppercase()),
+        capital,
         fanout.join(format!("{}.0123", &hex[2..])),
         fanout.join(format!("{}.0123456789abcdeg", &hex[2..])),
         dir.join(&hex[..1]).join(&hex[1..]),
     ] {
+        if folds_case && stray == fanout.join(hex[2..].to_uppercase()) {
+            continue;
+        }
         fs::create_dir_all(stray.parent().unwrap()).unwrap();
         fs::write(&stray, b"stray").unwrap();
     }
