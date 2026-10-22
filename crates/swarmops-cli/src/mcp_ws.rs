@@ -281,19 +281,31 @@ mod tests {
         assert_eq!(advertised, requests, "one tool per workspace request type");
         assert_eq!(WS_TOOLS.len(), 11);
 
-        // 2. Each arm runs the function of its name.
+        // 2. Each arm runs the function of its name: one not built yet names itself, a built
+        //    one answers as it does on a store without workspaces.
         for spec in &WS_TOOLS {
             let called = RefCell::new(Vec::new());
             let outcome = RefCell::new(Vec::new());
             operate_ws(spec.tool, Probe::new(&called, &outcome));
             let outcome = outcome.into_inner();
             assert_eq!(outcome.len(), 1, "the {} tool", spec.name);
+            let expected = built(spec.tool).unwrap_or(spec.name);
             assert!(
-                outcome[0].contains(spec.name),
+                outcome[0].contains(expected),
                 "the {} tool ran {:?}",
                 spec.name,
                 outcome[0]
             );
+        }
+    }
+
+    /// What a built workspace operation answers to the probe's sample on a store without
+    /// workspaces; none for one not built yet.
+    fn built(tool: WsTool) -> Option<&'static str> {
+        match tool {
+            WsTool::List => Some("ok"),
+            WsTool::Info => Some(r#"the store has no workspace named "probe""#),
+            _ => None,
         }
     }
 }
