@@ -1,0 +1,44 @@
+{
+  "name": "swarmops-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "postbuild": "node scripts/postbuild.mjs && node scripts/markdown-twins.mjs",
+    "check": "node scripts/check-site.mjs",
+    "dev": "next dev",
+    "typecheck": "fumadocs-mdx && next typegen && tsc --noEmit",
+    "postinstall": "fumadocs-mdx"
+  },
+  "dependencies": {
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "fumadocs-core": "16.17.7",
+    "fumadocs-mdx": "15.4.9",
+    "fumadocs-ui": "16.17.7",
+    "lucide-react": "1.61.0",
+    "next": "16.4.2",
+    "next-themes": "0.4.6",
+    "radix-ui": "1.8.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "tailwind-merge": "3.7.0",
+    "unist-util-visit": "5.1.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/mdast": "4.0.4",
+    "@types/mdx": "2.0.14",
+    "@types/node": "22.20.5",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "postcss": "8.5.31",
+    "shadcn": "4.22.1",
+    "tailwindcss": "4.3.3",
+    "typescript": "7.0.2"
+  },
+  "engines": {
+    "node": ">=20.18.1"
+  }
+}

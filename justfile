@@ -27,7 +27,9 @@ default: check
 # CI (.github/workflows/ci.yml) runs this recipe with `NEXTEST_PROFILE=ci`; the release run
 # keeps the default profile, so that its one-test report does not replace the JUnit report of
 # the workspace run in target/nextest/ci/.
-# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices.
+# Then scripts/test-install.py runs the one-line installer against a fake release on 127.0.0.1,
+# offline, and checks that web/public/install.sh is the same file.
+# The definition of done for every session: fmt, clippy, tests, hook proof, docs, cargo-deny, license notices, installer, Markdown.
 check:
     cargo fmt --all --check
     cargo fmt --manifest-path fuzz/Cargo.toml --check
@@ -41,6 +43,9 @@ check:
     cargo deny --locked check
     cargo deny --locked --manifest-path fuzz/Cargo.toml --config deny.toml check
     python3 -I scripts/third-party-licenses.py --check
+    python3 -I scripts/test-install.py
+    python3 -I scripts/check-docs.py selftest
+    python3 -I scripts/check-docs.py
 
 # The test hooks are on (`--all-features`), as in `just check`. The ignored switches that rewrite
 # or rebuild fixtures on purpose (`regenerate_golden`, `regenerate_git_fixtures`,
@@ -132,3 +137,19 @@ bench-compare *args:
 fuzz target="codec_roundtrip":
     mkdir -p fuzz/corpus-new/{{target}}
     cd fuzz && cargo +nightly fuzz run {{target}} corpus-new/{{target}} corpus/{{target}} -- -max_total_time=60 -timeout=30
+
+# The website, web/: a Next.js static export (Fumadocs for /docs) that renders docs/**/*.md and
+# CHANGELOG.md, written to web/out/. `npm ci` needs the npm registry, so these recipes stay out of
+# `just check`; the build itself is offline once installed. .github/workflows/site.yml runs all three.
+# Installs the website's dependencies, exactly as web/package-lock.json pins them.
+web-install:
+    cd web && npm ci --no-audit --no-fund
+
+# Builds the website into web/out/: pages, search index, per-page CSP, the copied installer.
+web-build:
+    cd web && npm run build
+
+# Checks web/out/: every docs page, internal links and anchors, no third-party origin, the CSP
+# hashes, the first-load JS budget and the files served beside the pages.
+web-check:
+    cd web && npm run check

@@ -7,10 +7,7 @@ Report a vulnerability privately, never in a public issue, pull request, discuss
 The channel is GitHub's private vulnerability reporting: on the repository's **Security** tab,
 choose **Report a vulnerability**. That opens a draft security advisory that only you and the
 maintainers can see; we work out the fix with you there, and publish the advisory once the fix
-has landed. GitHub offers this for public repositories only, and SwarmOps' repository is private
-while SwarmOps is pre-release: it will be turned on when the repository goes public. Until then,
-the people who can see the repository report to a maintainer directly, outside the issue
-tracker.
+has landed.
 
 Please include what you found, how to reproduce it (a store, a command line, a crafted file),
 what it lets an attacker do, and the commit you tested. A fix lands on `stable`, and

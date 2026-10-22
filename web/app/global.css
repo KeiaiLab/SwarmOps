@@ -1,0 +1,119 @@
+/* swarmops.cc. Tailwind 4, Fumadocs' shadcn bridge (fumadocs colours read the shadcn variables
+   below, so docs and product pages share one palette), no web fonts. Brand colours come from
+   docs/assets/logo.svg: violet #7c5cff, amber #d97706; the light theme darkens both for contrast,
+   as the retired site/styles.css does. */
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/shadcn.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@custom-variant dark (&:is(.dark *));
+
+/* Light theme. */
+:root {
+  --radius: 0.75rem;
+  --background: #ffffff;
+  --foreground: #1b1f27;
+  --card: #f7f8fb;
+  --card-foreground: #1b1f27;
+  --popover: #ffffff;
+  --popover-foreground: #1b1f27;
+  --primary: #5b3ee6;
+  --primary-foreground: #ffffff;
+  --secondary: #f3f4f8;
+  --secondary-foreground: #1b1f27;
+  --muted: #f3f4f8;
+  --muted-foreground: #57606e;
+  --accent: rgba(107, 76, 240, 0.09);
+  --accent-foreground: #3b25b8;
+  --destructive: #b42318;
+  --border: #e1e4ea;
+  --input: #e1e4ea;
+  --ring: #b45309;
+  --brand: #5b3ee6;
+  --brand-2: #b45309;
+  --sidebar: #f7f8fb;
+  --sidebar-foreground: #1b1f27;
+  --sidebar-primary: #5b3ee6;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: rgba(107, 76, 240, 0.09);
+  --sidebar-accent-foreground: #3b25b8;
+  --sidebar-border: #e1e4ea;
+  --sidebar-ring: #b45309;
+}
+
+/* Dark theme. */
+.dark {
+  --background: #0b0e14;
+  --foreground: #e6edf3;
+  --card: #141a23;
+  --card-foreground: #e6edf3;
+  --popover: #0f141c;
+  --popover-foreground: #e6edf3;
+  --primary: #8b70ff;
+  --primary-foreground: #0b0e14;
+  --secondary: #1a212c;
+  --secondary-foreground: #e6edf3;
+  --muted: #141a23;
+  --muted-foreground: #9aa5b4;
+  --accent: rgba(124, 92, 255, 0.14);
+  --accent-foreground: #c9bdff;
+  --destructive: #f97066;
+  --border: #252d3a;
+  --input: #252d3a;
+  --ring: #f5a524;
+  --brand: #8b70ff;
+  --brand-2: #f5a524;
+  --sidebar: #0f141c;
+  --sidebar-foreground: #e6edf3;
+  --sidebar-primary: #8b70ff;
+  --sidebar-primary-foreground: #0b0e14;
+  --sidebar-accent: rgba(124, 92, 255, 0.14);
+  --sidebar-accent-foreground: #c9bdff;
+  --sidebar-border: #252d3a;
+  --sidebar-ring: #f5a524;
+}
+
+/* Tailwind utilities for the shadcn components (bg-primary, text-muted-foreground, ...). */
+@theme inline {
+  --font-sans: system-ui, -apple-system, 'Segoe UI', Roboto, 'Ubuntu Sans', 'Noto Sans', Helvetica, Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Menlo, Consolas, monospace;
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-brand: var(--brand);
+  --color-brand-2: var(--brand-2);
+}
+
+html {
+  scrollbar-gutter: stable;
+}
+
+html > body[data-scroll-locked] {
+  margin-right: 0px !important;
+  --removed-body-scroll-bar-size: 0px !important;
+}
+
+/* Keyboard focus in the amber accent, as on site/. */
+:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}

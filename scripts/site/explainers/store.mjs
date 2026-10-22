@@ -5,10 +5,10 @@
 //   git -C /tmp/anatomy checkout 1482e8469b0a9e0d8cc18ea2740a01423d29ae80
 //   ANATOMY_DIR=/tmp/anatomy node scripts/site/explainers/store.mjs
 //
-// Writes site/explainers/store.html and store-light.html (interactive, dark and light),
-// site/explainers/store.svg and store-light.svg (stills), the same stills as
+// Writes web/public/explainers/store.html and store-light.html (interactive, dark and light),
+// web/public/explainers/store.svg and store-light.svg (stills), the same stills as
 // docs/assets/store-dark.svg and store-light.svg for the README, and
-// site/THIRD-PARTY-NOTICES.txt.
+// web/public/THIRD-PARTY-NOTICES.txt.
 //
 // The pages inline the kit's script and stylesheet, and the stills its stylesheet, so each of
 // those files carries Anatomy's licence in a comment, copied from the checkout's LICENSE. The
@@ -487,10 +487,10 @@ const out = (rel, text) => {
   writeFileSync(p, text);
   console.log(rel, text.length);
 };
-out("site/explainers/store.html", page("dark"));
-out("site/explainers/store-light.html", page("light"));
-out("site/explainers/store.svg", stillSvg("dark"));
-out("site/explainers/store-light.svg", stillSvg("light"));
+out("web/public/explainers/store.html", page("dark"));
+out("web/public/explainers/store-light.html", page("light"));
+out("web/public/explainers/store.svg", stillSvg("dark"));
+out("web/public/explainers/store-light.svg", stillSvg("light"));
 out("docs/assets/store-dark.svg", stillSvg("dark"));
 out("docs/assets/store-light.svg", stillSvg("light"));
-out("site/THIRD-PARTY-NOTICES.txt", notices);
+out("web/public/THIRD-PARTY-NOTICES.txt", notices);

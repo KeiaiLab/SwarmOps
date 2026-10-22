@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <!-- Extensionless, as Cloudflare Pages serves them: /x.html redirects to /x. -->
-  <!-- /explainers/store-light is the same figure in the light theme and is not listed. -->
-  <url><loc>https://swarmops.cc/</loc></url>
-  <url><loc>https://swarmops.cc/explainers/store</loc></url>
-</urlset>

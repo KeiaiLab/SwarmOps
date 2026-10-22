@@ -35,7 +35,7 @@
 # cargo
 Cargo.lock linguist-generated
 
-# python3 -I scripts/third-party-licenses.py; the figure build writes the one under site/
+# python3 -I scripts/third-party-licenses.py; the figure build writes the one under web/public/
 THIRD-PARTY-* linguist-generated
 
 # cargo insta review
@@ -51,8 +51,8 @@ crates/swarmops-testkit/git-fixtures/*.tar linguist-generated
 fuzz/corpus/** binary linguist-generated
 
 # node scripts/site/explainers/store.mjs
-site/explainers/*.html linguist-generated
-site/explainers/*.svg linguist-generated
+web/public/explainers/*.html linguist-generated
+web/public/explainers/*.svg linguist-generated
 docs/assets/store-*.svg linguist-generated
 
 # Left out of git archive (and so of GitHub's source archives); a directory goes whole. The last

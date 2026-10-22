@@ -82,3 +82,11 @@ node_modules/
 
 # task worktrees (controller-managed)
 .worktrees/
+
+# The website (web/): npm ci installs, fumadocs-mdx generates .source/, next build writes .next/
+# and the static export out/
+/web/.source/
+/web/.next/
+/web/out/
+/web/next-env.d.ts
+/web/*.tsbuildinfo
