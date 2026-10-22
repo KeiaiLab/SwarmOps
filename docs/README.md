@@ -50,6 +50,8 @@ features, each with an example.
 | --- | --- |
 | [CLI reference](reference/cli.md) | Look up a command, its arguments and its output. |
 | [Error reference](reference/errors.md) | Look up an `E_*` code, its exit code and what to do. |
+| [Limits](reference/limits.md) | Look up a limit, its value, constant, commands and error. |
+| [Schema types](reference/schema-types.md) | Look up a request, response or value type and its fields. |
 | [MCP tool reference](reference/mcp-tools/README.md) | Look up an MCP tool, its input schema, annotations, an example call and its CLI command. |
 | [Versioning and stability](policies/versioning-and-stability.md) | Know what stays compatible, and how a breaking change is made. |
 | [MSRV and platforms](policies/msrv-and-platforms.md) | Know the Rust version and the platforms SwarmOps supports. |

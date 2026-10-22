@@ -86,6 +86,10 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   targets. Two milestones are added, M13 (git remotes from a store) and M14 (git clients against a
   store), and M11 takes `so clone` and `so sync`. `docs/goals.md` gains G15 to G17, and the site's
   roadmap page summarises the new page, topologies first.
+- `docs/reference/limits.md` lists every contract limit with its constant, value, the commands that
+  enforce it and its error, plus the defaults, the schema bounds and, separately, the internal
+  values. `docs/reference/schema-types.md` covers the 91 API types with their fields and values.
+  Both pages are generated from the code and have drift tests.
 
 ## [0.1.0] - 2026-10-20
 

@@ -455,6 +455,16 @@ Anthropic, and contains no Scion code, which is not public.
 
 ## Roadmap
 
+SwarmOps' goal is version control for agent swarms that works together with GitHub, in three
+topologies. [docs/roadmap.md](docs/roadmap.md) is the detailed roadmap: each topology's commands,
+design, acceptance criteria and targets. Command names of planned work are provisional.
+
+| Topology | Today | Planned |
+| --- | --- | --- |
+| 1. Local git, remote SwarmOps | Not served: a bare git repository that `git export` writes, whose pushes someone imports and lands | M14: `swarmops serve` over ssh and HTTP; stock `git clone`, `fetch`, `pull` and `push`; a push to `refs/land/main` lands |
+| 2. Local SwarmOps, remote GitHub | `git import` from a bare clone, `git export` back to it, and a hand-run `git push` (M3, M8) | M13: `so clone https://github.com/…`, `so fetch`, `so push`, `so sync`, with no hand-run git |
+| 3. Local SwarmOps, remote SwarmOps | Through a git remote, one writing host at a time (M8) | M11: `so clone so://host/…` and `so sync`, offline-first |
+
 The milestones of the umbrella spec (§13), in the order they are built. ✅ delivered · 📋 planned.
 
 | Status | Milestone | Scope |
@@ -468,11 +478,13 @@ The milestones of the umbrella spec (§13), in the order they are built. ✅ del
 | ✅ | M4 | Merge and landing, and the journal shown as an operation log with undo. Landing is a compare-and-swap loop that merges again, incrementally, when the target moves; its measurement under a swarm's load, and the landing model that measurement chooses, come next. |
 | ✅ | M8 | git export, moved ahead so that work landed in SwarmOps goes back to git and today's deployment pipelines keep running. |
 | 📋 | M12 | Portability: macOS and Windows builds, tests and releases. |
+| 📋 | M13 | Git remotes from a store (topology 2): packs over a connection, git's fetch and push as a client, the store's git mirror, `so clone`, `so remote`, `so fetch`, `so push`, `so sync` and their MCP tools. |
 | 📋 | M5 | Workspaces, with an adapter for Claude Code's worktree hooks, so that an agent builds and tests a change on disk before it lands it. |
-| 📋 | M6 | Verify, crash safety and fuzzing: fsck and repair, gc, detection of unsupported filesystems, bounded reads of store files, a capped `verify` report, and the next store `FORMAT`. |
+| 📋 | M6 | Verify, crash safety and fuzzing: fsck and repair, gc, detection of unsupported filesystems, bounded reads of store files, a capped `verify` report, and the next store `FORMAT`, with branch names, tags and remote-tracking refs. |
+| 📋 | M14 | Git clients against a store (topology 1): `swarmops serve` over ssh and HTTP, run per connection; pushes by compare-and-swap or that land; access control. |
 | 📋 | M7 | Blame and review. |
 | 📋 | M9 | Simulation and a benchmark gate: the store's own code under a deterministic simulator and in real processes killed at random, and benchmarks that fail on a regression. |
-| 📋 | M11 | Remote sync, offline-first: a full store on every host, `fetch`, `push` and `sync status` against one upstream, over ssh. |
+| 📋 | M11 | Remote sync, offline-first (topology 3): a full store on every host, `so clone so://…`, `fetch`, `push`, `sync` and `sync status` against one upstream, over ssh. |
 
 M0, M1, M1.5, M1.6, M2, M3, M4 and M8 make the first release, 0.1.0, together with the security
 fixes in its [changelog](CHANGELOG.md), an [operations guide](docs/operations.md) and a
@@ -483,12 +495,14 @@ quiet host: landing by 32 and 50 processes through the binary against umbrella �
 and the landing model those numbers choose; whether a transaction can sync the journal once
 instead of twice; the import's and the export's timings on larger repositories. The order of
 the milestones from M5 on is settled once the pilot has run; until then the table is the plan.
+M13 and M14 are new, and where they go is part of that plan.
 
 When it is usable (umbrella spec §1): by one agent from M1; by a swarm, landing through MCP,
 from M4; on an existing git repository, its history imported and its landed work exported back
 so that its CI and deployments run as before, from M8, in the first release; by agents that
-build and test their changes in a workspace before they land them, from M5; with review from
-M7; as the complete v1 at M9; across hosts, offline-first, from M11.
+build and test their changes in a workspace before they land them, from M5; with GitHub as the
+remote, without a hand-run `git push`, from M13; by people with stock git against a store, from
+M14; with review from M7; as the complete v1 at M9; across hosts, offline-first, from M11.
 [docs/known-limitations.md](docs/known-limitations.md) lists what is still open, and which
 milestone takes each item.
 

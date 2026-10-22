@@ -29,6 +29,8 @@ use crate::cli::{Cli, op_name};
 
 mod cli_page;
 mod command_page;
+mod limits;
+mod schema_types;
 
 /// The variable that makes `regen_reference` write the pages.
 const REGEN_VAR: &str = "SWARMOPS_REGEN_REFERENCE";
@@ -181,6 +183,8 @@ fn pages() -> Vec<Page> {
         },
     ];
     pages.extend(command_page::pages());
+    pages.push(limits::page());
+    pages.push(schema_types::page());
     pages
 }
 
