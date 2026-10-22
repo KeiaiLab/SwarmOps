@@ -137,7 +137,7 @@ with `E_IDENTITY_REQUIRED` (exit 5) without it; `init`, reads, `git export` and 
 The changeset records the identity, and its run as `run_id` metadata; the journal records who moved
 each ref. SwarmOps records identities without verifying them (`meta.auth` is `"trust"`).
 
-Explained in: [README, The store and the identity](../README.md#the-store-and-the-identity) ·
+Explained in: [README, Store, identity and lifetime](../README.md#store-identity-and-lifetime) ·
 [operations, Identities](operations.md#identities).
 
 ## Op log and undo
