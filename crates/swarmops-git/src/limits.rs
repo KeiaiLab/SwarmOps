@@ -9,14 +9,15 @@
 //! Under the `test-hooks` feature, `SWARMOPS_TEST_GITHUB_HOSTS` (a comma-separated list of
 //! `host[:port]`) adds hosts that count as GitHub's, for the loopback server of the tests; without
 //! the feature it is ignored.
-//!
-//! The M13 plan's task C1 froze these items; task C7 writes their bodies, which until then
-//! panic with the task that writes them.
 
 use crate::transport::NewObjects;
 
-/// The task that writes this module's bodies.
-const PLANNED: &str = "planned in M13 (C7)";
+/// GitHub's host; its subdomains (`ssh.github.com`) count as it.
+const GITHUB: &str = "github.com";
+
+/// The variable that adds hosts under the `test-hooks` feature: `host[:port]`, comma-separated.
+#[cfg(feature = "test-hooks")]
+const TEST_HOSTS: &str = "SWARMOPS_TEST_GITHUB_HOSTS";
 
 /// A file GitHub refuses: larger than 100 MiB ("About large files on GitHub").
 pub const GITHUB_FILE_REFUSED: u64 = 100 * 1024 * 1024;
@@ -60,13 +61,71 @@ pub struct LimitExceeded {
     pub limit: u64,
 }
 
-/// Whether the limits apply to a remote on `host`: `github.com` and its subdomains.
-pub fn applies_to(_host: &str) -> bool {
-    unimplemented!("{PLANNED}")
+/// Whether the limits apply to a remote on `host` (without user or port): `github.com` and
+/// its subdomains, in any case. Under the `test-hooks` feature, also each host
+/// `SWARMOPS_TEST_GITHUB_HOSTS` names (its port, if any, is not compared).
+pub fn applies_to(host: &str) -> bool {
+    let host = host.to_ascii_lowercase();
+
+    // GitHub's own host, or a name under it.
+    let under = host
+        .strip_suffix(GITHUB)
+        .is_some_and(|rest| rest.is_empty() || (rest.ends_with('.') && rest.len() > 1));
+    under || test_host(&host)
 }
 
-/// Checks what a push would add against the limits: the warnings for the files from 50 MiB,
-/// or the first limit it breaks.
-pub fn check(_objects: &NewObjects) -> Result<Vec<String>, LimitExceeded> {
-    unimplemented!("{PLANNED}")
+/// Whether `SWARMOPS_TEST_GITHUB_HOSTS` names `host` (the `test-hooks` feature only).
+#[cfg(feature = "test-hooks")]
+fn test_host(host: &str) -> bool {
+    let Some(listed) = std::env::var_os(TEST_HOSTS) else {
+        return false;
+    };
+    let listed = listed.to_string_lossy().to_ascii_lowercase();
+
+    // Each `host[:port]` entry, by its host.
+    listed
+        .split(',')
+        .map(|entry| entry.trim().split(':').next().unwrap_or_default())
+        .any(|entry| !entry.is_empty() && entry == host)
+}
+
+/// Without the `test-hooks` feature no host is added.
+#[cfg(not(feature = "test-hooks"))]
+fn test_host(_host: &str) -> bool {
+    false
+}
+
+/// Checks what a push would add against the limits: the warnings for the files over 50 MiB,
+/// or the first limit it breaks, a file over 100 MiB before a push over 2 GB (the file is what
+/// can be acted on).
+pub fn check(objects: &NewObjects) -> Result<Vec<String>, LimitExceeded> {
+    // 1. Each file: refused over 100 MiB, warned about over 50 MiB.
+    let mut warnings = Vec::new();
+    for (_, size, path) in &objects.blobs {
+        if *size > GITHUB_FILE_REFUSED {
+            return Err(LimitExceeded {
+                scope: LimitScope::RemoteFile,
+                path: Some(path.clone()),
+                size: *size,
+                limit: GITHUB_FILE_REFUSED,
+            });
+        }
+        if *size > GITHUB_FILE_WARNED {
+            warnings.push(format!(
+                "github_large_file: {path} is {size} bytes, more than the {GITHUB_FILE_WARNED} \
+                 GitHub warns about"
+            ));
+        }
+    }
+
+    // 2. The push as a whole, by its objects' bytes on disk: an upper bound of the pack.
+    if objects.disk_usage > GITHUB_PUSH_REFUSED {
+        return Err(LimitExceeded {
+            scope: LimitScope::RemotePush,
+            path: None,
+            size: objects.disk_usage,
+            limit: GITHUB_PUSH_REFUSED,
+        });
+    }
+    Ok(warnings)
 }
