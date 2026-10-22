@@ -43,23 +43,27 @@ The command also takes the [global options](../cli.md#global-options).
 ### CLI
 
 ```sh
-swarmops --repo [tmp]/store --as agent/worker-17 op undo 0
+swarmops --repo [tmp]/store --as agent/worker-17 op undo 3
 ```
 
 ```json
 {
-  "ok": false,
+  "ok": true,
   "op": "undo",
   "api": 1,
-  "error": {
-    "code": "E_NOTHING_TO_UNDO",
-    "message": "operation 0 moved no ref, so there is nothing to undo",
-    "retryable": false,
-    "exit": 1,
-    "details": {
-      "op": 0
-    },
-    "hint": "swarmops op log"
+  "result": {
+    "undone": 3,
+    "op": 4,
+    "ref_moves": [
+      {
+        "name": "main",
+        "old": "[c2]",
+        "new": "[c1]",
+        "actor": "agent/worker-17",
+        "at": "[at]"
+      }
+    ],
+    "already_applied": false
   },
   "meta": {
     "repo": "[tmp]/store",
@@ -70,7 +74,7 @@ swarmops --repo [tmp]/store --as agent/worker-17 op undo 0
 }
 ```
 
-Exit code 1. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
+Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
 
 ### MCP
 

@@ -56,7 +56,87 @@ The most changesets to list for each operation.
 
 ### CLI
 
-No recorded example yet.
+```sh
+swarmops --repo [tmp]/store op log
+```
+
+```json
+{
+  "ok": true,
+  "op": "op_log",
+  "api": 1,
+  "result": {
+    "ops": [
+      {
+        "op": 3,
+        "kind": "ref_move",
+        "changesets": [],
+        "changesets_total": 0,
+        "ref_moves": [
+          {
+            "name": "main",
+            "old": "[c1]",
+            "new": "[c2]",
+            "actor": "agent/worker-17",
+            "at": "[at]"
+          }
+        ]
+      },
+      {
+        "op": 2,
+        "kind": "commit",
+        "changesets": [
+          {
+            "id": "[c2]",
+            "agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c2"
+          }
+        ],
+        "changesets_total": 1,
+        "ref_moves": []
+      },
+      {
+        "op": 1,
+        "kind": "ref_move",
+        "changesets": [],
+        "changesets_total": 0,
+        "ref_moves": [
+          {
+            "name": "main",
+            "new": "[c1]",
+            "actor": "agent/worker-17",
+            "at": "[at]"
+          }
+        ]
+      },
+      {
+        "op": 0,
+        "kind": "commit",
+        "changesets": [
+          {
+            "id": "[c1]",
+            "agent": "agent/worker-17",
+            "created_at": "[created_at]",
+            "title": "c1"
+          }
+        ],
+        "changesets_total": 1,
+        "ref_moves": []
+      }
+    ],
+    "truncated": false
+  },
+  "meta": {
+    "repo": "[tmp]/store",
+    "elapsed_ms": "[elapsed_ms]",
+    "resolved": {},
+    "auth": "trust"
+  }
+}
+```
+
+Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
 
 ### MCP
 

@@ -63,7 +63,30 @@ With --follow: start from the journal's first frame, not its end.
 
 ### CLI
 
-No recorded example yet.
+```sh
+swarmops --repo [tmp]/store derive
+```
+
+```json
+{
+  "ok": true,
+  "op": "derive",
+  "api": 1,
+  "result": {
+    "derived": 2,
+    "cached": 0,
+    "next": 1
+  },
+  "meta": {
+    "repo": "[tmp]/store",
+    "elapsed_ms": "[elapsed_ms]",
+    "resolved": {},
+    "auth": "trust"
+  }
+}
+```
+
+Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
 
 ## Return information
 

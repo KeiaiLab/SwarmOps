@@ -40,7 +40,30 @@ The command also takes the [global options](../cli.md#global-options).
 
 ### CLI
 
-No recorded example yet.
+```sh
+swarmops --repo [tmp]/store --as agent/worker-17 blob put [tmp]/payload.txt
+```
+
+```json
+{
+  "ok": true,
+  "op": "blob_put",
+  "api": 1,
+  "result": {
+    "blob": "[blob]",
+    "size": 12,
+    "written": true
+  },
+  "meta": {
+    "repo": "[tmp]/store",
+    "elapsed_ms": "[elapsed_ms]",
+    "resolved": {},
+    "auth": "trust"
+  }
+}
+```
+
+Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
 
 ### MCP
 

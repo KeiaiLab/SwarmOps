@@ -71,26 +71,26 @@ What to do with a submodule's entry: refuse it, or drop it as --lossy gitlinks d
 ### CLI
 
 ```sh
-swarmops --repo [tmp]/store --as agent/worker-17 git import [tmp]/missing
+swarmops --repo [tmp]/copy --as agent/worker-17 git import [git]
 ```
 
 ```json
 {
-  "ok": false,
+  "ok": true,
   "op": "git_import",
   "api": 1,
-  "error": {
-    "code": "E_GIT_NOT_A_REPO",
-    "message": "no git repository it can open there: \"[tmp]/missing\" does not appear to be a git repository: Could not retrieve metadata of \"[tmp]/missing\": No such file or directory (os error 2)",
-    "retryable": false,
-    "exit": 6,
-    "details": {
-      "git_path": "[tmp]/missing"
-    },
-    "hint": null
+  "result": {
+    "imported": 2,
+    "skipped": 0,
+    "head_changeset": "[imported]",
+    "git_head_sha": "[id4]",
+    "target_ref": "main",
+    "ref_moved": true,
+    "lossy": [],
+    "lossy_total": 0
   },
   "meta": {
-    "repo": "[tmp]/store",
+    "repo": "[tmp]/copy",
     "elapsed_ms": "[elapsed_ms]",
     "resolved": {},
     "auth": "trust"
@@ -98,7 +98,7 @@ swarmops --repo [tmp]/store --as agent/worker-17 git import [tmp]/missing
 }
 ```
 
-Exit code 6. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
+Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
 
 ## Return information
 

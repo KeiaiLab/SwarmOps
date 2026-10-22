@@ -47,7 +47,7 @@ The repository's name, at most 255 bytes (default: the directory's name).
 ### CLI
 
 ```sh
-swarmops init [tmp]/store --name acme
+swarmops init [tmp]/store
 ```
 
 ```json
@@ -57,7 +57,7 @@ swarmops init [tmp]/store --name acme
   "api": 1,
   "result": {
     "repo_id": "[repo_id]",
-    "name": "acme",
+    "name": "store",
     "store_version": 1,
     "changesets": 0,
     "refs": 0

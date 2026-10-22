@@ -94,36 +94,40 @@ A resolution applies while the ref holds its path as THEIRS did, whether the pat
 ### CLI
 
 ```sh
-swarmops --repo [tmp]/store --as agent/worker-17 land main
+swarmops --repo [tmp]/store --as agent/worker-17 land [head] --key land-7
 ```
 
 ```json
 {
-  "ok": false,
+  "ok": true,
   "op": "land",
   "api": 1,
-  "error": {
-    "code": "E_NOTHING_TO_LAND",
-    "message": "nothing to land: the head is on the target",
-    "retryable": false,
-    "exit": 1,
-    "details": {
-      "reason": "on_target"
-    },
-    "hint": null
+  "result": {
+    "status": "landed",
+    "landed": "[landed]",
+    "rebased_onto": "[theirs]",
+    "target": "main",
+    "base": "[t0]",
+    "attempts": 1,
+    "relocated": false,
+    "files_changed": 1,
+    "squashed_from": [
+      "[head]"
+    ]
   },
   "meta": {
     "repo": "[tmp]/store",
     "elapsed_ms": "[elapsed_ms]",
     "resolved": {
-      "main": "[c1]"
+      "[head]": "[head]",
+      "main": "[theirs]"
     },
     "auth": "trust"
   }
 }
 ```
 
-Exit code 1. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
+Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
 
 ### MCP
 

@@ -65,26 +65,23 @@ Move a branch that diverged all the same, replacing what git holds there (by com
 ### CLI
 
 ```sh
-swarmops --repo [tmp]/store git export [refs]/repo.git
+swarmops --repo [tmp]/store git export [git]
 ```
 
 ```json
 {
-  "ok": false,
+  "ok": true,
   "op": "git_export",
   "api": 1,
-  "error": {
-    "code": "E_GIT_EXPORT_DIVERGED",
-    "message": "the branch main has diverged from [c1] (branch_moved): it names [id4]",
-    "retryable": false,
-    "exit": 3,
-    "details": {
-      "branch": "main",
-      "git_head": "[id4]",
-      "head_changeset": "[c1]",
-      "reason": "branch_moved"
-    },
-    "hint": "git -C [refs]/repo.git log refs/heads/main shows what the branch holds; --force replaces it with the export"
+  "result": {
+    "exported": 1,
+    "objects_written": 3,
+    "head_changeset": "[c1]",
+    "head_sha": "[id2]",
+    "branch": "main",
+    "branch_moved": true,
+    "incremental": false,
+    "rewritten": 0
   },
   "meta": {
     "repo": "[tmp]/store",
@@ -97,7 +94,7 @@ swarmops --repo [tmp]/store git export [refs]/repo.git
 }
 ```
 
-Exit code 3. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
+Exit code 0. Recorded by the CLI tests. A name in square brackets, such as `[tmp]` or `[c1]`, stands for what differs from run to run: the test's temporary directory, an id, a time.
 
 ## Return information
 
