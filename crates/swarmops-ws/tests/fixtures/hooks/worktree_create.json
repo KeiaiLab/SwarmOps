@@ -1,0 +1,7 @@
+{
+  "session_id": "abc123",
+  "transcript_path": "/home/user/.claude/projects/acme/00893aaf-19fa-41d2-8238-13269b9b3ca0.jsonl",
+  "cwd": "/home/user/acme",
+  "hook_event_name": "WorktreeCreate",
+  "name": "feature-auth"
+}

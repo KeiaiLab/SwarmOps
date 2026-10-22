@@ -831,7 +831,7 @@ impl<'a> Tree<'a> {
     }
 
     /// The entry at `path`, if the tree has one.
-    fn entry(&self, path: &str) -> Result<Option<TreeEntryOut>, OpError> {
+    pub(crate) fn entry(&self, path: &str) -> Result<Option<TreeEntryOut>, OpError> {
         let (dir, name) = path.rsplit_once('/').unwrap_or(("", path));
         let listing = self.listing(dir)?;
         Ok(listing.and_then(|entries| entries.iter().find(|e| e.name == name).cloned()))
