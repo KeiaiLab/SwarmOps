@@ -42,6 +42,17 @@ pub struct RepoRead<'r, O: ObjectStore> {
     pub(crate) meta: MetaRead<'r>,
 }
 
+/// What [`RepoRead::blobs`] read.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BlobsRead {
+    /// The blobs found, each with its bytes, in the order asked.
+    pub found: Vec<(BlobId, Vec<u8>)>,
+    /// The ids the store holds no blob under, among those the read reached.
+    pub missing: Vec<BlobId>,
+    /// Whether the read stopped before the last id, to keep within the byte budget.
+    pub truncated: bool,
+}
+
 impl<O: ObjectStore> std::fmt::Debug for RepoRead<'_, O> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RepoRead")
@@ -293,6 +304,42 @@ impl<O: ObjectStore> RepoRead<'_, O> {
     /// under that id.
     pub fn blob(&self, id: BlobId) -> Result<Vec<u8>, RepoError> {
         repo::object(&self.repo.objects, id.0, ObjectKind::Blob)
+    }
+
+    /// Blobs `ids`, in the order given, up to `max_bytes` of content: each blob's size comes
+    /// from its object's header ([`ObjectStore::stat`]) before its payload is read, so a blob
+    /// that does not fit is never read. The first blob found is returned whole even if it alone
+    /// exceeds `max_bytes`, so that a batch always makes progress. An id the store holds no
+    /// blob under, or holds an object of another kind under, is in `missing`. A blob that does
+    /// not fit stops the read: it and every id after it are left for the next request
+    /// ([`BlobsRead::truncated`]).
+    pub fn blobs(&self, ids: &[BlobId], max_bytes: u64) -> Result<BlobsRead, RepoError> {
+        let mut read = BlobsRead::default();
+        let mut used = 0u64;
+
+        for &id in ids {
+            // 1. The header says what is there and how big, without reading the payload.
+            let Some(ObjectStat {
+                kind: ObjectKind::Blob,
+                size,
+            }) = self.repo.objects.stat(id.0)?
+            else {
+                read.missing.push(id);
+                continue;
+            };
+
+            // 2. Past the budget: stop, leaving this blob and the rest for the next request.
+            if !read.found.is_empty() && used.saturating_add(size) > max_bytes {
+                read.truncated = true;
+                break;
+            }
+
+            // 3. Read and verify the whole blob.
+            read.found.push((id, self.blob(id)?));
+            used = used.saturating_add(size);
+        }
+
+        Ok(read)
     }
 
     /// The entries of directory `dir` (the root for `None`) in changeset `cs`'s tree, in

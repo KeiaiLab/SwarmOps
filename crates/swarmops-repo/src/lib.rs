@@ -70,7 +70,9 @@ pub use merge::MergeOutcome;
 pub use oplog::{OpRecord, Operation, UndoOutcome};
 pub use path_history::PathEvent;
 pub use raw::{MAX_RAW_BATCH, RawBatch, RawBatchOutcome, RawChangeset, RawOutcome};
-pub use read::{FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, TreePage};
+pub use read::{
+    BlobsRead, FileSpan, FileSpanRead, ListedEntry, RepoRead, StoredChangeset, TreePage,
+};
 pub use repo::{CasOutcome, LocalRepo, Repo, RepoInfo};
 pub use swarmops_store::{CasResult, InsertOutcome, RefState, StoreError};
 pub use verify::{MismatchCause, VerifyProblem, VerifyReport};
