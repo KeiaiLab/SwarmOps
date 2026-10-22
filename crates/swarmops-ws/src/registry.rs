@@ -121,23 +121,18 @@ impl Registry {
         // 1. A name in the grammar that every platform can hold.
         check_name(&entry.name)?;
 
-        // 2. An entry of that name already: the same workspace, or another.
+        // 2. An entry of that name already: the same workspace, or another. A create cut
+        //    after its link may have left the names not yet durable: made so first.
         if let Some(there) = self.read(&entry.name)? {
+            self.sync_names()?;
             return same(entry, there);
         }
 
-        // 3. The registry's directories, their own names made durable when new.
+        // 3. The registry's directories; their names are made durable in step 5.
         let tmp = self.dir.join(TMP_DIR);
         let tmp_file = format!("{REGISTRY_DIR}/{TMP_DIR}");
-        let fresh = !(self.fs.exists(tmp.as_std_path()))
-            .map_err(|e| io_failed(FsMethod::Exists, &tmp_file, &e))?;
         (self.fs.create_dir_all(tmp.as_std_path()))
             .map_err(|e| io_failed(FsMethod::CreateDirAll, &tmp_file, &e))?;
-        if fresh {
-            self.sync(&self.dir, REGISTRY_DIR)?;
-            let root = self.dir.parent().unwrap_or(&self.dir);
-            self.sync(root, ".")?;
-        }
 
         // 4. A synced temp, linked no-clobber onto the entry's name.
         let bytes = serde_json::to_vec(entry).expect("a registry entry serializes");
@@ -149,8 +144,9 @@ impl Registry {
             .link_noclobber(&staged, self.path(&entry.name).as_std_path()))
         .map_err(|e| io_failed(FsMethod::LinkNoclobber, &file, &e))?;
 
-        // 5. The name made durable, whichever create linked it.
-        self.sync(&self.dir, REGISTRY_DIR)?;
+        // 5. The names made durable, whichever create linked it: the entry's in the registry,
+        //    the registry's in the store root (a create cut earlier may have made it unsynced).
+        self.sync_names()?;
 
         // 6. Another create that linked first decides, as an entry found in step 2 would.
         if outcome == LinkOutcome::Placed {
@@ -230,6 +226,13 @@ impl Registry {
     /// Syncs directory `dir`, named `shown` in an error.
     fn sync(&self, dir: &Utf8Path, shown: &str) -> Result<(), OpError> {
         (self.fs.fsync_dir(dir.as_std_path())).map_err(|e| io_failed(FsMethod::FsyncDir, shown, &e))
+    }
+
+    /// Syncs `workspaces/`, then the store root: an entry's name, then the registry's.
+    fn sync_names(&self) -> Result<(), OpError> {
+        self.sync(&self.dir, REGISTRY_DIR)?;
+        let root = self.dir.parent().unwrap_or(&self.dir);
+        self.sync(root, ".")
     }
 }
 
