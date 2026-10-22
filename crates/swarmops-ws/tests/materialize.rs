@@ -1,11 +1,8 @@
 //! Materialisation: what an update writes, what it never overwrites, and the volume's rules.
 
-use std::sync::Arc;
-
 use swarmops_api::{StatusAfter, WsDiscardReq, WsMaterializeReq};
-use swarmops_ws::hostfs::{HostMethod, RecordingHost};
 use swarmops_ws::state::{self, SWARMWS_DIR, Volume};
-use swarmops_ws::{RealFs, RealHost, lock, materialize};
+use swarmops_ws::{RealFs, lock, materialize};
 
 use crate::fixture::{Fixture, Put, exec, file, link, tree_of};
 
@@ -88,7 +85,13 @@ fn create_materialises_the_prefixes_and_nothing_else() {
 /// An update from one changeset to the next writes the files that changed and removes the ones
 /// that went, and touches nothing else: counted by the recording host.
 #[test]
+#[cfg(feature = "test-hooks")]
 fn an_update_writes_only_what_changed() {
+    use std::sync::Arc;
+
+    use swarmops_ws::RealHost;
+    use swarmops_ws::hostfs::{HostMethod, RecordingHost};
+
     // 1. A tree of 50 files, a workspace of all of it.
     let f = Fixture::new();
     let names: Vec<String> = (0..50).map(|i| format!("src/m{i:02}.rs")).collect();
@@ -228,6 +231,32 @@ fn no_write_follows_a_symlink_the_agent_made() {
         ]
     );
     assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 0);
+}
+
+/// An update that removes a file below a symlink the agent made does not remove through it: it
+/// stops with `E_WS_DIRTY` naming the link, and the file the link leads to is kept.
+#[test]
+#[cfg(unix)]
+fn no_removal_follows_a_symlink_the_agent_made() {
+    // 1. A workspace of `src`; outside it, a file of the same name the link will lead to.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a/x", "x\n")]);
+    f.create("w", &base, &[]);
+    let dir = f.beside("w");
+    let outside = f.beside("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("x"), "x\n").unwrap();
+
+    // 2. The agent replaces `src/a` with a symlink to the outside directory.
+    std::fs::remove_dir_all(dir.join("src/a")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("src/a")).unwrap();
+
+    // 3. An update that removes `src/a/x`: refused, the outside file kept.
+    let next = f.commit(Some(&base), &[Put::Gone("src/a/x")]);
+    let refused = update(&f.ctx(), "w", &next).unwrap_err();
+    assert!(refused.starts_with("E_WS_DIRTY"), "{refused}");
+    assert!(refused.contains("src/a"), "{refused}");
+    assert_eq!(std::fs::read_to_string(outside.join("x")).unwrap(), "x\n");
 }
 
 /// On a case-insensitive volume (its record simulated on this host) a tree with two paths that
@@ -436,6 +465,7 @@ fn a_killed_materialisation_finishes_on_the_next_open_sampled() {
 /// The crash sweep of a create, run by the two tests above.
 #[cfg(feature = "test-hooks")]
 mod killed {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use camino::Utf8Path;
@@ -445,7 +475,7 @@ mod killed {
     use swarmops_testkit::child;
     use swarmops_ws::hostfs::CrashAtHost;
     use swarmops_ws::workspace::{Locate, Workspace};
-    use swarmops_ws::{Ctx, HostFs};
+    use swarmops_ws::{Ctx, HostFs, RealHost};
 
     use super::*;
     use crate::fixture::AGENT;
@@ -671,6 +701,39 @@ fn discard_restores_a_path_from_head() {
     };
     let again = swarmops_ws::discard(&f.ctx(), req).unwrap();
     assert_eq!(again.discarded, Vec::<String>::new());
+}
+
+/// `ws discard <path>` of a file the head lacks, below a symlink the agent made, does not
+/// remove through it: `E_WS_DIRTY` naming the link, and the file the link leads to is kept.
+#[test]
+#[cfg(unix)]
+fn discard_follows_no_symlink_the_agent_made() {
+    // 1. A workspace of `src`; outside it, a file the link will lead to.
+    let f = Fixture::new();
+    let base = f.commit(None, &[Put::File("src/a/x", "x\n")]);
+    f.create("w", &base, &[]);
+    let dir = f.beside("w");
+    let outside = f.beside("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("precious"), "p\n").unwrap();
+
+    // 2. The agent replaces `src/a` with a symlink to the outside directory.
+    std::fs::remove_dir_all(dir.join("src/a")).unwrap();
+    std::os::unix::fs::symlink(&outside, dir.join("src/a")).unwrap();
+
+    // 3. A discard of `src/a/precious`: refused, the outside file kept.
+    let req = WsDiscardReq {
+        workspace: "w".to_owned(),
+        paths: vec!["src/a/precious".to_owned()],
+        status_after: StatusAfter::None,
+    };
+    let refused = swarmops_ws::discard(&f.ctx(), req).unwrap_err();
+    assert_eq!(refused.code, "E_WS_DIRTY", "{refused:?}");
+    assert_eq!(refused.details["paths"], serde_json::json!(["src/a"]));
+    assert_eq!(
+        std::fs::read_to_string(outside.join("precious")).unwrap(),
+        "p\n"
+    );
 }
 
 /// A tree deeper than one listing reaches (64 levels below a prefix) is listed again from the

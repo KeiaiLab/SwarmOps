@@ -404,11 +404,18 @@ fn check_host(
     changes: Vec<Change>,
     start: Start,
 ) -> Result<Prepared, OpError> {
-    // 1. What the tree removes: a file or symlink there may stand above a path it writes.
+    // 1. What the tree removes: a file or symlink there may stand above a path it writes. What
+    //    it writes: a file or symlink there may stand above a path it removed already.
     let deletes: HashSet<String> = (changes.iter())
         .filter_map(|change| match change {
             Change::Delete { old } => Some(old.path.clone()),
             Change::Write { .. } => None,
+        })
+        .collect();
+    let writes: HashSet<String> = (changes.iter())
+        .filter_map(|change| match change {
+            Change::Write { new, .. } => Some(new.path.clone()),
+            Change::Delete { .. } => None,
         })
         .collect();
 
@@ -421,6 +428,17 @@ fn check_host(
             Change::Write { new, .. } => new.path.clone(),
             Change::Delete { old } => old.path.clone(),
         };
+        // A removal never goes through a symlink or file above it: one the agent made is an
+        // edit; one the new tree writes there means the removal ran before the crash.
+        if matches!(change, Change::Delete { .. })
+            && let Some(blocked) = blocker(host, dir, &path, &HashSet::new(), &mut above)?
+        {
+            if !writes.contains(&blocked) {
+                dirt.push(blocked);
+            }
+            continue;
+        }
+
         let abs = dir.join(&path);
         let there = host
             .symlink_metadata(&abs)
