@@ -14,8 +14,8 @@ use serde::Serialize;
 
 /// The directory the stores are made in, created if missing: `SWARMOPS_BENCH_DIR`, or
 /// `~/.local/state/swarmops-bench` (the native filesystem, unlike a `/tmp` that may be a
-/// tmpfs), as the store's own benches use. A path under `/mnt` (a Windows drive on WSL) is
-/// refused, as the store refuses it.
+/// tmpfs), as the store's own benches use. A path on a volume a store may not live on (under
+/// `/mnt` on Linux, a Windows drive on WSL) is refused, as the store refuses it.
 pub fn base_dir() -> PathBuf {
     let dir = std::env::var_os("SWARMOPS_BENCH_DIR").map_or_else(
         || {
@@ -27,8 +27,8 @@ pub fn base_dir() -> PathBuf {
     fs::create_dir_all(&dir).expect("create the bench base dir");
     let utf8 = camino::Utf8Path::from_path(&dir).expect("a UTF-8 bench dir");
     assert!(
-        swarmops_store::is_native_linux_fs(utf8),
-        "{} is not on a native Linux filesystem",
+        swarmops_store::is_supported_store_fs(utf8),
+        "{} is not on a filesystem a store supports",
         dir.display()
     );
     dir

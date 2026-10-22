@@ -171,17 +171,6 @@ impl Layout {
     }
 }
 
-/// False for a path under `/mnt/`, where WSL mounts Windows drives (drvfs); true otherwise.
-/// A store must live on a native Linux filesystem (storage spec §2).
-///
-/// Compares path components, so pass an absolute path; `/mnt` itself counts as native.
-pub fn is_native_linux_fs(path: &Utf8Path) -> bool {
-    match path.strip_prefix("/mnt") {
-        Ok(below) => below.as_str().is_empty(),
-        Err(_) => true,
-    }
-}
-
 /// The first 8 bytes of BLAKE3 of `key`, which the name of a derived value's file ends in
 /// (`.<16 hex>`, [`Layout::derived_path`]); `None` for an empty key, whose file's name has no
 /// such end.

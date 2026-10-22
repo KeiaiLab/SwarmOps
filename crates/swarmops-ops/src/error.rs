@@ -20,6 +20,19 @@ use swarmops_store::{IoFailure, Layout, LimitKind, MAX_OBJECT_LEN};
 
 use crate::local::cas_mismatch;
 
+/// `E_UNSUPPORTED_FS`'s hint: where this platform's stores may live (storage-core design,
+/// §2.1 P4).
+#[cfg(not(any(target_os = "macos", windows)))]
+const UNSUPPORTED_FS_HINT: &str = "put the store on a native Linux filesystem, such as under \
+                                   ~/.local/state/swarmops/repos/; /mnt/* holds Windows drives \
+                                   under WSL";
+#[cfg(target_os = "macos")]
+const UNSUPPORTED_FS_HINT: &str = "put the store on an APFS volume, such as under your home \
+                                   directory";
+#[cfg(windows)]
+const UNSUPPORTED_FS_HINT: &str = "put the store on a local NTFS drive, such as under \
+                                   %LOCALAPPDATA%\\swarmops\\repos\\";
+
 /// What was being done when a repository error arose: a few errors mean something else while
 /// a store is created or opened.
 #[derive(Debug, Clone, Copy)]
@@ -227,10 +240,7 @@ fn store_error(e: StoreError, message: String, during: During<'_>) -> OpError {
         },
         StoreError::UnsupportedFs(at) => error(ErrorCode::UnsupportedFs, message)
             .with_details(details([("path", at.as_str().into())]))
-            .with_hint(
-                "put the store on a native Linux filesystem, such as under \
-                 ~/.local/state/swarmops/repos/; /mnt/* holds Windows drives under WSL",
-            ),
+            .with_hint(UNSUPPORTED_FS_HINT),
         StoreError::Corrupt { id } | StoreError::BadHeader { id } => {
             corrupt(message, during, "swarmops verify --deep").with_details(object(id))
         }

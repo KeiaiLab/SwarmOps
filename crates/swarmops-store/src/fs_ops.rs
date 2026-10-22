@@ -291,7 +291,9 @@ pub trait FsOps: Send + Sync {
     /// [`FsOps::fsync_dir`] on its directory. On error `from` may remain.
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome>;
 
-    /// Flushes directory `p` to stable storage, making the entries created in it durable.
+    /// Flushes directory `p` to stable storage, making the entries created in it durable
+    /// (storage-core design, §2.1 P2: on macOS `F_FULLFSYNC` on the directory, no weaker
+    /// fallback).
     fn fsync_dir(&self, p: &Path) -> io::Result<()>;
 
     /// The whole content of file `p`, or `None` if it does not exist. A `p` that is not a
@@ -419,7 +421,9 @@ impl FsOps for RealFs {
     }
 
     fn sync_data(&self, path: &Path) -> io::Result<()> {
-        File::open(path)?.sync_data()
+        // Write access, as Windows's flush needs (§2.1 P1); neither created nor cut. On Linux
+        // the sync is the same fdatasync.
+        OpenOptions::new().write(true).open(path)?.sync_data()
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {

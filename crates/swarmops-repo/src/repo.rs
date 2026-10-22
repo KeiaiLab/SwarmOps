@@ -24,8 +24,8 @@
 //! Create writes it in step 5 below, after `meta/` and before `FORMAT`, replacing it
 //! atomically (a temp file in the store root, synced, renamed over it, the root synced), so a
 //! store with `FORMAT` always has it; a create that resumes after a crash writes it again,
-//! with a new id. Open requires it alongside `FORMAT`: after refusing a path that leads under
-//! `/mnt/` as create does ([`StoreError::UnsupportedFs`]) and checking `FORMAT`, it reads
+//! with a new id. Open requires it alongside `FORMAT`: after refusing a path on a volume a store
+//! may not live on as create does ([`StoreError::UnsupportedFs`]) and checking `FORMAT`, it reads
 //! `REPO`, and refuses a store whose `REPO` is missing, longer than an id line and a 255-byte
 //! name (measured before it is read, so a crafted one of huge length is never read into
 //! memory), not UTF-8, or does not start with an id line ([`StoreError::Format`]).
@@ -36,10 +36,11 @@
 //! resumes after a crash at any of its steps:
 //!
 //! 1. It works out where the store path leads (each symlink followed, `..` taken, missing
-//!    directories kept as named) and refuses a path that leads under `/mnt/` (where WSL mounts
-//!    Windows drives) before it creates anything. Then it makes the missing directories, syncs
-//!    the parent of each one it made (or of the store directory alone if that was there), and
-//!    checks again once the path is canonical.
+//!    directories kept as named) and refuses a path on a volume a store may not live on
+//!    (storage-core design, §2.1 P4: on Linux under `/mnt/`, where WSL mounts Windows drives;
+//!    on macOS any volume but APFS or journaled HFS+) before it creates anything. Then it makes
+//!    the missing directories, syncs the parent of each one it made (or of the store directory
+//!    alone if that was there), and checks again once the path is canonical.
 //! 2. It refuses a directory that holds `FORMAT`: a store is there already
 //!    ([`RepoError::Exists`]).
 //! 3. It creates `objects/` with its 256 fan-out directories and `tmp/`, keeping those that
@@ -68,7 +69,7 @@ use swarmops_core::{Changeset, ChangesetId, ObjectId, ObjectKind, Tree, TreeId};
 use swarmops_store::{
     CasResult, DerivedStore, ExternalEntry, ExternalIds, ExternalPut, FileOp, FsObjectStore, FsOps,
     HookedFs, IoFailure, Layout, LinkOutcome, MetaStore, ObjectStore, RealFs, Recovered, RefState,
-    StoreError, StoreFs, is_native_linux_fs,
+    StoreError, StoreFs, is_supported_store_fs,
 };
 
 use crate::derive::Registry;
@@ -154,7 +155,8 @@ impl LocalRepo {
     /// Creates a store at `store` (the directory is created if missing) for a repository
     /// named `name`, and opens it: see [the module documentation](self) for the steps.
     /// [`RepoError::Exists`] if the directory holds a store already (its `FORMAT` file);
-    /// [`StoreError::UnsupportedFs`] for a path under `/mnt/`. A name of more than 255 bytes is
+    /// [`StoreError::UnsupportedFs`] for a path on a volume a store may not live on
+    /// ([`swarmops_store::is_supported_store_fs`]). A name of more than 255 bytes is
     /// refused with [`StoreError::Limit`]
     /// ([`RepoNameBytes`](swarmops_store::LimitKind::RepoNameBytes)) before anything is
     /// created; any other is kept verbatim.
@@ -189,7 +191,7 @@ impl LocalRepo {
     /// [`StoreError::Format`] if `FORMAT` is missing (no store there) or names another layout
     /// version, if `REPO` is missing, malformed or longer than an id line and a 255-byte name,
     /// or if `meta/` is missing; and, before any of that, [`StoreError::UnsupportedFs`] if the
-    /// path leads under `/mnt/`, as `create` refuses it. Honors `SWARMOPS_TEST_CRASH_AT` and
+    /// path leads to a volume a store may not live on, as `create` refuses it. Honors `SWARMOPS_TEST_CRASH_AT` and
     /// `SWARMOPS_TEST_FS_CALLS` as [`LocalRepo::create`] does.
     pub fn open(store: &Utf8Path) -> Result<LocalRepo, RepoError> {
         let (fs, one_thread) = default_fs();
@@ -275,10 +277,10 @@ impl LocalRepo {
     ) -> Result<LocalRepo, RepoError> {
         let root = absolute(store)?;
         // Where the path leads (symlinks followed whether or not their target exists, `..` as
-        // the kernel takes it), as `create` resolves it: a store that leads under /mnt/ is
+        // the kernel takes it), as `create` resolves it: a store on an unsupported volume is
         // refused on open as on create, whether it was moved, copied or linked there.
         let (target, _) = resolve(&root)?;
-        if !is_native_linux_fs(&target) {
+        if !is_supported_store_fs(&target) {
             return Err(StoreError::UnsupportedFs(target).into());
         }
         let layout = Layout::new(root.clone());
@@ -609,25 +611,26 @@ fn default_fs() -> (Arc<dyn FsOps>, bool) {
     }
 }
 
-/// `store` as a canonical path on a native Linux filesystem, created (through `fs`) if
-/// missing, each new directory's entry made durable. Where the path leads is worked out before
-/// anything is created ([`resolve`]): a path that leads under `/mnt/` is refused then, and,
-/// should anything have swapped in a symlink meanwhile, again once the directory exists.
+/// `store` as a canonical path on a filesystem a store supports (storage-core design, §2.1 P4),
+/// created (through `fs`) if missing, each new directory's entry made durable. Where the path
+/// leads is worked out before anything is created ([`resolve`]): a path on a volume a store may
+/// not live on (under `/mnt/` on Linux) is refused then, and, should anything have swapped in a
+/// symlink meanwhile, again once the directory exists.
 ///
 /// When the store directory exists already, perhaps made by a create that crashed, only its
 /// parent is synced: the directories above it that the crashed create may have made are not
-/// known any more. That is enough on the filesystems a store lives on (ext4, XFS): their
-/// journal is one ordered log for the whole filesystem, so the parent's sync commits every
-/// metadata change made before it, those directories' entries among them. Not on btrfs, whose
-/// fsync logs what it syncs alone: there a power loss after a resumed create may take back the
-/// directories the crashed one made above the store, and the store with them; creating it
-/// again mends that, as nothing but a fresh store is at stake.
+/// known any more. That is enough on the filesystems a store lives on (storage-core design,
+/// §2.1 P3): their journal is one ordered log for the whole filesystem, so the parent's sync
+/// commits every metadata change made before it, those directories' entries among them. Not on
+/// btrfs, whose fsync logs what it syncs alone: there a power loss after a resumed create may
+/// take back the directories the crashed one made above the store, and the store with them;
+/// creating it again mends that, as nothing but a fresh store is at stake.
 ///
 /// A failure names the store directory as `.` and the directories above it as no file of the
 /// store; one of working out where the path leads is [`FileOp::Resolve`], with no file.
 fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, RepoError> {
     let (target, missing) = resolve(&absolute(store)?)?;
-    if !is_native_linux_fs(&target) {
+    if !is_supported_store_fs(&target) {
         return Err(StoreError::UnsupportedFs(target).into());
     }
     let fs = StoreFs::new(Arc::clone(fs), &target);
@@ -645,7 +648,7 @@ fn native_root(store: &Utf8Path, fs: &Arc<dyn FsOps>) -> Result<Utf8PathBuf, Rep
         }
     }
     let canonical = target.canonicalize_utf8().map_err(resolving)?;
-    if !is_native_linux_fs(&canonical) {
+    if !is_supported_store_fs(&canonical) {
         return Err(StoreError::UnsupportedFs(canonical).into());
     }
     Ok(canonical)

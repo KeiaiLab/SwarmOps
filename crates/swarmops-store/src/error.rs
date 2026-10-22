@@ -40,7 +40,7 @@ pub enum StoreError {
     /// on Linux a path under `/mnt/`, where WSL mounts Windows drives (drvfs); on macOS a volume
     /// that is neither APFS nor journaled HFS+; on Windows a network share (UNC) or a path in the
     /// device namespace.
-    #[error("store path {0} is not on a native Linux filesystem")]
+    #[error("store path {0} is not on a filesystem a store supports")]
     UnsupportedFs(Utf8PathBuf),
     /// Another writer held `meta/lock` for the whole wait. Retryable.
     #[error("the metadata store is busy: another writer holds meta/lock")]

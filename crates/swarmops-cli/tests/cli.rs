@@ -35,9 +35,24 @@ const AGENT: &str = "agent/worker-17";
 /// The keys whose numbers are times or durations, replaced by `[<key>]` in snapshots.
 const TIME_KEYS: &[&str] = &["elapsed_ms", "created_at", "secs", "at"];
 
-/// A store path under `/mnt/`, where WSL mounts Windows drives: `init` and every open refuse it
-/// by its name, so it need not exist, and nothing is made there.
-const MNT_STORE: &str = "/mnt/swarmops-cli-test/store";
+/// A store path on a volume a store may not live on (storage-core design, §2.1 P4): `init` and
+/// every open refuse it before anything is made, so it need not exist. On Linux a path under
+/// `/mnt/`, where WSL mounts Windows drives, refused by its name.
+#[cfg(not(target_os = "macos"))]
+const UNSUPPORTED_STORE: &str = "/mnt/swarmops-cli-test/store";
+/// macOS: a path on devfs, refused by its volume's type.
+#[cfg(target_os = "macos")]
+const UNSUPPORTED_STORE: &str = "/dev/swarmops-cli-test/store";
+
+/// The hint `E_UNSUPPORTED_FS` gives on this platform, named in snapshots so that one
+/// transcript holds on each.
+#[cfg(not(target_os = "macos"))]
+const UNSUPPORTED_FS_HINT: &str = "put the store on a native Linux filesystem, such as under \
+                                   ~/.local/state/swarmops/repos/; /mnt/* holds Windows drives \
+                                   under WSL";
+#[cfg(target_os = "macos")]
+const UNSUPPORTED_FS_HINT: &str = "put the store on an APFS volume, such as under your home \
+                                   directory";
 
 /// One `--human` run: the variables set, the arguments, the exit code it must give.
 type HumanRun<'a> = (&'a [(&'a str, &'a str)], &'a [&'a str], i32);
@@ -952,25 +967,25 @@ fn not_a_repo_exits_6() {
     insta::assert_json_snapshot!(s.transcript());
 }
 
-/// A store that leads under `/mnt/` is refused on open as `init` refuses it ([`MNT_STORE`]):
-/// `info` on a path there, and on a symlink that leads there, is `E_UNSUPPORTED_FS` with the
-/// `/mnt` path in `details.path`, before anything is read, and nothing is made there. The
-/// refusal by that name is Linux's (WSL's drvfs): other systems judge a volume by its file system
-/// (the storage-core design, §2.1 P4).
+/// A store that leads under `/mnt/` is refused on open as `init` refuses it
+/// ([`UNSUPPORTED_STORE`]): `info` on a path there, and on a symlink that leads there, is
+/// `E_UNSUPPORTED_FS` with the `/mnt` path in `details.path`, before anything is read, and
+/// nothing is made there. The refusal by that name is Linux's (WSL's drvfs): other systems judge
+/// a volume by its file system (the storage-core design, §2.1 P4).
 #[cfg(target_os = "linux")]
 #[test]
 fn a_store_that_leads_under_mnt_is_refused_on_open() {
     let mut s = Session::new();
-    let direct = s.run(&["--repo", MNT_STORE, "info"]);
+    let direct = s.run(&["--repo", UNSUPPORTED_STORE, "info"]);
     assert_eq!((direct.exit, direct.code()), (1, "E_UNSUPPORTED_FS"));
-    assert_eq!(direct["error"]["details"]["path"], MNT_STORE);
+    assert_eq!(direct["error"]["details"]["path"], UNSUPPORTED_STORE);
     let link = format!("{}/link", s.tmp());
-    std::os::unix::fs::symlink(MNT_STORE, &link).unwrap();
+    std::os::unix::fs::symlink(UNSUPPORTED_STORE, &link).unwrap();
     let linked = s.run(&["--repo", &link, "info"]);
     assert_eq!((linked.exit, linked.code()), (1, "E_UNSUPPORTED_FS"));
-    assert_eq!(linked["error"]["details"]["path"], MNT_STORE);
+    assert_eq!(linked["error"]["details"]["path"], UNSUPPORTED_STORE);
     assert!(
-        !fs::exists(MNT_STORE).unwrap_or(false),
+        !fs::exists(UNSUPPORTED_STORE).unwrap_or(false),
         "nothing was made under /mnt"
     );
 }
@@ -1615,6 +1630,10 @@ fn error_codes_reach_the_cli() {
     // On main's head, but main stays where it is: a commit without --advance moves no ref.
     let c2 = s.commit(&store, None, "src/main.rs", "fn main() {}\n", "c2");
 
+    // The refused path and its hint differ by platform; named, one transcript holds on each.
+    s.name(UNSUPPORTED_STORE, "unsupported_store");
+    s.name(UNSUPPORTED_FS_HINT, "unsupported_fs_hint");
+
     let mut raised = Vec::new();
     for (code, args) in error_cases(&s, &store, &c2) {
         let args: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1672,8 +1691,8 @@ fn error_codes_reach_the_cli() {
     }
     raised.push("E_IO");
     assert!(
-        !fs::exists(MNT_STORE).unwrap_or(false),
-        "nothing was made under /mnt"
+        !fs::exists(UNSUPPORTED_STORE).unwrap_or(false),
+        "nothing was made at the unsupported store path"
     );
 
     // Each code is raised here or listed as not raised, never both.
@@ -1766,7 +1785,7 @@ fn error_cases(s: &Session, store: &str, c2: &str) -> Vec<(&'static str, Vec<Str
         ("E_INVALID_ARG", commit(&not_json)),
         (
             "E_UNSUPPORTED_FS",
-            vec!["init".to_owned(), MNT_STORE.to_owned()],
+            vec!["init".to_owned(), UNSUPPORTED_STORE.to_owned()],
         ),
         // Operation 0 is the first commit, which moved no ref; the store has three.
         ("E_NOTHING_TO_UNDO", on(&["op", "undo", "0"])),
