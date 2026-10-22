@@ -47,8 +47,8 @@ or the README; change them together.
 
 ## Deploy
 
-The site built in `web/` is deployed to Cloudflare Pages, project `swarmops`, with
+`.github/workflows/site.yml` deploys the built site to Cloudflare Pages, project `swarmops`, with
 `swarmops.cc` as its custom domain (the domain is on Cloudflare; its mail records stay as they
-are); [`web/README.md`](../../web/README.md) describes the build. Every `*.pages.dev` address
+are); [`web/README.md`](../../web/README.md#deploy) describes it. Every `*.pages.dev` address
 answers with `X-Robots-Tag: noindex`, so only `swarmops.cc` is indexed. Set the repository's
 social preview to `docs/assets/social-card.png` and its website to `https://swarmops.cc`.

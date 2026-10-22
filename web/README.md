@@ -1,7 +1,8 @@
 # swarmops.cc, the website
 
 A static site, built with Next.js 16 (`output: "export"`), Fumadocs for `/docs`, Tailwind 4 and
-shadcn/ui components. Every page is HTML in `out/`; there is no server runtime.
+shadcn/ui components. Every page is HTML in `out/`; there is no server runtime. The site
+workflow deploys `out/` to swarmops.cc (see Deploy).
 
 ```sh
 just web-install   # npm ci: the only step that needs the network
@@ -54,3 +55,23 @@ The budget is a ceiling taken from measurement, not a goal: product pages (`/`, 
 `/roadmap`) loaded 139.3 kB of JS (gzip) at the first build, and an empty page of the pinned
 next 16.4.2 and react 19.3.1 loads 132.0 kB, so the ceiling is 140 kB. Lowering it is a design
 change; raising it needs a measurement and a judged change.
+
+## Deploy
+
+`.github/workflows/site.yml` builds and checks the site, then deploys `out/` to Cloudflare Pages,
+project `swarmops`, whose production branch is `stable`: a push to `stable` is production
+(swarmops.cc), a push to a `feat/**` branch a preview on its `pages.dev` address, and a pull
+request is built and checked only. The deploy uses the repository secrets `CLOUDFLARE_API_TOKEN`
+and `CLOUDFLARE_ACCOUNT_ID`; while either is unset, the deploy job leaves a notice and succeeds
+without deploying. By hand, after `just web-build` and `just web-check`:
+
+```sh
+npx wrangler pages deploy web/out --project-name swarmops --branch preview   # a preview
+npx wrangler pages deploy web/out --project-name swarmops --branch stable    # production
+```
+
+`public/_redirects` sends the addresses of the first site's guides (`/guides/<name>`) to their
+docs pages (`/docs/guides/<name>`) with a 308. `/explainers/*` keeps its own policy in
+`public/_headers` (its pages inline their script and style), and postbuild leaves those pages
+without a meta policy. `public/install.sh` is the tracked copy of `../scripts/install.sh`:
+`just check` (scripts/test-install.py) fails when the two differ.
