@@ -12,24 +12,16 @@
 
 use std::time::Duration;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD;
-use serde::Deserialize;
 use serde_json::{Map, Value};
-use swarmops_api::{ContentEncoding, ErrorCode, OpError, ReadFileReq, StoreOps};
+use swarmops_api::{ErrorCode, OpError, StoreOps};
 
+use crate::bootstrap::{REPO_CONFIG, repo_config};
 use crate::run::{self, Run};
 use crate::state::SWARMWS_DIR;
 use crate::workspace::Workspace;
 
-/// The repository's workspace settings, read from the store: `check.argv` is the default check.
-pub const CONFIG_PATH: &str = ".swarmops/workspaces.json";
-
 /// The directory of the checks' logs, in [`SWARMWS_DIR`]: `<attempt>.log` each.
 pub const CHECKS_DIR: &str = "checks";
-
-/// The most bytes of [`CONFIG_PATH`] read.
-const CONFIG_MAX_BYTES: u64 = 64 * 1024;
 
 /// The check's name, as its environment gives it: the workspace's name.
 pub const ENV_WS: &str = "SWARMOPS_WS";
@@ -39,22 +31,6 @@ pub const ENV_TREE: &str = "SWARMOPS_CHECK_TREE";
 
 /// The attempt the check runs in, from 1.
 pub const ENV_ATTEMPT: &str = "SWARMOPS_CHECK_ATTEMPT";
-
-/// The part of [`CONFIG_PATH`] the check reads; other keys are left to their readers.
-#[derive(Deserialize, Default)]
-struct Config {
-    /// The check's settings.
-    #[serde(default)]
-    check: Option<CheckConfig>,
-}
-
-/// `check` of [`CONFIG_PATH`].
-#[derive(Deserialize, Default)]
-struct CheckConfig {
-    /// The command and its arguments.
-    #[serde(default)]
-    argv: Option<Vec<String>>,
-}
 
 /// What a check runs on: the rebased changeset and its tree, in an attempt.
 pub(crate) struct Subject<'a> {
@@ -66,35 +42,13 @@ pub(crate) struct Subject<'a> {
     pub(crate) attempt: u32,
 }
 
-/// `check.argv` of [`CONFIG_PATH`] at changeset `rev`; none when the file, its `check` or its
-/// `argv` is missing or the argv is empty. `E_INVALID_ARG` for a file that does not parse.
+/// `check.argv` of the repository's [`REPO_CONFIG`] at changeset `rev`; none when the file, its
+/// `check` or its argv is missing. `E_INVALID_ARG` for a file that does not parse.
 pub(crate) fn configured(store: &dyn StoreOps, rev: &str) -> Result<Option<Vec<String>>, OpError> {
-    // 1. The file, if the tree has one.
-    let req = ReadFileReq {
-        rev: rev.into(),
-        path: CONFIG_PATH.to_owned(),
-        offset: 0,
-        lines: None,
-        max_bytes: CONFIG_MAX_BYTES,
-    };
-    let file = match store.read_file(req) {
-        Ok(file) => file,
-        Err(e) if e.code == ErrorCode::PathNotFound.as_str() => return Ok(None),
-        Err(e) => return Err(e),
-    };
-
-    // 2. Its bytes, parsed for `check.argv`.
-    let bytes = match file.encoding {
-        ContentEncoding::Utf8 => file.content.into_bytes(),
-        ContentEncoding::Base64 => STANDARD.decode(&file.content).unwrap_or_default(),
-    };
-    let config: Config = serde_json::from_slice(&bytes).map_err(|e| {
-        OpError::new(
-            ErrorCode::InvalidArg,
-            format!("{CONFIG_PATH} does not parse: {e}"),
-        )
-    })?;
-    let argv = config.check.and_then(|check| check.argv);
+    let config = repo_config(store, rev)?;
+    let argv = config
+        .and_then(|config| config.check)
+        .map(|check| check.argv);
     Ok(argv.filter(|argv| !argv.is_empty()))
 }
 
@@ -102,7 +56,7 @@ pub(crate) fn configured(store: &dyn StoreOps, rev: &str) -> Result<Option<Vec<S
 pub(crate) fn missing() -> OpError {
     OpError::new(
         ErrorCode::InvalidArg,
-        format!("--check names no command, and the repository's {CONFIG_PATH} has no check.argv"),
+        format!("--check names no command, and the repository's {REPO_CONFIG} has no check.argv"),
     )
     .with_details(Map::from_iter([(
         "missing".to_owned(),
