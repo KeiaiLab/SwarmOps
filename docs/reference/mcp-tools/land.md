@@ -29,17 +29,18 @@ max_result_chars: null
 | `max_attempts` | integer | no | `8` | How many times to try to publish before failing with `E_CAS_RETRY_EXHAUSTED`: 1 to 32. |
 | `max_conflict_bytes` | integer | no | `32768` | The most bytes of hunk text an `E_CONFLICT` report carries: past it, the texts are left out (`truncated`), and the line positions and blob ids stay. |
 | `message` | string or null | no |  | The landed changeset's message; `head`'s when omitted. |
-| `resolutions` | object or null | no |  | What to make of the paths an `E_CONFLICT` report named, decided without a checkout (operations spec §3, resolution path (b)). Each resolution applies to its path while the target holds there what `against` held, whether the path conflicts or not; a path the target changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report that names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses an `against` that is not a full 64-hex id (`E_INVALID_ARG`). |
+| `resolutions` | object or null | no |  | What to make of the paths an `E_CONFLICT` report named, decided without a checkout. Each resolution applies to its path while the target holds there what `against` held, whether the path conflicts or not; a path the target changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report that names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses an `against` that is not a full 64-hex id (`E_INVALID_ARG`). |
 | `target` | string | no | `"main"` | The ref to land on: `main` or `release/<name>`, which must exist. |
 
 ### JSON Schema
 
 As `tools/list` gives it: each `$ref` replaced by its definition, so that it stands alone.
+Its descriptions' citations of the design documents are left out here.
 
 ```json
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "`land`: merge a change three-way onto a target ref and publish it there as one new\nchangeset, in one transaction (operations spec §3). The change is `head` with its\nfirst-parent chain after `base`, squashed: the landed changeset's parent is the target's\nhead, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in\n`details.report`; nothing is recorded then.",
+  "description": "`land`: merge a change three-way onto a target ref and publish it there as one new\nchangeset, in one transaction. The change is `head` with its\nfirst-parent chain after `base`, squashed: the landed changeset's parent is the target's\nhead, so the target stays linear. A conflict is the error `E_CONFLICT`, with the report in\n`details.report`; nothing is recorded then.",
   "properties": {
     "base": {
       "anyOf": [
@@ -236,7 +237,7 @@ As `tools/list` gives it: each `$ref` replaced by its definition, so that it sta
           "type": "null"
         }
       ],
-      "description": "What to make of the paths an `E_CONFLICT` report named, decided without a checkout\n(operations spec §3, resolution path (b)). Each resolution applies to its path while the\ntarget holds there what `against` held, whether the path conflicts or not; a path the\ntarget changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report\nthat names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses\nan `against` that is not a full 64-hex id (`E_INVALID_ARG`)."
+      "description": "What to make of the paths an `E_CONFLICT` report named, decided without a checkout. Each resolution applies to its path while the\ntarget holds there what `against` held, whether the path conflicts or not; a path the\ntarget changed since is stale, and the land fails `E_CONFLICT` again, with a fresh report\nthat names it in `stale`. Conflicts left unresolved fail it too. `swarmops mcp` refuses\nan `against` that is not a full 64-hex id (`E_INVALID_ARG`)."
     },
     "target": {
       "default": "main",

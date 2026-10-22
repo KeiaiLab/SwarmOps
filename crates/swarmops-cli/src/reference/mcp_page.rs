@@ -536,8 +536,16 @@ fn rpc_errors(out: &mut String) {
 /// Renders the page of tool `spec`.
 fn tool_page(spec: &Spec, golden: &Golden, commands: &[Vec<String>], all: &Value) -> String {
     let command = command_of(spec.name, commands);
-    let schema = tool_input_schema(spec, all);
     let mut out = String::new();
+
+    // The input schema, without the design documents' citations its descriptions carry.
+    let listed = tool_input_schema(spec, all);
+    let schema = uncited(&listed);
+    let citations = if schema == listed {
+        Citations::None
+    } else {
+        Citations::Cut
+    };
 
     // 1. Marker, title, what the tool does, and its metadata.
     let _ = writeln!(out, "{GENERATED}\n");
@@ -546,7 +554,7 @@ fn tool_page(spec: &Spec, golden: &Golden, commands: &[Vec<String>], all: &Value
     metadata(&mut out, spec, command);
 
     // 2. What it takes and how a client sees it.
-    input_schema(&mut out, spec, &schema);
+    input_schema(&mut out, spec, &schema, citations);
     annotations(&mut out, spec);
     let _ = writeln!(out, "## CLI command\n");
     let _ = writeln!(
@@ -606,8 +614,71 @@ fn metadata(out: &mut String, spec: &Spec, command: &[String]) {
     let _ = writeln!(out, "```\n");
 }
 
+/// Whether a schema's descriptions lost citations of the design documents on the page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Citations {
+    None,
+    Cut,
+}
+
+/// `schema` with each description's parenthesis that cites a design document's section
+/// (`(operations spec §3)`) left out: the pages cite no design document.
+fn uncited(schema: &Value) -> Value {
+    match schema {
+        Value::Object(members) => Value::Object(
+            members
+                .iter()
+                .map(|(key, value)| {
+                    let kept = match (key.as_str(), value) {
+                        ("description", Value::String(text)) => Value::from(uncite(text)),
+                        _ => uncited(value),
+                    };
+                    (key.clone(), kept)
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(uncited).collect()),
+        other => other.clone(),
+    }
+}
+
+/// `text` without its parentheses that hold a section sign, nested ones included, and the
+/// space or line break before each: `in one transaction (operations spec §3).` → `in one
+/// transaction.`
+fn uncite(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(open) = rest.find('(') {
+        // 1. The parenthesis, to its matching end.
+        let mut depth = 0;
+        let mut close = rest.len();
+        for (at, c) in rest[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 {
+                close = open + at + 1;
+                break;
+            }
+        }
+
+        // 2. Kept unless it cites a section.
+        let group = &rest[open..close];
+        if group.contains('\u{a7}') {
+            out.push_str(rest[..open].trim_end());
+        } else {
+            out.push_str(&rest[..close]);
+        }
+        rest = &rest[close..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// The arguments: a table of the schema's fields, then the whole schema.
-fn input_schema(out: &mut String, spec: &Spec, schema: &Value) {
+fn input_schema(out: &mut String, spec: &Spec, schema: &Value, citations: Citations) {
     let _ = writeln!(out, "## Input schema\n");
     let _ = writeln!(
         out,
@@ -651,8 +722,15 @@ fn input_schema(out: &mut String, spec: &Spec, schema: &Value) {
     let _ = writeln!(
         out,
         "As `tools/list` gives it: each `$ref` replaced by its definition, so that it stands \
-         alone.\n"
+         alone."
     );
+    if citations == Citations::Cut {
+        let _ = writeln!(
+            out,
+            "Its descriptions' citations of the design documents are left out here."
+        );
+    }
+    out.push('\n');
     let _ = writeln!(out, "```json\n{}\n```\n", pretty(schema));
 }
 
@@ -995,7 +1073,16 @@ fn mcp_tool_pages_match() {
     let dir = reference_dir();
     let pages = pages();
 
-    // 1. Each page, as rendered.
+    // 1. No page cites a design document's section.
+    for page in &pages {
+        assert!(
+            !page.text.contains('\u{a7}'),
+            "docs/reference/{} cites a section",
+            page.name
+        );
+    }
+
+    // 2. Each page, as rendered.
     for page in &pages {
         let committed = fs::read_to_string(dir.join(&page.name)).unwrap_or_default();
         assert!(
@@ -1007,7 +1094,7 @@ fn mcp_tool_pages_match() {
         );
     }
 
-    // 2. Nothing else among the pages.
+    // 3. Nothing else among the pages.
     let names: Vec<String> = pages.iter().map(|page| page.name.clone()).collect();
     let stale = strays(DIR, &names);
     assert!(
@@ -1015,7 +1102,7 @@ fn mcp_tool_pages_match() {
         "docs/reference/{stale:?}: no tool renders these; run `{REGEN_CMD}`"
     );
 
-    // 3. A note names a tool.
+    // 4. A note names a tool.
     let notes: Vec<String> = TOOLS
         .iter()
         .map(|spec| format!("{NOTES_DIR}/{}", file_name(spec.name)))
@@ -1123,4 +1210,8 @@ fn page_parts_are_sound() {
         "[a](../develop/a.md) [b](#b)\n[d]: d.md"
     );
     assert_eq!(file_name("read_file"), "read-file.md");
+    assert_eq!(
+        uncite("a (x spec \u{a7}3, path (b)). b (kept) c\n(y \u{a7}1)"),
+        "a. b (kept) c"
+    );
 }
