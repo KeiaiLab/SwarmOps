@@ -5,8 +5,9 @@ each with the milestone that takes it.
 
 - **One host, one writer per trunk.** No sync between hosts until M11; git carries history between
   them, with one host landing and exporting and the others importing.
-- **No workspaces** (M5): agents read and write through the tools, a whole file per change. An agent
-  that must build first works in a git worktree
+- **Workspaces are not synced** (M5): a power cut can leave a workspace's files torn, which
+  `ws status` shows as edits and `ws discard` restores; and a checked land holds the lock twice, so
+  under a busy `main` a long check may rebase and run again until `--max-attempts`
   ([Building and testing a change](build-and-test.md)).
 - **No review** (M7): SwarmOps does not hold a landing for a person's approval. The loop puts the
   review in git, between the review branch and the trunk ([step 5](daily-loop.md#5-review-then-move-the-trunk)).

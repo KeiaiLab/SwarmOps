@@ -89,21 +89,28 @@ are not served. The results of `server/discover` and `tools/list` may be kept fo
 
 ### Tools
 
-`tools/list` gives 18 tools, one per operation, named as the envelope's `op` is: `repo_info`,
-`resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`,
-`ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `blob_has` and
-`verify`. A tool's input schema is its request type's JSON Schema (`swarmops schema <Req>`), with
-every reference inlined so that it stands alone. Its annotations say what it does to the store:
+`tools/list` gives 35 tools, one per operation, named as the envelope's `op` is: the 24 store
+operations `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`,
+`diff`, `op_log`, `ref_list`, `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `rebase`,
+`blob_put`, `blob_has`, `verify`, `remote_list`, `fetch`, `push`, `sync` and `sync_status`, then
+the 11 workspace operations `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`,
+`ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_list` and `ws_info`. A tool's input
+schema is its request type's JSON Schema (`swarmops schema <Req>`), with every reference inlined so
+that it stands alone. Its annotations say what it does to the store:
 
-| Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` |
-| --- | --- | --- | --- |
-| The 12 reads, `blob_has` and `verify` among them | `true` | `false` | `true` |
-| `commit`, `blob_put` | `false` | `false` | `false` |
-| `ref_set`, `ref_delete`, `undo` | `false` | `true` | `true` |
-| `land` | `false` | `false` | `true` |
+| Tools | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` |
+| --- | --- | --- | --- | --- |
+| The 14 store reads, `blob_has`, `verify`, `remote_list` and `sync_status` among them; `ws_status`, `ws_diff`, `ws_list`, `ws_info` | `true` | `false` | `true` | `false` |
+| `commit`, `rebase`, `blob_put`, `ws_commit` | `false` | `false` | `false` | `false` |
+| `ref_set`, `ref_delete`, `undo` | `false` | `true` | `true` | `false` |
+| `land`, `ws_create`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize` | `false` | `false` | `true` | `false` |
+| `ws_discard` | `false` | `true` | `true` | `false` |
+| `fetch`, `push` | `false` | `false` | `true` | `true` |
+| `sync` | `false` | `false` | `false` | `true` |
 
-None reaches beyond the store (`openWorldHint: false`). `init`, `whoami`, `schema`, `git import`,
-`git export`, `derive` and `mcp` have no tool: a call to one is the protocol error `-32602`
+Only the git remote tools reach beyond the store and the workspaces' directories. `init`, `whoami`,
+`schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`, `clone`,
+`remote add|remove`, `derive` and `mcp` have no tool: a call to one is the protocol error `-32602`
 (`Unknown tool`). The git commands and `init` read or write paths on the operator's host, and
 `derive` is maintenance, no agent's work.
 

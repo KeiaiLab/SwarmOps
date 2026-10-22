@@ -55,15 +55,17 @@ matters. Give the store's path absolute, as above.
 
 ## The tools agents get
 
-The server lists 18 tools, one per operation, each taking the operation's request as its
+The server lists 35 tools, one per operation, each taking the operation's request as its
 arguments and returning the envelope the CLI prints for it:
 
-| Reads | Writes |
-| --- | --- |
-| `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify` | `commit`, `land`, `blob_put`, `ref_set`, `ref_delete`, `undo` |
+| Reads | Writes | Workspaces |
+| --- | --- | --- |
+| `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `remote_list`, `sync_status` | `commit`, `land`, `rebase`, `blob_put`, `ref_set`, `ref_delete`, `undo`, `fetch`, `push`, `sync` | `ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`, `ws_materialize`, `ws_discard`, `ws_list`, `ws_info` |
 
-`init`, `whoami`, `schema`, `git import`, `git export` and `derive` are commands only: you run
-them, not the agents.
+`init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`,
+`derive`, `clone` and `remote add|remove` are commands only: you run them, not the agents. The git remote tools take a remote by its name
+only, and run git with the server's environment: its ssh agent and token variables
+([GitHub as a remote](../guides/github-remote.md#through-mcp)).
 
 - The store and the identity are the server's: `--repo` (else `SWARMOPS_REPO`) and `--as` (else
   `SWARMOPS_AGENT`). No call can name others, and without an identity every write fails with
@@ -85,9 +87,11 @@ them, not the agents.
   clients limit long tool results. Put the same in the project's `CLAUDE.md` if you want it in
   every prompt.
 - Agents work without a checkout: they read files through `read_file` and `read_tree`, and write
-  whole files through `commit`. There are no workspaces yet (M5), so an agent that must build or
-  test its change needs the files on disk some other way, such as a git worktree of the git side
-  ([Build and test a change](build-and-test.md)).
+  whole files through `commit`. An agent that must build or test its change works in a workspace,
+  a directory on the server's host that the workspace tools name by its name
+  ([Build and test a change](build-and-test.md)); Claude Code's worktree hooks make one for each
+  `--worktree` session and `isolation: worktree` subagent
+  ([Claude Code](../guides/claude-code.md#workspaces-for-worktree-sessions-and-subagents)).
 
 ## Keep a copy of every envelope
 

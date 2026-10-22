@@ -8,7 +8,7 @@ Commands and outputs here follow the
 
 - A store ([Stores](stores.md)), `flock` and, for a large store, `rsync`.
 - To take back what was exported after a backup: the git side, `GIT_SIDE`, of the
-  [daily loop](daily-loop.md#once-bring-the-repository-in).
+  [daily loop](daily-loop.md#without-a-remote-a-bare-clone).
 
 ## What a copy may rely on
 
@@ -64,6 +64,22 @@ rsync -a --exclude=/tmp/ "$SWARMOPS_REPO/objects/" "$BACKUP/objects/"
 flock "$SWARMOPS_REPO/meta/lock" rsync -a --delete --exclude=/objects/tmp/ "$SWARMOPS_REPO/" "$BACKUP/"
 swarmops --repo "$BACKUP" verify --deep
 ```
+
+## The git mirror and the remotes' files
+
+A store with a git remote holds three more things in its directory
+([GitHub as a remote](../guides/github-remote.md)):
+
+- **`remotes.toml`** names each remote, its URL and the branch `main` follows, and
+  **`authors.toml`** the address each agent family signs new commits with. Both are small files
+  that SwarmOps or a person writes whole; back them up with the store, as the copies above do.
+  Neither holds a credential.
+- **`git/mirror.git`** is a cache: the remotes' commits as git fetched them, and the exports a push
+  sent. It needs no backup. A copy may leave it out (`--exclude=/git/mirror.git/` in both `rsync`
+  commands): a store without it, or with one that a fetch was writing while it was copied, makes it
+  again at its next `fetch` (or `sync`, which fetches), which moves a damaged one aside as
+  `git/mirror.git.broken-<time>` and never deletes it. `meta/lock` does not stop the mirror's
+  writers; `git/lock` does, for the time a `fetch`, `push`, `sync` or `remote` command runs.
 
 ## What writers see while you hold the lock
 

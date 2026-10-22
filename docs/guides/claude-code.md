@@ -4,8 +4,10 @@ SwarmOps is a git replacement for coding-agent swarms. `swarmops mcp` serves a S
 Claude Code as MCP tools. An agent reads files, history and diffs from the store, commits to it,
 lands its change with a three-way merge, and undoes an operation.
 
-This guide registers the server, gives each agent process an identity of its own, and sets out the
-two rules an agent needs: full ids for compare-and-swap, and small results.
+This guide registers the server, gives each agent process an identity of its own, sets out the
+two rules an agent needs (full ids for compare-and-swap, and small results), and gives
+`claude --worktree` sessions and `isolation: worktree` subagents a SwarmOps workspace through
+Claude Code's worktree hooks.
 
 **Pre-1.0** · Linux today; macOS and Windows next · MIT licence
 
@@ -17,8 +19,9 @@ You need SwarmOps, a store and Claude Code, on one host.
   program under a shorter name.
 - **A store**: one directory, on a native Linux filesystem. A path under `/mnt/`, where WSL mounts
   Windows drives, is refused with `E_UNSUPPORTED_FS`.
-- **Claude Code on the same host.** SwarmOps has no network code: every operation runs against the
-  host's own store, and the client starts the server as its own user.
+- **Claude Code on the same host.** Every operation runs against the host's own store, and the
+  client starts the server as its own user; only the git remote tools (`fetch`, `push`, `sync`)
+  reach another host, through the user's git.
 
 **Make a store**
 
@@ -113,17 +116,18 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 18 MCP tools
+## The 35 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs
-beside the store as maintenance.
+beside the store as maintenance, and `blob_get`, which the workspaces use; then eleven workspace
+tools.
 
 A tool's arguments are the operation's request. Its result is the envelope the CLI prints for that
 request, as `structuredContent` and as text, and a failed operation sets `isError`. A tool's
 annotations say whether it changes the store and how.
 
-### Twelve tools read
+### Fourteen tools read
 
 - **`repo_info`**
 
@@ -177,7 +181,16 @@ annotations say whether it changes the store and how.
 
   Checks the whole store's consistency; deep re-hashes every object too.
 
-### Six tools write
+- **`remote_list`**
+
+  The git remotes the store records: each one's name, URL and the branch `main` follows.
+
+- **`sync_status`**
+
+  How `main` and a remote's branch stand, as the last fetch saw it: the changes the remote lacks
+  and the commits `main` lacks. Offline.
+
+### Ten tools write
 
 - **`commit`**
 
@@ -189,6 +202,12 @@ annotations say whether it changes the store and how.
   Merges a change three-way onto `main`, or another `target`, and publishes the result as one
   changeset in one transaction. On `E_CONFLICT`, `details.report` lists each conflict, and
   `resolutions` settle them.
+
+- **`rebase`**
+
+  Merges a change three-way onto a ref's head, as `land` does, and records the result there as one
+  changeset without moving the ref: build and test it, then `land` it with `expect_target`, the
+  head it was rebased onto, so that the landed tree is the tested one.
 
 - **`blob_put`**
 
@@ -207,8 +226,31 @@ annotations say whether it changes the store and how.
   Moves every ref an operation of `op_log` moved back to what it named before, all of them or none.
   Changesets are never removed.
 
-`init`, `whoami` and `schema` live in the CLI, and so do `git import` and `git export`: an agent
-runs them as commands, not as tools. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
+- **`fetch`**
+
+  Fetches a git remote, by its name, and imports its followed branch's new commits; moves no ref.
+
+- **`push`**
+
+  Sends a store ref to a remote branch by compare-and-swap against what the last fetch saw, never by
+  force.
+
+- **`sync`**
+
+  Fetches, lands `main`'s unpublished changes onto the remote's head, moves `main` there and
+  pushes; with `mode` `local`, it does not push.
+
+### Eleven workspace tools
+
+`ws_create`, `ws_status`, `ws_diff`, `ws_commit`, `ws_rebase`, `ws_resolve`, `ws_land`,
+`ws_materialize`, `ws_discard`, `ws_list` and `ws_info` work on a workspace, a directory on the
+server's host, named by its name in the store's registry. Each mutation's result carries
+`status_after`, the workspace's status after it. [Workspaces](#workspaces-for-worktree-sessions-and-subagents)
+below has the flow.
+
+`init`, `whoami` and `schema` live in the CLI, and so do `blob get`, `ws delete`, `ws hook`,
+`git import`, `git export`, `clone` and `remote add|remove`: an agent runs them as commands, not as
+tools. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
 to clients that open with `initialize`.
 
 ## Publish a change
@@ -225,6 +267,48 @@ A land that loses a race to another publish merges again and retries by itself, 
 run again with its key replays it. A change that conflicts with what `main` gained fails with
 `E_CONFLICT` and the conflict report in `details.report`, and records nothing. While `main` has not
 moved, a `commit` with `advance` and `parent` publishes in one step.
+
+## Workspaces for worktree sessions and subagents
+
+`claude --worktree` and a subagent with `isolation: worktree` run in a directory of their own.
+Registered as Claude Code's `WorktreeCreate` and `WorktreeRemove` hooks, `so ws hook` makes that
+directory a SwarmOps workspace instead of a git worktree, so the repository need not be a git
+repository. `so ws hook config` prints the settings to merge into `.claude/settings.json`:
+
+```json
+{
+  "hooks": {
+    "WorktreeCreate": [{"hooks": [{"type": "command", "command": "swarmops ws hook worktree-create"}]}],
+    "WorktreeRemove": [{"hooks": [{"type": "command", "command": "swarmops ws hook worktree-remove"}]}]
+  }
+}
+```
+
+- **Create.** The hook finds the store from the session's directory: the workspace it stands in,
+  else `--repo` or `SWARMOPS_REPO` (both naming different stores is exit 2, neither is exit 6). It
+  makes the workspace `<root>/<store>/<name>`, where `<root>` is `SWARMOPS_WS_ROOT`, else
+  `~/.local/state/swarmops/workspaces`, and `<store>` the store's name; its creator is
+  `claude-code/<name>`. It stands on the head and prefixes of the workspace the session stands in,
+  else on `main` with the prefixes of `.swarmops/workspaces.json` (the whole tree without them);
+  another session's workspace of the same name gets a suffix. A new workspace gets the files `.worktreeinclude` lists, copied from the session's
+  directory, and runs the repository's bootstrap command (`bootstrap.argv` of
+  `.swarmops/workspaces.json`); `SWARMOPS_WS_BOOTSTRAP=skip` skips both. The hook prints the
+  workspace's path, and a failure is an envelope on stderr.
+- **Remove.** Uncommitted edits are kept as a rescue changeset on the workspace's head (no ref
+  moves), its id printed on stderr; then the directory and its registry entry go. A directory that
+  is no workspace is left alone, with exit 0.
+- **Build, test and land.** In the workspace, the agent edits with its own tools and lands through
+  MCP, in one of two ways. `ws_land` with `check` rebases, runs the command in the workspace and
+  lands only the tree it ran on, but holds the server for as long as the command runs. With its
+  own shell, the agent splits it: `ws_rebase`, then the build and test, then `ws_land` with `mode`
+  `exact`, which publishes only if the target has not moved since that rebase (else
+  `E_CAS_MISMATCH`: rebase and test again). [Build and test a change](../operate/build-and-test.md)
+  shows the same steps at the command line.
+
+Claude Code does not run `WorktreeRemove` when a subagent or a workflow agent finishes, so their
+workspaces stay until `so ws delete <name>`; `so ws list --check` lists them. Subagents that share
+their session's MCP server share its identity: the workspace's `created_by` names the subagent,
+and its commits name the server's agent when the server has one.
 
 ## Two rules for agents
 
@@ -345,17 +429,17 @@ is `read_file`, `ls` is `read_tree` and `info` is `repo_info`.
 
 ## What to know first
 
-- **Work happens through the tools.** An agent reads a file at a revision and writes whole-file
-  changes in a commit. Workspaces, which write files to disk, are planned (M5), with an adapter for
-  Claude Code's worktree hooks.
-- **Git stays outside the tools.** No tool pushes to or pulls from a git remote. Git does that, and
-  `git import` and `git export` carry history between git and the store.
-- **One host.** There is no network code, and SwarmOps is built and tested on x86_64 Linux today;
-  macOS and Windows are next. Between hosts, work moves through a git remote, one writing host at a
-  time.
+- **Two ways to work.** Through the tools alone, an agent reads a file at a revision and writes
+  whole-file changes in a commit. In a workspace, it edits files on disk, builds and tests them,
+  and lands the tested tree.
+- **Git remotes by name only.** The tools `remote_list`, `fetch`, `push`, `sync` and `sync_status`
+  work with the remotes the store records; adding a remote and `clone` stay on the command line
+  ([GitHub as a remote](github-remote.md#through-mcp)). `git import` and `git export` are not tools.
+- **One host.** SwarmOps is built and tested on x86_64 Linux today. Between hosts, work moves
+  through a git remote.
 - **Landing is not yet measured under a swarm's load.** `land` is built, and it merges again and
   retries by itself when the ref moves.
-- **Pre-1.0.** A minor version, 0.1 to 0.2, may break a public surface other than the hash contract.
+- **Pre-1.0.** A minor version, 0.2 to 0.3 say, may break a public surface other than the hash contract.
   The MCP tools' names, input schemas and results are such a surface.
 - **What a client may rely on.** A new tool, optional argument or error code is not a breaking
   change, so a client should allow for them. The wording of `error.message` and of a `hint` is not

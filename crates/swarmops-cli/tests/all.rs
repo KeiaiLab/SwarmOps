@@ -21,6 +21,7 @@ mod landing;
 mod mcp;
 mod mcp_ws;
 mod multiprocess;
+mod pilot_ws;
 mod power_loss;
 mod remote_acceptance;
 mod remote_fetch;

@@ -2,7 +2,8 @@
 
 This guide is for whoever runs SwarmOps for a swarm of coding agents on one host. It installs the
 binary, creates a store, gives agents the store through MCP, runs the daily loop between the store
-and the git repository that CI and deployment watch, with a person's review before the trunk moves,
+and the git remote that CI and deployment watch (`so fetch`, `so push` and `so sync`, through the
+host's git), with a person's review before the trunk moves,
 checks, backs up and trims the store, and says what an upgrade means, where the limits are and what
 to watch. [pilot.md](pilot.md) runs the same loop once on this repository, as the first real use.
 Each task has a page of its own under [operate/](operate/).
@@ -14,9 +15,10 @@ Each task has a page of its own under [operate/](operate/).
 | Install the binary, and upgrade it and the stores | [Install and upgrade](operate/install-and-upgrade.md) |
 | Choose where a store lives, set its permissions, create it, give writers identities | [Stores](operate/stores.md) |
 | Register `swarmops mcp` with Claude Code, and keep a copy of every envelope | [Give agents the store](operate/agents.md) |
-| Run the loop between the store and git, with a person's review | [The daily loop](operate/daily-loop.md) |
-| Build and test an agent's change in a git worktree | [Build and test a change](operate/build-and-test.md) |
-| Keep one writer per trunk, and recover when both sides moved | [One writer per trunk](operate/one-writer-per-trunk.md) |
+| Run the loop between the store and its git remote, with a person's review | [The daily loop](operate/daily-loop.md) |
+| Clone, fetch, push and sync with GitHub; tokens and commit authors | [GitHub as a remote](guides/github-remote.md) |
+| Build and test an agent's change in a workspace, or in a git worktree | [Build and test a change](operate/build-and-test.md) |
+| Keep one writer per trunk through a bare clone, and recover when both sides moved | [One writer per trunk](operate/one-writer-per-trunk.md) |
 | Check a store, read a failed check, repair | [Verify and repair](operate/verify-and-repair.md) |
 | Back up a store in use, and restore it | [Backup and restore](operate/backup-and-restore.md) |
 | Remove what may go, with every writer stopped | [Making room](operate/making-room.md) |
@@ -33,7 +35,7 @@ The examples run the long name, `swarmops`; `so` is the same program.
 
 ## Before you start
 
-- **Linux** and **git** on the host ([Install and upgrade](operate/install-and-upgrade.md#before-you-start)).
+- **Linux** and **git** on the host, 2.39 or later for a git remote ([Install and upgrade](operate/install-and-upgrade.md#before-you-start)).
 - **One host**, a **native Linux filesystem** for the store, and **one Unix user** who owns it
   ([Stores](operate/stores.md#where-a-store-may-live), [permissions](operate/stores.md#set-the-permissions)).
 

@@ -5,15 +5,123 @@ Notable changes to SwarmOps. The format follows
 [the versioning policy](docs/policies/versioning-and-stability.md) (Semantic Versioning, read the
 pre-1.0 way).
 
-SwarmOps 0.1.0 is the first release, tagged `v0.1.0`; no crate is published (`publish = false`).
-Its section holds every change up to it, grouped by milestone of the design (umbrella spec §13).
+SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, 0.2.0 the second, with the git remotes
+(M13), and 0.3.0 the third, with the workspaces (M5); no crate is published
+(`publish = false`). The 0.1.0 section holds every change up to it, grouped by milestone of the
+design (umbrella spec §13).
 From here, **Unreleased** collects the changes on `stable` that no release holds yet, until the
 next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-22
+
 ### Added
 
+#### M5: workspaces (2026-10-22)
+
+- `so ws` commands (`create`, `status`, `diff`, `commit`, `rebase`, `resolve`, `land`,
+  `materialize`, `discard`, `list`, `info`, `delete`, `hook`) and eleven MCP workspace tools; a
+  command run inside a workspace finds its store. With `rebase`, twelve new MCP tools: 35 in all.
+- Workspaces materialise a sparse tree on disk, write only what changed on update, never overwrite
+  an edit or write through a symlink, and refuse trees the volume cannot hold (paths that differ
+  only in case on a case-insensitive volume, names Windows refuses), naming the paths.
+- `so ws status`, `ws diff` and `ws commit`: changes found by stat and an index, hashed only when
+  needed; commits upload only the blobs the store lacks and replay after a crash.
+- `so ws land --check <command>` rebases the workspace onto the target, runs the command there,
+  and lands only if the target has not moved since, so the landed tree is the tree the command
+  checked; a moved target makes it rebase and check again, up to `--max-attempts`.
+- `rebase` merges a change onto a ref's head and records the result as one changeset there,
+  moving no ref (`so rebase`, MCP `rebase`).
+- `land --expect-target <id>` publishes only while the target names that changeset, in one
+  attempt; otherwise `E_CAS_MISMATCH`, nothing written. With a rebased head, the landed tree is
+  the tested tree.
+- `so blob get` reads blobs by id, in batches up to a byte budget; it is no MCP tool.
+- Claude Code: `so ws hook worktree-create` and `worktree-remove`, registered as the
+  `WorktreeCreate` and `WorktreeRemove` hooks, give `--worktree` sessions and `isolation: worktree`
+  subagents a SwarmOps workspace; uncommitted edits are kept as a rescue changeset when the
+  worktree is removed. `.worktreeinclude` files are copied, and the repository's bootstrap command
+  (`.swarmops/workspaces.json`) runs.
+- `SWARMOPS_WS_ROOT` places the workspaces the Claude Code hooks make; `SWARMOPS_WS_BOOTSTRAP=skip`
+  skips the copy of `.worktreeinclude` files and the repository's bootstrap command.
+- Nine error codes: `E_WS_EXISTS`, `E_WS_NOT_FOUND`, `E_WS_LOCKED` (exit 4, retryable),
+  `E_WS_DIRTY`, `E_PATH_NOT_EMPTY`, `E_UNRESOLVED_CONFLICTS`, `E_MARKERS_PRESENT`,
+  `E_WS_UNPORTABLE` and `E_CHECK_FAILED`, each pinned by a golden envelope: 50 codes in all.
+- Crash sweeps of a workspace's update, commit, rebase, land and checked land, and an
+  eight-process checked-land test in which one lander is killed and run again: every checked land
+  is on `main` once, with the tree its check recorded. The pilot's workspace step is a test of the
+  binary: a hook-made workspace in a directory that is no git repository lands through MCP.
+- `docs/goals.md`, G9: the workspace latency targets, none measured yet: `ws status` of 50,000
+  files under 100 ms warm (umbrella spec §15) and, proposed with M5, under 150 ms after 100 edits;
+  `ws create` of 10,000 files under 3 s; an update after a 10-file land under 100 ms; `ws commit`
+  at G2's target plus hashing; `ws land --check` under 1 s on 12,000 changesets without the check.
+- Docs: [Build and test a change](docs/operate/build-and-test.md) leads with workspaces and keeps
+  the git-worktree recipe, now landing the tested tree with `rebase` and `land --expect-target`;
+  the Claude Code guide's hooks section; the workspace codes in the troubleshooting page; a
+  "Workspaces" section in the known limitations.
+
+### Fixed
+
+- Two `init`s on one directory at once: one creates the store, the other fails with `E_EXISTS`.
+- A workspace update killed after it wrote an executable file and before it set the file's mode is
+  finished by the next open; it was refused as an edit of that file.
+
+## [0.2.0] - 2026-10-22
+
+### Added
+
+#### M13: git remotes, topology 2 (2026-10-22)
+
+- `so clone`, `so remote add|remove|list` and `so fetch`: a store fetches a git remote over HTTPS
+  or ssh into a git mirror it owns (`git/mirror.git`, a cache), and imports the followed branch's
+  commits; `main` does not move. `clone` makes the store, records the remote, fetches it and
+  imports the followed branch into `main`, and continues when run again after a failure.
+  Remotes live in `<store>/remotes.toml`, which holds no credential.
+- `so push <remote> [<ref>[:<branch>]]`: a compare-and-swap against what the last fetch saw, never
+  forced; a moved remote is `E_REMOTE_DIVERGED`, a refusal `E_REMOTE_REJECTED`. Files over
+  GitHub's 100 MiB limit and pushes over its 2 GB limit are refused before anything is sent, with
+  a warning per file over 50 MiB. Run again with nothing new, it starts no git.
+- `so sync <remote>`: fetch, land the store's unpublished changes onto the remote's head in order,
+  move `main` there and push by compare-and-swap; changes the remote already holds (merged by a
+  merge commit, a squash or a rebase) are recognised by their `SwarmOps-Changeset`,
+  `SwarmOps-Squashed-From` and `SwarmOps-Land-Key` lines (indented or bulleted, as a squash
+  description lists them) or by merging as no change, and dropped. `--no-push` for branches that
+  take pull requests only. `so sync status` counts what is ahead and behind, offline.
+- `remote_list`, `fetch`, `push`, `sync` and `sync_status` are MCP tools (23 in all); `clone` and
+  `remote add|remove` stay in the CLI.
+- The git transport runs your own git (2.39 or later, `SWARMOPS_GIT` or `PATH`): its credential
+  helpers, proxies and ssh settings apply as they do for `git fetch`. `--token-env <VAR>` names a
+  variable whose token reaches git as a header for that remote alone, redacted from every error;
+  git never prompts.
+- `<store>/authors.toml` gives an agent family the email (and name) its new commits are signed
+  with, so that GitHub links them to an account; existing changesets export as before.
+- Four error codes: `E_REMOTE_DIVERGED` (exit 3), `E_REMOTE_REJECTED` (exit 5),
+  `E_REMOTE_UNREACHABLE` (exit 4, retryable) and `E_REMOTE_NOT_FOUND` (exit 6), pinned by golden
+  envelopes over smart HTTP and ssh.
+- The git import can take a ref's commits as changesets without moving any ref (`objects_only`,
+  used by `fetch`), and the repository can land a change onto a head with no ref moved
+  (`Repo::land_detached`, used by `sync`).
+- `git import` and `git export` refuse a path inside a store's `git/` directory
+  (`E_INVALID_ARG`, `details.reason` `store_mirror`): the mirror is SwarmOps' alone.
+- The test kit serves git repositories without the network: git's own `http-backend` on loopback
+  and a stand-in for ssh; the weekly git matrix runs the remote suites with git 2.39.5, 2.43.0
+  and 2.56.0, built with curl, and a weekly job runs the live round trip with GitHub against a
+  scratch repository once a repository variable names it; the live run reads its token in the
+  `github-live` environment.
+- `just perf` times the git remotes against the roadmap's targets (docs/perf.md, "Git remotes
+  (M13)"): fetch met its target; push, sync and clone missed theirs.
+- A guide, [GitHub as a remote](docs/guides/github-remote.md); the daily loop now runs on
+  `so sync`, `so push` and a pull request merged by any method, and the bare clone stays for the
+  round trip without a remote.
+- The GitHub round trip was piloted on a private repository: two agents over MCP, pull requests
+  merged by squash, rebase and merge commit, `so sync` after each, no rewritten commit
+  ([docs/pilot.md](docs/pilot.md#the-m13-pilot-a-store-and-github)).
+
+#### Since 0.1.0
+
+- CI, the weekly run, the website build and the release now run on the maintainers' own host through
+  self-hosted runners; release binaries are built inside an ubuntu:24.04 container pinned by digest
+  (pull requests from forks still run on GitHub's ubuntu-24.04).
 - A one-line installer, `curl -fsSL https://get.swarmops.cc/install.sh | bash` (`scripts/install.sh`,
   served as `web/public/install.sh`): it installs `swarmops` and `so` from a release, checked against
   its `SHA256SUMS`, into `~/.local/bin` (`/usr/local/bin` as root); `--version` pins a release,
@@ -1258,5 +1366,7 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.1.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.3.0...stable
+[0.3.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0

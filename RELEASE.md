@@ -12,7 +12,9 @@ check below passes, and nothing otherwise.
 
 ## What the release workflow does
 
-On a pushed `v*` tag, with no secret but each job's own token:
+On a pushed `v*` tag, with no secret but each job's own token, on the maintainers' own host:
+every job runs on the self-hosted runners labelled `swarmops-local` that run CI, none on
+GitHub's hosted runners.
 
 1. **Checks the tag** (job `tag, version and notes`): the tag is `v` and the workspace version of
    `Cargo.toml` (`v0.1.0` for `version = "0.1.0"`); `CHANGELOG.md` has a non-empty
@@ -21,11 +23,14 @@ On a pushed `v*` tag, with no secret but each job's own token:
    most the 125,000 characters a release takes); and `stable` holds the tagged commit. No other
    job starts unless these pass.
 2. **Runs the release gate** (job `just check`): `just check` on the tagged commit, with the tools
-   and versions of CI's `check` job but without its cache, so that it builds from clean.
+   and versions of CI's `check` job but without its cache or the runner's target directory, so
+   that it builds from clean.
 3. **Builds the binaries** (job `build <target>`, one per target): `swarmops` and `so` with
    `cargo build --release --locked` on the pinned toolchain, without the `test-hooks` feature, for
    `x86_64-unknown-linux-gnu`, natively, and `aarch64-unknown-linux-gnu`, cross-compiled with
-   Ubuntu's aarch64 GCC. Each binary is smoke-run, the aarch64 ones under QEMU's user-mode
+   Ubuntu's aarch64 GCC, each inside an `ubuntu:24.04` container pinned by digest (glibc 2.39),
+   which installs the compilers, QEMU and the pinned toolchain and builds into its own
+   filesystem. Each binary is smoke-run, the aarch64 ones under QEMU's user-mode
    emulator: it must print the tag's version, need no glibc newer than 2.34, and `init`,
    `commit`, `show`, `cat` and `verify --deep` a store with every `SWARMOPS_TEST_*` hook set,
    which a release build ignores. Each target is packed into `swarmops-X.Y.Z-<target>.tar.gz`
@@ -55,8 +60,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
   archives with `actions/attest-build-provenance`, which needs `id-token: write` and
   `attestations: write` there too, and step 9 below gains
   `gh attestation verify <archive> --repo KeiaiLab/SwarmOps`.
-- **Linux today (x86_64 and aarch64, glibc 2.34 or newer); macOS and Windows are the next
-  milestone, M12.** The aarch64 binaries are
+- **Linux today (x86_64 and aarch64, glibc 2.34 or newer); macOS and Windows are milestone M12,
+  developed separately.** The aarch64 binaries are
   cross-compiled and only smoke-tested, under QEMU; the test suite runs on x86_64
   ([docs/policies/msrv-and-platforms.md](docs/policies/msrv-and-platforms.md)). There is no
   macOS, Windows or static (musl) build.
@@ -78,8 +83,8 @@ installs the same tool versions as `ci.yml`'s: move them together.
    - `just perf` in a quiet window if storage code changed since the last release, with the
      results added to `docs/perf.md`.
 
-   The release workflow runs only `just check` again, on a hosted runner, which is too small for
-   the 32-process measurements and too noisy for `just perf`.
+   The release workflow runs only `just check` again, on a runner that shares the host with
+   CI's other runners: too contended for the 32-process measurements and `just perf`.
 3. **Check the public surfaces** against the last release (`git diff <last tag>..HEAD`):
    - the golden vectors in `crates/swarmops-core/tests/golden/` did not change;
    - `FORMAT` was bumped if the store layout changed;

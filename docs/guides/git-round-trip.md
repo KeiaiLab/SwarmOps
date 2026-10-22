@@ -10,8 +10,10 @@ branch keeps running. This guide runs the round trip command by command, and lis
 ## The round trip
 
 Git and the store meet in one git repository on the host. Make it a bare clone of your remote:
-`git import` reads it, `git export` writes it, and git itself fetches into it and pushes from it,
-because SwarmOps has no network code.
+`git import` reads it, `git export` writes it, and git itself fetches into it and pushes from it.
+A store can also reach the remote itself, with no bare clone and no hand-run `git push`:
+`so clone`, `so fetch`, `so push` and `so sync` ([GitHub as a remote](github-remote.md)). This
+guide is the round trip without them, through a repository on the host.
 
 ```text
  remote               ~/src/acme.git        the store
@@ -275,8 +277,8 @@ The request and response types are in `so schema GitExportReq` and `so schema Gi
 
 ## Push, and CI runs
 
-Git sends the branch on. SwarmOps has no network code, and an export writes only the repository on
-this host.
+Git sends the branch on: an export writes only the repository on this host. (`so push` sends a
+store ref to a remote by itself: [GitHub as a remote](github-remote.md#push).)
 
 **Push the exported branch**
 
@@ -502,10 +504,11 @@ mode is no kind of entry. An object the repository lacks, as a partial clone lac
 
 - **One writing host at a time.** Between hosts SwarmOps syncs through a git remote: the writer
   exports, then pushes with git, and the others fetch with git, then import. Two hosts that both
-  write stop on `E_GIT_EXPORT_DIVERGED` or `E_GIT_IMPORT_DIVERGED` rather than merge. Offline-first
-  sync is planned (M11).
-- **One host, Linux today; macOS and Windows next.** There is no network code, and SwarmOps is built
-  and tested on x86_64 Linux.
+  write stop on `E_GIT_EXPORT_DIVERGED` or `E_GIT_IMPORT_DIVERGED` rather than merge. With a remote
+  that each store reaches itself, `so sync` lands one host's changes on top of the other's
+  ([GitHub as a remote](github-remote.md#sync)); offline-first sync between stores is planned (M11).
+- **Linux today.** `git import` and `git export` read and write a repository on this host, and
+  SwarmOps is built and tested on x86_64 Linux.
 - **Branches, not tags.** A store has the refs `main` and `release/<name>`, no tags, and an export
   moves one branch. SwarmOps has no user hooks, signing, submodules or LFS.
 - **The export is a contract.** The rendering of commits made in the store is version 1 of the

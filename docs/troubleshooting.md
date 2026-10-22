@@ -1,8 +1,8 @@
 # Troubleshooting
 
 This page goes from what you see to why it happens and what to run. It covers the installer, the
-MCP server, where a store may live, a busy store, a damaged store, git import and export, and every
-`E_*` error code that a command or a tool call can return.
+MCP server, where a store may live, a busy store, a damaged store, git import and export,
+workspaces, and every `E_*` error code that a command or a tool call can return.
 
 Every example was run on 2026-10-22: the commands with the binary built from this repository
 (`swarmops 0.1.0`), in a scratch directory that holds the store `acme` (`SWARMOPS_REPO=acme`); the
@@ -76,6 +76,15 @@ retry advice; this is that table. Four codes are in the schema but no operation 
 | `E_GIT_IMPORT_DIVERGED` | 3 | no | The store's ref and the git history went separate ways. | [Git import](#e_git_import_diverged) |
 | `E_GIT_EXPORT_DIVERGED` | 3 | no | The git branch holds commits that are no export of the ref. | [Git export](#e_git_export_diverged) |
 | `E_GIT_WRITE` | 1 | no | The git repository could not be written. | [Git export](#e_git_write) |
+| `E_WS_EXISTS` | 1 | no | A workspace of that name exists, made with other arguments. | [Workspaces](#e_ws_exists) |
+| `E_WS_NOT_FOUND` | 6 | no | No workspace by that name, or around that directory. | [Workspaces](#e_ws_not_found) |
+| `E_WS_LOCKED` | 4 | yes | Another mutation held the workspace's lock for the whole 5 s wait. | [Workspaces](#e_ws_locked) |
+| `E_WS_DIRTY` | 1 | no | The workspace holds edits the operation would overwrite or lose. | [Workspaces](#e_ws_dirty) |
+| `E_PATH_NOT_EMPTY` | 1 | no | `ws create` was given a directory that holds something. | [Workspaces](#e_path_not_empty) |
+| `E_UNRESOLVED_CONFLICTS` | 1 | no | A rebase still has conflicting paths no one resolved. | [Workspaces](#e_unresolved_conflicts) |
+| `E_MARKERS_PRESENT` | 1 | no | `ws resolve` found a conflict marker line in a file. | [Workspaces](#e_markers_present) |
+| `E_WS_UNPORTABLE` | 1 | no | The tree holds paths the workspace's volume cannot hold. | [Workspaces](#e_ws_unportable) |
+| `E_CHECK_FAILED` | 1 | no | A workspace's check or bootstrap command failed or timed out. | [Workspaces](#e_check_failed) |
 | `E_REF_NOT_FOUND` | 6 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
 | `E_AUTH` | 5 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
 | `E_POLICY_DENIED` | 5 | no | Not raised yet. | [Codes not raised yet](#codes-not-raised-yet) |
@@ -1149,6 +1158,72 @@ swarmops git export acme.git --branch review
 Remove the lock file only once no git process runs in the repository, as the hint says. The run
 after it wrote no object (`objects_written: 0`), since the failed run had written them, and moved
 the branch. An export that dies while it moves the branch leaves such a file too.
+
+## Workspaces
+
+`swarmops ws` and the `ws_*` tools work on a directory on this host
+([Build and test a change](operate/build-and-test.md)). A workspace command finds its workspace by
+`--ws <name>`, `--ws-path <dir>`, or the directory it runs in; `.swarmws/` in that directory is the
+workspace's own state, not to be edited.
+
+### `E_WS_EXISTS`
+
+`ws create` found a workspace of that name made with other arguments (`details.path` is where).
+Pick another name, or `ws delete` the old one. The same arguments again are no error: the answer
+is the workspace, with `created: false`.
+
+### `E_WS_NOT_FOUND`
+
+No workspace by that name in the store's registry, or no `.swarmws/workspace.json` at or above the
+directory. `ws list` lists the store's workspaces; a workspace whose entry is there but whose
+directory is gone shows as an orphan in `ws list --check`, and `ws delete <name> --force` removes
+the entry.
+
+### `E_WS_LOCKED`
+
+Exit 4, retryable. Another mutation of the same workspace held its lock for the whole 5 s wait:
+two processes in one workspace is a misuse, and this is how it shows. Run the command again once
+the other finishes. Reads (`ws status`, `ws diff`) take no lock.
+
+### `E_WS_DIRTY`
+
+The workspace holds edits the operation would overwrite or lose, listed in `details.paths`: a
+`ws rebase` or an update over edited files, a write through a symlink the agent made, or a
+`ws delete` with edits or commits not landed. Commit them (`ws commit -m <message>`, or `-m` on
+`ws land`), restore them (`ws discard <path>`), or, for `ws delete`, take `--rescue`, which keeps
+them as a changeset, or `--force`.
+
+### `E_PATH_NOT_EMPTY`
+
+`ws create` writes only into a directory that is missing or empty. Give another `--path`.
+
+### `E_UNRESOLVED_CONFLICTS`
+
+The workspace is rebasing, and `details.paths` still conflict: `ws status` lists them under
+`rebasing.conflicts`. Edit each, `ws resolve <path>` (or `--take ours|theirs`), then
+`ws rebase --continue`; `ws rebase --abort` gives up the rebase.
+
+### `E_MARKERS_PRESENT`
+
+`ws resolve` found a line that starts with `<<<<<<< ours`, `||||||| base` or `>>>>>>>` still in a
+file it was asked to mark resolved. Remove the markers, or give `--force` if the file really holds such a line.
+
+### `E_WS_UNPORTABLE`
+
+The tree holds paths this workspace's volume cannot hold, and nothing was written: `details.reason`
+is `case_collision` (two paths that differ only in case, on a case-insensitive volume, both in
+`details.paths`), `windows_name` (a name Windows refuses) or `reserved_name` (a top-level
+`.swarmws`, the workspace's own directory). Rename the paths in the store with a commit, or create
+the workspace with `--prefix` paths that leave them out.
+
+### `E_CHECK_FAILED`
+
+The check of `ws land --check` (`details.stage: check`) or a new workspace's bootstrap command
+(`stage: bootstrap`) exited non-zero or ran past its time (`timed_out`). `stdout_tail` and
+`stderr_tail` hold the last 8 KiB of each stream, and `details.log` the whole output, relative to
+the workspace. After a failed check nothing landed, and the workspace stands on the rebased
+changeset (`details.changeset`), where the failure reproduces: fix, `ws commit`, and land again.
+A check that needs more than 900 s takes `--check-timeout`.
 
 ## Codes not raised yet
 

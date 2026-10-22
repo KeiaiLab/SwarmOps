@@ -123,10 +123,10 @@ Four answers, one per request; the notification gets none.
 ids for compare-and-swap, `land` to publish, small pages):
 
 ```text
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.1.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
-**`tools/list`.** One page of 18 tools. Each entry holds `name`, `title`, `description`,
+**`tools/list`.** One page of 35 tools. Each entry holds `name`, `title`, `description`,
 `inputSchema` and `annotations`; `read_file` alone also carries `_meta`:
 
 ```sh
@@ -152,6 +152,11 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"blob_put","title":"Store a blob","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"blob_has","title":"Find stored blobs","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"verify","title":"Verify the store","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"remote_list","title":"List git remotes","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"fetch","title":"Fetch a git remote","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":true,"readOnlyHint":false}}
+{"name":"push","title":"Push to a git remote","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":true,"readOnlyHint":false}}
+{"name":"sync","title":"Sync with a git remote","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":true,"readOnlyHint":false}}
+{"name":"sync_status","title":"Show sync status","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 ```
 
 A tool's `inputSchema` is its request type's JSON Schema, as `swarmops schema <Type>` prints it,
@@ -230,7 +235,7 @@ SWARMOPS_AGENT=agent/worker-1 swarmops mcp --repo /tmp/dev-guide/acme < s3.jsonl
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},"name":"resolve_rev","arguments":{"rev":"main"}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2027-01-01","io.modelcontextprotocol/clientCapabilities":{}}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/list"}
-{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28","2025-11-25","2025-06-18"],"capabilities":{"tools":{}},"instructions":"…","ttlMs":3600000,"cacheScope":"public","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.1.0"}}}}
+{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28","2025-11-25","2025-06-18"],"capabilities":{"tools":{}},"instructions":"…","ttlMs":3600000,"cacheScope":"public","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"}}}}
 {"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":"…","structuredContent":{"ok":true,"op":"resolve_rev","api":1,"result":{"id":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","kind":"ref"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{"main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"},"auth":"trust"}},"isError":false,"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.1.0"}}}}
 {"jsonrpc":"2.0","id":3,"error":{"code":-32022,"message":"Unsupported protocol version: 2027-01-01; this server serves 2026-07-28 in params._meta, and 2025-11-25 and 2025-06-18 through initialize","data":{"requested":"2027-01-01","supported":["2026-07-28","2025-11-25","2025-06-18"]}}}
 {"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Invalid params: tools/list names no protocol version in params._meta (io.modelcontextprotocol/protocolVersion), and no initialize has opened a session"}}
@@ -280,12 +285,31 @@ the CLI command's request; `swarmops schema <Request>` prints the type.
 | `undo` | `swarmops op undo OP` | `UndoReq` | moves refs |
 | `commit` | `swarmops commit` | `CommitReq` | adds a changeset; with `advance`, moves a ref |
 | `land` | `swarmops land HEAD` | `LandReq` | adds a changeset and moves the target |
+| `rebase` | `swarmops rebase HEAD` | `RebaseReq` | adds a changeset |
 | `blob_put` | `swarmops blob put` | `BlobPutReq` | adds a blob |
 | `blob_has` | `swarmops blob has` | `BlobHasReq` | no |
 | `verify` | `swarmops verify` | `VerifyReq` | no |
+| `remote_list` | `swarmops remote list` | `RemoteListReq` | no |
+| `fetch` | `swarmops fetch REMOTE` | `FetchReq` | adds what the remote holds |
+| `push` | `swarmops push REMOTE` | `PushReq` | no; moves the remote's branch |
+| `sync` | `swarmops sync REMOTE` | `SyncReq` | adds changesets and moves `main` |
+| `sync_status` | `swarmops sync status REMOTE` | `SyncStatusReq` | no |
+| `ws_create` | `swarmops ws create NAME` | `WsCreateReq` | makes a workspace |
+| `ws_status` | `swarmops ws status` | `WsStatusReq` | no |
+| `ws_diff` | `swarmops ws diff` | `WsDiffReq` | no |
+| `ws_commit` | `swarmops ws commit` | `WsCommitReq` | adds a changeset |
+| `ws_rebase` | `swarmops ws rebase` | `WsRebaseReq` | adds a changeset |
+| `ws_resolve` | `swarmops ws resolve` | `WsResolveReq` | the workspace only |
+| `ws_land` | `swarmops ws land` | `WsLandReq` | adds changesets and moves the target |
+| `ws_materialize` | `swarmops ws materialize PATH` | `WsMaterializeReq` | the workspace only |
+| `ws_discard` | `swarmops ws discard` | `WsDiscardReq` | the workspace only |
+| `ws_list` | `swarmops ws list` | `WsListReq` | no |
+| `ws_info` | `swarmops ws info` | `WsInfoReq` | no |
 
-`init`, `whoami`, `schema`, `git import`, `git export`, `derive` and `mcp` have no tool: an
-operator or a script runs them as commands. A `verify` that finds problems is `E_STORE_CORRUPT`,
+`init`, `whoami`, `schema`, `blob get`, `ws delete`, `ws hook`, `git import`, `git export`,
+`clone`, `remote add|remove`, `derive` and `mcp` have no tool: an operator or a script runs them as
+commands. A workspace tool names its workspace by its name in the store's registry, and works on
+that directory on the server's host. A `verify` that finds problems is `E_STORE_CORRUPT`,
 as `swarmops verify` is.
 
 Rules the server adds to the request types, each refused with `E_INVALID_ARG`:
@@ -381,10 +405,10 @@ A resolution is `{"take": "ours"}`, `{"take": "theirs"}`, `{"content": CONTENT}`
 changed again since `against` comes back in a new report's `stale`: read the new `theirs`, and
 resolve against it.
 
-There are no workspaces yet (M5): an agent that must build or test its change before it lands it
-needs the files on disk some other way;
-[Operations: building and testing a change](../operations.md#building-and-testing-a-change) gives
-the stopgap.
+An agent that must build or test its change before it lands it works in a workspace: `ws_create`,
+edits on disk, then `ws_land` with `check`, or `ws_rebase`, its own build and test, and `ws_land`
+with `mode` `exact`, which lands only the tree it tested
+([Build and test a change](../operate/build-and-test.md)).
 
 ## Result size limits
 

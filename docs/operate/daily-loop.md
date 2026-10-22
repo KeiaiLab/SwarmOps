@@ -1,34 +1,37 @@
 # The daily loop
 
 The loop keeps two copies of the history in step: the store, where agents commit and land, and
-the git repository that people, CI and deployment use. The store's side of git is a bare clone
-of that repository, the *git side*: imports read it, exports write it, and `git fetch` and
-`git push` move commits between it and the remote. The examples call the repository `acme`, its
-trunk `stable`, and its remote `git@github.com:acme/acme.git` (a stand-in: the runs behind this
-guide used a local bare repository as the remote).
+the git repository that people, CI and deployment use. The store reaches that repository as a
+git remote: `swarmops fetch`, `push` and `sync` run your own git (2.39 or later) against it, with
+your credentials, and keep what they fetched in a git mirror inside the store. The examples call
+the repository `acme`, its trunk `stable`, and its remote `git@github.com:acme/acme.git` (a
+stand-in: the runs behind this guide used a local repository served over a stand-in for ssh).
+[GitHub as a remote](../guides/github-remote.md) is the guide to the commands themselves.
 
 Until a review is part of SwarmOps (M7), a person reviews what agents landed before it reaches a
-trunk that deploys. Exports therefore go to a *review branch*, `review` in the examples, where CI
-and the reviewer see them, and the trunk moves to the reviewed commit by a fast-forward push
-([step 5](#5-review-then-move-the-trunk)). Nothing in SwarmOps stops an export to the trunk; the
-loop below never makes one.
+trunk that deploys. Pushes therefore go to a *review branch*, `review` in the examples, where CI
+and the reviewer see them, and the trunk moves when the pull request from it is merged
+([step 5](#5-review-then-move-the-trunk)). Nothing in SwarmOps stops a push to the trunk
+(`swarmops sync origin` makes one); the loop below never makes one.
 
 Commands and outputs here follow the
 [conventions of the operations guide](../operations.md#how-to-read-these-pages).
 
 ```text
-  remote (CI, deployment)       git side (bare clone)              store
-  -----------------------       ---------------------              -----
-  stable ---- git fetch ----->  stable ---- git import ------->  main  <-- agents commit and land
-  review <--- git push -------  review <--- git export --------  main
-  stable <--- git push review:stable, after the review and green CI on review
+  remote (CI, deployment)                                     store
+  -----------------------                                     -----
+  stable ---- swarmops sync origin --no-push ------------->  main  <-- agents commit and land
+  review <--- swarmops push origin main:review -----------  main
+  stable <--- the pull request from review, merged by any method, after green CI
 ```
 
 ## Before you start
 
-- A store and an identity of your own ([Stores](stores.md)), and agents that reach the store
+- An identity of your own ([Stores](stores.md)), and agents that reach the store
   ([Give agents the store](agents.md)).
-- git on the host, with access to the remote, and `python3` for the `field` helper of step 2.
+- git 2.39 or later on the host, with access to the remote (an ssh key, or a credential helper or
+  a token for HTTPS: [GitHub as a remote](../guides/github-remote.md#credentials)), and `python3`
+  for the `field` helper of step 2.
 - CI that runs on a push of the review branch ([step 4](#4-send-it-to-git-for-review)).
 
 ## Once: bring the repository in
@@ -36,49 +39,41 @@ Commands and outputs here follow the
 ```sh
 export SWARMOPS_REPO=~/.local/state/swarmops/repos/acme
 export SWARMOPS_AGENT=operator/ada
-GIT_SIDE=~/.local/state/swarmops/git/acme.git
-git clone --bare git@github.com:acme/acme.git "$GIT_SIDE"
-swarmops git import "$GIT_SIDE" --ref stable --into main
+swarmops clone git@github.com:acme/acme.git --into "$SWARMOPS_REPO" --branch stable
 ```
 
 ```json
-{"ok":true,"op":"git_import","api":1,"result":{"imported":3,"skipped":0,"head_changeset":"c893148f…","git_head_sha":"84226f3190a555751039017a08ef8485fd9f514b","target_ref":"main","ref_moved":true,"lossy":[],"lossy_total":0},"meta":{"repo":"…","elapsed_ms":80,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"clone_repo","api":1,"result":{"repo":{"repo_id":"3930dfc5…","name":"acme","main":"c51b1735…","store_version":1,"changesets":3,"refs":1},"remote":{"name":"origin","url":"git@github.com:acme/acme.git","branch":"stable","lossy":[]},"fetch":{"remote":"origin","branch":"stable","head":{"sha":"a4a47ecd332f37219c9e1c12ddf79977cd168f46","changeset":"c51b1735…"},"imported":3,"branches":[{"branch":"stable","new":"a4a47ecd332f37219c9e1c12ddf79977cd168f46"}],"branches_truncated":false,"tags_fetched":0},"imported":3,"main":"c51b1735…"},"meta":{"repo":"…","elapsed_ms":235,…}}
 ```
 
-The store's `main` now holds the trunk's history, each changeset the git commit it came from.
-`imported` counts the commits that became changesets, and `skipped` the commits the store held
-already that the import's walk met at its frontier and stopped at, not the history the store
-holds (0 in a new store).
-`--ref` and `--into` name the git side's branch and the store's ref (`--ref` defaults to `HEAD`,
-`--into` to `main`). Content a changeset cannot hold as git has it (a submodule, a name that is
-not UTF-8, a mode or a tree order git does not write, an empty directory, a commit whose bytes
-its fields cannot give back) is refused with `E_GIT_IMPORT_LOSSY`, naming the commit, the path
-and the class, until you allow that class with `--lossy`
-([README](../../README.md#bring-a-git-repository-in)). SHA-256 repositories, reftable refs and
-shallow clones are refused.
+`clone` made the store, recorded the remote as `origin` following `stable` (`--branch`; without
+it, the remote's default branch), fetched it into the store's mirror, and imported the trunk's
+history into `main`, each changeset the git commit it came from. `imported` counts the commits
+that became changesets. The remote's other branches are in the mirror (`branches`) but not
+imported; its tags are fetched and never imported. Content a changeset cannot hold as git has it
+(a submodule, a name that is not UTF-8, a mode or a tree order git does not write, an empty
+directory, a commit whose bytes its fields cannot give back) is refused with
+`E_GIT_IMPORT_LOSSY`, naming the commit, the path and the class, until you allow that class with
+`--lossy` ([README](../../README.md#bring-a-git-repository-in)). SHA-256 repositories are refused.
+A clone that stops half-way continues when run again with the same URL into the same directory.
 
 ## 1. Take in what git gained
 
 ```sh
-git -C "$GIT_SIDE" fetch origin stable:stable
-swarmops git import "$GIT_SIDE" --ref stable --into main
+swarmops sync origin --no-push
 ```
 
 ```json
-{"ok":true,"op":"git_import","api":1,"result":{"imported":0,"skipped":1,"head_changeset":"c893148f…","git_head_sha":"84226f3190a555751039017a08ef8485fd9f514b","target_ref":"main","ref_moved":false,"old_head":"c893148f…","lossy":[],"lossy_total":0},"meta":{"repo":"…","elapsed_ms":0,"resolved":{},"auth":"trust"}}
+{"ok":true,"op":"sync","api":1,"result":{"remote":"origin","branch":"stable","status":"up_to_date","attempts":1,"published":[],"dropped":[],"main":{"old":"c51b1735…","new":"c51b1735…"},"remote_head":{"old":"a4a47ecd332f37219c9e1c12ddf79977cd168f46","new":"a4a47ecd332f37219c9e1c12ddf79977cd168f46"}},"meta":{"repo":"…","elapsed_ms":8,…}}
 ```
 
-With nothing new, the import writes nothing. Its walk stopped at once, at the commit `main` holds:
-that one commit is the `skipped` 1. Commits pushed to the trunk on top of the last promoted export
-come in, and `main` moves to the last of them (`"imported":1` for one). The fetch moves the git
-side's `stable` only forward, and nothing else moves it, since exports go to the review branch. When
-it refuses (`! [rejected] stable -> stable (non-fast-forward)`, exit 1), the git side's `stable`
-holds commits the remote lacks: an export went to it instead of the review branch, or the remote's
-trunk was rewritten.
-
-While an export waits for its review, the trunk is behind `main`, and the import fails with
-`E_GIT_IMPORT_DIVERGED` although nothing is wrong: take this step after step 5, once the trunk holds
-the last export ([One writer per trunk](one-writer-per-trunk.md) tells this from a real divergence).
+`sync` fetches, then puts `main` on top of the trunk's head: with nothing new on either side it
+moves nothing (`up_to_date`). Commits pushed to the trunk come in and `main` moves to the last of
+them (`fast_forwarded`); lands that the trunk does not hold yet are landed again on top of its
+head, one by one, as `land` merges them (`landed_locally`, each in `published`). `--no-push`
+keeps it from pushing: the trunk takes pull requests only. `swarmops fetch origin` alone takes the
+commits into the store and moves no ref; `swarmops sync status origin` then counts what `main` has
+that the trunk lacks (`ahead`) and the reverse (`behind`), offline.
 
 ## 2. Agents commit and land
 
@@ -91,13 +86,13 @@ field() { python3 -I -c 'import functools, json, sys; print(functools.reduce(lam
 BASE=$(swarmops resolve main | field result.id)
 cat change.json
 swarmops --as agent/worker-1 commit -m "greet the swarm" --changes change.json --parent "$BASE"
-swarmops --as agent/worker-1 land 8f22e3a1ee2ff15836609fdf359065ce00cccab04d858258e9b1d8cb50c40af1 --key "$(uuidgen)"
+swarmops --as agent/worker-1 land 994a4ed3f65e5fc7765bd74e9b27c1138a86c98e06be58c5432ebb1dca6a11a9 --key "$(uuidgen)"
 ```
 
 ```text
 [{"path": "src/lib.rs", "op": "put", "content": {"inline": "pub fn greet() -> &'static str {\n    \"hello, swarm\"\n}\n"}}]
-{"ok":true,"op":"commit","api":1,"result":{"changeset":"8f22e3a1ee2ff15836609fdf359065ce00cccab04d858258e9b1d8cb50c40af1","parent":"c893148f…","root":"ff7ba3ee…","files_changed":1,"blobs_written":1,"replayed":false},"meta":{"repo":"…","elapsed_ms":146,…}}
-{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138","rebased_onto":"c893148f…","target":"main","base":"c893148f…","attempts":1,"relocated":false,"files_changed":1,"squashed_from":["8f22e3a1…"]},"meta":{"repo":"…","elapsed_ms":146,…}}
+{"ok":true,"op":"commit","api":1,"result":{"changeset":"994a4ed3f65e5fc7765bd74e9b27c1138a86c98e06be58c5432ebb1dca6a11a9","parent":"c51b1735…","root":"3d9867ea…","files_changed":1,"blobs_written":1,"replayed":false},"meta":{"repo":"…","elapsed_ms":21,…}}
+{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e","rebased_onto":"c51b1735…","target":"main","base":"c51b1735…","attempts":1,"relocated":false,"files_changed":1,"squashed_from":["994a4ed3…"]},"meta":{"repo":"…","elapsed_ms":25,…}}
 ```
 
 The commit records the change without moving any ref; the land merges it onto `main`'s head
@@ -123,12 +118,12 @@ swarmops --as agent/worker-2 land "$C2" --key "$(uuidgen)" --pretty
   "api": 1,
   "error": {
     "code": "E_CONFLICT",
-    "message": "1 path(s) of the change conflict with the target's head 8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138: nothing was recorded",
+    "message": "1 path(s) of the change conflict with the target's head 91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e: nothing was recorded",
     "retryable": false,
     "exit": 3,
     "details": {
       "report": {
-        "base": "c893148f550e68a1d0c0dfcf9bd10b4a738b8f60245ddcc94f4dbf0cb5d67755",
+        "base": "c51b1735c428042e4ab5920448064b62a15b1310fc14ce2b7ea7d8eb38ef2767",
         "files": [
           {
             "base_blob": "2cda0801…",
@@ -157,18 +152,18 @@ swarmops --as agent/worker-2 land "$C2" --key "$(uuidgen)" --pretty
             "path": "src/lib.rs",
             "theirs_agent": "agent/worker-1",
             "theirs_blob": "5d417d12…",
-            "theirs_changeset": "8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138"
+            "theirs_changeset": "91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e"
           }
         ],
         "kinds": [
           "content"
         ],
-        "ours": "8070d2dd63f46a1157fb28ccc7025c7b6d3c39be621930bf6dbfee44075aef7f",
-        "theirs": "8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138",
+        "ours": "7017711372805e975731cd46b175a3766b0dd342511a3142cfae15a426e8c26e",
+        "theirs": "91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e",
         "truncated": false
       }
     },
-    "hint": "swarmops cat 8fe1b0f9…:src/lib.rs, then swarmops land 8070d2dd… --resolve <file> with each path's resolution and against = 8fe1b0f9…"
+    "hint": "swarmops cat 91073fdd…:src/lib.rs, then swarmops land 70177113… --resolve <file> with each path's resolution and against = 91073fdd…"
   },
   …
 }
@@ -186,9 +181,9 @@ swarmops --as agent/worker-2 land "$C2" --resolve resolve.json --key "$(uuidgen)
 ```
 
 ```text
-{"against": "8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138",
+{"against": "91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e",
  "files": {"src/lib.rs": {"content": {"inline": "pub fn greet() -> &'static str {\n    \"hi, swarm\"\n}\n"}}}}
-{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b","rebased_onto":"8fe1b0f9…","target":"main","base":"c893148f…","attempts":1,"relocated":false,"files_changed":2,"squashed_from":["8070d2dd…"]},"meta":{"repo":"…","elapsed_ms":134,…}}
+{"ok":true,"op":"land","api":1,"result":{"status":"landed","landed":"8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6","rebased_onto":"91073fdd…","target":"main","base":"c51b1735…","attempts":1,"relocated":false,"files_changed":2,"squashed_from":["70177113…"]},"meta":{"repo":"…","elapsed_ms":26,…}}
 ```
 
 Through MCP, the `land` tool takes the same resolutions as its `resolutions` argument.
@@ -202,14 +197,14 @@ swarmops op log -n 2 --human
 ```
 
 ```text
-entries[0].id: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
-entries[0].parents[0]: 8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138
+entries[0].id: 8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6
+entries[0].parents[0]: 91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e
 entries[0].author_agent: agent/worker-2
-entries[0].created_at: 1792484229000
+entries[0].created_at: 1792671661000
 entries[0].title: a shorter greeting
 …
-from: c893148f550e68a1d0c0dfcf9bd10b4a738b8f60245ddcc94f4dbf0cb5d67755
-to: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
+from: c51b1735c428042e4ab5920448064b62a15b1310fc14ce2b7ea7d8eb38ef2767
+to: 8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6
 files[0].path: README.md
 files[0].status: modified
 files[0].binary: false
@@ -219,12 +214,12 @@ files[1].path: src/lib.rs
 …
 ops[0].op: 5
 ops[0].kind: land
-ops[0].changesets[0].id: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
+ops[0].changesets[0].id: 8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6
 ops[0].changesets[0].agent: agent/worker-2
 …
 ops[0].ref_moves[0].name: main
-ops[0].ref_moves[0].old: 8fe1b0f9749d40af77452e714b5183da151033b004ecbd5d26cc0c3bdf805138
-ops[0].ref_moves[0].new: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
+ops[0].ref_moves[0].old: 91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e
+ops[0].ref_moves[0].new: 8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6
 ops[0].ref_moves[0].actor: agent/worker-2
 …
 ```
@@ -235,89 +230,128 @@ back, by compare-and-swap, all or none ([README](../../README.md#first-commands)
 ## 4. Send it to git for review
 
 ```sh
-swarmops git export "$GIT_SIDE" --ref main --branch review
-git -C "$GIT_SIDE" push origin review
+swarmops push origin main:review
 ```
 
-```text
-{"ok":true,"op":"git_export","api":1,"result":{"exported":2,"objects_written":9,"head_changeset":"1092352e…","head_sha":"0eb07c3f0140e815e6bc153043eebaf5672eb46b","branch":"review","branch_moved":true,"incremental":false,"rewritten":0},"meta":{"repo":"…","elapsed_ms":185,…}}
-To …
- * [new branch]      review -> review
+```json
+{"ok":true,"op":"push","api":1,"result":{"remote":"origin","branch":"review","status":"created","new":"4db8e624d22fd98a3ca1dc51c3622c313ce7d64c","head_changeset":"8dc0ca37…","objects_written":9,"rewritten":0},"meta":{"repo":"…","elapsed_ms":69,…}}
 ```
 
-The export writes every changeset the branch does not reach as a git commit, makes the objects
-durable, then moves the branch by compare-and-swap; run again, it writes nothing. This one made the
-branch (`incremental` is false and there is no `old_sha`), and later ones move it forward. CI runs
-on the push as it runs on any branch push (point it at this branch if it runs only on the trunk or
-on pull requests), and the reviewer reads the branch. What they see:
+The push exports every changeset the branch does not reach as a git commit into the store's
+mirror, then has git send it with a lease on the value the last fetch saw: the remote branch moves
+only from there to a descendant of it, never by force. This one made the branch (`created`); later
+ones move it forward (`pushed`, with `old`), and one with nothing new sends nothing and starts no
+git (`up_to_date`). A branch someone moved since the last fetch fails with `E_REMOTE_DIVERGED`
+(exit 3) and nothing is sent: fetch, then push again, or sync. CI runs on the push as it runs on any
+branch push (point it at this branch if it runs only on the trunk or on pull requests), and the
+reviewer reads the branch. What they see, in a clone of their own:
 
 ```sh
-git -C "$GIT_SIDE" log --format="%h %an <%ae>%n    %s" -3 review
-git -C "$GIT_SIDE" log -1 --format=%B review
+git log --format="%h %an <%ae>%n    %s" -3 origin/review
+git log -1 --format=%B origin/review
 ```
 
 ```text
-0eb07c3 agent/worker-2 <worker-2@agent.swarmops.local>
+4db8e62 agent/worker-2 <worker-2@agent.swarmops.local>
     a shorter greeting
-91ac021 agent/worker-1 <worker-1@agent.swarmops.local>
+91fc10d agent/worker-1 <worker-1@agent.swarmops.local>
     greet the swarm
-84226f3 Ada Lovelace <ada@example.com>
+a4a47ec Ada Lovelace <ada@example.com>
     docs: say what acme does
 a shorter greeting
 
-SwarmOps-Changeset: 1092352e3a895f0ae9301a5e0637b74ae36763b57d3e907897e0e0408a07830b
+SwarmOps-Changeset: 8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6
 SwarmOps-Land-Key: 23fc28da-8ee7-4ed6-ba30-b94291a54525
-SwarmOps-Squashed-From: 8070d2dd63f46a1157fb28ccc7025c7b6d3c39be621930bf6dbfee44075aef7f
+SwarmOps-Squashed-From: 7017711372805e975731cd46b175a3766b0dd342511a3142cfae15a426e8c26e
 ```
 
-Commits imported from git come back as themselves, byte for byte. A changeset made in the store
+Commits fetched from git go back as themselves, byte for byte. A changeset made in the store
 becomes a commit whose author and committer are the identities the store recorded for it (an
-agent's, with a `swarmops.local` address), with SwarmOps' trailers after the message and no
-signature: a pipeline or branch rule that requires signed commits or known authors refuses it. A
-message that already ends in a trailer block, such as `Co-Authored-By:`, keeps it, and the
-SwarmOps trailers join that block. Tags stay git's: tag an exported commit in git, as before.
+agent's, with a `swarmops.local` address, unless the store's `authors.toml` gives the agent's
+family an address of its own: [Commit authors](../guides/github-remote.md#commit-authors)), with
+SwarmOps' trailers after the message and no signature: a pipeline or branch rule that requires
+signed commits refuses it. A message that already ends in a trailer block, such as
+`Co-Authored-By:`, keeps it, and the SwarmOps trailers join that block. Tags stay git's: tag a
+pushed commit in git, as before.
 
 ## 5. Review, then move the trunk
 
-A person reads what the review branch has that the trunk lacks (`git log` and
-`git diff stable...review` in the git side, or a pull request from `review` to `stable`), and CI
-runs on the branch. When the review approves and CI is green on the branch's tip, the trunk moves to
-that commit by a fast-forward push:
+A person reads what the review branch has that the trunk lacks (a pull request from `review` to
+`stable`), and CI runs on the branch. When the review approves and CI is green, the pull request
+is merged by any of the host's methods: a merge commit, a squash or a rebase. Then the store
+takes the trunk in:
 
 ```sh
-git -C "$GIT_SIDE" log --oneline stable..review
-git -C "$GIT_SIDE" push origin review:stable
+swarmops sync origin --no-push --pretty
 ```
 
 ```text
-0eb07c3 a shorter greeting
-91ac021 greet the swarm
-To …
-   84226f3..0eb07c3  review -> stable
+{
+  "ok": true,
+  "op": "sync",
+  "api": 1,
+  "result": {
+    "remote": "origin",
+    "branch": "stable",
+    "status": "fast_forwarded",
+    "attempts": 1,
+    "published": [],
+    "dropped": [
+      {
+        "changeset": "91073fdd7c734576c4aa0e08f0c39800aa26d2b957eab71b5c24b0e1fdf30b0e",
+        "by": "trailer"
+      },
+      {
+        "changeset": "8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6",
+        "by": "trailer"
+      }
+    ],
+    "main": {
+      "old": "8dc0ca37d8a4a5b29d0e95892066be702aee4b4f99cc699115cb2e8ef12293c6",
+      "new": "d29be6aada952285d7243ba06651a73f320bce2b08a6317bd4b493ca212abfb3"
+    },
+    "remote_head": {
+      "old": "d068fccdd8df508f9d5c025f05679e2c967c2e8c",
+      "new": "d068fccdd8df508f9d5c025f05679e2c967c2e8c"
+    }
+  },
+  …
+}
 ```
 
-The push makes no commit: the trunk now holds the commits that were reviewed and tested, and the CI
-run of the branch's tip is the run of the trunk's. The remote's deployment still runs on the trunk,
-and is to wait for green CI on that commit. When agents landed more and exported again while the
-review ran, push the commit that was reviewed (`git push origin <commit>:stable`), not the branch.
-The next step 1 finds the last export on the trunk, so the import continues from the exported head
-and takes in nothing:
+This pull request was squashed: the trunk gained one commit that the store never exported, whose
+message lists the two commits with their `SwarmOps-Changeset:` lines, as GitHub's default squash
+message does. The sync recognised both changes by those lines (`by: "trailer"`), dropped them
+rather than land them twice, and moved `main` to the squash commit's changeset. A rebase keeps the
+lines too; a merge commit needs none, since the trunk then holds the exported commits themselves.
+A squash whose message lost the lines is recognised when what is left of the store's changes
+merges onto the trunk's head as no change (`by: "no_op"`). A dropped change stays in the store's
+history, and `swarmops op undo` of the sync's move of `main` brings it back.
 
-```sh
-git -C "$GIT_SIDE" fetch origin stable:stable
-swarmops git import "$GIT_SIDE" --ref stable --into main
-```
-
-```text
-From …
-   84226f3..0eb07c3  stable     -> stable
-{"ok":true,"op":"git_import","api":1,"result":{"imported":0,"skipped":1,"head_changeset":"1092352e…","git_head_sha":"0eb07c3f0140e815e6bc153043eebaf5672eb46b","target_ref":"main","ref_moved":false,"old_head":"1092352e…","lossy":[],"lossy_total":0},"meta":{"repo":"…","elapsed_ms":1,…}}
-```
-
-Move the trunk with this push, not with the host's merge button: a squash merge writes one commit
-that the store never exported, and the next import fails with `E_GIT_IMPORT_DIVERGED` (a merge
-commit works, and comes in as a merge changeset).
+When agents landed more while the review ran, the same sync lands those changes on top of the
+trunk's head (`landed_locally`), and the next `swarmops push origin main:review` sends them for the
+next review.
 
 Next: an agent that must build or test before it lands works in a
-[git worktree](build-and-test.md); when people change the trunk too, see
-[One writer per trunk](one-writer-per-trunk.md).
+[git worktree](build-and-test.md); [One writer per trunk](one-writer-per-trunk.md) is the rule for
+the round trip through a bare clone, below.
+
+## Without a remote: a bare clone
+
+`git import` and `git export` still meet a git repository on the host, a bare clone beside the
+store, the *git side*, when the store should not reach the remote itself, or when another page
+needs a git repository of the store's work ([Build and test a change](build-and-test.md),
+[One writer per trunk](one-writer-per-trunk.md)):
+
+```sh
+GIT_SIDE=~/.local/state/swarmops/git/acme.git
+git clone --bare git@github.com:acme/acme.git "$GIT_SIDE"
+swarmops git import "$GIT_SIDE" --ref stable --into main     # take in what git gained
+swarmops git export "$GIT_SIDE" --ref main --branch review   # send the store's work to git
+git -C "$GIT_SIDE" push origin review
+```
+
+Git then moves every commit between the git side and the remote, and a squash merge on the remote
+writes a commit that the next import refuses with `E_GIT_IMPORT_DIVERGED`: move the trunk by a
+fast-forward push of the reviewed commit instead (`git push origin review:stable`). The
+[git round trip](../guides/git-round-trip.md) runs it command by command.

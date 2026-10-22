@@ -287,14 +287,24 @@ them or none, by compare-and-swap, and refuses if another operation has moved on
 
 ### Claude Code and MCP
 
-`swarmops mcp` serves 18 operations to an agent as MCP tools, among them `read_file`, `commit` and
-`land`. Register it with Claude Code:
+`swarmops mcp` serves 35 operations to an agent as MCP tools, among them `read_file`, `commit`,
+`land` and the eleven workspace tools. Register it with Claude Code:
 `claude mcp add swarmops -- so mcp --repo <store> --as <agent>`. By default Claude Code starts one
 server per session and the session's subagents share it, so their commits are recorded for the
 session's agent. An agent that needs an identity of its own runs as its own Claude Code process,
 with its own `SWARMOPS_AGENT`. [Use SwarmOps from Claude Code over MCP](claude-code.md) covers the
 registration, one identity for each agent process and the two rules agents follow; the home page has
 [the MCP section](https://swarmops.cc/#mcp).
+
+### Workspaces to build and test in
+
+`so ws create` writes a changeset's tree, or the paths under chosen prefixes, into a directory of
+its own, where an agent builds and tests with the project's tools. `so ws land --check` rebases the
+workspace onto `main`, runs the check there and publishes only if `main` has not moved since, so
+the landed tree is the one the check ran on. Claude Code's `WorktreeCreate` and `WorktreeRemove`
+hooks make `claude --worktree` sessions and `isolation: worktree` subagents use a workspace in
+place of a git worktree ([Workspaces for worktree sessions and subagents](claude-code.md#workspaces-for-worktree-sessions-and-subagents),
+[Build and test a change](../operate/build-and-test.md)).
 
 ### Git at both ends
 
@@ -305,15 +315,14 @@ deployment pipelines keep running. Where git still leads is listed next.
 ## Where git worktrees still lead
 
 These are the dimensions where SwarmOps stands behind git today. Most come from the README's own
-comparison with git; the second follows from SwarmOps having no workspaces yet, and the platforms
-row from its platform policy.
+comparison with git; the platforms row follows from its platform policy.
 
 | Dimension | Git worktrees | SwarmOps today |
 |---|---|---|
 | **Write throughput** | Agents serialize nothing, and git's defaults sync none of a commit's files. | Writers take turns: each commit holds one store-wide lock across two journal syncs, and full fsync is the only mode. A commit with no contention takes about 21 ms; 32 processes managed 72.7 commits a second on one busy host. No git number exists to set beside them. |
-| **A directory to build and test in** | Every worktree is a checkout of its own. GitButler's documentation recommends worktrees “when agents need incompatible checkout states, separate runtime state, or competing attempts at the same task”. | No workspaces yet; they are planned for M5. An agent that must build or test its change does so in a git worktree checked out from an export of `main`, at the head it read, and commits the files it made there. |
+| **A directory to build and test in** | Every worktree is a checkout of its own. GitButler's documentation recommends worktrees “when agents need incompatible checkout states, separate runtime state, or competing attempts at the same task”. | Since M5, workspaces: a sparse copy of a changeset's tree on disk, with status, commit, rebase and a checked land. Not yet measured: the status of a 50,000-file workspace, and checked lands under a busy `main`, where a check of minutes may have to rebase and run again. |
 | **Refs** | Multi-ref transactions, tags, free-form branch names and symbolic refs. | `main` and `release/<name>` only, moved one per call. |
-| **Reading** | Batch reads, `git grep <tree>` and sparse checkouts. | One file or one directory per call, with a byte offset or a range of lines for a file and a depth for a directory. Sparse workspaces are planned. |
+| **Reading** | Batch reads, `git grep <tree>` and sparse checkouts. | One file or one directory per call, with a byte offset or a range of lines for a file and a depth for a directory; `blob get` reads blobs by id in batches, and a workspace puts the files on disk. |
 | **Storage on disk** | Packs. | One file per object, zstd-compressed when that makes it smaller; no packs, no delta compression. |
 | **Review and the ecosystem** | Patch-review tools, with Gerrit and GitHub adding review on top; hooks, signing, submodules and LFS. | No user hooks, signing, submodules or LFS. Review, with change requests, approvals and a landing gate, is planned for M7. |
 | **Between hosts** | Clone, fetch and push over any transport, and bundles without one. | One host. Between hosts, a git remote carries the history, one writing host at a time. Offline-first sync is planned for M11. |
@@ -342,8 +351,6 @@ measured against git, and no git baseline has been measured.
 Use git worktrees, or `claude --worktree`, when
 
 - a few agents work on long tasks that a person reviews and merges;
-- an agent must build, test or run a server in a checkout of its own, since SwarmOps has no
-  workspaces yet;
 - you need tags, many branches, review tools or hooks, or you work on macOS or Windows today.
 
 With worktrees, a few habits keep the integration step small:
@@ -365,12 +372,14 @@ Consider SwarmOps when
   merge-and-retry loops;
 - you want conflicts and errors as data an agent can act on: an error code that does not change, a
   retryable flag, a hint and a conflict report;
-- you accept what the table says: pre-1.0, no workspaces, and a landing that is built but not yet
-  measured under a swarm's load.
+- agents must build and test their changes on disk before they land them: a workspace each, and
+  `ws land --check` lands the tree the check ran on;
+- you accept what the table says: pre-1.0, and a landing that is built but not yet measured under a
+  swarm's load.
 
 The two are not exclusive. `git import` and `git export` move history between a store and a git
-repository, and [the operations guide](../operations.md#building-and-testing-a-change) has an agent
-build and test in a git worktree checked out from an export, then commit the files it made there.
+repository, and [Build and test a change](../operate/build-and-test.md) also has an agent build
+and test in a git worktree checked out from an export, then land exactly the tree it tested.
 
 ## What has been measured, and what has not
 

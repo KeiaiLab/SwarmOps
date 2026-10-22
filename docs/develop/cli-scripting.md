@@ -154,12 +154,12 @@ The exit code is `error.exit`, and 0 on success:
 | Exit | Meaning | Codes |
 | --- | --- | --- |
 | 0 | Success. | |
-| 1 | The operation failed. | `E_EXISTS`, `E_AMBIGUOUS_ID`, `E_IS_DIR`, `E_TOO_LARGE`, `E_EMPTY_COMMIT`, `E_TYPE_CONFLICT`, `E_REF_NAME_INVALID`, `E_STORE_CORRUPT`, `E_UNSUPPORTED_FS`, `E_IO`, `E_INTERNAL`, `E_NOTHING_TO_LAND`, `E_NOTHING_TO_UNDO`, `E_GIT_IMPORT_LOSSY`, `E_GIT_UNSUPPORTED`, `E_GIT_READ`, `E_GIT_WRITE` |
+| 1 | The operation failed. | `E_EXISTS`, `E_AMBIGUOUS_ID`, `E_IS_DIR`, `E_TOO_LARGE`, `E_EMPTY_COMMIT`, `E_TYPE_CONFLICT`, `E_REF_NAME_INVALID`, `E_STORE_CORRUPT`, `E_UNSUPPORTED_FS`, `E_IO`, `E_INTERNAL`, `E_NOTHING_TO_LAND`, `E_NOTHING_TO_UNDO`, `E_GIT_IMPORT_LOSSY`, `E_GIT_UNSUPPORTED`, `E_GIT_READ`, `E_GIT_WRITE`, `E_WS_EXISTS`, `E_WS_DIRTY`, `E_PATH_NOT_EMPTY`, `E_UNRESOLVED_CONFLICTS`, `E_MARKERS_PRESENT`, `E_WS_UNPORTABLE`, `E_CHECK_FAILED` |
 | 2 | A malformed request or command line. | `E_INVALID_ARG` |
-| 3 | A conflict with what the change lands on: resolve it, then run it again. | `E_CONFLICT`, `E_GIT_IMPORT_DIVERGED`, `E_GIT_EXPORT_DIVERGED` |
-| 4 | Retryable: it can succeed if run again. | `E_CAS_MISMATCH`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY`, `E_IO_TRANSIENT`, `E_MAINTENANCE_BUSY` |
-| 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED`, `E_AUTH`, `E_POLICY_DENIED` |
-| 6 | Something it names does not exist. | `E_NOT_A_REPO`, `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND`, `E_UNKNOWN_PARENT`, `E_REF_NOT_FOUND`, `E_OP_NOT_FOUND`, `E_GIT_NOT_A_REPO`, `E_GIT_REF_NOT_FOUND` |
+| 3 | A conflict with what the change lands on: resolve it, then run it again. | `E_CONFLICT`, `E_GIT_IMPORT_DIVERGED`, `E_GIT_EXPORT_DIVERGED`, `E_REMOTE_DIVERGED` |
+| 4 | Retryable: it can succeed if run again. | `E_CAS_MISMATCH`, `E_CAS_RETRY_EXHAUSTED`, `E_BUSY`, `E_IO_TRANSIENT`, `E_MAINTENANCE_BUSY`, `E_REMOTE_UNREACHABLE`, `E_WS_LOCKED` |
+| 5 | An identity or policy requirement refused it. | `E_IDENTITY_REQUIRED`, `E_AUTH`, `E_POLICY_DENIED`, `E_REMOTE_REJECTED` |
+| 6 | Something it names does not exist. | `E_NOT_A_REPO`, `E_REV_NOT_FOUND`, `E_PATH_NOT_FOUND`, `E_UNKNOWN_PARENT`, `E_REF_NOT_FOUND`, `E_OP_NOT_FOUND`, `E_GIT_NOT_A_REPO`, `E_GIT_REF_NOT_FOUND`, `E_REMOTE_NOT_FOUND`, `E_WS_NOT_FOUND` |
 
 `E_REF_NOT_FOUND`, `E_AUTH`, `E_POLICY_DENIED` and `E_MAINTENANCE_BUSY` are not raised yet; they are
 in the schema so that a script can match them before any operation raises them

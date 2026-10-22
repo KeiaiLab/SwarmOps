@@ -542,6 +542,12 @@ pub mod sweep {
     /// The sweeps' workspace.
     const WS: &str = "w";
 
+    /// Longer than a tick of the filesystem's clock, which stamps file mtimes: a file written
+    /// this long before a scan has an mtime before the index that scan writes, so the next
+    /// status trusts its row instead of hashing it (the racy rule). Without the wait the number
+    /// of host calls of a scenario depends on the timing, and a sweep's cuts on it.
+    const PAST_THE_CLOCK_TICK: std::time::Duration = std::time::Duration::from_millis(50);
+
     /// What a sweep drives.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Scenario {
@@ -944,8 +950,11 @@ pub mod sweep {
                 remove(&dir, "docs/x.md");
             }
             Scenario::Rebase | Scenario::Land | Scenario::LandChecked => {
-                // A commit of the workspace's own, and `main` moved on another file.
+                // A commit of the workspace's own, and `main` moved on another file. The wait
+                // makes every file older than the commit's index, so each run of the scenario
+                // makes the same calls.
                 write(&dir, "src/a.rs", "mine\n");
+                std::thread::sleep(PAST_THE_CLOCK_TICK);
                 let req = WsCommitReq {
                     workspace: WS.to_owned(),
                     message: "mine".to_owned(),
