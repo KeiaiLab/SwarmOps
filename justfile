@@ -83,8 +83,11 @@ bench:
 # every store bench. Prints only their summary lines (the
 # store-level test's by their shape, without its per-child JSON lines) and the load average
 # between them; target/perf/ keeps the full output. docs/perf.md records what they print.
-# The M1 and M13 measurements in one go: both 32-process contention tests, the remote cases,
-# then the store benches.
+# The M5 workspace cases (ws_processes::perf::*: the 50,000-file tree's status, edits, commits
+# and update, the 10,000-file create, the checked land on 12,000 changesets) print `ws-perf: `
+# lines.
+# The M1, M13 and M5 measurements in one go: both 32-process contention tests, the remote
+# cases, the workspace cases, then the store benches.
 perf:
     #!/usr/bin/env bash
     set -uo pipefail
@@ -107,6 +110,11 @@ perf:
     cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
         -E 'test(/^remote_perf::/)' --no-capture 2>&1 | tee target/perf/remote.log \
         | grep --line-buffered '^remote-perf: '
+    [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
+    load between
+    cargo nextest run --locked --release -p swarmops-cli --all-features --run-ignored ignored-only \
+        -E 'test(/^ws_processes::perf::/)' --no-capture 2>&1 | tee target/perf/ws.log \
+        | grep --line-buffered '^ws-perf: '
     [ "${PIPESTATUS[0]}" -eq 0 ] || status=1
     load between
     cargo bench --locked -p swarmops-store --bench '*' -- --output-format bencher 2>&1 \

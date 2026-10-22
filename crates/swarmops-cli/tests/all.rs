@@ -29,6 +29,7 @@ mod remote_push;
 mod remote_sync;
 mod so;
 mod ws;
+mod ws_processes;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's
