@@ -1057,6 +1057,9 @@ already_applied: true
 requested state already, writes nothing and says `already_applied: true`, so it is safe to
 retry.
 
+To move a ref past several changesets at once, commit each with `--parent` on the one before,
+then move the ref once: `swarmops ref set <ref> <last> --expect <old>` (or `--create`).
+
 `ref set` takes exactly one of the two:
 
 - **`--expect OLD`** moves an existing ref, only if it names `OLD` now.
