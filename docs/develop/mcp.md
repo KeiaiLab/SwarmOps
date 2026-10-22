@@ -123,10 +123,10 @@ Four answers, one per request; the notification gets none.
 ids for compare-and-swap, `land` to publish, small pages):
 
 ```text
-{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.1.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
+{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-11-25","capabilities":{"tools":{}},"serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"},"instructions":"SwarmOps is source control for coding-agent swarms: many agents commit to one store at once. …"}}
 ```
 
-**`tools/list`.** One page of 18 tools. Each entry holds `name`, `title`, `description`,
+**`tools/list`.** One page of 23 tools. Each entry holds `name`, `title`, `description`,
 `inputSchema` and `annotations`; `read_file` alone also carries `_meta`:
 
 ```sh
@@ -152,6 +152,11 @@ sed -n 2p answers.jsonl | jq -c '.result.tools[] | {name, title, annotations} + 
 {"name":"blob_put","title":"Store a blob","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":false,"readOnlyHint":false}}
 {"name":"blob_has","title":"Find stored blobs","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 {"name":"verify","title":"Verify the store","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"remote_list","title":"List git remotes","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
+{"name":"fetch","title":"Fetch a git remote","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":true,"readOnlyHint":false}}
+{"name":"push","title":"Push to a git remote","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":true,"readOnlyHint":false}}
+{"name":"sync","title":"Sync with a git remote","annotations":{"destructiveHint":false,"idempotentHint":false,"openWorldHint":true,"readOnlyHint":false}}
+{"name":"sync_status","title":"Show sync status","annotations":{"destructiveHint":false,"idempotentHint":true,"openWorldHint":false,"readOnlyHint":true}}
 ```
 
 A tool's `inputSchema` is its request type's JSON Schema, as `swarmops schema <Type>` prints it,
@@ -230,7 +235,7 @@ SWARMOPS_AGENT=agent/worker-1 swarmops mcp --repo /tmp/dev-guide/acme < s3.jsonl
 {"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}},"name":"resolve_rev","arguments":{"rev":"main"}}}
 {"jsonrpc":"2.0","id":3,"method":"tools/list","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2027-01-01","io.modelcontextprotocol/clientCapabilities":{}}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/list"}
-{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28","2025-11-25","2025-06-18"],"capabilities":{"tools":{}},"instructions":"…","ttlMs":3600000,"cacheScope":"public","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.1.0"}}}}
+{"jsonrpc":"2.0","id":1,"result":{"resultType":"complete","supportedVersions":["2026-07-28","2025-11-25","2025-06-18"],"capabilities":{"tools":{}},"instructions":"…","ttlMs":3600000,"cacheScope":"public","_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.2.0"}}}}
 {"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":"…","structuredContent":{"ok":true,"op":"resolve_rev","api":1,"result":{"id":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118","kind":"ref"},"meta":{"repo":"/tmp/dev-guide/acme","elapsed_ms":0,"resolved":{"main":"bae3bcec1c5a0b70695b8baae3d38c34de91b270fa788268c696ed233a342118"},"auth":"trust"}},"isError":false,"_meta":{"io.modelcontextprotocol/serverInfo":{"name":"swarmops","title":"SwarmOps","version":"0.1.0"}}}}
 {"jsonrpc":"2.0","id":3,"error":{"code":-32022,"message":"Unsupported protocol version: 2027-01-01; this server serves 2026-07-28 in params._meta, and 2025-11-25 and 2025-06-18 through initialize","data":{"requested":"2027-01-01","supported":["2026-07-28","2025-11-25","2025-06-18"]}}}
 {"jsonrpc":"2.0","id":4,"error":{"code":-32602,"message":"Invalid params: tools/list names no protocol version in params._meta (io.modelcontextprotocol/protocolVersion), and no initialize has opened a session"}}

@@ -6,7 +6,9 @@
 # with three gits, runs the git import's tests on what each made, has each check the git
 # export's repositories with `git fsck`, and runs the remote suites (fetch, push, sync over smart
 # HTTP and ssh) with each; and the live run with GitHub, once a repository variable names its
-# scratch repository. Hardened and pinned to ubuntu-24.04 as ci.yml is.
+# scratch repository. Hardened as ci.yml is, and run where it runs: on the maintainers' own host,
+# through the self-hosted runners labelled `swarmops-local`, each building into its runner's
+# persistent CARGO_TARGET_DIR, so no build cache travels through GitHub.
 name: Scheduled
 
 on:
@@ -28,7 +30,7 @@ defaults:
 jobs:
   slow:
     name: just check-ci-slow
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     timeout-minutes: 45
@@ -47,16 +49,15 @@ jobs:
         with:
           tool: just@1.58.0,cargo-nextest@0.9.146
           fallback: none
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # The cache CI's `check` job saves on its pushes; restored here, never saved.
-          shared-key: check
-          workspaces: |
-            . -> target
-            fuzz -> target
-          cache-bin: false
-          save-if: false
       - run: just check-ci-slow
+      # The runner builds into its own CARGO_TARGET_DIR: bring the report to target/.
+      - name: Collect the JUnit report
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -n "${CARGO_TARGET_DIR:-}" ] && [ -f "$CARGO_TARGET_DIR/nextest/ci-slow/junit.xml" ]; then
+            mkdir -p target/nextest/ci-slow
+            cp "$CARGO_TARGET_DIR/nextest/ci-slow/junit.xml" target/nextest/ci-slow/
+          fi
       - name: Upload the JUnit report
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -69,7 +70,7 @@ jobs:
 
   fuzz:
     name: fuzz smoke
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     timeout-minutes: 30
@@ -118,7 +119,7 @@ jobs:
 
   bench-compare:
     name: bench/compare
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     timeout-minutes: 30
@@ -159,7 +160,7 @@ jobs:
   # smart HTTP to the test kit's loopback server.
   git-matrix:
     name: git matrix (${{ matrix.git }})
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     timeout-minutes: 45
@@ -185,15 +186,6 @@ jobs:
         with:
           tool: cargo-nextest@0.9.146
           fallback: none
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          # The cache CI's `check` job saves on its pushes; restored here, never saved.
-          shared-key: check
-          workspaces: |
-            . -> target
-            fuzz -> target
-          cache-bin: false
-          save-if: false
       # The install prefix is the cache, by release and tarball; the job saves it when it passes.
       - name: Restore git ${{ matrix.git }}, built before
         id: git-cache
@@ -203,16 +195,23 @@ jobs:
           # `-curl`: a git built before the remote suites, without curl, is never restored.
           key: git-${{ matrix.git }}-${{ matrix.sha256 }}-curl-ubuntu-24.04
       # Without what the tests do not use (Tcl/Tk, gettext, Perl, Python, expat), so that zlib's
-      # and curl's headers are the packages the build needs beyond the image's compiler; curl for
-      # git's HTTP transport, which the remote suites run.
+      # and curl's headers are the packages the build needs beyond the host's compiler; curl for
+      # git's HTTP transport, which the remote suites run. The runner's user cannot install
+      # packages: the host provides them (zlib1g-dev, libcurl4-openssl-dev).
       - name: Build git ${{ matrix.git }} from kernel.org's release tarball
         if: steps.git-cache.outputs.cache-hit != 'true'
         env:
           GIT_RELEASE: ${{ matrix.git }}
           GIT_SHA256: ${{ matrix.sha256 }}
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends zlib1g-dev libcurl4-openssl-dev
+          if [ ! -f /usr/include/zlib.h ]; then
+            echo "::error::the runner's host lacks zlib's headers (zlib1g-dev)"
+            exit 1
+          fi
+          if ! command -v curl-config >/dev/null; then
+            echo "::error::the runner's host lacks curl's headers (libcurl4-openssl-dev)"
+            exit 1
+          fi
           tarball="$RUNNER_TEMP/git-$GIT_RELEASE.tar.xz"
           curl -fsSL --retry 3 -o "$tarball" \
             "https://mirrors.edge.kernel.org/pub/software/scm/git/git-$GIT_RELEASE.tar.xz"

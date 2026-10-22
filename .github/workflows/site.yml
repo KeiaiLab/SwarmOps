@@ -8,6 +8,9 @@
 # comment), no token permission a job does not need (the deploy job alone may write deployments,
 # the GitHub record of each Pages deploy), `actions/checkout` keeps no credentials, no
 # `pull_request_target`; ci.yml's zizmor job audits this file too.
+#
+# Where jobs run: as in ci.yml, on the maintainers' own host, through the self-hosted runners
+# labelled `swarmops-local`; a pull request from a fork is built and checked on ubuntu-24.04.
 name: Site
 
 on:
@@ -44,7 +47,7 @@ defaults:
 jobs:
   site:
     name: build and check the site
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || 'ubuntu-24.04' }} # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read # checkout
     timeout-minutes: 15
@@ -80,7 +83,7 @@ jobs:
     name: deploy to Cloudflare Pages
     needs: site
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-24.04
+    runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
     # The secrets are read in an environment of their own: production for stable, preview for
     # every other branch. Neither has protection rules; the URL is the deploy's address.
     environment:
@@ -111,7 +114,16 @@ jobs:
           name: site
           path: web/out
 
-      # 3. The deploy. The project's production branch is stable: `--branch stable` is
+      # 3. Node for wrangler: a self-hosted runner's PATH does not reach JavaScript actions, so
+      # the deploy pins the same Node as the site job.
+      - if: steps.secrets.outputs.ready == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.15.0
+          # No cache: nothing restored can reach the job that holds the deploy token.
+          package-manager-cache: false
+
+      # 4. The deploy. The project's production branch is stable: `--branch stable` is
       # production, any other branch a preview. _headers and _redirects in web/out apply.
       - id: deploy
         if: steps.secrets.outputs.ready == 'true'

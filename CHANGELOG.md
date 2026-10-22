@@ -5,15 +5,69 @@ Notable changes to SwarmOps. The format follows
 [the versioning policy](docs/policies/versioning-and-stability.md) (Semantic Versioning, read the
 pre-1.0 way).
 
-SwarmOps 0.1.0 is the first release, tagged `v0.1.0`; no crate is published (`publish = false`).
-Its section holds every change up to it, grouped by milestone of the design (umbrella spec §13).
+SwarmOps 0.1.0 is the first release, tagged `v0.1.0`, and 0.2.0 the second, with the git remotes
+(M13); no crate is published (`publish = false`). The 0.1.0 section holds every change up to it,
+grouped by milestone of the design (umbrella spec §13).
 From here, **Unreleased** collects the changes on `stable` that no release holds yet, until the
 next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
 ### Added
 
+#### M13: git remotes, topology 2 (2026-10-22)
+
+- `so clone`, `so remote add|remove|list` and `so fetch`: a store fetches a git remote over HTTPS
+  or ssh into a git mirror it owns (`git/mirror.git`, a cache), and imports the followed branch's
+  commits; `main` does not move. `clone` makes the store, records the remote, fetches it and
+  imports the followed branch into `main`, and continues when run again after a failure.
+  Remotes live in `<store>/remotes.toml`, which holds no credential.
+- `so push <remote> [<ref>[:<branch>]]`: a compare-and-swap against what the last fetch saw, never
+  forced; a moved remote is `E_REMOTE_DIVERGED`, a refusal `E_REMOTE_REJECTED`. Files over
+  GitHub's 100 MiB limit and pushes over its 2 GB limit are refused before anything is sent, with
+  a warning per file over 50 MiB. Run again with nothing new, it starts no git.
+- `so sync <remote>`: fetch, land the store's unpublished changes onto the remote's head in order,
+  move `main` there and push by compare-and-swap; changes the remote already holds (merged by a
+  merge commit, a squash or a rebase) are recognised by their `SwarmOps-Changeset`,
+  `SwarmOps-Squashed-From` and `SwarmOps-Land-Key` lines (indented or bulleted, as a squash
+  description lists them) or by merging as no change, and dropped. `--no-push` for branches that
+  take pull requests only. `so sync status` counts what is ahead and behind, offline.
+- `remote_list`, `fetch`, `push`, `sync` and `sync_status` are MCP tools (23 in all); `clone` and
+  `remote add|remove` stay in the CLI.
+- The git transport runs your own git (2.39 or later, `SWARMOPS_GIT` or `PATH`): its credential
+  helpers, proxies and ssh settings apply as they do for `git fetch`. `--token-env <VAR>` names a
+  variable whose token reaches git as a header for that remote alone, redacted from every error;
+  git never prompts.
+- `<store>/authors.toml` gives an agent family the email (and name) its new commits are signed
+  with, so that GitHub links them to an account; existing changesets export as before.
+- Four error codes: `E_REMOTE_DIVERGED` (exit 3), `E_REMOTE_REJECTED` (exit 5),
+  `E_REMOTE_UNREACHABLE` (exit 4, retryable) and `E_REMOTE_NOT_FOUND` (exit 6), pinned by golden
+  envelopes over smart HTTP and ssh.
+- The git import can take a ref's commits as changesets without moving any ref (`objects_only`,
+  used by `fetch`), and the repository can land a change onto a head with no ref moved
+  (`Repo::land_detached`, used by `sync`).
+- `git import` and `git export` refuse a path inside a store's `git/` directory
+  (`E_INVALID_ARG`, `details.reason` `store_mirror`): the mirror is SwarmOps' alone.
+- The test kit serves git repositories without the network: git's own `http-backend` on loopback
+  and a stand-in for ssh; the weekly git matrix runs the remote suites with git 2.39.5, 2.43.0
+  and 2.56.0, built with curl, and a weekly job runs the live round trip with GitHub against a
+  scratch repository once a repository variable names it.
+- `just perf` times the git remotes against the roadmap's targets (docs/perf.md, "Git remotes
+  (M13)"): fetch met its target; push, sync and clone missed theirs.
+- A guide, [GitHub as a remote](docs/guides/github-remote.md); the daily loop now runs on
+  `so sync`, `so push` and a pull request merged by any method, and the bare clone stays for the
+  round trip without a remote.
+- The GitHub round trip was piloted on a private repository: two agents over MCP, pull requests
+  merged by squash, rebase and merge commit, `so sync` after each, no rewritten commit
+  ([docs/pilot.md](docs/pilot.md#the-m13-pilot-a-store-and-github)).
+
+#### Since 0.1.0
+
+- CI, the weekly run, the website build and the release now run on the maintainers' own host through
+  self-hosted runners; release binaries are built inside an ubuntu:24.04 container pinned by digest
+  (pull requests from forks still run on GitHub's ubuntu-24.04).
 - A one-line installer, `curl -fsSL https://get.swarmops.cc/install.sh | bash` (`scripts/install.sh`,
   served as `web/public/install.sh`): it installs `swarmops` and `so` from a release, checked against
   its `SHA256SUMS`, into `~/.local/bin` (`/usr/local/bin` as root); `--version` pins a release,
@@ -1258,5 +1312,6 @@ next release ([RELEASE.md](RELEASE.md)) moves them into a section of its own.
   ([docs/known-limitations.md](docs/known-limitations.md), "An import onto a target reads the
   head's whole tree, and onto a native head the whole history below it").
 
-[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.1.0...stable
+[Unreleased]: https://github.com/KeiaiLab/SwarmOps/compare/v0.2.0...stable
+[0.2.0]: https://github.com/KeiaiLab/SwarmOps/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/KeiaiLab/SwarmOps/releases/tag/v0.1.0

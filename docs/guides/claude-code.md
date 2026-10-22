@@ -17,8 +17,9 @@ You need SwarmOps, a store and Claude Code, on one host.
   program under a shorter name.
 - **A store**: one directory, on a native Linux filesystem. A path under `/mnt/`, where WSL mounts
   Windows drives, is refused with `E_UNSUPPORTED_FS`.
-- **Claude Code on the same host.** SwarmOps has no network code: every operation runs against the
-  host's own store, and the client starts the server as its own user.
+- **Claude Code on the same host.** Every operation runs against the host's own store, and the
+  client starts the server as its own user; only the git remote tools (`fetch`, `push`, `sync`)
+  reach another host, through the user's git.
 
 **Make a store**
 
@@ -113,7 +114,7 @@ SwarmOps records an identity and does not verify it: every envelope's `meta.auth
 treats every agent that runs against a store as a trusted local user acting for the same owner, and
 the store directory's permissions are the access boundary.
 
-## The 18 MCP tools
+## The 23 MCP tools
 
 A changeset is what a commit records, and a ref, such as `main`, is a name that points at one.
 `swarmops mcp` lists one tool for each store operation but `derive`, which `swarmops derive` runs
@@ -123,7 +124,7 @@ A tool's arguments are the operation's request. Its result is the envelope the C
 request, as `structuredContent` and as text, and a failed operation sets `isError`. A tool's
 annotations say whether it changes the store and how.
 
-### Twelve tools read
+### Fourteen tools read
 
 - **`repo_info`**
 
@@ -177,7 +178,16 @@ annotations say whether it changes the store and how.
 
   Checks the whole store's consistency; deep re-hashes every object too.
 
-### Six tools write
+- **`remote_list`**
+
+  The git remotes the store records: each one's name, URL and the branch `main` follows.
+
+- **`sync_status`**
+
+  How `main` and a remote's branch stand, as the last fetch saw it: the changes the remote lacks
+  and the commits `main` lacks. Offline.
+
+### Nine tools write
 
 - **`commit`**
 
@@ -207,8 +217,22 @@ annotations say whether it changes the store and how.
   Moves every ref an operation of `op_log` moved back to what it named before, all of them or none.
   Changesets are never removed.
 
-`init`, `whoami` and `schema` live in the CLI, and so do `git import` and `git export`: an agent
-runs them as commands, not as tools. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
+- **`fetch`**
+
+  Fetches a git remote, by its name, and imports its followed branch's new commits; moves no ref.
+
+- **`push`**
+
+  Sends a store ref to a remote branch by compare-and-swap against what the last fetch saw, never by
+  force.
+
+- **`sync`**
+
+  Fetches, lands `main`'s unpublished changes onto the remote's head, moves `main` there and
+  pushes; with `mode` `local`, it does not push.
+
+`init`, `whoami` and `schema` live in the CLI, and so do `git import`, `git export`, `clone` and
+`remote add|remove`: an agent runs them as commands, not as tools. The server speaks MCP 2026-07-28, and 2025-11-25 and 2025-06-18
 to clients that open with `initialize`.
 
 ## Publish a change
@@ -348,11 +372,11 @@ is `read_file`, `ls` is `read_tree` and `info` is `repo_info`.
 - **Work happens through the tools.** An agent reads a file at a revision and writes whole-file
   changes in a commit. Workspaces, which write files to disk, are planned (M5), with an adapter for
   Claude Code's worktree hooks.
-- **Git stays outside the tools.** No tool pushes to or pulls from a git remote. Git does that, and
-  `git import` and `git export` carry history between git and the store.
-- **One host.** There is no network code, and SwarmOps is built and tested on x86_64 Linux today;
-  macOS and Windows are next. Between hosts, work moves through a git remote, one writing host at a
-  time.
+- **Git remotes by name only.** The tools `remote_list`, `fetch`, `push`, `sync` and `sync_status`
+  work with the remotes the store records; adding a remote and `clone` stay on the command line
+  ([GitHub as a remote](github-remote.md#through-mcp)). `git import` and `git export` are not tools.
+- **One host.** SwarmOps is built and tested on x86_64 Linux today. Between hosts, work moves
+  through a git remote.
 - **Landing is not yet measured under a swarm's load.** `land` is built, and it merges again and
   retries by itself when the ref moves.
 - **Pre-1.0.** A minor version, 0.1 to 0.2, may break a public surface other than the hash contract.

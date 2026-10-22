@@ -12,8 +12,10 @@ Commands and outputs here follow the
 ## Where a store may live
 
 - **One host.** Every agent, every MCP server and every command that uses a store runs on the
-  host that holds it: SwarmOps has no network protocol yet (remote sync is M11). Between hosts,
-  git carries the history, one writer at a time ([One writer per trunk](one-writer-per-trunk.md)).
+  host that holds it: SwarmOps has no network protocol of its own yet (remote sync is M11).
+  Between hosts, git carries the history: through a git remote that each store fetches from and
+  syncs with ([GitHub as a remote](../guides/github-remote.md)), or one writer at a time through a
+  bare clone ([One writer per trunk](one-writer-per-trunk.md)).
 - **A native Linux filesystem for the store**: ext4 with its journal (what SwarmOps is tested and
   measured on), XFS or btrfs. A store under `/mnt/` (where WSL mounts Windows drives) is refused
   with `E_UNSUPPORTED_FS`; NFS, SMB and FUSE mounts are not detected yet, and not supported.

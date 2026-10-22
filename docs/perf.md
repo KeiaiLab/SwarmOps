@@ -976,7 +976,22 @@ pilot task, not here.
 | a one-commit `push`, same | 72 ms and 278 ms: 3.86x | missed |
 | a `sync` of one land onto a remote that gained one commit, under 1 s on 12,000 commits | 8.76 s | missed |
 
-Each missed target is an issue and a line for `docs/goals.md`, handed to the fan-in task; none
-blocks the milestone (the plan's decision 22). The run's log is
+Each missed target is recorded in [goals.md](goals.md) (G17) and the
+[known limitations](known-limitations.md#git-remotes); none blocks the milestone (the plan's
+decision 22). The run's log is
 `target/perf/remote.log`; the load was not controlled, so the ratios of the clone and the sync
 may move on a quiet host, and a rerun is due before the numbers become goals.
+
+### The pilot's repository (2026-10-22)
+
+The M13 pilot timed one clone of its scratch repository on GitHub, over HTTPS from this host, one
+run each: 11 commits, 144 KiB as a bare repository.
+
+| Path | Time |
+| --- | --- |
+| `so clone https://github.com/… --token-env GH_TOKEN` | 2.003 s |
+| `git clone --bare`, then `so init` and `so git import` of its `main` | 0.832 + 0.075 + 0.089 = 0.996 s |
+
+`so clone` took about twice the manual path on this small repository. The difference is a fixed
+cost (the mirror's set-up, the fetch's own negotiation and the import), not a cost per commit; the
+first target's 1.1 times is for the 12,000-commit fixture above, where the ratio was 1.29.
