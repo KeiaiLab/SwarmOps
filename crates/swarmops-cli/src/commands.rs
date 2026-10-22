@@ -1,7 +1,9 @@
 //! Running a command (operations spec §1): its request built from the command line, the
 //! operation called through `dyn StoreOps` (spec §7), or, for `git import` and `git export`, a
 //! client-side operation that no `StoreOps` has, on the store's `LocalOps` ([`Ctx::on_local`]),
-//! and its envelope rendered.
+//! and its envelope rendered. The git remotes' commands (M13) are client-side operations too:
+//! `remote`, `fetch`, `push` and `sync` run on the store's `LocalOps` as `git import` does, and
+//! `clone`, which has no store to open yet, runs as `init` does.
 //!
 //! A command first checks what it can without the store: the store the user named (only
 //! whether the variable is readable), a mutation's identity, its own arguments and a commit's
@@ -41,6 +43,7 @@ use serde_json::{Map, Value};
 use swarmops_api::LandReq;
 use swarmops_api::ResolutionsInput;
 use swarmops_api::ResolveRevReq;
+use swarmops_api::remote::DEFAULT_PUSH_SOURCE;
 use swarmops_api::{BlobHasReq, BlobPutReq};
 use swarmops_api::{
     ChangeInput, CommitReq, ContentInput, DEFAULT_DERIVE_LIMIT, DeriveReq, DeriveResp, DiffFormat,
@@ -49,12 +52,17 @@ use swarmops_api::{
     RefListReq, RefSetReq, RepoInfo, Rev, ShowReq, StoreOps, UndoReq, VerifyReport, VerifyReq,
     schema_for_all,
 };
+use swarmops_api::{
+    CloneReq, CloneResp, FetchReq, Identity, PushReq, RemoteAddReq, RemoteListReq, RemoteRemoveReq,
+    SyncMode, SyncReq, SyncStatusReq,
+};
 use swarmops_ops::content::MAX_REQUEST_BYTES;
 use swarmops_ops::identity::{AUTH_TRUST, identity_info};
 use swarmops_ops::{LocalOps, Recording, Resolved, shell_word};
 
 use crate::cli::{
     self, BlobCommand, Command, DiffArgs, DiffFormatArg, GitCommand, Global, OpCommand, RefCommand,
+    RemoteCommand, SyncCommand,
 };
 use crate::context::{self, Env};
 use crate::mcp;
@@ -214,6 +222,8 @@ pub fn run(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
         Command::Git(command) => run_git(ctx, op, command),
         Command::Mcp => mcp::serve(ctx.global, ctx.env),
         derive @ Command::Derive { .. } => run_derive(ctx, op, &derive),
+        // The rest: the git remotes' commands (M13).
+        remotes => run_remotes(ctx, op, remotes),
     }
 }
 
@@ -567,8 +577,9 @@ impl Ctx<'_> {
         output::render(&self.envelope_on_local(op, prepare, call), self.format)
     }
 
-    /// [`Ctx::on_local`]'s envelope, before it is printed, and [`Ctx::envelope_on_store`]'s.
-    fn envelope_on_local<P, T>(
+    /// [`Ctx::on_local`]'s envelope, before it is printed, and [`Ctx::envelope_on_store`]'s:
+    /// what `swarmops mcp` returns as the result of a client-side tool (`fetch`, `push`, …).
+    pub(crate) fn envelope_on_local<P, T>(
         &self,
         op: &str,
         prepare: impl FnOnce() -> Result<P, OpError>,
@@ -752,6 +763,170 @@ fn run_git(ctx: &Ctx<'_>, op: &'static str, command: GitCommand) -> Printed {
             |ops, req| ops.git_export(req),
         ),
     }
+}
+
+/// Runs one of the git remotes' commands (M13), which names operation `op`.
+fn run_remotes(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    match command {
+        clone @ Command::Clone { .. } => run_clone(ctx, op, clone),
+        Command::Remote(command) => run_remote(ctx, op, command),
+        Command::Fetch { remote } => fetch(ctx, op, remote),
+        Command::Push { remote, target } => push(ctx, op, remote, target.as_deref()),
+        sync @ Command::Sync { .. } => run_sync(ctx, op, sync),
+        other => unreachable!("run passes the remotes' commands alone, not {other:?}"),
+    }
+}
+
+/// Runs `clone`, which names operation `op`, as the caller: `command` is the clone's arguments.
+/// It runs as `init` does, since there is no store to open before it: the identity is checked
+/// before anything is made, and the directory is the envelope's `repo`.
+fn run_clone(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::Clone {
+        url,
+        into,
+        name,
+        branch,
+        remote,
+        token_env,
+        lossy,
+    } = command
+    else {
+        unreachable!("run passes clone its own command alone");
+    };
+    if !into.is_empty() {
+        ctx.used.repo.replace(Some(into.clone()));
+    }
+
+    // The identity first: nothing is made without one.
+    let result = context::mutator(ctx.global.agent.as_deref(), ctx.env).and_then(|who| {
+        let req = CloneReq {
+            url,
+            path: into,
+            name,
+            branch,
+            remote,
+            token_env,
+            lossy: cli::lossy_classes(&lossy, None),
+        };
+        clone(req, &who, &ctx.used.resolved)
+    });
+    ctx.finish(op, ctx.used.meta(), result)
+}
+
+/// `clone`: the store `req` makes, as `who`, its ref move recorded in `resolved`.
+fn clone(req: CloneReq, who: &Identity, resolved: &Resolved) -> Result<CloneResp, OpError> {
+    let (_, resp) = LocalOps::clone_repo(req, who, resolved)?;
+    Ok(resp)
+}
+
+/// Runs a `remote` subcommand, which names operation `op`: the store's git remotes, which no
+/// [`StoreOps`] has. None needs an identity: they write the remote configuration and the
+/// mirror, no store object.
+fn run_remote(ctx: &Ctx<'_>, op: &'static str, command: RemoteCommand) -> Printed {
+    match command {
+        RemoteCommand::Add {
+            name,
+            url,
+            branch,
+            token_env,
+            lossy,
+        } => ctx.on_local(
+            op,
+            || {
+                Ok(RemoteAddReq {
+                    name,
+                    url,
+                    branch,
+                    token_env,
+                    lossy: cli::lossy_classes(&lossy, None),
+                })
+            },
+            |ops, req| ops.remote_add(req),
+        ),
+        RemoteCommand::Remove { name } => ctx.on_local(
+            op,
+            || Ok(RemoteRemoveReq { name }),
+            |ops, req| ops.remote_remove(req),
+        ),
+        RemoteCommand::List => {
+            ctx.on_local(op, || Ok(RemoteListReq {}), |ops, req| ops.remote_list(req))
+        }
+    }
+}
+
+/// Runs `fetch`, which names operation `op`: `remote`'s history into the store's mirror and its
+/// followed branch into the store. It needs no identity.
+fn fetch(ctx: &Ctx<'_>, op: &'static str, remote: String) -> Printed {
+    ctx.on_local(op, || Ok(FetchReq { remote }), |ops, req| ops.fetch(req))
+}
+
+/// Runs `push`, which names operation `op`: `target` sent to `remote`. It needs no identity.
+fn push(ctx: &Ctx<'_>, op: &'static str, remote: String, target: Option<&str>) -> Printed {
+    ctx.on_local(
+        op,
+        || Ok(push_request(remote, target)),
+        |ops, req| ops.push(req),
+    )
+}
+
+/// `push`'s request: `target`, `<ref>[:<branch>]`, sent to `remote`; the ref is `main` and the
+/// branch the remote's default for it when the line names none.
+fn push_request(remote: String, target: Option<&str>) -> PushReq {
+    let target = target.unwrap_or(DEFAULT_PUSH_SOURCE);
+    let (source_ref, branch) = match target.split_once(':') {
+        Some((source_ref, branch)) => (source_ref, Some(branch.to_owned())),
+        None => (target, None),
+    };
+    PushReq {
+        remote,
+        source_ref: source_ref.to_owned(),
+        branch,
+    }
+}
+
+/// Runs `sync` or `sync status`, which names operation `op`: `command` is the sync's arguments.
+/// `sync` needs an identity, as it moves main; `sync status` only reads.
+fn run_sync(ctx: &Ctx<'_>, op: &'static str, command: Command) -> Printed {
+    let Command::Sync {
+        remote,
+        no_push,
+        max_attempts,
+        status,
+    } = command
+    else {
+        unreachable!("run passes sync its own command alone");
+    };
+
+    // 1. `sync status`, offline.
+    if let Some(SyncCommand::Status { remote, limit }) = status {
+        return ctx.on_local(
+            op,
+            || Ok(SyncStatusReq { remote, limit }),
+            |ops, req| ops.sync_status(req),
+        );
+    }
+
+    // 2. `sync`, as the caller.
+    let mode = if no_push {
+        SyncMode::Local
+    } else {
+        SyncMode::Publish
+    };
+    ctx.on_local(
+        op,
+        || {
+            let remote = remote.ok_or_else(|| {
+                OpError::new(ErrorCode::InvalidArg, "sync needs the remote to sync with")
+            })?;
+            let req = SyncReq {
+                remote,
+                mode,
+                max_attempts,
+            };
+            Ok((context::mutator(ctx.global.agent.as_deref(), ctx.env)?, req))
+        },
+        |ops, (who, req)| ops.sync(&who, req),
+    )
 }
 
 /// `init`: a store in `dir` for a repository named `name`, by default the directory's name.

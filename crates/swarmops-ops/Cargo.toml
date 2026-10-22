@@ -13,9 +13,11 @@ workspace = true
 
 [features]
 # The test hooks: the store's (`SWARMOPS_TEST_CRASH_AT`, `SWARMOPS_TEST_FS_CALLS`,
-# `SWARMOPS_TEST_FAIL_AT`, `SWARMOPS_TEST_ORDER_CHECK`), and `SWARMOPS_TEST_NOW`, the time
-# `LocalOps` signs changesets at. Off unless asked for.
+# `SWARMOPS_TEST_FAIL_AT`, `SWARMOPS_TEST_ORDER_CHECK`), `SWARMOPS_TEST_NOW`, the time
+# `LocalOps` signs changesets at, and the git crate's (with M13's `SWARMOPS_TEST_GITHUB_HOSTS`).
+# Off unless asked for.
 test-hooks = [
+    "swarmops-git/test-hooks",
     "swarmops-repo/test-hooks",
     "swarmops-store/test-hooks",
     "swarmops-testkit/test-hooks",
@@ -31,6 +33,8 @@ swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
 base64.workspace = true
 camino.workspace = true
 serde_json.workspace = true
+# The store's TOML files: `remotes.toml`, `authors.toml` (M13).
+toml.workspace = true
 
 [dev-dependencies]
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }

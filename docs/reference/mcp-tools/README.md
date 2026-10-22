@@ -28,8 +28,13 @@ In `tools/list`'s order.
 | [`blob_put`](blob-put.md) | Store a blob | [`swarmops blob put`](../commands/blob-put.md) | adds to it | yes |
 | [`blob_has`](blob-has.md) | Find stored blobs | [`swarmops blob has`](../commands/blob-has.md) | no | no |
 | [`verify`](verify.md) | Verify the store | [`swarmops verify`](../commands/verify.md) | no | no |
+| [`remote_list`](remote-list.md) | List git remotes | [`swarmops remote list`](../commands/remote-list.md) | no | no |
+| [`fetch`](fetch.md) | Fetch a git remote | [`swarmops fetch`](../commands/fetch.md) | adds what a git remote holds, or sends it there | no |
+| [`push`](push.md) | Push to a git remote | [`swarmops push`](../commands/push.md) | adds what a git remote holds, or sends it there | no |
+| [`sync`](sync.md) | Sync with a git remote | [`swarmops sync`](../commands/sync.md) | lands onto a git remote's head, moves main and pushes | yes |
+| [`sync_status`](sync-status.md) | Show sync status | [`swarmops sync status`](../commands/sync-status.md) | no | no |
 
-These commands have no tool: [`swarmops init`](../commands/init.md), [`swarmops whoami`](../commands/whoami.md), [`swarmops schema`](../commands/schema.md), [`swarmops git import`](../commands/git-import.md), [`swarmops git export`](../commands/git-export.md), [`swarmops mcp`](../commands/mcp.md), [`swarmops derive`](../commands/derive.md). An operator or a script runs them as commands; `derive` runs beside the store as maintenance, deriving values ahead of readers.
+These commands have no tool: [`swarmops init`](../commands/init.md), [`swarmops whoami`](../commands/whoami.md), [`swarmops schema`](../commands/schema.md), [`swarmops git import`](../commands/git-import.md), [`swarmops git export`](../commands/git-export.md), [`swarmops clone`](../commands/clone.md), [`swarmops remote add`](../commands/remote-add.md), [`swarmops remote remove`](../commands/remote-remove.md), [`swarmops mcp`](../commands/mcp.md), [`swarmops derive`](../commands/derive.md). An operator or a script runs them as commands; `derive` runs beside the store as maintenance, deriving values ahead of readers.
 
 ## Protocol versions
 
@@ -94,8 +99,8 @@ Both are the server's, never a call's; no tool argument names either.
 
 - The store is `--repo`, else `SWARMOPS_REPO`, opened anew for each call, so that a call sees what other processes committed. A store that is not there is each call's `E_NOT_A_REPO`, and the server serves on.
 - The identity is `--as`, else `SWARMOPS_AGENT`, with `SWARMOPS_RUN_ID`, as for the CLI. Every change is recorded for it.
-- These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`.
-- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`.
+- These tools need it, and without one fail with `E_IDENTITY_REQUIRED`: `ref_set`, `ref_delete`, `undo`, `commit`, `land`, `blob_put`, `sync`.
+- These need none: `repo_info`, `resolve_rev`, `read_file`, `read_tree`, `show`, `log`, `path_history`, `diff`, `op_log`, `ref_list`, `blob_has`, `verify`, `remote_list`, `fetch`, `push`, `sync_status`.
 - The output flags (`--json`, `--human`, `--pretty`) do not apply.
 
 ## Result size limits

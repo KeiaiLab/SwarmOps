@@ -27,6 +27,8 @@
 //!   ([`git::fixture`]) and rebuilt only on purpose (`just git-fixtures`).
 //! - [`landing`]: what the landing measurements share: workloads, the record of a land, the
 //!   invariants every run keeps, and a run's statistics.
+//! - [`remote`]: the git remotes' test double (M13), git's own server on loopback and through
+//!   an ssh stand-in.
 //!
 //! It depends on no crate above `swarmops-repo`: the operations' unit tests use it, and a
 //! dependency on `swarmops-ops` would build a second copy of the crate under test there. No
@@ -47,6 +49,7 @@ pub mod git;
 pub mod landing;
 pub mod measure;
 pub mod power;
+pub mod remote;
 #[cfg(feature = "repo")]
 pub mod repo;
 pub mod store;

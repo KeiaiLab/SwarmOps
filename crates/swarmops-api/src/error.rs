@@ -185,6 +185,25 @@ error_codes! {
     /// round; `details.branch`). Running the export again after the cause is gone writes what
     /// is still missing.
     GitWrite => "E_GIT_WRITE", EXIT_ERROR, false;
+    // The git remotes (M13): `fetch`, `push`, `sync` and the commands that ask a remote.
+    /// A push or a sync found the remote branch elsewhere than it can move from: `details.reason`
+    /// says why (`remote_moved`: it moved since the last fetch, and the push's compare-and-swap
+    /// sent nothing; `not_fast_forward`; `behind`: the store ref is behind the remote;
+    /// `diverged`; `lossy_history`; `no_common_base`: the sync found no changeset both hold),
+    /// with `remote`, `branch` and, where known, `expected` and `main_moved`. Nothing was sent;
+    /// the hint names the fetch or the sync to run.
+    RemoteDiverged => "E_REMOTE_DIVERGED", EXIT_CONFLICT, false;
+    /// The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or
+    /// a rule of the remote's) or `unclassified` (a failure git's messages do not explain, never
+    /// retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`,
+    /// `stderr_tail`, the token redacted).
+    RemoteRejected => "E_REMOTE_REJECTED", EXIT_AUTH, false;
+    /// The network or the remote's host did not answer: `details.phase` (`fetch`, `push`,
+    /// `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`,
+    /// `ssh`). Nothing changed in the store; running the command again can succeed.
+    RemoteUnreachable => "E_REMOTE_UNREACHABLE", EXIT_RETRYABLE, true;
+    /// The store records no remote of that name (`details.remote`).
+    RemoteNotFound => "E_REMOTE_NOT_FOUND", EXIT_NOT_FOUND, false;
 }
 
 impl ErrorCode {

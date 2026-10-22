@@ -11,10 +11,10 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | 0 | Success. |  |
 | 1 | The operation failed. | [`E_EXISTS`](#e_exists), [`E_AMBIGUOUS_ID`](#e_ambiguous_id), [`E_IS_DIR`](#e_is_dir), [`E_TOO_LARGE`](#e_too_large), [`E_EMPTY_COMMIT`](#e_empty_commit), [`E_TYPE_CONFLICT`](#e_type_conflict), [`E_REF_NAME_INVALID`](#e_ref_name_invalid), [`E_STORE_CORRUPT`](#e_store_corrupt), [`E_UNSUPPORTED_FS`](#e_unsupported_fs), [`E_IO`](#e_io), [`E_INTERNAL`](#e_internal), [`E_NOTHING_TO_LAND`](#e_nothing_to_land), [`E_NOTHING_TO_UNDO`](#e_nothing_to_undo), [`E_GIT_IMPORT_LOSSY`](#e_git_import_lossy), [`E_GIT_UNSUPPORTED`](#e_git_unsupported), [`E_GIT_READ`](#e_git_read), [`E_GIT_WRITE`](#e_git_write) |
 | 2 | The request or the command line is malformed. | [`E_INVALID_ARG`](#e_invalid_arg) |
-| 3 | The change conflicts with what it lands on: resolve it, then run the operation again. | [`E_CONFLICT`](#e_conflict), [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged), [`E_GIT_EXPORT_DIVERGED`](#e_git_export_diverged) |
-| 4 | The operation can succeed when it is run again. | [`E_CAS_MISMATCH`](#e_cas_mismatch), [`E_IO_TRANSIENT`](#e_io_transient), [`E_BUSY`](#e_busy), [`E_CAS_RETRY_EXHAUSTED`](#e_cas_retry_exhausted), [`E_MAINTENANCE_BUSY`](#e_maintenance_busy) |
-| 5 | An identity or policy requirement refused the operation. | [`E_IDENTITY_REQUIRED`](#e_identity_required), [`E_AUTH`](#e_auth), [`E_POLICY_DENIED`](#e_policy_denied) |
-| 6 | Something the request names does not exist. | [`E_NOT_A_REPO`](#e_not_a_repo), [`E_REV_NOT_FOUND`](#e_rev_not_found), [`E_PATH_NOT_FOUND`](#e_path_not_found), [`E_UNKNOWN_PARENT`](#e_unknown_parent), [`E_REF_NOT_FOUND`](#e_ref_not_found), [`E_OP_NOT_FOUND`](#e_op_not_found), [`E_GIT_NOT_A_REPO`](#e_git_not_a_repo), [`E_GIT_REF_NOT_FOUND`](#e_git_ref_not_found) |
+| 3 | The change conflicts with what it lands on: resolve it, then run the operation again. | [`E_CONFLICT`](#e_conflict), [`E_GIT_IMPORT_DIVERGED`](#e_git_import_diverged), [`E_GIT_EXPORT_DIVERGED`](#e_git_export_diverged), [`E_REMOTE_DIVERGED`](#e_remote_diverged) |
+| 4 | The operation can succeed when it is run again. | [`E_CAS_MISMATCH`](#e_cas_mismatch), [`E_IO_TRANSIENT`](#e_io_transient), [`E_BUSY`](#e_busy), [`E_CAS_RETRY_EXHAUSTED`](#e_cas_retry_exhausted), [`E_MAINTENANCE_BUSY`](#e_maintenance_busy), [`E_REMOTE_UNREACHABLE`](#e_remote_unreachable) |
+| 5 | An identity or policy requirement refused the operation. | [`E_IDENTITY_REQUIRED`](#e_identity_required), [`E_AUTH`](#e_auth), [`E_POLICY_DENIED`](#e_policy_denied), [`E_REMOTE_REJECTED`](#e_remote_rejected) |
+| 6 | Something the request names does not exist. | [`E_NOT_A_REPO`](#e_not_a_repo), [`E_REV_NOT_FOUND`](#e_rev_not_found), [`E_PATH_NOT_FOUND`](#e_path_not_found), [`E_UNKNOWN_PARENT`](#e_unknown_parent), [`E_REF_NOT_FOUND`](#e_ref_not_found), [`E_OP_NOT_FOUND`](#e_op_not_found), [`E_GIT_NOT_A_REPO`](#e_git_not_a_repo), [`E_GIT_REF_NOT_FOUND`](#e_git_ref_not_found), [`E_REMOTE_NOT_FOUND`](#e_remote_not_found) |
 
 ## Codes
 
@@ -57,6 +57,10 @@ A failed command prints an envelope whose `error` names a stable `E_*` code, the
 | [`E_GIT_READ`](#e_git_read) | 1 | no | `git import` could not read the source: an object is missing (as in a partial clone), does not hash to its id or does not parse, or the filesystem refused a read (`details.reason`; `details.object` names the object when there is one). |
 | [`E_GIT_EXPORT_DIVERGED`](#e_git_export_diverged) | 3 | no | `git export`: the branch holds commits that are not the export of the source ref's head or of an ancestor of it, so the branch did not move; there is no silent merge, and the request's `force` moves it anyway. |
 | [`E_GIT_WRITE`](#e_git_write) | 1 | no | `git export` could not write the repository; `details.reason` says what failed: `io` (the filesystem refused a write; `details.path` names the file, relative to the git directory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists: another git process holds it, or an earlier export died holding it, and git itself says to remove it once no git process runs; `details.path` names it) or `ref_name_conflict` (an existing ref stands where the branch's name needs a directory, or the other way round; `details.branch`). |
+| [`E_REMOTE_DIVERGED`](#e_remote_diverged) | 3 | no | A push or a sync found the remote branch elsewhere than it can move from: `details.reason` says why (`remote_moved`: it moved since the last fetch, and the push's compare-and-swap sent nothing; `not_fast_forward`; `behind`: the store ref is behind the remote; `diverged`; `lossy_history`; `no_common_base`: the sync found no changeset both hold), with `remote`, `branch` and, where known, `expected` and `main_moved`. |
+| [`E_REMOTE_REJECTED`](#e_remote_rejected) | 5 | no | The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted). |
+| [`E_REMOTE_UNREACHABLE`](#e_remote_unreachable) | 4 | yes | The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). |
+| [`E_REMOTE_NOT_FOUND`](#e_remote_not_found) | 6 | no | The store records no remote of that name (`details.remote`). |
 
 ## E_EXISTS
 
@@ -279,3 +283,27 @@ Exit 3. Retryable: no.
 Exit 1. Retryable: no.
 
 `git export` could not write the repository; `details.reason` says what failed: `io` (the filesystem refused a write; `details.path` names the file, relative to the git directory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists: another git process holds it, or an earlier export died holding it, and git itself says to remove it once no git process runs; `details.path` names it) or `ref_name_conflict` (an existing ref stands where the branch's name needs a directory, or the other way round; `details.branch`). Running the export again after the cause is gone writes what is still missing.
+
+## E_REMOTE_DIVERGED
+
+Exit 3. Retryable: no.
+
+A push or a sync found the remote branch elsewhere than it can move from: `details.reason` says why (`remote_moved`: it moved since the last fetch, and the push's compare-and-swap sent nothing; `not_fast_forward`; `behind`: the store ref is behind the remote; `diverged`; `lossy_history`; `no_common_base`: the sync found no changeset both hold), with `remote`, `branch` and, where known, `expected` and `main_moved`. Nothing was sent; the hint names the fetch or the sync to run.
+
+## E_REMOTE_REJECTED
+
+Exit 5. Retryable: no.
+
+The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted).
+
+## E_REMOTE_UNREACHABLE
+
+Exit 4. Retryable: yes.
+
+The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). Nothing changed in the store; running the command again can succeed.
+
+## E_REMOTE_NOT_FOUND
+
+Exit 6. Retryable: no.
+
+The store records no remote of that name (`details.remote`).

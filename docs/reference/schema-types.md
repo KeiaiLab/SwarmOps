@@ -2,7 +2,7 @@
 
 # Schema types
 
-The 91 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
+The 116 request, response and value types of the API, as `swarmops schema` prints their JSON Schemas (2020-12); `swarmops schema <TYPE>` prints one. The command line, the MCP tools and the store exchange exactly this JSON.
 
 ## Index
 
@@ -14,11 +14,14 @@ The 91 request, response and value types of the API, as `swarmops schema` prints
 | [`BlobHasResp`](#blobhasresp) | object | `blob_has`: the blobs the store holds, of those asked for. |
 | [`BlobPutReq`](#blobputreq) | object | `blob_put` (CLI `blob put`): store content as a blob, outside any commit, so that a commit's change list can name it by its id (`{"blob": id}`) instead of carrying its bytes. |
 | [`BlobPutResp`](#blobputresp) | object | `blob_put`: the blob stored. |
+| [`BranchUpdate`](#branchupdate) | object | A remote branch a fetch saw move, appear or go. |
 | [`ChangeInput`](#changeinput) | object | One change of a commit. |
 | [`ChangeOp`](#changeop) | enumeration | What a change does to its path, in a commit's change list and a changeset's changes alike. |
 | [`ChangeOut`](#changeout) | object | One entry of a changeset's changes. |
 | [`ChangesetDetail`](#changesetdetail) | object | `show`: a changeset's header, changes and metadata. |
 | [`ChangesetSummary`](#changesetsummary) | object | One changeset of a log. |
+| [`CloneReq`](#clonereq) | object | `clone`: a new store in a directory of the caller's host, holding a git remote's history, with the remote recorded and its followed branch imported into `main`. |
+| [`CloneResp`](#cloneresp) | object | `clone`: the store made, the remote recorded, its fetch, and where `main` stands. |
 | [`CommitReq`](#commitreq) | object | `commit`: record a changeset from an explicit change list. |
 | [`CommitResp`](#commitresp) | object | `commit`: the changeset that was recorded. |
 | [`ConflictKindOut`](#conflictkindout) | enumeration | What kind of conflict a file has. |
@@ -33,9 +36,13 @@ The 91 request, response and value types of the API, as `swarmops schema` prints
 | [`DiffLineOut`](#difflineout) | object | One line of a hunk. |
 | [`DiffReq`](#diffreq) | object | `diff`: the files that differ between two revisions, in path order, a page at a time. |
 | [`DiffStatus`](#diffstatus) | enumeration | What happened to a file between the two revisions. |
+| [`DropReason`](#dropreason) | enumeration | How a sync found that the remote holds a change already. |
+| [`DroppedChange`](#droppedchange) | object | An unpublished change a sync dropped, since the remote holds it already. |
 | [`EntryKindOut`](#entrykindout) | enumeration | What a tree entry is. |
 | [`Envelope`](#envelope) | object | One command's output: `result` on success, `error` on failure, `meta` either way. |
 | [`ErrorCode`](#errorcode) | enumeration | Why an operation failed: a stable code with a fixed exit code and retry advice. |
+| [`FetchReq`](#fetchreq) | object | `fetch`: bring a remote's branches and tags into the store's mirror, and its followed branch's commits into the store as changesets. |
+| [`FetchResp`](#fetchresp) | object | `fetch`: where the followed branch stands, and what moved. |
 | [`FileConflictOut`](#fileconflictout) | object | One conflicting file. |
 | [`FileContent`](#filecontent) | object | `read_file` (CLI `cat`): a file's content, or the part of it the request names. |
 | [`FileDiff`](#filediff) | object | One file that differs: a file, an executable or a symlink whose content or kind changed, or that is on one side only. |
@@ -44,6 +51,7 @@ The 91 request, response and value types of the API, as `swarmops schema` prints
 | [`GitExportResp`](#gitexportresp) | object | `git export`: what the export wrote, and where the branch stands. |
 | [`GitImportReq`](#gitimportreq) | object | `git import`: bring a git repository's history into the store. |
 | [`GitImportResp`](#gitimportresp) | object | `git import`: what the import brought in, and where the target ref stands. |
+| [`HeadMove`](#headmove) | object | A head before and after a sync. |
 | [`HunkOut`](#hunkout) | object | One place where the two sides' edits of a text file meet: each side's lines there. |
 | [`Identity`](#identity) | object | The caller of a mutation: an agent name `<family>/<instance>` (`agent/worker-17`, `human/purple`) and an optional run id. |
 | [`IdentityInfo`](#identityinfo) | object | `whoami`: the identity the caller's mutations carry. |
@@ -71,6 +79,10 @@ The 91 request, response and value types of the API, as `swarmops schema` prints
 | [`PathHistoryEntry`](#pathhistoryentry) | object | One changeset of a path's history, and what the path holds after it. |
 | [`PathHistoryPage`](#pathhistorypage) | object | `path_history` (CLI `history`): a page of a path's history, newest first. |
 | [`PathHistoryReq`](#pathhistoryreq) | object | `path_history` (CLI `history`): the changesets that changed what a path holds, newest first, following first parents, a page at a time. |
+| [`PublishedChange`](#publishedchange) | object | An unpublished change a sync landed onto the remote's head. |
+| [`PushReq`](#pushreq) | object | `push`: send a store ref to a remote branch by compare-and-swap, never forcing: the remote moves only from the head the last fetch saw to a descendant of it. |
+| [`PushResp`](#pushresp) | object | `push`: where the remote branch stands. |
+| [`PushStatus`](#pushstatus) | enumeration | What a push did to the remote branch. |
 | [`ReadFileReq`](#readfilereq) | object | `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or a range of its lines. |
 | [`ReadTreeReq`](#readtreereq) | object | `read_tree` (CLI `ls`): list one directory at a revision, without a checkout, a page at a time; with `depth`, the directories below it too. |
 | [`RecoveredOut`](#recoveredout) | object | What a write's recovery repaired (`meta.recovered`), as offsets and counts in the store's metadata files, with no paths. |
@@ -81,6 +93,13 @@ The 91 request, response and value types of the API, as `swarmops schema` prints
 | [`RefOut`](#refout) | object | One ref. |
 | [`RefSetReq`](#refsetreq) | object | `ref set`: move a ref, or create one, by compare-and-swap. |
 | [`RefSetResp`](#refsetresp) | object | `ref set` and `ref delete`: the move that was made. |
+| [`RemoteAddReq`](#remoteaddreq) | object | `remote add`: record a git remote in the store. |
+| [`RemoteHead`](#remotehead) | object | A remote branch's head: its commit, and the changeset that commit is in the store. |
+| [`RemoteInfo`](#remoteinfo) | object | A remote the store records. |
+| [`RemoteList`](#remotelist) | object | `remote list`: every remote, in the order they were added. |
+| [`RemoteListReq`](#remotelistreq) | object | `remote list`: the remotes the store records. |
+| [`RemoteRemoveReq`](#remoteremovereq) | object | `remote remove`: forget a remote, and the mirror's refs of it. |
+| [`RemoteRemoveResp`](#remoteremoveresp) | object | `remote remove`: the remote forgotten. |
 | [`RepoInfo`](#repoinfo) | object | `init` and `info`: what the store is and holds. |
 | [`ResolutionInput`](#resolutioninput) | object | What a land makes of one path, and of every path below it: exactly one of `take`, `content` and `delete` (anything else is `E_INVALID_ARG`, a rule the server checks), the rest of the merge as it merged. |
 | [`ResolutionsInput`](#resolutionsinput) | object | A land's resolutions (`land --resolve`): what to make of some paths of the merge of the change onto the target, decided against one of the target's heads. |
@@ -92,6 +111,12 @@ The 91 request, response and value types of the API, as `swarmops schema` prints
 | [`Side`](#side) | enumeration | One side of a land's merge. |
 | [`SignatureOut`](#signatureout) | object | A git signature: who, and when. |
 | [`Signatures`](#signatures) | object | A changeset's git signatures: git-fidelity data for import and export. |
+| [`SyncMode`](#syncmode) | enumeration | Whether `sync` sends what it landed. |
+| [`SyncReq`](#syncreq) | object | `sync`: fetch a remote, land `main`'s unpublished changes onto the remote's head, move `main` there and push it. |
+| [`SyncResp`](#syncresp) | object | `sync`: what it landed, dropped and sent, and where `main` and the remote stand. |
+| [`SyncStatus`](#syncstatus) | object | `sync status`: what is unpublished, and how far behind `main` is. |
+| [`SyncStatusKind`](#syncstatuskind) | enumeration | What a sync did. |
+| [`SyncStatusReq`](#syncstatusreq) | object | `sync status`: how `main` and a remote's followed branch stand, as the last fetch saw the remote. |
 | [`TreeEntryOut`](#treeentryout) | object | One entry of a listing. |
 | [`TreeListing`](#treelisting) | object | `read_tree` (CLI `ls`): a page of a directory's entries, in pre-order: a directory, then the entries below it to the request's `depth`, each directory's entries by name bytes (at `depth` 1, the tree's order). |
 | [`UndoReq`](#undoreq) | object | `undo` (CLI `op undo`): restore every ref an operation moved to what it named before, by compare-and-swap, in one transaction: all of them or none. |
@@ -167,6 +192,18 @@ Kind: object. `swarmops schema BlobPutResp` prints its JSON Schema.
 | `size` | `integer` (uint64) | yes | The content's size in bytes. |
 | `written` | `boolean` | yes | Whether this call placed the blob in the object store; false when the store held it already, or a concurrent writer placed it first. |
 
+## BranchUpdate
+
+A remote branch a fetch saw move, appear or go.
+
+Kind: object. `swarmops schema BranchUpdate` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `branch` | `string` | yes | The branch, by its short name. |
+| `new` | `string` or `null` | no | The commit it names now; omitted for a branch the remote deleted. |
+| `old` | `string` or `null` | no | The commit it named before; omitted for a branch that appeared. |
+
 ## ChangeInput
 
 One change of a commit.
@@ -241,6 +278,36 @@ Kind: object. `swarmops schema ChangesetSummary` prints its JSON Schema.
 | `id` | `string` | yes | The changeset's id. |
 | `parents` | array of `string` | yes | The parents' ids, mainline parent first. |
 | `title` | `string` | yes | The message's first line. |
+
+## CloneReq
+
+`clone`: a new store in a directory of the caller's host, holding a git remote's history, with the remote recorded and its followed branch imported into `main`. It needs an identity, as `git import` does: it moves `main`.
+
+Kind: object. `swarmops schema CloneReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `branch` | `string` or `null` | no | The remote branch `main` follows; by default the remote's default branch. |
+| `lossy` | array of [`LossyClass`](#lossyclass) | no | The classes of content the import of this remote's commits may drop or normalize, as `git import`'s `lossy`. Default: `[]`. |
+| `name` | `string` or `null` | no | The repository's name; by default the URL's last path component without `.git`. |
+| `path` | `string` | yes | The directory to create the store in, on the caller's host: absent or empty. A directory holding a store with this remote at this URL continues an interrupted clone. |
+| `remote` | `string` | no | The name to record the remote under: `origin` by default. Default: `"origin"`. |
+| `token_env` | `string` or `null` | no | The environment variable that holds a token for the remote, by its name; the token is never stored. |
+| `url` | `string` | yes | The remote's URL: `https://host/path`, `ssh://[user@]host/path` or the scp form `user@host:path`. A URL with a password, another scheme, or one that starts with `-` is refused; plain `http://` only to a loopback address. |
+
+## CloneResp
+
+`clone`: the store made, the remote recorded, its fetch, and where `main` stands.
+
+Kind: object. `swarmops schema CloneResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `fetch` | [`FetchResp`](#fetchresp) | yes | The clone's fetch. |
+| `imported` | `integer` (uint64) | yes | How many changesets the import into `main` added. |
+| `main` | `string` or `null` | no | The changeset `main` names; omitted when the remote is empty. |
+| `remote` | [`RemoteInfo`](#remoteinfo) | yes | The remote recorded. |
+| `repo` | [`RepoInfo`](#repoinfo) | yes | The new store. |
 
 ## CommitReq
 
@@ -435,6 +502,28 @@ Kind: enumeration. `swarmops schema DiffStatus` prints its JSON Schema.
 | `"modified"` | Its content or its exec bit changed: a file or an executable on both sides, or a symlink on both sides. |
 | `"type_changed"` | A symlink on one side, a file or an executable on the other. |
 
+## DropReason
+
+How a sync found that the remote holds a change already.
+
+Kind: enumeration. `swarmops schema DropReason` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"trailer"` | A commit the remote's head reaches names it in a `SwarmOps-Changeset`, `SwarmOps-Squashed-From` or `SwarmOps-Land-Key` line. |
+| `"no_op"` | It merges onto the remote's head as no change. |
+
+## DroppedChange
+
+An unpublished change a sync dropped, since the remote holds it already. It stays in the store, and an undo of the sync's ref move brings it back on `main`.
+
+Kind: object. `swarmops schema DroppedChange` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `by` | [`DropReason`](#dropreason) | yes | How the sync found it on the remote. |
+| `changeset` | `string` | yes | The change. |
+
 ## EntryKindOut
 
 What a tree entry is.
@@ -517,6 +606,38 @@ Kind: enumeration. `swarmops schema ErrorCode` prints its JSON Schema.
 | `"E_GIT_READ"` | `git import` could not read the source: an object is missing (as in a partial clone), does not hash to its id or does not parse, or the filesystem refused a read (`details.reason`; `details.object` names the object when there is one). |
 | `"E_GIT_EXPORT_DIVERGED"` | `git export`: the branch holds commits that are not the export of the source ref's head or of an ancestor of it, so the branch did not move; there is no silent merge, and the request's `force` moves it anyway. `details.reason` says why: `branch_ahead` (commits made in git on top of the export of the head itself, which `git import` brings in), `both_moved` (commits made in git on top of an older export, while the source ref moved too), `branch_moved` (the branch names a commit that is no export of this history), `source_moved_back` (the source ref's head is behind the export the branch holds, after an `undo` or a `ref set` backwards), `lossy_history` (the branch holds the original commits of a history imported lossily, which the export would replace) or `moved_during_export` (another writer moved the branch while this export wrote; running the export again settles it, and what it wrote stays). The first five are found before anything is written. `details` also names `branch`, `git_head` (the commit the branch holds), `head_changeset` and, when the branch holds the export of a changeset, `exported_changeset`. |
 | `"E_GIT_WRITE"` | `git export` could not write the repository; `details.reason` says what failed: `io` (the filesystem refused a write; `details.path` names the file, relative to the git directory), `ref_locked` (the branch's lock file, `refs/heads/<branch>.lock`, exists: another git process holds it, or an earlier export died holding it, and git itself says to remove it once no git process runs; `details.path` names it) or `ref_name_conflict` (an existing ref stands where the branch's name needs a directory, or the other way round; `details.branch`). Running the export again after the cause is gone writes what is still missing. |
+| `"E_REMOTE_DIVERGED"` | A push or a sync found the remote branch elsewhere than it can move from: `details.reason` says why (`remote_moved`: it moved since the last fetch, and the push's compare-and-swap sent nothing; `not_fast_forward`; `behind`: the store ref is behind the remote; `diverged`; `lossy_history`; `no_common_base`: the sync found no changeset both hold), with `remote`, `branch` and, where known, `expected` and `main_moved`. Nothing was sent; the hint names the fetch or the sync to run. |
+| `"E_REMOTE_REJECTED"` | The remote or git refused: `details.reason` is `auth`, `not_found`, `declined` (a hook or a rule of the remote's) or `unclassified` (a failure git's messages do not explain, never retried), with `remote` and what git said (`refs`, `remote_messages`, `git_exit`, `stderr_tail`, the token redacted). |
+| `"E_REMOTE_UNREACHABLE"` | The network or the remote's host did not answer: `details.phase` (`fetch`, `push`, `ls_remote`) and `details.cause` (`dns`, `connect`, `timeout`, `tls`, `disconnected`, `ssh`). Nothing changed in the store; running the command again can succeed. |
+| `"E_REMOTE_NOT_FOUND"` | The store records no remote of that name (`details.remote`). |
+
+## FetchReq
+
+`fetch`: bring a remote's branches and tags into the store's mirror, and its followed branch's commits into the store as changesets. No ref of the store moves, so it needs no identity.
+
+Kind: object. `swarmops schema FetchReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `remote` | `string` | yes | The remote, by its name. |
+
+## FetchResp
+
+`fetch`: where the followed branch stands, and what moved.
+
+Kind: object. `swarmops schema FetchResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `branch` | `string` | yes | The followed branch. |
+| `branches` | array of [`BranchUpdate`](#branchupdate) | yes | The remote branches that moved, appeared or went, at most 1,000. |
+| `branches_truncated` | `boolean` | yes | Whether more branches moved than `branches` lists. |
+| `head` | [`RemoteHead`](#remotehead) or `null` | no | The followed branch's head after the fetch; omitted when the remote has no such branch. |
+| `imported` | `integer` (uint64) | yes | How many changesets the import of the followed branch added. |
+| `old_head` | [`RemoteHead`](#remotehead) or `null` | no | The followed branch's head as the last fetch saw it; omitted when none did. |
+| `remote` | `string` | yes | The remote, by its name. |
+| `tags_fetched` | `integer` (uint64) | yes | How many tags the fetch brought into the mirror (they are never imported). |
+| `warnings` | array of `string` or `null` | no | What the fetch has to say that did not stop it. Omitted when there is nothing. |
 
 ## FileConflictOut
 
@@ -648,6 +769,17 @@ Kind: object. `swarmops schema GitImportResp` prints its JSON Schema.
 | `skipped` | `integer` (uint64) | yes | How many commits the import found in the store already, where its walk stopped: the commit of the target's head, or commits an earlier import made. Importing the commit the target names already imports 0 and skips 1. |
 | `target_ref` | `string` | yes | The ref the import moved, or found at `head_changeset` already. |
 | `warnings` | array of `string` | no | Problems the import met that did not stop it, such as failed housekeeping after the target's move became durable; the import itself succeeded. Omitted when empty. |
+
+## HeadMove
+
+A head before and after a sync.
+
+Kind: object. `swarmops schema HeadMove` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `new` | `string` | yes | What it names now. |
+| `old` | `string` or `null` | no | What it named before; omitted when it did not exist. |
 
 ## HunkOut
 
@@ -1003,6 +1135,60 @@ Kind: object. `swarmops schema PathHistoryReq` prints its JSON Schema.
 | `path` | `string` | yes | The repository path: a file, whose history is that of its content and kind, or a directory, whose history is that of everything below it. One trailing `/` is taken. |
 | `rev` | [`Rev`](#rev) or `null` | no | Where to start; `main` when omitted. |
 
+## PublishedChange
+
+An unpublished change a sync landed onto the remote's head.
+
+Kind: object. `swarmops schema PublishedChange` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `changeset` | `string` | yes | The change as `main` held it. |
+| `landed_as` | `string` | yes | The changeset it was landed as, on the remote's head. |
+| `sha` | `string` | yes | The commit `landed_as` exports to. |
+
+## PushReq
+
+`push`: send a store ref to a remote branch by compare-and-swap, never forcing: the remote moves only from the head the last fetch saw to a descendant of it. A push is an export, so it needs no identity.
+
+Kind: object. `swarmops schema PushReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `branch` | `string` or `null` | no | The remote branch; by default the remote's followed branch for `main`, and the same name for `release/<name>`. |
+| `remote` | `string` | yes | The remote, by its name. |
+| `source_ref` | `string` | no | The store ref to send: `main` (the default) or `release/<name>`. Default: `"main"`. |
+
+## PushResp
+
+`push`: where the remote branch stands.
+
+Kind: object. `swarmops schema PushResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `branch` | `string` | yes | The remote branch. |
+| `head_changeset` | `string` | yes | The changeset at the store ref's head. |
+| `new` | `string` | yes | The commit the branch names now: the export of `head_changeset`. |
+| `objects_written` | `integer` (uint64) | yes | How many git objects the push's export wrote into the mirror. |
+| `old` | `string` or `null` | no | The commit the branch named before; omitted when it did not exist. |
+| `remote` | `string` | yes | The remote, by its name. |
+| `rewritten` | `integer` (uint64) | yes | How many of the exported commits have another id than the commit they were imported from, as `git export`'s `rewritten`. |
+| `status` | [`PushStatus`](#pushstatus) | yes | What the push did. |
+| `warnings` | array of `string` or `null` | no | What the push has to say that did not stop it. Omitted when there is nothing. |
+
+## PushStatus
+
+What a push did to the remote branch.
+
+Kind: enumeration. `swarmops schema PushStatus` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"pushed"` | The branch moved to the export of the ref's head. |
+| `"up_to_date"` | The branch named it already: nothing was sent. |
+| `"created"` | The branch did not exist, and the push created it. |
+
 ## ReadFileReq
 
 `read_file` (CLI `cat`): read one file at a revision, without a checkout: from an offset, or a range of its lines.
@@ -1135,6 +1321,85 @@ Kind: object. `swarmops schema RefSetResp` prints its JSON Schema.
 | `old` | `string` or `null` | no | What the ref held before a move that was applied. On a replay (`already_applied`) it is `expected_old` as resolved, which the ref need not have held; omitted when `create` was given. |
 | `warnings` | array of `string` | no | Problems found after the move became durable, such as failed housekeeping; the move itself succeeded. Omitted when empty. |
 
+## RemoteAddReq
+
+`remote add`: record a git remote in the store. It needs no identity: it writes the store's remote configuration and its mirror, no store object.
+
+Kind: object. `swarmops schema RemoteAddReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `branch` | `string` or `null` | no | The remote branch `main` follows; by default the remote's default branch, which asks the remote (a network call). |
+| `lossy` | array of [`LossyClass`](#lossyclass) | no | The classes of content the import of this remote's commits may drop or normalize. Default: `[]`. |
+| `name` | `string` | yes | The remote's name: lowercase letters, digits, `.`, `_` and `-`, 1 to 63 of them, starting with a letter or a digit, not ending in `.`, and not `status`. |
+| `token_env` | `string` or `null` | no | The environment variable that holds a token for the remote, by its name. |
+| `url` | `string` | yes | The remote's URL, as a clone's `url` is. |
+
+## RemoteHead
+
+A remote branch's head: its commit, and the changeset that commit is in the store.
+
+Kind: object. `swarmops schema RemoteHead` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `changeset` | `string` | yes | The changeset id of that commit in the store. |
+| `sha` | `string` | yes | The commit's git id, 40 lowercase hex digits. |
+
+## RemoteInfo
+
+A remote the store records.
+
+Kind: object. `swarmops schema RemoteInfo` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `branch` | `string` | yes | The remote branch `main` follows. |
+| `lossy` | array of [`LossyClass`](#lossyclass) | yes | The classes of content the import of this remote's commits may drop or normalize. |
+| `name` | `string` | yes | The remote's name. |
+| `token_env` | `string` or `null` | no | The environment variable that holds a token for the remote, by its name; omitted when the remote names none. |
+| `url` | `string` | yes | The remote's URL, as it was given. |
+| `warnings` | array of `string` or `null` | no | What adding the remote has to say that did not stop it, such as `default_branch_unknown` (the remote named no default branch, so `branch` is `main`). Omitted when there is nothing. |
+
+## RemoteList
+
+`remote list`: every remote, in the order they were added.
+
+Kind: object. `swarmops schema RemoteList` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `remotes` | array of [`RemoteInfo`](#remoteinfo) | yes | The remotes; empty when the store has none. |
+
+## RemoteListReq
+
+`remote list`: the remotes the store records.
+
+Kind: object. `swarmops schema RemoteListReq` prints its JSON Schema.
+
+It has no properties.
+
+## RemoteRemoveReq
+
+`remote remove`: forget a remote, and the mirror's refs of it. No changeset is removed.
+
+Kind: object. `swarmops schema RemoteRemoveReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | yes | The remote's name. |
+
+## RemoteRemoveResp
+
+`remote remove`: the remote forgotten.
+
+Kind: object. `swarmops schema RemoteRemoveResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `name` | `string` | yes | The remote's name. |
+| `removed_refs` | `integer` (uint64) | yes | How many of the mirror's refs of the remote were removed. |
+
 ## RepoInfo
 
 `init` and `info`: what the store is and holds.
@@ -1257,6 +1522,89 @@ Kind: object. `swarmops schema Signatures` prints its JSON Schema.
 | --- | --- | --- | --- |
 | `author` | [`SignatureOut`](#signatureout) | yes | The git author. |
 | `committer` | [`SignatureOut`](#signatureout) | yes | The git committer; its time is `created_at`. |
+
+## SyncMode
+
+Whether `sync` sends what it landed.
+
+Kind: enumeration. `swarmops schema SyncMode` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"publish"` | Land onto the remote's head, move `main`, and push it. |
+| `"local"` | The same without the push: for a branch that takes pull requests only. |
+
+## SyncReq
+
+`sync`: fetch a remote, land `main`'s unpublished changes onto the remote's head, move `main` there and push it. It moves `main`, so it needs an identity.
+
+Kind: object. `swarmops schema SyncReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `max_attempts` | `integer` (uint32) | no | How many times to fetch and land again when the remote or `main` moved meanwhile: 1 to 32. Default: `8`. At least 1. At most 32. |
+| `mode` | [`SyncMode`](#syncmode) | no | `publish` (the default) pushes; `local` stops before the push. Default: `"publish"`. |
+| `remote` | `string` | yes | The remote, by its name. |
+
+## SyncResp
+
+`sync`: what it landed, dropped and sent, and where `main` and the remote stand.
+
+Kind: object. `swarmops schema SyncResp` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `attempts` | `integer` (uint32) | yes | How many attempts it took. |
+| `branch` | `string` | yes | The followed branch. |
+| `dropped` | array of [`DroppedChange`](#droppedchange) | yes | The changes the remote held already. |
+| `main` | [`HeadMove`](#headmove) | yes | `main`'s changeset before and after. |
+| `published` | array of [`PublishedChange`](#publishedchange) | yes | The changes landed onto the remote's head, oldest first. |
+| `remote` | `string` | yes | The remote, by its name. |
+| `remote_head` | [`HeadMove`](#headmove) | yes | The remote branch's commit before and after. |
+| `status` | [`SyncStatusKind`](#syncstatuskind) | yes | What the sync did. |
+| `warnings` | array of `string` or `null` | no | What the sync has to say that did not stop it. Omitted when there is nothing. |
+
+## SyncStatus
+
+`sync status`: what is unpublished, and how far behind `main` is.
+
+Kind: object. `swarmops schema SyncStatus` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `ahead` | `integer` (uint64) | yes | How many changes on `main` are above the base: unpublished. |
+| `base` | `string` or `null` | no | The newest changeset on `main`'s first-parent chain that the remote's head reaches; omitted when there is none. |
+| `behind` | `integer` (uint64) | yes | How many changesets on the remote's first-parent chain are above the base. |
+| `branch` | `string` | yes | The followed branch. |
+| `fetched` | `boolean` | yes | Whether a fetch ever saw the followed branch. |
+| `remote` | `string` | yes | The remote, by its name. |
+| `remote_head` | [`RemoteHead`](#remotehead) or `null` | no | The followed branch's head as the last fetch saw it; omitted when none did. |
+| `truncated` | `boolean` | yes | Whether a count or the list stopped at its bound. |
+| `unpublished` | array of [`ChangesetSummary`](#changesetsummary) | yes | The unpublished changes, newest first, at most `limit`. |
+
+## SyncStatusKind
+
+What a sync did.
+
+Kind: enumeration. `swarmops schema SyncStatusKind` prints its JSON Schema.
+
+| Value | Description |
+| --- | --- |
+| `"up_to_date"` | `main` and the remote held the same: nothing moved. |
+| `"pushed"` | The landed changes were pushed. |
+| `"fast_forwarded"` | `main` had nothing unpublished and moved to the remote's head. |
+| `"landed_locally"` | `main` moved onto the remote's head and nothing was pushed (`mode: local`). |
+
+## SyncStatusReq
+
+`sync status`: how `main` and a remote's followed branch stand, as the last fetch saw the remote. It reads only the store and its mirror: no network, no lock.
+
+Kind: object. `swarmops schema SyncStatusReq` prints its JSON Schema.
+
+| Property | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | `integer` (uint) | no | The most unpublished changesets to list. Default: `50`. |
+| `remote` | `string` | yes | The remote, by its name. |
 
 ## TreeEntryOut
 

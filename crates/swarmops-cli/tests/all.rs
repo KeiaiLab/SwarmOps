@@ -16,10 +16,16 @@ mod damaged_index;
 #[cfg(feature = "test-hooks")]
 mod faults;
 mod git;
+mod github_live;
 mod landing;
 mod mcp;
 mod multiprocess;
 mod power_loss;
+mod remote_acceptance;
+mod remote_fetch;
+mod remote_perf;
+mod remote_push;
+mod remote_sync;
 mod so;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file

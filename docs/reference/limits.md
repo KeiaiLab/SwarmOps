@@ -88,7 +88,7 @@ The agent name of `--as` or `SWARMOPS_AGENT`, `<family>/<instance>`, which a ref
 
 - Value: 255 bytes.
 - Constant: `swarmops_api::identity::MAX_AGENT_LEN`, in `crates/swarmops-api/src/identity.rs`.
-- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`mcp`](commands/mcp.md).
+- Commands: [`whoami`](commands/whoami.md), [`commit`](commands/commit.md), [`land`](commands/land.md), [`blob put`](commands/blob-put.md), [`ref set`](commands/ref-set.md), [`ref delete`](commands/ref-delete.md), [`op undo`](commands/op-undo.md), [`git import`](commands/git-import.md), [`clone`](commands/clone.md), [`sync`](commands/sync.md), [`mcp`](commands/mcp.md).
 - Error: [`E_INVALID_ARG`](errors.md#e_invalid_arg).
 
 ### Ref name
@@ -199,6 +199,7 @@ The bounds `swarmops schema` states on a field, beside the integer formats' own.
 | [`ReadTreeReq`](schema-types.md#readtreereq) | `depth` | 1 to 64 |
 | [`ReadTreeReq`](schema-types.md#readtreereq) | `limit` | at least 1 |
 | [`ShowReq`](schema-types.md#showreq) | `max_changes` | at least 1 |
+| [`SyncReq`](schema-types.md#syncreq) | `max_attempts` | 1 to 32 |
 
 ## Internal values
 

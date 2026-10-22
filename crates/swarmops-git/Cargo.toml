@@ -40,6 +40,10 @@ swarmops-core = { path = "../swarmops-core", version = "0.1.0" }
 swarmops-repo = { path = "../swarmops-repo", version = "0.1.0" }
 # The object length limit (`MAX_OBJECT_LEN`), which the conversion refuses a longer blob against.
 swarmops-store = { path = "../swarmops-store", version = "0.1.0" }
+# A token's `Authorization: Basic` header for a remote (M13).
+base64.workspace = true
+# The store root a mirror is opened at (M13).
+camino.workspace = true
 gix.workspace = true
 rayon.workspace = true
 # An export oid's serde form, which the derived store keeps (as postcard).
@@ -48,7 +52,6 @@ thiserror.workspace = true
 
 [dev-dependencies]
 swarmops-testkit = { path = "../swarmops-testkit", version = "0.1.0" }
-camino.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 

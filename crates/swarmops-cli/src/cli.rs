@@ -8,6 +8,7 @@ use clap::error::ErrorKind;
 use clap::{
     ArgGroup, ArgMatches, Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum,
 };
+use swarmops_api::remote::{DEFAULT_REMOTE, DEFAULT_SYNC_STATUS_LIMIT};
 use swarmops_api::{
     DEFAULT_DIFF_CONTEXT, DEFAULT_DIFF_LIMIT, DEFAULT_DIFF_MAX_BYTES, DEFAULT_LOG_LIMIT,
     DEFAULT_MAX_BYTES, DEFAULT_MAX_CHANGES, DEFAULT_MAX_CHANGESETS, DEFAULT_OP_LOG_LIMIT,
@@ -194,6 +195,46 @@ A resolution applies while the ref holds its path as THEIRS did, whether the pat
 not. A path the ref changed since is stale: the land fails with E_CONFLICT again, its report \
 naming the path in stale, as it does for each conflict left unresolved. Read the report's \
 theirs, and resolve against it.";
+
+/// `clone`'s short help.
+const CLONE_HELP: &str = "Make a store from a git remote: fetch it, import its default branch \
+into main, and record it as a remote";
+
+/// `clone`'s long help.
+const CLONE_LONG_HELP: &str = "Make a store from a git remote: a new store in --into, the remote \
+recorded as --remote (origin), fetched, and its followed branch (--branch, else the remote's \
+default branch) imported into main.
+
+The URL is an https or ssh URL, or the scp form user@host:path; a plain http URL only to a \
+loopback address, and a URL holding a password is refused (leave the token to git's credential \
+helper, or name its variable with --token-env). Git 2.39 or later runs the transfer, with the \
+user's own credentials, proxies and ssh configuration. It needs an identity, as git import does: it moves main. Run again into the \
+same directory with the same URL, it continues an interrupted clone.";
+
+/// `push`'s target's help.
+const PUSH_TARGET_HELP: &str = "What to send, as <ref>[:<branch>]: the store ref (main, the \
+default, or release/<name>) and the remote branch (by default the remote's followed branch for \
+main, the same name for release/<name>)";
+
+/// `push`'s long help.
+const PUSH_LONG_HELP: &str = "Send a store ref to a remote branch by compare-and-swap, never by \
+force: the remote moves only from the head the last fetch saw, to a descendant of it.
+
+The ref is exported into the store's mirror on top of what the last fetch saw of the branch, so \
+the export only appends, then git pushes it with a lease on that value. A remote that moved since \
+fails with E_REMOTE_DIVERGED (exit 3) and nothing is sent: fetch, or sync. Run again, it sends \
+nothing and starts no git. It needs no identity: a push is an export.";
+
+/// `sync`'s long help.
+const SYNC_LONG_HELP: &str = "Fetch the remote, land main's unpublished changes onto its head, \
+move main there, and push it.
+
+Changes the remote holds already (a SwarmOps-Changeset, SwarmOps-Squashed-From or \
+SwarmOps-Land-Key line in one of its commits, or a change that merges as none) are dropped; the \
+rest land onto the remote's head one by one, as land merges them. A remote that moved meanwhile \
+makes it fetch and land again, up to --max-attempts. With --no-push it stops before the push, for \
+a branch that takes pull requests only. It needs an identity: it moves main. sync status shows \
+where main and the remote stand, offline.";
 
 /// Source control for coding-agent swarms. Every command but mcp prints one JSON envelope
 /// on stdout.
@@ -412,16 +453,88 @@ pub enum Command {
     /// Bring history in from git, or send it back.
     #[command(subcommand)]
     Git(GitCommand),
+    /// Make a store from a git remote.
+    #[command(about = CLONE_HELP, long_about = CLONE_LONG_HELP)]
+    Clone {
+        /// The remote's URL.
+        url: String,
+        /// The directory to make the store in: absent or empty.
+        #[arg(long, value_name = "DIR")]
+        into: String,
+        /// The repository's name (default: the URL's last path component, without .git).
+        #[arg(long)]
+        name: Option<String>,
+        /// The remote branch main follows (default: the remote's default branch).
+        #[arg(long)]
+        branch: Option<String>,
+        /// The name to record the remote under.
+        #[arg(long, value_name = "NAME", default_value = DEFAULT_REMOTE)]
+        remote: String,
+        /// The environment variable that holds a token for the remote, by its name.
+        #[arg(long, value_name = "VAR")]
+        token_env: Option<String>,
+        /// A class of content the import may drop or normalize, as git import's.
+        #[arg(long, value_name = "CLASS")]
+        lossy: Vec<LossyArg>,
+    },
+    /// Add, remove or list the store's git remotes.
+    #[command(subcommand)]
+    Remote(RemoteCommand),
+    /// Fetch a git remote into the store's mirror, and its followed branch into the store.
+    ///
+    /// Git 2.39 or later fetches the remote's branches and tags into the store's mirror; the
+    /// followed branch's commits become changesets, with no ref moved: main never moves. Run
+    /// again with nothing new on the remote, it imports nothing. It needs no identity.
+    Fetch {
+        /// The remote, by its name.
+        remote: String,
+    },
+    /// Send a store ref to a git remote's branch by compare-and-swap, never by force.
+    #[command(long_about = PUSH_LONG_HELP)]
+    Push {
+        /// The remote, by its name.
+        remote: String,
+        #[arg(value_name = "REF[:BRANCH]", help = PUSH_TARGET_HELP)]
+        target: Option<String>,
+    },
+    /// Land main's unpublished changes onto a git remote's head, and push them.
+    #[command(
+        long_about = SYNC_LONG_HELP,
+        args_conflicts_with_subcommands = true,
+        subcommand_negates_reqs = true
+    )]
+    Sync {
+        /// The remote, by its name.
+        #[arg(required = true)]
+        remote: Option<String>,
+        /// Land onto the remote's head and move main, but push nothing.
+        #[arg(long)]
+        no_push: bool,
+        /// How many times to fetch and land again when the remote or main moved meanwhile:
+        /// 1 to 32.
+        #[arg(
+            long,
+            value_name = "N",
+            default_value_t = DEFAULT_MAX_ATTEMPTS,
+            value_parser = clap::value_parser!(u32).range(1..=32)
+        )]
+        max_attempts: u32,
+        /// `sync status`.
+        #[command(subcommand)]
+        status: Option<SyncCommand>,
+    },
     /// Serve the store's operations to an agent as an MCP server on stdin and stdout.
     ///
     /// One tool per operation (repo_info, resolve_rev, read_file, read_tree, show, log,
     /// path_history, diff, op_log, ref_list, ref_set, ref_delete, undo, commit, land, blob_put,
-    /// blob_has, verify), each taking the operation's request as its arguments and returning the
-    /// envelope the other commands print. The store and the identity are the server's, --repo and
+    /// blob_has, verify, and the git remotes' remote_list, fetch, push, sync and sync_status),
+    /// each taking the operation's request as its arguments and returning the envelope the other
+    /// commands print. The store and the identity are the server's, --repo and
     /// --as or their variables, never a call's. Speaks MCP 2026-07-28, and 2025-11-25 and
     /// 2025-06-18 to clients that open with initialize. Prints no envelope: stdout carries the
     /// protocol until stdin ends, and a command line it refuses has its envelope on stderr. The
-    /// derive command has no tool: it is maintenance, no agent's work.
+    /// derive command has no tool: it is maintenance, no agent's work; nor have clone and remote
+    /// add|remove, so that an agent cannot point the store at a URL of its choosing.
     Mcp,
     /// Derive the eager derived values of new changesets, ahead of any reader.
     ///
@@ -574,6 +687,56 @@ pub enum GitCommand {
         branch: String,
         #[arg(long, help = GIT_EXPORT_FORCE_HELP)]
         force: bool,
+    },
+}
+
+/// `remote`'s operations.
+#[derive(Subcommand, Debug)]
+pub enum RemoteCommand {
+    /// Record a git remote in the store.
+    ///
+    /// The name is 1 to 63 lowercase letters, digits, dots, underscores and dashes, starting with
+    /// a letter or a digit, not ending in a dot, and not status. Without --branch the remote is
+    /// asked for its default branch (a network call); an empty remote gives main, with a
+    /// warning. No credential is stored: --token-env records a variable's name. It needs no
+    /// identity.
+    Add {
+        /// The remote's name.
+        name: String,
+        /// The remote's URL: an https or ssh URL, or the scp form user@host:path.
+        url: String,
+        /// The remote branch main follows (default: the remote's default branch).
+        #[arg(long)]
+        branch: Option<String>,
+        /// The environment variable that holds a token for the remote, by its name.
+        #[arg(long, value_name = "VAR")]
+        token_env: Option<String>,
+        /// A class of content the import of the remote's commits may drop or normalize.
+        #[arg(long, value_name = "CLASS")]
+        lossy: Vec<LossyArg>,
+    },
+    /// Forget a git remote, and the mirror's refs of it; no changeset is removed.
+    Remove {
+        /// The remote's name.
+        name: String,
+    },
+    /// List the store's git remotes.
+    List,
+}
+
+/// `sync`'s operation besides syncing.
+#[derive(Subcommand, Debug)]
+pub enum SyncCommand {
+    /// Show how main and a git remote's followed branch stand, as the last fetch saw it.
+    ///
+    /// Offline: it reads the store and its mirror only, takes no lock and runs no git. A branch
+    /// never fetched gives fetched false.
+    Status {
+        /// The remote, by its name.
+        remote: String,
+        /// The most unpublished changesets to list.
+        #[arg(short = 'n', long, value_name = "N", default_value_t = DEFAULT_SYNC_STATUS_LIMIT)]
+        limit: usize,
     },
 }
 
@@ -801,6 +964,14 @@ pub fn op_name<S: AsRef<str>>(path: &[S]) -> Option<&'static str> {
         ["verify"] => "verify",
         ["git", "import"] => "git_import",
         ["git", "export"] => "git_export",
+        ["clone"] => "clone_repo",
+        ["remote", "add"] => "remote_add",
+        ["remote", "remove"] => "remote_remove",
+        ["remote", "list"] => "remote_list",
+        ["fetch"] => "fetch",
+        ["push"] => "push",
+        ["sync"] => "sync",
+        ["sync", "status"] => "sync_status",
         ["mcp"] => "mcp",
         ["derive"] => "derive",
         _ => return None,
@@ -850,6 +1021,7 @@ fn command() -> clap::Command {
         .mut_subcommand("blob", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("git", |cmd| cmd.arg_required_else_help(false))
         .mut_subcommand("op", |cmd| cmd.arg_required_else_help(false))
+        .mut_subcommand("remote", |cmd| cmd.arg_required_else_help(false))
 }
 
 /// Of `--json` and `--human`, keeps the one given last: clap's `overrides_with` settles them
@@ -916,10 +1088,12 @@ mod tests {
             for sub in cmd.get_subcommands().filter(|sub| sub.get_name() != "help") {
                 let mut path = prefix.to_vec();
                 path.push(sub.get_name().to_owned());
+                // A group names no operation itself, but `sync` does and has `sync status`.
+                if !sub.has_subcommands() || op_name(&path).is_some() {
+                    out.push(path.clone());
+                }
                 if sub.has_subcommands() {
                     leaves(sub, &path, out);
-                } else {
-                    out.push(path);
                 }
             }
         }
@@ -929,14 +1103,15 @@ mod tests {
             .iter()
             .map(|path| op_name(path).unwrap_or_else(|| panic!("{path:?} names no op")))
             .collect();
-        assert_eq!(ops.len(), 25);
+        assert_eq!(ops.len(), 33);
         ops.sort_unstable();
         ops.dedup();
-        assert_eq!(ops.len(), 25, "two subcommands name one op");
+        assert_eq!(ops.len(), 33, "two subcommands name one op");
         assert_eq!(op_name(&["ref"]), None);
         assert_eq!(op_name(&["blob"]), None);
         assert_eq!(op_name(&["git"]), None);
         assert_eq!(op_name(&["op"]), None);
+        assert_eq!(op_name(&["remote"]), None);
     }
 
     #[test]

@@ -11,6 +11,7 @@ pub mod envelope;
 pub mod error;
 pub mod identity;
 pub mod ops;
+pub mod remote;
 pub mod rev;
 
 pub use envelope::{API_VERSION, Envelope, LogCutOut, Meta, RecoveredOut};
@@ -36,6 +37,12 @@ pub use ops::{
 pub use ops::{BlobHasReq, BlobHasResp, BlobPutReq, BlobPutResp};
 pub use ops::{ResolutionInput, ResolutionsInput, Side};
 pub use ops::{ResolveRevReq, ResolvedRev, RevKind};
+pub use remote::{
+    BranchUpdate, CloneReq, CloneResp, DropReason, DroppedChange, FetchReq, FetchResp, HeadMove,
+    PublishedChange, PushReq, PushResp, PushStatus, RemoteAddReq, RemoteHead, RemoteInfo,
+    RemoteList, RemoteListReq, RemoteRemoveReq, RemoteRemoveResp, SyncMode, SyncReq, SyncResp,
+    SyncStatus, SyncStatusKind, SyncStatusReq,
+};
 pub use rev::Rev;
 
 /// The object [`schema_for_all`] returns: each listed type's JSON Schema under the type's name.
@@ -55,6 +62,18 @@ macro_rules! schemas {
 /// [`Envelope`] is listed as `Envelope<serde_json::Value>`: its `result` is an operation's
 /// response, whose type has its own entry.
 pub fn schema_for_all() -> serde_json::Value {
+    // The store's operations' types, then the git remotes'.
+    let mut all = store_schemas();
+    if let (serde_json::Value::Object(all), serde_json::Value::Object(remote)) =
+        (&mut all, remote_schemas())
+    {
+        all.extend(remote);
+    }
+    all
+}
+
+/// The schemas of the store's operations' types and of those every operation shares.
+fn store_schemas() -> serde_json::Value {
     schemas![
         // Shared by every operation.
         Envelope<serde_json::Value>,
@@ -161,5 +180,37 @@ pub fn schema_for_all() -> serde_json::Value {
         RefMoveOut,
         UndoReq,
         UndoResp,
+    ]
+}
+
+/// The schemas of the git remotes' types (M13), which run on the client, as git import and
+/// export do.
+fn remote_schemas() -> serde_json::Value {
+    schemas![
+        CloneReq,
+        CloneResp,
+        RemoteAddReq,
+        RemoteInfo,
+        RemoteRemoveReq,
+        RemoteRemoveResp,
+        RemoteListReq,
+        RemoteList,
+        FetchReq,
+        FetchResp,
+        RemoteHead,
+        BranchUpdate,
+        PushReq,
+        PushResp,
+        PushStatus,
+        SyncReq,
+        SyncMode,
+        SyncResp,
+        SyncStatusKind,
+        PublishedChange,
+        DroppedChange,
+        DropReason,
+        HeadMove,
+        SyncStatusReq,
+        SyncStatus,
     ]
 }

@@ -11,6 +11,10 @@ use camino::Utf8Path;
 use serde_json::{Map, Value};
 use swarmops_api::{DEFAULT_MAX_CONFLICT_BYTES, ErrorCode, OpError};
 use swarmops_core::{ChangesetId, ObjectId, RepoPath};
+use swarmops_git::limits::LimitExceeded;
+use swarmops_git::mirror::MirrorError;
+use swarmops_git::sync::SyncError;
+use swarmops_git::transport::{RejectReason, TransportError, UrlRefused};
 use swarmops_git::{
     ConvertError, DivergedReason, ExportError, GitOid, ImportError, SinkError, SourceError,
     Unsupported,
@@ -903,6 +907,330 @@ fn progress(mut stopped: OpError, imported: u64, last: Option<GitOid>) -> OpErro
         stopped.hint = Some(RESUME_HINT.to_owned());
     }
     stopped
+}
+
+// ---- The git remotes (M13) ----
+//
+// The mappings of the remote commands' errors: the transport's, the mirror's, the sync engine's,
+// GitHub's limits and the URL rules (§4.3 of the M13 plan's design). The commands call them from
+// the M13 plan's tasks C6, C7 and C8b on; until then only the tests below do.
+
+/// Which git call of a remote command failed: `details.phase` of `E_REMOTE_UNREACHABLE`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code, reason = "the remote commands (M13 C6, C7) use it")]
+pub(crate) enum Phase {
+    /// `git fetch`.
+    Fetch,
+    /// `git push`.
+    Push,
+    /// `git ls-remote`, which reads a remote's default branch.
+    LsRemote,
+}
+
+impl Phase {
+    /// The phase as `details.phase` writes it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Phase::Fetch => "fetch",
+            Phase::Push => "push",
+            Phase::LsRemote => "ls_remote",
+        }
+    }
+}
+
+/// The error of a remote operation not written yet: `E_INTERNAL`, naming the M13 task that
+/// writes it (`C6`).
+pub(crate) fn planned(task: &str) -> OpError {
+    error(ErrorCode::Internal, format!("planned in M13 ({task})"))
+}
+
+/// `E_REMOTE_NOT_FOUND`: the store records no remote named `remote`.
+#[allow(dead_code, reason = "the remote commands (M13 C6) use it")]
+pub(crate) fn remote_not_found(remote: &str) -> OpError {
+    error(
+        ErrorCode::RemoteNotFound,
+        format!("the store records no remote {remote:?}"),
+    )
+    .with_details(details([("remote", remote.into())]))
+    .with_hint("swarmops remote list names the remotes; swarmops remote add records one")
+}
+
+/// `E_INVALID_ARG`: a remote's URL the rules refuse, `why` as `details.reason`. The URL is not
+/// repeated: it may hold a password.
+#[allow(dead_code, reason = "the remote commands (M13 C6) use it")]
+pub(crate) fn url_refused(why: UrlRefused) -> OpError {
+    let (message, next) = match why {
+        UrlRefused::CleartextHttp => (
+            "a remote's URL is not plain http, but to a loopback address",
+            "use the https:// URL of the remote",
+        ),
+        UrlRefused::Scheme => (
+            "a remote's URL is https://, ssh:// or user@host:path",
+            "give the remote's https:// or ssh:// URL",
+        ),
+        UrlRefused::CredentialInUrl => (
+            "a remote's URL holds no password",
+            "leave the token to git's credential helper, or name its variable with --token-env",
+        ),
+        UrlRefused::OptionLike => (
+            "a remote's URL or host does not start with -",
+            "give the remote's https:// or ssh:// URL",
+        ),
+    };
+    error(ErrorCode::InvalidArg, message)
+        .with_details(details([("reason", why.as_str().into())]))
+        .with_hint(next)
+}
+
+/// The operations-spec error for the transport's failure `e`, in `phase` of a command on
+/// `remote`.
+#[allow(dead_code, reason = "the remote commands (M13 C6, C7) use it")]
+pub(crate) fn transport_error(e: TransportError, remote: &str, phase: Phase) -> OpError {
+    let fetch = || hint(format!("swarmops fetch {}", shell_word(remote)));
+    match e {
+        TransportError::GitMissing => error(ErrorCode::GitUnsupported, "no git to run")
+            .with_details(details([("reason", "git_missing".into())]))
+            .with_hint("install git 2.39 or later, or name its binary in SWARMOPS_GIT"),
+        TransportError::GitTooOld { found } => error(
+            ErrorCode::GitUnsupported,
+            format!("git {found} is older than 2.39"),
+        )
+        .with_details(details([
+            ("reason", "git_too_old".into()),
+            ("found", found.into()),
+            ("needs", "2.39".into()),
+        ]))
+        .with_hint("install git 2.39 or later, or name its binary in SWARMOPS_GIT"),
+        TransportError::Unreachable { cause, stderr_tail } => {
+            let mut found = details([
+                ("remote", remote.into()),
+                ("phase", phase.as_str().into()),
+                ("cause", cause.as_str().into()),
+            ]);
+            put_text(&mut found, "stderr_tail", stderr_tail);
+            error(
+                ErrorCode::RemoteUnreachable,
+                format!("the remote {remote:?} did not answer ({})", cause.as_str()),
+            )
+            .with_details(found)
+            .with_hint("run it again once the network is back: nothing changed")
+        }
+        TransportError::Rejected {
+            reason,
+            refs,
+            remote_messages,
+            git_exit,
+            stderr_tail,
+            token_env_unset,
+        } => {
+            let said = Said {
+                refs,
+                remote_messages,
+                git_exit,
+                stderr_tail,
+                token_env_unset,
+            };
+            rejected(reason, said, remote)
+        }
+        TransportError::Stale { branch } => error(
+            ErrorCode::RemoteDiverged,
+            format!("{branch} on {remote:?} moved since the last fetch: nothing was sent"),
+        )
+        .with_details(details([
+            ("remote", remote.into()),
+            ("branch", branch.into()),
+            ("reason", "remote_moved".into()),
+        ]))
+        .with_hint(fetch()),
+        TransportError::NotFastForward { branch } => error(
+            ErrorCode::RemoteDiverged,
+            format!("{branch} on {remote:?} refused a push that is not a fast-forward"),
+        )
+        .with_details(details([
+            ("remote", remote.into()),
+            ("branch", branch.into()),
+            ("reason", "not_fast_forward".into()),
+        ]))
+        .with_hint(hint(format!("swarmops sync {}", shell_word(remote)))),
+        TransportError::Sha256 => error(
+            ErrorCode::GitUnsupported,
+            format!("the remote {remote:?} is a SHA-256 repository"),
+        )
+        .with_details(details([("reason", "sha256".into())])),
+    }
+}
+
+/// What git said of a refusal: the refs the remote refused and its reasons, the remote's own
+/// lines, git's exit status and the end of its stderr, and whether the token variable was unset.
+struct Said {
+    refs: Vec<(String, String)>,
+    remote_messages: Vec<String>,
+    git_exit: Option<i32>,
+    stderr_tail: String,
+    token_env_unset: bool,
+}
+
+/// `E_REMOTE_REJECTED` (exit 5): `remote` refused for `reason`, `said` as the details.
+fn rejected(reason: RejectReason, said: Said, remote: &str) -> OpError {
+    // 1. The details: each part git gave.
+    let mut found = details([
+        ("remote", remote.into()),
+        ("reason", reason.as_str().into()),
+    ]);
+    if !said.refs.is_empty() {
+        let refs = said
+            .refs
+            .into_iter()
+            .map(|(name, message)| serde_json::json!({"ref": name, "message": message}))
+            .collect();
+        found.insert("refs".to_owned(), Value::Array(refs));
+    }
+    if !said.remote_messages.is_empty() {
+        found.insert("remote_messages".to_owned(), said.remote_messages.into());
+    }
+    if let Some(exit) = said.git_exit {
+        found.insert("git_exit".to_owned(), exit.into());
+    }
+    put_text(&mut found, "stderr_tail", said.stderr_tail);
+    if said.token_env_unset {
+        found.insert("token_env_unset".to_owned(), true.into());
+    }
+
+    // 2. The next step the reason calls for.
+    let next = match reason {
+        RejectReason::Auth => {
+            "check the credential git uses for the remote, or the variable --token-env names"
+        }
+        RejectReason::NotFound => {
+            "check the URL: a host such as GitHub answers so for a private repository the \
+             credential cannot see"
+        }
+        RejectReason::Declined => {
+            "details.refs and details.remote_messages give the remote's reason"
+        }
+        RejectReason::Unclassified => "details.stderr_tail gives what git said",
+    };
+    error(
+        ErrorCode::RemoteRejected,
+        format!("the remote {remote:?} refused ({})", reason.as_str()),
+    )
+    .with_details(found)
+    .with_hint(next)
+}
+
+/// The operations-spec error for the mirror's failure `e`.
+#[allow(dead_code, reason = "the remote commands (M13 C6, C7, C8b) use it")]
+pub(crate) fn mirror_error(e: MirrorError) -> OpError {
+    let message = e.to_string();
+    let again = "the mirror is a cache: run the command again; a mirror git cannot open is set \
+                 aside and made again";
+    match e {
+        MirrorError::Busy => error(ErrorCode::Busy, message)
+            .with_details(details([("lock", "git_mirror".into())]))
+            .with_hint("run it again once the other fetch, push, sync or clone has ended"),
+        MirrorError::GitLockBusy { file } => git_lock_busy(message, file),
+        MirrorError::Sink(SinkError::RefLocked { lock }) => git_lock_busy(message, lock),
+        MirrorError::Io(_) => error(ErrorCode::Io, message)
+            .with_details(details([("store_file", "git".into())]))
+            .with_hint(again),
+        MirrorError::Sink(_) => error(ErrorCode::GitWrite, message)
+            .with_details(details([("reason", "mirror".into())]))
+            .with_hint(again),
+        MirrorError::Source(_) => error(ErrorCode::GitRead, message)
+            .with_details(details([("reason", "mirror".into())]))
+            .with_hint(again),
+    }
+}
+
+/// `E_BUSY` for a git lock file in the mirror, `file` (relative to `mirror.git`), that may
+/// belong to a git child still writing; retryable, and no person removes it.
+fn git_lock_busy(message: String, file: String) -> OpError {
+    error(ErrorCode::Busy, message)
+        .with_details(details([
+            ("lock", "git_mirror_file".into()),
+            ("file", file.into()),
+        ]))
+        .with_hint(
+            "run it again in a few minutes: a dead process's lock file is cleared by the next run",
+        )
+}
+
+/// The operations-spec error for the sync engine's failure `e`, in a sync of `remote`'s
+/// `branch`.
+#[allow(dead_code, reason = "the sync command (M13 C8b) uses it")]
+pub(crate) fn sync_error(e: SyncError, remote: &str, branch: &str) -> OpError {
+    let message = e.to_string();
+    match e {
+        SyncError::NoCommonBase => error(ErrorCode::RemoteDiverged, message)
+            .with_details(details([
+                ("remote", remote.into()),
+                ("branch", branch.into()),
+                ("reason", "no_common_base".into()),
+            ]))
+            .with_hint(hint(format!(
+                "swarmops log main and the remote's history share nothing within 10,000 \
+                 changesets: swarmops sync status {} says how far each is",
+                shell_word(remote)
+            ))),
+        SyncError::Conflict {
+            change,
+            onto,
+            conflicts,
+        } => {
+            let mut found = conflict(&conflicts, message, DEFAULT_MAX_CONFLICT_BYTES);
+            found
+                .details
+                .insert("change".to_owned(), change.to_string().into());
+            found
+                .details
+                .insert("onto".to_owned(), onto.to_string().into());
+            found
+        }
+        SyncError::MergeChangeset(id) => error(ErrorCode::InvalidArg, message)
+            .with_details(details([("changeset", id.to_string().into())]))
+            .with_hint("push a merge changeset with git: the sync relocates single changes only"),
+        SyncError::Repo(e) => land_error(e, message),
+    }
+}
+
+/// `E_TOO_LARGE` for a push to `remote` past one of GitHub's limits, `e`: nothing was sent.
+#[allow(dead_code, reason = "the push command (M13 C7) uses it")]
+pub(crate) fn limit_error(e: LimitExceeded, remote: &str) -> OpError {
+    let LimitExceeded {
+        scope,
+        path,
+        size,
+        limit,
+    } = e;
+    let (message, next) = match &path {
+        Some(path) => (
+            format!("{path} is {size} bytes, more than GitHub takes ({limit}): nothing was sent"),
+            "take the file out of the history before pushing it to GitHub".to_owned(),
+        ),
+        None => (
+            format!("the push is {size} bytes, more than GitHub takes ({limit}): nothing was sent"),
+            "push an older state first with git, then the rest".to_owned(),
+        ),
+    };
+    let mut found = details([
+        ("scope", scope.as_str().into()),
+        ("size", size.into()),
+        ("limit", limit.into()),
+        ("remote", remote.into()),
+    ]);
+    if let Some(path) = path {
+        found.insert("path".to_owned(), path.into());
+    }
+    error(ErrorCode::TooLarge, message)
+        .with_details(found)
+        .with_hint(next)
+}
+
+/// Puts `text` into `found` as `key`, when there is any.
+fn put_text(found: &mut Map<String, Value>, key: &str, text: String) {
+    if !text.is_empty() {
+        found.insert(key.to_owned(), text.into());
+    }
 }
 
 #[cfg(test)]
@@ -2186,5 +2514,240 @@ mod tests {
             reason: "Input/output error".into(),
         });
         export_maps(unread, ErrorCode::GitRead, &json!({"reason": "io"}));
+    }
+
+    // ---- The git remotes (M13) ----
+
+    /// `error` has `code`'s string, exit code and retry advice, and `want` as its details.
+    #[track_caller]
+    fn is(error: &OpError, code: ErrorCode, want: &Value) {
+        assert_eq!(error.code, code.as_str(), "{error:?}");
+        let advice = (error.exit, error.retryable);
+        assert_eq!(advice, (code.exit(), code.retryable()), "{error:?}");
+        assert_eq!(&Value::Object(error.details.clone()), want, "{error:?}");
+        assert!(!error.message.is_empty() && !error.message.contains('\n'));
+    }
+
+    /// Every failure of the transport maps to its code (the M13 plan, §4.3 and §3.5): the four
+    /// remote codes, and `E_GIT_UNSUPPORTED` for a git that is missing or too old and for a
+    /// SHA-256 remote; an empty stderr tail is left out.
+    #[test]
+    fn transport_errors_map_to_the_remote_codes() {
+        use serde_json::json;
+        use swarmops_git::transport::{Cause, RejectReason};
+
+        // 1. git itself.
+        let missing = transport_error(TransportError::GitMissing, "origin", Phase::Fetch);
+        is(
+            &missing,
+            ErrorCode::GitUnsupported,
+            &json!({"reason": "git_missing"}),
+        );
+        let old = TransportError::GitTooOld {
+            found: "2.30.1".into(),
+        };
+        let old = transport_error(old, "origin", Phase::Fetch);
+        let want = json!({"reason": "git_too_old", "found": "2.30.1", "needs": "2.39"});
+        is(&old, ErrorCode::GitUnsupported, &want);
+        let sha256 = transport_error(TransportError::Sha256, "origin", Phase::Fetch);
+        is(
+            &sha256,
+            ErrorCode::GitUnsupported,
+            &json!({"reason": "sha256"}),
+        );
+
+        // 2. The network: retryable, with the phase and the cause.
+        let down = TransportError::Unreachable {
+            cause: Cause::Connect,
+            stderr_tail: "fatal: unable to access".into(),
+        };
+        let down = transport_error(down, "origin", Phase::LsRemote);
+        let want = json!({"remote": "origin", "phase": "ls_remote", "cause": "connect",
+                          "stderr_tail": "fatal: unable to access"});
+        is(&down, ErrorCode::RemoteUnreachable, &want);
+        assert!(down.retryable);
+        let quiet = TransportError::Unreachable {
+            cause: Cause::Timeout,
+            stderr_tail: String::new(),
+        };
+        let quiet = transport_error(quiet, "origin", Phase::Push);
+        let want = json!({"remote": "origin", "phase": "push", "cause": "timeout"});
+        is(&quiet, ErrorCode::RemoteUnreachable, &want);
+
+        // 3. A refusal: exit 5, not retryable, with what git said.
+        let declined = TransportError::Rejected {
+            reason: RejectReason::Declined,
+            refs: vec![("refs/heads/main".into(), "pre-receive hook declined".into())],
+            remote_messages: vec!["no pushes on Fridays".into()],
+            git_exit: Some(1),
+            stderr_tail: String::new(),
+            token_env_unset: true,
+        };
+        let declined = transport_error(declined, "origin", Phase::Push);
+        let refs = json!([{"ref": "refs/heads/main", "message": "pre-receive hook declined"}]);
+        let want = json!({"remote": "origin", "reason": "declined", "refs": refs,
+                          "remote_messages": ["no pushes on Fridays"], "git_exit": 1,
+                          "token_env_unset": true});
+        is(&declined, ErrorCode::RemoteRejected, &want);
+        for reason in [
+            RejectReason::Auth,
+            RejectReason::NotFound,
+            RejectReason::Unclassified,
+        ] {
+            let refused = TransportError::Rejected {
+                reason,
+                refs: Vec::new(),
+                remote_messages: Vec::new(),
+                git_exit: None,
+                stderr_tail: String::new(),
+                token_env_unset: false,
+            };
+            let refused = transport_error(refused, "origin", Phase::Fetch);
+            let want = json!({"remote": "origin", "reason": reason.as_str()});
+            is(&refused, ErrorCode::RemoteRejected, &want);
+            assert!(!refused.retryable && refused.hint.is_some());
+        }
+
+        // 4. A remote that moved: exit 3, with the fetch or the sync to run.
+        let stale = TransportError::Stale {
+            branch: "main".into(),
+        };
+        let stale = transport_error(stale, "origin", Phase::Push);
+        let want = json!({"remote": "origin", "branch": "main", "reason": "remote_moved"});
+        is(&stale, ErrorCode::RemoteDiverged, &want);
+        assert_eq!(stale.hint.as_deref(), Some("swarmops fetch origin"));
+        let behind = TransportError::NotFastForward {
+            branch: "main".into(),
+        };
+        let behind = transport_error(behind, "origin", Phase::Push);
+        let want = json!({"remote": "origin", "branch": "main", "reason": "not_fast_forward"});
+        is(&behind, ErrorCode::RemoteDiverged, &want);
+        assert_eq!(behind.hint.as_deref(), Some("swarmops sync origin"));
+    }
+
+    /// The mirror's lock and git's lock files in it are `E_BUSY`, retryable, and say which
+    /// lock: the export's `RefLocked` in the mirror too, which no person is told to remove.
+    #[test]
+    fn mirror_errors_map_to_their_codes() {
+        use serde_json::json;
+
+        let held = mirror_error(MirrorError::Busy);
+        is(&held, ErrorCode::Busy, &json!({"lock": "git_mirror"}));
+        let file = "refs/remotes/origin/main.lock";
+        let young = mirror_error(MirrorError::GitLockBusy { file: file.into() });
+        let want = json!({"lock": "git_mirror_file", "file": file});
+        is(&young, ErrorCode::Busy, &want);
+        let lock = "refs/heads/push/origin/main.lock";
+        let staged = mirror_error(MirrorError::Sink(SinkError::RefLocked {
+            lock: lock.into(),
+        }));
+        let want = json!({"lock": "git_mirror_file", "file": lock});
+        is(&staged, ErrorCode::Busy, &want);
+        assert!(!staged.hint.unwrap_or_default().contains("remove"));
+
+        let io = mirror_error(MirrorError::Io(io::Error::other("disk full")));
+        is(&io, ErrorCode::Io, &json!({"store_file": "git"}));
+        let written = MirrorError::Sink(SinkError::BadBranch { name: "x".into() });
+        let written = mirror_error(written);
+        is(&written, ErrorCode::GitWrite, &json!({"reason": "mirror"}));
+    }
+
+    /// The sync engine's failures: no common base is `E_REMOTE_DIVERGED`, a conflict is a
+    /// land's `E_CONFLICT` with the change and what it landed onto, and a merge changeset is
+    /// refused as a land refuses one.
+    #[test]
+    fn sync_errors_map_to_their_codes() {
+        use serde_json::json;
+        use swarmops_repo::MergeConflicts;
+
+        let unrelated = sync_error(SyncError::NoCommonBase, "origin", "main");
+        let want = json!({"remote": "origin", "branch": "main", "reason": "no_common_base"});
+        is(&unrelated, ErrorCode::RemoteDiverged, &want);
+
+        let conflicts = MergeConflicts {
+            base: id(),
+            ours: id(),
+            theirs: id(),
+            conflicts: Vec::new(),
+            auto_merged: Vec::new(),
+            last_touched: std::collections::BTreeMap::new(),
+            stale: Vec::new(),
+        };
+        let conflicted = SyncError::Conflict {
+            change: id(),
+            onto: id(),
+            conflicts: Box::new(conflicts),
+        };
+        let conflicted = sync_error(conflicted, "origin", "main");
+        assert_eq!(conflicted.code, "E_CONFLICT");
+        assert_eq!(conflicted.details["change"], id().to_string());
+        assert_eq!(conflicted.details["onto"], id().to_string());
+        assert!(conflicted.details.contains_key("report"));
+
+        let merge = sync_error(SyncError::MergeChangeset(id()), "origin", "main");
+        is(
+            &merge,
+            ErrorCode::InvalidArg,
+            &json!({"changeset": id().to_string()}),
+        );
+        let repo = sync_error(
+            SyncError::Repo(RepoError::NotFound("main".into())),
+            "o",
+            "m",
+        );
+        assert_eq!(repo.code, "E_REV_NOT_FOUND");
+    }
+
+    /// GitHub's limits are `E_TOO_LARGE` with the scope, the sizes and the remote, and the
+    /// file's path when a file broke them; the URL rules are `E_INVALID_ARG` with the reason and
+    /// never the URL; an unknown remote is `E_REMOTE_NOT_FOUND`; a stub names its task.
+    #[test]
+    fn limits_urls_and_names_map_to_their_codes() {
+        use serde_json::json;
+        use swarmops_git::limits::LimitScope;
+
+        let file = LimitExceeded {
+            scope: LimitScope::RemoteFile,
+            path: Some("assets/big.bin".into()),
+            size: 104_857_601,
+            limit: 104_857_600,
+        };
+        let file = limit_error(file, "origin");
+        let want = json!({"scope": "remote_file", "path": "assets/big.bin", "size": 104_857_601_u64,
+                          "limit": 104_857_600_u64, "remote": "origin"});
+        is(&file, ErrorCode::TooLarge, &want);
+        let push = LimitExceeded {
+            scope: LimitScope::RemotePush,
+            path: None,
+            size: 2_000_000_001,
+            limit: 2_000_000_000,
+        };
+        let push = limit_error(push, "origin");
+        let want = json!({"scope": "remote_push", "size": 2_000_000_001_u64,
+                          "limit": 2_000_000_000_u64, "remote": "origin"});
+        is(&push, ErrorCode::TooLarge, &want);
+
+        for (why, reason) in [
+            (UrlRefused::CleartextHttp, "cleartext_http"),
+            (UrlRefused::Scheme, "url_scheme"),
+            (UrlRefused::CredentialInUrl, "credential_in_url"),
+            (UrlRefused::OptionLike, "url_option"),
+        ] {
+            is(
+                &url_refused(why),
+                ErrorCode::InvalidArg,
+                &json!({"reason": reason}),
+            );
+        }
+
+        let unknown = remote_not_found("upstream");
+        is(
+            &unknown,
+            ErrorCode::RemoteNotFound,
+            &json!({"remote": "upstream"}),
+        );
+        let stub = planned("C6");
+        is(&stub, ErrorCode::Internal, &json!({}));
+        assert_eq!(stub.message, "planned in M13 (C6)");
     }
 }
