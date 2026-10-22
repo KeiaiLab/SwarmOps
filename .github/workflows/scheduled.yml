@@ -262,6 +262,8 @@ jobs:
     name: live run on GitHub
     if: vars.SWARMOPS_GITHUB_LIVE_REPO != ''
     runs-on: [self-hosted, swarmops-local] # zizmor: ignore[self-hosted-runner]
+    # The token is read in an environment of its own, without protection rules.
+    environment: github-live
     permissions:
       contents: read
     timeout-minutes: 45
