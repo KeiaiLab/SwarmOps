@@ -391,6 +391,23 @@ pub(crate) fn holds(
     Ok(blob_id(&host.read_file(abs)?) == item.blob)
 }
 
+/// Whether the host's `meta` at `abs` is a file holding `item`'s bytes, whatever its mode: what a
+/// write killed between the file and its executable bit leaves.
+fn bytes_held(
+    host: &dyn HostFs,
+    abs: &Utf8Path,
+    meta: HostMeta,
+    item: &Item,
+) -> Result<bool, OpError> {
+    if meta.kind != HostKind::File || meta.size != item.size {
+        return Ok(false);
+    }
+    let bytes = host
+        .read_file(abs)
+        .map_err(|e| host_failed(&item.path, &e))?;
+    Ok(blob_id(&bytes) == item.blob)
+}
+
 /// The id of the blob holding `bytes`.
 fn blob_id(bytes: &[u8]) -> String {
     hash_object(ObjectKind::Blob, bytes).to_string()
@@ -468,6 +485,12 @@ fn check_host(
                     (None, Some(_)) => start == Start::Resume,
                     (Some(meta), _) if held(&new, meta)? => continue,
                     (Some(meta), Some(old)) if held(old, meta)? => true,
+                    // A file written before the crash, its mode not yet set: finished, not an edit.
+                    (Some(meta), _)
+                        if start == Start::Resume && bytes_held(host, &abs, meta, &new)? =>
+                    {
+                        true
+                    }
                     (Some(meta), _) if meta.kind == HostKind::Dir => {
                         only_removed(host, dir, &path, &deletes)?
                     }
