@@ -114,7 +114,14 @@ jobs:
           name: site
           path: web/out
 
-      # 3. The deploy. The project's production branch is stable: `--branch stable` is
+      # 3. Node for wrangler: a self-hosted runner's PATH does not reach JavaScript actions, so
+      # the deploy pins the same Node as the site job.
+      - if: steps.secrets.outputs.ready == 'true'
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22.15.0
+
+      # 4. The deploy. The project's production branch is stable: `--branch stable` is
       # production, any other branch a preview. _headers and _redirects in web/out apply.
       - id: deploy
         if: steps.secrets.outputs.ready == 'true'
