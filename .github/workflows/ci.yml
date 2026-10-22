@@ -5,8 +5,9 @@
 # Where jobs run: Linux jobs on the maintainers' own host, through self-hosted runners labelled
 # `swarmops-local`, for every push and for pull requests from branches of this repository; a
 # persistent target directory per runner (the runner's CARGO_TARGET_DIR) makes each build
-# incremental, so no build cache travels through GitHub. macOS has no runner on that host and runs
-# on GitHub's macos-26. A pull request from a fork runs on GitHub's images instead: a public
+# incremental, so no build cache travels through GitHub. macOS jobs run on the maintainers' own Mac
+# on the same network (label `macos-local`). A pull request from a fork runs on GitHub's images
+# instead: a public
 # repository's self-hosted runner must never run a stranger's code, and GitHub also holds those
 # runs for a maintainer's approval.
 #
@@ -38,7 +39,7 @@ defaults:
 jobs:
   check:
     name: just check (${{ matrix.os }})
-    runs-on: ${{ matrix.os == 'ubuntu-24.04' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "swarmops-local"]') || matrix.os }} # zizmor: ignore[self-hosted-runner]
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(matrix.os == 'ubuntu-24.04' && '["self-hosted", "swarmops-local"]' || '["self-hosted", "macos-local"]') || matrix.os }} # zizmor: ignore[self-hosted-runner]
     permissions:
       contents: read
     # The default is 360 minutes: a hung test would spend them all from the plan's budget.
