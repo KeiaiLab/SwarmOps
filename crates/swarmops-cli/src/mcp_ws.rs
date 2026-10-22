@@ -304,7 +304,7 @@ mod tests {
     fn built(tool: WsTool) -> Option<&'static str> {
         match tool {
             WsTool::List => Some("ok"),
-            WsTool::Info => Some(r#"the store has no workspace named "probe""#),
+            WsTool::Info | WsTool::Status => Some(r#"the store has no workspace named "probe""#),
             WsTool::Create => Some("ws create needs an identity"),
             WsTool::Materialize => Some("ws materialize needs at least one path"),
             WsTool::Discard => Some("ws discard without paths is not built yet"),
