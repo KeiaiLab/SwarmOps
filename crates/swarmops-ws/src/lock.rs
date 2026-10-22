@@ -24,7 +24,7 @@ pub const LOCK_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(10);
 
 /// The lock file, in [`SWARMWS_DIR`].
-const LOCK_FILE: &str = "lock";
+pub(crate) const LOCK_FILE: &str = "lock";
 
 /// The exclusive lock of one workspace, held until dropped.
 #[derive(Debug)]
