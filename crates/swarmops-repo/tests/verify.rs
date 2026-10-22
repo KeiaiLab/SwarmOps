@@ -695,6 +695,9 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
     // in the store.
     use swarmops_store::{FileOp, FsMethod};
 
+    /// `ELOOP`, too many levels of symbolic links: 40 on Linux, 62 on macOS.
+    const ELOOP: i32 = if cfg!(target_os = "macos") { 62 } else { 40 };
+
     let (_dir, root, repo) = new_repo();
     let c1 = commit(&repo, &[], vec![put("f", b"1")]);
     repo.cas_ref("release/a", None, Some(c1), "test/agent")
@@ -710,7 +713,7 @@ fn verify_fails_on_a_ref_file_it_cannot_read() {
     for deep in [true, false] {
         match repo.verify(deep) {
             Err(RepoError::Store(StoreError::Io(e))) => {
-                assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}");
+                assert_eq!(e.raw_os_error(), Some(ELOOP), "ELOOP: {e}");
                 assert_eq!(
                     (e.op, e.file.as_deref()),
                     (

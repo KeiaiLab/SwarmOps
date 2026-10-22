@@ -153,6 +153,14 @@ fn a_lock_file_that_is_not_a_regular_file_is_refused_before_it_is_opened() {
         let made = Command::new("mkfifo").arg(&lock).status();
         assert!(made.expect("run mkfifo").success(), "mkfifo");
     };
+    // A socket's own path may hold 103 bytes on macOS (`sun_path`), and `lock` comes close to
+    // that under a long temp dir: the socket is bound under a short name of its own, and moved.
+    let socket = || {
+        let short = tempfile::tempdir().expect("make a directory for the socket");
+        let bound = short.path().join("s");
+        drop(UnixListener::bind(&bound).unwrap());
+        fs::rename(&bound, &lock).unwrap();
+    };
     let cases: [(&str, &dyn Fn()); 6] = [
         ("a FIFO", &mkfifo),
         ("a symlink to a regular file", &|| {
@@ -164,7 +172,7 @@ fn a_lock_file_that_is_not_a_regular_file_is_refused_before_it_is_opened() {
         ("a symlink to a device", &|| {
             symlink("/dev/null", &lock).unwrap();
         }),
-        ("a socket", &|| drop(UnixListener::bind(&lock).unwrap())),
+        ("a socket", &socket),
         ("a directory", &|| fs::create_dir(&lock).unwrap()),
     ];
     let mut wrong = Vec::new();

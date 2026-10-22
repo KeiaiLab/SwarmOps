@@ -41,26 +41,33 @@ use std::process::Output;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
+#[cfg(target_os = "linux")]
 use std::time::{Duration, Instant};
 
 use camino::{Utf8Path, Utf8PathBuf};
 use swarmops_core::ChangesetId;
 use swarmops_core::bytes::to_u64;
+#[cfg(target_os = "linux")]
+use swarmops_git::GitOid;
+#[cfg(target_os = "linux")]
 use swarmops_git::import::DEFAULT_FRAME_CHANGESETS;
-use swarmops_git::{GitOid, GixSource, ImportError, ImportReport, ImportRequest, import};
+use swarmops_git::{GixSource, ImportError, ImportReport, ImportRequest, import};
 use swarmops_repo::LocalRepo;
 use swarmops_store::external_ids::lower_hex;
 use swarmops_store::{
     CRASH_AT_ENV, ExternalEntry, ExternalIds, FAIL_AT_ENV, FS_CALLS_ENV, Frame, Journal, Layout,
     ORDER_CHECK_ENV, RealFs, Record, SYSTEM_GIT,
 };
-use swarmops_testkit::child::{Child, SIGABRT, run, this_test};
+#[cfg(target_os = "linux")]
+use swarmops_testkit::child::Child;
+use swarmops_testkit::child::{SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{NoSyncFs, copy_dir};
 use swarmops_testkit::git::{self, GitFixture};
 use swarmops_testkit::test_name;
 use tempfile::TempDir;
 
+#[cfg(target_os = "linux")]
 use crate::support::MemSource;
 
 /// Set only in the children the sweeps spawn: the store the child imports into.
@@ -70,6 +77,7 @@ const STORE_ENV: &str = "SWARMOPS_TEST_GIT_SWEEP_STORE";
 const SOURCE_ENV: &str = "SWARMOPS_TEST_GIT_SWEEP_SOURCE";
 
 /// Set only in the child of the scale test: the store it creates and imports into.
+#[cfg(target_os = "linux")]
 const SCALE_ENV: &str = "SWARMOPS_TEST_GIT_SCALE_STORE";
 
 /// How a child reports to its parent, among the test harness's output.
@@ -95,12 +103,15 @@ const PERSISTENT_AT: u64 = 2;
 const AT_ONCE: usize = 8;
 
 /// The scale test's commits.
+#[cfg(target_os = "linux")]
 const SCALE_COMMITS: u64 = 100_000;
 
 /// The most memory the scale test's process may hold resident at its peak: 1 GiB, in KiB.
+#[cfg(target_os = "linux")]
 const SCALE_PEAK_KIB: u64 = 1 << 20;
 
 /// How long the scale test's child may run.
+#[cfg(target_os = "linux")]
 const SCALE_TIMEOUT: Duration = Duration::from_mins(30);
 
 /// The import the sweeps cut short: `newer` into `main`, [`FRAME_CHANGESETS`] to a frame.
@@ -719,7 +730,9 @@ fn import_failing_at_every_call_stops_and_resumes() {
     );
 }
 
-/// The peak resident memory of this process (`VmHWM` in `/proc/self/status`), in KiB.
+/// The peak resident memory of this process (`VmHWM` in `/proc/self/status`, a file only Linux
+/// has), in KiB.
+#[cfg(target_os = "linux")]
 fn peak_resident_kib() -> u64 {
     let status = std::fs::read_to_string("/proc/self/status").expect("/proc/self/status");
     (status.lines())
@@ -733,6 +746,7 @@ fn peak_resident_kib() -> u64 {
 /// to stable storage ([`NoSyncFs`]: what the store holds is the subject, not what survives a
 /// power loss). Reports the commits imported, the import's wall time in milliseconds and the
 /// process's peak resident memory in KiB, the source's included.
+#[cfg(target_os = "linux")]
 fn import_at_scale(root: &Utf8Path) {
     let mut source = MemSource::default();
     let mut parent: Option<GitOid> = None;
@@ -755,7 +769,8 @@ fn import_at_scale(root: &Utf8Path) {
 /// 100,000 commits import in 13 frames of at most 8,192 changesets, the index compacting at
 /// most once a frame and once more, and the importing process's peak resident memory stays under
 /// 1 GiB. The import runs in a child of its own, so that the peak is its own; the test prints the
-/// wall time.
+/// wall time. It runs on Linux alone, which has the file that tells the peak.
+#[cfg(target_os = "linux")]
 #[test]
 #[ignore = "slow, ~2 min: 100,000 synthetic commits"]
 fn a_hundred_thousand_commit_import_stays_within_its_budget() {

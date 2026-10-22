@@ -25,7 +25,9 @@ use swarmops_store::{
     JournalEntry, Layout, LimitKind, LogCut, MetaLock, MetaRead, MetaStore, RealFs, Record,
     Recovered, RefMoveEntry, RefState, StoreError,
 };
-use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, test_args, this_test};
+#[cfg(target_os = "linux")]
+use swarmops_testkit::child::test_args;
+use swarmops_testkit::child::{CHILD_TIMEOUT, Child, SIGABRT, run, this_test};
 use swarmops_testkit::faults::checked;
 use swarmops_testkit::fs::{Call, Failing, NoSyncFs, RecordingFs, Watch, Watched, When, copy_dir};
 #[cfg(feature = "test-hooks")]
@@ -2072,7 +2074,7 @@ fn an_index_open_counts_by_length_past_a_malformed_checkpoint_and_fails_on_an_un
     // A symlink to itself: a read of it fails with ELOOP.
     std::os::unix::fs::symlink("journal.ckpt", layout.journal_ckpt()).unwrap();
     match Index::open(&layout, Arc::new(RealFs)) {
-        Err(StoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(40), "ELOOP: {e}"),
+        Err(StoreError::Io(e)) => assert_eq!(e.raw_os_error(), Some(libc::ELOOP), "ELOOP: {e}"),
         other => panic!("an unreadable checkpoint: expected its I/O error, got {other:?}"),
     }
 }

@@ -15,7 +15,6 @@ use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::panic::{self, AssertUnwindSafe};
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -480,9 +479,15 @@ fn racers_past_their_deadline_are_killed_and_reaped() {
         waited < Duration::from_secs(5),
         "killed at their deadline: {waited:?}"
     );
+    // A signal 0 finds a process that is still there, a killed one that nobody has waited for
+    // (a zombie) included: it finds none of these children. `sh`'s own `kill` takes the pid.
     for pid in pids {
-        let proc = PathBuf::from(format!("/proc/{pid}"));
-        assert!(!proc.exists(), "child {pid} is gone, reaped");
+        let found = std::process::Command::new("sh")
+            .args(["-c", r#"kill -0 "$0" 2>/dev/null"#])
+            .arg(pid.to_string())
+            .status()
+            .expect("run sh");
+        assert!(!found.success(), "child {pid} is gone, reaped");
     }
     drop(lock);
     store.assert_clean("after commits killed while they waited for the lock");

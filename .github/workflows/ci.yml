@@ -1,11 +1,13 @@
-# The gate: `just check`, the same recipe every session runs, on a hosted runner. `tests-pass`
-# is the one check to require: it fails unless every other job here succeeded.
+# The gate: `just check`, the same recipe every session runs, on a hosted runner of each
+# platform (Linux and macOS). `tests-pass` is the one check to require: it fails unless every
+# other job here succeeded, every platform's `check` among them.
 #
 # Hardening: every action is pinned to a full commit SHA (its version in the trailing comment;
 # Dependabot updates both), the token has no permissions unless a job asks for one,
 # `actions/checkout` keeps no credentials, and no workflow uses `pull_request_target`. The
-# `zizmor` job audits all of that on every run. Jobs run on ubuntu-24.04, not ubuntu-latest,
-# which moves to a new Ubuntu in November 2026: changing the image is a commit, not a surprise.
+# `zizmor` job audits all of that on every run. Jobs run on ubuntu-24.04 and macos-26, not on
+# ubuntu-latest or macos-latest, which move to a new image on GitHub's schedule (ubuntu-latest to
+# a new Ubuntu in November 2026): changing an image is a commit, not a surprise.
 name: CI
 
 on:
@@ -27,12 +29,27 @@ defaults:
 
 jobs:
   check:
-    name: just check
-    runs-on: ubuntu-24.04
+    name: just check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     # The default is 360 minutes: a hung test would spend them all from the plan's budget.
-    timeout-minutes: 30
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      # A red platform does not cancel the others: each one's run is its own evidence.
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            timeout: 30
+            # The scheduled slow suite restores this cache under the same key.
+            cache-key: check
+          # Every sync is an F_FULLFSYNC here, a flush of the drive's cache (the storage-core
+          # design, §2.1 P1), so the lane gets 60 minutes. A lane that runs past them is
+          # mitigated by a measurement, never by a weaker gate.
+          - os: macos-26
+            timeout: 60
+            cache-key: check-macos
     env:
       CARGO_TERM_COLOR: always
       # `just check`'s workspace run uses .config/nextest.toml's `ci` profile: no fail-fast, no
@@ -51,8 +68,7 @@ jobs:
           fallback: none
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          # The scheduled slow suite restores this cache under the same key.
-          shared-key: check
+          shared-key: ${{ matrix.cache-key }}
           workspaces: |
             . -> target
             fuzz -> target
@@ -67,7 +83,7 @@ jobs:
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: junit-check
+          name: junit-check-${{ matrix.os }}
           path: target/nextest/ci/junit.xml
           if-no-files-found: ignore
           overwrite: true

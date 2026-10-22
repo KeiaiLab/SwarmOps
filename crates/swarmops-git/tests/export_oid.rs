@@ -35,7 +35,9 @@ struct Recorded {
 impl Recorded {
     fn new() -> Recorded {
         let (dir, tmp) = temp_dir();
-        let root = tmp.join("store");
+        // `create` makes the store's path canonical, so the calls are named against that one
+        // (macOS keeps its temp dirs behind a symlink, `/var`).
+        let root = tmp.canonicalize_utf8().unwrap().join("store");
         let (fs, calls) = RecordingFs::new();
         let fs = fs.naming_paths_in(root.clone().into_std_path_buf());
         let mut repo = LocalRepo::create_with_fs(&root, "test", Arc::new(fs)).unwrap();

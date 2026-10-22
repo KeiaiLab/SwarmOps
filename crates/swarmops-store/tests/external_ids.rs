@@ -355,8 +355,9 @@ fn a_damaged_entry_is_external_id_corrupt() {
 /// `ExternalIdCorrupt`, and a put of its key names it as a conflict and leaves it as it is. Each
 /// file here is the entry it was, then a byte too many, or a hole (no disk) to 64 MiB, or to
 /// 1 TiB, more than a host holds in memory. What a call read is what this thread's `read` calls
-/// returned meanwhile, by its `rchar` count (`/proc/thread-self/io`); the entry itself reads back
-/// in 44 bytes.
+/// returned meanwhile, by its `rchar` count (`/proc/thread-self/io`, a file only Linux has, so
+/// this test runs on Linux alone); the entry itself reads back in 44 bytes.
+#[cfg(target_os = "linux")]
 #[test]
 fn an_entry_file_longer_than_an_entry_is_corrupt_and_read_no_further() {
     use std::fs::{File, OpenOptions};
@@ -472,7 +473,14 @@ fn list_and_systems_pass_over_strays() {
     let entries = three();
     index.put_batch(SYSTEM_GIT, &entries).unwrap();
     let git = layout.external_ids_dir().join("git");
+
+    // A case-insensitive volume (macOS's APFS by default) folds `AA` onto the entries' `aa` and
+    // `Git` onto `git`: such a stray cannot exist there, so it is made only where it can.
+    let folds_case = fs::exists(git.join("AA")).unwrap();
     for dir in ["AA", "a", "zz", "aaa"] {
+        if folds_case && dir == "AA" {
+            continue;
+        }
         fs::create_dir(git.join(dir)).unwrap();
         fs::write(git.join(dir).join("0102"), b"stray").unwrap();
     }
@@ -480,7 +488,9 @@ fn list_and_systems_pass_over_strays() {
         fs::write(git.join("aa").join(file), b"stray").unwrap();
     }
     fs::write(git.join("cc"), b"a file where a fan-out directory would be").unwrap();
-    fs::create_dir(layout.external_ids_dir().join("Git")).unwrap();
+    if !folds_case {
+        fs::create_dir(layout.external_ids_dir().join("Git")).unwrap();
+    }
     fs::write(layout.external_ids_dir().join("stray"), b"stray").unwrap();
     let listed: Vec<(Vec<u8>, ExternalEntry)> = index
         .list(SYSTEM_GIT)

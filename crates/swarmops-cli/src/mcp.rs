@@ -2440,6 +2440,9 @@ mod tests {
         // socket (what some clients give a server) has no path, so it is skipped.
         if std::fs::metadata("/dev/stdin").is_ok() {
             refused("/dev/stdin", "stdin or stdout");
+
+            // Linux's procfs name for fd 0; macOS has none.
+            #[cfg(target_os = "linux")]
             refused("/proc/self/fd/0", "stdin or stdout");
         }
         if std::fs::metadata("/dev/stdout").is_ok() {

@@ -1495,8 +1495,8 @@ fn a_client_file_that_is_not_a_regular_file_is_refused_without_blocking() {
 /// A commit whose client files declare more than 1 GiB together is refused by the sizes they
 /// declare, before a byte of them is read: sixteen puts of one sparse 512 MiB file are
 /// `E_TOO_LARGE` (scope `commit`) at the third, which names its change, its file and the
-/// contents' size with it; the server's peak resident memory grows by less than 64 MiB, nothing
-/// is written, and the server serves on.
+/// contents' size with it; the server's peak resident memory (on Linux alone, which has a file for
+/// it) grows by less than 64 MiB, nothing is written, and the server serves on.
 #[test]
 fn a_commit_past_1_gib_of_client_files_is_refused_before_a_byte_is_read() {
     let store = Store::init();
@@ -1510,6 +1510,7 @@ fn a_commit_past_1_gib_of_client_files_is_refused_before_a_byte_is_read() {
     let changes: Vec<Value> = (0..16)
         .map(|n| json!({"path": format!("big/{n}.bin"), "op": "put", "content": {"file": file}}))
         .collect();
+    #[cfg(target_os = "linux")]
     let before = server.peak_resident_kib();
     let refused = server.err(
         "commit",
@@ -1524,7 +1525,9 @@ fn a_commit_past_1_gib_of_client_files_is_refused_before_a_byte_is_read() {
         }),
         "{refused}"
     );
+    #[cfg(target_os = "linux")]
     let grown = server.peak_resident_kib().saturating_sub(before);
+    #[cfg(target_os = "linux")]
     assert!(
         grown < 64 * 1024,
         "the server's peak resident memory grew by {grown} KiB"
@@ -1876,14 +1879,15 @@ fn requests_before_initialize_are_refused(server: &mut Server) {
 /// that a tool's request type does not know. Each line holds the same array of half a million
 /// objects of one member, 3.5 MiB, which a JSON value holds in many times as many bytes; each line
 /// is answered as it would be without the array, the server serves on, and its peak resident
-/// memory grows by less than four times the longest line, and 16 MiB. Read as their request type,
-/// a tool's arguments that name a field of it twice are `E_INVALID_ARG`, as a change list that does
-/// is in the CLI.
+/// memory (on Linux alone, which has a file for it) grows by less than four times the longest
+/// line, and 16 MiB. Read as their request type, a tool's arguments that name a field of it twice
+/// are `E_INVALID_ARG`, as a change list that does is in the CLI.
 #[test]
 fn a_line_is_read_only_as_far_as_the_server_serves_it() {
     let store = Store::init();
     let mut server = Server::start(&["--repo", store.path(), "--as", AGENT], &[]);
     server.initialize();
+    #[cfg(target_os = "linux")]
     let before = server.peak_resident_kib();
     let filler = format!("[{}{{\"\":0}}]", "{\"\":0},".repeat((1 << 19) - 1));
     let batch = filler.clone();
@@ -1897,6 +1901,7 @@ fn a_line_is_read_only_as_far_as_the_server_serves_it() {
     let notification =
         format!(r#"{{"jsonrpc":"2.0","method":"notifications/x","params":{{"x":{filler}}}}}"#);
     let response = format!(r#"{{"jsonrpc":"2.0","id":9,"result":{filler}}}"#);
+    #[cfg(target_os = "linux")]
     let lines = [
         &batch,
         &id,
@@ -1906,6 +1911,7 @@ fn a_line_is_read_only_as_far_as_the_server_serves_it() {
         &notification,
         &response,
     ];
+    #[cfg(target_os = "linux")]
     let longest = lines.iter().map(|line| line.len()).max().unwrap();
 
     // A batch, and an id that is neither a string nor an integer: refused, without an id.
@@ -1933,8 +1939,11 @@ fn a_line_is_read_only_as_far_as_the_server_serves_it() {
     server.send_line(response.as_bytes());
     assert_eq!(server.result("ping", json!({})), json!({}));
 
+    #[cfg(target_os = "linux")]
     let grown = server.peak_resident_kib().saturating_sub(before);
+    #[cfg(target_os = "linux")]
     let line_kib = u64::try_from(longest / 1024).unwrap();
+    #[cfg(target_os = "linux")]
     assert!(
         grown < 4 * line_kib + 16 * 1024,
         "the server's peak resident memory grew by {grown} KiB for lines of at most {line_kib} KiB"
@@ -2277,7 +2286,9 @@ impl Server {
         assert_eq!(stderr, "", "nothing on stderr");
     }
 
-    /// The server's peak resident memory (`VmHWM` in its `/proc/<pid>/status`), in KiB.
+    /// The server's peak resident memory (`VmHWM` in its `/proc/<pid>/status`, a file only Linux
+    /// has), in KiB.
+    #[cfg(target_os = "linux")]
     fn peak_resident_kib(&self) -> u64 {
         let status = fs::read_to_string(format!("/proc/{}/status", self.child.id()))
             .expect("the server's /proc/<pid>/status");
