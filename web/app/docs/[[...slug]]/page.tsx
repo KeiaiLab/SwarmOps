@@ -5,8 +5,10 @@ import { notFound } from 'next/navigation';
 import { DocsBody, DocsPage, EditOnGitHub } from 'fumadocs-ui/layouts/docs/page';
 import { getMDXComponents } from '@/components/mdx';
 import { DocsLanding } from '@/components/docs-landing';
+import { ReferenceBody } from '@/components/reference/reference-body';
 import { githubUrl } from '@/lib/docs-paths';
 import { nodeText } from '@/lib/node-text';
+import { pageKind } from '@/lib/reference/pages';
 import { repoPath, source } from '@/lib/source';
 
 // The page title is the Markdown's own `# ` heading; the TOC lists the sections below it.
@@ -29,6 +31,7 @@ export default async function Page({ params }: Props) {
   }
 
   const MDX = page.data.body;
+  const kind = pageKind(repoPath(page.data));
   const toc = page.data.toc
     .filter((item) => item.depth >= TOC_MIN_DEPTH)
     .map((item) => ({ ...item, title: nodeText(item.title) }));
@@ -36,7 +39,7 @@ export default async function Page({ params }: Props) {
   return (
     <DocsPage toc={toc} breadcrumb={{ includeRoot: true, includePage: true }}>
       <DocsBody>
-        <MDX components={getMDXComponents()} />
+        {kind ? <ReferenceBody page={page} kind={kind} /> : <MDX components={getMDXComponents()} />}
       </DocsBody>
       <EditOnGitHub href={githubUrl(repoPath(page.data))} />
     </DocsPage>
