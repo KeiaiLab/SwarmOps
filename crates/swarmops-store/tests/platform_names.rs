@@ -317,6 +317,28 @@ fn a_case_variant_of_a_ref_moves_no_ref() {
     assert_eq!((state.target, state.version), (c1, 1));
 }
 
+/// Replay brings each ref the frames past the checkpoint move to its last target, every write
+/// again. Once `release/a` is deleted and `release/A` made, replaying the deletion removes no
+/// file: on a case-insensitive volume the path of `release/a` finds the file of `release/A`,
+/// which is not that ref's.
+#[test]
+fn a_replayed_deletion_leaves_a_case_variant_alone() {
+    let (_dir, root, store) = new_store();
+    let c = committed(&store, 1);
+
+    // Make, delete, then make the case variant, all past the checkpoint.
+    moved(&store, "release/a", None, Some(c));
+    moved(&store, "release/a", Some(c), None);
+    moved(&store, "release/A", None, Some(c));
+
+    // The next write replays those frames; release/A's file stays.
+    drop(store.write().unwrap());
+    let file = root.join("meta/refs/release/A");
+    assert!(file.exists(), "release/A's file is there");
+    let state = store.read().unwrap().get_ref("release/A").unwrap();
+    assert_eq!(state.map(|state| state.target), Some(c));
+}
+
 /// A derived value's name may not be a Windows device name either: it names a directory under
 /// `meta/derived/`. Only code chooses these names; one that only starts like a device's is taken.
 #[test]

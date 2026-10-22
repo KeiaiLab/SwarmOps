@@ -247,7 +247,8 @@ pub(crate) fn moved(current: Option<RefState>, target: Option<ChangesetId>) -> O
 }
 
 /// Makes the file of ref `name` (a valid name) say what [`moved`] gives for `target`:
-/// replaces it, removes it, or leaves it alone if it says that already. Leaving it alone relies
+/// replaces it, removes it, or leaves it alone if it says that already. A deletion leaves alone
+/// a file not of this very name, which a case-insensitive volume finds. Leaving it alone relies
 /// on storage spec §2 rule 5: the file may say it because of a replace whose directory fsync
 /// failed, and on the filesystems the store supports a failed directory fsync is fail-stop, so
 /// every later sync fails too and nothing that relies on the file (a checkpoint past its frame)
@@ -275,12 +276,28 @@ pub(crate) fn write(
             fs.atomic_replace(path.as_std_path(), bytes.as_bytes())?;
         }
         None => {
+            // A case-insensitive volume finds another ref's file under the name (release/A for
+            // release/a): that file is not this ref's, so a replayed deletion leaves it.
+            if !own_file(layout, fs, name)? {
+                return Ok(false);
+            }
             fs.remove(path.as_std_path())?;
             let dir = path.parent().expect("a ref file lies in meta/refs/");
             fs.fsync_dir(dir.as_std_path())?;
         }
     }
     Ok(true)
+}
+
+/// Whether the file found under ref `name` (a valid name) is a file of that very name, case and
+/// all: always for `main`, which no other name differs from only in case; for `release/<x>`,
+/// when the listing of `meta/refs/release/` holds it ([`release_names`]).
+fn own_file(layout: &Layout, fs: &StoreFs, name: &str) -> Result<bool, StoreError> {
+    if !name.starts_with("release/") {
+        return Ok(true);
+    }
+    let held = release_names(layout, fs)?;
+    Ok(held.iter().any(|file| file == name))
 }
 
 /// The file of ref `name`.
