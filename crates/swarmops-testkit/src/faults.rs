@@ -159,7 +159,7 @@ impl ModelFile {
 impl FsyncModelFs<RealFs> {
     /// The model over the real filesystem, failing nothing.
     pub fn new() -> Self {
-        Self::over(RealFs)
+        Self::over(RealFs::new())
     }
 
     /// The model over the real filesystem, failing its `k`-th sync-class call, and no other.

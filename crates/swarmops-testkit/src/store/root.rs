@@ -24,7 +24,7 @@ pub fn new_root() -> (TempDir, Layout) {
 
 /// The real filesystem, as the stores take it.
 pub fn real_fs() -> Arc<dyn FsOps> {
-    Arc::new(RealFs)
+    Arc::new(RealFs::new())
 }
 
 /// The length of the file at `path`, which must exist.

@@ -93,7 +93,7 @@ impl<W: Watch + ?Sized> Watch for Arc<W> {
 }
 
 /// A filesystem, the real one ([`RealFs`]) unless the type says otherwise, its watcher run
-/// around each call: `Watched(watcher, RealFs)`, or `Watched(watcher, NoSyncFs)` say, any
+/// around each call: `Watched(watcher, RealFs::new())`, or `Watched(watcher, NoSyncFs)` say, any
 /// [`FsOps`] inside. It dereferences to the watcher.
 pub struct Watched<W, F = RealFs>(
     /// The watcher.
@@ -239,7 +239,7 @@ impl RecordingFs {
             failing: Failing::default(),
             syncs: Rendezvous::default(),
         };
-        let fs = Watched(recorder, RealFs);
+        let fs = Watched(recorder, RealFs::new());
         (fs, move || std::mem::take(&mut *calls.lock().unwrap()))
     }
 
@@ -379,7 +379,7 @@ impl FailingFs {
     /// The real filesystem, failing the calls `fail` picks, given the method and the path the
     /// call acts on.
     pub fn new(fail: impl Fn(FsMethod, &Path) -> bool + Send + Sync + 'static) -> Self {
-        Watched(FailWhen::new(fail), RealFs)
+        Watched(FailWhen::new(fail), RealFs::new())
     }
 }
 
@@ -409,7 +409,7 @@ pub struct NoSyncFs;
 
 impl FsOps for NoSyncFs {
     fn create_dir_all(&self, p: &Path) -> io::Result<()> {
-        RealFs.create_dir_all(p)
+        RealFs::new().create_dir_all(p)
     }
 
     fn write_durable_temp(&self, dir: &Path, bytes: &[u8]) -> io::Result<PathBuf> {
@@ -420,7 +420,7 @@ impl FsOps for NoSyncFs {
     }
 
     fn link_noclobber(&self, from: &Path, to: &Path) -> io::Result<LinkOutcome> {
-        RealFs.link_noclobber(from, to)
+        RealFs::new().link_noclobber(from, to)
     }
 
     fn fsync_dir(&self, p: &Path) -> io::Result<()> {
@@ -428,23 +428,23 @@ impl FsOps for NoSyncFs {
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
+        RealFs::new().read(p)
     }
 
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
+        RealFs::new().exists(p)
     }
 
     fn remove(&self, p: &Path) -> io::Result<()> {
-        RealFs.remove(p)
+        RealFs::new().remove(p)
     }
 
     fn append_durable(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
+        RealFs::new().append(path, bytes)
     }
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
+        RealFs::new().file_len(path)
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
@@ -465,7 +465,7 @@ impl FsOps for NoSyncFs {
     }
 
     fn append(&self, path: &Path, bytes: &[u8]) -> io::Result<u64> {
-        RealFs.append(path, bytes)
+        RealFs::new().append(path, bytes)
     }
 
     fn rename_durable(&self, from: &Path, to: &Path) -> io::Result<()> {
@@ -768,6 +768,7 @@ mod tests {
             FsMethod::SyncData => of(fs.sync_data(path), |()| Outcome::Done),
             FsMethod::Append => of(fs.append(path, bytes), Outcome::Len),
             FsMethod::RenameDurable => of(fs.rename_durable(path, to), |()| Outcome::Done),
+            _ => panic!("a variant this test does not know"),
         }
     }
 
@@ -784,7 +785,7 @@ mod tests {
         ];
         for method in FsMethod::ALL {
             for (path, to) in cases {
-                let outcomes = [&RealFs as &dyn FsOps, &NoSyncFs].map(|fs| {
+                let outcomes = [&RealFs::new() as &dyn FsOps, &NoSyncFs].map(|fs| {
                     let dir = tempfile::tempdir().unwrap();
                     fs::write(dir.path().join("file"), b"a file").unwrap();
                     call(fs, method, &dir.path().join(path), &dir.path().join(to))
@@ -859,7 +860,7 @@ mod tests {
     #[test]
     fn no_sync_fs_leaves_what_real_fs_leaves() {
         let (real, no_sync) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let ran = script(&RealFs, real.path());
+        let ran = script(&RealFs::new(), real.path());
         assert_eq!(script(&NoSyncFs, no_sync.path()), ran);
         assert!(ran.contains(&Outcome::Linked(LinkOutcome::AlreadyExists)));
         let left = tree(real.path());
@@ -904,11 +905,11 @@ mod tests {
         assert_eq!(missing.kind(), io::ErrorKind::NotFound, "{missing}");
 
         let (alone, wrapped) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let direct = Watched(Methods::default(), RealFs);
+        let direct = Watched(Methods::default(), RealFs::new());
         script(&direct, alone.path());
         let watched = Watched(
             FailWhen::new(|_, _| false),
-            Watched(Methods::default(), RealFs),
+            Watched(Methods::default(), RealFs::new()),
         );
         script(&watched, wrapped.path());
         let Watched(_, Watched(Methods(reached), _)) = &watched;
@@ -929,7 +930,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         for method in [FsMethod::AtomicReplace, FsMethod::RenameDurable] {
-            let outcomes = [&RealFs as &dyn FsOps, &NoSyncFs].map(|fs| {
+            let outcomes = [&RealFs::new() as &dyn FsOps, &NoSyncFs].map(|fs| {
                 let dir = tempfile::tempdir().unwrap();
                 let (shut, file) = (dir.path().join("shut"), dir.path().join("file"));
                 fs::create_dir(&shut).unwrap();

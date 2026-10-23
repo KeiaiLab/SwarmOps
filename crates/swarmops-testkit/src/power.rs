@@ -243,11 +243,11 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn read(&self, p: &Path) -> io::Result<Option<Vec<u8>>> {
-        RealFs.read(p)
+        RealFs::new().read(p)
     }
 
     fn exists(&self, p: &Path) -> io::Result<bool> {
-        RealFs.exists(p)
+        RealFs::new().exists(p)
     }
 
     fn remove(&self, p: &Path) -> io::Result<()> {
@@ -269,7 +269,7 @@ impl FsOps for ImageRecordingFs {
     }
 
     fn file_len(&self, path: &Path) -> io::Result<u64> {
-        RealFs.file_len(path)
+        RealFs::new().file_len(path)
     }
 
     fn truncate(&self, path: &Path, len: u64) -> io::Result<()> {
