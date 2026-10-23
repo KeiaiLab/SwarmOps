@@ -16,7 +16,9 @@ use crate::{GitOid, RawCommit, RawIdent};
 ///
 /// `child` gives the git id of an entry's object: a leaf's blob, whose bytes git hashes as they
 /// are, and a subdirectory's own rendering.
-pub fn tree_bytes(tree: &Tree, child: impl Fn(&TreeEntry) -> GitOid) -> Vec<u8> {
+///
+/// `None` if an entry is of a kind newer than this build, which it has no git mode for.
+pub fn tree_bytes(tree: &Tree, child: impl Fn(&TreeEntry) -> GitOid) -> Option<Vec<u8>> {
     let mut entries: Vec<&TreeEntry> = tree.entries().iter().collect();
     // A tree's names are unique, so no two of its entries compare equal.
     entries.sort_unstable_by(|a, b| {
@@ -27,13 +29,13 @@ pub fn tree_bytes(tree: &Tree, child: impl Fn(&TreeEntry) -> GitOid) -> Vec<u8> 
     });
     let mut out = Vec::new();
     for entry in entries {
-        out.extend_from_slice(git_mode(entry.target));
+        out.extend_from_slice(git_mode(entry.target)?);
         out.push(b' ');
         out.extend_from_slice(entry.name.as_bytes());
         out.push(0);
         out.extend_from_slice(&child(entry).0);
     }
-    out
+    Some(out)
 }
 
 /// The bytes of the git commit a changeset renders to, without git's `commit <len>\0` header:
@@ -75,13 +77,14 @@ fn is_dir(target: EntryTarget) -> bool {
     matches!(target, EntryTarget::Dir(_))
 }
 
-/// The mode git writes for an entry of `target`'s kind.
-fn git_mode(target: EntryTarget) -> &'static [u8] {
+/// The mode git writes for an entry of `target`'s kind; `None` for a kind newer than this build.
+fn git_mode(target: EntryTarget) -> Option<&'static [u8]> {
     match target {
-        EntryTarget::Leaf(LeafKind::File, _) => b"100644",
-        EntryTarget::Leaf(LeafKind::Exec, _) => b"100755",
-        EntryTarget::Leaf(LeafKind::Symlink, _) => b"120000",
-        EntryTarget::Dir(_) => b"40000",
+        EntryTarget::Leaf(LeafKind::File, _) => Some(b"100644"),
+        EntryTarget::Leaf(LeafKind::Exec, _) => Some(b"100755"),
+        EntryTarget::Leaf(LeafKind::Symlink, _) => Some(b"120000"),
+        EntryTarget::Dir(_) => Some(b"40000"),
+        _ => None,
     }
 }
 

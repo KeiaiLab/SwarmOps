@@ -232,13 +232,21 @@ pub enum ExportError {
     Repo(#[from] RepoError),
     /// What can only be a bug: a commit whose rendering does not hash to its export oid, an
     /// object the repository wrote under another oid, an external id entry naming another
-    /// changeset for a commit the export wrote. Nothing more is written, and the branch is not
-    /// moved.
+    /// changeset for a commit the export wrote, a variant of another crate's enum newer than this
+    /// build. Nothing more is written, and the branch is not moved.
     #[error("an export bug: {reason}; the branch was not moved")]
     Bug {
         /// What was found.
         reason: String,
     },
+}
+
+/// The [`ExportError::Bug`] of a `match` on enum `ty` of another crate that found a variant
+/// newer than this build.
+fn unknown_variant(ty: &str) -> ExportError {
+    ExportError::Bug {
+        reason: format!("{ty}: {}", crate::UNKNOWN_VARIANT),
+    }
 }
 
 /// Why a branch is no export the source's head goes on from ([`ExportError::Diverged`]).
@@ -849,6 +857,7 @@ impl<'a, 'r> Run<'a, 'r> {
                         stack.push((sub, sub_against));
                     }
                     EntryTarget::Leaf(_, blob) => self.blob(blob)?,
+                    _ => return Err(unknown_variant("EntryTarget")),
                 }
             }
         }
@@ -905,14 +914,16 @@ impl<'a, 'r> Run<'a, 'r> {
             oids.push(match entry.target {
                 EntryTarget::Leaf(_, blob) => self.blob_git_oid(blob)?,
                 EntryTarget::Dir(dir) => self.tree_git_oid(dir)?,
+                _ => return Err(unknown_variant("EntryTarget")),
             });
         }
-        Ok(render::tree_bytes(tree, |entry| {
+        let bytes = render::tree_bytes(tree, |entry| {
             let at = (tree.entries())
                 .binary_search_by(|other| other.name.as_bytes().cmp(entry.name.as_bytes()))
                 .expect("tree_bytes gives the tree's own entries");
             oids[at]
-        }))
+        });
+        bytes.ok_or_else(|| unknown_variant("EntryTarget"))
     }
 
     /// The bytes of `commit`'s git commit ([`render_commit`]) over its parents' export oids,
@@ -997,10 +1008,7 @@ impl<'a, 'r> Run<'a, 'r> {
         let entries: Vec<(Vec<u8>, ExternalEntry)> = (commits.iter())
             .filter(|commit| !self.nodes[&commit.id].imported)
             .map(|commit| {
-                let entry = ExternalEntry {
-                    changeset: commit.id,
-                    faithful: true,
-                };
+                let entry = ExternalEntry::new(commit.id, true);
                 (commit.exported.oid.to_vec(), entry)
             })
             .collect();

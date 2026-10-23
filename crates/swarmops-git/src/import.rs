@@ -1038,25 +1038,22 @@ impl<'a, 's> Run<'a, 's> {
                 lossy,
                 metadata,
             } = commit;
-            let raw = RawChangeset {
-                parents: self.changesets(oid, &parents)?,
+            let raw = RawChangeset::new(
+                self.changesets(oid, &parents)?,
                 root,
                 author,
                 committer,
                 message,
                 extra_headers,
                 metadata,
-            };
+            );
             let id = batch
                 .push(raw.clone())
                 .map_err(|source| self.stopped(source))?;
             self.ids.insert(oid, id);
             self.note_lossy(oid, id, lossy);
             let faithful = lossy.is_empty();
-            let entry = ExternalEntry {
-                changeset: id,
-                faithful,
-            };
+            let entry = ExternalEntry::new(id, faithful);
             entries.push((oid.0.to_vec(), entry));
             raws.push(raw);
         }
@@ -1188,6 +1185,11 @@ impl<'a, 's> Run<'a, 's> {
                 let target_ref = req.target_ref.clone();
                 return Err(ImportError::CasMismatch { target_ref, actual });
             }
+            // A result newer than this build: the move is not known to have happened.
+            _ => {
+                let what = format!("CasResult: {}", crate::UNKNOWN_VARIANT);
+                return Err(self.stopped(RepoError::Internal(what)));
+            }
         };
         // A move whose step after its commit point failed is not followed by another write.
         let flush_again = ref_moved && moved.warnings.is_empty();
@@ -1258,6 +1260,7 @@ fn absorb(total: &mut Recovered, more: Recovered) {
         views_rebuilt,
         records_replayed,
         refs_replayed,
+        ..
     } = more;
     total.log_cut = total.log_cut.or(log_cut);
     total.frames_listed += frames_listed;

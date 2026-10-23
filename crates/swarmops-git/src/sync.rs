@@ -281,22 +281,21 @@ pub fn relocate(
         no_ops: Vec::new(),
     };
     for (id, parent, cs) in changes {
-        let land = DetachedLand {
-            base: parent,
-            head: id,
-            onto: relocated.head,
-            lander: lander.clone(),
-            key: value(&cs, LAND_KEY).and_then(|key| String::from_utf8(key.to_vec()).ok()),
-            squashed_from: value(&cs, SQUASHED_FROM).and_then(chain),
-            message: None,
-            extra_metadata: vec![(SYNCED_FROM.to_owned(), id.to_string().into_bytes())],
-        };
+        let mut land = DetachedLand::new(parent, id, relocated.head, lander.clone());
+        land.key = value(&cs, LAND_KEY).and_then(|key| String::from_utf8(key.to_vec()).ok());
+        land.squashed_from = value(&cs, SQUASHED_FROM).and_then(chain);
+        land.extra_metadata = vec![(SYNCED_FROM.to_owned(), id.to_string().into_bytes())];
         match repo.land_detached(land) {
             Ok(DetachedOutcome::Landed(made)) => {
                 relocated.landed.push((id, made));
                 relocated.head = made;
             }
             Ok(DetachedOutcome::NoChanges) => relocated.no_ops.push(id),
+            // An outcome newer than this build: where the change stands is not known.
+            Ok(_) => {
+                let what = format!("DetachedOutcome: {}", crate::UNKNOWN_VARIANT);
+                return Err(SyncError::Repo(RepoError::Internal(what)));
+            }
             Err(RepoError::Conflict(conflicts)) => {
                 return Err(SyncError::Conflict {
                     change: id,
@@ -401,7 +400,7 @@ fn token(key: &str) -> &'static str {
 /// A changeset id from its 64 hex digits; `None` for anything else.
 fn parse_id(hex: &[u8]) -> Option<ChangesetId> {
     let hex = std::str::from_utf8(hex).ok()?;
-    ObjectId::from_hex(hex).ok().map(ChangesetId)
+    ObjectId::from_hex(hex).ok().map(ChangesetId::new)
 }
 
 /// A `squashed_from` value as ids, oldest first; `None` when one is not an id.
