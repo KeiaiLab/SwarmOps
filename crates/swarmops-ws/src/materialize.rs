@@ -36,14 +36,14 @@ use swarmops_api::{
     MAX_TREE_DEPTH, OpError, ReadTreeReq, StoreOps, TreeEntryOut, WsMaterializeReq,
     WsMaterializeResp,
 };
-use swarmops_core::{ObjectKind, RepoPath, hash_object};
+use swarmops_core::{ObjectKind, RepoPath};
 
 use crate::hostfs::{HostFs, HostKind, HostMeta};
 use crate::pending::{self, Intent};
 use crate::portable::{self, HOST};
 use crate::state::{self, Volume};
 use crate::volume::{EXEC_BITS, EXEC_MODE};
-use crate::workspace::{Locate, Workspace, open_locked};
+use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
 /// The entries one `read_tree` or `diff` page asks for.
@@ -128,7 +128,7 @@ pub fn materialize(ctx: &Ctx<'_>, req: WsMaterializeReq) -> Result<WsMaterialize
         ));
     }
     let asked = normalize(paths)?;
-    let (mut ws, _held) = open_locked(ctx, &Locate::Name(workspace))?;
+    let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
 
     // 2. The ones it does not hold yet, each one the tree has.
     let added: Vec<String> = if ws.file.all {
@@ -414,7 +414,7 @@ fn bytes_held(
 
 /// The id of the blob holding `bytes`.
 fn blob_id(bytes: &[u8]) -> String {
-    hash_object(ObjectKind::Blob, bytes).to_string()
+    swarmops_core::hash_object(ObjectKind::Blob, bytes).to_string()
 }
 
 /// The changes `prepare` checks, the host's side of each.
@@ -808,7 +808,7 @@ pub(crate) struct Tree<'a> {
     /// The changeset, a full id.
     rev: String,
     /// The directories read so far, by path ("" the root); none for one the tree lacks.
-    dirs: std::sync::Mutex<HashMap<String, Option<Arc<Vec<TreeEntryOut>>>>>,
+    dirs: std::sync::Mutex<HashMap<String, Option<Arc<[TreeEntryOut]>>>>,
 }
 
 impl<'a> Tree<'a> {
@@ -823,7 +823,7 @@ impl<'a> Tree<'a> {
 
     /// The entries of directory `dir` ("" the root), every page; none when the tree has no
     /// directory there.
-    fn listing(&self, dir: &str) -> Result<Option<Arc<Vec<TreeEntryOut>>>, OpError> {
+    fn listing(&self, dir: &str) -> Result<Option<Arc<[TreeEntryOut]>>, OpError> {
         // 1. Read before.
         if let Some(known) = self.dirs.lock().expect("no reader panicked").get(dir) {
             return Ok(known.clone());
@@ -847,7 +847,7 @@ impl<'a> Tree<'a> {
             };
             entries.extend(page.entries);
             if !page.truncated {
-                break Some(Arc::new(entries));
+                break Some(Arc::from(entries));
             }
             cursor = page.cursor;
         };

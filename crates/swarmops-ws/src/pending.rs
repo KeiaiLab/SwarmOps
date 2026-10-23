@@ -17,7 +17,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
 use swarmops_store::{FsMethod, FsOps};
 
-use crate::io_failed;
+use crate::io_error;
 use crate::state::SWARMWS_DIR;
 
 /// The intents' directory, in [`SWARMWS_DIR`].
@@ -127,8 +127,8 @@ fn read_json<T: DeserializeOwned>(
     // 1. The bytes, if any.
     let file = shown(name);
     let path = journal_in(dir).join(name);
-    let Some(bytes) =
-        (fs.read(path.as_std_path())).map_err(|e| io_failed(FsMethod::Read, &file, &e))?
+    let Some(bytes) = (fs.read(path.as_std_path()))
+        .map_err(|e| io_error::io_failed(FsMethod::Read, &file, &e))?
     else {
         return Ok(None);
     };
@@ -154,12 +154,12 @@ fn write_json<T: Serialize>(
     let journal = journal_in(dir);
     let file = shown(name);
     (fs.create_dir_all(journal.as_std_path()))
-        .map_err(|e| io_failed(FsMethod::CreateDirAll, &file, &e))?;
+        .map_err(|e| io_error::io_failed(FsMethod::CreateDirAll, &file, &e))?;
 
     // 2. The record, replaced whole: temp, sync, rename, directory sync.
     let bytes = serde_json::to_vec(value).expect("an intent record serializes");
     (fs.atomic_replace(journal.join(name).as_std_path(), &bytes))
-        .map_err(|e| io_failed(FsMethod::AtomicReplace, &file, &e))
+        .map_err(|e| io_error::io_failed(FsMethod::AtomicReplace, &file, &e))
 }
 
 /// Removes record `name` of the workspace at `dir`: an unlink, then a directory sync.
@@ -170,11 +170,12 @@ fn remove_json(fs: &dyn FsOps, dir: &Utf8Path, name: &str) -> Result<(), OpError
     match fs.remove(journal.join(name).as_std_path()) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(io_failed(FsMethod::Remove, &file, &e)),
+        Err(e) => return Err(io_error::io_failed(FsMethod::Remove, &file, &e)),
     }
 
     // 2. The removal made durable.
-    (fs.fsync_dir(journal.as_std_path())).map_err(|e| io_failed(FsMethod::FsyncDir, &file, &e))
+    (fs.fsync_dir(journal.as_std_path()))
+        .map_err(|e| io_error::io_failed(FsMethod::FsyncDir, &file, &e))
 }
 
 #[cfg(test)]

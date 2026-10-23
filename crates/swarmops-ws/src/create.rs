@@ -23,13 +23,13 @@ use swarmops_api::{ErrorCode, InfoReq, OpError, ResolveRevReq, RevKind, WsCreate
 use swarmops_store::FsMethod;
 
 use crate::hostfs::HostFs;
-use crate::list::described;
-use crate::materialize::{self, Start, host_failed, normalize};
+use crate::list;
+use crate::materialize::{self, Start};
 use crate::pending::{self, Intent};
 use crate::registry::{ENTRY_FORMAT, Entry, Linked, Registry};
 use crate::state::{self, SWARMWS_DIR, State, WORKSPACE_FORMAT, WorkspaceFile};
-use crate::workspace::{Locate, Workspace, host_path};
-use crate::{Ctx, after, io_failed, volume};
+use crate::workspace::{self, Locate, Workspace};
+use crate::{Ctx, after, io_error, volume};
 
 /// The ref a workspace lands on when its base names no ref.
 const DEFAULT_TARGET: &str = "main";
@@ -50,14 +50,14 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
             "ws create needs the workspace's directory (`path`)",
         ));
     };
-    let dir = host_path(Path::new(path))?;
+    let dir = workspace::host_path(Path::new(path))?;
     if req.all && !req.prefixes.is_empty() {
         return Err(OpError::new(
             ErrorCode::InvalidArg,
             "give prefixes or `all`, not both",
         ));
     }
-    let prefixes = normalize(req.prefixes)?;
+    let prefixes = materialize::normalize(req.prefixes)?;
 
     // 2. The store's side: the base's changeset, the ref it lands on, the store's id.
     let resolved = ctx.store.resolve_rev(ResolveRevReq {
@@ -97,9 +97,11 @@ pub fn create(ctx: &Ctx<'_>, req: WsCreateReq) -> Result<WsInfo, OpError> {
     let swarmws = dir.join(SWARMWS_DIR);
     let journal = pending::journal_in(&dir);
     (ctx.fs.create_dir_all(journal.as_std_path()))
-        .map_err(|e| io_failed(FsMethod::CreateDirAll, SWARMWS_DIR, &e))?;
-    (ctx.fs.fsync_dir(dir.as_std_path())).map_err(|e| io_failed(FsMethod::FsyncDir, ".", &e))?;
-    let volume = volume::probe(host, &swarmws).map_err(|e| host_failed(SWARMWS_DIR, &e))?;
+        .map_err(|e| io_error::io_failed(FsMethod::CreateDirAll, SWARMWS_DIR, &e))?;
+    (ctx.fs.fsync_dir(dir.as_std_path()))
+        .map_err(|e| io_error::io_failed(FsMethod::FsyncDir, ".", &e))?;
+    let volume =
+        volume::probe(host, &swarmws).map_err(|e| materialize::host_failed(SWARMWS_DIR, &e))?;
 
     // 6. The tree checked before anything of it is written; a refusal leaves nothing.
     let file = WorkspaceFile {
@@ -150,7 +152,7 @@ fn answer(
     WsInfo {
         created,
         status_after: after::attach(ctx, ws, status_after),
-        ..described(&ws.file.name, &ws.dir, &ws.file)
+        ..list::described(&ws.file.name, &ws.dir, &ws.file)
     }
 }
 
@@ -172,7 +174,7 @@ fn empty(host: &dyn HostFs, dir: &Utf8Path) -> Result<bool, OpError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
         Err(e) if e.kind() == std::io::ErrorKind::NotADirectory => Err(not_empty(dir)),
         Err(e) if e.kind() == std::io::ErrorKind::InvalidData => Err(not_empty(dir)),
-        Err(e) => Err(host_failed(".", &e)),
+        Err(e) => Err(materialize::host_failed(".", &e)),
     }
 }
 
@@ -205,10 +207,10 @@ fn undo(
         (pending::journal_in(dir), SWARMWS_DIR),
         (swarmws.clone(), SWARMWS_DIR),
     ] {
-        (host.remove_dir_if_empty(&path)).map_err(|e| host_failed(shown, &e))?;
+        (host.remove_dir_if_empty(&path)).map_err(|e| materialize::host_failed(shown, &e))?;
     }
     if made_dir {
-        (host.remove_dir_if_empty(dir)).map_err(|e| host_failed(".", &e))?;
+        (host.remove_dir_if_empty(dir)).map_err(|e| materialize::host_failed(".", &e))?;
     }
 
     // 2. The entry, if this create made it.

@@ -239,7 +239,7 @@ fn text(tail: &Tail) -> String {
     let bytes = tail.lock().unwrap_or_else(PoisonError::into_inner);
     let start = if bytes.len() == TAIL_BYTES {
         // A cut can fall inside a character: its continuation bytes (0b10xx_xxxx) go.
-        bytes.iter().take_while(|&&b| b & 0xC0 == 0x80).count()
+        bytes.iter().take_while(|&&b| b & 0xc0 == 0x80).count()
     } else {
         0
     };
@@ -269,8 +269,8 @@ fn own_group(_command: &mut Command) {}
 /// should it have left the group. One already gone is killed.
 #[cfg(unix)]
 fn kill(child: &mut Child) {
-    use rustix::process::{Pid, Signal, kill_process_group};
-    let _ = kill_process_group(Pid::from_child(child), Signal::KILL);
+    use rustix::process::{Pid, Signal};
+    let _ = rustix::process::kill_process_group(Pid::from_child(child), Signal::KILL);
     let _ = child.kill();
 }
 

@@ -15,7 +15,7 @@ use std::time::Duration;
 use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError, StoreOps};
 
-use crate::bootstrap::{REPO_CONFIG, repo_config};
+use crate::bootstrap::{self, REPO_CONFIG};
 use crate::run::{self, Run};
 use crate::state::SWARMWS_DIR;
 use crate::workspace::Workspace;
@@ -45,7 +45,7 @@ pub(crate) struct Subject<'a> {
 /// `check.argv` of the repository's [`REPO_CONFIG`] at changeset `rev`; none when the file, its
 /// `check` or its argv is missing. `E_INVALID_ARG` for a file that does not parse.
 pub(crate) fn configured(store: &dyn StoreOps, rev: &str) -> Result<Option<Vec<String>>, OpError> {
-    let config = repo_config(store, rev)?;
+    let config = bootstrap::repo_config(store, rev)?;
     let argv = config
         .and_then(|config| config.check)
         .map(|check| check.argv);

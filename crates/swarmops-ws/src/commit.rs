@@ -25,11 +25,11 @@ use swarmops_store::MAX_OBJECT_LEN;
 
 use crate::hostfs::HostKind;
 use crate::index::{Index, Row, UNCONFIRMED};
-use crate::materialize::{covered, host_failed, normalize};
+use crate::materialize;
 use crate::pending::{self, Pending, PendingOp};
 use crate::scan::{self, Blob, Change, HASH_BYTES_IN_FLIGHT, HostFile, Keep, Want};
 use crate::state::{self, State};
-use crate::workspace::{Locate, Workspace, open_locked};
+use crate::workspace::{self, Locate, Workspace};
 use crate::{Ctx, after};
 
 /// The ids one `blob_has` asks about.
@@ -55,9 +55,9 @@ pub fn commit(ctx: &Ctx<'_>, req: WsCommitReq) -> Result<WsCommitResp, OpError> 
         modes,
         status_after,
     } = req;
-    let named = normalize(paths)?;
+    let named = materialize::normalize(paths)?;
     let modes = modes_of(modes)?;
-    let (mut ws, _held) = open_locked(ctx, &Locate::Name(workspace))?;
+    let (mut ws, _held) = workspace::open_locked(ctx, &Locate::Name(workspace))?;
 
     // 2. The commit, then the status after it.
     let mut done = commit_in(ctx, &mut ws, message, &named, &modes)?;
@@ -151,7 +151,8 @@ pub(crate) fn commit_in(
     file.materialized.clone_from(&done.changeset);
     file.onto = None;
     if !extra.is_empty() {
-        file.prefixes = normalize(file.prefixes.iter().chain(&extra).cloned().collect())?;
+        file.prefixes =
+            materialize::normalize(file.prefixes.iter().chain(&extra).cloned().collect())?;
     }
     state::replace(ctx.fs.as_ref(), &ws.dir, &file)?;
     ws.file = file;
@@ -184,7 +185,7 @@ fn modes_of(modes: BTreeMap<String, ModeInput>) -> Result<BTreeMap<String, FileK
                 ));
             }
         };
-        let [path] = normalize(vec![path])?
+        let [path] = materialize::normalize(vec![path])?
             .try_into()
             .expect("one path in, one out");
         out.insert(path, kind);
@@ -197,13 +198,13 @@ fn modes_of(modes: BTreeMap<String, ModeInput>) -> Result<BTreeMap<String, FileK
 fn outside(ctx: &Ctx<'_>, ws: &Workspace, named: &[String]) -> Result<Vec<String>, OpError> {
     let mut extra = Vec::new();
     for path in named {
-        if ws.file.all || covered(path, &ws.file.prefixes) {
+        if ws.file.all || materialize::covered(path, &ws.file.prefixes) {
             continue;
         }
         let meta = ctx
             .host
             .symlink_metadata(&ws.dir.join(path))
-            .map_err(|e| host_failed(path, &e))?;
+            .map_err(|e| materialize::host_failed(path, &e))?;
         if !meta.is_some_and(|meta| matches!(meta.kind, HostKind::File | HostKind::Symlink)) {
             return Err(OpError::new(
                 ErrorCode::InvalidArg,
@@ -343,7 +344,7 @@ fn upload(ctx: &Ctx<'_>, ws: &Workspace, entries: &[Entry]) -> Result<u64, OpErr
             .expect("only entries read from the host are uploaded");
         let abs = ws.dir.join(&entry.path);
         let bytes = scan::content(ctx.host.as_ref(), &abs, host.meta.kind)
-            .map_err(|e| host_failed(&entry.path, &e))?;
+            .map_err(|e| materialize::host_failed(&entry.path, &e))?;
         if ObjectId(scan::blob_id(&bytes)).to_hex() != id {
             return Err(changed_meanwhile(&entry.path));
         }

@@ -12,7 +12,7 @@ use serde_json::{Map, Value};
 use swarmops_api::{ErrorCode, OpError};
 use swarmops_store::{FsMethod, FsOps};
 
-use crate::io_failed;
+use crate::io_error;
 
 /// The workspace's private directory, at its root; never a tree path.
 pub const SWARMWS_DIR: &str = ".swarmws";
@@ -101,8 +101,8 @@ pub fn path_in(dir: &Utf8Path) -> Utf8PathBuf {
 pub fn read(fs: &dyn FsOps, dir: &Utf8Path) -> Result<WorkspaceFile, OpError> {
     // 1. The bytes, if the file is there.
     let file = relative();
-    let Some(bytes) =
-        (fs.read(path_in(dir).as_std_path())).map_err(|e| io_failed(FsMethod::Read, &file, &e))?
+    let Some(bytes) = (fs.read(path_in(dir).as_std_path()))
+        .map_err(|e| io_error::io_failed(FsMethod::Read, &file, &e))?
     else {
         return Err(OpError::new(
             ErrorCode::WsNotFound,
@@ -137,7 +137,7 @@ pub fn read(fs: &dyn FsOps, dir: &Utf8Path) -> Result<WorkspaceFile, OpError> {
 pub fn replace(fs: &dyn FsOps, dir: &Utf8Path, file: &WorkspaceFile) -> Result<(), OpError> {
     let bytes = serde_json::to_vec(file).expect("a workspace's state serializes");
     (fs.atomic_replace(path_in(dir).as_std_path(), &bytes))
-        .map_err(|e| io_failed(FsMethod::AtomicReplace, &relative(), &e))
+        .map_err(|e| io_error::io_failed(FsMethod::AtomicReplace, &relative(), &e))
 }
 
 /// `workspace.json`'s path below the workspace's root, as errors name it.
