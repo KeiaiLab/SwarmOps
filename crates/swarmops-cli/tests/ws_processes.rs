@@ -296,25 +296,18 @@ mod perf {
     /// the new changeset.
     fn put(ops: &LocalOps, parent: Option<String>, changes: Vec<ChangeInput>) -> String {
         let who = Identity::parse(AGENT).unwrap();
-        let req = CommitReq {
-            parent: parent.map(Into::into),
-            changes,
-            message: "seed".to_owned(),
-            advance: Some("main".to_owned()),
-            idempotency_key: None,
-            allow_empty: false,
-        };
+        let mut req = CommitReq::new(changes, "seed");
+        req.parent = parent.map(Into::into);
+        req.advance = Some("main".to_owned());
         ops.commit(&who, req).unwrap().changeset
     }
 
     /// One put of inline `text` at `path`.
     fn change(path: String, text: String) -> ChangeInput {
-        ChangeInput {
-            path,
-            op: ChangeOp::Put,
-            content: Some(ContentInput::Inline(text)),
-            mode: Some(ModeInput::File),
-        }
+        let mut change = ChangeInput::new(path, ChangeOp::Put);
+        change.content = Some(ContentInput::Inline(text));
+        change.mode = Some(ModeInput::File);
+        change
     }
 
     /// A store at `store` holding the synthetic tree of `files` files in `dirs` directories,
@@ -424,7 +417,7 @@ mod perf {
 
     /// The head of `main` in `ops`.
     fn ops_head(ops: &LocalOps) -> String {
-        let req = swarmops_api::ResolveRevReq { rev: "main".into() };
+        let req = swarmops_api::ResolveRevReq::new("main");
         ops.resolve_rev(req).unwrap().id
     }
 

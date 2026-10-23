@@ -311,13 +311,14 @@ struct External {
 
 /// A fixed signature, so that a commit makes the same changeset in every run.
 fn signature() -> Signature {
-    Signature {
-        name: b"test-power/worker-1".to_vec(),
-        email: b"worker-1@test-power.swarmops.local".to_vec(),
-        secs: 1_700_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        b"test-power/worker-1".to_vec(),
+        b"worker-1@test-power.swarmops.local".to_vec(),
+        1_700_000_000,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// Runs `init`, then [`RUN`], on an [`ImageRecordingFs`] in a temp dir, on a one-thread pool:
@@ -432,33 +433,34 @@ fn run(root: &Utf8Path, fs: &Arc<ImageRecordingFs>, ops: &[Op]) -> Ran {
         match *op {
             Op::Commit { parent, puts } | Op::CommitAdvance { parent, puts, .. } => {
                 let advance = match *op {
-                    Op::CommitAdvance { name, .. } => Some(swarmops_repo::Advance {
-                        name: name.to_owned(),
-                        actor: "test-power/worker-1".to_owned(),
-                    }),
+                    Op::CommitAdvance { name, .. } => {
+                        Some(swarmops_repo::Advance::new(name, "test-power/worker-1"))
+                    }
                     _ => None,
                 };
                 let advancing = advance.is_some();
                 let changes = puts
                     .iter()
-                    .map(|(path, content)| Change {
-                        path: RepoPath::new(*path).expect("a repo path"),
-                        op: ChangeOp::Put {
-                            kind: LeafKind::File,
-                            content: content.as_bytes().to_vec(),
-                        },
+                    .map(|(path, content)| {
+                        Change::new(
+                            RepoPath::new(*path).expect("a repo path"),
+                            ChangeOp::Put {
+                                kind: LeafKind::File,
+                                content: content.as_bytes().to_vec(),
+                            },
+                        )
                     })
                     .collect();
-                let request = CommitRequest {
-                    parents: parent.map(|p| commits[p]).into_iter().collect(),
+                let request = CommitRequest::new(
+                    parent.map(|p| commits[p]).into_iter().collect(),
                     changes,
-                    author: signature(),
-                    committer: signature(),
-                    message: format!("commit {}", commits.len()).into_bytes(),
-                    metadata: Vec::new(),
-                    allow_empty: false,
+                    signature(),
+                    signature(),
+                    format!("commit {}", commits.len()).into_bytes(),
+                    Vec::new(),
+                    false,
                     advance,
-                };
+                );
                 let outcome = repo.commit(request).expect("commit");
                 assert!(outcome.warnings.is_empty(), "{outcome:?}");
                 let moved = outcome.advanced.as_ref().map(|moved| moved.already_applied);
@@ -542,22 +544,22 @@ fn commit_blob(
         .put(ObjectKind::Blob, content.as_bytes())
         .expect("put the blob");
     drop(writer);
-    let request = CommitRequest {
-        parents: parent.into_iter().collect(),
-        changes: vec![Change {
-            path: RepoPath::new(path).expect("a repo path"),
-            op: ChangeOp::PutBlob {
+    let request = CommitRequest::new(
+        parent.into_iter().collect(),
+        vec![Change::new(
+            RepoPath::new(path).expect("a repo path"),
+            ChangeOp::PutBlob {
                 kind: LeafKind::File,
-                id: swarmops_core::BlobId(id),
+                id: swarmops_core::BlobId::new(id),
             },
-        }],
-        author: signature(),
-        committer: signature(),
-        message: format!("commit {number}").into_bytes(),
-        metadata: Vec::new(),
-        allow_empty: false,
-        advance: None,
-    };
+        )],
+        signature(),
+        signature(),
+        format!("commit {number}").into_bytes(),
+        Vec::new(),
+        false,
+        None,
+    );
     let outcome = repo.commit(request).expect("commit");
     assert!(outcome.warnings.is_empty(), "{outcome:?}");
     assert_eq!(outcome.blobs_written, 0, "the blob was put before");
@@ -580,10 +582,7 @@ fn record_entries(repo: &LocalRepo, commits: &[ChangesetId], entries: &[usize]) 
     let entries: Vec<(Vec<u8>, swarmops_store::ExternalEntry)> = entries
         .iter()
         .map(|&commit| {
-            let entry = swarmops_store::ExternalEntry {
-                changeset: commits[commit],
-                faithful: true,
-            };
+            let entry = swarmops_store::ExternalEntry::new(commits[commit], true);
             (exported[commit].0.to_vec(), entry)
         })
         .collect();
@@ -607,12 +606,9 @@ fn record_entries(repo: &LocalRepo, commits: &[ChangesetId], entries: &[usize]) 
 fn export_oids(repo: &LocalRepo, commits: &[ChangesetId]) -> Vec<swarmops_git::GitOid> {
     let dir = tempfile::tempdir().expect("make a temp dir");
     let at = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("a UTF-8 temp path");
-    let memos = swarmops_store::DerivedStore::open(Layout::new(at), Arc::new(RealFs));
+    let memos = swarmops_store::DerivedStore::open(Layout::new(at), Arc::new(RealFs::new()));
     let read = repo.snapshot().expect("a snapshot");
-    let reader = swarmops_git::ExportReader {
-        read: &read,
-        store: &memos,
-    };
+    let reader = swarmops_git::ExportReader::new(&read, &memos);
     let mut exported: HashMap<ChangesetId, swarmops_git::GitOid> = HashMap::new();
     let mut oids = Vec::with_capacity(commits.len());
     for &id in commits {
@@ -638,15 +634,18 @@ fn export_oids(repo: &LocalRepo, commits: &[ChangesetId]) -> Vec<swarmops_git::G
 fn bulk(root: &Utf8Path, shared: &Arc<dyn FsOps>, fs: &ImageRecordingFs) -> Vec<ChangesetId> {
     let tree = Tree::empty_root();
     let changesets: Vec<Changeset> = (0..BULK)
-        .map(|n| Changeset {
-            parents: Vec::new(),
-            root: tree.id(),
-            delta: Vec::new(),
-            author: signature(),
-            committer: signature(),
-            message: format!("bulk {n}").into_bytes(),
-            extra_headers: Vec::new(),
-            metadata: Vec::new(),
+        .map(|n| {
+            Changeset::new(
+                Vec::new(),
+                tree.id(),
+                Vec::new(),
+                signature(),
+                signature(),
+                format!("bulk {n}").into_bytes(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .unwrap()
         })
         .collect();
     let mut objects = vec![(ObjectKind::Tree, tree.encode())];
@@ -665,13 +664,7 @@ fn bulk(root: &Utf8Path, shared: &Arc<dyn FsOps>, fs: &ImageRecordingFs) -> Vec<
     for changeset in &changesets {
         let id = changeset.id().expect("the id");
         let delta_hash = changeset.delta_hash().expect("the delta hash");
-        let record = ChangesetMeta {
-            id,
-            seq: 0,
-            generation: 0,
-            delta_hash,
-            parents: Vec::new(),
-        };
+        let record = ChangesetMeta::new(id, 0, 0, delta_hash, Vec::new());
         write.insert_changeset(record).expect("insert");
         ids.push(id);
     }
@@ -712,7 +705,7 @@ fn raw_batch(repo: &LocalRepo, merged: ChangesetId) -> Vec<ChangesetId> {
             let entries = files
                 .iter()
                 .map(|&(name, content)| {
-                    let blob = BlobId(hash_object(ObjectKind::Blob, content.as_bytes()));
+                    let blob = BlobId::new(hash_object(ObjectKind::Blob, content.as_bytes()));
                     objects.insert(blob.0, (ObjectKind::Blob, content.as_bytes().to_vec()));
                     TreeEntry::leaf(name, LeafKind::File, blob)
                 })
@@ -738,15 +731,15 @@ fn raw_batch(repo: &LocalRepo, merged: ChangesetId) -> Vec<ChangesetId> {
             1 => vec![ids[0]],
             _ => vec![ids[1], merged],
         };
-        let raw = RawChangeset {
+        let raw = RawChangeset::new(
             parents,
             root,
-            author: signature(),
-            committer: signature(),
-            message: format!("raw {n}").into_bytes(),
-            extra_headers: Vec::new(),
-            metadata: Vec::new(),
-        };
+            signature(),
+            signature(),
+            format!("raw {n}").into_bytes(),
+            Vec::new(),
+            Vec::new(),
+        );
         ids.push(scratch.push(raw.clone()).expect("a raw changeset"));
         raws.push(raw);
     }
@@ -1038,7 +1031,7 @@ fn no_store(store: &str) -> Result<Found, String> {
 /// The journal of the store at `store`, on the real filesystem.
 fn journal_of(store: &str) -> Result<Journal, String> {
     let layout = Layout::new(Utf8PathBuf::from(store));
-    Journal::open(&layout, Arc::new(RealFs)).map_err(|e| format!("open the journal: {e}"))
+    Journal::open(&layout, Arc::new(RealFs::new())).map_err(|e| format!("open the journal: {e}"))
 }
 
 /// Where the frame that records changeset `id` (in hex) starts in the journal of the store at
@@ -1119,7 +1112,7 @@ fn external_ids_as_imaged(
     cut: usize,
 ) -> Result<(), String> {
     let layout = Layout::new(Utf8PathBuf::from(store));
-    let index = swarmops_store::ExternalIds::new(layout, Arc::new(RealFs));
+    let index = swarmops_store::ExternalIds::new(layout, Arc::new(RealFs::new()));
     for External {
         key,
         commit,
@@ -1899,25 +1892,22 @@ mod committed_read {
     /// Commit `n` of the run: the file `<n>.txt` put on commit `parent` (a root for `None`), and
     /// main advanced to it in the same transaction.
     fn one_file(n: usize, parent: Option<ChangesetId>) -> CommitRequest {
-        CommitRequest {
-            parents: parent.into_iter().collect(),
-            changes: vec![Change {
-                path: RepoPath::new(format!("{n}.txt")).expect("a repo path"),
-                op: ChangeOp::Put {
+        CommitRequest::new(
+            parent.into_iter().collect(),
+            vec![Change::new(
+                RepoPath::new(format!("{n}.txt")).expect("a repo path"),
+                ChangeOp::Put {
                     kind: LeafKind::File,
                     content: format!("{n}\n").into_bytes(),
                 },
-            }],
-            author: signature(),
-            committer: signature(),
-            message: format!("commit {n}").into_bytes(),
-            metadata: Vec::new(),
-            allow_empty: false,
-            advance: Some(Advance {
-                name: "main".to_owned(),
-                actor: "test-power/worker-1".to_owned(),
-            }),
-        }
+            )],
+            signature(),
+            signature(),
+            format!("commit {n}").into_bytes(),
+            Vec::new(),
+            false,
+            Some(Advance::new("main", "test-power/worker-1")),
+        )
     }
 
     /// The recorded run of [`read_committed_snapshot_survives_power_loss`].

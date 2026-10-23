@@ -304,26 +304,26 @@ fn git_import_of_an_object_past_the_object_limit_is_e_too_large() {
         oid
     };
     let commit = |tree: GitOid, parents: &[GitOid]| {
-        let ident = RawIdent {
-            name: b"Crafted".to_vec(),
-            email: b"crafted@example.invalid".to_vec(),
-            secs: 1_700_000_000,
-            offset_secs: 0,
-            negative_zero: false,
-        };
-        let raw = RawCommit {
+        let ident = RawIdent::new(
+            b"Crafted".to_vec(),
+            b"crafted@example.invalid".to_vec(),
+            1_700_000_000,
+            0,
+            false,
+        );
+        let raw = RawCommit::new(
             tree,
-            parents: parents.to_vec(),
-            author: ident.clone(),
-            committer: ident,
-            extra_headers: Vec::new(),
-            message: b"crafted\n".to_vec(),
-        };
+            parents.to_vec(),
+            ident.clone(),
+            ident,
+            Vec::new(),
+            b"crafted\n".to_vec(),
+        );
         object(RawKind::Commit, &raw.render())
     };
-    let huge_tree = huge(GitOid([0x5d; 20]), RawKind::Tree);
-    let huge_commit = huge(GitOid([0x5c; 20]), RawKind::Commit);
-    let huge_tag = huge(GitOid([0x5a; 20]), RawKind::Tag);
+    let huge_tree = huge(GitOid::new([0x5d; 20]), RawKind::Tree);
+    let huge_commit = huge(GitOid::new([0x5c; 20]), RawKind::Commit);
+    let huge_tag = huge(GitOid::new([0x5a; 20]), RawKind::Tag);
     let empty_tree = object(RawKind::Tree, b"");
     let refs = [
         ("refs/heads/main", commit(huge_tree, &[])),
@@ -955,11 +955,11 @@ fn commit_made_in_git(git_dir: &std::path::Path, parent: &str, file: &str) -> St
         .expect("the parent's tree");
     let mut tree = RawTree::parse(&bytes).expect("a tree");
     let blob = sink.write_object(RawKind::Blob, file.as_bytes()).unwrap();
-    tree.entries.push(RawTreeEntry {
-        mode: b"100644".to_vec(),
-        name: file.as_bytes().to_vec(),
-        oid: blob,
-    });
+    tree.entries.push(RawTreeEntry::new(
+        b"100644".to_vec(),
+        file.as_bytes().to_vec(),
+        blob,
+    ));
     // git's order: the names' bytes, a directory's as if it ended in `/`.
     tree.entries.sort_by_key(|entry| {
         let mut key = entry.name.clone();
@@ -969,13 +969,14 @@ fn commit_made_in_git(git_dir: &std::path::Path, parent: &str, file: &str) -> St
         key
     });
     let tree = sink.write_object(RawKind::Tree, &tree.render()).unwrap();
-    let person = Signature {
-        name: b"A Git User".to_vec(),
-        email: b"git@example.com".to_vec(),
-        secs: 1_760_000_200,
-        offset_secs: 3_600,
-        negative_zero: false,
-    };
+    let person = Signature::new(
+        b"A Git User".to_vec(),
+        b"git@example.com".to_vec(),
+        1_760_000_200,
+        3_600,
+        false,
+    )
+    .unwrap();
     let message = format!("Add {file}\n");
     let bytes = commit_bytes(tree, &[parent], &person, &person, &[], message.as_bytes());
     let commit = sink.write_object(RawKind::Commit, &bytes).unwrap();
@@ -1180,15 +1181,10 @@ fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
     let source = swarmops_testkit::git::empty_repository();
     let mut sink = GixSink::open(&source.dir).expect("open the source");
     let mut write = |kind, bytes: &[u8]| sink.write_object(kind, bytes).unwrap();
-    let file = |name: &str, oid| RawTreeEntry {
-        mode: b"100644".to_vec(),
-        name: name.as_bytes().to_vec(),
-        oid,
-    };
+    let file =
+        |name: &str, oid| RawTreeEntry::new(b"100644".to_vec(), name.as_bytes().to_vec(), oid);
     let evil = write(RawKind::Blob, b"evil\n");
-    let x_tree = RawTree {
-        entries: vec![file("foo.txt", evil)],
-    };
+    let x_tree = RawTree::new(vec![file("foo.txt", evil)]);
     let x_tree = write(RawKind::Tree, &x_tree.render());
     let sig = signature();
     let x = write(
@@ -1196,9 +1192,7 @@ fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
         &commit_bytes(x_tree, &[], &sig, &sig, &[], b"X\n"),
     );
     let new = write(RawKind::Blob, b"new\n");
-    let c_tree = RawTree {
-        entries: vec![file("foo.txt", evil), file("new.txt", new)],
-    };
+    let c_tree = RawTree::new(vec![file("foo.txt", evil), file("new.txt", new)]);
     let c_tree = write(RawKind::Tree, &c_tree.render());
     let c = write(
         RawKind::Commit,
@@ -1208,16 +1202,11 @@ fn git_import_over_a_crafted_head_memo_is_e_store_corrupt() {
     assert_eq!(sink.cas_branch("main", None, c), Ok(BranchUpdate::Applied));
 
     // The memo: the head's export oid, it says, is `x`'s (20 bytes, then 1 for `kept`).
-    let head = ChangesetId(ObjectId::from_hex(&native).expect("a changeset id"));
-    let slot = DerivedSlot {
-        name: "git_oid",
-        version: 1,
-        subject: head.0,
-        key: &[],
-    };
+    let head = ChangesetId::new(ObjectId::from_hex(&native).expect("a changeset id"));
+    let slot = DerivedSlot::new("git_oid", 1, head.0, &[]);
     let mut memo = x.0.to_vec();
     memo.push(1);
-    let derived = DerivedStore::open(store.layout(), Arc::new(RealFs));
+    let derived = DerivedStore::open(store.layout(), Arc::new(RealFs::new()));
     assert!(
         derived.put(&slot, &memo).expect("plant the memo"),
         "planted"
@@ -1281,15 +1270,10 @@ fn git_import_over_a_crafted_external_id_is_e_git_import_diverged() {
     let source = swarmops_testkit::git::empty_repository();
     let mut sink = GixSink::open(&source.dir).expect("open the source");
     let mut write = |kind, bytes: &[u8]| sink.write_object(kind, bytes).unwrap();
-    let file = |name: &str, oid| RawTreeEntry {
-        mode: b"100644".to_vec(),
-        name: name.as_bytes().to_vec(),
-        oid,
-    };
+    let file =
+        |name: &str, oid| RawTreeEntry::new(b"100644".to_vec(), name.as_bytes().to_vec(), oid);
     let git = write(RawKind::Blob, b"git\n");
-    let x_tree = RawTree {
-        entries: vec![file("foo.txt", git)],
-    };
+    let x_tree = RawTree::new(vec![file("foo.txt", git)]);
     let x_tree = write(RawKind::Tree, &x_tree.render());
     let sig = signature();
     let x = write(
@@ -1297,9 +1281,7 @@ fn git_import_over_a_crafted_external_id_is_e_git_import_diverged() {
         &commit_bytes(x_tree, &[], &sig, &sig, &[], b"X\n"),
     );
     let new = write(RawKind::Blob, b"new\n");
-    let c_tree = RawTree {
-        entries: vec![file("foo.txt", git), file("new.txt", new)],
-    };
+    let c_tree = RawTree::new(vec![file("foo.txt", git), file("new.txt", new)]);
     let c_tree = write(RawKind::Tree, &c_tree.render());
     let c = write(
         RawKind::Commit,
@@ -1309,12 +1291,9 @@ fn git_import_over_a_crafted_external_id_is_e_git_import_diverged() {
     assert_eq!(sink.cas_branch("main", None, c), Ok(BranchUpdate::Applied));
 
     // The entry: `x`, it says, is the head's.
-    let head = ChangesetId(ObjectId::from_hex(&native).expect("a changeset id"));
-    let entry = ExternalEntry {
-        changeset: head,
-        faithful: true,
-    };
-    let ids = ExternalIds::new(store.layout(), Arc::new(RealFs));
+    let head = ChangesetId::new(ObjectId::from_hex(&native).expect("a changeset id"));
+    let entry = ExternalEntry::new(head, true);
+    let ids = ExternalIds::new(store.layout(), Arc::new(RealFs::new()));
     let put = ids.put_batch(SYSTEM_GIT, &[(x.0.to_vec(), entry)]).unwrap();
     assert_eq!(put.written, 1, "planted");
     let journal = store.journal_len();
@@ -1454,7 +1433,7 @@ mod sweeps {
 
     /// Every git entry of `store`'s external id index, by its key's hex, the commit's id.
     fn entries(store: &Store) -> Vec<(String, ExternalEntry)> {
-        let ids = ExternalIds::new(store.layout(), Arc::new(RealFs));
+        let ids = ExternalIds::new(store.layout(), Arc::new(RealFs::new()));
         let listed = ids.list(SYSTEM_GIT).expect("list the git external ids");
         let mut entries: Vec<(String, ExternalEntry)> = (listed.into_iter())
             .map(|(key, entry)| (lower_hex(&key), entry.expect("a whole entry")))
@@ -1465,7 +1444,7 @@ mod sweeps {
 
     /// How many whole frames `store`'s `journal.log` holds that its `journal.off` does not list.
     fn unlisted_frames(store: &Store) -> u64 {
-        let journal = Journal::open(&store.layout(), Arc::new(RealFs)).expect("the journal");
+        let journal = Journal::open(&store.layout(), Arc::new(RealFs::new())).expect("the journal");
         let whole = journal.tail_frames_from(0).expect("read the journal").len();
         let whole = u64::try_from(whole).expect("fits");
         whole - journal.frame_count().expect("journal.off")
@@ -1498,10 +1477,7 @@ mod sweeps {
             vec![put("notes/two.txt", b"two\n")],
             "Add notes/two.txt\n",
         );
-        req.advance = Some(Advance {
-            name: "main".to_owned(),
-            actor: AGENT.to_owned(),
-        });
+        req.advance = Some(Advance::new("main", AGENT));
         let outcome = repo.commit(req).expect("committed, its listing failed");
         assert_eq!(outcome.warnings.len(), 1, "{outcome:?}");
     }
