@@ -7,6 +7,7 @@ mod commit;
 mod damaged_index;
 mod derive;
 mod diff;
+mod gc;
 mod history;
 mod land;
 mod land_detached;
@@ -19,7 +20,9 @@ mod path_history;
 mod raw;
 mod read;
 mod rebase;
+mod repair;
 mod store_fs;
+mod upgrade;
 mod verify;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file

@@ -15,6 +15,7 @@ mod crash;
 mod damaged_index;
 #[cfg(feature = "test-hooks")]
 mod faults;
+mod format2;
 mod git;
 mod github_live;
 mod landing;
@@ -28,6 +29,7 @@ mod remote_fetch;
 mod remote_perf;
 mod remote_push;
 mod remote_sync;
+mod sigkill;
 mod so;
 mod ws;
 mod ws_processes;

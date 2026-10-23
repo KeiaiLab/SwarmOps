@@ -3,16 +3,23 @@
 //! target from `tests/` (`autotests = false` in `Cargo.toml`): a new test file is a `mod` line
 //! here.
 
+mod check;
 mod contention;
 mod derived;
 mod external_ids;
+mod fs_kind;
+mod fsck;
 mod fsync_percentiles;
+mod gc;
 mod index;
 mod journal;
+mod journal2;
 mod layout;
 mod lock;
 mod meta;
 mod objects;
+mod refs2;
+mod upgrade;
 
 /// Every test file is a module here: with `autotests = false` Cargo builds no target from a file
 /// of `tests/` that no `mod` line names, and its tests would never run (jj's
