@@ -24,3 +24,23 @@ pub struct Ctx<'a> {
     /// The host layer of the materialised tree.
     pub host: Arc<dyn HostFs>,
 }
+
+impl<'a> Ctx<'a> {
+    /// A context on `store`, whose root on the host is `store_root`, acting as `who`, over the
+    /// durable files' `fs` and the materialised tree's `host`.
+    pub fn new(
+        store: &'a dyn StoreOps,
+        store_root: Utf8PathBuf,
+        who: Option<Identity>,
+        fs: Arc<dyn FsOps>,
+        host: Arc<dyn HostFs>,
+    ) -> Ctx<'a> {
+        Ctx {
+            store,
+            store_root,
+            who,
+            fs,
+            host,
+        }
+    }
+}

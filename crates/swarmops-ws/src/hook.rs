@@ -47,11 +47,29 @@ pub struct HookCreate {
     pub cwd: Utf8PathBuf,
 }
 
+impl HookCreate {
+    /// The input of session `session_id`, standing in `cwd`, that asks for a workspace `name`.
+    pub fn new(name: String, session_id: String, cwd: Utf8PathBuf) -> HookCreate {
+        HookCreate {
+            name,
+            session_id,
+            cwd,
+        }
+    }
+}
+
 /// The `WorktreeRemove` hook's input.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookRemove {
     /// The directory to remove: the path the create hook printed.
     pub worktree_path: Utf8PathBuf,
+}
+
+impl HookRemove {
+    /// The input that removes the workspace at `worktree_path`.
+    pub fn new(worktree_path: Utf8PathBuf) -> HookRemove {
+        HookRemove { worktree_path }
+    }
 }
 
 /// Whether a new workspace's bootstrap runs: `SWARMOPS_WS_BOOTSTRAP=skip`, as the CLI read it,

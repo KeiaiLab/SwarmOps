@@ -56,6 +56,21 @@ pub struct Entry {
     pub session: Option<String>,
 }
 
+impl Entry {
+    /// The entry of workspace `name` at `path`, made by `created_by` at `created_at` (Unix
+    /// milliseconds), in [`ENTRY_FORMAT`], which a read checks again; no hook session.
+    pub fn new(name: String, path: String, created_by: String, created_at: u64) -> Entry {
+        Entry {
+            format: ENTRY_FORMAT,
+            name,
+            path,
+            created_by,
+            created_at,
+            session: None,
+        }
+    }
+}
+
 /// What [`Registry::create`] found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Linked {
