@@ -18,6 +18,7 @@ use swarmops_core::LeafKind;
 /// no lines. The texts are those lines' bytes as they are: a line keeps its `\n`
 /// ([`split_lines`](crate::line_diff::split_lines)).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct ConflictHunk {
     /// The base's lines here.
     pub base: Range<u32>,
@@ -59,6 +60,7 @@ impl ConflictHunk {
 
 /// What one file's content merges to.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ContentMerge {
     /// The merged content.
     Clean(Vec<u8>),
@@ -74,6 +76,7 @@ pub enum ContentMerge {
 /// Why a path conflicts. Its [`name`](ConflictKind::name) is the one the operations spec's
 /// conflict report gives it.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ConflictKind {
     /// Both sides edited the same lines of a text file, or lines next to each other.
     Content {
@@ -123,3 +126,57 @@ impl ConflictKind {
 /// A three-way merge of one file's content, as a tree merge takes it: called with the base's,
 /// ours' and theirs' contents, in that order, it returns what they merge to.
 pub type ContentMerger<'a> = &'a dyn Fn(&[u8], &[u8], &[u8]) -> ContentMerge;
+
+#[cfg(test)]
+mod tests {
+    use swarmops_core::LeafKind;
+
+    use super::ConflictKind;
+
+    /// One kind of each has its name, in operations spec §3's order. The `match` has no
+    /// wildcard, which only this crate may omit (`ConflictKind` is `#[non_exhaustive]`): a kind
+    /// added fails to compile here until it is listed, here and in `tests/conflict.rs`.
+    #[test]
+    fn one_of_each_kind_is_named() {
+        let kinds = [
+            ConflictKind::Content { hunks: Vec::new() },
+            ConflictKind::Binary,
+            ConflictKind::DeleteModify,
+            ConflictKind::ModifyDelete,
+            ConflictKind::AddAdd { hunks: Vec::new() },
+            ConflictKind::Mode {
+                ours: LeafKind::Exec,
+                theirs: LeafKind::Symlink,
+            },
+            ConflictKind::TypeChange,
+        ];
+
+        // 1. Every kind is listed: no wildcard.
+        for kind in &kinds {
+            match kind {
+                ConflictKind::Content { .. }
+                | ConflictKind::Binary
+                | ConflictKind::DeleteModify
+                | ConflictKind::ModifyDelete
+                | ConflictKind::AddAdd { .. }
+                | ConflictKind::Mode { .. }
+                | ConflictKind::TypeChange => {}
+            }
+        }
+
+        // 2. The names, in the spec's order.
+        let names: Vec<&str> = kinds.iter().map(ConflictKind::name).collect();
+        assert_eq!(
+            names,
+            [
+                "content",
+                "binary",
+                "delete_modify",
+                "modify_delete",
+                "add_add",
+                "mode",
+                "type_change",
+            ]
+        );
+    }
+}

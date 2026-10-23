@@ -29,6 +29,7 @@ pub trait TreeRead {
 
 /// A leaf as a tree entry names it: a file, an executable or a symlink, and its blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Leaf {
     /// File, executable or symlink.
     pub kind: LeafKind,
@@ -45,6 +46,7 @@ impl Leaf {
 
 /// What happened to the leaf at one path, from one tree to the other.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ChangeKind {
     /// No leaf was there before (nothing, or a directory); `new` is there now.
     Added {
@@ -97,6 +99,7 @@ impl ChangeKind {
 
 /// The change of the leaf at one path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct TreeChange {
     /// The leaf's full path from the root.
     pub path: RepoPath,
@@ -114,6 +117,7 @@ impl TreeChange {
 /// The paths a diff looks at: every path ([`PathFilter::all`]), or those that equal or lie below
 /// one of some prefixes ([`PathFilter::under`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct PathFilter {
     /// `None` for every path; else the prefixes, sorted by bytes, each once.
     prefixes: Option<Vec<RepoPath>>,
@@ -434,6 +438,7 @@ pub fn delta_of(changes: &[TreeChange]) -> Vec<DeltaEntry> {
 
 /// A path that a three-way merge decides: the leaf each of the three trees holds there.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct PathTriple {
     /// The leaf's full path from the root.
     pub path: RepoPath,

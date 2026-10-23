@@ -191,6 +191,7 @@ fn check_unified(
                     DiffLine::Context(bytes)
                     | DiffLine::Removed(bytes)
                     | DiffLine::Added(bytes) => bytes,
+                    _ => panic!("a variant this test does not know"),
                 })
                 .collect()
         };
@@ -230,6 +231,7 @@ fn check_unified(
                         added += 1;
                     }
                 }
+                _ => panic!("a variant this test does not know"),
             }
         }
         if in_a_change {
@@ -502,10 +504,10 @@ mod bound {
         let past = lines(MAX_DIFF_LINES + 1, usize::MAX);
         let unended = &past[..past.len() - 1];
         for side in [&past[..], unended] {
-            assert_eq!(line_hunks(side, &edited), Err(TooLarge));
-            assert_eq!(line_hunks(&edited, side), Err(TooLarge));
-            assert_eq!(line_hunks(b"", side), Err(TooLarge));
-            assert_eq!(line_hunks(side, b""), Err(TooLarge));
+            assert_eq!(line_hunks(side, &edited), Err(TooLarge::default()));
+            assert_eq!(line_hunks(&edited, side), Err(TooLarge::default()));
+            assert_eq!(line_hunks(b"", side), Err(TooLarge::default()));
+            assert_eq!(line_hunks(side, b""), Err(TooLarge::default()));
         }
     }
 
@@ -519,7 +521,7 @@ mod bound {
         assert_eq!(at.len(), MAX_DIFF_BYTES);
         assert_eq!(line_hunks(&at, &edited), Ok(edit_of(1)));
         let past = [&at[..], b"d"].concat();
-        assert_eq!(line_hunks(&past, &edited), Err(TooLarge));
-        assert_eq!(line_hunks(&edited, &past), Err(TooLarge));
+        assert_eq!(line_hunks(&past, &edited), Err(TooLarge::default()));
+        assert_eq!(line_hunks(&edited, &past), Err(TooLarge::default()));
     }
 }

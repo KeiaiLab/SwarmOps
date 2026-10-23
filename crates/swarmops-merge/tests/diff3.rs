@@ -662,6 +662,7 @@ fn agrees_with_the_git_merge_file_corpus() {
                 );
             }
             ContentMerge::Binary => panic!("{name}: binary here, git merges it as text"),
+            _ => panic!("a variant this test does not know"),
         }
     }
 }
@@ -687,6 +688,7 @@ mod past_the_line_diff_bound {
             ContentMerge::Clean(bytes) => format!("Clean, {} bytes", bytes.len()),
             ContentMerge::Conflicted(hunks) => format!("Conflicted, {} hunks", hunks.len()),
             ContentMerge::Binary => "Binary".to_owned(),
+            _ => panic!("a variant this test does not know"),
         }
     }
 

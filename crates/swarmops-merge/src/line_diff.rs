@@ -36,6 +36,7 @@ pub const MAX_DIFF_BYTES: usize = 8 << 20;
 /// What [`line_hunks`] gives for a side past the line diff's bound, more than [`MAX_DIFF_LINES`]
 /// lines or [`MAX_DIFF_BYTES`] bytes: no hunks.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TooLarge;
 
 /// The lines of `bytes`: each ends after its `\n` and keeps it, a last line without one is a line,
@@ -52,6 +53,7 @@ fn lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
 /// side's lines `after`. Both are 0-based, half-open ranges of line numbers; one of them is empty
 /// for a pure insertion or deletion (at that position), never both.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub struct Hunk {
     /// The old side's lines that go.
     pub before: Range<u32>,
@@ -107,6 +109,7 @@ pub fn is_text(bytes: &[u8]) -> bool {
 
 /// The lines a diff inserts and deletes, as `git diff --stat` counts them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LineStats {
     /// The new side's lines the hunks bring in.
     pub insertions: u64,
@@ -137,6 +140,7 @@ pub fn line_stats(hunks: &[Hunk]) -> LineStats {
 
 /// One line of a unified hunk, with its `\n` if it has one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DiffLine<'a> {
     /// A line both sides have, around a change.
     Context(&'a [u8]),
@@ -149,6 +153,7 @@ pub enum DiffLine<'a> {
 /// A hunk as a unified diff prints it: one or more changes, the unchanged lines around them, and
 /// its header `@@ -before_start,before_lines +after_start,after_lines @@`.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UnifiedHunk<'a> {
     /// The old side's first line in the hunk, 1-based; when the hunk has none of the old side's
     /// lines, the line before where they would be (0 at the top), as git prints it.

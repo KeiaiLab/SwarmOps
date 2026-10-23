@@ -43,8 +43,10 @@ fn ops_spec_kinds(spec: &str) -> Vec<&str> {
         .collect()
 }
 
-/// One conflict of each kind, in the order operations spec §3 lists them. The `match` has no
-/// wildcard: a kind added to `ConflictKind` fails to compile here until it is listed.
+/// One conflict of each kind, in the order operations spec §3 lists them. `ConflictKind` is
+/// `#[non_exhaustive]`, so the `match` needs a wildcard here; the crate's own unit test
+/// `one_of_each_kind_is_named` has none and fails to compile on a new kind, which then belongs
+/// here too.
 fn one_of_each() -> Vec<ConflictKind> {
     let hunk = || {
         ConflictHunk::new(
@@ -81,6 +83,7 @@ fn one_of_each() -> Vec<ConflictKind> {
             | ConflictKind::AddAdd { .. }
             | ConflictKind::Mode { .. }
             | ConflictKind::TypeChange => {}
+            _ => panic!("a variant this test does not know"),
         }
     }
     kinds

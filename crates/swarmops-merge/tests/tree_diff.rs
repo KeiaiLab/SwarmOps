@@ -221,6 +221,7 @@ fn reversed(change: &TreeChange) -> TreeChange {
         ChangeKind::Deleted { old } => ChangeKind::Added { new: old },
         ChangeKind::Modified { old, new } => ChangeKind::Modified { old: new, new: old },
         ChangeKind::TypeChanged { old, new } => ChangeKind::TypeChanged { old: new, new: old },
+        _ => panic!("a variant this test does not know"),
     };
     TreeChange::new(change.path.clone(), kind)
 }
