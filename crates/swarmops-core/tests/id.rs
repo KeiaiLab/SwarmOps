@@ -45,7 +45,7 @@ fn object_id_hex_parse_cases() {
 }
 
 /// `Display` and `Debug` print what they printed before they wrote from a stack buffer: the
-/// lowercase hex, inside `ObjectId(…)` for `Debug`, with formatting flags such as a width
+/// lowercase hex, inside `ObjectId::new(…)` for `Debug`, with formatting flags such as a width
 /// ignored; the typed ids print the same. A guard: it passes before and after.
 #[test]
 fn display_and_debug_are_unchanged() {
@@ -53,8 +53,8 @@ fn display_and_debug_are_unchanged() {
 
     for id in [
         hash_object(ObjectKind::Blob, b"x"),
-        ObjectId([0; 32]),
-        ObjectId([0xff; 32]),
+        ObjectId::new([0; 32]),
+        ObjectId::new([0xff; 32]),
     ] {
         let hex = id.to_hex();
         assert_eq!(format!("{id}"), hex);
@@ -62,11 +62,11 @@ fn display_and_debug_are_unchanged() {
         assert_eq!(format!("{id:>70}"), hex, "no padding");
         assert_eq!(format!("{id:<70}|"), format!("{hex}|"), "no padding");
         assert_eq!(format!("{id:.8}"), hex, "no truncation");
-        assert_eq!(format!("{}", BlobId(id)), hex);
-        assert_eq!(format!("{}", TreeId(id)), hex);
-        assert_eq!(format!("{}", ChangesetId(id)), hex);
+        assert_eq!(format!("{}", BlobId::new(id)), hex);
+        assert_eq!(format!("{}", TreeId::new(id)), hex);
+        assert_eq!(format!("{}", ChangesetId::new(id)), hex);
         assert_eq!(
-            format!("{:?}", BlobId(id)),
+            format!("{:?}", BlobId::new(id)),
             format!("BlobId(ObjectId({hex}))")
         );
     }
@@ -96,4 +96,37 @@ fn hashed_new_is_hash_object() {
         );
         assert_eq!(kept, [7; 4096]);
     }
+}
+
+/// An object file's header writes a kind as the byte `tag` gives: 0 blob, 1 tree, 2 changeset,
+/// the bytes the store wrote before the tag moved here. `from_tag` reads them back and no other.
+#[test]
+fn object_kind_tag_round_trips() {
+    let kinds = [
+        (ObjectKind::Blob, 0),
+        (ObjectKind::Tree, 1),
+        (ObjectKind::Changeset, 2),
+    ];
+    for (kind, byte) in kinds {
+        assert_eq!(kind.tag(), byte, "{kind:?}");
+        assert_eq!(ObjectKind::from_tag(byte), Some(kind));
+    }
+
+    // Every other byte names no kind.
+    for byte in 3..=u8::MAX {
+        assert_eq!(ObjectKind::from_tag(byte), None, "{byte}");
+    }
+}
+
+/// The constructors wrap what they are given: an id's digest, a typed id's untyped one.
+#[test]
+fn id_constructors_wrap_their_input() {
+    use swarmops_core::{BlobId, ChangesetId, TreeId};
+
+    let id = ObjectId::new([7; 32]);
+    assert_eq!(id.0, [7; 32]);
+    assert_eq!(ObjectId::from([7; 32]), id);
+    assert_eq!(BlobId::new(id).as_object_id(), id);
+    assert_eq!(TreeId::new(id).as_object_id(), id);
+    assert_eq!(ChangesetId::new(id).as_object_id(), id);
 }

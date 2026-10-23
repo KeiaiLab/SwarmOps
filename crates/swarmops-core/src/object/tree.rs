@@ -11,6 +11,7 @@ const VERSION: u8 = 1;
 /// entry names its target with an [`EntryTarget`], whose [`EntryTarget::kind`] gives this byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum EntryKind {
     /// Regular file, mode 100644.
     File = 0,
@@ -45,6 +46,7 @@ impl EntryKind {
 /// [`EntryKind`] byte of the same name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
+#[non_exhaustive]
 pub enum LeafKind {
     /// Regular file, mode 100644.
     File = 0,
@@ -85,6 +87,7 @@ impl LeafKind {
 /// canonical layout writes it as the entry's kind byte ([`EntryTarget::kind`]) and id
 /// ([`EntryTarget::id`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum EntryTarget {
     /// A file, an executable or a symlink, and the blob that holds its content (a symlink's:
     /// its target).
@@ -110,6 +113,22 @@ impl EntryTarget {
         }
     }
 
+    /// The leaf's kind and blob; `None` for a subdirectory.
+    pub fn leaf(self) -> Option<(LeafKind, BlobId)> {
+        match self {
+            Self::Leaf(kind, blob) => Some((kind, blob)),
+            Self::Dir(_) => None,
+        }
+    }
+
+    /// The subdirectory's tree; `None` for a leaf.
+    pub fn dir(self) -> Option<TreeId> {
+        match self {
+            Self::Leaf(..) => None,
+            Self::Dir(tree) => Some(tree),
+        }
+    }
+
     /// The target that the layout's kind byte, parsed into `kind`, and `id` name.
     pub(crate) fn from_parts(kind: EntryKind, id: ObjectId) -> Self {
         match kind {
@@ -123,6 +142,7 @@ impl EntryTarget {
 
 /// One entry of a tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TreeEntry {
     /// A single path component.
     pub name: String,
@@ -131,6 +151,15 @@ pub struct TreeEntry {
 }
 
 impl TreeEntry {
+    /// The entry `name` naming `target`. The name is checked where entries become a tree
+    /// ([`Tree::new`]).
+    pub fn new(name: impl Into<String>, target: EntryTarget) -> Self {
+        Self {
+            name: name.into(),
+            target,
+        }
+    }
+
     /// The entry `name` of a leaf of `kind` whose content is blob `blob`.
     pub fn leaf(name: impl Into<String>, kind: LeafKind, blob: BlobId) -> Self {
         Self {
@@ -150,6 +179,7 @@ impl TreeEntry {
 
 /// A directory with entries sorted by raw name bytes and unique names.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Tree {
     entries: Vec<TreeEntry>,
 }

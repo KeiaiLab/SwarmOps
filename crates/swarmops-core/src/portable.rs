@@ -21,6 +21,7 @@ const FORBIDDEN: [char; 9] = ['\\', '/', ':', '*', '?', '"', '<', '>', '|'];
 
 /// Why a component is not a name every platform can hold ([`check_component`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum Unportable {
     /// A Windows device name ([`is_windows_device_name`]).
     #[error("a Windows device name")]
