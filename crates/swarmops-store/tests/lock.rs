@@ -35,8 +35,29 @@ fn new_meta() -> (TempDir, Layout) {
 /// names its process and its file, as `<major>:<minor>:<inode>`; the inode and this process's
 /// id pick the lines out (the device `stat` reports need not be the one the line shows, on
 /// btrfs for one).
+///
+/// The kernel hands `/proc/locks` out a page per read and lets go of its lock table between
+/// pages, so one reading of a busy table can skip or repeat lines; a count is taken only once
+/// [`SETTLED_READS`] readings in a row agree on it.
 #[cfg(target_os = "linux")]
 fn flocks_on(path: &Path) -> (usize, usize) {
+    let mut last = read_flocks(path);
+    let mut agreeing = 1;
+    while agreeing < SETTLED_READS {
+        let now = read_flocks(path);
+        agreeing = if now == last { agreeing + 1 } else { 1 };
+        last = now;
+    }
+    last
+}
+
+/// How many readings of `/proc/locks` in a row must agree before [`flocks_on`] takes a count.
+#[cfg(target_os = "linux")]
+const SETTLED_READS: usize = 3;
+
+/// One reading of `/proc/locks` for [`flocks_on`]: the held and waiting counts it lists.
+#[cfg(target_os = "linux")]
+fn read_flocks(path: &Path) -> (usize, usize) {
     let inode = fs::metadata(path)
         .expect("stat the lock file")
         .ino()
@@ -84,7 +105,11 @@ fn abandoned_waiter_releases_the_lock_it_acquires_late() {
     let (_root, layout) = new_meta();
     let lock_file = layout.meta_lock().into_std_path_buf();
     let held = MetaLock::acquire(&layout, Duration::ZERO).unwrap();
-    assert_eq!(flocks_on(&lock_file), (1, 0), "one holder, nobody waiting");
+    assert_eq!(
+        wait_for_flocks(&lock_file, (1, 0)),
+        (1, 0),
+        "one holder, nobody waiting"
+    );
 
     let started = Instant::now();
     let got = MetaLock::acquire(&layout, Duration::from_millis(100));
