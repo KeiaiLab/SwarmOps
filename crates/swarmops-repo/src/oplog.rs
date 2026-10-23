@@ -39,6 +39,7 @@ use crate::repo::{self, Repo};
 
 /// One operation: a write transaction, as the journal holds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Operation {
     /// Its number: its frame's seq, from 0 in commit order.
     pub seq: u64,
@@ -48,6 +49,7 @@ pub struct Operation {
 
 /// One record of an [`Operation`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum OpRecord {
     /// A changeset joined the store.
     Changeset {
@@ -75,6 +77,7 @@ pub enum OpRecord {
 
 /// What [`Repo::undo`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct UndoOutcome {
     /// The operation undone.
     pub undone: u64,

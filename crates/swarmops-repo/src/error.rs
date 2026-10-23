@@ -10,6 +10,7 @@ use crate::land::{MergeConflicts, NothingToLandReason};
 
 /// Why a repository operation failed.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum RepoError {
     /// The store failed: I/O, a corrupt object file, damaged metadata, a writer lock held for
     /// the whole wait ([`StoreError::Busy`], retryable), commits landing during every round of a

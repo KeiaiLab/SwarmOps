@@ -45,6 +45,7 @@ const EMAIL: &[u8] = b"lander@swarmops.local";
 /// A landing model: how a publish handles a target that moved after the land read it (see
 /// [the module documentation](super)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Model {
     /// The yardstick: insert and compare-and-swap; a moved target goes back to the lander.
     CasLoop,
@@ -84,6 +85,7 @@ impl Model {
 
 /// A land's changeset, prepared on the head it read ([`Repo::prepare`]) and ready to publish.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Publication {
     /// The ref it lands on.
     pub target: String,
@@ -99,6 +101,7 @@ pub struct Publication {
 
 /// What a publish did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Published {
     /// The changeset `id` is on the target, its head now; `onto` its parent. `relocated` when
     /// the lock holder made it from the land's changeset onto a head that had moved.
@@ -131,6 +134,7 @@ pub enum Published {
 
 /// A publish's outcome, with how long it held the metadata lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Timed<T> {
     /// The outcome.
     pub value: T,

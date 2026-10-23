@@ -160,11 +160,7 @@ fn verify_clean_store_zero_problems() {
     for depth in [Depth::Deep, Depth::Shallow] {
         assert_eq!(
             repo.verify(depth).unwrap(),
-            VerifyReport {
-                objects_checked: 0,
-                changesets_checked: 0,
-                problems: Vec::new(),
-            }
+            VerifyReport::new(0, 0, Vec::new())
         );
     }
 
@@ -1300,7 +1296,7 @@ mod derived_values {
 
     /// The key of `p`'s values of `last_modified`: its path's postcard bytes.
     fn path_key(p: &str) -> Vec<u8> {
-        postcard::to_stdvec(&PathKey(path(p))).unwrap()
+        postcard::to_stdvec(&PathKey::new(path(p))).unwrap()
     }
 
     /// The slot of `cs`'s value of `last_modified` under `key`.
@@ -1325,7 +1321,7 @@ mod derived_values {
 
     /// A value of `last_modified`, as postcard writes it.
     fn touch(cs: Option<ChangesetId>) -> Vec<u8> {
-        postcard::to_stdvec(&LastTouch(cs)).unwrap()
+        postcard::to_stdvec(&LastTouch::new(cs)).unwrap()
     }
 
     /// A skip list of `ids`, as postcard writes it: their number, then each one's 32 bytes.

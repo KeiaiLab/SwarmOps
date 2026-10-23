@@ -42,6 +42,7 @@ const MAX_ATTEMPTS: u32 = 8;
 /// A land to make ([`Repo::land`]): the change, the first-parent chain from `base` to `head`, onto
 /// the ref `target`.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LandRequest {
     /// The change's head: the last changeset of the chain the land squashes.
     pub head: ChangesetId,
@@ -101,6 +102,7 @@ impl LandRequest {
 
 /// What a land did ([`Repo::land`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct LandOutcome {
     /// Whether it landed the change now, or found it landed by a land with its key.
     pub status: LandStatus,
@@ -164,6 +166,7 @@ impl LandOutcome {
 
 /// Whether a land landed its change ([`LandOutcome::status`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum LandStatus {
     /// It landed the change now.
     Landed,
@@ -173,6 +176,7 @@ pub enum LandStatus {
 
 /// Why a land has nothing to land ([`RepoError::NothingToLand`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum NothingToLandReason {
     /// The head is on the target's first-parent chain.
     OnTarget,
@@ -203,6 +207,7 @@ impl fmt::Display for NothingToLandReason {
 /// Why a land conflicts ([`RepoError::Conflict`]): the three-way merge of the change onto the
 /// target's head, and what a report of it needs.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MergeConflicts {
     /// The base the change was taken from.
     pub base: ChangesetId,

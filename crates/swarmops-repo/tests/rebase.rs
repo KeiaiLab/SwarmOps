@@ -64,10 +64,9 @@ pub(crate) fn landing(head: ChangesetId) -> LandRequest {
 
 /// A request for `changes` on `parents`, recording `agent` in its metadata.
 fn by(agent: &str, parents: &[ChangesetId], changes: Vec<Change>) -> CommitRequest {
-    CommitRequest {
-        metadata: vec![("agent".to_owned(), agent.as_bytes().to_vec())],
-        ..request(parents, changes, "a test commit")
-    }
+    let mut req = request(parents, changes, "a test commit");
+    req.metadata = vec![("agent".to_owned(), agent.as_bytes().to_vec())];
+    req
 }
 
 /// Commits `changes` on `parents` by `agent`; the new changeset's id.
@@ -90,13 +89,8 @@ pub(crate) fn advance(
     parents: &[ChangesetId],
     changes: Vec<Change>,
 ) -> ChangesetId {
-    let req = CommitRequest {
-        advance: Some(Advance {
-            name: "main".to_owned(),
-            actor: agent.to_owned(),
-        }),
-        ..by(agent, parents, changes)
-    };
+    let mut req = by(agent, parents, changes);
+    req.advance = Some(Advance::new("main", agent));
     repo.commit(req).unwrap().id
 }
 
@@ -158,10 +152,8 @@ fn rebase_records_one_changeset_on_the_target_head_and_moves_no_ref() {
     let frames = frame_count(&root);
 
     // 1. Rebase the change onto main's head, with metadata of the caller's.
-    let req = RebaseRequest {
-        metadata: vec![("agent".to_owned(), REBASER.as_bytes().to_vec())],
-        ..rebasing(head)
-    };
+    let mut req = rebasing(head);
+    req.metadata = vec![("agent".to_owned(), REBASER.as_bytes().to_vec())];
     let out = repo.rebase(req).unwrap();
 
     // 2. What it says: recorded, on t1, from t0, one path changed.
@@ -239,12 +231,13 @@ fn rebase_conflicts_report_as_land_does_and_record_nothing() {
 #[test]
 fn a_keyed_rebase_replays_without_a_frame() {
     let (_dir, root, repo, [_, head, t1]) = moved_on();
-    let keyed = || RebaseRequest {
-        metadata: vec![(
+    let keyed = || {
+        let mut rebase = rebasing(head);
+        rebase.metadata = vec![(
             "commit_key".to_owned(),
             b"01890a5d-ac96-774b-bcce-b302099a8057".to_vec(),
-        )],
-        ..rebasing(head)
+        )];
+        rebase
     };
     let first = repo.rebase(keyed()).unwrap();
     let frames = frame_count(&root);

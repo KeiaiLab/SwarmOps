@@ -69,15 +69,15 @@ fn tree_of(files: &[(&str, &[u8])], objects: &mut Vec<(ObjectKind, Vec<u8>)>) ->
 /// A raw changeset of `root` on `parents`, by [`signature`], with `message` and no extra headers
 /// or metadata.
 fn raw(parents: &[ChangesetId], root: TreeId, message: &str) -> RawChangeset {
-    RawChangeset {
-        parents: parents.to_vec(),
+    RawChangeset::new(
+        parents.to_vec(),
         root,
-        author: signature(),
-        committer: signature(),
-        message: message.as_bytes().to_vec(),
-        extra_headers: Vec::new(),
-        metadata: Vec::new(),
-    }
+        signature(),
+        signature(),
+        message.as_bytes().to_vec(),
+        Vec::new(),
+        Vec::new(),
+    )
 }
 
 /// The id of the changeset `raw` makes if its delta is `delta`: the test's own oracle.
@@ -170,11 +170,7 @@ fn commit_raw_makes_a_root_changeset_while_main_exists() {
     );
 
     let outcome = repo.commit_raw(second).expect("commit_raw");
-    let made = RawOutcome {
-        id: want,
-        insert: InsertOutcome::Inserted { seq: 1 },
-        files_changed: 2,
-    };
+    let made = RawOutcome::new(want, InsertOutcome::Inserted { seq: 1 }, 2);
     assert_eq!(outcome.outcomes, [made]);
     assert_eq!(
         outcome.frame_seq,
@@ -200,34 +196,39 @@ fn commit_raw_keeps_parents_signatures_headers_and_message_verbatim() {
     let newer = commit(&repo, &[], vec![put("a", b"newer")]);
     let root = store_tree(&repo, &[("a", b"merged")]);
     let gpgsig = b"-----BEGIN PGP SIGNATURE-----\n\nwsBcBAABCAAQBQJ\n-----END PGP SIGNATURE-----";
-    let raw = RawChangeset {
-        parents: vec![newer, older],
-        root,
-        author: Signature {
-            name: b"Ren\xe9 Fixture".to_vec(),
-            email: b"rene@fixture.example".to_vec(),
-            secs: -86_400,
-            offset_secs: 19_800,
-            negative_zero: false,
-        },
-        committer: Signature {
-            name: b"Committer".to_vec(),
-            email: b"committer@fixture.example".to_vec(),
-            secs: 1_700_000_060,
-            offset_secs: 0,
-            negative_zero: true,
-        },
-        message: b"merge newer into older\n\nno line break at the end".to_vec(),
-        extra_headers: vec![
-            (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
-            (b"gpgsig".to_vec(), gpgsig.to_vec()),
-            (b"x-custom".to_vec(), b"kept as it is".to_vec()),
-        ],
-        metadata: vec![(
-            "git.oid".to_owned(),
-            b"0123456789abcdef0123456789abcdef01234567".to_vec(),
-        )],
+    let author = Signature {
+        name: b"Ren\xe9 Fixture".to_vec(),
+        email: b"rene@fixture.example".to_vec(),
+        secs: -86_400,
+        offset_secs: 19_800,
+        negative_zero: false,
     };
+    let committer = Signature {
+        name: b"Committer".to_vec(),
+        email: b"committer@fixture.example".to_vec(),
+        secs: 1_700_000_060,
+        offset_secs: 0,
+        negative_zero: true,
+    };
+    let message = b"merge newer into older\n\nno line break at the end".to_vec();
+    let extra_headers = vec![
+        (b"encoding".to_vec(), b"ISO-8859-1".to_vec()),
+        (b"gpgsig".to_vec(), gpgsig.to_vec()),
+        (b"x-custom".to_vec(), b"kept as it is".to_vec()),
+    ];
+    let metadata = vec![(
+        "git.oid".to_owned(),
+        b"0123456789abcdef0123456789abcdef01234567".to_vec(),
+    )];
+    let raw = RawChangeset::new(
+        vec![newer, older],
+        root,
+        author,
+        committer,
+        message,
+        extra_headers,
+        metadata,
+    );
 
     let outcome = repo.commit_raw(raw.clone()).expect("commit_raw");
     let id = outcome.outcomes[0].id;
@@ -309,11 +310,7 @@ fn commit_raw_batch_is_one_frame_with_parents_from_the_batch() {
 
     let outcome = repo.commit_raw_batch(raws).expect("commit_raw_batch");
     let inserted: Vec<RawOutcome> = (ids.iter().zip(0..))
-        .map(|(&id, seq)| RawOutcome {
-            id,
-            insert: InsertOutcome::Inserted { seq },
-            files_changed: 1,
-        })
+        .map(|(&id, seq)| RawOutcome::new(id, InsertOutcome::Inserted { seq }, 1))
         .collect();
     assert_eq!(outcome.outcomes, inserted);
     let frames = frames(&root_dir);
@@ -355,10 +352,7 @@ fn commit_raw_of_a_changeset_the_store_holds_is_already_present() {
     let log = fs::read(Layout::new(&root_dir).journal_log()).unwrap();
 
     let again = repo.commit_raw(raw(&[], root, "once")).expect("commit_raw");
-    let present = RawOutcome {
-        insert: InsertOutcome::AlreadyPresent,
-        ..made
-    };
+    let present = RawOutcome::new(made.id, InsertOutcome::AlreadyPresent, made.files_changed);
     assert_eq!(again.outcomes, [present]);
     assert_eq!(again.frame_seq, None, "no frame");
     assert_eq!(fs::read(Layout::new(&root_dir).journal_log()).unwrap(), log);
@@ -389,34 +383,35 @@ fn commit_raw_refuses_before_writing() {
     let refuse = |raw: RawChangeset| refused(&repo, &root_dir, vec![raw]);
 
     let many = (0..256_u32).map(|n| unknown(&n.to_le_bytes())).collect();
-    let err = refuse(RawChangeset {
-        parents: many,
-        ..good()
-    });
+    let mut raw = good();
+    raw.parents = many;
+    let err = refuse(raw);
     let limit = |e: &RepoError| match e {
         RepoError::Store(StoreError::Limit { what, max, got }) => Some((*what, *max, *got)),
         _ => None,
     };
     assert_eq!(limit(&err), Some((LimitKind::Parents, 255, 256)), "{err:?}");
-    let err = refuse(RawChangeset {
-        parents: vec![parent, parent],
-        ..good()
-    });
+    let mut raw = good();
+    raw.parents = vec![parent, parent];
+    let err = refuse(raw);
     assert!(matches!(err, RepoError::Store(StoreError::DuplicateParent(p)) if p == parent));
     let metadata = vec![("note:b64".to_owned(), b"x".to_vec())];
-    let err = refuse(RawChangeset { metadata, ..good() });
+    let mut raw = good();
+    raw.metadata = metadata;
+    let err = refuse(raw);
     assert!(matches!(&err, RepoError::ReservedMetadataKey { key } if key == "note:b64"));
     let metadata = vec![("b".to_owned(), Vec::new()), ("a".to_owned(), Vec::new())];
-    let err = refuse(RawChangeset { metadata, ..good() });
+    let mut raw = good();
+    raw.metadata = metadata;
+    let err = refuse(raw);
     assert!(
         matches!(err, RepoError::Codec(CodecError::UnsortedMetadata)),
         "{err:?}"
     );
     let unstored = TreeId(hash_object(ObjectKind::Tree, b"never stored"));
-    let err = refuse(RawChangeset {
-        root: unstored,
-        ..good()
-    });
+    let mut raw = good();
+    raw.root = unstored;
+    let err = refuse(raw);
     let missing = |e: &RepoError| match e {
         RepoError::MissingObject { id, kind } => Some((*id, *kind)),
         _ => None,
@@ -428,20 +423,18 @@ fn commit_raw_refuses_before_writing() {
     );
     // A blob the store holds, named as the root.
     let not_a_tree = TreeId(blob(b"b").0);
-    let err = refuse(RawChangeset {
-        root: not_a_tree,
-        ..good()
-    });
+    let mut raw = good();
+    raw.root = not_a_tree;
+    let err = refuse(raw);
     assert_eq!(
         missing(&err),
         Some((not_a_tree.0, ObjectKind::Tree)),
         "{err:?}"
     );
     let stranger = unknown(b"never committed");
-    let err = refuse(RawChangeset {
-        parents: vec![stranger],
-        ..good()
-    });
+    let mut raw = good();
+    raw.parents = vec![stranger];
+    let err = refuse(raw);
     assert!(
         matches!(err, RepoError::UnknownParent(p) if p == stranger),
         "{err:?}"

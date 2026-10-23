@@ -108,10 +108,10 @@ fn last_modified_is_built_in() {
     );
     let (_dir, root, mut repo) = new_repo();
     let chain = chain_of(&repo, vec![vec![put("a", b"1")], vec![put("b", b"1")]]);
-    let key = PathKey(path("a"));
+    let key = PathKey::new(path("a"));
     let touch = repo.derived::<LastModified>(chain[1], &key).unwrap();
-    assert_eq!(touch, LastTouch(Some(chain[0])));
-    match repo.register(LastModified) {
+    assert_eq!(touch, LastTouch::new(Some(chain[0])));
+    match repo.register(LastModified::default()) {
         Err(RepoError::Derived { name, why }) => {
             assert_eq!(name, "last_modified", "{why}");
             assert!(why.contains("registered already"), "{why}");
@@ -653,7 +653,7 @@ fn a_crafted_last_touch_is_refused_where_a_reader_can_tell() {
         ],
     );
     let head = c[3];
-    let key = postcard::to_stdvec(&PathKey(path("a"))).unwrap();
+    let key = postcard::to_stdvec(&PathKey::new(path("a"))).unwrap();
     let slot = |cs: ChangesetId| DerivedSlot {
         name: LastModified::NAME,
         version: LastModified::VERSION,
@@ -666,7 +666,7 @@ fn a_crafted_last_touch_is_refused_where_a_reader_can_tell() {
         if file.exists() {
             fs::remove_file(&file).unwrap();
         }
-        let value = postcard::to_stdvec(&LastTouch(toucher)).unwrap();
+        let value = postcard::to_stdvec(&LastTouch::new(toucher)).unwrap();
         assert!(repo.derived_store().put(&slot(cs), &value).unwrap());
     };
     let unknown = ChangesetId(hash_object(ObjectKind::Changeset, b"in no store"));

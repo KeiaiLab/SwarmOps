@@ -103,10 +103,7 @@ fn new_store() -> (TempDir, camino::Utf8PathBuf, LocalRepo) {
 /// Commits `changes` on `parents`, moving `main` to the new changeset.
 fn advance(repo: &LocalRepo, parents: &[ChangesetId], changes: Vec<Change>) -> ChangesetId {
     let mut req = request(parents, changes, "a test commit");
-    req.advance = Some(Advance {
-        name: "main".to_owned(),
-        actor: ACTOR.to_owned(),
-    });
+    req.advance = Some(Advance::new("main", ACTOR));
     repo.commit(req).unwrap().id
 }
 
@@ -343,10 +340,7 @@ fn pushrebase_relocates_a_disjoint_change_onto_the_moved_head() {
         // Its tree is its delta applied to the moved head's: what a commit of the same changes
         // on that head makes.
         let same = vec![
-            Change {
-                path: path("a.txt"),
-                op: swarmops_repo::ChangeOp::Delete,
-            },
+            Change::new(path("a.txt"), swarmops_repo::ChangeOp::Delete),
             put("b.txt", b"b\n"),
             put("docs/y", b"y\n"),
         ];
@@ -792,6 +786,7 @@ impl Lander {
                         None => self.head(),
                     }
                 }
+                _ => panic!("a variant this test does not know"),
             };
             // As the land loop does (ops spec §3 step 7): out of attempts, the land ends before
             // it would re-merge for another.
@@ -889,7 +884,9 @@ impl Lander {
         let mut in_a_row = 0;
         loop {
             match transaction() {
-                Ok(Timed { value, lock_hold }) => {
+                Ok(Timed {
+                    value, lock_hold, ..
+                }) => {
                     record.lock_hold_us.push(micros(lock_hold));
                     return value;
                 }
@@ -1048,10 +1045,7 @@ fn commit_base(repo: &LocalRepo, cell: &Cell) -> ChangesetId {
         .map(|(p, content)| put(&p, &content))
         .collect();
     let mut req = request(&[], changes, "the landing base");
-    req.advance = Some(Advance {
-        name: TARGET.to_owned(),
-        actor: "landing/base".to_owned(),
-    });
+    req.advance = Some(Advance::new(TARGET, "landing/base"));
     repo.commit(req).expect("commit the base").id
 }
 

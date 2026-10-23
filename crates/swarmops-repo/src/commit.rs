@@ -83,6 +83,7 @@ pub const RESERVED_METADATA_KEY_SUFFIX: &str = ":b64";
 
 /// One change of a [`CommitRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Change {
     /// The path it changes.
     pub path: RepoPath,
@@ -99,6 +100,7 @@ impl Change {
 
 /// What a [`Change`] does at its path.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ChangeOp {
     /// The path holds `content` as a `kind` leaf afterwards: a file, an executable or a symlink
     /// (whose content is its target), never a directory. Missing directories on the way are
@@ -126,6 +128,7 @@ pub enum ChangeOp {
 
 /// A commit to make: changes to the first parent's tree, and the changeset's other fields.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitRequest {
     /// The parents, the mainline parent first: the changes apply to its tree. None for a root
     /// changeset, whose changes apply to the empty tree.
@@ -184,6 +187,7 @@ impl CommitRequest {
 
 /// The ref a commit publishes its changeset on ([`CommitRequest::advance`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advance {
     /// The ref: `main` or `release/<x>`.
     pub name: String,
@@ -204,6 +208,7 @@ impl Advance {
 
 /// The move of the ref a commit advanced ([`CommitOutcome::advanced`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Advanced {
     /// The ref.
     pub name: String,
@@ -228,6 +233,7 @@ impl Advanced {
 
 /// What [`Repo::put_blob`] stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BlobPut {
     /// The blob's id, which a [`ChangeOp::PutBlob`] names it by.
     pub id: BlobId,
@@ -247,6 +253,7 @@ impl BlobPut {
 
 /// What [`Repo::commit`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CommitOutcome {
     /// The changeset's id.
     pub id: ChangesetId,

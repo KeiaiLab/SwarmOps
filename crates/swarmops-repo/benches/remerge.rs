@@ -59,10 +59,7 @@ fn commit(
 ) -> ChangesetId {
     let mut req: CommitRequest = request(parents, changes, "a bench commit");
     if advance {
-        req.advance = Some(Advance {
-            name: "main".to_owned(),
-            actor: ACTOR.to_owned(),
-        });
+        req.advance = Some(Advance::new("main", ACTOR));
     }
     repo.commit(req).expect("commit").id
 }

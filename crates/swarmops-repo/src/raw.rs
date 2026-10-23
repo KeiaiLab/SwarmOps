@@ -64,6 +64,7 @@ pub const MAX_RAW_BATCH: usize = 65_535;
 /// A changeset to record with the fields its caller gives ([`Repo::commit_raw_batch`]); the
 /// delta is the one field it does not give, as the module documentation says.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawChangeset {
     /// The parents in their order, the mainline parent first: the delta is against its root.
     /// None for a root changeset, made whatever refs exist. At most 255, each once, each in the
@@ -111,6 +112,7 @@ impl RawChangeset {
 
 /// What a raw batch did with one of its changesets ([`RawBatchOutcome::outcomes`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawOutcome {
     /// The changeset's id.
     pub id: ChangesetId,
@@ -134,6 +136,7 @@ impl RawOutcome {
 
 /// What [`Repo::commit_raw_batch`] (or [`RawBatch::commit`]) did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RawBatchOutcome {
     /// One per changeset of the batch, in its order.
     pub outcomes: Vec<RawOutcome>,
@@ -154,6 +157,7 @@ pub struct RawBatchOutcome {
 /// its raw and makes its changeset at once, as [`Repo::commit_raw_batch`] does, and gives its id,
 /// which a raw pushed later can name as a parent; nothing is written until [`RawBatch::commit`]
 /// writes them all, in one frame. Dropped uncommitted, it writes nothing.
+#[non_exhaustive]
 pub struct RawBatch<'r, O: ObjectStore> {
     repo: &'r Repo<O>,
     /// A snapshot of the metadata, taken at the first parent the batch does not hold.

@@ -13,6 +13,7 @@ use crate::repo::{self, Repo};
 
 /// A land's changeset, written and flushed, to publish.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Publication {
     /// The ref it lands on.
     pub target: String,
@@ -29,6 +30,7 @@ pub struct Publication {
 
 /// What a publish did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Published {
     /// The target names `id` now, on `onto`: the changeset and the target's move to it are
     /// committed in one frame.

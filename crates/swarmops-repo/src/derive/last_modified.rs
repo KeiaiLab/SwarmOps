@@ -25,12 +25,14 @@ use super::{Derivation, DeriveCtx, DeriveError, Subject};
 /// Its key is the path ([`PathKey`]), its value the changeset ([`LastTouch`]), which
 /// [`RepoRead::last_modified`](crate::RepoRead::last_modified) gives.
 #[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
 pub struct LastModified;
 
 /// [`LastModified`]'s key: a path, stored as its string, which decodes into a path again (the
 /// derived store keeps a key as its postcard bytes, and `swarmops-core`'s types have no serde
 /// form of their own).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub struct PathKey(pub RepoPath);
 
 impl PathKey {
@@ -67,6 +69,7 @@ impl<'de> Deserialize<'de> for PathKey {
 /// Stored, as postcard encodes it, as an option of the id's 32 bytes: what version 1 of
 /// [`LastModified`] reads back, so any other layout takes a new version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub struct LastTouch(pub Option<ChangesetId>);
 
 impl LastTouch {

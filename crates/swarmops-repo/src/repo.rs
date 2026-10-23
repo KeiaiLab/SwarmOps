@@ -96,6 +96,7 @@ const MAX_NAME_LEN: usize = 255;
 const MAX_REPO_LEN: u64 = 32 + 1 + 255;
 
 /// A repository: objects in `O`, metadata in the native [`MetaStore`].
+#[non_exhaustive]
 pub struct Repo<O: ObjectStore> {
     pub(crate) objects: O,
     pub(crate) meta: MetaStore,
@@ -118,6 +119,7 @@ pub type LocalRepo = Repo<FsObjectStore>;
 
 /// What [`LocalRepo::info`] reports about a repository.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RepoInfo {
     /// The id [`LocalRepo::create`] chose: 32 lowercase hex digits, random.
     pub repo_id: String,
@@ -156,6 +158,7 @@ impl RepoInfo {
 
 /// What [`Repo::cas_ref`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct CasOutcome {
     /// What the store decided under the lock: [`CasResult::Applied`] when the ref named
     /// `expected` (it names `new` now; with `old` equal to `new` for a move to the target it

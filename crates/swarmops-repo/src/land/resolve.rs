@@ -46,6 +46,7 @@ use crate::repo::Repo;
 /// A land's resolutions ([`LandRequest::resolutions`](super::LandRequest::resolutions)): what to
 /// make of some paths of the merge, decided against a changeset.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Resolutions {
     /// The changeset they were decided against: the conflict report's `theirs`, a head of the
     /// target. A resolution applies while the target's head holds its path as this does.
@@ -67,6 +68,7 @@ impl Resolutions {
 
 /// What a land makes of a path, and of every path below it ([`Resolutions`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Resolution {
     /// What this side holds there: a leaf, a directory, or nothing.
     Take(Side),
@@ -93,6 +95,7 @@ pub enum Resolution {
 
 /// One side of a land's merge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Side {
     /// The change: its head.
     Ours,
