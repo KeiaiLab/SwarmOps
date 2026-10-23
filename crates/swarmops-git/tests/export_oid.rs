@@ -16,7 +16,7 @@ use swarmops_git::{
     ExportOid, ExportReader, ExportedOid, GitOid, RawKind, TRAILERS, blob_oid, commit_bytes,
     export_message, git_hash, register, render_commit, tree_oid,
 };
-use swarmops_repo::{Change, CommitRequest, LocalRepo, RepoError};
+use swarmops_repo::{Change, LocalRepo, RepoError};
 use swarmops_store::DerivedSlot;
 use swarmops_testkit::fs::{NoSyncFs, RecordingFs};
 use swarmops_testkit::repo::{blob, new_repo, put, put_as, request, signature};
@@ -84,10 +84,8 @@ fn commit(
     let metadata = (metadata.iter())
         .map(|&(key, value)| (key.to_owned(), value.as_bytes().to_vec()))
         .collect();
-    let req = CommitRequest {
-        metadata,
-        ..request(parents, changes, message)
-    };
+    let mut req = request(parents, changes, message);
+    req.metadata = metadata;
     repo.commit(req).unwrap().id
 }
 
@@ -103,18 +101,19 @@ fn value(repo: &LocalRepo, id: ChangesetId) -> ExportedOid {
 
 /// A changeset no store holds, with `message` and `metadata` (its keys ascending), and its id.
 fn unstored(message: &[u8], metadata: &[(&str, &[u8])]) -> (ChangesetId, Changeset) {
-    let cs = Changeset {
-        parents: Vec::new(),
-        root: Tree::empty_root().id(),
-        delta: Vec::new(),
-        author: signature(),
-        committer: signature(),
-        message: message.to_vec(),
-        extra_headers: Vec::new(),
-        metadata: (metadata.iter())
+    let cs = Changeset::new(
+        Vec::new(),
+        Tree::empty_root().id(),
+        Vec::new(),
+        signature(),
+        signature(),
+        message.to_vec(),
+        Vec::new(),
+        (metadata.iter())
             .map(|&(key, value)| (key.to_owned(), value.to_vec()))
             .collect(),
-    };
+    )
+    .unwrap();
     (cs.id().unwrap(), cs)
 }
 
@@ -153,25 +152,24 @@ fn derived_path(name: &str, subject: ObjectId) -> String {
 #[test]
 fn a_native_changeset_renders_to_pinned_bytes() {
     let (_dir, repo) = registered();
-    let worker = Signature {
-        name: b"claude-code/worker-17".to_vec(),
-        email: b"worker-17@claude-code.swarmops.local".to_vec(),
-        secs: 1_700_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    };
+    let worker = Signature::new(
+        b"claude-code/worker-17".to_vec(),
+        b"worker-17@claude-code.swarmops.local".to_vec(),
+        1_700_000_000,
+        0,
+        false,
+    )
+    .unwrap();
     let squashed = "c".repeat(64);
-    let req = CommitRequest {
-        author: worker.clone(),
-        committer: worker,
-        metadata: vec![
-            ("agent".to_owned(), b"claude-code/worker-17".to_vec()),
-            ("land_key".to_owned(), b"k-1".to_vec()),
-            ("run_id".to_owned(), b"r1".to_vec()),
-            ("squashed_from".to_owned(), squashed.clone().into_bytes()),
-        ],
-        ..request(&[], vec![put("a", b"a\n")], "Add a\n")
-    };
+    let mut req = request(&[], vec![put("a", b"a\n")], "Add a\n");
+    req.author = worker.clone();
+    req.committer = worker;
+    req.metadata = vec![
+        ("agent".to_owned(), b"claude-code/worker-17".to_vec()),
+        ("land_key".to_owned(), b"k-1".to_vec()),
+        ("run_id".to_owned(), b"r1".to_vec()),
+        ("squashed_from".to_owned(), squashed.clone().into_bytes()),
+    ];
     let id = repo.commit(req).unwrap().id;
     let cs = changeset(&repo, id);
     let read = repo.snapshot().unwrap();
@@ -207,12 +205,7 @@ fn a_native_changeset_renders_to_pinned_bytes() {
     assert_eq!(id.0.to_hex(), pinned);
     assert_eq!(commit, oid("289054922b69c2600fa2e17c8990bfaaa2654b1b"));
     // Stored as version 1 reads it back: the oid's 20 bytes, then `kept`.
-    let slot = DerivedSlot {
-        name: "git_oid",
-        version: 1,
-        subject: id.0,
-        key: &[],
-    };
+    let slot = DerivedSlot::new("git_oid", 1, id.0, &[]);
     let stored = repo.derived_store().get(&slot).unwrap().unwrap();
     assert_eq!(stored, [&commit.0[..], &[1]].concat());
 }
@@ -512,12 +505,7 @@ fn tree_and_blob_oids_are_memoized_per_object_id() {
         let link = format!("link_noclobber {}", derived_path(name, subject));
         assert!(calls.contains(&link), "no {link} in {calls:#?}");
     }
-    let slot = DerivedSlot {
-        name: "git_tree_oid",
-        version: 1,
-        subject: one.0,
-        key: &[],
-    };
+    let slot = DerivedSlot::new("git_tree_oid", 1, one.0, &[]);
     assert_eq!(
         repo.derived_store().get(&slot).unwrap(),
         Some(expected.0.to_vec())

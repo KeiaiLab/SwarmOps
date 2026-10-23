@@ -915,7 +915,7 @@ mod tests {
             assert_eq!(component(name.as_bytes()), Ok(name));
             Tree::new(vec![TreeEntry::dir(
                 name,
-                TreeId(swarmops_core::ObjectId([0; 32])),
+                TreeId::new(swarmops_core::ObjectId::new([0; 32])),
             )])
             .unwrap_or_else(|error| panic!("{name}: {error}"));
         }
@@ -966,5 +966,22 @@ mod tests {
         let mut whole = headers.to_vec();
         whole.push(b'\n');
         assert_eq!(unlike(headers, &whole), "no blank line after its headers");
+    }
+
+    /// An ident written `-0000` with a nonzero offset, which git's parse never gives, is
+    /// refused as malformed; a `-0000` of offset zero is a signature.
+    #[test]
+    fn a_negative_zero_ident_with_an_offset_is_malformed() {
+        let ident = |offset_secs| RawIdent::new(b"A".to_vec(), b"a".to_vec(), 1, offset_secs, true);
+
+        // 1. Offset zero: the signature keeps the `-0000`.
+        let kept = signature(GitOid::NULL, ident(0)).unwrap();
+        assert!(kept.negative_zero);
+
+        // 2. Another offset: malformed, naming the commit.
+        assert!(matches!(
+            signature(GitOid::NULL, ident(3_600)),
+            Err(ConvertError::Malformed { oid, .. }) if oid == GitOid::NULL
+        ));
     }
 }

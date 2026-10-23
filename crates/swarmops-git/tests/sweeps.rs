@@ -160,9 +160,9 @@ struct State {
 impl State {
     /// What the store at `root` holds, read under the order checker.
     fn of(root: &Utf8Path) -> State {
-        let repo = LocalRepo::open_with_fs(root, checked(RealFs)).expect("open the store");
+        let repo = LocalRepo::open_with_fs(root, checked(RealFs::new())).expect("open the store");
         let info = repo.info().expect("the store's counts");
-        let ids = ExternalIds::new(Layout::new(root), checked(RealFs));
+        let ids = ExternalIds::new(Layout::new(root), checked(RealFs::new()));
         let listed = ids.list(SYSTEM_GIT).expect("list the git external ids");
         let mut entries: Vec<(String, ExternalEntry)> = (listed.into_iter())
             .map(|(key, entry)| (lower_hex(&key), entry.expect("a whole entry")))
@@ -178,7 +178,8 @@ impl State {
 
 /// The journal's frames in the store at `root`, as a reader reads them.
 fn frames(root: &Utf8Path) -> Vec<Frame> {
-    let journal = Journal::open(&Layout::new(root), Arc::new(RealFs)).expect("open the journal");
+    let journal =
+        Journal::open(&Layout::new(root), Arc::new(RealFs::new())).expect("open the journal");
     journal.tail_frames_from(0).expect("read the journal")
 }
 
@@ -368,7 +369,7 @@ impl Sweep {
         let source = fixture.repo.clone().expect("refs holds a repository");
         let template_dir = tempfile::tempdir().expect("a temp dir");
         let template = utf8(template_dir.path().join("store"));
-        let repo = LocalRepo::create_with_fs(&template, "sweeps", checked(RealFs))
+        let repo = LocalRepo::create_with_fs(&template, "sweeps", checked(RealFs::new()))
             .expect("create the store");
         if let Onto::Older = onto {
             let older = ImportRequest::new("older", "main", ACTOR);
@@ -391,7 +392,8 @@ impl Sweep {
         let before = frames(&template).len();
         let added: Vec<String> = frames(&root)[before..].iter().map(shape).collect();
         assert_eq!(added, onto.frames(), "the dry run onto {onto:?}");
-        let journal = Journal::open(&Layout::new(&root), Arc::new(RealFs)).expect("the journal");
+        let journal =
+            Journal::open(&Layout::new(&root), Arc::new(RealFs::new())).expect("the journal");
         let end = std::fs::metadata(root.join("meta/journal.log")).expect("journal.log");
         assert_eq!(journal.ckpt().expect("the checkpoint"), end.len());
         let whole = State::of(&root);
@@ -926,10 +928,7 @@ mod export {
             .expect("read main")
             .map(|state| state.target);
         let mut req = request(head.as_slice(), changes, message);
-        req.advance = Some(Advance {
-            name: MAIN.to_owned(),
-            actor: ACTOR.to_owned(),
-        });
+        req.advance = Some(Advance::new(MAIN, ACTOR));
         repo.commit(req).expect("commit on main").id
     }
 

@@ -122,16 +122,16 @@ mod tests {
 
     #[test]
     fn a_tree_renders_in_git_order_with_git_modes() {
-        let blob = BlobId(ObjectId([1; 32]));
+        let blob = BlobId::new(ObjectId::new([1; 32]));
         let tree = Tree::new(vec![
-            TreeEntry::dir("a", TreeId(ObjectId([2; 32]))),
+            TreeEntry::dir("a", TreeId::new(ObjectId::new([2; 32]))),
             TreeEntry::leaf("a.b", LeafKind::File, blob),
             TreeEntry::leaf("link", LeafKind::Symlink, blob),
             TreeEntry::leaf("run", LeafKind::Exec, blob),
         ])
         .unwrap();
         let child = |entry: &TreeEntry| GitOid([entry.name.as_bytes()[0]; 20]);
-        let rendered = RawTree::parse(&tree_bytes(&tree, child)).unwrap();
+        let rendered = RawTree::parse(&tree_bytes(&tree, child).unwrap()).unwrap();
         let entries: Vec<(&[u8], &[u8])> = (rendered.entries.iter())
             .map(|entry| (entry.mode.as_slice(), entry.name.as_slice()))
             .collect();
@@ -147,7 +147,11 @@ mod tests {
         assert_eq!(rendered.entries[1].oid, GitOid([b'a'; 20]));
         // The empty root renders to git's empty tree.
         assert_eq!(
-            git_hash(RawKind::Tree, &tree_bytes(&Tree::empty_root(), child)).to_string(),
+            git_hash(
+                RawKind::Tree,
+                &tree_bytes(&Tree::empty_root(), child).unwrap()
+            )
+            .to_string(),
             "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
         );
     }

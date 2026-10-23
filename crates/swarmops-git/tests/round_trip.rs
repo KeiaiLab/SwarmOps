@@ -27,7 +27,7 @@ use swarmops_git::{
     GitOid, GitSink, GitSource, GixSink, GixSource, ImportError, ImportReport, ImportRequest,
     RawCommit, RawIdent, RawKind, RawTree, Stored, export, import, register,
 };
-use swarmops_repo::{Change, CommitRequest, LandRequest, LandStatus, LocalRepo, OpRecord};
+use swarmops_repo::{Change, LandRequest, LandStatus, LocalRepo, OpRecord};
 use swarmops_testkit::fs::NoSyncFs;
 use swarmops_testkit::git::{self, GitFixture, Manifest};
 use swarmops_testkit::repo::{put, put_as, request};
@@ -65,24 +65,26 @@ const SECOND_MESSAGE: &str =
 /// The agent's signature, as SwarmOps' operations sign a commit: the agent's name, and
 /// `<instance>@<family>.swarmops.local` at offset 0.
 fn agent() -> Signature {
-    Signature {
-        name: AGENT.as_bytes().to_vec(),
-        email: b"worker-17@agent.swarmops.local".to_vec(),
-        secs: 1_760_000_000,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        AGENT.as_bytes().to_vec(),
+        b"worker-17@agent.swarmops.local".to_vec(),
+        1_760_000_000,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// The lander's signature: the committer of every changeset a land makes.
 fn lander() -> Signature {
-    Signature {
-        name: b"swarmops/lander".to_vec(),
-        email: b"lander@swarmops.swarmops.local".to_vec(),
-        secs: 1_760_000_100,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        b"swarmops/lander".to_vec(),
+        b"lander@swarmops.swarmops.local".to_vec(),
+        1_760_000_100,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// `sig` as git's commit header holds it.
@@ -212,17 +214,13 @@ struct Landing {
 #[track_caller]
 fn land(repo: &LocalRepo, key: &'static str, changes: Vec<Change>, message: &str) -> Landing {
     let head = main_head(repo);
-    let commit_req = CommitRequest {
-        author: agent(),
-        committer: agent(),
-        metadata: vec![("agent".to_owned(), AGENT.as_bytes().to_vec())],
-        ..request(&[head], changes, message)
-    };
+    let mut commit_req = request(&[head], changes, message);
+    commit_req.author = agent();
+    commit_req.committer = agent();
+    commit_req.metadata = vec![("agent".to_owned(), AGENT.as_bytes().to_vec())];
     let change = repo.commit(commit_req).expect("commit").id;
-    let land_req = LandRequest {
-        key: Some(key.to_owned()),
-        ..LandRequest::new(change, "main", lander())
-    };
+    let mut land_req = LandRequest::new(change, "main", lander());
+    land_req.key = Some(key.to_owned());
     let outcome = repo.land(land_req).expect("land");
     assert_eq!(outcome.status, LandStatus::Landed);
     assert_eq!(
@@ -364,11 +362,13 @@ fn store_files(repo: &LocalRepo, cs: ChangesetId) -> BTreeMap<String, (Vec<u8>, 
                     continue;
                 }
                 EntryTarget::Leaf(kind, _) => kind,
+                _ => panic!("a variant this test does not know"),
             };
             let mode: &[u8] = match kind {
                 LeafKind::File => b"100644",
                 LeafKind::Exec => b"100755",
                 LeafKind::Symlink => b"120000",
+                _ => panic!("a variant this test does not know"),
             };
             let (_, _, content) = (read.read_blob_at(cs, &path).unwrap()).expect("a file");
             files.insert(path.to_string(), (mode.to_vec(), content));

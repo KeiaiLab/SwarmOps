@@ -17,7 +17,7 @@ use camino::Utf8Path;
 use swarmops_core::{ChangesetId, Signature};
 use swarmops_git::sync::{self, DropReason, Recognised, SyncError, SyncPlan};
 use swarmops_git::{ExportOid, ExportReader, RawKind, git_hash, register, render_commit, tree_oid};
-use swarmops_repo::{Change, CommitRequest, LocalRepo};
+use swarmops_repo::{Change, LocalRepo};
 use swarmops_store::{Journal, Layout, RealFs};
 use swarmops_testkit::repo::{new_repo, path, put, request};
 
@@ -29,13 +29,14 @@ const SYNCED_FROM: &str = "synced_from";
 
 /// The lander's signature: fixed, so that the same relocation makes the same changesets.
 fn lander() -> Signature {
-    Signature {
-        name: LANDER.as_bytes().to_vec(),
-        email: b"lander@test.swarmops.local".to_vec(),
-        secs: 1_760_000_100,
-        offset_secs: 0,
-        negative_zero: false,
-    }
+    Signature::new(
+        LANDER.as_bytes().to_vec(),
+        b"lander@test.swarmops.local".to_vec(),
+        1_760_000_100,
+        0,
+        false,
+    )
+    .unwrap()
 }
 
 /// Commits `changes` on `parents` with `message` and `metadata` (keys ascending): its id.
@@ -51,10 +52,8 @@ fn commit(
         .iter()
         .map(|(key, value)| ((*key).to_owned(), value.as_bytes().to_vec()))
         .collect();
-    let req = CommitRequest {
-        metadata,
-        ..request(parents, changes, message)
-    };
+    let mut req = request(parents, changes, message);
+    req.metadata = metadata;
     repo.commit(req).unwrap().id
 }
 
@@ -84,7 +83,7 @@ fn file(repo: &LocalRepo, id: ChangesetId, file: &str) -> Vec<u8> {
 
 /// How many frames the journal of the store at `root` lists.
 fn frame_count(root: &Utf8Path) -> u64 {
-    Journal::open(&Layout::new(root), Arc::new(RealFs))
+    Journal::open(&Layout::new(root), Arc::new(RealFs::new()))
         .unwrap()
         .frame_count()
         .unwrap()
